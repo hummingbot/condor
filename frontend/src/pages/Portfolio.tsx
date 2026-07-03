@@ -14,8 +14,10 @@ import {
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import {
   api,
   type AgentSummary,
@@ -25,7 +27,7 @@ import {
   type PortfolioHistoryPoint,
   type PortfolioHistoryResponse,
 } from "@/lib/api";
-import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume } from "@/lib/formatters";
+import { formatCurrency, formatCurrencyPnl, formatCurrencyVolume, isExecutorActive } from "@/lib/formatters";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── Formatters ──
@@ -67,10 +69,6 @@ function getChartColors() {
 // ── KPI helpers ──
 
 const TIME_PERIODS = ["1D", "1W", "1M"] as const;
-
-function isExecutorActive(status: string) {
-  return status === "active" || status === "running";
-}
 
 function computeExecutorStats(
   executors: ExecutorInfo[],
@@ -167,8 +165,8 @@ function DashboardStrip({
   const execStats = useMemo(() => computeExecutorStats(allExecutors, period, convert), [allExecutors, period, convert]);
 
   const activeAgents = agents.filter((a) => a.status === "running" || a.status === "active");
-  const agentPnl = agents.reduce((s, a) => s + a.daily_pnl, 0);
-  const agentSessions = agents.reduce((s, a) => s + a.session_count, 0);
+  const agentPnl = agents.reduce((s, a) => s + (a.daily_pnl ?? 0), 0);
+  const agentSessions = agents.reduce((s, a) => s + (a.session_count ?? 0), 0);
 
   const btnClass = "flex items-center justify-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] w-full";
 
@@ -251,6 +249,7 @@ function TokenBarChart({
 }) {
   if (tokens.length === 0) return null;
   const maxVal = tokens[0]?.usd_value ?? 0;
+  const chartColors = getChartColors();
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 h-full flex flex-col">
@@ -259,12 +258,13 @@ function TokenBarChart({
         {tokens.map((t, i) => {
           const barPct = maxVal > 0 ? (t.usd_value / maxVal) * 100 : 0;
           const allocPct = totalPortfolioValue > 0 ? (t.usd_value / totalPortfolioValue) * 100 : 0;
+          const color = chartColors[i % chartColors.length];
           return (
             <div key={`${t.connector}-${t.token}`} className="flex items-center gap-2">
               <div className="flex items-center gap-1.5 w-16 justify-end shrink-0">
                 <div
                   className="h-2.5 w-2.5 rounded-sm shrink-0"
-                  style={{ backgroundColor: getChartColors()[i % getChartColors().length] }}
+                  style={{ backgroundColor: color }}
                 />
                 <span className="text-xs font-medium truncate">{t.token}</span>
               </div>
@@ -273,7 +273,7 @@ function TokenBarChart({
                   className="h-full rounded transition-all duration-500"
                   style={{
                     width: `${Math.max(barPct, 2)}%`,
-                    backgroundColor: getChartColors()[i % getChartColors().length],
+                    backgroundColor: color,
                     opacity: 0.8,
                   }}
                 />
@@ -474,71 +474,80 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
   const plotW = W - PAD.left - PAD.right;
   const plotH = H - PAD.top - PAD.bottom;
 
-  // Compute scales
-  const minTs = points.length > 0 ? points[0].timestamp : 0;
-  const maxTs = points.length > 0 ? points[points.length - 1].timestamp : 1;
-  const values = points.map((p) => p.total_usd);
-  const minVal = stacked ? 0 : (values.length > 0 ? Math.min(...values) * 0.98 : 0);
-  const maxVal = values.length > 0 ? Math.max(...values) * 1.02 : 1;
-  const valRange = maxVal - minVal || 1;
-  const tsRange = maxTs - minTs || 1;
+  // Memoize chart geometry so hover re-renders only rebuild the crosshair/tooltip,
+  // not the scales and SVG path strings (theme-dependent colors stay outside).
+  const { minTs, tsRange, toX, toY, stackedAreaPaths, linePath, areaPath, yTicks, xTicks } = useMemo(() => {
+    // Compute scales
+    const minTs = points.length > 0 ? points[0].timestamp : 0;
+    const maxTs = points.length > 0 ? points[points.length - 1].timestamp : 1;
+    const values = points.map((p) => p.total_usd);
+    const minVal = stacked ? 0 : (values.length > 0 ? Math.min(...values) * 0.98 : 0);
+    const maxVal = values.length > 0 ? Math.max(...values) * 1.02 : 1;
+    const valRange = maxVal - minVal || 1;
+    const tsRange = maxTs - minTs || 1;
 
-  const toX = (ts: number) => PAD.left + ((ts - minTs) / tsRange) * plotW;
-  const toY = (val: number) => PAD.top + plotH - ((val - minVal) / valRange) * plotH;
+    const toX = (ts: number) => PAD.left + ((ts - minTs) / tsRange) * plotW;
+    const toY = (val: number) => PAD.top + plotH - ((val - minVal) / valRange) * plotH;
 
-  // Build stacked area paths
-  const stackedAreas: { token: string; color: string; path: string }[] = [];
-  if (stacked && topTokens.length > 0 && points.length > 1) {
-    // For each point, compute cumulative bounds per token
-    const tokenOrder = topTokens;
-    for (let ti = 0; ti < tokenOrder.length; ti++) {
-      const token = tokenOrder[ti];
-      const color = getChartColors()[ti % getChartColors().length];
+    // Build stacked area paths
+    const stackedAreaPaths: { token: string; path: string }[] = [];
+    if (stacked && topTokens.length > 0 && points.length > 1) {
+      // For each point, compute cumulative bounds per token
+      const tokenOrder = topTokens;
+      for (let ti = 0; ti < tokenOrder.length; ti++) {
+        const token = tokenOrder[ti];
 
-      // Upper line (cumulative up to and including this token)
-      const upperPoints = points.map((p) => {
-        let cumUpper = 0;
-        for (let j = 0; j <= ti; j++) {
-          cumUpper += p.tokens?.[tokenOrder[j]] ?? 0;
-        }
-        return { x: toX(p.timestamp).toFixed(2), y: toY(cumUpper).toFixed(2) };
-      });
+        // Upper line (cumulative up to and including this token)
+        const upperPoints = points.map((p) => {
+          let cumUpper = 0;
+          for (let j = 0; j <= ti; j++) {
+            cumUpper += p.tokens?.[tokenOrder[j]] ?? 0;
+          }
+          return { x: toX(p.timestamp).toFixed(2), y: toY(cumUpper).toFixed(2) };
+        });
 
-      // Lower line (cumulative up to but NOT including this token)
-      const lowerPoints = points.map((p) => {
-        let cumLower = 0;
-        for (let j = 0; j < ti; j++) {
-          cumLower += p.tokens?.[tokenOrder[j]] ?? 0;
-        }
-        return { x: toX(p.timestamp).toFixed(2), y: toY(cumLower).toFixed(2) };
-      });
+        // Lower line (cumulative up to but NOT including this token)
+        const lowerPoints = points.map((p) => {
+          let cumLower = 0;
+          for (let j = 0; j < ti; j++) {
+            cumLower += p.tokens?.[tokenOrder[j]] ?? 0;
+          }
+          return { x: toX(p.timestamp).toFixed(2), y: toY(cumLower).toFixed(2) };
+        });
 
-      const upperPath = upperPoints.map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x} ${pt.y}`).join(" ");
-      const lowerPath = [...lowerPoints].reverse().map((pt, i) => `${i === 0 ? "L" : "L"} ${pt.x} ${pt.y}`).join(" ");
-      const areaPath = `${upperPath} ${lowerPath} Z`;
+        const upperPath = upperPoints.map((pt, i) => `${i === 0 ? "M" : "L"} ${pt.x} ${pt.y}`).join(" ");
+        const lowerPath = [...lowerPoints].reverse().map((pt, i) => `${i === 0 ? "L" : "L"} ${pt.x} ${pt.y}`).join(" ");
+        const areaPath = `${upperPath} ${lowerPath} Z`;
 
-      stackedAreas.push({ token, color, path: areaPath });
+        stackedAreaPaths.push({ token, path: areaPath });
+      }
     }
-  }
 
-  // Build line path (normal mode)
-  const linePath =
-    !stacked && points.length > 1
-      ? points.map((p, i) => `${i === 0 ? "M" : "L"} ${toX(p.timestamp).toFixed(2)} ${toY(p.total_usd).toFixed(2)}`).join(" ")
-      : "";
+    // Build line path (normal mode)
+    const linePath =
+      !stacked && points.length > 1
+        ? points.map((p, i) => `${i === 0 ? "M" : "L"} ${toX(p.timestamp).toFixed(2)} ${toY(p.total_usd).toFixed(2)}`).join(" ")
+        : "";
 
-  const areaPath =
-    !stacked && points.length > 1
-      ? linePath +
-        ` L ${toX(points[points.length - 1].timestamp).toFixed(2)} ${(PAD.top + plotH).toFixed(2)}` +
-        ` L ${toX(points[0].timestamp).toFixed(2)} ${(PAD.top + plotH).toFixed(2)} Z`
-      : "";
+    const areaPath =
+      !stacked && points.length > 1
+        ? linePath +
+          ` L ${toX(points[points.length - 1].timestamp).toFixed(2)} ${(PAD.top + plotH).toFixed(2)}` +
+          ` L ${toX(points[0].timestamp).toFixed(2)} ${(PAD.top + plotH).toFixed(2)} Z`
+        : "";
 
-  // Y-axis gridlines (5 lines)
-  const yTicks = Array.from({ length: 5 }, (_, i) => minVal + (valRange * i) / 4);
+    // Y-axis gridlines (5 lines)
+    const yTicks = Array.from({ length: 5 }, (_, i) => minVal + (valRange * i) / 4);
 
-  // X-axis labels (5 labels)
-  const xTicks = Array.from({ length: 5 }, (_, i) => minTs + (tsRange * i) / 4);
+    // X-axis labels (5 labels)
+    const xTicks = Array.from({ length: 5 }, (_, i) => minTs + (tsRange * i) / 4);
+
+    return { minTs, tsRange, toX, toY, stackedAreaPaths, linePath, areaPath, yTicks, xTicks };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [points, stacked, topTokens]);
+
+  const chartColors = getChartColors();
+  const stackedAreas = stackedAreaPaths.map((area, ti) => ({ ...area, color: chartColors[ti % chartColors.length] }));
 
   // Handle mouse move
   const handleMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
@@ -563,7 +572,7 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
   // Tooltip dimensions for stacked mode
   const hoverTokens = hover?.point.tokens ?? {};
   const hoverTokenEntries = stacked && topTokens.length > 0
-    ? topTokens.filter((t) => (hoverTokens[t] ?? 0) > 0).map((t) => ({ token: t, value: hoverTokens[t] ?? 0, color: getChartColors()[topTokens.indexOf(t) % getChartColors().length] }))
+    ? topTokens.filter((t) => (hoverTokens[t] ?? 0) > 0).map((t) => ({ token: t, value: hoverTokens[t] ?? 0, color: chartColors[topTokens.indexOf(t) % chartColors.length] }))
     : [];
   const tooltipH = stacked && hoverTokenEntries.length > 0 ? 28 + hoverTokenEntries.length * 16 : 40;
   const tooltipW = stacked && hoverTokenEntries.length > 0 ? 150 : 108;
@@ -742,7 +751,7 @@ function PortfolioEvolution({ server, range, convertFromUsd, currencySymbol }: {
                 <div key={token} className="flex items-center gap-1.5">
                   <div
                     className="h-2.5 w-2.5 rounded-sm"
-                    style={{ backgroundColor: getChartColors()[i % getChartColors().length] }}
+                    style={{ backgroundColor: chartColors[i % chartColors.length] }}
                   />
                   <span className="text-xs text-[var(--color-text-muted)]">{token}</span>
                 </div>
@@ -793,11 +802,21 @@ export function Portfolio() {
     placeholderData: keepPreviousData,
   });
 
+  // Subscribe to the executors WS channel so the KPI strip updates live;
+  // the query below shares the canonical ["executors", server, ""] cache key
+  // (prefetched by usePrefetchData, pushed by useWebSocket) with a relaxed
+  // poll as fallback.
+  const executorChannels = useMemo(
+    () => (server ? [`executors:${server}`] : []),
+    [server],
+  );
+  useCondorWebSocket(executorChannels, server ?? null);
+
   const { data: allExecutors } = useQuery({
-    queryKey: ["executors-all", server],
+    queryKey: ["executors", server, ""],
     queryFn: () => api.getExecutors(server!),
     enabled: !!server,
-    refetchInterval: 30000,
+    refetchInterval: 60000,
     placeholderData: keepPreviousData,
   });
 
@@ -837,17 +856,7 @@ export function Portfolio() {
   );
 
   if (!server) {
-    return (
-      <div className="flex items-center justify-center min-h-[60vh]">
-        <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-8 text-center max-w-sm">
-          <Server className="h-10 w-10 mx-auto mb-3 text-[var(--color-text-muted)]" />
-          <h2 className="text-lg font-semibold mb-1">No Server Selected</h2>
-          <p className="text-sm text-[var(--color-text-muted)]">
-            Select a server from the sidebar to view your portfolio.
-          </p>
-        </div>
-      </div>
-    );
+    return <NoServerCard message="Select a server from the sidebar to view your portfolio." />;
   }
 
   if (isLoading && !data) {

@@ -5,8 +5,6 @@
 // (e.g. wallet/hyperliquid.ts), and new EVM keys (e.g. a plain Ethereum signer) can reuse it
 // directly. Non-EVM families (e.g. Solana) belong in a sibling module, not here.
 
-import { parseSignature } from "viem";
-
 // ── Minimal EIP-1193 / EIP-6963 provider types ──
 export interface Eip1193Provider {
   request: (args: { method: string; params?: unknown[] }) => Promise<unknown>;
@@ -112,8 +110,13 @@ export interface EvmSignature {
 
 /** Normalize a 65-byte hex signature into the `{r, s, v}` shape exchanges expect. */
 export function normalizeSignature(sigHex: `0x${string}`): EvmSignature {
-  const { r, s, v, yParity } = parseSignature(sigHex);
-  return { r, s, v: v !== undefined ? Number(v) : yParity + 27 };
+  const hex = sigHex.slice(2);
+  if (hex.length !== 130) throw new Error(`Expected a 65-byte signature, got ${hex.length / 2} bytes.`);
+  const r = `0x${hex.slice(0, 64)}` as `0x${string}`;
+  const s = `0x${hex.slice(64, 128)}` as `0x${string}`;
+  let v = parseInt(hex.slice(128, 130), 16);
+  if (v < 27) v += 27; // normalize a 0/1 yParity to the legacy 27/28 v value
+  return { r, s, v };
 }
 
 /** Sign EIP-712 typed data with the wallet's active account and return the normalized signature. */

@@ -176,12 +176,15 @@ export function ReportViewer({
           src={`/reports/${report.filename}`}
           className="h-full w-full border-0"
           title={report.title}
+          sandbox="allow-scripts allow-popups"
         />
         {/* Fullscreen chevron overlays */}
         {fullscreen && hasPrev && (
           <button
             onClick={goPrev}
             className="absolute left-2 top-1/2 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white/70 hover:bg-black/70 hover:text-white transition-all"
+            title="Previous report"
+            aria-label="Previous report"
           >
             <ChevronLeft className="h-5 w-5" />
           </button>
@@ -190,6 +193,8 @@ export function ReportViewer({
           <button
             onClick={goNext}
             className="absolute right-2 top-1/2 -translate-y-1/2 rounded-full bg-black/50 p-2 text-white/70 hover:bg-black/70 hover:text-white transition-all"
+            title="Next report"
+            aria-label="Next report"
           >
             <ChevronRight className="h-5 w-5" />
           </button>

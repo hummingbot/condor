@@ -69,6 +69,8 @@ export interface SnapshotStats {
 export interface ParsedSnapshot {
   tick: number;
   timestamp: string;
+  model: string;
+  executionMode: string;
   systemPrompt: string;
   systemPromptLength: number;
   executorState: string;
@@ -80,16 +82,25 @@ export interface ParsedSnapshot {
 
 // ── Section extraction helper ──
 
+// The "Agent Response" body is free-form LLM markdown that routinely emits its
+// own "## Decision" / "## Market Data" headings, so for it we must NOT treat those
+// as section boundaries — only the known structural sections that follow it
+// (Tool Calls / Stats / Cost) or a <details> block end it. Every OTHER section has
+// controlled content, so any "## " header ends it (the original behavior — needed
+// so journal sections like "Snapshots" stop at the following learning sections,
+// e.g. "## Market Observations", instead of swallowing them).
+const AGENT_RESPONSE_BOUNDARY = /^(?:## (?:Tool Calls|Stats|Cost)\b|<details>)/m;
+const DEFAULT_BOUNDARY = /^(?:## |<details>)/m;
+
 function getSection(text: string, name: string): string {
   const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  // Find section start, then grab everything until next ## header or <details> block
   const startPattern = new RegExp(`^## ${escaped}\\n`, "m");
   const startMatch = startPattern.exec(text);
   if (!startMatch) return "";
   const contentStart = startMatch.index + startMatch[0].length;
-  // Find next section boundary: ## header or <details> at start of line
   const rest = text.slice(contentStart);
-  const endMatch = rest.match(/^(?:## |<details>)/m);
+  const boundary = name === "Agent Response" ? AGENT_RESPONSE_BOUNDARY : DEFAULT_BOUNDARY;
+  const endMatch = rest.match(boundary);
   const content = endMatch ? rest.slice(0, endMatch.index) : rest;
   return content.trim();
 }
@@ -278,6 +289,8 @@ export function parseSnapshot(content: string): ParsedSnapshot {
   const result: ParsedSnapshot = {
     tick: 0,
     timestamp: "",
+    model: "",
+    executionMode: "",
     systemPrompt: "",
     systemPromptLength: 0,
     executorState: "",
@@ -294,6 +307,12 @@ export function parseSnapshot(content: string): ParsedSnapshot {
     result.timestamp = headerMatch[2].trim();
   }
 
+  // Experiment snapshots carry "Mode:" / "Model:" lines under the header.
+  const modeMatch = content.match(/^Mode:\s*(\S+)/m);
+  if (modeMatch) result.executionMode = modeMatch[1];
+  const modelMatch = content.match(/^Model:\s*(\S+)/m);
+  if (modelMatch) result.model = modelMatch[1];
+
   // System prompt - inside <details> block
   const promptLenMatch = content.match(/System Prompt \((\d+) chars\)/);
   if (promptLenMatch) {
@@ -309,10 +328,18 @@ export function parseSnapshot(content: string): ParsedSnapshot {
   result.riskState = getSection(content, "Risk State");
   result.agentResponse = getSection(content, "Agent Response");
 
-  // Tool calls - inside <details> block
+  // Tool calls - sessions wrap them in a <details> block; experiment snapshots
+  // (dry_run / run_once) write them flat under a "## Tool Calls (N)" section.
   const toolDetailsMatch = content.match(/<details><summary>Tool Calls[^<]*<\/summary>\s*(.*?)\s*<\/details>/s);
   if (toolDetailsMatch) {
     result.toolCalls = parseToolCalls(toolDetailsMatch[1]);
+  } else {
+    const toolSectionMatch = content.match(/^## Tool Calls[^\n]*\n([\s\S]*)/m);
+    if (toolSectionMatch) {
+      // Cut at the following Stats/Cost section so we only parse the tool block.
+      const body = toolSectionMatch[1].split(/^## (?:Stats|Cost)\b/m)[0];
+      result.toolCalls = parseToolCalls(body);
+    }
   }
 
   // Stats: Duration: Ns
@@ -330,20 +357,24 @@ function parseToolCalls(text: string): ToolCall[] {
   // Match each ### N. tool_name (status) line, with optional content after
   const headerRegex = /^### (\d+)\.\s+(\S+)\s+\(([^)]*)\)/gm;
   let match;
-  const headers: { number: number; name: string; status: string; index: number }[] = [];
+  // `start` = raw offset of the header line; `index` = offset of the block body
+  // right after the header line. The block for header i runs until the next
+  // header's `start` (exact), avoiding magic offset arithmetic.
+  const headers: { number: number; name: string; status: string; start: number; index: number }[] = [];
 
   while ((match = headerRegex.exec(text)) !== null) {
     headers.push({
       number: parseInt(match[1]),
       name: match[2],
       status: match[3],
+      start: match.index,
       index: match.index + match[0].length,
     });
   }
 
   for (let i = 0; i < headers.length; i++) {
     const h = headers[i];
-    const blockEnd = i + 1 < headers.length ? headers[i + 1].index - headers[i + 1].name.length - 20 : text.length;
+    const blockEnd = i + 1 < headers.length ? headers[i + 1].start : text.length;
     const block = text.slice(h.index, blockEnd);
 
     const tc: ToolCall = {

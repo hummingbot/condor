@@ -2,6 +2,7 @@ import { AlertTriangle, ChevronDown, ChevronRight, Clock, Trash2 } from "lucide-
 import { useState } from "react";
 
 import { type RoutineInstance } from "@/lib/api";
+import { formatRelativeTime } from "@/lib/formatters";
 import { formatInterval } from "@/lib/routineUtils";
 
 interface RoutineInstancesProps {
@@ -15,15 +16,6 @@ function formatDuration(sec: number | null): string {
   if (sec < 1) return `${(sec * 1000).toFixed(0)}ms`;
   if (sec < 60) return `${sec.toFixed(1)}s`;
   return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
-}
-
-function formatAgo(ts: number | null): string {
-  if (!ts) return "never";
-  const diff = Date.now() / 1000 - ts;
-  if (diff < 60) return `${Math.floor(diff)}s ago`;
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
-  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
-  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 export function RoutineInstances({ instances, onStop, stopping }: RoutineInstancesProps) {
@@ -79,7 +71,7 @@ function InstanceCard({
             </span>
           )}
           <span className="text-[10px] text-[var(--color-text-muted)]">
-            {inst.run_count} runs · {formatAgo(inst.last_run_at)}
+            {inst.run_count} runs · {formatRelativeTime(inst.last_run_at, "never")}
           </span>
           {inst.last_duration != null && (
             <span className="text-[10px] text-[var(--color-text-muted)]">

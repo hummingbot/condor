@@ -1,17 +1,8 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
+import { formatCurrencyPnl } from "@/lib/formatters";
 import type { MetricEntry } from "@/lib/parse-agent";
-
-function getChartColors() {
-  const style = getComputedStyle(document.documentElement);
-  return {
-    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
-    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
-    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
-    up: style.getPropertyValue("--chart-up").trim() || "#22c55e",
-    down: style.getPropertyValue("--chart-down").trim() || "#ef4444",
-  };
-}
+import { getThemeColors } from "@/lib/theme-colors";
 
 interface PnlDataPoint {
   time: number; // unix seconds
@@ -27,14 +18,22 @@ interface AgentPnlChartProps {
 export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
+  const chartModuleRef = useRef<typeof import("lightweight-charts") | null>(null);
   const chartRef = useRef<import("lightweight-charts").IChartApi | null>(null);
+  const seriesRef = useRef<import("lightweight-charts").ISeriesApi<"Baseline"> | null>(null);
+  // Tracks the point count of the last applied dataset, so we only auto-fit
+  // on the first non-empty load and when new points are appended (not on every update).
+  const lastLenRef = useRef(0);
+  const [chartReady, setChartReady] = useState(false);
 
+  // ── Initialize chart + series + crosshair tooltip ONCE ──
   useEffect(() => {
     let cancelled = false;
     import("lightweight-charts").then((mod) => {
       if (cancelled || !containerRef.current) return;
+      chartModuleRef.current = mod;
 
-      const colors = getChartColors();
+      const colors = getThemeColors();
       const chart = mod.createChart(containerRef.current, {
         autoSize: true,
         layout: {
@@ -49,7 +48,7 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
         timeScale: { timeVisible: true, secondsVisible: false },
         rightPriceScale: { borderVisible: false },
         localization: {
-          priceFormatter: (price: number) => `$${price >= 0 ? "+" : ""}${price.toFixed(2)}`,
+          priceFormatter: (price: number) => formatCurrencyPnl(price),
         },
       });
       chartRef.current = chart;
@@ -66,18 +65,9 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
         priceLineVisible: false,
         lastValueVisible: true,
       });
-
-      // Set data
-      if (data.length > 0) {
-        const sorted = [...data].sort((a, b) => a.time - b.time);
-        series.setData(
-          sorted.map((d) => ({
-            time: d.time as import("lightweight-charts").UTCTimestamp,
-            value: d.value,
-          })),
-        );
-        chart.timeScale().fitContent();
-      }
+      seriesRef.current = series;
+      // Signals the data effect that the series is ready to receive data.
+      setChartReady(true);
 
       // Crosshair tooltip
       chart.subscribeCrosshairMove((param) => {
@@ -97,7 +87,6 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
 
         const pnl = (seriesData as { value: number }).value;
         const pnlColor = pnl >= 0 ? colors.up : colors.down;
-        const sign = pnl >= 0 ? "+" : "";
         const ts = typeof param.time === "number" ? param.time : 0;
         const date = new Date(ts * 1000);
         const timeStr = date.toLocaleString("en-US", {
@@ -109,7 +98,7 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
 
         tooltip.innerHTML = `
           <div style="color:#9ca3af;font-size:10px;margin-bottom:2px">${timeStr}</div>
-          <div style="color:${pnlColor};font-weight:600;font-size:13px">$${sign}${pnl.toFixed(2)}</div>
+          <div style="color:${pnlColor};font-weight:600;font-size:13px">${formatCurrencyPnl(pnl)}</div>
         `;
         tooltip.style.display = "block";
 
@@ -124,15 +113,65 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
 
     return () => {
       cancelled = true;
+      setChartReady(false);
       if (chartRef.current) {
         chartRef.current.remove();
         chartRef.current = null;
+        seriesRef.current = null;
+        chartModuleRef.current = null;
       }
+      lastLenRef.current = 0;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Re-apply chart colors on theme change ──
+  useEffect(() => {
+    if (!chartRef.current || !chartModuleRef.current) return;
+    const chart = chartRef.current;
+    const mod = chartModuleRef.current;
+    const observer = new MutationObserver(() => {
+      const colors = getThemeColors();
+      chart.applyOptions({
+        layout: {
+          background: { type: mod.ColorType.Solid, color: colors.bg },
+          textColor: colors.text,
+        },
+        grid: {
+          vertLines: { color: colors.grid },
+          horzLines: { color: colors.grid },
+        },
+      });
+    });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => observer.disconnect();
+  }, [chartReady]);
 
-  if (data.length === 0) return null;
+  // ── Push live `data` to the series whenever it changes ──
+  // Runs once the series exists (chartReady) and on every `data` update, so the
+  // curve keeps up with the consumer's 10s refetch instead of freezing at mount.
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!chartReady || !series) return;
+
+    const sorted = [...data].sort((a, b) => a.time - b.time);
+    series.setData(
+      sorted.map((d) => ({
+        time: d.time as import("lightweight-charts").UTCTimestamp,
+        value: d.value,
+      })),
+    );
+
+    // Auto-fit on the first non-empty load and when new points are appended;
+    // skip re-fit on same-length updates so the user's pan/zoom is preserved.
+    if (sorted.length > 0 && sorted.length > lastLenRef.current) {
+      chartRef.current?.timeScale().fitContent();
+    }
+    lastLenRef.current = sorted.length;
+  }, [data, chartReady]);
+
+  // NOTE: do NOT early-return before the chart container mounts — the init effect
+  // needs `containerRef` to exist. When data is empty we render an empty container
+  // (kept mounted) so the empty→non-empty transition just flows through the data effect.
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">

@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import {
   api,
   type ControllerConfigSummary,
@@ -387,6 +388,8 @@ export function DeployBotDialog({
     }
   }, [open]);
 
+  useEscapeKey(open, handleClose);
+
   if (!open) return null;
 
   const hasSelected = selected.size > 0;
@@ -411,6 +414,8 @@ export function DeployBotDialog({
           <button
             onClick={handleClose}
             className="p-1 rounded hover:bg-[var(--color-surface-hover)] transition-colors"
+            title="Close"
+            aria-label="Close"
           >
             <X className="h-4 w-4" />
           </button>

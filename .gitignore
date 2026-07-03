@@ -171,5 +171,12 @@ config.yml
 audit_log.yml
 data/
 
+# Per-assistant runtime stores (FEAT-003): definitions are committed, stores are not.
+# assistants/{name}/AGENT.md is tracked; assistants/{name}/store/ is runtime.
+assistants/*/store/
+agents/*/store/
+
 # Node
 node_modules/
+/improvements/
+/features/

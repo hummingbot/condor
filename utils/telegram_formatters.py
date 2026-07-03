@@ -7,6 +7,67 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
+def format_compact_number(value, decimals: int = 2) -> str:
+    """Format number with K/M suffix for readability (no currency prefix).
+
+    Handles large numbers (K/M suffixes), small crypto prices with
+    progressively higher precision, and scientific notation for
+    extremely small values. Returns "—" for None/invalid input.
+    """
+    if value is None:
+        return "—"
+    try:
+        num = float(value)
+        if num == 0:
+            return "0"
+        if abs(num) >= 1_000_000:
+            return f"{num/1_000_000:.{decimals}f}M"
+        if abs(num) >= 1_000:
+            return f"{num/1_000:.{decimals}f}K"
+        if abs(num) >= 1:
+            return f"{num:.{decimals}f}"
+        if abs(num) >= 0.01:
+            return f"{num:.4f}"
+        if abs(num) >= 0.0001:
+            return f"{num:.6f}"
+        if abs(num) >= 0.000001:
+            return f"{num:.8f}"
+        if abs(num) >= 0.00000001:
+            return f"{num:.10f}"
+        # For extremely small numbers, use scientific notation
+        return f"{num:.2e}"
+    except (ValueError, TypeError):
+        return "—"
+
+
+def format_network_display(network_id: str) -> str:
+    """Format network ID for button display.
+
+    Examples:
+        solana-mainnet-beta -> Solana
+        ethereum-mainnet -> Ethereum
+        solana-devnet -> Solana Dev
+    """
+    if not network_id:
+        return "Network"
+
+    parts = network_id.split("-")
+    chain = parts[0].capitalize()
+
+    if len(parts) > 1:
+        net = parts[1]
+        if net in ("mainnet", "mainnet-beta"):
+            return chain
+        elif net == "devnet":
+            return f"{chain} Dev"
+        elif net == "testnet":
+            return f"{chain} Test"
+        else:
+            return f"{chain} {net[:4]}"
+
+    return chain
+
+
 def format_uptime(deployed_at: str) -> str:
     """
     Format time elapsed since deployment as a compact uptime string.

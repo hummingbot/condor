@@ -217,14 +217,13 @@ export function usePositionConfig() {
 interface Props {
   state: PositionState;
   dispatch: React.Dispatch<PositionAction>;
+  validation: ExecutorValidation;
   currentPrice: number | null;
   isSpot?: boolean;
   pair?: string;
 }
 
-export function PositionConfigPanel({ state, dispatch, currentPrice, isSpot = false, pair }: Props) {
-  const validation = usePositionValidation(state);
-
+export function PositionConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair }: Props) {
   // Auto-fill entry price from current price on first load (if zero)
   useEffect(() => {
     if (state.entry_price === 0 && currentPrice && currentPrice > 0) {

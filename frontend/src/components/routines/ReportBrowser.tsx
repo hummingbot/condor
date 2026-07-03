@@ -9,7 +9,6 @@ import {
   Clock,
   Download,
   Loader2,
-  MessageSquare,
   Moon,
   Play,
   PlayCircle,
@@ -23,6 +22,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
+import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
 import { type RoutineInstance, api } from "@/lib/api";
 import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
@@ -230,7 +230,7 @@ export function ReportBrowser({
     const iframe = iframeRef.current;
     if (!iframe) return;
     const sendTheme = () => {
-      iframe.contentWindow?.postMessage({ type: "set-theme", theme: reportTheme }, "*");
+      iframe.contentWindow?.postMessage({ type: "set-theme", theme: reportTheme }, window.location.origin);
     };
     iframe.addEventListener("load", sendTheme);
     sendTheme();
@@ -675,16 +675,7 @@ export function ReportBrowser({
               {reportTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
             {/* Agent chat toggle */}
-            <button
-              onClick={() => {
-                window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
-              }}
-              className="ml-1 flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 border border-amber-500/30 transition-all"
-              title="Agent (⌘K)"
-            >
-              <MessageSquare className="h-3.5 w-3.5" />
-              <span>Agent</span>
-            </button>
+            <AgentToggleButton className="ml-1" />
             {/* Close */}
             <button
               onClick={onClose}
@@ -893,6 +884,7 @@ export function ReportBrowser({
               src={`/reports/${selectedReport.filename}`}
               className="h-full w-full border-0"
               title={selectedReport.title}
+              sandbox="allow-scripts allow-popups"
             />
           )}
 
@@ -901,6 +893,8 @@ export function ReportBrowser({
             <button
               onClick={goPrevReport}
               className="absolute left-3 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/60 hover:bg-black/60 hover:text-white transition-all"
+              title="Previous report"
+              aria-label="Previous report"
             >
               <ChevronLeft className="h-5 w-5" />
             </button>
@@ -909,6 +903,8 @@ export function ReportBrowser({
             <button
               onClick={goNextReport}
               className="absolute right-3 top-1/2 -translate-y-1/2 rounded-full bg-black/40 p-2 text-white/60 hover:bg-black/60 hover:text-white transition-all"
+              title="Next report"
+              aria-label="Next report"
             >
               <ChevronRight className="h-5 w-5" />
             </button>

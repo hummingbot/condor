@@ -100,7 +100,10 @@ export function ServersSettings() {
 
       {/* Add / Edit form */}
       {(adding || editing) && (
-        <div className="rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-surface)] p-4">
+        <form
+          onSubmit={(e) => { e.preventDefault(); submitForm(); }}
+          className="rounded-lg border border-[var(--color-primary)]/30 bg-[var(--color-surface)] p-4"
+        >
           <h3 className="mb-3 text-sm font-semibold text-[var(--color-text)]">
             {editing ? `Edit ${editing}` : "Add Server"}
           </h3>
@@ -156,7 +159,7 @@ export function ServersSettings() {
           </div>
           <div className="mt-3 flex items-center gap-2">
             <button
-              onClick={submitForm}
+              type="submit"
               disabled={addMut.isPending || updateMut.isPending || (!editing && !form.name)}
               className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
             >
@@ -164,6 +167,7 @@ export function ServersSettings() {
               {editing ? "Save" : "Add"}
             </button>
             <button
+              type="button"
               onClick={() => { setAdding(false); setEditing(null); setForm(EMPTY_FORM); }}
               className="rounded-md px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
             >
@@ -175,7 +179,7 @@ export function ServersSettings() {
               {(addMut.error || updateMut.error)?.message}
             </p>
           )}
-        </div>
+        </form>
       )}
 
       {/* Server list */}
@@ -228,14 +232,21 @@ export function ServersSettings() {
                     <div className="flex items-center gap-1">
                       <button
                         onClick={() => deleteMut.mutate(s.name)}
-                        className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10"
+                        disabled={deleteMut.isPending}
+                        className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10 disabled:opacity-50"
                         title="Confirm delete"
                       >
-                        <Check className="h-3.5 w-3.5" />
+                        {deleteMut.isPending ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Check className="h-3.5 w-3.5" />
+                        )}
                       </button>
                       <button
                         onClick={() => setConfirmDelete(null)}
                         className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                        title="Cancel delete"
+                        aria-label="Cancel delete"
                       >
                         <X className="h-3.5 w-3.5" />
                       </button>
@@ -258,6 +269,12 @@ export function ServersSettings() {
         {servers.length === 0 && (
           <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">
             No servers configured. Add one to get started.
+          </p>
+        )}
+
+        {(deleteMut.error || defaultMut.error) && (
+          <p className="text-xs text-[var(--color-red)]">
+            {(deleteMut.error || defaultMut.error)?.message}
           </p>
         )}
       </div>

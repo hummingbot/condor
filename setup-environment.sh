@@ -105,6 +105,109 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Quick localhost API probe — avoid hanging Step 2 when port 8000 is slow/unreachable
+api_health_check() {
+    curl -sf --connect-timeout 3 --max-time 5 http://localhost:8000/docs >/dev/null 2>&1
+}
+
+# Restore Tailscale wizard choice from .env (survives re-runs after Step 1 is skipped)
+load_tailscale_choice() {
+    case "${USE_TAILSCALE:-}" in
+        [Tt][Rr][Uu][Ee]|[Yy][Ee][Ss]|[Yy]|1) use_tailscale_early="y" ;;
+    esac
+}
+
+# True when config.yml already has a server host entry under servers:
+config_has_api_server() {
+    [ -f "$CONFIG_FILE" ] && grep -A8 '^servers:' "$CONFIG_FILE" 2>/dev/null | grep -q 'host:'
+}
+
+# Merge API connection details into config.yml (handles both template and servers: {} layouts).
+# PyYAML is NOT part of the Python standard library and is not guaranteed to be
+# preinstalled on a fresh Linux/Mac/WSL box, so this tries several ways to get a
+# working python3+yaml before falling back to a plain text edit. Returns 0 on a
+# full YAML-aware update, 1 if it had to fall back to the degraded sed edit.
+update_config_api_server() {
+    local host="$1" port="$2" username="$3" password="$4"
+    local yaml_script
+    yaml_script=$(cat << 'PYEOF'
+import sys
+from pathlib import Path
+import yaml
+
+path = Path(sys.argv[1])
+host, port, username, password, admin_id = sys.argv[2:7]
+data = yaml.safe_load(path.read_text()) if path.exists() else {}
+if not isinstance(data, dict):
+    data = {}
+
+servers = data.setdefault("servers", {})
+servers["local"] = {
+    "host": host,
+    "port": int(port),
+    "username": username,
+    "password": password,
+}
+data["default_server"] = data.get("default_server") or "local"
+
+server_access = data.setdefault("server_access", {})
+if "local" not in server_access:
+    server_access["local"] = {
+        "owner_id": int(admin_id) if admin_id.isdigit() else admin_id,
+        "created_at": None,
+        "shared_with": {},
+    }
+
+# Compare as strings since the YAML template stores this key as an int but
+# admin_id arrives here as a string -- avoids writing a duplicate entry.
+chat_defaults = data.setdefault("chat_defaults", {})
+existing_keys = {str(k) for k in chat_defaults.keys()}
+if admin_id and admin_id not in existing_keys:
+    chat_defaults[int(admin_id) if admin_id.isdigit() else admin_id] = "local"
+
+data.setdefault("version", 1)
+path.write_text(yaml.safe_dump(data, sort_keys=False, default_flow_style=False))
+PYEOF
+)
+
+    # 1. PyYAML already importable by the system python3 -- use it directly.
+    if python3 -c "import yaml" >/dev/null 2>&1; then
+        echo "$yaml_script" | python3 - "$CONFIG_FILE" "$host" "$port" "$username" "$password" "$ADMIN_USER_ID" && return 0
+    fi
+
+    # 2. uv is already installed by Step 0 of this script -- use it to run the
+    #    editor in an ephemeral environment with pyyaml. No system/user
+    #    site-packages changes, no PEP 668 "externally managed" errors.
+    if command_exists uv; then
+        if echo "$yaml_script" | uv run --with pyyaml python3 - "$CONFIG_FILE" "$host" "$port" "$username" "$password" "$ADMIN_USER_ID" 2>/dev/null; then
+            return 0
+        fi
+    fi
+
+    # 3. Last resort: try installing pyyaml directly for python3 (covers both
+    #    PEP 668 "externally managed" distros and plain ones, root or non-root).
+    msg_warn "PyYAML unavailable via uv -- attempting a direct pip install..."
+    if python3 -m pip install --user --quiet pyyaml >/dev/null 2>&1 \
+       || python3 -m pip install --user --break-system-packages --quiet pyyaml >/dev/null 2>&1 \
+       || python3 -m pip install --break-system-packages --quiet pyyaml >/dev/null 2>&1; then
+        if python3 -c "import yaml" >/dev/null 2>&1; then
+            echo "$yaml_script" | python3 - "$CONFIG_FILE" "$host" "$port" "$username" "$password" "$ADMIN_USER_ID" && return 0
+        fi
+    fi
+
+    # 4. All YAML-based paths failed -- fall back to the old text-based edit so
+    #    config.yml still gets updated, just without the richer server_access /
+    #    chat_defaults handling.
+    msg_warn "Could not load PyYAML -- falling back to a simpler text-based edit of $CONFIG_FILE"
+    sed -i.bak "/servers:/,/^[^ ]/ s/host: .*/host: $host/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    sed -i.bak "/servers:/,/^[^ ]/ s/port: .*/port: $port/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    if [ -n "$username" ]; then
+        sed -i.bak "/servers:/,/^[^ ]/ s/username: .*/username: $username/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+        sed -i.bak "/servers:/,/^[^ ]/ s/password: .*/password: $password/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    fi
+    return 1
+}
+
 # On WSL2, systemd doesn't manage tailscaled — we must start the daemon manually
 # before calling `tailscale up`, otherwise the call silently fails.
 tailscale_up() {
@@ -370,6 +473,7 @@ fi
 if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${ADMIN_USER_ID:-}" ]; then
     msg_ok "Telegram already configured"
     telegram_configured=true
+    load_tailscale_choice
 else
     msg_info "Create a bot: $(make_link 'https://t.me/BotFather')"
     msg_info "Get your ID: $(make_link 'https://t.me/userinfobot')"
@@ -419,6 +523,12 @@ else
         SERVER_IP="${server_ip:-}"
     fi
 
+    if [[ "${use_tailscale_early:-}" =~ ^[Yy]$ ]]; then
+        USE_TAILSCALE=true
+    else
+        USE_TAILSCALE=false
+    fi
+
     # Write .env (preserve extra vars if file exists)
     if [ -f "$ENV_FILE" ]; then
         # Update existing values
@@ -444,10 +554,17 @@ else
                 echo "WEB_URL=http://$(escape_env_value "$SERVER_IP"):8088" >> "$ENV_FILE"
             fi
         fi
+        if grep -q "^USE_TAILSCALE=" "$ENV_FILE"; then
+            sed -i.bak "s|^USE_TAILSCALE=.*|USE_TAILSCALE=$USE_TAILSCALE|" "$ENV_FILE"
+            rm -f "$ENV_FILE.bak"
+        else
+            echo "USE_TAILSCALE=$USE_TAILSCALE" >> "$ENV_FILE"
+        fi
     else
         {
             echo "TELEGRAM_TOKEN=$(escape_env_value "$TELEGRAM_TOKEN")"
             echo "ADMIN_USER_ID=$(escape_env_value "$ADMIN_USER_ID")"
+            echo "USE_TAILSCALE=$USE_TAILSCALE"
             if [ -n "$SERVER_IP" ]; then
                 echo "WEB_URL=http://$(escape_env_value "$SERVER_IP"):8088"
             fi
@@ -476,18 +593,26 @@ if [ -f "$ENV_FILE" ]; then
     source "$ENV_FILE" 2>/dev/null
     set +a
 fi
+load_tailscale_choice
 
+finish_remote_api=false
 if [ -n "${DEPLOY_HUMMINGBOT_API:-}" ]; then
     if [ "${DEPLOY_HUMMINGBOT_API:-}" = "true" ]; then
         msg_ok "Hummingbot API already configured (enabled)"
         hb_api_deployed=true
-    else
+    elif config_has_api_server; then
         msg_ok "Hummingbot API already configured (skipped)"
+    else
+        msg_info "Finishing remote API configuration..."
+        finish_remote_api=true
     fi
-else
+fi
+
+if [ -z "${DEPLOY_HUMMINGBOT_API:-}" ] || [ "$finish_remote_api" = true ]; then
     # Check if a Hummingbot API is already running on port 8000
     existing_api=false
-    if curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
+    msg_info "Checking for an existing API on localhost:8000..."
+    if api_health_check; then
         existing_api=true
         msg_warn "Hummingbot API already running on localhost:8000"
         echo ""
@@ -504,12 +629,21 @@ else
     fi
 
     if [ "$existing_api" != "skip" ]; then
+    if [ "$finish_remote_api" = true ]; then
+        deploy_hb="n"
+        msg_info "Condor connects to Hummingbot Backend API for trading."
+        echo ""
+        msg_ok "Using remote Hummingbot API (local Docker deploy skipped)"
+    else
     msg_info "Condor connects to Hummingbot Backend API for trading."
     echo ""
     prompt_visible "Configure and launch local Hummingbot API with Docker? [Y/n]" "Y" "deploy_hb"
+    fi
 
     if [[ "${deploy_hb:-}" =~ ^[Nn]$ ]]; then
-        echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
+        if [ "$finish_remote_api" != true ]; then
+            echo "DEPLOY_HUMMINGBOT_API=false" >> "$ENV_FILE"
+        fi
         msg_ok "Skipped Hummingbot API deployment"
         echo ""
         msg_info "Enter the Hummingbot API connection details."
@@ -532,6 +666,10 @@ else
         # ── Tailscale option for external API ──────────────
         use_tailscale_remote="${use_tailscale_early:-N}"
         if [[ "${use_tailscale_remote:-}" =~ ^[Yy]$ ]]; then
+            if command_exists tailscale && tailscale status >/dev/null 2>&1; then
+                msg_ok "Tailscale already connected on this machine"
+                ts_auth_key="${ts_auth_key:-}"
+            else
             echo ""
             echo -e "  ${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
             echo -e "  ${CYAN}  How to get a Tailscale auth key:${RESET}"
@@ -553,13 +691,12 @@ else
                 fi
                 break
             done
-            # Hostname defaults to "hummingbot-api" — matches the TS_HOSTNAME set on the server
-            ts_hostname="hummingbot-api"
-
             msg_info "Installing Tailscale on this machine..."
             curl -fsSL https://tailscale.com/install.sh | sh
             msg_info "Connecting to Tailscale network..."
             tailscale_up --authkey="$ts_auth_key" --hostname="condor" --accept-dns=true
+            fi
+            ts_hostname="hummingbot-api"
             ts_condor_ip=$(tailscale ip -4 2>/dev/null | head -1)
 
             # Use the Tailscale MagicDNS hostname to reach hummingbot-api (plain HTTP — WireGuard encrypts in transit)
@@ -761,13 +898,13 @@ PYEOF
                     # Wait for API to be healthy
                     msg_info "Waiting for API to be ready..."
                     for i in $(seq 1 30); do
-                        if curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
+                        if api_health_check; then
                             msg_ok "Hummingbot API is healthy"
                             break
                         fi
                         sleep 2
                     done
-                    if ! curl -sf http://localhost:8000/docs >/dev/null 2>&1; then
+                    if ! api_health_check; then
                         msg_warn "API not responding yet (may still be starting)"
                         msg_info "Check status: cd $HB_API_DIR && docker compose ps"
                     fi
@@ -886,13 +1023,11 @@ fi
 
 # If user provided a remote API URL (skipped local deployment), update config.yml
 if [ "${hb_api_configured:-false}" = true ] && [ -f "$CONFIG_FILE" ]; then
-    sed -i.bak "/servers:/,/^[^ ]/ s/host: .*/host: $HB_API_HOST/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
-    sed -i.bak "/servers:/,/^[^ ]/ s/port: .*/port: $HB_API_PORT/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
-    if [ -n "${hb_username:-}" ]; then
-        sed -i.bak "/servers:/,/^[^ ]/ s/username: .*/username: $hb_username/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
-        sed -i.bak "/servers:/,/^[^ ]/ s/password: .*/password: $hb_password/" "$CONFIG_FILE" && rm -f "$CONFIG_FILE.bak"
+    if update_config_api_server "$HB_API_HOST" "$HB_API_PORT" "${hb_username:-admin}" "${hb_password:-admin}"; then
+        msg_ok "Configured $CONFIG_FILE: ${HB_API_PROTOCOL:-http}://${HB_API_HOST}:${HB_API_PORT}"
+    else
+        msg_warn "Configured $CONFIG_FILE with a basic edit -- review the servers: section to confirm it looks right"
     fi
-    msg_ok "Configured $CONFIG_FILE: ${HB_API_PROTOCOL:-http}://${HB_API_HOST}:${HB_API_PORT}"
 fi
 
 if [ "$config_updated" = false ] && [ -f "$CONFIG_FILE" ]; then

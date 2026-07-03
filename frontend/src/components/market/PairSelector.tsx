@@ -126,7 +126,7 @@ export function PairSelector({
     <div ref={containerRef} className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="group flex items-center gap-1 px-4 py-2.5 transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none"
+        className="group flex items-center gap-1 px-4 py-2.5 transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)]"
       >
         {isLoading ? (
           <span className="text-sm text-[var(--color-text-muted)]">Loading...</span>
@@ -156,7 +156,7 @@ export function PairSelector({
               className="flex-1 bg-transparent text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
             />
             {search && (
-              <button onClick={() => setSearch("")}>
+              <button onClick={() => setSearch("")} title="Clear search" aria-label="Clear search">
                 <X className="h-3.5 w-3.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]" />
               </button>
             )}

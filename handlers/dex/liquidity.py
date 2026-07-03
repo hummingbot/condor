@@ -43,27 +43,6 @@ logger = logging.getLogger(__name__)
 # ============================================
 
 
-def _format_number(value, decimals: int = 2) -> str:
-    """Format number with K/M suffix for readability"""
-    if value is None:
-        return "—"
-    try:
-        num = float(value)
-        if num == 0:
-            return "0"
-        if abs(num) >= 1_000_000:
-            return f"{num/1_000_000:.{decimals}f}M"
-        if abs(num) >= 1_000:
-            return f"{num/1_000:.{decimals}f}K"
-        if abs(num) >= 1:
-            return f"{num:.{decimals}f}"
-        if abs(num) >= 0.01:
-            return f"{num:.4f}"
-        return f"{num:.6f}"
-    except (ValueError, TypeError):
-        return "—"
-
-
 def _format_value(value: float) -> str:
     """Format USD values"""
     if value >= 1000000:

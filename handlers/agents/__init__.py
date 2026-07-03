@@ -6,6 +6,8 @@ import shutil
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from condor.acp import ACP_COMMANDS, PromptDone
+from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 from handlers import clear_all_input_states
 from utils.auth import restricted
 
@@ -17,13 +19,12 @@ from ._shared import (
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
     DEFAULT_MODE,
-    load_assistant,
     get_project_dir,
+    load_assistant,
+    normalize_mode,
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
-from condor.acp import ACP_COMMANDS, PromptDone
-from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
 
@@ -59,6 +60,29 @@ def _is_agent_available(agent_key: str) -> bool:
     return available
 
 
+def _reclaim_default_agent(context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Resolve the effective agent_key, reclaiming DEFAULT_AGENT after an auto-switch.
+
+    A previous auto-switch (no installed CLI for the configured default) parks the
+    user on whatever backend was available and flags it ``agent_llm_auto``. That was
+    never the user's choice, so once DEFAULT_AGENT's CLI is back, restore it. An
+    explicit pick via Change LLM clears the flag, so deliberate choices are never
+    reverted. Used by both the /agent command and the always-on message handler so
+    healing happens no matter how the user re-enters.
+    """
+    context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
+    agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
+    if (
+        context.user_data.get("agent_llm_auto")
+        and agent_key != DEFAULT_AGENT
+        and _is_agent_available(DEFAULT_AGENT)
+    ):
+        context.user_data["agent_llm"] = DEFAULT_AGENT
+        context.user_data.pop("agent_llm_auto", None)
+        agent_key = DEFAULT_AGENT
+    return agent_key
+
+
 @restricted
 async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /agent command — manage agent settings, mode, and session."""
@@ -71,12 +95,13 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     clear_all_input_states(context)
 
-    # Ensure defaults are set
-    context.user_data.setdefault("agent_mode", DEFAULT_MODE)
-    context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
+    # Ensure defaults are set (coercing any legacy/removed persisted mode)
+    context.user_data["agent_mode"] = normalize_mode(
+        context.user_data.get("agent_mode")
+    )
+    agent_key = _reclaim_default_agent(context)
 
     # Warn if no agent CLI is available
-    agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     if not _is_agent_available(agent_key):
         available = [k for k in AGENT_OPTIONS if _is_agent_available(k)]
         if not available:
@@ -89,8 +114,10 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 "Then restart the bot."
             )
             return
-        # Auto-switch to an available one
+        # Auto-switch to an available one. Flag it as non-user so the reclaim
+        # logic above can restore DEFAULT_AGENT once its CLI is installed.
         context.user_data["agent_llm"] = available[0]
+        context.user_data["agent_llm_auto"] = True
 
     await show_agent_menu(update, context)
 
@@ -111,12 +138,10 @@ async def agent_callback_handler(
     data = query.data
     action = data.split(":", 1)[1] if ":" in data else data
 
-    # Mode switching
+    # Start a session (single condor agent)
     if action.startswith("mode:"):
         mode = action.split(":", 1)[1]
         await _handle_mode_start(update, context, mode)
-    elif action == "switch_mode":
-        await _handle_switch_mode_menu(update, context)
 
     # Settings
     elif action == "settings":
@@ -172,7 +197,6 @@ async def agent_callback_handler(
         await query.message.edit_text(text)
 
 
-
 async def _handle_mode_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -184,9 +208,8 @@ async def _handle_mode_start(
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    # Backward compat: treat "trading" as "agent_builder"
-    if mode == "trading":
-        mode = "agent_builder"
+    # Never start a session in a removed/unknown mode (stale state, old button).
+    mode = normalize_mode(mode)
 
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     mode_label = AGENT_MODES.get(mode, {}).get("label", mode)
@@ -238,24 +261,7 @@ async def _handle_mode_start(
         await message.edit_text(f"Failed to start agent: {e}")
 
 
-async def _handle_switch_mode_menu(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
-    """Show mode selection menu."""
-    from .menu import _mode_selection_keyboard
-
-    query = update.callback_query
-    lines = ["Select a mode:\n"]
-    for key, info in AGENT_MODES.items():
-        lines.append(f"• {info['label']} — {info['description']}")
-    await query.message.edit_text(
-        "\n".join(lines), reply_markup=_mode_selection_keyboard()
-    )
-
-
-async def _handle_settings(
-    update: Update, context: ContextTypes.DEFAULT_TYPE
-) -> None:
+async def _handle_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show settings sub-menu with LLM picker."""
     from .menu import _settings_keyboard
 
@@ -277,6 +283,7 @@ async def _handle_set_llm(
         return
 
     context.user_data["agent_llm"] = llm_key
+    context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
     chat_id = update.effective_chat.id
@@ -361,6 +368,7 @@ async def _handle_openrouter_pick(
     model = models[idx]
     agent_key = f"openrouter:{model.slug}"
     context.user_data["agent_llm"] = agent_key
+    context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
     await destroy_session(update.effective_chat.id)
@@ -436,9 +444,7 @@ async def _resolve_openrouter_typed_slug(
                 InlineKeyboardButton(
                     "Use this model", callback_data="agent:or_type_confirm"
                 ),
-                InlineKeyboardButton(
-                    "Cancel", callback_data="agent:or_type_cancel"
-                ),
+                InlineKeyboardButton("Cancel", callback_data="agent:or_type_cancel"),
             ]
         ]
     )
@@ -461,6 +467,7 @@ async def _handle_openrouter_type_confirm(
         return
 
     context.user_data["agent_llm"] = f"openrouter:{slug}"
+    context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
     await destroy_session(update.effective_chat.id)
@@ -747,7 +754,9 @@ async def agent_voice_handler(
         return
 
     if not text or not text.strip():
-        await status_msg.edit_text("Could not transcribe any speech from the voice message.")
+        await status_msg.edit_text(
+            "Could not transcribe any speech from the voice message."
+        )
         return
 
     # Show the transcribed text
@@ -812,20 +821,18 @@ async def agent_message_handler(
         await _resolve_openrouter_typed_slug(update, context, text)
         return
 
-    # Backward compat
-    mode = context.user_data.get("agent_mode", DEFAULT_MODE)
-    if mode == "trading":
-        mode = "agent_builder"
+    mode = normalize_mode(context.user_data.get("agent_mode"))
 
     session = get_session(chat_id)
 
     # Auto-create session if none exists (always-on agent)
     if not session or not session.client.alive:
-        agent_key = context.user_data.get("agent_llm", context.user_data.get("agent_selected", DEFAULT_AGENT))
-        context.user_data.setdefault("agent_llm", agent_key)
+        # Reclaim the configured default after an auto-switch — same healing the
+        # /agent command does, so users who only ever type messages benefit too.
+        agent_key = _reclaim_default_agent(context)
 
-        # Always start in condor mode when auto-creating a session (e.g. after restart).
-        # Users can switch to agent_builder via /agent menu.
+        # Condor is the single interactive agent; its builder capabilities ship
+        # as built-in skills, so there is only ever one mode.
         mode = DEFAULT_MODE
         context.user_data["agent_mode"] = mode
 
@@ -858,7 +865,9 @@ async def agent_message_handler(
                 try:
                     await session.client.prompt(extra_context)
                 except Exception:
-                    log.warning("Failed to inject %s context for chat %d", mode, chat_id)
+                    log.warning(
+                        "Failed to inject %s context for chat %d", mode, chat_id
+                    )
 
         except Exception as e:
             log.exception("Failed to create agent session")
@@ -868,7 +877,8 @@ async def agent_message_handler(
     # Check if busy
     if session.is_busy:
         await update.message.reply_text(
-            r"⏳ Still working on the previous request\.\.\." "\n"
+            r"⏳ Still working on the previous request\.\.\."
+            "\n"
             r"Your message will be queued — or wait for it to finish\.",
             parse_mode="MarkdownV2",
         )

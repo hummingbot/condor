@@ -10,15 +10,13 @@ Contains:
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from condor.cache import (
-    DEFAULT_CACHE_TTL,
-    clear_cache as _clear_cache,
-    get_cached as _get_cached,
-    invalidate_groups as _invalidate_groups,
-    invalidates as _invalidates,
-    set_cached as _set_cached,
-    cached_call as _cached_call,
-)
+from condor.cache import DEFAULT_CACHE_TTL
+from condor.cache import cached_call as _cached_call
+from condor.cache import clear_cache as _clear_cache
+from condor.cache import get_cached as _get_cached
+from condor.cache import invalidate_groups as _invalidate_groups
+from condor.cache import invalidates as _invalidates
+from condor.cache import set_cached as _set_cached
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +28,9 @@ logger = logging.getLogger(__name__)
 _NS = "_cex_cache"  # namespace for CEX cache
 
 
-def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+def get_cached(
+    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
+) -> Optional[Any]:
     return _get_cached(user_data, key, ttl, namespace=_NS)
 
 
@@ -50,7 +50,9 @@ async def cached_call(
     *args,
     **kwargs,
 ) -> Any:
-    return await _cached_call(user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs)
+    return await _cached_call(
+        user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs
+    )
 
 
 # ============================================
@@ -102,7 +104,9 @@ def get_cex_connectors(connectors: Dict[str, Any]) -> List[str]:
 # ============================================
 
 
-from condor.fetchers.portfolio import fetch_cex_balances  # noqa: F811 — canonical source
+from condor.fetchers.portfolio import (  # noqa: F811 — canonical source
+    fetch_cex_balances,
+)
 
 
 async def get_cex_balances(
@@ -163,7 +167,9 @@ async def get_positions(
 # ============================================
 
 
-from condor.fetchers.trading_rules import fetch_trading_rules  # noqa: F811 — canonical source
+from condor.fetchers.trading_rules import (  # noqa: F811 — canonical source
+    fetch_trading_rules,
+)
 
 
 async def get_trading_rules(
@@ -310,7 +316,9 @@ def format_trading_rules_info(
 # ============================================
 
 
-from condor.fetchers.connectors import fetch_available_cex_connectors  # noqa: F811 — canonical source
+from condor.fetchers.connectors import (  # noqa: F811 — canonical source
+    fetch_available_cex_connectors,
+)
 
 
 async def get_available_cex_connectors(
@@ -336,24 +344,6 @@ async def get_available_cex_connectors(
     return await cached_call(
         user_data, cache_key, fetch_available_cex_connectors, ttl, client, account_name
     )
-
-
-# ============================================
-# STATE HELPERS
-# ============================================
-
-
-def clear_cex_state(context) -> None:
-    """Clear all CEX-related state from user context
-
-    Args:
-        context: Telegram context object
-    """
-    context.user_data.pop("cex_state", None)
-    context.user_data.pop("cex_previous_state", None)
-    context.user_data.pop("place_order_params", None)
-    context.user_data.pop("current_positions", None)
-    context.user_data.pop("current_orders", None)
 
 
 # ============================================
@@ -532,11 +522,13 @@ async def validate_trading_pair(
 
     # Special handling for Hyperliquid HIP3 markets (issuer:symbol format)
     if "hyperliquid" in connector_name.lower():
-        logger.info(f"Hyperliquid HIP3 handling for input '{pair_normalized}', available pairs count: {len(available_pairs)}")
+        logger.info(
+            f"Hyperliquid HIP3 handling for input '{pair_normalized}', available pairs count: {len(available_pairs)}"
+        )
         # Log a few sample pairs to debug
         sample_pairs = available_pairs[:5] if available_pairs else []
         logger.info(f"Sample pairs: {sample_pairs}")
-        
+
         # For input like "XYZ", look for pairs like "ISSUER:XYZ-USDC" or "ISSUER:XYZ-USD"
         hip3_matches = []
         for pair in available_pairs:
@@ -548,17 +540,23 @@ async def validate_trading_pair(
                     )  # Split from right to handle complex symbols
                     if ":" in issuer_symbol:
                         issuer, symbol = issuer_symbol.split(":", 1)
-                        logger.debug(f"Checking pair '{pair}': issuer='{issuer}', symbol='{symbol}', quote='{quote}' vs input='{pair_normalized}'")
+                        logger.debug(
+                            f"Checking pair '{pair}': issuer='{issuer}', symbol='{symbol}', quote='{quote}' vs input='{pair_normalized}'"
+                        )
                         # Check if the input matches the symbol part
                         if symbol.upper() == pair_normalized.upper():
-                            logger.info(f"Found HIP3 symbol match: '{pair}' matches input '{pair_normalized}'")
+                            logger.info(
+                                f"Found HIP3 symbol match: '{pair}' matches input '{pair_normalized}'"
+                            )
                             hip3_matches.append(pair)
                         # Also check if input matches the full issuer:symbol part
                         elif (
                             issuer_symbol.upper().replace(":", "-")
                             == pair_normalized.upper()
                         ):
-                            logger.info(f"Found HIP3 issuer:symbol match: '{pair}' matches input '{pair_normalized}'")
+                            logger.info(
+                                f"Found HIP3 issuer:symbol match: '{pair}' matches input '{pair_normalized}'"
+                            )
                             hip3_matches.append(pair)
                 except ValueError as e:
                     logger.debug(f"Failed to parse HIP3 pair '{pair}': {e}")
@@ -566,10 +564,14 @@ async def validate_trading_pair(
 
         if hip3_matches:
             # Found HIP3 matches - return success with the first match as correct format
-            logger.info(f"Returning HIP3 match: '{hip3_matches[0]}' for input '{pair_normalized}'")
+            logger.info(
+                f"Returning HIP3 match: '{hip3_matches[0]}' for input '{pair_normalized}'"
+            )
             return True, None, [], hip3_matches[0]
         else:
-            logger.warning(f"No HIP3 matches found for input '{pair_normalized}' on {connector_name}")
+            logger.warning(
+                f"No HIP3 matches found for input '{pair_normalized}' on {connector_name}"
+            )
 
     # Pair not found - find suggestions
     suggestions = find_similar_trading_pairs(pair_normalized, available_pairs, limit=4)

@@ -6,27 +6,24 @@ import {
   ChevronUp,
   Circle,
   Loader2,
-  MessageSquare,
   Pause,
   Play,
   RotateCcw,
   Save,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import yamlLib from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
+import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
 import { api, type ControllerInfo } from "@/lib/api";
-import { formatCurrencyVolume, formatCurrencyPnl } from "@/lib/formatters";
+import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
+import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
 import { setViewContext } from "@/lib/viewContext";
 
 type ConvertFn = (value: number, quoteCurrency: string) => { value: number; converted: boolean };
-
-function pnlColor(val: number) {
-  return val >= 0 ? "var(--color-green)" : "var(--color-red)";
-}
 
 function parseSide(raw: string): string {
   const dot = raw.lastIndexOf(".");
@@ -59,17 +56,6 @@ interface ControllerBrowserProps {
   currencySymbol: string;
 }
 
-// Keys to strip from the YAML display (internal / read-only fields)
-const YAML_HIDDEN_KEYS = new Set(["id", "controller_name", "controller_type"]);
-
-function configToYaml(config: Record<string, unknown>): string {
-  const filtered: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(config)) {
-    if (!YAML_HIDDEN_KEYS.has(k) && !k.startsWith("_")) filtered[k] = v;
-  }
-  return yamlLib.dump(filtered, { lineWidth: -1, noRefs: true, sortKeys: true });
-}
-
 // ── YAML Config Editor ──
 
 function YamlConfigEditor({
@@ -85,16 +71,28 @@ function YamlConfigEditor({
   botName: string;
   onSaved: () => void;
 }) {
-  const originalYaml = configToYaml(config);
+  // Memoize the dump so typing / local-state renders don't re-run yaml.dump, and
+  // so WS-tick churn of the `config` object identity that yields the SAME content
+  // produces an identical string (compared by value) below.
+  const originalYaml = useMemo(
+    () =>
+      configToYaml(config, {
+        hiddenKeys: CONTROLLER_HIDDEN_KEYS,
+        stripUnderscore: true,
+        sortKeys: true,
+      }),
+    [config],
+  );
   const [yamlContent, setYamlContent] = useState(originalYaml);
   const [parseError, setParseError] = useState<string | null>(null);
 
-  // Sync when config changes externally (e.g. after save or controller switch)
+  // Sync when config content actually changes (save / controller switch). Keyed
+  // on the string value, not the `config` object: a tick that re-creates `config`
+  // with unchanged content leaves `originalYaml` equal, so unsaved edits survive.
   useEffect(() => {
-    const newYaml = configToYaml(config);
-    setYamlContent(newYaml);
+    setYamlContent(originalYaml);
     setParseError(null);
-  }, [config]);
+  }, [originalYaml]);
 
   const isDirty = yamlContent !== originalYaml;
 
@@ -456,16 +454,7 @@ export function ControllerBrowser({
               )}
             </button>
             {/* Agent chat toggle */}
-            <button
-              onClick={() => {
-                window.dispatchEvent(new KeyboardEvent("keydown", { key: "k", metaKey: true, bubbles: true }));
-              }}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 border border-amber-500/30 transition-all"
-              title="Agent (Cmd+K)"
-            >
-              <MessageSquare className="h-3.5 w-3.5" />
-              <span>Agent</span>
-            </button>
+            <AgentToggleButton />
             <button
               onClick={onClose}
               className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

@@ -15,10 +15,12 @@ import {
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 
+import { NoServerCard } from "@/components/NoServerCard";
 import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
 import { PnlSparkline } from "@/components/bots/PnlSparkline";
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 
 import { useRates } from "@/hooks/useRates";
 import { useServer } from "@/hooks/useServer";
@@ -347,7 +349,7 @@ function ControllerRow({
         </div>
       </td>
       <td className="px-4 py-2.5">
-        <div className="flex items-center justify-center" onClick={(e) => e.stopPropagation()}>
+        <div className="flex flex-col items-center justify-center" onClick={(e) => e.stopPropagation()}>
           <button
             onClick={() => toggleMutation.mutate()}
             disabled={toggleMutation.isPending || isStopping}
@@ -358,7 +360,15 @@ function ControllerRow({
                   ? "text-[var(--color-green)] hover:bg-[var(--color-green)]/10"
                   : "text-[var(--color-yellow)] hover:bg-[var(--color-yellow)]/10"
             }`}
-            title={isStopping ? "Stopping..." : isKilled ? "Start controller" : "Pause controller"}
+            title={
+              toggleMutation.isError
+                ? `Failed to ${isKilled ? "start" : "pause"}: ${toggleMutation.error instanceof Error ? toggleMutation.error.message : "Unknown error"}`
+                : isStopping
+                  ? "Stopping..."
+                  : isKilled
+                    ? "Start controller"
+                    : "Pause controller"
+            }
           >
             {toggleMutation.isPending || isStopping ? (
               <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
@@ -368,6 +378,14 @@ function ControllerRow({
               <Pause className="h-3.5 w-3.5" />
             )}
           </button>
+          {toggleMutation.isError && (
+            <span
+              className="text-[10px] text-[var(--color-red)] whitespace-nowrap"
+              title={toggleMutation.error instanceof Error ? toggleMutation.error.message : "Unknown error"}
+            >
+              Failed to {isKilled ? "start" : "pause"}
+            </span>
+          )}
         </div>
       </td>
     </tr>
@@ -653,9 +671,9 @@ export function ActiveBotsTab() {
   const { convert, formatPnlValue, formatValue, currencySymbol } = useRates(quoteCurrencies);
 
   if (!server) {
-    return <p className="text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to view active bots." />;
   }
-  if (isLoading) return <p className="text-[var(--color-text-muted)]">Loading...</p>;
+  if (isLoading) return <FallbackSpinner />;
   if (error)
     return (
       <p className="text-[var(--color-red)]">
@@ -761,7 +779,7 @@ export function ActiveBotsTab() {
                       const cid = ctrl.controller_id || ctrl.controller_name;
                       return (
                         <ControllerRow
-                          key={`${ctrl.bot_name}-${ctrl.controller_name}`}
+                          key={`${ctrl.bot_name}-${cid}`}
                           ctrl={ctrl}
                           server={server!}
                           isSelected={selectedKey === `${ctrl.bot_name}-${ctrl.controller_id || ctrl.controller_name}`}

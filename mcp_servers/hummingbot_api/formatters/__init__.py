@@ -31,9 +31,6 @@ from .base import (
 # Table builder for creating consistent tables
 from .table_builder import ColumnDef, TableBuilder, create_simple_table
 
-# Account formatters
-from .account import format_connector_result
-
 # Bot formatters
 from .bots import format_active_bots_as_table, format_bot_logs_as_table
 
@@ -70,8 +67,6 @@ from .portfolio import format_portfolio_as_table
 from .trading import format_orders_as_table, format_positions_as_table
 
 __all__ = [
-    # Account formatters
-    "format_connector_result",
     # Gateway formatters
     "format_gateway_container_result",
     "format_gateway_config_result",

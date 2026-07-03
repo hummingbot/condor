@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Brain,
@@ -16,6 +16,7 @@ import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { api, type ChatAgentOption, type ChatModeOption } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
+import { useResizeDrag } from "@/hooks/useResizeDrag";
 
 const MIN_WIDTH = 360;
 const MAX_WIDTH = 1200;
@@ -38,7 +39,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const panelRef = useRef<HTMLDivElement>(null);
 
   const [width, setWidth] = useState(DEFAULT_WIDTH);
-  const [isDragging, setIsDragging] = useState(false);
   const [showNewMenu, setShowNewMenu] = useState(false);
   const [pendingSession, setPendingSession] = useState(false);
 
@@ -94,27 +94,14 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   }, [chat.activeSlot?.messages]);
 
   // Resize drag handling
-  const startDrag = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      setIsDragging(true);
-      const startX = e.clientX;
-      const startWidth = width;
-
-      const onMove = (ev: MouseEvent) => {
-        const delta = startX - ev.clientX;
-        setWidth(Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, startWidth + delta)));
-      };
-      const onUp = () => {
-        setIsDragging(false);
-        document.removeEventListener("mousemove", onMove);
-        document.removeEventListener("mouseup", onUp);
-      };
-      document.addEventListener("mousemove", onMove);
-      document.addEventListener("mouseup", onUp);
-    },
-    [width],
-  );
+  const { onMouseDown: startDrag, isDragging } = useResizeDrag({
+    axis: "x",
+    value: width,
+    onChange: setWidth,
+    min: MIN_WIDTH,
+    max: MAX_WIDTH,
+    direction: "inverted",
+  });
 
   // Clear pending state when active slot becomes available
   useEffect(() => {
@@ -238,9 +225,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         {chat.permissionRequest && (
           <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3">
             <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-yellow)]" />
               <div className="flex-1 text-sm">
-                <p className="font-medium text-amber-200">Confirm action</p>
+                <p className="font-medium text-[var(--color-yellow)]">Confirm action</p>
                 <p className="mt-0.5 text-[var(--color-text-muted)]">
                   {chat.permissionRequest.summary}
                 </p>
@@ -249,7 +236,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     onClick={() =>
                       chat.resolvePermission(chat.permissionRequest!.request_id, true)
                     }
-                    className="rounded bg-green-600 px-3 py-1 text-xs font-medium text-white hover:bg-green-500"
+                    className="rounded bg-[var(--color-green)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
                   >
                     Approve
                   </button>
@@ -257,7 +244,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                     onClick={() =>
                       chat.resolvePermission(chat.permissionRequest!.request_id, false)
                     }
-                    className="rounded bg-red-600 px-3 py-1 text-xs font-medium text-white hover:bg-red-500"
+                    className="rounded bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
                   >
                     Reject
                   </button>
@@ -449,7 +436,7 @@ function NewSessionMenu({
         <div className="mt-1 border-t border-[var(--color-border)] px-3 pt-2 pb-2">
           <button
             onClick={() => onStart(selectedAgent, selectedMode)}
-            className="flex w-full items-center justify-center gap-2 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-black hover:bg-[var(--color-primary)]/80"
+            className="flex w-full items-center justify-center gap-2 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--color-primary)]/80"
           >
             <ModeIcon className="h-3.5 w-3.5" />
             Start Session
@@ -591,11 +578,20 @@ function SessionTab({
       )}
       <span
         role="button"
+        tabIndex={0}
+        aria-label="Close session"
         onClick={(e) => {
           e.stopPropagation();
           onClose();
         }}
-        className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-[var(--color-surface-hover)] group-hover:opacity-100"
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            e.stopPropagation();
+            onClose();
+          }
+        }}
+        className="ml-0.5 rounded p-0.5 opacity-0 transition-opacity hover:bg-[var(--color-surface-hover)] group-hover:opacity-100 focus-visible:opacity-100 group-focus-within:opacity-100"
       >
         <X className="h-2.5 w-2.5" />
       </span>

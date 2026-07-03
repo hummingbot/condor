@@ -31,12 +31,18 @@ function SelectField({
 
   const options = data?.options ?? [];
 
-  // Auto-select first option when options load and no value is set
+  // Auto-select first option ONLY when no value is set. A non-empty persisted
+  // value is preserved even if it's absent from the currently loaded options
+  // (e.g. server/pair temporarily unavailable, server-scoped options).
   useEffect(() => {
     if (options.length === 0) return;
-    if (value && value !== "" && options.includes(String(value))) return;
+    if (value != null && value !== "") return;
     onChange(options[0]);
-  }, [options, value, onChange]);
+    // onChange is an unstable inline closure from the parent; depending on it
+    // would re-run this effect every parent render. The auto-select trigger
+    // only depends on options/value, so we intentionally omit it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [options, value]);
 
   return (
     <div className="relative">

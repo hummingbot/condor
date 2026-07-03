@@ -13,6 +13,26 @@ function nonCandleChannels(channels: string[]): string[] {
   return channels.filter((ch) => !ch.startsWith("candles:"));
 }
 
+/**
+ * Merge incoming performance snapshots into existing ones, deduplicating by
+ * `controller_id:timestamp`.
+ */
+function mergeSnapshots(
+  existing: ControllerPerformanceSnapshot[],
+  incoming: ControllerPerformanceSnapshot[],
+): ControllerPerformanceSnapshot[] {
+  const merged = [...existing];
+  const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
+  for (const snap of incoming) {
+    const key = `${snap.controller_id}:${snap.timestamp}`;
+    if (!seen.has(key)) {
+      merged.push(snap);
+      seen.add(key);
+    }
+  }
+  return merged;
+}
+
 export function useCondorWebSocket(
   channels: string[],
   server: string | null,
@@ -32,8 +52,6 @@ export function useCondorWebSocket(
 
     // Wire candle store singleton to this WS instance
     candleStore.setWs(ws);
-
-    let lastVersion = ws.version;
 
     ws.onMessage((channel, data) => {
       const prefix = channel.split(":")[0];
@@ -120,7 +138,7 @@ export function useCondorWebSocket(
         const execs = data as unknown[];
         if (Array.isArray(execs)) {
           queryClient.setQueryData(
-            ["executors-infinite", server, ""],
+            ["executors-infinite", server],
             (old: { pages?: { executors: unknown[]; next_cursor: string | null }[]; pageParams?: unknown[] } | undefined) => {
               if (!old?.pages?.length) return old;
               const firstPage = old.pages[0];
@@ -142,16 +160,7 @@ export function useCondorWebSocket(
             (old: ControllerPerformanceHistoryResponse | undefined) => {
               if (!old) return old;
               // Append new snapshots and deduplicate by controller_id+timestamp
-              const existing = old.snapshots ?? [];
-              const merged = [...existing];
-              const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
-              for (const snap of incoming.snapshots!) {
-                const key = `${snap.controller_id}:${snap.timestamp}`;
-                if (!seen.has(key)) {
-                  merged.push(snap);
-                  seen.add(key);
-                }
-              }
+              const merged = mergeSnapshots(old.snapshots ?? [], incoming.snapshots!);
               return { ...old, snapshots: merged };
             },
           );
@@ -170,16 +179,7 @@ export function useCondorWebSocket(
               ["controller-perf-history", server, cid],
               (old: ControllerPerformanceHistoryResponse | undefined) => {
                 if (!old) return old;
-                const existing = old.snapshots ?? [];
-                const merged = [...existing];
-                const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
-                for (const snap of snaps) {
-                  const key = `${snap.controller_id}:${snap.timestamp}`;
-                  if (!seen.has(key)) {
-                    merged.push(snap);
-                    seen.add(key);
-                  }
-                }
+                const merged = mergeSnapshots(old.snapshots ?? [], snaps);
                 return { ...old, snapshots: merged };
               },
             );
@@ -194,21 +194,14 @@ export function useCondorWebSocket(
       }
     });
 
-    // Notify React immediately when WS connects
+    // Notify React on each (re)connect. The WS fires onConnect from its onopen
+    // handler after bumping `version`, covering both the initial connect and
+    // every reconnect — no polling needed.
     ws.onConnect(() => setWsVersion((v) => v + 1));
 
     ws.connect();
 
-    // Poll as fallback for reconnects
-    const versionPoll = setInterval(() => {
-      if (ws.version !== lastVersion) {
-        lastVersion = ws.version;
-        setWsVersion(ws.version);
-      }
-    }, 500);
-
     return () => {
-      clearInterval(versionPoll);
       candleStore.setWs(null);
       ws.disconnect();
       wsRef.current = null;

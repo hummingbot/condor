@@ -17,6 +17,23 @@ from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
 
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def assistant_routines_dir(agent_slug: str | None) -> Path:
+    """Routines dir for an assistant.
+
+    There is a single home for the general library — the repo-root ``routines/``,
+    owned by the chat ``condor``. Domain experts/trading agents are isolated: each
+    owns its routines and does **not** see the general library.
+
+    - chat ``condor`` (``agent_slug`` None) → ``routines`` (the general library)
+    - trading agent / domain expert (slug) → ``agents/<slug>/routines`` (isolated)
+    """
+    if agent_slug:
+        return _PROJECT_ROOT / "agents" / agent_slug / "routines"
+    return _PROJECT_ROOT / "routines"
+
 
 @dataclass
 class RoutineResult:
@@ -40,7 +57,28 @@ def normalize_result(result) -> RoutineResult:
         return result
     return RoutineResult(text=str(result) if result else "Completed")
 
+
 _routines_cache: dict[str, "RoutineInfo"] | None = None
+
+# {stem: mtime} of every file seen on the last scan of routines/ — including
+# files that failed to load, so a broken routine isn't re-executed on every
+# call but is retried as soon as its mtime changes.
+_routines_mtimes: dict[str, float | None] = {}
+
+# Per-directory caches for discover_routines_from_path, keyed by
+# (resolved dir, agent_slug): (mtimes-as-scanned, loaded RoutineInfos).
+_path_caches: dict[
+    tuple[str, str | None],
+    tuple[dict[str, float | None], dict[str, "RoutineInfo"]],
+] = {}
+
+
+def _safe_mtime(file_path: Path) -> float | None:
+    """Return the file's modification time (epoch seconds), or None on failure."""
+    try:
+        return file_path.stat().st_mtime
+    except OSError:
+        return None
 
 
 class RoutineInfo:
@@ -58,6 +96,7 @@ class RoutineInfo:
         cleanup_fn: Callable | None = None,
         category: str = "Uncategorized",
         source: str = "global",
+        last_modified: float | None = None,
     ):
         self.name = name
         self.config_class = config_class
@@ -69,6 +108,8 @@ class RoutineInfo:
         self.cleanup_fn = cleanup_fn
         self.category = category
         self.source = source
+        # File modification time (epoch seconds) of the routine's source file.
+        self.last_modified = last_modified
 
         # Extract description from Config docstring
         doc = config_class.__doc__ or name
@@ -114,28 +155,44 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     - run(config, context) -> str: Async function that executes the routine
     - CONTINUOUS = True (optional): Mark as continuous routine with internal loop
 
+    Discovery is cached per file mtime: unchanged modules are NOT re-imported,
+    while new/edited files are (re)loaded and deleted files dropped on every
+    call — so edits are still picked up without restarting the bot.
+
     Args:
-        force_reload: Force reimport of all modules
+        force_reload: Force reimport of all modules regardless of mtimes
+                      (explicit hot-reload path, e.g. the file watcher)
 
     Returns:
         Dict mapping routine name to RoutineInfo
     """
     global _routines_cache
 
-    if _routines_cache is not None and not force_reload:
-        return _routines_cache
+    fresh_start = force_reload or _routines_cache is None
+    prev_routines = {} if fresh_start else _routines_cache
+    prev_mtimes = {} if fresh_start else _routines_mtimes
 
     routines_dir = Path(__file__).parent
     routines = {}
+    scanned_mtimes: dict[str, float | None] = {}
 
     for file_path in routines_dir.glob("*.py"):
-        if file_path.stem in ("__init__", "base"):
+        stem = file_path.stem
+        if stem in ("__init__", "base"):
+            continue
+
+        mtime = _safe_mtime(file_path)
+        scanned_mtimes[stem] = mtime
+        if mtime is not None and stem in prev_mtimes and prev_mtimes[stem] == mtime:
+            # Unchanged since last scan: reuse cached info (or cached failure).
+            if stem in prev_routines:
+                routines[stem] = prev_routines[stem]
             continue
 
         try:
-            module_name = f"routines.{file_path.stem}"
+            module_name = f"routines.{stem}"
 
-            if force_reload and module_name in importlib.sys.modules:
+            if module_name in importlib.sys.modules:
                 importlib.reload(importlib.sys.modules[module_name])
             else:
                 importlib.import_module(module_name)
@@ -167,6 +224,7 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
                 cleanup_fn=cleanup_fn,
                 category=category,
                 source="global",
+                last_modified=_safe_mtime(file_path),
             )
             logger.debug(
                 f"Discovered routine: {file_path.stem} (continuous={is_continuous})"
@@ -175,21 +233,26 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
         except Exception as e:
             logger.error(f"Failed to load routine {file_path.stem}: {e}")
 
+    _routines_mtimes.clear()
+    _routines_mtimes.update(scanned_mtimes)
     _routines_cache = routines
     return routines
 
 
 def discover_routines_from_path(
-    routines_dir: Path, agent_slug: str | None = None
+    routines_dir: Path, agent_slug: str | None = None, force_reload: bool = False
 ) -> dict[str, RoutineInfo]:
     """Discover routines from an arbitrary directory path.
 
     Uses importlib.util for dynamic loading since agent-local routines
-    aren't on the Python module path. No global cache -- each call scans fresh.
+    aren't on the Python module path. Discovery is cached per directory and
+    keyed by file mtimes: unchanged modules are NOT re-executed, while
+    new/edited files are (re)loaded and deleted files dropped on every call.
 
     Args:
         routines_dir: Directory containing routine .py files.
         agent_slug: If provided, sets source to "agent:{slug}" and default category to agent name.
+        force_reload: Force re-execution of all modules regardless of mtimes.
 
     Returns:
         Dict mapping routine name to RoutineInfo.
@@ -201,15 +264,38 @@ def discover_routines_from_path(
     if not routines_dir.exists():
         return routines
 
+    cache_key = (str(routines_dir.resolve()), agent_slug)
+    prev_mtimes, prev_routines = (
+        ({}, {}) if force_reload else _path_caches.get(cache_key, ({}, {}))
+    )
+    scanned_mtimes: dict[str, float | None] = {}
+
     source = f"agent:{agent_slug}" if agent_slug else "global"
-    default_category = agent_slug.replace("_", " ").replace("-", " ").title() if agent_slug else "Uncategorized"
+    default_category = (
+        agent_slug.replace("_", " ").replace("-", " ").title()
+        if agent_slug
+        else "Uncategorized"
+    )
 
     for file_path in routines_dir.glob("*.py"):
-        if file_path.stem.startswith("_"):
+        stem = file_path.stem
+        if stem.startswith("_"):
+            continue
+
+        mtime = _safe_mtime(file_path)
+        scanned_mtimes[stem] = mtime
+        if mtime is not None and stem in prev_mtimes and prev_mtimes[stem] == mtime:
+            # Unchanged since last scan: reuse cached info (or cached failure).
+            if stem in prev_routines:
+                routines[stem] = prev_routines[stem]
             continue
 
         try:
-            module_name = f"agent_routine_{agent_slug}_{file_path.stem}" if agent_slug else f"agent_routine_{file_path.stem}"
+            module_name = (
+                f"agent_routine_{agent_slug}_{file_path.stem}"
+                if agent_slug
+                else f"agent_routine_{file_path.stem}"
+            )
             spec = importlib.util.spec_from_file_location(module_name, file_path)
             if not spec or not spec.loader:
                 continue
@@ -238,12 +324,14 @@ def discover_routines_from_path(
                 cleanup_fn=cleanup_fn,
                 category=category,
                 source=source,
+                last_modified=_safe_mtime(file_path),
             )
             logger.debug(f"Discovered agent routine: {file_path.stem}")
 
         except Exception as e:
             logger.error(f"Failed to load agent routine {file_path.stem}: {e}")
 
+    _path_caches[cache_key] = (scanned_mtimes, routines)
     return routines
 
 

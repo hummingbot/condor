@@ -1,6 +1,8 @@
-import { Archive, Bot, FlaskConical, History, Loader2, TerminalSquare } from "lucide-react";
+import { Archive, Bot, FlaskConical, History, TerminalSquare } from "lucide-react";
 import { lazy, Suspense, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
+
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 
 const ActiveBotsTab = lazy(() =>
   import("@/pages/tabs/ActiveBotsTab").then((m) => ({ default: m.ActiveBotsTab })),
@@ -27,14 +29,6 @@ const TABS = [
 ] as const;
 
 type TabKey = (typeof TABS)[number]["key"];
-
-function FallbackSpinner() {
-  return (
-    <div className="flex items-center justify-center py-20">
-      <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
-    </div>
-  );
-}
 
 export function Bots() {
   const [searchParams, setSearchParams] = useSearchParams();

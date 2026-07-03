@@ -9,7 +9,6 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from config_manager import get_config_manager
 from condor.web.auth import get_current_user
 from condor.web.models import (
     BalanceItem,
@@ -19,6 +18,7 @@ from condor.web.models import (
     PortfolioResponse,
     WebUser,
 )
+from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -74,7 +74,9 @@ async def get_portfolio(
             # Update SDS cache so subsequent non-refresh reads get fresh data
             get_server_data_service().put(name, ServerDataType.PORTFOLIO, state)
         else:
-            state = await get_server_data_service().get_or_fetch(name, ServerDataType.PORTFOLIO)
+            state = await get_server_data_service().get_or_fetch(
+                name, ServerDataType.PORTFOLIO
+            )
     except Exception as e:
         logger.warning("Portfolio fetch exception for %s: %s", name, e)
         raise HTTPException(status_code=502, detail=f"Failed to get portfolio: {e}")
@@ -85,13 +87,18 @@ async def get_portfolio(
         registered = ServerDataType.PORTFOLIO in sds._fetch_registry
         logger.warning(
             "Portfolio returned None for %s (fetch registered: %s, health: %s)",
-            name, registered,
-            sds.get_server_health(name).status.value if name in sds._health else "unknown",
+            name,
+            registered,
+            (
+                sds.get_server_health(name).status.value
+                if name in sds._health
+                else "unknown"
+            ),
         )
         raise HTTPException(
             status_code=502,
             detail=f"Failed to get portfolio: server '{name}' returned no data"
-                   + ("" if registered else " (fetch not registered — try restarting)"),
+            + ("" if registered else " (fetch not registered — try restarting)"),
         )
 
     # Parse portfolio state into structured response
@@ -116,14 +123,23 @@ async def get_portfolio(
                         continue
                     token = item.get("token", item.get("asset", ""))
                     total_bal = float(item.get("units", item.get("total_balance", 0)))
-                    available = float(item.get("available_units", item.get("available_balance", total_bal)))
+                    available = float(
+                        item.get(
+                            "available_units", item.get("available_balance", total_bal)
+                        )
+                    )
                     usd_val = float(item.get("value", item.get("usd_value", 0)))
 
                     if not token:
                         continue
 
                     balances.append(
-                        BalanceItem(token=token, total=total_bal, available=available, usd_value=usd_val)
+                        BalanceItem(
+                            token=token,
+                            total=total_bal,
+                            available=available,
+                            usd_value=usd_val,
+                        )
                     )
                     connector_total += usd_val
 
@@ -132,7 +148,11 @@ async def get_portfolio(
                 balances.sort(key=lambda b: b.usd_value, reverse=True)
 
                 connectors.append(
-                    ConnectorBalance(connector=connector_name, balances=balances, total_usd=connector_total)
+                    ConnectorBalance(
+                        connector=connector_name,
+                        balances=balances,
+                        total_usd=connector_total,
+                    )
                 )
 
     _dedupe_hyperliquid_unified(connectors)
@@ -171,7 +191,9 @@ def _dedupe_hyperliquid_unified(connectors: list[ConnectorBalance]) -> None:
     # Drop the duplicated stable collateral from the perp side; keep any non-stable (perp-only) items.
     perp.balances = [b for b in perp.balances if b.token not in _HL_STABLES]
     perp.total_usd = sum(b.usd_value for b in perp.balances)
-    perp.note = "Unified account — USDC balance is reflected in the hyperliquid (spot) balance."
+    perp.note = (
+        "Unified account — USDC balance is reflected in the hyperliquid (spot) balance."
+    )
 
 
 RANGE_CONFIG = {
@@ -193,7 +215,9 @@ async def _fetch_history(server: str, range_key: str) -> Any:
     )
 
 
-async def _get_cached_history(server: str, range_key: str, breakdown: bool = False) -> Any:
+async def _get_cached_history(
+    server: str, range_key: str, breakdown: bool = False
+) -> Any:
     """Return cached history if fresh, otherwise fetch, cache, and return.
 
     The raw data is the same regardless of *breakdown* (parsing happens in the
@@ -246,15 +270,20 @@ async def _refresh_loop(server: str) -> None:
                 )
                 return
 
+            tasks = []
             for range_key in RANGE_CONFIG:
-                try:
-                    data = await _fetch_history(server, range_key)
-                    key = (server, range_key, False)
-                    _history_cache[key] = _CacheEntry(
-                        data=data, fetched_at=time.time(), ttl=_RANGE_TTLS[range_key]
+                tasks.append(_fetch_history(server, range_key))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for range_key, result in zip(RANGE_CONFIG, results):
+                if isinstance(result, Exception):
+                    logger.debug(
+                        "Refresh failed for %s/%s: %s", server, range_key, result
                     )
-                except Exception as e:
-                    logger.debug("Refresh failed for %s/%s: %s", server, range_key, e)
+                    continue
+                key = (server, range_key, False)
+                _history_cache[key] = _CacheEntry(
+                    data=result, fetched_at=time.time(), ttl=_RANGE_TTLS[range_key]
+                )
     except asyncio.CancelledError:
         logger.info("Portfolio history refresh loop cancelled for %s", server)
 
@@ -267,7 +296,9 @@ def stop_history_refresh(server: str) -> None:
         logger.info("Stopped portfolio history refresh for %s", server)
 
 
-@router.get("/servers/{name}/portfolio/history", response_model=PortfolioHistoryResponse)
+@router.get(
+    "/servers/{name}/portfolio/history", response_model=PortfolioHistoryResponse
+)
 async def get_portfolio_history(
     name: str,
     range: str = Query("1D", pattern="^(1D|1W|1M|3M)$"),
@@ -293,152 +324,144 @@ async def get_portfolio_history(
     if isinstance(history, dict):
         logger.debug("Portfolio history keys: %s", list(history.keys()))
 
-    points: list[PortfolioHistoryPoint] = []
-
-    # Parse defensively — the response may be a list of snapshots or a dict with data key
-    snapshots = []
-    found_key = False
-    if isinstance(history, list):
-        snapshots = history
-    elif isinstance(history, dict):
-        # Try common keys
-        for key in ("data", "snapshots", "history", "points", "results"):
-            if key in history and isinstance(history[key], list):
-                snapshots = history[key]
-                found_key = True
-                break
-        if not snapshots and not found_key:
-            # Maybe the dict itself maps timestamps → portfolio states
-            dict_prev_totals: dict[str, float] = {}
-            dict_entries: list[tuple[float, object]] = []
-            for ts_key, snapshot_data in history.items():
-                try:
-                    ts = _parse_timestamp(ts_key)
-                except (ValueError, TypeError):
-                    continue
-                dict_entries.append((ts, snapshot_data))
-            dict_entries.sort(key=lambda x: x[0])
-            for ts, snapshot_data in dict_entries:
-                cur = _extract_connector_totals(snapshot_data)
-                if cur and dict_prev_totals:
-                    for k, v in dict_prev_totals.items():
-                        if k not in cur:
-                            cur[k] = v
-                if cur:
-                    dict_prev_totals = cur
-                total = sum(cur.values())
-                if total > 0:
-                    points.append(PortfolioHistoryPoint(timestamp=ts, total_usd=total))
+    entries, keyed = _extract_snapshot_entries(history)
 
     # Forward-fill: track per-connector totals so missing exchanges
     # carry forward their last known value instead of dropping to 0.
+    points: list[PortfolioHistoryPoint] = []
     prev_connector_totals: dict[str, float] = {}
-
-    for snapshot in snapshots:
-        if not isinstance(snapshot, dict):
-            continue
-        ts = snapshot.get("timestamp", snapshot.get("time", snapshot.get("t", 0)))
-        total = snapshot.get("total_value", snapshot.get("total_usd", 0))
+    for ts, snapshot in entries:
+        total = (
+            0 if keyed else snapshot.get("total_value", snapshot.get("total_usd", 0))
+        )
         if total == 0:
             # Sum token values from nested structure
             # API returns {timestamp, state: {account: {connector: [balances]}}}
-            state = snapshot.get("state", snapshot)
-            cur_totals = _extract_connector_totals(state)
-
+            cur_totals = _extract_connector_totals(_snapshot_state(snapshot, keyed))
             if cur_totals and prev_connector_totals:
                 # Forward-fill: for connectors seen before but missing now, use previous value
                 for key, prev_val in prev_connector_totals.items():
                     if key not in cur_totals:
                         cur_totals[key] = prev_val
-
             if cur_totals:
                 prev_connector_totals = cur_totals
             total = sum(cur_totals.values())
-        if ts:
-            points.append(PortfolioHistoryPoint(timestamp=_parse_timestamp(ts), total_usd=float(total)))
+        if keyed and total <= 0:
+            # Dict-keyed payloads historically drop zero-total points
+            continue
+        points.append(PortfolioHistoryPoint(timestamp=ts, total_usd=float(total)))
 
     points.sort(key=lambda p: p.timestamp)
 
     top_tokens: list[str] = []
     if breakdown and points:
-        # Extract per-token values for each point
-        raw_snapshots = []
-        if isinstance(history, list):
-            raw_snapshots = history
-        elif isinstance(history, dict):
-            for key in ("data", "snapshots", "history", "points", "results"):
-                if key in history and isinstance(history[key], list):
-                    raw_snapshots = history[key]
-                    break
+        top_tokens = _build_token_breakdown(entries, keyed, points)
 
-        # Build token values per timestamp (with forward-fill for missing exchanges)
-        ts_token_map: dict[float, dict[str, float]] = {}
-        prev_token_vals: dict[str, float] = {}
-        # Collect and sort by timestamp to ensure correct ffill order
-        raw_entries: list[tuple[float, dict[str, float]]] = []
-        for snapshot in raw_snapshots:
-            if not isinstance(snapshot, dict):
-                continue
-            ts = snapshot.get("timestamp", snapshot.get("time", snapshot.get("t", 0)))
-            if not ts:
-                continue
-            parsed_ts = _parse_timestamp(ts)
-            state = snapshot.get("state", snapshot)
-            token_vals = _extract_token_values(state)
-            if token_vals:
-                raw_entries.append((parsed_ts, token_vals))
+    return PortfolioHistoryResponse(
+        server=name, points=points, interval=interval, top_tokens=top_tokens
+    )
 
-        # Also handle dict-keyed timestamps
-        if not raw_snapshots and isinstance(history, dict):
-            for ts_key, snapshot_data in history.items():
-                try:
-                    ts = _parse_timestamp(ts_key)
-                except (ValueError, TypeError):
-                    continue
-                token_vals = _extract_token_values(snapshot_data)
-                if token_vals:
-                    raw_entries.append((ts, token_vals))
 
-        raw_entries.sort(key=lambda x: x[0])
-        for parsed_ts, token_vals in raw_entries:
-            # Forward-fill: tokens present before but missing now keep previous value
-            if prev_token_vals:
-                for tk, tv in prev_token_vals.items():
-                    if tk not in token_vals:
-                        token_vals[tk] = tv
-            prev_token_vals = token_vals
-            ts_token_map[parsed_ts] = token_vals
+_SNAPSHOT_LIST_KEYS = ("data", "snapshots", "history", "points", "results")
 
-        if ts_token_map:
-            # Determine top 8 tokens by aggregate value
-            agg: dict[str, float] = {}
-            for tv in ts_token_map.values():
-                for token, val in tv.items():
-                    agg[token] = agg.get(token, 0) + val
-            sorted_tokens = sorted(agg, key=lambda t: agg[t], reverse=True)
-            top_tokens = sorted_tokens[:8]
-            top_set = set(top_tokens)
 
-            # Populate token breakdown on each point, collapsing rest into "Other"
-            for point in points:
-                tv = ts_token_map.get(point.timestamp, {})
-                if not tv:
-                    continue
-                tokens_out: dict[str, float] = {}
-                other = 0.0
-                for token, val in tv.items():
-                    if token in top_set:
-                        tokens_out[token] = val
-                    else:
-                        other += val
-                if other > 0:
-                    tokens_out["Other"] = other
-                point.tokens = tokens_out
+def _snapshot_state(snapshot: Any, keyed: bool) -> Any:
+    """Return the portfolio state within a snapshot entry."""
+    return snapshot if keyed else snapshot.get("state", snapshot)
 
-            if "Other" in {t for p in points for t in p.tokens} and "Other" not in top_tokens:
-                top_tokens.append("Other")
 
-    return PortfolioHistoryResponse(server=name, points=points, interval=interval, top_tokens=top_tokens)
+def _extract_snapshot_entries(history: Any) -> tuple[list[tuple[float, Any]], bool]:
+    """Normalize a history response into sorted (timestamp, snapshot) entries.
+
+    Handles three shapes: a bare list of snapshots, a dict with the snapshot
+    list under a common key, or a dict mapping timestamps to portfolio states.
+    Returns (entries, keyed); keyed=True means the dict-keyed-timestamp shape,
+    where each entry holds a raw portfolio state instead of a snapshot dict.
+    """
+    snapshots = None
+    if isinstance(history, list):
+        snapshots = history
+    elif isinstance(history, dict):
+        # Try common keys
+        for key in _SNAPSHOT_LIST_KEYS:
+            if key in history and isinstance(history[key], list):
+                snapshots = history[key]
+                break
+        if snapshots is None:
+            # The dict itself maps timestamps → portfolio states
+            keyed_entries: list[tuple[float, Any]] = [
+                (_parse_timestamp(ts_key), snapshot_data)
+                for ts_key, snapshot_data in history.items()
+            ]
+            keyed_entries.sort(key=lambda x: x[0])
+            return keyed_entries, True
+
+    entries: list[tuple[float, Any]] = []
+    for snapshot in snapshots or []:
+        if not isinstance(snapshot, dict):
+            continue
+        ts = snapshot.get("timestamp", snapshot.get("time", snapshot.get("t", 0)))
+        if not ts:
+            continue
+        entries.append((_parse_timestamp(ts), snapshot))
+    entries.sort(key=lambda x: x[0])
+    return entries, False
+
+
+def _build_token_breakdown(
+    entries: list[tuple[float, Any]],
+    keyed: bool,
+    points: list[PortfolioHistoryPoint],
+) -> list[str]:
+    """Populate each point's per-token values, collapsing beyond the top 8 into "Other".
+
+    Mutates ``point.tokens`` in place and returns the top token names.
+    """
+    # Build token values per timestamp (with forward-fill for missing exchanges)
+    ts_token_map: dict[float, dict[str, float]] = {}
+    prev_token_vals: dict[str, float] = {}
+    for ts, snapshot in entries:
+        token_vals = _extract_token_values(_snapshot_state(snapshot, keyed))
+        if not token_vals:
+            continue
+        # Forward-fill: tokens present before but missing now keep previous value
+        if prev_token_vals:
+            for tk, tv in prev_token_vals.items():
+                if tk not in token_vals:
+                    token_vals[tk] = tv
+        prev_token_vals = token_vals
+        ts_token_map[ts] = token_vals
+
+    if not ts_token_map:
+        return []
+
+    # Determine top 8 tokens by aggregate value
+    agg: dict[str, float] = {}
+    for tv in ts_token_map.values():
+        for token, val in tv.items():
+            agg[token] = agg.get(token, 0) + val
+    top_tokens = sorted(agg, key=lambda t: agg[t], reverse=True)[:8]
+    top_set = set(top_tokens)
+
+    # Populate token breakdown on each point, collapsing rest into "Other"
+    for point in points:
+        tv = ts_token_map.get(point.timestamp, {})
+        if not tv:
+            continue
+        tokens_out: dict[str, float] = {}
+        other = 0.0
+        for token, val in tv.items():
+            if token in top_set:
+                tokens_out[token] = val
+            else:
+                other += val
+        if other > 0:
+            tokens_out["Other"] = other
+        point.tokens = tokens_out
+
+    if "Other" in {t for p in points for t in p.tokens} and "Other" not in top_tokens:
+        top_tokens.append("Other")
+    return top_tokens
 
 
 def _parse_timestamp(val: object) -> float:

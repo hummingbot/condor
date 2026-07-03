@@ -181,6 +181,7 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("executor_list_page", None)
     context.user_data.pop("executor_chart_interval", None)
     context.user_data.pop("executor_wizard_type", None)
+    context.user_data.pop("history_executors", None)
 
     # Clear SDS subscriptions for this user (resets active polling)
     user_id = context.user_data.get("_user_id")

@@ -1,60 +1,48 @@
-"""Persistent key-value notes storage."""
+"""DEPRECATED key-value notes — alias over the user memory store.
 
-import json
-from pathlib import Path
+Historically notes were a per-chat key-value JSON blob. They are now a thin,
+deprecated alias over ``manage_memory`` (keyed by user, with frontmatter and
+auditing). Kept for one release so anything still calling it keeps working;
+new code should use ``manage_memory`` directly.
+"""
 
-from mcp_servers.condor.settings import settings
-
-
-def _notes_file() -> Path:
-    return Path("data") / "notes" / f"chat_{settings.chat_id}.json"
-
-
-def _load() -> dict:
-    f = _notes_file()
-    if f.exists():
-        try:
-            return json.loads(f.read_text())
-        except Exception:
-            return {}
-    return {}
+from mcp_servers.condor.tools import memory
 
 
-def _save(notes: dict) -> None:
-    f = _notes_file()
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(notes, indent=2))
-
-
-async def manage_notes(action: str, key: str | None = None, value: str | None = None) -> dict:
+async def manage_notes(
+    action: str, key: str | None = None, value: str | None = None
+) -> dict:
     if action == "list":
-        return {"notes": _load()}
+        return await memory.manage_memory(action="list")
 
     elif action == "get":
         if not key:
             return {"error": "key is required"}
-        notes = _load()
-        v = notes.get(key)
-        if v is None:
+        res = await memory.manage_memory(action="read", name=key)
+        if "error" in res:
             return {"error": f"Note '{key}' not found"}
-        return {"key": key, "value": v}
+        return {"key": key, "value": res["content"]}
 
     elif action == "set":
         if not key or value is None:
             return {"error": "key and value are required"}
-        notes = _load()
-        notes[key] = str(value)
-        _save(notes)
+        res = await memory.manage_memory(
+            action="write",
+            name=key,
+            content=str(value),
+            description=key,
+            type="reference",
+        )
+        if "error" in res:
+            return res
         return {"saved": True, "key": key, "value": str(value)}
 
     elif action == "delete":
         if not key:
             return {"error": "key is required"}
-        notes = _load()
-        if key not in notes:
+        res = await memory.manage_memory(action="delete", name=key)
+        if "error" in res:
             return {"error": f"Note '{key}' not found"}
-        del notes[key]
-        _save(notes)
         return {"deleted": True, "key": key}
 
     return {"error": f"Unknown action: {action}"}

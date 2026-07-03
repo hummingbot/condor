@@ -158,9 +158,9 @@ export function RoutineDetail({ routine, instances, onOpenReport }: RoutineDetai
         )}
       </div>
 
-      {runMutation.isError && (
+      {(runMutation.isError || scheduleMutation.isError) && (
         <p className="text-xs text-[var(--color-red)]">
-          {(runMutation.error as Error).message}
+          {((runMutation.error || scheduleMutation.error) as Error).message}
         </p>
       )}
 

@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Circle, Database, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
 
+import { NoServerCard } from "@/components/NoServerCard";
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useServer } from "@/hooks/useServer";
 import { api, type BotRunInfo } from "@/lib/api";
 
@@ -64,10 +66,59 @@ function StatusDot({ status }: { status: string }) {
   return <Circle className={`h-2 w-2 fill-current ${color}`} />;
 }
 
+function DeleteConfirmDialog({
+  botNames,
+  onConfirm,
+  onCancel,
+}: {
+  botNames: string[];
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const count = botNames.length;
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onCancel}>
+      <div
+        className="bg-[var(--color-surface)] border border-[var(--color-border)] rounded-xl shadow-xl p-6 w-full max-w-sm space-y-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h3 className="text-sm font-semibold">
+          Delete {count === 1 ? "Bot Run" : `${count} Bot Runs`}?
+        </h3>
+        <p className="text-xs text-[var(--color-text-muted)] break-words">
+          {count === 1
+            ? `This will permanently delete "${botNames[0]}".`
+            : `This will permanently delete ${count} archived bot runs: ${botNames.map((n) => `"${n}"`).join(", ")}.`}
+        </p>
+
+        <div className="flex items-center gap-2 justify-end">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium hover:bg-[var(--color-surface-hover)] transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded-md bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:opacity-90 transition-colors"
+          >
+            Confirm Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function BotRunsTab() {
   const { server } = useServer();
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [confirmTarget, setConfirmTarget] = useState<BotRunInfo | "bulk" | null>(null);
   const queryClient = useQueryClient();
 
   const { data, isLoading, error } = useQuery({
@@ -113,6 +164,7 @@ export function BotRunsTab() {
   const handleDelete = async (run: BotRunInfo) => {
     if (!run.bot_run_id) return;
     setDeleting(run.bot_name);
+    setDeleteError(null);
     try {
       await deleteMutation.mutateAsync(run.bot_run_id);
       setSelected((prev) => {
@@ -120,35 +172,60 @@ export function BotRunsTab() {
         next.delete(run.bot_name);
         return next;
       });
+    } catch (err) {
+      setDeleteError(
+        `Failed to delete "${run.bot_name}": ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       setDeleting(null);
     }
   };
 
-  const handleBulkDelete = async () => {
-    const toDelete = runs.filter(
-      (r) => selected.has(r.bot_name) && r.deployment_status === "ARCHIVED" && r.bot_run_id,
-    );
-    if (toDelete.length === 0) return;
-    if (!confirm(`Delete ${toDelete.length} archived bot run(s)?`)) return;
+  const bulkDeletable = runs.filter(
+    (r) => selected.has(r.bot_name) && r.deployment_status === "ARCHIVED" && r.bot_run_id,
+  );
 
+  const handleBulkDelete = async () => {
+    const toDelete = bulkDeletable;
+    if (toDelete.length === 0) return;
+
+    setDeleteError(null);
+    let failedCount = 0;
+    let firstErrorMessage = "";
     for (const run of toDelete) {
       setDeleting(run.bot_name);
       try {
         await deleteMutation.mutateAsync(run.bot_run_id!);
-      } catch {
+      } catch (err) {
+        failedCount += 1;
+        if (!firstErrorMessage) {
+          firstErrorMessage = err instanceof Error ? err.message : String(err);
+        }
         // continue with remaining
       }
+    }
+    if (failedCount > 0) {
+      setDeleteError(`Failed to delete ${failedCount} run(s): ${firstErrorMessage}`);
     }
     setSelected(new Set());
     setDeleting(null);
   };
 
+  const handleConfirmDelete = () => {
+    const target = confirmTarget;
+    setConfirmTarget(null);
+    if (target === "bulk") {
+      void handleBulkDelete();
+    } else if (target) {
+      void handleDelete(target);
+    }
+  };
+
   if (!server) {
-    return <p className="text-[var(--color-text-muted)]">Select a server</p>;
+    return <NoServerCard message="Select a server from the sidebar to view bot runs." />;
   }
 
-  if (isLoading) return <p className="text-[var(--color-text-muted)]">Loading...</p>;
+  if (isLoading) return <FallbackSpinner />;
   if (error) {
     return (
       <p className="text-[var(--color-red)]">
@@ -168,10 +245,12 @@ export function BotRunsTab() {
 
   return (
     <div className="space-y-4">
+      {deleteError && <p className="text-[var(--color-red)]">{deleteError}</p>}
+
       {selected.size > 0 && (
         <div className="flex justify-end">
           <button
-            onClick={handleBulkDelete}
+            onClick={() => setConfirmTarget("bulk")}
             disabled={deleting !== null}
             className="flex items-center gap-1.5 rounded-md bg-[var(--color-red)]/10 px-3 py-1.5 text-xs font-medium text-[var(--color-red)] hover:bg-[var(--color-red)]/20 transition-colors disabled:opacity-50"
           >
@@ -226,13 +305,25 @@ export function BotRunsTab() {
                   isSelected={selected.has(run.bot_name)}
                   isDeleting={deleting === run.bot_name}
                   onToggleSelect={() => toggleSelect(run.bot_name)}
-                  onDelete={() => handleDelete(run)}
+                  onRequestDelete={() => setConfirmTarget(run)}
                 />
               ))}
             </tbody>
           </table>
         </div>
       </div>
+
+      {confirmTarget !== null && (
+        <DeleteConfirmDialog
+          botNames={
+            confirmTarget === "bulk"
+              ? bulkDeletable.map((r) => r.bot_name)
+              : [confirmTarget.bot_name]
+          }
+          onConfirm={handleConfirmDelete}
+          onCancel={() => setConfirmTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -242,13 +333,13 @@ function BotRunRow({
   isSelected,
   isDeleting,
   onToggleSelect,
-  onDelete,
+  onRequestDelete,
 }: {
   run: BotRunInfo;
   isSelected: boolean;
   isDeleting: boolean;
   onToggleSelect: () => void;
-  onDelete: () => void;
+  onRequestDelete: () => void;
 }) {
   const deplClass = DEPLOYMENT_COLORS[run.deployment_status] ?? "bg-[var(--color-surface)] text-[var(--color-text-muted)]";
   const isArchived = run.deployment_status === "ARCHIVED";
@@ -313,7 +404,7 @@ function BotRunRow({
           <button
             onClick={(e) => {
               e.stopPropagation();
-              if (confirm(`Delete "${run.bot_name}"?`)) onDelete();
+              onRequestDelete();
             }}
             className="rounded p-1 text-[var(--color-text-muted)] hover:text-[var(--color-red)] hover:bg-[var(--color-red)]/10 transition-colors"
             title="Delete bot run"

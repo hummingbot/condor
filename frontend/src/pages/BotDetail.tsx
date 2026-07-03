@@ -14,8 +14,10 @@ import { Link, useParams } from "react-router-dom";
 import yaml from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
+import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
+import { configToYaml } from "@/lib/configYaml";
 
 export function BotDetail() {
   const { id } = useParams<{ id: string }>();
@@ -50,10 +52,7 @@ export function BotDetail() {
     const sig = JSON.stringify(data.config);
     if (sig === prevConfigSig.current) return;
     prevConfigSig.current = sig;
-    const filtered = Object.fromEntries(
-      Object.entries(data.config).filter(([k]) => k !== "id"),
-    );
-    const dumped = yaml.dump(filtered, { sortKeys: false, lineWidth: -1 });
+    const dumped = configToYaml(data.config);
     setYamlValue(dumped);
     setOriginalYaml(dumped);
     setYamlError(null);
@@ -99,7 +98,7 @@ export function BotDetail() {
   };
 
   if (!server || !id) return null;
-  if (isLoading) return <p className="text-[var(--color-text-muted)]">Loading...</p>;
+  if (isLoading) return <FallbackSpinner />;
   if (error)
     return (
       <p className="text-[var(--color-red)]">
@@ -126,7 +125,7 @@ export function BotDetail() {
       </Link>
 
       <div className="mb-6 flex items-center gap-3">
-        <h2 className="text-xl font-bold">{bot.name}</h2>
+        <h1 className="text-xl font-bold text-[var(--color-text)]">{bot.name}</h1>
         <span className={`flex items-center gap-1.5 text-sm ${statusColor}`}>
           <Circle className="h-2 w-2 fill-current" />
           {bot.status}
