@@ -24,6 +24,19 @@ async def call_main_api(
     from condor.web.auth import create_jwt
     from utils.config import WEB_PORT
 
+    # Without an identity the JWT below is minted for user 0, which is not a
+    # registered account — the main process then 403s deep inside the call
+    # (consult/delegate/lifecycle) with an opaque "Access denied". Fail fast
+    # with the actual fix instead.
+    if not settings.user_id:
+        raise APIError(
+            "Condor MCP server was started without an identity: set the "
+            "CONDOR_USER_ID and CONDOR_CHAT_ID env vars (or pass --user-id/"
+            "--chat-id args) to your registered Condor user id — the same id "
+            "your Telegram bot / web dashboard login uses — then restart the "
+            "MCP session."
+        )
+
     url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"
     token = create_jwt(settings.user_id, role="user")
     headers = {"Authorization": f"Bearer {token}"}

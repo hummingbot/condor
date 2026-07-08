@@ -628,7 +628,20 @@ should visibly follow.
 
 Interactive: `cd /path/to/condor && claude` — the repo's own `.mcp.json`
 registers both servers (identity then comes from `CONDOR_CHAT_ID`/
-`CONDOR_USER_ID` env vars, so export those first).
+`CONDOR_USER_ID` env vars, so **export those first** — put them in your
+shell profile; the MCP subprocess inherits Claude Code's environment):
+
+```bash
+export CONDOR_USER_ID=<your registered user id>   # e.g. config.yml's admin_id
+export CONDOR_CHAT_ID=<same id>
+```
+
+**Known failure without them** (hit in QA): `consult`/`delegate`/lifecycle
+calls fail — formerly an opaque `403 Access denied` (the server minted a
+JWT for the default user id 0, which isn't a registered account; same auth
+as the web dashboard). `call_main_api` now fails fast with an error naming
+these env vars. Note this is Condor-user identity, unrelated to the
+hummingbot-api's admin/admin credentials.
 
 Headless / isolated (what this spike used — avoids touching repo state):
 write the two servers into a scratch `qa-mcp.json` (identity as explicit
