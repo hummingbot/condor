@@ -156,7 +156,9 @@ async def _run_agent_to_completion(
             agent_slug=slug,
         )
     else:
-        mcp_servers = build_mcp_servers_for_session(user_id, chat_id)
+        # Serverless agents still need their own memory/skill scope — without
+        # agent_slug the condor MCP tools would target the CHAT's stores.
+        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, agent_slug=slug)
 
     # ``permission_callback`` is passed in: CONSULT routes dangerous-tool
     # confirmations to the user's Telegram chat; DELEGATE passes None so an ACP

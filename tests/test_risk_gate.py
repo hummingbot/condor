@@ -159,3 +159,57 @@ def test_callback_cumulative_exposure_cancelled_same_tick():
     first, second = asyncio.run(_drive())
     assert first["outcome"]["outcome"] == "selected"
     assert second["outcome"]["outcome"] == "cancelled"
+
+
+# ---------------------------------------------------------------------------
+# dry_run must block manage_bots deploy/mutate actions too, not just
+# manage_executors/place_order/gateway swaps — manage_bots(deploy) places real
+# capital via a controller-based bot, a separate path from manage_executors.
+# ---------------------------------------------------------------------------
+
+
+def _bot_call(action: str, **extra) -> dict:
+    return {"tool": "mcp__mcp-hummingbot__manage_bots", "input": {"action": action, **extra}}
+
+
+def test_dry_run_blocks_manage_bots_deploy():
+    engine = RiskEngine(RiskLimits())
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+
+    result = asyncio.run(
+        callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
+    )
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_dry_run_blocks_manage_bots_update_config():
+    engine = RiskEngine(RiskLimits())
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+
+    result = asyncio.run(callback(_bot_call("update_config", bot_name="x"), _OPTIONS))
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_dry_run_allows_manage_bots_status():
+    """Read-only manage_bots actions must not be blocked in dry_run."""
+    engine = RiskEngine(RiskLimits())
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+
+    result = asyncio.run(callback(_bot_call("status"), _OPTIONS))
+    assert result["outcome"]["outcome"] == "selected"
+
+
+def test_loop_mode_still_auto_approves_manage_bots_deploy():
+    """Outside dry_run, manage_bots(deploy) is unaffected by this fix (pre-existing
+    behavior — no risk-engine coverage for bot deploys yet, tracked separately)."""
+    engine = RiskEngine(RiskLimits())
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+
+    result = asyncio.run(
+        callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
+    )
+    assert result["outcome"]["outcome"] == "selected"

@@ -52,8 +52,7 @@ controllers. Your job is to:
 ### Step 1: Run routines
 Use the values from `[CURRENT CONFIG]` for all routine calls:
 - `market_analyzer` with `{"trading_pair": "<trading_pair>", "connector_name": "<connector_name>"}`
-- `portfolio_scanner` with `{"connector_name": "<connector_name>"}`
-- `bot_position_tracker` with `{"trading_pair": "<trading_pair>"}`
+- `mm_dashboard` with `{"connector_name": "<connector_name>", "trading_pair": "<trading_pair>"}`
 
 ### Step 2: Assess regime
 From market_analyzer output, extract:

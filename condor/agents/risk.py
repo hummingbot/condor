@@ -173,7 +173,7 @@ def auto_approve_with_risk_check(
     execution_mode: str = "loop",
 ):
     """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones."""
-    from handlers.agents._shared import is_dangerous_tool_call
+    from handlers.agents._shared import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
@@ -187,6 +187,12 @@ def auto_approve_with_risk_check(
                     action = input_data.get("action", "")
                     if action in ("create", "stop"):
                         log.info("Dry-run mode: blocked manage_executors(%s)", action)
+                        return {"outcome": {"outcome": "cancelled"}}
+                elif tool_name == "manage_bots":
+                    input_data = tool_call.get("input", {})
+                    action = input_data.get("action", "")
+                    if action in DANGEROUS_BOT_ACTIONS:
+                        log.info("Dry-run mode: blocked manage_bots(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
                 elif tool_name in (
                     "place_order",
