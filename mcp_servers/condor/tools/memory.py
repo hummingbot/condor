@@ -6,7 +6,7 @@ LLM never has to report who is writing.
 """
 
 from condor.memory import MemoryStore
-from mcp_servers.condor.settings import settings
+from mcp_servers.condor.settings import ensure_identity, settings
 
 
 def _source() -> str:
@@ -27,6 +27,17 @@ async def manage_memory(
     query: str | None = None,
     max_entries: int = 30,
 ) -> dict:
+    # Memory is resolved by user_id directly (no main-API call to fail on),
+    # so an unresolved identity would silently read/write user 0's store.
+    if not settings.user_id and not ensure_identity():
+        return {
+            "error": "Condor MCP server has no identity, and auto-bind could "
+            "not resolve one (zero or multiple approved users in config.yml) — "
+            "memory would silently target user 0's store. Set the "
+            "CONDOR_USER_ID and CONDOR_CHAT_ID env vars (or pass "
+            "--user-id/--chat-id args) to your registered Condor user id, "
+            "then restart the MCP session."
+        }
     store = _store()
 
     if action == "write":

@@ -35,6 +35,14 @@ def _parse_settings() -> Settings:
 settings = _parse_settings()
 
 
+def _config_present() -> bool:
+    """ConfigManager creates a default config.yml when none exists — don't let
+    an identity probe drop a stray config file in an arbitrary cwd."""
+    from pathlib import Path
+
+    return Path("config.yml").exists()
+
+
 def ensure_identity() -> bool:
     """Tier A identity auto-bind: resolve a missing identity to the sole
     approved user in config.yml.
@@ -51,6 +59,8 @@ def ensure_identity() -> bool:
     """
     if settings.user_id:
         return True
+    if not _config_present():
+        return False
     try:
         from config_manager import get_config_manager
 

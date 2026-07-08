@@ -25,6 +25,7 @@ def test_call_main_api_fails_fast_without_identity(monkeypatch):
     'Access denied' (the exact failure a stock `claude` session hits with the
     repo's identity-less .mcp.json)."""
     monkeypatch.setattr(condor_client.settings, "user_id", 0)
+    monkeypatch.setattr(settings_module, "_config_present", lambda: True)
     monkeypatch.setattr(
         config_manager, "get_config_manager", lambda: _StubCM([111, 222])
     )
@@ -38,6 +39,7 @@ def test_ensure_identity_auto_binds_sole_approved_user(monkeypatch):
     (user_id and, when unset, chat_id)."""
     monkeypatch.setattr(settings_module.settings, "user_id", 0)
     monkeypatch.setattr(settings_module.settings, "chat_id", 0)
+    monkeypatch.setattr(settings_module, "_config_present", lambda: True)
     monkeypatch.setattr(
         config_manager, "get_config_manager", lambda: _StubCM([456181693])
     )
@@ -50,6 +52,7 @@ def test_ensure_identity_auto_binds_sole_approved_user(monkeypatch):
 def test_ensure_identity_refuses_ambiguous_or_empty(monkeypatch):
     """Zero or multiple approved users: no bind — a multi-user box must say
     who it is explicitly."""
+    monkeypatch.setattr(settings_module, "_config_present", lambda: True)
     for approved in ([], [111, 222]):
         monkeypatch.setattr(settings_module.settings, "user_id", 0)
         monkeypatch.setattr(
@@ -57,6 +60,35 @@ def test_ensure_identity_refuses_ambiguous_or_empty(monkeypatch):
         )
         assert settings_module.ensure_identity() is False
         assert settings_module.settings.user_id == 0
+
+
+def test_ensure_identity_never_creates_a_config_file(monkeypatch):
+    """With no config.yml in cwd, the identity probe must not touch
+    ConfigManager at all — instantiating it would CREATE a default config.yml
+    as a side effect."""
+
+    def _boom():
+        raise AssertionError("ConfigManager must not be instantiated")
+
+    monkeypatch.setattr(settings_module.settings, "user_id", 0)
+    monkeypatch.setattr(settings_module, "_config_present", lambda: False)
+    monkeypatch.setattr(config_manager, "get_config_manager", _boom)
+
+    assert settings_module.ensure_identity() is False
+
+
+def test_manage_memory_fails_fast_without_identity(monkeypatch):
+    """Memory tools resolve the store from user_id directly (no main-API call
+    to 403), so an unresolved identity must return an actionable error instead
+    of silently reading/writing user 0's store."""
+    from mcp_servers.condor.tools.memory import manage_memory
+
+    monkeypatch.setattr(settings_module.settings, "user_id", 0)
+    monkeypatch.setattr(settings_module, "_config_present", lambda: True)
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _StubCM([]))
+
+    result = asyncio.run(manage_memory(action="list"))
+    assert "CONDOR_USER_ID" in result["error"]
 
 
 def test_ensure_identity_keeps_explicit_identity(monkeypatch):

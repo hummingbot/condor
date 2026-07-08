@@ -202,9 +202,15 @@ def test_dry_run_allows_manage_bots_status():
     assert result["outcome"]["outcome"] == "selected"
 
 
-def test_loop_mode_still_auto_approves_manage_bots_deploy():
-    """Outside dry_run, manage_bots(deploy) is unaffected by this fix (pre-existing
-    behavior — no risk-engine coverage for bot deploys yet, tracked separately)."""
+# ---------------------------------------------------------------------------
+# loop mode: manage_bots(deploy) is risk-gated on a declared loss cap — the
+# capital lives in saved controller configs on the API server, so the deploy
+# must carry a max_global_drawdown_quote bounded by the position limit.
+# ---------------------------------------------------------------------------
+
+
+def test_loop_mode_blocks_bot_deploy_without_loss_cap():
+    """A deploy with no declared max_global_drawdown_quote is blocked."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
     callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
@@ -212,4 +218,90 @@ def test_loop_mode_still_auto_approves_manage_bots_deploy():
     result = asyncio.run(
         callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
     )
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "deploy",
+                bot_name="x",
+                controllers_config=["cfg"],
+                max_global_drawdown_quote=400.0,
+            ),
+            _OPTIONS,
+        )
+    )
+    assert result["outcome"]["outcome"] == "selected"
+
+
+def test_loop_mode_blocks_bot_deploy_with_excessive_loss_cap():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "deploy",
+                bot_name="x",
+                controllers_config=["cfg"],
+                max_global_drawdown_quote=5000.0,
+            ),
+            _OPTIONS,
+        )
+    )
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_loop_mode_blocks_update_config_raising_amount_beyond_limit():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "update_config",
+                bot_name="x",
+                config_name="cfg",
+                config_data={"total_amount_quote": 900.0},
+            ),
+            _OPTIONS,
+        )
+    )
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_loop_mode_approves_update_config_within_limit():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+
+    result = asyncio.run(
+        callback(
+            _bot_call(
+                "update_config",
+                bot_name="x",
+                config_name="cfg",
+                config_data={"total_amount_quote": 300.0},
+            ),
+            _OPTIONS,
+        )
+    )
+    assert result["outcome"]["outcome"] == "selected"
+
+
+def test_loop_mode_still_approves_bot_stop():
+    """Stops are risk-reducing — never blocked by the loss-cap gate."""
+    engine = RiskEngine(RiskLimits())
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+
+    result = asyncio.run(callback(_bot_call("stop_bot", bot_name="x"), _OPTIONS))
     assert result["outcome"]["outcome"] == "selected"

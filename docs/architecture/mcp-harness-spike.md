@@ -1,23 +1,18 @@
-# Spike: validating Condor strategies via MCP from Claude Code / OpenClaw / Hermes
+# Spike: validating Condor strategies via MCP from external harnesses (Claude Code, OpenClaw)
 
-Companion to [`mcp-first-value-add.md`](../strategy/mcp-first-value-add.md) (the
-harness-agnostic thesis this spike tests empirically) and
-[`strategy-engine-and-shared-intelligence.md`](./strategy-engine-and-shared-intelligence.md)
-(§1.2's request-path walkthrough, which this spike is designed to confirm against
-real harnesses instead of just the code). **Scope note**: pluggable *scheduling*
-(OpenClaw/Hermes cron firing ticks, §1.5–1.6 of that doc) is deferred and out of
-scope here — this spike keeps Condor's own `TickEngine` as the sole scheduler
-throughout. It tests something narrower and already in-scope today: can
-OpenClaw, Hermes, and Claude Code be used as **Tier 1 interactive MCP clients** —
-starting, consulting, and stopping a strategy — in place of Condor's own
-Telegram bot or web dashboard.
+**Scope note**: pluggable *scheduling* (an external harness's cron firing
+ticks) is deferred and out of scope here — this spike keeps Condor's own
+`TickEngine` as the sole scheduler throughout. It tests something narrower
+and already in-scope today: can external harnesses (Claude Code, OpenClaw)
+be used as **Tier 1 interactive MCP clients** — starting, consulting, and
+stopping a strategy — in place of Condor's own Telegram bot or web dashboard.
 
 ## Goal
 
 Decide whether Telegram and the web dashboard can be genuinely deprioritized as
 Condor's interaction surface, by concretely validating: start the
-`market_making_expert` agent's `pmm_mister_operator` strategy from Claude Code,
-OpenClaw, or Hermes, and confirm it runs identically to starting it from
+`market_making_expert` agent's `pmm_mister_operator` strategy from Claude Code
+or OpenClaw, and confirm it runs identically to starting it from
 Condor's own Telegram bot — same tools, same running `TickEngine`, same
 journal, visible and controllable from any of these interchangeably.
 
@@ -49,7 +44,7 @@ None of step 3 reads anything about which harness issued the `start_agent`
 call in step 1. Once started, the strategy's actual market-making behavior —
 which model reasons about it, which tools it calls, how it's journaled — is
 **already guaranteed identical** regardless of whether a human typed
-`start_agent` from Telegram, Claude Code, OpenClaw, or Hermes. That part of
+`start_agent` from Telegram or any external harness. That part of
 "does it work the same" doesn't need a spike; it's a fact about the code.
 
 **What the spike actually needs to validate is narrower and lives entirely at
@@ -67,7 +62,7 @@ usage:
 3. Does the resulting running strategy show up identically in Condor's *own*
    tooling — `list_agents`, the web dashboard, a Telegram `/status` — proving
    Tier 2 state was never tied to the harness that started it (the concrete,
-   observable version of architecture doc §1.2's claim)?
+   observable version of the three-tier architecture's core claim)?
 
 ## Does `market_making_expert` / `pmm_mister_operator` need modification?
 
@@ -107,64 +102,19 @@ strategy was already broken":
 `trading_pair` — a strict superset of what the two retired routines took —
 so this is a one-line Step-1 edit, not a rewrite.)
 
-**One real, named non-parity gap (not a blocker, but sharper than first
-described once a TUI is in the picture): `send_notification`
+**One real, named non-parity gap (not a blocker): `send_notification`
 (`mcp_servers/condor/tools/notification.py`) is Telegram-only, hardcoded.**
 It POSTs directly to `api.telegram.org` using `settings.bot_token`/
 `settings.chat_id` — there is no branch for "notify via whatever harness is
-active." Originally this was framed as "fine as long as Telegram stays the
-alerting channel, only a gap if Telegram is later dropped entirely" — but
-that framing assumed whatever replaces Telegram is itself push-capable.
-**If the replacement interactive surface is a TUI — OpenClaw's TUI or Claude
-Code's terminal UI — that assumption doesn't hold, and not as an
-implementation gap but as a structural property of TUIs:**
-
-- Telegram (and any messaging-channel adapter — Discord, Slack, SMS) is
-  **persistent and push-capable**: a message can reach the user's phone at
-  3am with nothing already open on their end. A `TickEngine` tick alerting
-  on a stop-loss trigger needs exactly this, because most of the time
-  nobody has anything open — that's the entire point of an unattended,
-  24/7 strategy loop.
-- A TUI is **session-scoped and pull-based**: it only exists while a human
-  has a terminal window open, the same limitation already named for Claude
-  Code's `/loop` (session-scoped, dies on terminal exit) in the scheduling
-  research (`strategy-engine-and-shared-intelligence.md` §1.5). There is
-  no mechanism by which a background tick can make a TUI that isn't running
-  suddenly appear on someone's screen. A TUI is structurally never a valid
-  `send_notification` target, no matter how much engineering goes into it —
-  this isn't "not implemented yet," it's "there's nothing to dispatch to."
-
-**Decision: stick with Telegram as the alert channel for now** — nothing
-here needs to change today, and Telegram alone still carries every alert
-unmodified regardless of which harness starts or consults a strategy. The
-point worth carrying forward isn't "switch off Telegram," it's narrower and
-more specific than "make `send_notification` multi-channel across
-harnesses": **separate *interactive harness* from *alert channel* as two
-independent choices, not one**, and worth genericizing precisely *because*
-OpenClaw and Hermes already ship their own messaging adapters — the
-capability to dispatch elsewhere already exists on their side, it's
-Condor's own `send_notification` that's hardcoded to one channel. Route it
-to whichever **persistent, push-capable channel** is configured — which may
-or may not be the same thing as the interactive harness a user is currently
-typing into:
-- OpenClaw's TUI + OpenClaw's own Telegram/Discord/Slack adapter (OpenClaw
-  ships both, per the scheduling research) — TUI for hands-on sessions,
-  channel adapter for alerts, both under one harness.
-- Claude Code's terminal UI has no push-capable channel of its own at all —
-  if Claude Code's terminal is the interactive surface, *something else*
-  (Telegram, email, SMS) still has to carry alerts; there is no in-harness
-  substitute to fall back to.
-- Hermes-agent: same shape as OpenClaw — a cron/gateway process plus its own
-  messaging adapters, separate from however a human is interacting with it
-  at a given moment.
-
-This also reinforces, rather than undermines, `roadmap-v2.md` Phase 2's
-existing decision that Telegram is the hosted customer's access point: even
-in a world where the *interactive* choice moves to a TUI-based harness for
-power users, the *alerting* requirement doesn't move with it — some
-persistent channel is still needed underneath, for exactly the reason a
-hosted, unattended strategy can't rely on someone having a terminal open.
-**Not needed for this spike** — tracked as a `## Follow-ups` item instead.
+active." Alerts from an unattended 24/7 strategy need a **persistent,
+push-capable channel**: a stop-loss alert must reach the user's phone at 3am
+with nothing already open on their end. A terminal UI is structurally never
+that — it is session-scoped and pull-based, existing only while a human has
+it open — so the *interactive harness* and the *alert channel* are two
+independent choices, not one. **Decision: Telegram stays the alert channel
+for now**; it carries every alert unmodified regardless of which harness
+starts or consults a strategy. Genericizing `send_notification` to other
+persistent channels is a `## Follow-ups` item, **not needed for this spike**.
 
 **Routines are not a general blocker, already solved.** `mm_dashboard.py`
 imports `telegram.ext.ContextTypes` only as a type hint for its `run(config,
@@ -196,8 +146,8 @@ as a known limitation, not something this spike needs to touch.)
   `config_manager.get_server(name)`). For a first spike, use a paper-trading
   or testnet server config, not the live-capital one — an explicit safety
   gate, not implied by anything in the code itself.
-- **Per-harness MCP registration** — all three need the same two stdio MCP
-  servers Condor's own sessions already use
+- **Per-harness MCP registration** — every harness needs the same two stdio
+  MCP servers Condor's own sessions already use
   (`handlers/agents/_shared.py:305-440`), just registered through each
   harness's own config mechanism instead of Condor's dynamic
   `build_mcp_servers_for_*`:
@@ -212,13 +162,9 @@ as a known limitation, not something this spike needs to touch.)
     `claude mcp add`), with `args` including the flags above — same shape as
     this repo's own `.mcp.json`, just with explicit identity/server flags
     instead of relying on Condor's session code to inject them via env.
-  - **OpenClaw / Hermes**: same two stdio server definitions, registered
-    through each project's own MCP config surface. Exact config syntax for
-    each is an **open item to verify against their docs at implementation
-    time** — flagged here rather than assumed, consistent with how the
-    scheduling spike (`strategy-engine-and-shared-intelligence.md` §1.6,
-    Hermes' cron registration) already treats its own unverified integration
-    points.
+  - **OpenClaw**: same two stdio server definitions, registered through its
+    own MCP config surface (`openclaw mcp add`; see the QA instructions
+    below for the exact, tested invocation).
 
 ## Test protocol
 
@@ -248,7 +194,7 @@ as a known limitation, not something this spike needs to touch.)
    tools, same `tool_preload_hint` behavior for ACP-based harnesses per
    `build_initial_context`, `handlers/agents/_shared.py:487-519`).
 6. **Cross-harness check**: register the same two MCP servers in a *second*
-   harness (OpenClaw or Hermes), and from there call `list_agents`/`consult`/
+   harness (e.g. OpenClaw), and from there call `list_agents`/`consult`/
    `stop_agent`/`pause_agent` against the strategy **started in step 3 from
    Claude Code**. This is the test that most directly answers the spike's
    stated goal — if a strategy started from one harness is fully visible and
@@ -284,19 +230,9 @@ as a known limitation, not something this spike needs to touch.)
 
 - Genericize `send_notification` to dispatch via whichever **persistent,
   push-capable channel** is configured, not hardcoded to Telegram's Bot
-  API — worth doing *because* OpenClaw and Hermes already ship their own
-  Telegram/Discord/Slack adapters (the capability already exists on their
-  side; Condor's own tool is the thing hardcoded to one channel), not
-  because Telegram itself needs to go away. Telegram stays the channel for
-  now either way. Explicitly **not** the interactive TUI itself as a
-  target, since a TUI has no mechanism to receive a push when nothing is
-  open — if the interactive harness is Claude Code's terminal specifically,
-  there's no in-harness channel to fall back to at all, so some persistent
-  channel (Telegram or otherwise) is still required regardless of harness
-  choice.
-- If step 6 passes, this spike is the concrete evidence
-  `mcp-first-value-add.md`'s harness-agnostic pitch needs — worth a pointer
-  back from that doc once results are in.
+  API. Telegram stays the channel for now either way. A terminal UI is
+  explicitly **not** a valid target — it has no mechanism to receive a push
+  when nothing is open.
 
 ## Results (executed 2026-07-07)
 
@@ -475,7 +411,15 @@ question, not a harness question.
 ## Follow-ups discovered during execution, not planned in advance
 
 - **hummingbot/condor#151** (dry-run gap) — fixed and merged into this
-  branch's working tree during this spike; see above.
+  branch's working tree during this spike; see above. Its live-mode sibling
+  is fixed on this branch too: in `loop` mode, `manage_bots(deploy)` was
+  auto-approved with **no** risk-engine check (while `manage_executors
+  (create)` is exposure-gated). Since a bot's capital lives in saved
+  controller configs on the API server — not in the tool call — the gate
+  bounds the *loss* instead: a deploy must declare
+  `max_global_drawdown_quote` ≤ the strategy's `max_position_size_quote`,
+  and an `update_config` may not raise `total_amount_quote` above that
+  limit (`RiskEngine.check_bot_action`).
 - **~~RESTART THE MAIN CONDOR PROCESS to activate the #151 fix~~ — DONE
   (same day).** The `main.py` running since Jul 2 predated the fix and held
   the old `risk.py`/`prompts.py` in memory — visible in
@@ -548,13 +492,13 @@ zero persona. Layering:
 ### 3. Skills go harness-native; one canonical directory
 
 Condor's skill format (`<name>/SKILL.md`, `name`/`description`/
-`when_to_use` frontmatter) is already the same shape all three harnesses
+`when_to_use` frontmatter) is already the same shape the external harnesses
 use natively: Claude Code (`.claude/skills/`), OpenClaw (`openclaw skills
-install` from a local dir; ClawHub), Hermes (agentskills.io standard). So:
+install` from a local dir; ClawHub). So:
 
 - Keep **one canonical skills directory** in the repo; expose it natively
   per harness (symlink into `.claude/skills/`, `openclaw skills install
-  <path>`, drop-in for Hermes). Native progressive disclosure replaces the
+  <path>`). Native progressive disclosure replaces the
   "call `manage_skill(action='read')` before known flows" instruction and
   is a strictly better UX.
 - Skill→routine linkage survives untouched: skill bodies instruct MCP calls
@@ -613,7 +557,12 @@ When the MCP server starts with no identity (no `--user-id`/`--chat-id`
 args, no `CONDOR_USER_ID`/`CONDOR_CHAT_ID` env) and `config.yml` has
 **exactly one approved user**, bind to it and log the choice
 (`settings.ensure_identity()`, called at server startup and defensively
-from `call_main_api`). Resolution order: CLI args > env vars > auto-bind.
+from `call_main_api` and the memory tools — memory resolves its store from
+`user_id` directly, so an unresolved identity errors instead of silently
+targeting user 0's store). The probe never *creates* a `config.yml` (it
+checks for the file first — `ConfigManager` would otherwise write a default
+one into whatever cwd the harness launched from). Resolution order: CLI
+args > env vars > auto-bind.
 
 - Zero setup for the dominant case (single-user local install): any harness
   pointed at the repo just works — no env vars, no 403.
@@ -642,8 +591,8 @@ box until then.
 
 ### Tier C — MCP OAuth 2.1 (only when Tier 2 leaves the machine)
 
-**Yes — Tier C is specifically for the hosted/cloud deployment** (the
-roadmap's Phase 0 hosted box), or any topology where the harness and the
+**Yes — Tier C is specifically for a hosted/cloud deployment**, or any
+topology where the harness and the
 Condor main process are on different machines. That's the first point where
 a network boundary — and therefore real authentication — exists. The MCP
 transport becomes HTTP, and the MCP authorization spec (OAuth 2.1) is the
@@ -655,9 +604,8 @@ matter how many harnesses they use.
 
 ### Net
 
-Identity becomes harness-independent at every tier — Telegram, Claude Code,
-OpenClaw, Codex, Hermes all resolve the same Condor account through the
-same chain (explicit args > env > credential file (B) > auto-bind (A)), and
+Identity becomes harness-independent at every tier — Telegram and every
+external harness resolve the same Condor account through the same chain (explicit args > env > credential file (B) > auto-bind (A)), and
 each tier is added only when the trust situation it addresses actually
 appears: A now (UX, no security pretense), B at multi-user-on-one-box, C at
 remote/hosted.
@@ -784,15 +732,6 @@ args = ["run", "--directory", "/path/to/condor", "python", "-m", "mcp_servers.hu
 Then run `codex` and drive the same checklist below. Check Codex's MCP
 request timeout — if configurable and < 240s, raise it (same consult issue
 as OpenClaw). Record results in this doc.
-
-### Hermes — NOT yet tested, expected shape
-
-Hermes-agent has first-class MCP client support (auto-reconnect, per-server
-timeouts — see fork-vs-build.md); registration is a one-block
-`mcp_servers:` entry in its config using the same command/args shape as the
-table above (use `uv run --directory /path/to/condor ...` if its config has
-no cwd field). Set its per-server timeout ≥ 240s. Consult Hermes docs for
-the exact config schema; record results in this doc.
 
 ### The QA checklist (same for every harness)
 
