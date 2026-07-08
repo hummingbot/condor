@@ -584,3 +584,168 @@ multi-brain sync problem and no reason for a memory taxonomy:
 - One line in the MCP instructions does the routing: "save durable trading
   facts with `manage_memory`" — the same nudge the tick prompt already
   contains.
+
+## QA instructions: reproducing this spike per harness
+
+Everything below assumes the QA machine has the condor repo checked out and
+working (`uv sync` done, `config.yml` present). All harnesses connect to the
+same two stdio MCP servers, launched **from the repo directory** — `uv run`
+resolves the project venv from the cwd, so either open the harness in the
+repo dir or use `uv run --directory /path/to/condor ...` in the server args.
+
+### Prerequisites (all harnesses)
+
+1. **The Condor main process must be running** (`make run` in the repo dir).
+   Tier 2 lives there: `start_agent`/`stop_agent`/`list_agents`/`consult`
+   all forward to its web API on `127.0.0.1:8088` (`WEB_PORT`). Without it,
+   lifecycle calls return API errors — MCP tools alone do not carry Tier 2.
+   **Corollary: after pulling code changes, restart it** — fixes on disk do
+   not reach the running process (learned twice in this spike).
+2. **A Hummingbot API server** reachable (default `localhost:8000`) and
+   registered in `config.yml`.
+3. **Identity values** — you need three, all from `config.yml`:
+   - `CHAT_ID` / `USER_ID`: a registered user id (e.g. `admin_id`)
+   - `SERVER_NAME`: a server entry name the user can access (e.g. `local`)
+4. ⚠️ **Capital check before anything else**: run a read-only
+   `get_portfolio_overview` and look at what the configured server holds.
+   If it's a live account, use `execution_mode="dry_run"` ONLY, and never
+   `loop`/`run_once`. The dry-run gate blocks `manage_executors`,
+   `manage_bots` mutations, `place_order`, and gateway swaps — but treat it
+   as a seatbelt, not an invitation.
+
+The two servers, in the shape every harness needs (adjust identity):
+
+| server | command | args |
+|---|---|---|
+| `condor` | `uv` | `run python -m mcp_servers.condor --chat-id <CHAT_ID> --user-id <USER_ID> --server-name <SERVER_NAME>` |
+| `mcp-hummingbot` | `uv` | `run python -m mcp_servers.hummingbot_api --url http://localhost:8000 --username <U> --password <P> --server-name <SERVER_NAME>` |
+
+Expected on connect: **12 tools each**. The condor server also delivers
+routing instructions (skill → agent → raw tools) that the harness's agent
+should visibly follow.
+
+### Claude Code — tested ✅
+
+Interactive: `cd /path/to/condor && claude` — the repo's own `.mcp.json`
+registers both servers (identity then comes from `CONDOR_CHAT_ID`/
+`CONDOR_USER_ID` env vars, so export those first).
+
+Headless / isolated (what this spike used — avoids touching repo state):
+write the two servers into a scratch `qa-mcp.json` (identity as explicit
+`--chat-id`/... args), then:
+
+```bash
+claude -p --mcp-config qa-mcp.json --strict-mcp-config \
+  --allowedTools "mcp__condor__manage_trading_agent" \
+  "Call manage_trading_agent with action='list_agents' and report the raw JSON."
+```
+
+### OpenClaw — tested ✅
+
+```bash
+openclaw mcp add condor --command uv \
+  --arg run --arg python --arg -m --arg mcp_servers.condor \
+  --arg --chat-id --arg <CHAT_ID> --arg --user-id --arg <USER_ID> \
+  --arg --server-name --arg <SERVER_NAME> \
+  --cwd /path/to/condor --timeout 240
+openclaw mcp add mcp-hummingbot --command uv \
+  --arg run --arg python --arg -m --arg mcp_servers.hummingbot_api \
+  --arg --url --arg http://localhost:8000 \
+  --arg --username --arg <U> --arg --password --arg <P> \
+  --arg --server-name --arg <SERVER_NAME> \
+  --cwd /path/to/condor --timeout 240
+openclaw mcp probe    # expect: condor: 12 tools; mcp-hummingbot: 12 tools
+openclaw agent --local --agent main --session-key condor-qa \
+  -m "Call manage_trading_agent action='list_agents' and report the raw JSON."
+```
+
+**`--timeout 240` is required, not optional**: OpenClaw's default
+per-request MCP timeout (~60s) kills `consult`/`delegate`-class tools
+(a consult runs a full worker session, 1–3 min; the tool's own budget is
+180s) with `MCP error -32001: Request timed out`.
+
+Gotchas hit during this spike: the `main` agent needs a working model
+credential in its own auth store (`openclaw models status` to check;
+`openclaw doctor --repair` fixed a migration gap here); the gateway
+LaunchAgent may need `openclaw doctor --repair` + `openclaw gateway
+install` after a CLI upgrade (though `--local` embedded runs work without
+the gateway).
+
+### Codex — NOT yet tested, expected shape
+
+Codex reads MCP servers from `~/.codex/config.toml`. There is no per-server
+cwd, so use `uv --directory` to pin the project:
+
+```toml
+[mcp_servers.condor]
+command = "uv"
+args = ["run", "--directory", "/path/to/condor", "python", "-m", "mcp_servers.condor",
+        "--chat-id", "<CHAT_ID>", "--user-id", "<USER_ID>", "--server-name", "<SERVER_NAME>"]
+
+[mcp_servers.mcp-hummingbot]
+command = "uv"
+args = ["run", "--directory", "/path/to/condor", "python", "-m", "mcp_servers.hummingbot_api",
+        "--url", "http://localhost:8000", "--username", "<U>", "--password", "<P>",
+        "--server-name", "<SERVER_NAME>"]
+```
+
+Then run `codex` and drive the same checklist below. Check Codex's MCP
+request timeout — if configurable and < 240s, raise it (same consult issue
+as OpenClaw). Record results in this doc.
+
+### Hermes — NOT yet tested, expected shape
+
+Hermes-agent has first-class MCP client support (auto-reconnect, per-server
+timeouts — see fork-vs-build.md); registration is a one-block
+`mcp_servers:` entry in its config using the same command/args shape as the
+table above (use `uv run --directory /path/to/condor ...` if its config has
+no cwd field). Set its per-server timeout ≥ 240s. Consult Hermes docs for
+the exact config schema; record results in this doc.
+
+### The QA checklist (same for every harness)
+
+Run these in order; each step's expected result is exact:
+
+1. **Connectivity**: both servers connect, 12 tools each.
+2. **Read state**: `manage_trading_agent(action="list_agents")` → valid
+   JSON (`{"agents": [], "message": "No agents running"}` if idle).
+3. **Start**: `action="start_agent"`,
+   `strategy_id="market_making_expert.pmm_mister_operator"`,
+   `config={"execution_mode": "dry_run"}` → `{"started": true,
+   "agent_id": "..._eN"}`. Note: `strategy_id` must be the **full
+   `agent.strategy` key** — a bare `pmm_mister_operator` returns
+   "not found".
+4. **Observe**: immediate `list_agents` → the agent with
+   `status: "running"`, `execution_mode: "dry_run"`. Dry-run is
+   **one-shot**: after ~2–3 min the tick completes, the agent disappears
+   from `list_agents` (this is expected, not instability), and
+   `agents/market_making_expert/strategies/pmm_mister_operator/dry_runs/experiment_N.md`
+   exists, ending with "No executors were created (dry run)".
+5. **Cross-harness**: start another dry_run from harness A, then within
+   ~2 min from harness B: `list_agents` shows it; `stop_agent` with its
+   agent_id → `{"stopped": true}`. (The window is short — script harness
+   A's start so B fires immediately.)
+6. **Consult**: `consult(agent="market_making_expert", task="quick regime
+   read for <pair> on <connector>, advisory only")` → a domain analysis
+   that takes no deploy action. Requires client MCP timeout ≥ 240s.
+7. **Create loop**: `create_agent` (any test slug) → `consult` it (alive?)
+   → `create_strategy` → `start_agent` dry_run → snapshot written under
+   the new agent's dir. Clean up with `delete_strategy`/`delete_agent`.
+8. **Routine authoring**: `consult(agent="routine_builder", task="create a
+   routine named <x> for agent <slug> that ...")` → file appears under
+   `agents/<slug>/routines/`, and the builder's answer shows it read its
+   `routine_cookbook` skill (if it says the cookbook is unavailable, you
+   are running pre-#152 code — restart the main process). Then
+   `manage_routines(action="run", name="<x>",
+   strategy_id="<slug>.<strategy>")` executes it.
+9. **Safety spot-check** (dry_run integrity): during any dry-run tick,
+   `manage_bots(action="status")` before vs after shows no new bot;
+   portfolio unchanged. The tick prompt (visible in the `experiment_N.md`
+   snapshot header) must contain the manage_bots blocking language — if it
+   shows only "Do NOT create or stop executors", the backend is running
+   pre-#151 code; restart it.
+
+**Prompting tip for weaker/looser models**: give one precise tool call per
+turn ("Call manage_trading_agent with EXACTLY these params ... report the
+raw response"). In this spike, a multi-step turn led gemini to misread the
+one-shot agent's expected self-stop as instability and abandon its steps.
