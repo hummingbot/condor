@@ -585,6 +585,83 @@ multi-brain sync problem and no reason for a memory taxonomy:
   facts with `manage_memory`" — the same nudge the tick prompt already
   contains.
 
+## Identity across harnesses: the tiered plan (Tier A ships in this PR)
+
+QA hit the identity problem in the wild: a stock `claude` session using the
+repo's identity-less `.mcp.json` got an opaque `403 Access denied` on every
+consult/delegate — the MCP server defaulted to user id 0 and minted a JWT
+for a nonexistent account. Fixing that properly forced the question: how
+should identity work when we can't depend on Telegram to assert it?
+
+**The grounding fact that shapes everything below**: the JWT signing secret
+lives in `config.yml` on the same filesystem (`condor/web/auth.py`), so
+anyone who can read the repo can mint a JWT for *any* user id. The numeric
+user id was never a credential — Telegram just asserts it honestly. Locally
+there is no security boundary to defend; the design goal is picking the
+right identity *automatically*, and introducing a real credential only
+where a real boundary exists.
+
+**Rejected: harness-level identity (e.g. "use the OpenClaw id").** In local
+mode a harness's identity is itself just self-declared ambient state — zero
+security gain over an env var — and it couples Condor to one harness's
+identity model, against the harness-agnostic thesis. The harness should
+*carry a Condor-issued identity/credential*, not substitute its own.
+
+### Tier A — single-user auto-bind (✅ this PR)
+
+When the MCP server starts with no identity (no `--user-id`/`--chat-id`
+args, no `CONDOR_USER_ID`/`CONDOR_CHAT_ID` env) and `config.yml` has
+**exactly one approved user**, bind to it and log the choice
+(`settings.ensure_identity()`, called at server startup and defensively
+from `call_main_api`). Resolution order: CLI args > env vars > auto-bind.
+
+- Zero setup for the dominant case (single-user local install): any harness
+  pointed at the repo just works — no env vars, no 403.
+- No trust change: the OS user launching the harness already holds every
+  secret on disk. Auto-bind is a *selector*, not authentication.
+- With zero or multiple approved users, nothing is bound and the fail-fast
+  error (also this PR) names the exact fix — a multi-user box must say who
+  it is explicitly.
+
+### Tier B — `condor init` pairing with a stored credential (later: when one box genuinely has multiple users)
+
+The `gh auth login`/`aws configure` pattern: a one-time command generates a
+random token, stores it at `~/.condor/credentials` (0600, outside the repo
+so it can't be committed), and registers it against a user in `config.yml`.
+The MCP server reads it as another resolution-order step; the main API
+verifies the **token**, not just a self-minted JWT — the first point at
+which per-user identity on a shared box becomes real (distinct secrets,
+revocable). Telegram ids become linked aliases of the account rather than
+the primary key.
+
+**Trigger to build it**: the first genuine multi-user-on-one-machine need —
+a shared team box, or Portal-style onboarding that registers more than one
+user. Not before: for single-user installs it's pure ceremony on top of
+Tier A, and the env-var escape hatch already covers the rare multi-user
+box until then.
+
+### Tier C — MCP OAuth 2.1 (only when Tier 2 leaves the machine)
+
+**Yes — Tier C is specifically for the hosted/cloud deployment** (the
+roadmap's Phase 0 hosted box), or any topology where the harness and the
+Condor main process are on different machines. That's the first point where
+a network boundary — and therefore real authentication — exists. The MCP
+transport becomes HTTP, and the MCP authorization spec (OAuth 2.1) is the
+ecosystem-standard mechanism: the harness pops a browser, the user logs
+into Condor's portal, and a scoped token is issued. Claude Code and peers
+already do this dance natively for remote MCP servers, so the UX is
+*better* than env vars, not worse. Local installs never need Tier C, no
+matter how many harnesses they use.
+
+### Net
+
+Identity becomes harness-independent at every tier — Telegram, Claude Code,
+OpenClaw, Codex, Hermes all resolve the same Condor account through the
+same chain (explicit args > env > credential file (B) > auto-bind (A)), and
+each tier is added only when the trust situation it addresses actually
+appears: A now (UX, no security pretense), B at multi-user-on-one-box, C at
+remote/hosted.
+
 ## QA instructions: reproducing this spike per harness
 
 Everything below assumes the QA machine has the condor repo checked out and
@@ -627,21 +704,23 @@ should visibly follow.
 ### Claude Code — tested ✅
 
 Interactive: `cd /path/to/condor && claude` — the repo's own `.mcp.json`
-registers both servers (identity then comes from `CONDOR_CHAT_ID`/
-`CONDOR_USER_ID` env vars, so **export those first** — put them in your
-shell profile; the MCP subprocess inherits Claude Code's environment):
+registers both servers. Identity: on a **single-user install** (one
+approved user in `config.yml`) nothing is needed — Tier A auto-bind picks
+that user. On a multi-user box, export your registered id first (shell
+profile; the MCP subprocess inherits Claude Code's environment):
 
 ```bash
 export CONDOR_USER_ID=<your registered user id>   # e.g. config.yml's admin_id
 export CONDOR_CHAT_ID=<same id>
 ```
 
-**Known failure without them** (hit in QA): `consult`/`delegate`/lifecycle
-calls fail — formerly an opaque `403 Access denied` (the server minted a
-JWT for the default user id 0, which isn't a registered account; same auth
-as the web dashboard). `call_main_api` now fails fast with an error naming
-these env vars. Note this is Condor-user identity, unrelated to the
-hummingbot-api's admin/admin credentials.
+**Known failure mode** (hit in QA, pre-Tier-A): `consult`/`delegate`/
+lifecycle calls failed with an opaque `403 Access denied` — the server
+minted a JWT for the default user id 0, which isn't a registered account
+(same auth as the web dashboard). Now: single-user installs auto-bind;
+ambiguous configs fail fast with an error naming these env vars. Note this
+is Condor-user identity, unrelated to the hummingbot-api's admin/admin
+credentials.
 
 Headless / isolated (what this spike used — avoids touching repo state):
 write the two servers into a scratch `qa-mcp.json` (identity as explicit

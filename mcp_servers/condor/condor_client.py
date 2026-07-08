@@ -5,7 +5,7 @@ import re
 import aiohttp
 
 from mcp_servers.condor.exceptions import APIError
-from mcp_servers.condor.settings import settings
+from mcp_servers.condor.settings import ensure_identity, settings
 
 
 async def call_main_api(
@@ -26,15 +26,16 @@ async def call_main_api(
 
     # Without an identity the JWT below is minted for user 0, which is not a
     # registered account — the main process then 403s deep inside the call
-    # (consult/delegate/lifecycle) with an opaque "Access denied". Fail fast
-    # with the actual fix instead.
-    if not settings.user_id:
+    # (consult/delegate/lifecycle) with an opaque "Access denied". Try the
+    # single-user auto-bind first (Tier A), then fail fast with the actual fix.
+    if not settings.user_id and not ensure_identity():
         raise APIError(
-            "Condor MCP server was started without an identity: set the "
-            "CONDOR_USER_ID and CONDOR_CHAT_ID env vars (or pass --user-id/"
-            "--chat-id args) to your registered Condor user id — the same id "
-            "your Telegram bot / web dashboard login uses — then restart the "
-            "MCP session."
+            "Condor MCP server was started without an identity, and auto-bind "
+            "could not resolve one (zero or multiple approved users in "
+            "config.yml): set the CONDOR_USER_ID and CONDOR_CHAT_ID env vars "
+            "(or pass --user-id/--chat-id args) to your registered Condor "
+            "user id — the same id your Telegram bot / web dashboard login "
+            "uses — then restart the MCP session."
         )
 
     url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"

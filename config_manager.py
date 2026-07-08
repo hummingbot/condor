@@ -536,6 +536,12 @@ class ConfigManager:
         role = self.get_user_role(user_id)
         return role in (UserRole.ADMIN, UserRole.USER)
 
+    def get_approved_users(self) -> list[int]:
+        """All user ids with an approved role (admin or user)."""
+        return [
+            uid for uid in self._data.get("users", {}) if self.is_approved(uid)
+        ]
+
     def register_pending(self, user_id: int, username: str = None) -> bool:
         """Register a new pending user."""
         users = self._data["users"]
