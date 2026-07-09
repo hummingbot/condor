@@ -1,9 +1,12 @@
 """
-API Keys configuration handlers (read-only).
+API Keys configuration handlers.
 
-Connecting and removing exchange API keys is done exclusively through the
-Condor web dashboard (Settings → Keys). The Telegram bot only shows which
-exchanges are currently connected and points the user to the web UI.
+Mostly read-only: connecting or removing a generic exchange's API keys is
+still done through the Condor web dashboard (Settings → Keys), and this view
+just shows which exchanges are connected and points there. Hyperliquid is the
+one exception -- see hyperliquid_connect.py -- since its agent-wallet +
+builder-fee approval can be done entirely via WalletConnect, so it's offered
+directly from this menu instead of requiring the dashboard.
 """
 
 import logging
@@ -173,6 +176,15 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                         [InlineKeyboardButton("🌐 Open Web Dashboard", url=web_url)]
                     )
 
+                keyboard.append(
+                    [
+                        InlineKeyboardButton(
+                            "🔗 Connect Hyperliquid",
+                            callback_data="api_key_connect_hyperliquid",
+                        )
+                    ]
+                )
+
                 message_text = header + creds_display + web_hint
                 keyboard.append(
                     [InlineKeyboardButton("« Close", callback_data="config_close")]
@@ -207,10 +219,15 @@ async def handle_api_keys_callback(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """
-    Route API key callback queries to the read-only view.
+    Route API key callback queries.
 
-    All callbacks (the live `config_api_keys` entry and any stale `api_key_*`
-    buttons from before keys management moved to the web UI) just refresh the
-    read-only view.
+    `api_key_connect_hyperliquid` starts the WalletConnect flow; the live
+    `config_api_keys` entry and any stale `api_key_*` buttons from before keys
+    management moved to the web UI fall through to the read-only view.
     """
+    if update.callback_query.data == "api_key_connect_hyperliquid":
+        from .hyperliquid_connect import start_hyperliquid_connect
+
+        await start_hyperliquid_connect(update, context)
+        return
     await show_api_keys(update.callback_query, context)

@@ -24,6 +24,19 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+def generate_qr_png(uri: str) -> bytes:
+    """PNG bytes for a scannable QR of `uri`. Shared by every surface that
+    delivers a WalletConnect pairing (Telegram's /keys button, the MCP tool)
+    so QR generation lives in exactly one place."""
+    import io
+
+    import qrcode
+
+    buf = io.BytesIO()
+    qrcode.make(uri).save(buf, format="PNG")
+    return buf.getvalue()
+
 BRIDGE_SCRIPT = Path(__file__).resolve().parent.parent / "walletconnect_bridge" / "bridge.mjs"
 
 _URI_TIMEOUT = 20  # seconds to wait for the bridge to hand back a pairing URI

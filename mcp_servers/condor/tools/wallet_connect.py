@@ -15,6 +15,7 @@ from urllib.parse import quote
 
 import httpx
 
+from condor.walletconnect import generate_qr_png
 from mcp_servers.condor.condor_client import call_main_api
 from mcp_servers.condor.settings import settings
 
@@ -31,11 +32,7 @@ async def _send_qr_photo(uri: str) -> bool:
     if not settings.bot_token or not settings.chat_id:
         return False
     try:
-        import qrcode
-
-        buf = io.BytesIO()
-        qrcode.make(uri).save(buf, format="PNG")
-        buf.seek(0)
+        buf = io.BytesIO(generate_qr_png(uri))
         async with httpx.AsyncClient(timeout=10) as client:
             resp = await client.post(
                 f"https://api.telegram.org/bot{settings.bot_token}/sendPhoto",

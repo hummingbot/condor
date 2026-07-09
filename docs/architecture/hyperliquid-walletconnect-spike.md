@@ -220,7 +220,32 @@ Telegram user gets a scannable image inline. For non-Telegram MCP hosts
 a spike; rendering it as an inline image for arbitrary MCP hosts is a
 follow-up.
 
-### 5. Skill stub (optional, small)
+### 5. `/keys` → "🔗 Connect Hyperliquid" (Telegram, deterministic entry point)
+
+Chat-only delivery via the MCP tool turned out clunky in practice: without a
+live Telegram bot in the loop, there's no good way for an agent to hand a
+user a scannable QR — the fallback (build an HTML page, publish it,
+send a link) is slow and adds a browser round-trip for something that should
+be instant. The MCP tool's routing also depends on the agent reliably
+inferring intent from free-form phrasing.
+
+`handlers/config/hyperliquid_connect.py` adds a deterministic alternative: a
+"🔗 Connect Hyperliquid" button on the existing `/keys` menu
+(`handlers/config/api_keys.py`). It calls the same
+`condor.walletconnect.start_walletconnect_session` /
+`get_session_status` functions the MCP tool uses — directly, no HTTP
+loopback, since Telegram handlers already run in the main process — sends
+the QR via `context.bot.send_photo`, then edits that photo's caption in
+place as the session progresses (`pending_approval` → `pending_signatures`
+→ `done`/`error`), polling every 3s for up to 6 minutes. QR generation was
+factored out into `condor.walletconnect.generate_qr_png` so both this and
+the MCP tool's `_send_qr_photo` share one implementation.
+
+This is now the primary, fast path; the MCP tool remains for
+non-Telegram/agentic surfaces (Claude Code, etc.), where the skill stub
+below still matters for routing.
+
+### 6. Skill stub (optional, small)
 
 A minimal `assistants/condor/skills/connect_hyperliquid_wallet/SKILL.md`
 (same frontmatter shape as
@@ -243,18 +268,25 @@ capabilities.
 
 ## Verification
 
-1. Set `WALLETCONNECT_PROJECT_ID` (from a free WalletConnect Cloud project)
-   and confirm `npm install` succeeds in `walletconnect_bridge/`.
-2. Call `connect_hyperliquid_wallet(action="start")` via the MCP tool (or
-   directly exercise `condor/walletconnect.py`) — confirm a `uri` comes back
-   and, if `CONDOR_CHAT_ID`/`TELEGRAM_BOT_TOKEN` are set, a QR photo lands in
-   Telegram.
-3. Scan with a real mobile wallet (Rabby or MetaMask mobile) holding a
-   Hyperliquid-funded address on Arbitrum One; approve both signature
-   requests.
-4. Poll `connect_hyperliquid_wallet(action="get", session_id=...)` until
-   `status: "done"`.
-5. Confirm via `manage_servers` / the dashboard's API Keys list that
-   `hyperliquid` and `hyperliquid_perpetual` credentials now exist for
-   `master_account`, and that a test order can be placed through them (reuse
-   whatever smoke check the existing browser-connected flow uses today).
+**MCP tool path — validated end-to-end against a real wallet and a live
+Hyperliquid account** (not just a smoke test): `start_walletconnect_session`
+returned a genuine `wc:` pairing URI, a real mobile wallet paired and signed
+both `ApproveAgent` and `ApproveBuilderFee`, and `hyperliquid` +
+`hyperliquid_perpetual` landed in `master_account` — confirmed independently
+via a direct credentials query against hummingbot-api, not just the tool's
+self-reported result. Along the way this also caught and fixed: the SDK's
+internal logger polluting the stdout event-prefix protocol,
+`client.connect()` hanging forever with no internal timeout on a bad relay
+handshake, and a swallowed exception in the credential-save path that
+misreported a real failure (a crashed `hummingbot-api` container) as
+"process exited unexpectedly."
+
+**`/keys` → "🔗 Connect Hyperliquid" (Telegram) — not yet live-tested**, since
+it requires restarting the running `main.py` process to pick up the new
+handler. To verify: restart, `/keys` in Telegram, tap the button, confirm the
+QR photo arrives and its caption updates live through
+`pending_approval` → `pending_signatures` → `done` as you approve on your
+phone, then re-run the credentials query above to confirm the save. The
+underlying session/save logic is shared with the already-validated MCP path
+— this is a new *delivery* surface (`send_photo` + caption polling) on
+already-proven mechanics, not new signing/save logic.
