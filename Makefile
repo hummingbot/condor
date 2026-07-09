@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: help setup install run test lint build-frontend setup-chrome
+.PHONY: help setup install run test lint build-frontend setup-chrome register-mcp
 
 # Helper function to find node/npm via nvm or system
 define find_node
@@ -22,6 +22,7 @@ help:
 	@echo "  make run         - Run locally (dev)"
 	@echo "  make test        - Run tests"
 	@echo "  make lint        - Run black + isort"
+	@echo "  make register-mcp - Register MCP servers with OpenClaw (no-op if absent)"
 
 setup:
 	@chmod +x setup-environment.sh && ./setup-environment.sh
@@ -34,6 +35,11 @@ install: setup
 		cd frontend && npm install \
 	'
 	@$(MAKE) setup-chrome
+	@$(MAKE) register-mcp
+
+# Runs after uv sync: probing spawns the servers, so deps must be installed.
+register-mcp:
+	@chmod +x scripts/register-openclaw-mcp.sh && ./scripts/register-openclaw-mcp.sh
 
 setup-chrome:
 	@echo "Setting up Chrome for chart rendering..."
