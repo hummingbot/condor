@@ -18,6 +18,7 @@ from mcp_servers.condor.tools import (
     servers,
     skills,
     trading_agent,
+    wallet_connect,
 )
 
 
@@ -234,6 +235,40 @@ async def manage_servers(
         Action-specific result dict.
     """
     return await servers.manage_servers(action, name)
+
+
+@mcp.tool()
+@handle_errors("connect hyperliquid wallet")
+async def connect_hyperliquid_wallet(
+    action: str,
+    session_id: str = "",
+    server: str = "",
+) -> dict:
+    """Connect a Hyperliquid wallet via WalletConnect (agent-wallet + builder-fee approval).
+
+    Lets a user authorize a trade-only Hyperliquid "agent wallet" and the Condor
+    builder fee from their own mobile wallet (Rabby, MetaMask, ...) via a
+    WalletConnect QR code / link -- no browser extension needed, and their master
+    private key never leaves their phone. This is the WalletConnect counterpart to
+    the web dashboard's "Connect Hyperliquid" flow; use it when the user only has a
+    mobile wallet, or wants to connect from chat instead of the dashboard.
+
+    Actions:
+    - "start": Begin a session (optional server, defaults to the active server).
+      Returns {"session_id", "uri", "next_steps"} immediately -- does NOT wait for
+      approval. If Telegram is configured, a scannable QR is also sent as a photo.
+    - "get": Poll a session's status (requires session_id). Returns
+      {"status": "pending_approval" | "pending_signatures" | "done" | "error", ...}.
+
+    Args:
+        action: start | get.
+        session_id: Session id returned by start (for get).
+        server: Hummingbot API server name (optional for start, defaults to the active server).
+
+    Returns:
+        Action-specific result dict.
+    """
+    return await wallet_connect.connect_hyperliquid_wallet(action, session_id, server)
 
 
 @mcp.tool()

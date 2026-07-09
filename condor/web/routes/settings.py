@@ -437,3 +437,35 @@ async def delete_credential(
         return {"deleted": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── WalletConnect (Hyperliquid agent-wallet connect, spike) ──
+
+
+@router.post("/walletconnect/hyperliquid")
+async def start_hyperliquid_walletconnect(
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    from condor.walletconnect import start_walletconnect_session
+
+    try:
+        return await start_walletconnect_session(server, user.id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/walletconnect/hyperliquid/{session_id}")
+async def get_hyperliquid_walletconnect(
+    session_id: str,
+    user: WebUser = Depends(get_current_user),
+):
+    from condor.walletconnect import get_session_status
+
+    result = await get_session_status(session_id, user.id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Unknown session_id")
+    return result

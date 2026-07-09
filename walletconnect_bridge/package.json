@@ -1,0 +1,12 @@
+{
+  "name": "condor-walletconnect-bridge",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Standalone WalletConnect bridge for Condor's Hyperliquid agent-wallet connect flow (spike). Spawned as a subprocess by condor/walletconnect.py.",
+  "main": "bridge.mjs",
+  "dependencies": {
+    "@walletconnect/sign-client": "^2.17.2",
+    "viem": "^2.21.0"
+  }
+}

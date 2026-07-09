@@ -23,6 +23,8 @@ dependencies = [
     "scipy>=1.17.1",
     "pydantic-ai[mcp]",
     "beautifulsoup4>=4.14.3",
+    "lz4>=4.4.5",
+    "qrcode[pil]>=8.0",
 ]
 
 [project.optional-dependencies]
