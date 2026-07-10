@@ -339,6 +339,15 @@ class ConfigManager:
         secret = self._data.get("web_jwt_secret")
         if secret:
             return secret
+        # Several processes share config.yml (main bot + each MCP subprocess),
+        # each with its own snapshot loaded at startup. A snapshot without the
+        # secret does NOT mean the file has none: another process may have
+        # generated one since. Adopt the on-disk value before minting — a
+        # second generation here clobbers the file via _save_config() and
+        # invalidates every JWT the other processes signed (opaque 401s).
+        on_disk = self.reload_web_jwt_secret()
+        if on_disk:
+            return on_disk
         secret = secrets.token_urlsafe(32)
         self._data["web_jwt_secret"] = secret
         self._save_config()
@@ -347,6 +356,23 @@ class ConfigManager:
             self.config_path,
         )
         return secret
+
+    def reload_web_jwt_secret(self) -> Optional[str]:
+        """Re-read ``web_jwt_secret`` from config.yml into the snapshot.
+
+        Returns the on-disk secret (or None). Lets a long-lived process pick up
+        a secret persisted by a sibling process after this one loaded its
+        snapshot, instead of diverging from it.
+        """
+        try:
+            with open(self.config_path, "r") as f:
+                on_disk = (yaml.safe_load(f) or {}).get("web_jwt_secret")
+        except Exception as e:
+            logger.error(f"Failed to re-read web JWT secret: {e}")
+            return self._data.get("web_jwt_secret")
+        if on_disk:
+            self._data["web_jwt_secret"] = on_disk
+        return on_disk
 
     async def get_client(self, name: str = None):
         """Get or create API client for a server."""

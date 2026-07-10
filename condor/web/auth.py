@@ -88,6 +88,19 @@ def decode_jwt(token: str) -> Optional[dict]:
     try:
         return jwt.decode(token, _jwt_secret(), algorithms=[_ALGORITHM])
     except JWTError:
+        pass
+    # The token may be signed with a secret a sibling process persisted to
+    # config.yml after our snapshot was loaded (main bot vs MCP subprocess).
+    # Refresh from disk once and retry before rejecting. Skipped when the
+    # env var pins the secret — there is nothing fresher to read.
+    if os.getenv("WEB_JWT_SECRET"):
+        return None
+    fresh = get_config_manager().reload_web_jwt_secret()
+    if not fresh:
+        return None
+    try:
+        return jwt.decode(token, fresh, algorithms=[_ALGORITHM])
+    except JWTError:
         return None
 
 
