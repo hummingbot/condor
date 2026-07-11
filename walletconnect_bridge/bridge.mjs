@@ -1,11 +1,21 @@
 #!/usr/bin/env node
 // Standalone WalletConnect bridge for the Hyperliquid agent-wallet + builder-fee
-// approval flow. Spawned as a subprocess by condor/walletconnect.py; speaks
-// newline-delimited JSON on stdout, one event per line:
+// approval flow. Spawned as a subprocess by condor/walletconnect.py -- ONE
+// signature per process invocation, each with its OWN fresh WalletConnect
+// pairing (fresh QR / fresh MetaMask deep link), rather than one long-lived
+// session driving both signatures back to back. A fresh pairing forces the
+// wallet app to foreground on every step; a second request sent to an
+// already-paired-but-backgrounded session doesn't reliably prompt the wallet
+// (confirmed by hand -- see docs/architecture/hyperliquid-walletconnect-spike.md).
 //
+// Invocation:
+//   node bridge.mjs agent
+//   node bridge.mjs builder <expectedMainAddress>
+//
+// Speaks newline-delimited JSON on stdout, one event per line:
 //   {"event":"uri","uri":"wc:..."}
 //   {"event":"approved","mainAddress":"0x..."}
-//   {"event":"done","mainAddress":"0x...","agentAddress":"0x...","agentPrivateKey":"0x..."}
+//   {"event":"done", ...}                          -- shape depends on step, see below
 //   {"event":"error","message":"..."}
 //
 // Python never touches private keys or the WalletConnect protocol -- all of
@@ -36,16 +46,25 @@ if (!PROJECT_ID) {
   process.exit(1);
 }
 
+const STEP = process.argv[2]; // "agent" | "builder"
+const EXPECTED_MAIN_ADDRESS = process.argv[3] || null; // required for "builder"
+if (STEP !== "agent" && STEP !== "builder") {
+  emit({ event: "error", message: `Unknown step '${STEP}'. Use agent | builder.` });
+  process.exit(1);
+}
+if (STEP === "builder" && !EXPECTED_MAIN_ADDRESS) {
+  emit({ event: "error", message: "The builder step requires the expected main address as argv[3]." });
+  process.exit(1);
+}
+
 // ── Hyperliquid mainnet signing constants (mirrors wallet/hyperliquid.ts) ──
 const CHAIN_ID_NUM = 42161; // Arbitrum One -- Hyperliquid mainnet signs on this domain
 const CHAIN = `eip155:${CHAIN_ID_NUM}`;
 const HL_EXCHANGE_URL = "https://api.hyperliquid.xyz/exchange";
-const HL_INFO_URL = "https://api.hyperliquid.xyz/info";
 const HL_CHAIN = "Mainnet";
 
 const BUILDER_ADDRESS = "0x10ba451e6439efc6a17dc20d21121aa838100705";
-const BUILDER_MAX_FEE_RATE = "0.01%"; // 1 bps
-const BUILDER_MAX_FEE_RATE_TENTHS_BPS = Math.round(parseFloat(BUILDER_MAX_FEE_RATE) * 1000);
+const BUILDER_MAX_FEE_RATE = "0.01%"; // 1 bps -- mirrors _BUILDER_MAX_FEE_RATE_TENTHS_BPS in condor/walletconnect.py
 const DEFAULT_AGENT_NAME = "condor";
 const MAX_AGENT_NAME = 16;
 
@@ -72,11 +91,8 @@ function defaultAgentName() {
   return `${DEFAULT_AGENT_NAME}-${creationStamp()}`.slice(0, MAX_AGENT_NAME);
 }
 
-let lastNonce = 0;
 function nextNonce() {
-  const now = Date.now();
-  lastNonce = now > lastNonce ? now : lastNonce + 1;
-  return lastNonce;
+  return Date.now();
 }
 
 /** Normalize a 65-byte hex signature into the {r, s, v} shape Hyperliquid expects. */
@@ -124,17 +140,6 @@ function buildApproveBuilderFeeTypedData(nonce) {
   };
 }
 
-/** The user's current on-chain approved max builder fee for Condor's builder (0 if never approved). */
-async function getHyperliquidBuilderApproval(userAddress) {
-  const res = await fetch(HL_INFO_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ type: "maxBuilderFee", user: userAddress, builder: BUILDER_ADDRESS }),
-  });
-  if (!res.ok) throw new Error(`Hyperliquid builder-fee lookup failed (HTTP ${res.status}).`);
-  return Number(await res.json());
-}
-
 async function signAndSubmit(client, topic, mainAddress, typedData, action) {
   const sigHex = await client.request({
     topic,
@@ -176,6 +181,84 @@ function withTimeout(promise, ms, label) {
   ]);
 }
 
+async function pairAndApprove(client) {
+  const { uri, approval } = await withTimeout(
+    client.connect({
+      requiredNamespaces: {
+        eip155: {
+          methods: ["eth_signTypedData_v4"],
+          chains: [CHAIN],
+          events: ["chainChanged", "accountsChanged"],
+        },
+      },
+    }),
+    RELAY_CONNECT_TIMEOUT_MS,
+    "a WalletConnect pairing URI",
+  );
+  emit({ event: "uri", uri });
+
+  const session = await withTimeout(approval(), APPROVAL_TIMEOUT_MS, "wallet approval");
+  const account = session.namespaces.eip155.accounts[0]; // "eip155:42161:0xabc..."
+  const mainAddress = account.split(":")[2];
+  return { session, mainAddress };
+}
+
+/** Pairs, waits for approval, and (for the builder step, reconnecting after the
+ * agent step) verifies the reconnecting wallet is the same one that created the
+ * agent -- each step is a fresh pairing, so nothing but the address itself
+ * carries over between them. */
+async function pairApproveAndVerify(client) {
+  const { session, mainAddress } = await pairAndApprove(client);
+
+  if (EXPECTED_MAIN_ADDRESS && mainAddress.toLowerCase() !== EXPECTED_MAIN_ADDRESS.toLowerCase()) {
+    await client.disconnect({ topic: session.topic, reason: { code: 6000, message: "wrong wallet" } }).catch(() => {});
+    throw new Error(
+      `Connected wallet ${mainAddress} doesn't match ${EXPECTED_MAIN_ADDRESS} from the previous step -- ` +
+        "reconnect using the same wallet.",
+    );
+  }
+  emit({ event: "approved", mainAddress });
+  return { session, mainAddress };
+}
+
+async function runAgentStep(client) {
+  const { session, mainAddress } = await pairApproveAndVerify(client);
+
+  const agentPrivateKey = generatePrivateKey();
+  const agentAddress = privateKeyToAccount(agentPrivateKey).address;
+  const agentName = defaultAgentName();
+  const nonce = nextNonce();
+
+  await signAndSubmit(client, session.topic, mainAddress, buildApproveAgentTypedData(agentAddress, agentName, nonce), {
+    type: "approveAgent",
+    hyperliquidChain: HL_CHAIN,
+    signatureChainId: `0x${CHAIN_ID_NUM.toString(16)}`,
+    agentAddress,
+    agentName,
+    nonce,
+  });
+
+  emit({ event: "done", mainAddress, agentAddress, agentPrivateKey });
+  await client.disconnect({ topic: session.topic, reason: { code: 6000, message: "done" } }).catch(() => {});
+}
+
+async function runBuilderStep(client) {
+  const { session, mainAddress } = await pairApproveAndVerify(client);
+
+  const nonce = nextNonce();
+  await signAndSubmit(client, session.topic, mainAddress, buildApproveBuilderFeeTypedData(nonce), {
+    type: "approveBuilderFee",
+    hyperliquidChain: HL_CHAIN,
+    signatureChainId: `0x${CHAIN_ID_NUM.toString(16)}`,
+    maxFeeRate: BUILDER_MAX_FEE_RATE,
+    builder: BUILDER_ADDRESS,
+    nonce,
+  });
+
+  emit({ event: "done", mainAddress });
+  await client.disconnect({ topic: session.topic, reason: { code: 6000, message: "done" } }).catch(() => {});
+}
+
 async function main() {
   const client = await withTimeout(
     SignClient.init({
@@ -192,65 +275,11 @@ async function main() {
     "the WalletConnect relay to initialize",
   );
 
-  const { uri, approval } = await withTimeout(
-    client.connect({
-      requiredNamespaces: {
-        eip155: {
-          methods: ["eth_signTypedData_v4"],
-          chains: [CHAIN],
-          events: ["chainChanged", "accountsChanged"],
-        },
-      },
-    }),
-    RELAY_CONNECT_TIMEOUT_MS,
-    "a WalletConnect pairing URI",
-  );
-
-  emit({ event: "uri", uri });
-
-  const session = await withTimeout(approval(), APPROVAL_TIMEOUT_MS, "wallet approval");
-  const account = session.namespaces.eip155.accounts[0]; // "eip155:42161:0xabc..."
-  const mainAddress = account.split(":")[2];
-
-  emit({ event: "approved", mainAddress });
-
-  const agentPrivateKey = generatePrivateKey();
-  const agentAddress = privateKeyToAccount(agentPrivateKey).address;
-  const agentName = defaultAgentName();
-
-  // 1. Authorize the agent wallet (trade-only, no withdrawals).
-  const aaNonce = nextNonce();
-  await signAndSubmit(client, session.topic, mainAddress, buildApproveAgentTypedData(agentAddress, agentName, aaNonce), {
-    type: "approveAgent",
-    hyperliquidChain: HL_CHAIN,
-    signatureChainId: `0x${CHAIN_ID_NUM.toString(16)}`,
-    agentAddress,
-    agentName,
-    nonce: aaNonce,
-  });
-
-  // 2. Approve the builder fee, unless the user already approved at least that much
-  // (the approval persists on-chain per (user, builder), so a returning user need not sign again).
-  let builderApproved = false;
-  try {
-    builderApproved = (await getHyperliquidBuilderApproval(mainAddress)) >= BUILDER_MAX_FEE_RATE_TENTHS_BPS;
-  } catch {
-    builderApproved = false;
+  if (STEP === "agent") {
+    await runAgentStep(client);
+  } else {
+    await runBuilderStep(client);
   }
-  if (!builderApproved) {
-    const bfNonce = nextNonce();
-    await signAndSubmit(client, session.topic, mainAddress, buildApproveBuilderFeeTypedData(bfNonce), {
-      type: "approveBuilderFee",
-      hyperliquidChain: HL_CHAIN,
-      signatureChainId: `0x${CHAIN_ID_NUM.toString(16)}`,
-      maxFeeRate: BUILDER_MAX_FEE_RATE,
-      builder: BUILDER_ADDRESS,
-      nonce: bfNonce,
-    });
-  }
-
-  emit({ event: "done", mainAddress, agentAddress, agentPrivateKey });
-  await client.disconnect({ topic: session.topic, reason: { code: 6000, message: "done" } }).catch(() => {});
   process.exit(0);
 }
 

@@ -8,6 +8,7 @@ class MockMessage:
         self._msg = msg
         self.message_id = msg.message_id
         self.chat_id = msg.chat_id
+        self.photo = msg.photo
 
     async def edit_text(self, text, parse_mode=None, reply_markup=None):
         return await self._msg.edit_text(

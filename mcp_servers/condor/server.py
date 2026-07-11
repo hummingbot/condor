@@ -247,22 +247,37 @@ async def connect_hyperliquid_wallet(
     """Connect a Hyperliquid wallet via WalletConnect (agent-wallet + builder-fee approval).
 
     Lets a user authorize a trade-only Hyperliquid "agent wallet" and the Condor
-    builder fee from their own mobile wallet (Rabby, MetaMask, ...) via a
-    WalletConnect QR code / link -- no browser extension needed, and their master
-    private key never leaves their phone. This is the WalletConnect counterpart to
-    the web dashboard's "Connect Hyperliquid" flow; use it when the user only has a
-    mobile wallet, or wants to connect from chat instead of the dashboard.
+    builder fee from their own mobile wallet (MetaMask, ...) via a WalletConnect QR
+    code / link -- no browser extension needed, and their master private key never
+    leaves their phone. This is the WalletConnect counterpart to the web
+    dashboard's "Connect Hyperliquid" flow; use it when the user only has a mobile
+    wallet, or wants to connect from chat instead of the dashboard.
+
+    Two independent steps, each its own fresh pairing (fresh QR/link) -- a fresh
+    pairing reliably foregrounds the wallet app; reusing one session for a second
+    request doesn't always prompt it:
+    1. Connect + create + authorize the agent wallet -- saved as soon as it
+       succeeds, so the connection already works even if step 2 is never done.
+    2. Approve the builder fee -- skipped automatically if the wallet already
+       approved it on-chain in a prior connect (check `needs_builder_step`).
 
     Actions:
-    - "start": Begin a session (optional server, defaults to the active server).
-      Returns {"session_id", "uri", "next_steps"} immediately -- does NOT wait for
-      approval. If Telegram is configured, a scannable QR is also sent as a photo.
-    - "get": Poll a session's status (requires session_id). Returns
-      {"status": "pending_approval" | "pending_signatures" | "done" | "error", ...}.
+    - "start": Begin step 1 (optional server, defaults to the active server).
+      Returns {"session_id", "uri", "deep_links", "step": "agent", "next_steps"}
+      immediately -- does NOT wait for approval. If Telegram is configured, a
+      scannable QR is also sent as a photo.
+    - "advance": Begin step 2 for a session whose step 1 finished and needs it
+      (requires session_id). Returns the same shape as "start" but with
+      "step": "builder". Only valid when a prior "get" showed
+      {"status": "step_done", "needs_builder_step": true}.
+    - "get": Poll a session's current step status (requires session_id). Returns
+      {"status": "pending_approval" | "pending_signature" | "step_done" | "done" |
+      "error", "step": "agent" | "builder", ...}. "step_done" means step 1
+      finished -- check "needs_builder_step" to see whether "advance" is needed.
 
     Args:
-        action: start | get.
-        session_id: Session id returned by start (for get).
+        action: start | advance | get.
+        session_id: Session id returned by start (for advance/get).
         server: Hummingbot API server name (optional for start, defaults to the active server).
 
     Returns:

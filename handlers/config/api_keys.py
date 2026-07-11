@@ -13,6 +13,7 @@ import logging
 from urllib.parse import quote, urlparse
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import TelegramError
 from telegram.ext import ContextTypes
 
 from utils.auth import restricted
@@ -190,26 +191,47 @@ async def show_api_keys(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     [InlineKeyboardButton("« Close", callback_data="config_close")]
                 )
 
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        try:
-            await query.message.edit_text(
-                message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-            )
-        except Exception as e:
-            if "Message is not modified" in str(e):
-                await query.answer("✅ Already up to date")
-            else:
-                raise
+        await _render_api_keys_view(query, context, message_text, keyboard)
 
     except Exception as e:
         logger.error(f"Error showing API keys: {e}", exc_info=True)
         error_text = f"❌ Error loading API keys: {escape_markdown_v2(str(e))}"
         keyboard = [[InlineKeyboardButton("« Close", callback_data="config_close")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_text(
-            error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
+        await _render_api_keys_view(query, context, error_text, keyboard)
+
+
+async def _render_api_keys_view(
+    query, context: ContextTypes.DEFAULT_TYPE, text: str, keyboard: list
+) -> None:
+    """Show `text`/`keyboard` in place of the current message.
+
+    Reachable via "Back" from the WalletConnect QR flow (handlers/config/
+    hyperliquid_connect.py), whose messages are photos -- editMessageText can't
+    turn a photo message into a text one (Telegram raises a BadRequest), so in
+    that case delete and resend as a new text message instead.
+    """
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if query.message.photo:
+        try:
+            await query.message.delete()
+        except TelegramError:
+            pass  # already gone
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text=text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup,
         )
+        return
+
+    try:
+        await query.message.edit_text(text, parse_mode="MarkdownV2", reply_markup=reply_markup)
+    except TelegramError as e:
+        if "Message is not modified" in str(e):
+            await query.answer("✅ Already up to date")
+        else:
+            raise
 
 
 # Entry point function for routing
@@ -221,13 +243,24 @@ async def handle_api_keys_callback(
     """
     Route API key callback queries.
 
-    `api_key_connect_hyperliquid` starts the WalletConnect flow; the live
-    `config_api_keys` entry and any stale `api_key_*` buttons from before keys
-    management moved to the web UI fall through to the read-only view.
+    `api_key_connect_hyperliquid` starts the WalletConnect flow's first step
+    (create agent wallet); `api_key_hl_advance:<session_id>` continues a session
+    into its second step (approve builder fee), via the "Continue to Step 2"
+    button shown once step 1 finishes. The live `config_api_keys` entry and any
+    stale `api_key_*` buttons from before keys management moved to the web UI
+    fall through to the read-only view.
     """
-    if update.callback_query.data == "api_key_connect_hyperliquid":
+    data = update.callback_query.data
+
+    if data == "api_key_connect_hyperliquid":
         from .hyperliquid_connect import start_hyperliquid_connect
 
         await start_hyperliquid_connect(update, context)
+        return
+    if data.startswith("api_key_hl_advance:"):
+        from .hyperliquid_connect import hyperliquid_connect_advance
+
+        session_id = data.split(":", 1)[1]
+        await hyperliquid_connect_advance(update, context, session_id)
         return
     await show_api_keys(update.callback_query, context)

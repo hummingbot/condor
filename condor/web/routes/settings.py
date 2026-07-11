@@ -469,3 +469,16 @@ async def get_hyperliquid_walletconnect(
     if result is None:
         raise HTTPException(status_code=404, detail="Unknown session_id")
     return result
+
+
+@router.post("/walletconnect/hyperliquid/{session_id}/advance")
+async def advance_hyperliquid_walletconnect(
+    session_id: str,
+    user: WebUser = Depends(get_current_user),
+):
+    from condor.walletconnect import advance_walletconnect_session
+
+    try:
+        return await advance_walletconnect_session(session_id, user.id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
