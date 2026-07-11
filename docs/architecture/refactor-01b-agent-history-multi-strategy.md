@@ -1,6 +1,6 @@
 # Refactor 01b — Agent-level history, strategies kept as playbooks
 
-Status: **accepted — plan of record** (2026-07-11), superseding
+Status: **implemented** (2026-07-11; commits 2ce7760, dc76d58 — full §9 sequence incl. refactor-02), superseding
 [refactor-01](refactor-01-agent-strategy-merge.md) (tabled)
 · Branch: `spike/simpler-agent-framework`
 

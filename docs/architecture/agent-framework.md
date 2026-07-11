@@ -1,5 +1,17 @@
 # Condor agent framework — data ontology & technical schema
 
+> **Superseded in part (2026-07-11):** refactor-01b and refactor-02 are now
+> implemented. Where this document describes per-strategy state
+> (`strategies/{sslug}/sessions|learnings|dry_runs`), composite
+> `{agent_slug}.{strategy_slug}_{N}` ids, flat `delegations/{task_id}.md`
+> transcripts, ungated delegations, or `run_once` as an experiment mode, the
+> current system differs: all history lives at `agents/{slug}/sessions/` with
+> `meta.yml` (kind + strategy), ids are `{slug}_{N}`, delegations are risk-gated
+> sessions, and run_once is `loop` + `max_ticks: 1`. See
+> [refactor-01b](refactor-01b-agent-history-multi-strategy.md) and
+> [refactor-02](refactor-02-unified-run-primitive.md), and
+> `condor/agents/README.md` for the current layout.
+
 Architectural reference for how Condor's assistant/agent/skill/routine/strategy
 system fits together, as of PR #135 (`feature/FEAT-003-stores-por-asistente`,
 merged `877bb09`). This restructured `condor/trading_agent/` into `condor/agents/`

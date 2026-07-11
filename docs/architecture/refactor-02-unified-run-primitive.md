@@ -1,6 +1,6 @@
 # Refactor 02 — One run primitive under tick / delegation / consult
 
-Status: **proposed** · Branch: `spike/simpler-agent-framework` · Depends on:
+Status: **implemented** (2026-07-11, commit 2ce7760 — all of §8 incl. the delegation flip + per-call override) · Branch: `spike/simpler-agent-framework` · Depends on:
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) (agent-level
 history + unified sessions; the original
 [refactor-01](refactor-01-agent-strategy-merge.md) is tabled — both variants
