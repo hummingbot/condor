@@ -188,11 +188,21 @@ mutations).
 
 Recommendation: delegations to agents with `server_required: true` (i.e. that
 can touch live trading) default to
-`risk_gate(agent.default_config.risk_limits, RiskState())`; `auto` remains for
-serverless specialists like `routine_builder`. Per the no-silent-fallbacks
-rule, an agent with no risk limits configured that receives a trading
-delegation should error loudly at `start_delegation` rather than quietly
-running unbounded.
+`risk_gate(agent.default_config.risk_limits, RiskState())` — under
+[refactor-01b](refactor-01b-agent-history-multi-strategy.md) the baseline
+lives in AGENT.md `risk_limits:` instead, since delegations aren't
+strategy-scoped. `auto` remains for serverless specialists like
+`routine_builder`.
+
+**Per-delegation override (adopted, resolving §9.3):** the `delegate` tool
+gains an optional `risk_limits` dict. The human issuing the call is the
+authorizer — an explicit per-call dict **replaces** the agent baseline for
+that run (replace, not merge: what you pass is exactly what governs).
+"Unbounded" is expressed by passing explicitly large caps — the number must
+be said out loud; there is no `auto` escape for trading agents. Per the
+no-silent-fallbacks rule, the loud error at `start_delegation` fires only
+when a trading delegation has **neither** an agent baseline **nor** a
+per-call override.
 
 ## 5. The three call paths, recomposed
 
@@ -331,7 +341,7 @@ foundational.
 | `condor/agents/run.py` (new) | `run_agent()` core + `RunResult`; absorbs `consult._run_agent_to_completion`'s client wiring and `engine._create_client`/`_collect_stream`. Owns model resolution (config > agent), healthcheck/fallback, MCP-server building, streaming, timeout, client reaping, and the refactor-01 session-persistence hook. |
 | `condor/agents/policies.py` (new, or fold into `risk.py`) | `human_gate(chat_id)` (wraps `confirmation.permission_callback`), `risk_gate(limits, state, dry_run=False)` (today's `auto_approve_with_risk_check`, unchanged logic — the state seed is the caller's choice, journal-derived for ticks, zero for delegations), `auto`. |
 | `condor/agents/consult.py` | Shrinks to: load agent → `build_agent_context` → `run_agent(policy=human_gate)`. Fallback-note logic moves into `run_agent`'s model resolution. |
-| `condor/agents/delegate.py` | Runner calls `run_agent(policy=risk_gate(limits, RiskState()) or auto, event_sink=...)`; registry/notify/timeout unchanged. Policy selection per §4.1. |
+| `condor/agents/delegate.py` | Runner calls `run_agent(policy=risk_gate(limits, RiskState()) or auto, event_sink=...)`; registry/notify/timeout unchanged. Policy selection per §4.1; `start_delegation` accepts the per-call `risk_limits` override (threaded through the `delegate` MCP tool). |
 | `condor/agents/engine.py` | Deletes `_create_client`, `_collect_stream`, `_active_client` plumbing (~150 lines); `_tick` becomes pre-flight → `run_agent(policy=risk_gate)` → journal write-back. Lifecycle, registry, shutdown untouched. |
 | `condor/agents/risk.py` | `auto_approve_with_risk_check` becomes `risk_gate` essentially as-is: `execution_mode: str` param → `dry_run: bool`; the checks themselves are untouched. No behavior change for ticks. |
 | `condor/agents/prompts.py`, `handlers/agents/_shared.py` | `build_tick_prompt` / `build_agent_context` unchanged in role — they are the two named context builders feeding the one primitive. |
@@ -408,6 +418,8 @@ assumes the unified `sessions/` envelope, and the file churn overlaps heavily
    with an explicit per-call opt-in. The current gap is real (§3); silent
    unbounded-capital delegations contradict the risk posture everywhere else.
 2. **Should consult get a timeout?** *Recommend yes* (900s) — see §7.
-3. **Expose `permission_policy` on the `delegate` MCP tool** (e.g.
-   `policy="auto"` override for a trusted long job)? *Recommend not yet* —
-   keep the lattice internal until a concrete need appears.
+3. **Expose `permission_policy` on the `delegate` MCP tool?** *Resolved
+   (2026-07-11): partially yes* — not the raw policy lattice, but a
+   `risk_limits` dict override per §4.1: the caller sets the bounds for one
+   run, the gate itself is never bypassed for trading agents. Raw
+   `policy="auto"` stays internal.

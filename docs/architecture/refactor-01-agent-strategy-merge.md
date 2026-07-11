@@ -1,7 +1,11 @@
 # Refactor 01 — Merge Strategy into Agent (one strategy per agent)
 
 Status: **proposed** · Branch: `spike/simpler-agent-framework` · Scope: first of a
-planned series of framework simplifications.
+planned series of framework simplifications. · Alternative under
+consideration: [refactor-01b](refactor-01b-agent-history-multi-strategy.md)
+(same agent-level history unification, but strategies kept as pure playbook
+templates — preserves playbook A/B testing at the cost of keeping a slimmed
+strategy tier).
 
 ## 1. Goal
 
