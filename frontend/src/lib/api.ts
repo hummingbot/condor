@@ -415,7 +415,7 @@ export interface AgentPerformanceResponse {
 
 export interface SessionInfo {
   number: number;
-  kind: "tick_loop" | "delegation" | "consult";
+  kind: "tick_loop" | "delegation" | "consult" | "curation";
   strategy: string;
   status: string;
   task: string;

@@ -187,8 +187,14 @@ class TickEngine:
         if self.is_experiment or not self.config.get("curate_on_stop", True):
             return
         try:
-            from .curation import should_curate, start_skill_curation
+            from .curation import (
+                is_curation_inflight,
+                should_curate,
+                start_skill_curation,
+            )
 
+            if is_curation_inflight(self.agent.slug):
+                return
             if not should_curate(self.agent.agent_dir):
                 return
             asyncio.create_task(

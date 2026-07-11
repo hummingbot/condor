@@ -30,13 +30,52 @@ log = logging.getLogger(__name__)
 AUTO = None
 
 
+def deny_gate(reason: str):
+    """Fail-closed policy: safe tools auto-approve, dangerous tools cancel.
+
+    The fallback when a human gate cannot reach a human. Returning ``None``
+    here would be catastrophic — a ``None`` permission callback means the
+    client AUTO-APPROVES everything (that is exactly how AUTO works), so a
+    failed gate must deny, loudly, never downgrade.
+    """
+    from handlers.agents._shared import is_dangerous_tool_call
+
+    async def callback(tool_call: dict, options: list[dict]) -> dict:
+        if is_dangerous_tool_call(tool_call):
+            log.warning(
+                "deny_gate cancelled %s: %s",
+                tool_call.get("tool") or tool_call.get("title") or "tool call",
+                reason,
+            )
+            return {"outcome": {"outcome": "cancelled"}}
+        for opt in options:
+            if opt.get("kind") in ("allow_once", "allow_always"):
+                return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
+        if options:
+            return {
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+            }
+        return {"outcome": {"outcome": "cancelled"}}
+
+    return callback
+
+
 def human_gate(chat_id: int):
     """Route dangerous-tool confirmations to the user's Telegram chat.
 
     Reuses the live bot registered at startup (main.py: routine_store.set_bot).
-    Returns ``None`` when no bot is available — mutations will then error
-    instead of silently auto-approving.
+    When there is no human to route to — no bot registered, or no usable
+    ``chat_id`` (web consults default to 0) — the gate FAILS CLOSED via
+    :func:`deny_gate`: safe reads proceed, mutations are cancelled with a
+    logged reason. It never returns ``None`` (which would silently become
+    full auto-approve).
     """
+    if not chat_id:
+        return deny_gate(
+            "consult has no Telegram chat to confirm in (chat_id=0); "
+            "mutations are denied — run the consult from a Telegram-linked "
+            "chat to approve actions"
+        )
     try:
         from condor.routine_store import get_routine_store
         from handlers.agents import confirmation
@@ -45,8 +84,8 @@ def human_gate(chat_id: int):
         if bot is not None:
             return functools.partial(confirmation.permission_callback, bot, chat_id)
     except Exception:
-        log.exception("Could not build human_gate callback; mutations will error")
-    return None
+        log.exception("Could not build human_gate callback")
+    return deny_gate("no Telegram bot registered to confirm with; mutations denied")
 
 
 def risk_gate(

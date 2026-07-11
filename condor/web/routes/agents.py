@@ -257,6 +257,9 @@ class UpdateLearningsRequest(BaseModel):
 class ConsultRequest(BaseModel):
     task: str
     context: str = ""
+    # Telegram chat that approves mutating tool calls. 0 (web default) means
+    # NO human gate is reachable: the consult still runs, but mutations are
+    # denied fail-closed (policies.deny_gate) rather than silently allowed.
     chat_id: int = 0
     user_id: int | None = None
     server_name: str | None = None

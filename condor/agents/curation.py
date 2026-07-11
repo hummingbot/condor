@@ -31,6 +31,18 @@ _ROOT = Path(__file__).parent.parent.parent
 
 CURATION_TIMEOUT_S = 600
 
+# Retention: curation sessions beyond this are pruned (auto-triggered no-op
+# passes would otherwise accrete forever; tick sessions are never touched).
+CURATION_SESSIONS_KEEP = 10
+
+# One curation pass per agent at a time: concurrent passes would race on
+# skill patches and the scoped git commit.
+_inflight: set[str] = set()
+
+
+def is_curation_inflight(agent_slug: str) -> bool:
+    return agent_slug in _inflight
+
 # Auto-trigger preconditions (session-end hook): enough new material to make
 # an LLM pass worthwhile, and enough history for the ≥2-session evidence rule.
 MIN_UNPROMOTED_LEARNINGS = 3
@@ -69,6 +81,30 @@ def should_curate(agent_dir: Path) -> bool:
     if count_sessions(agent_dir, kind="tick_loop") < MIN_TICK_SESSIONS:
         return False
     return True
+
+
+def _active_learnings(agent_dir: Path) -> str:
+    """Only the active category sections — never Promoted/Retired.
+
+    Feeding the raw file would invite the curator to re-promote entries it
+    already consumed in an earlier pass.
+    """
+    from condor.agents.journal import LEARNING_CATEGORIES
+
+    path = agent_dir / "learnings.md"
+    if not path.exists():
+        return ""
+    text = path.read_text()
+    parts: list[str] = []
+    for header in LEARNING_CATEGORIES.values():
+        m = re.search(
+            rf"^## {re.escape(header)}\n(.*?)(?=^## |\Z)",
+            text,
+            re.MULTILINE | re.DOTALL,
+        )
+        if m and m.group(1).strip():
+            parts.append(f"## {header}\n{m.group(1).strip()}")
+    return "\n\n".join(parts)
 
 
 def _sessions_digest(agent_dir: Path) -> str:
@@ -141,7 +177,22 @@ PROMOTION PROPOSALS:
 
 
 def _git_commit_skills(agent_slug: str, session_id: str, changelog: str) -> str:
-    """Commit skill changes scoped to this agent's skills dir. Returns summary."""
+    """Commit skill changes scoped to this agent's skills dir. Returns summary.
+
+    Retries once after a short wait — the user may hold the index lock with
+    their own git activity; a second collision is reported, never forced.
+    """
+    import time as _time
+
+    for attempt in (1, 2):
+        note = _git_commit_skills_once(agent_slug, session_id, changelog)
+        if not note.startswith("GIT COMMIT FAILED") or attempt == 2:
+            return note
+        _time.sleep(2)
+    return note
+
+
+def _git_commit_skills_once(agent_slug: str, session_id: str, changelog: str) -> str:
     rel = f"agents/{agent_slug}/skills"
     try:
         status = subprocess.run(
@@ -189,6 +240,12 @@ async def start_skill_curation(
     agent = AgentStore().get(agent_slug)
     if agent is None:
         raise ValueError(f"No agent named '{agent_slug}' exists.")
+    if agent_slug in _inflight:
+        raise ValueError(
+            f"A curation pass for '{agent_slug}' is already running — wait for "
+            "its notification before starting another."
+        )
+    _inflight.add(agent_slug)
 
     num, session_dir = allocate_session_dir(agent.agent_dir)
     session_id = f"{agent_slug}_{num}"
@@ -208,7 +265,11 @@ async def start_skill_curation(
 
 
 async def _run_curation(agent, session_id, session_dir, user_id, chat_id, trigger, bot):
-    from condor.agents.journal import finalize_session_meta, render_transcript
+    from condor.agents.journal import (
+        finalize_session_meta,
+        prune_sessions,
+        render_transcript,
+    )
     from condor.agents.policies import AUTO
     from condor.agents.run import run_agent
     from condor.memory import SkillStore
@@ -217,12 +278,10 @@ async def _run_curation(agent, session_id, session_dir, user_id, chat_id, trigge
     commit_note = "no skill changes"
     try:
         agent_dir = agent.agent_dir
-        learnings_path = agent_dir / "learnings.md"
-        learnings = learnings_path.read_text() if learnings_path.exists() else ""
         prompt = build_curation_prompt(
             agent,
             session_id,
-            learnings,
+            _active_learnings(agent_dir),
             _sessions_digest(agent_dir),
             SkillStore(agent.slug).list_index(),
         )
@@ -238,6 +297,9 @@ async def _run_curation(agent, session_id, session_dir, user_id, chat_id, trigge
             server_name=None,
             timeout_s=CURATION_TIMEOUT_S,
             fallback_on_unhealthy=True,
+            # Call-time tool restriction — holds even for ACP models that
+            # cannot be allowlisted: this run may only touch skills/journal.
+            condor_tool_profile="curation",
         )
         answer = result.fallback_note + (result.text or "")
         if result.timed_out:
@@ -253,10 +315,12 @@ async def _run_curation(agent, session_id, session_dir, user_id, chat_id, trigge
         status, error = "error", str(e)
         log.exception("Skill curation %s failed", session_id)
     finally:
+        _inflight.discard(agent.slug)
         try:
             finalize_session_meta(
                 session_dir, status, **({"error": error} if error else {})
             )
+            prune_sessions(agent.agent_dir, kind="curation", keep=CURATION_SESSIONS_KEEP)
         except Exception:
             log.exception("Failed to finalize curation meta %s", session_id)
 

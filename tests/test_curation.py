@@ -276,3 +276,110 @@ def test_curation_prompt_contains_shared_readonly_rule(tmp_path, monkeypatch):
     assert "read-only" in prompt
     assert "NEVER use action=\"edit\"" in prompt
     assert "GOOD outcome to change nothing" in prompt
+
+
+# ── in-flight lock, retention, active-learnings input ──
+
+
+def test_curation_lock_prevents_concurrent_passes(tmp_path, monkeypatch):
+    import pytest as _pytest
+
+    from condor.agents import run as run_module
+    from condor.agents.run import RunResult
+
+    agent = _make_agent(tmp_path, monkeypatch)
+    release = asyncio.Event()
+
+    async def slow_run(*a, **kw):
+        await release.wait()
+        return RunResult(text="CHANGELOG:\n- none\nPROMOTION PROPOSALS:\n- none")
+
+    async def fake_notify(chat_id, text, bot=None):
+        pass
+
+    monkeypatch.setattr(run_module, "run_agent", slow_run)
+    monkeypatch.setattr(curation_module, "_git_commit_skills", lambda *a: "no skill changes")
+    monkeypatch.setattr(curation_module, "_notify", fake_notify)
+
+    async def scenario():
+        sid = await start_skill_curation(agent_slug="acme", user_id=1, chat_id=0, trigger="t1")
+        assert curation_module.is_curation_inflight("acme") is True
+        with _pytest.raises(ValueError, match="already running"):
+            await start_skill_curation(agent_slug="acme", user_id=1, chat_id=0, trigger="t2")
+        release.set()
+        for _ in range(30):
+            await asyncio.sleep(0)
+        assert curation_module.is_curation_inflight("acme") is False
+        return sid
+
+    asyncio.run(scenario())
+
+
+def test_curation_retention_prunes_old_passes(tmp_path, monkeypatch):
+    from condor.agents.journal import read_session_meta
+
+    agent = _make_agent(tmp_path, monkeypatch)
+    # Seed 12 finished curation sessions + 1 tick session.
+    _seed_learnings(agent.agent_dir, n=1)
+    for _ in range(12):
+        _, d = allocate_session_dir(agent.agent_dir)
+        write_session_meta(d, {"kind": "curation", "status": "done"})
+
+    from condor.agents import run as run_module
+    from condor.agents.run import RunResult
+
+    async def fake_run(*a, **kw):
+        return RunResult(text="CHANGELOG:\n- none\nPROMOTION PROPOSALS:\n- none")
+
+    async def fake_notify(chat_id, text, bot=None):
+        pass
+
+    monkeypatch.setattr(run_module, "run_agent", fake_run)
+    monkeypatch.setattr(curation_module, "_git_commit_skills", lambda *a: "no skill changes")
+    monkeypatch.setattr(curation_module, "_notify", fake_notify)
+
+    async def scenario():
+        await start_skill_curation(agent_slug="acme", user_id=1, chat_id=0, trigger="t")
+        for _ in range(30):
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    kinds = [
+        read_session_meta(d).get("kind")
+        for d in (agent.agent_dir / "sessions").iterdir()
+    ]
+    assert kinds.count("curation") == curation_module.CURATION_SESSIONS_KEEP
+    assert kinds.count("tick_loop") == 1  # never touched
+
+
+def test_curation_prompt_gets_active_learnings_only(tmp_path, monkeypatch):
+    from condor.agents import run as run_module
+    from condor.agents.run import RunResult
+
+    agent = _make_agent(tmp_path, monkeypatch)
+    jm = _seed_learnings(agent.agent_dir, n=3)
+    jm.promote_learning("grid fills lag several seconds on OKX perpetual venues")
+
+    seen = {}
+
+    async def fake_run(agent_arg, prompt, **kw):
+        seen["prompt"] = prompt
+        seen["profile"] = kw.get("condor_tool_profile")
+        return RunResult(text="CHANGELOG:\n- none\nPROMOTION PROPOSALS:\n- none")
+
+    async def fake_notify(chat_id, text, bot=None):
+        pass
+
+    monkeypatch.setattr(run_module, "run_agent", fake_run)
+    monkeypatch.setattr(curation_module, "_git_commit_skills", lambda *a: "no skill changes")
+    monkeypatch.setattr(curation_module, "_notify", fake_notify)
+
+    async def scenario():
+        await start_skill_curation(agent_slug="acme", user_id=1, chat_id=0, trigger="t")
+        for _ in range(30):
+            await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert "JTO order book thins" in seen["prompt"]  # active learning present
+    assert "grid fills lag" not in seen["prompt"]  # promoted one excluded
+    assert seen["profile"] == "curation"  # tool profile threaded through

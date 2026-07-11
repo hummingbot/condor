@@ -78,6 +78,7 @@ async def run_agent(
     event_sink: Callable[[Any], None] | None = None,
     fallback_on_unhealthy: bool = False,
     on_client: Callable[[Any], None] | None = None,
+    condor_tool_profile: str | None = None,
 ) -> RunResult:
     """Run ``agent``'s brain to completion on ``prompt``; return a RunResult.
 
@@ -100,6 +101,9 @@ async def run_agent(
         on_client: Optional hook called with the live client after creation
             and with ``None`` after reaping — lets TickEngine.stop() keep its
             cancellation backstop on the in-flight subprocess.
+        condor_tool_profile: Named tool profile for the condor MCP subprocess
+            (e.g. "curation") — call-time enforcement that holds even for ACP
+            models, which cannot be tool-allowlisted client-side.
 
     Raises:
         RuntimeError: model backend unavailable and fallback disabled/unset.
@@ -149,6 +153,7 @@ async def run_agent(
             chat_id,
             agent_slug=agent.slug,
             execution_mode=execution_mode,
+            tool_profile=condor_tool_profile,
         )
     else:
         mcp_servers = build_mcp_servers_for_session(
@@ -156,6 +161,7 @@ async def run_agent(
             chat_id,
             execution_mode=execution_mode,
             agent_slug=agent.slug,
+            tool_profile=condor_tool_profile,
         )
 
     # -- client factory: pydantic-ai (allowlist enforced) or ACP subprocess --
