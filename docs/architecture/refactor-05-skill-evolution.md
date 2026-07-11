@@ -99,22 +99,65 @@ off by default, and its issue tracker documents real bypasses (obfuscated
 exfiltration scoring zero findings; skill descriptions injected into the
 system prompt unscanned). No git integration, no outcome measurement.
 
-**What we take from it:** (a) `/learn` — a human-*triggered* capture command
-is a cheap, safe complement to the curation loop (adopted into Phase 2
-below); (b) an explicit `patch` op on `manage_skill` — enforcing deltas-only
-mechanically instead of by prompt mandate; (c) frontmatter alignment with
-the agentskills.io spec (`version`, vendor `metadata` namespace) so skills
-stay import/export-compatible with that ecosystem. **What we decline:**
-in-run save heuristics (single-episode overfit — §2's failure modes) and
-security toggles that default to open; our equivalents (session-end
-curation, git commit per pass, human gate at the shared tier) stay on by
-construction, not by configuration.
+**The real conclusion is not to copy any of this.** Condor's deployment
+context is the opposite of Hermes's: **users run Condor's MCP server
+*inside* a host agent — Hermes, Claude Code, whatever speaks MCP.** Hermes
+is a host harness competing on host features (marketplaces, /learn, in-run
+self-editing); Condor is the domain layer behind the MCP boundary. What
+matters is that Condor's skills are **compatible** with that world — a
+Hermes user should be able to install Condor's skills natively — not that
+Condor grows its own copies of host features. §3.0 makes this the
+organizing constraint. (Two Hermes details do inform our internals either
+way: its `patch` old_string→new_string op is the right mechanical shape for
+our deltas-only mandate, and its off-by-default guardrails with documented
+bypasses are the cautionary case for keeping ours on by construction.)
 
 ## 3. Recommendation
 
-Three phases, each independently shippable. The principle throughout:
-**learnings are the capture channel, skills are the curated product, and the
-pen is held by a curation pass — never by the in-run agent.**
+Three phases, each independently shippable. Two principles throughout:
+**skills conform to the agentskills.io standard so they run in any host**,
+and **learnings are the capture channel, skills are the curated product,
+and the pen is held by a curation pass — never by the in-run agent.**
+
+### Phase 0 — The compatibility contract (host/domain split + spec alignment)
+
+Condor is used from inside host agents via its MCP server. That splits the
+skill estate into two kinds with different consumers, and the boundary IS
+the design:
+
+- **Host-facing skills** (`assistants/condor/skills/`: agent_builder,
+  log_analyzer, …) teach *how to drive Condor's MCP tools*. Their natural
+  home in a Hermes/Claude Code deployment is the **host's own skills
+  system**, discovered by the host's index — not tunneled through
+  `manage_skill`. They must therefore be strictly agentskills.io-conformant.
+  The directory layout (`skills/<name>/SKILL.md`) is already tap-compatible;
+  a Hermes user can `hermes skills tap add` the Condor repo (or we expose
+  `.well-known/skills/` from the web server later) and install them
+  natively. Condor's own Telegram/web chat keeps loading them exactly as
+  today — same files, two consumers.
+- **Agent-internal skills** (`agents/{slug}/skills/`, and Phase-1's
+  `_shared` tier) are the domain agents' brains, consumed by Condor's own
+  tick/consult/delegation runs behind the MCP boundary. They are never
+  exposed to the host index (the host shouldn't "helpfully" follow
+  mm_expert's deploy playbook itself), but they use the **same spec-shaped
+  format** — so promotion (internal → host-facing), export, and tooling are
+  file moves, not conversions.
+
+**Spec alignment (one-time migration, no dual-format reader):** `name` and
+`description` stay top-level per the spec, with the routing trigger folded
+into `description` (the spec's description IS the when-to-use signal);
+Condor-specific fields — `when_to_use`, `references_routine`, `source`,
+`created`, and Phase-2's `updated_by`/`changelog` — move under the spec's
+vendor namespace as `metadata.condor.*` (the same mechanism Hermes uses for
+`metadata.hermes`). `SkillStore` reads/writes the new shape only; the
+migration script rewrites the existing ~10 skills in place.
+
+**Self-improvement stays domain-side.** The curation loop (Phase 2) edits
+agent-internal skills only. Host-level skill learning (Hermes `/learn`,
+`skill_manage`, Claude skill-creator) is the host's business — Condor
+neither depends on it nor fights it. The one interaction point: curation
+may propose promoting a domain skill to host-facing; that promotion is the
+human-gated boundary crossing.
 
 ### Phase 1 — Shared tier + dedupe (un-table refactor-04, mostly as written)
 
@@ -147,11 +190,11 @@ primitives we already have (delegation + sessions + git):
    journals/transcripts (episodes). No in-run skill editing — the tick
    prompt's "skills are read-only" line stays.
 2. **Curate on a trigger** — session end (a stopped tick session), every N
-   sessions, or a `/curate` command; plus a Hermes-style `/learn <material>`
-   for human-triggered capture ("turn how we just did X into a skill") —
-   the user is the trigger, the agent does the authoring. Mechanically both
-   are a delegation to the agent itself (or a shared `skill_curator` flow)
-   with an AUTO policy — serverless, so no risk gate needed:
+   sessions, or an explicit chat request ("turn how we just did X into a
+   skill" — the user is the trigger, the agent does the authoring).
+   Mechanically both are a delegation to the agent itself (or a shared
+   `skill_curator` flow) with an AUTO policy — serverless, so no risk gate
+   needed:
    - Input: the agent's learnings.md + the last N session journals/
      transcripts + current skills index.
    - Mandate: **delta edits only** — append/refine a specific section, merge
@@ -159,8 +202,10 @@ primitives we already have (delegation + sessions + git):
      only distill patterns seen in **≥2 sessions** (single-episode reflexes
      stay in learnings). Consumed learnings are marked (moved to a
      "promoted" section) so the 20-cap stops evicting valuable ones.
-   - Output: `manage_skill(action="edit"/"create")` calls on the agent's
-     **local** tier only.
+   - Output: `manage_skill` calls on the agent's **local** tier only, via a
+     new `patch` action (old_string→new_string, mirroring the Edit-tool
+     shape) — deltas-only enforced mechanically, with `edit`/full-body
+     rewrites reserved for the human side.
 3. **Provenance on every edit**: skill frontmatter gains
    `updated_by: {session_id}` + a one-line `changelog:` entry (mirrors the
    `[strategy]` learning prefixes), and the curation pass ends with a **git
@@ -201,8 +246,9 @@ Our sessions already carry track records; close the loop nobody ships:
 
 ## 5. Sequencing & cost
 
-Phase 1 is small (SkillStore tier resolution + scope param + content moves —
-refactor-04 §4-6 already specifies it) and pays immediately by deleting the
-three-way regime duplication. Phase 2 is one new flow (curator prompt +
+Phase 0 is a frontmatter migration + docs (the layout is already
+tap-compatible). Phase 1 is small (SkillStore tier resolution + scope param
++ content moves — refactor-04 §4-6 already specifies it) and pays
+immediately by deleting the three-way regime duplication. Phase 2 is one new flow (curator prompt +
 trigger + git commit step) on existing primitives. Phase 3 is a meta.yml
 field + a rollup query, deferred until the loop is live.
