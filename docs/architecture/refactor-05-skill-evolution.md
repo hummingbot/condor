@@ -75,6 +75,41 @@ production system separates doing from learning:**
   — outcome-weighted retention), AWM (distill *cross-episode* workflows,
   not single-episode reflexes), CLIN (constrained schemas beat free text).
 
+### 2.1 Hermes agent (Nous Research) — the counterexample worth studying
+
+`hermes-agent` is the one production framework that ships agent-authored
+skills as a headline feature ("procedural memory"), so it deserves its own
+read. Same SKILL.md open standard (agentskills.io) and the same three-tier
+progressive disclosure we already have. Its memory framing maps 1:1 onto
+ours: episodic (SQLite) / semantic (MEMORY.md) / procedural (skills) ≈ our
+journal / learnings / skills — independent confirmation that the triple is
+the right decomposition.
+
+**How it self-improves:** an in-run `skill_manage` tool (create /
+**patch** (old_string→new_string) / edit / delete) with prompt heuristics —
+"save a skill after a complex 5+-tool-call task or after escaping a dead
+end" — plus a human-triggered `/learn <dir|URL|"how I just did X">` command
+that drafts a standards-compliant skill from material the agent gathers.
+
+**What its guardrails actually look like in practice:** a staging/approval
+flow exists (`skills.write_approval` → pending dir → `/skills
+approve|reject`) but is **off by default**; an LLM security scanner for
+installed skills exists but scanning the agent's *own* creations is also
+off by default, and its issue tracker documents real bypasses (obfuscated
+exfiltration scoring zero findings; skill descriptions injected into the
+system prompt unscanned). No git integration, no outcome measurement.
+
+**What we take from it:** (a) `/learn` — a human-*triggered* capture command
+is a cheap, safe complement to the curation loop (adopted into Phase 2
+below); (b) an explicit `patch` op on `manage_skill` — enforcing deltas-only
+mechanically instead of by prompt mandate; (c) frontmatter alignment with
+the agentskills.io spec (`version`, vendor `metadata` namespace) so skills
+stay import/export-compatible with that ecosystem. **What we decline:**
+in-run save heuristics (single-episode overfit — §2's failure modes) and
+security toggles that default to open; our equivalents (session-end
+curation, git commit per pass, human gate at the shared tier) stay on by
+construction, not by configuration.
+
 ## 3. Recommendation
 
 Three phases, each independently shippable. The principle throughout:
@@ -112,9 +147,11 @@ primitives we already have (delegation + sessions + git):
    journals/transcripts (episodes). No in-run skill editing — the tick
    prompt's "skills are read-only" line stays.
 2. **Curate on a trigger** — session end (a stopped tick session), every N
-   sessions, or a `/curate` command; mechanically it is a delegation to the
-   agent itself (or a shared `skill_curator` flow) with an AUTO policy —
-   serverless, so no risk gate needed:
+   sessions, or a `/curate` command; plus a Hermes-style `/learn <material>`
+   for human-triggered capture ("turn how we just did X into a skill") —
+   the user is the trigger, the agent does the authoring. Mechanically both
+   are a delegation to the agent itself (or a shared `skill_curator` flow)
+   with an AUTO policy — serverless, so no risk gate needed:
    - Input: the agent's learnings.md + the last N session journals/
      transcripts + current skills index.
    - Mandate: **delta edits only** — append/refine a specific section, merge
