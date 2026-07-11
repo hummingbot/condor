@@ -47,7 +47,7 @@ import json
 import re
 from pathlib import Path
 
-from .paths import builtin_skills_root
+from .paths import builtin_skills_root, shared_skills_root
 from .store import _atomic_write, _parse_frontmatter, _utcnow
 
 # agentskills.io name rule: 1-64 chars, lowercase alnum + hyphens, no
@@ -129,17 +129,52 @@ def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
 
 
 class SkillStore:
-    """Per-assistant, editable skill library.
+    """Per-assistant, editable skill library with tiered resolution.
 
     Keyed by ``agent_slug`` alone (skills are general to the assistant, not
-    per-user): ``None`` resolves the chat ``condor`` library, a slug resolves a
-    trading agent's / expert's library. The root is :func:`builtin_skills_root`.
+    per-user). Tiers (refactor-05 Phase 2):
+
+    - chat (``agent_slug`` None): the host-facing repo-root ``skills/`` only.
+    - domain agent (``agent_slug`` set): reads **local > shared** —
+      ``agents/{slug}/skills`` first, then ``agents/_shared/skills`` (name
+      clash: local wins). Writes land in the LOCAL tier only; any write
+      targeting a shared-resident skill errors loudly.
+    - ``scope="shared"``: the shared tier itself, read/write — the chat's
+      management handle for knowledge every domain agent should get.
     """
 
-    def __init__(self, agent_slug: str | None = None):
+    def __init__(self, agent_slug: str | None = None, scope: str | None = None):
+        if scope not in (None, "shared"):
+            raise ValueError(f"unknown skills scope {scope!r}")
+        if scope == "shared" and agent_slug:
+            raise ValueError("scope='shared' and agent_slug are mutually exclusive")
         self.agent_slug = agent_slug
-        # The assistant's skills dir (repo-shipped + runtime-created playbooks).
-        self.skills_dir = builtin_skills_root(agent_slug)
+        if scope == "shared":
+            self.skills_dir = shared_skills_root()
+            self._read_dirs = [self.skills_dir]
+        elif agent_slug:
+            self.skills_dir = builtin_skills_root(agent_slug)
+            self._read_dirs = [self.skills_dir, shared_skills_root()]
+        else:
+            self.skills_dir = builtin_skills_root(None)
+            self._read_dirs = [self.skills_dir]
+
+    def _locate(self, slug: str) -> Path | None:
+        """Resolve a skill's directory across the read tiers (local wins)."""
+        for root in self._read_dirs:
+            d = root / slug
+            if (d / "SKILL.md").exists():
+                return d
+        return None
+
+    def _shared_readonly_error(self, slug: str) -> dict:
+        return {
+            "error": f"Skill '{slug}' lives in the SHARED tier "
+            "(agents/_shared/skills), which is read-only for agents. Ask the "
+            "user to change it from the chat (manage_skill scope='shared'), or "
+            "create a local skill of the same name to override it for this "
+            "agent only."
+        }
 
     # -- public API --------------------------------------------------------
 
@@ -210,9 +245,12 @@ class SkillStore:
         if not self.skills_dir:
             return {"error": "this assistant has no skills library"}
         slug = _skill_slug(name)
-        path = self.skills_dir / slug / "SKILL.md"
-        if not path.exists():
+        skill_dir = self._locate(slug)
+        if skill_dir is None:
             return {"error": f"Skill '{name}' not found"}
+        if skill_dir.parent != self.skills_dir:
+            return self._shared_readonly_error(slug)
+        path = skill_dir / "SKILL.md"
 
         meta, body = _parse_frontmatter(path.read_text())
         meta.setdefault("name", slug)
@@ -236,21 +274,22 @@ class SkillStore:
         _atomic_write(path, _render_skill(meta, body))
         return self.read(slug) or {"saved": True, "name": slug}
 
-    def delete(self, name: str) -> bool:
+    def delete(self, name: str) -> dict:
         """Delete a skill (and its now-empty folder)."""
         if not self.skills_dir:
-            return False
+            return {"error": "this assistant has no skills library"}
         slug = _skill_slug(name)
-        skill_dir = self.skills_dir / slug
-        path = skill_dir / "SKILL.md"
-        if not path.exists():
-            return False
-        path.unlink()
+        skill_dir = self._locate(slug)
+        if skill_dir is None:
+            return {"error": f"Skill '{name}' not found"}
+        if skill_dir.parent != self.skills_dir:
+            return self._shared_readonly_error(slug)
+        (skill_dir / "SKILL.md").unlink()
         try:
             skill_dir.rmdir()
         except OSError:
             pass  # other files present — leave the folder
-        return True
+        return {"deleted": True, "name": slug}
 
     def read(self, name: str) -> dict | None:
         """Return a skill's frontmatter + body, or ``None`` if absent.
@@ -263,10 +302,10 @@ class SkillStore:
         slug = _skill_slug(name)
         if not self.skills_dir:
             return None
-        skill_dir = self.skills_dir / slug
-        path = skill_dir / "SKILL.md"
-        if not path.exists():
+        skill_dir = self._locate(slug)
+        if skill_dir is None:
             return None
+        path = skill_dir / "SKILL.md"
         meta, body = _parse_frontmatter(path.read_text())
         ref = _skill_meta_get(meta, "condor-references-routine")
         result = {
@@ -274,6 +313,8 @@ class SkillStore:
             "description": meta.get("description", ""),
             "body": body,
         }
+        if self.agent_slug and skill_dir.parent != self.skills_dir:
+            result["tier"] = "shared"  # read-only for this agent
         files = self._companion_files(skill_dir)
         if files:
             result["files"] = files
@@ -297,8 +338,8 @@ class SkillStore:
         if not self.skills_dir:
             return None, {"error": "this assistant has no skills library"}
         slug = _skill_slug(name)
-        skill_dir = self.skills_dir / slug
-        if not (skill_dir / "SKILL.md").exists():
+        skill_dir = self._locate(slug)
+        if skill_dir is None:
             return None, {"error": f"Skill '{name}' not found"}
 
         fname = (filename or "").strip()
@@ -361,6 +402,8 @@ class SkillStore:
             return error
 
         skill_dir = target.parent
+        if skill_dir.parent != self.skills_dir:
+            return self._shared_readonly_error(skill_dir.name)
         created = not target.exists()
         _atomic_write(target, content)
         return {
@@ -424,19 +467,24 @@ class SkillStore:
     # -- internals ---------------------------------------------------------
 
     def _iter_skills(self):
-        """Yield (meta, body) for every skill, sorted by slug.
+        """Yield (meta, body) for every skill across the read tiers.
 
-        Authored playbooks have no per-user ``created`` ordering, so slug order
-        gives a stable injection order.
+        Sorted by slug (stable injection order); on a name clash the more
+        specific tier wins (local shadows shared).
         """
-        if not self.skills_dir or not self.skills_dir.exists():
-            return
-        for f in sorted(self.skills_dir.glob("*/SKILL.md")):
+        merged: dict[str, Path] = {}
+        for root in self._read_dirs:
+            if not root or not root.exists():
+                continue
+            for f in root.glob("*/SKILL.md"):
+                merged.setdefault(f.parent.name, f)
+        for slug in sorted(merged):
+            f = merged[slug]
             try:
                 meta, body = _parse_frontmatter(f.read_text())
             except Exception:
                 continue
-            meta.setdefault("name", f.parent.name)
+            meta.setdefault("name", slug)
             yield meta, body
 
     def _index_lines(self) -> list[str]:

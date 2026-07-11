@@ -293,7 +293,7 @@ def test_agent_skill_library_read_and_edit(tmp_path, monkeypatch):
     assert store.create("stop or widen", "d2. Use when underwater.", "steps")["saved"]
     assert "[stop-or-widen] d2. Use when underwater." in store.list_index()
     assert store.edit("size-grid", description="updated")["description"] == "updated"
-    assert store.delete("stop-or-widen") is True
+    assert store.delete("stop-or-widen")["deleted"] is True
     assert "stop-or-widen" not in store.list_index()
 
 

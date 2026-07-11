@@ -66,6 +66,17 @@ def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
     return _PROJECT_ROOT / "skills"
 
 
+def shared_skills_root() -> Path:
+    """The SHARED skills tier: ``agents/_shared/skills/`` (refactor-05 Phase 2).
+
+    Read by every domain agent (resolution: local > shared), writable only
+    from the chat via ``manage_skill(scope="shared")`` — agents get a loud
+    error on writes. The ``_``-prefixed dir keeps it out of AgentStore
+    discovery and host skill indexes alike.
+    """
+    return _PROJECT_ROOT / "agents" / "_shared" / "skills"
+
+
 def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:
     """``(label, agent_slug, root)`` for each existing store of ``user_id``.
 

@@ -42,14 +42,31 @@ async def manage_skill(
     query: str | None = None,
     max_entries: int = 30,
     agent_slug: str | None = None,
+    scope: str | None = None,
     file: str | None = None,
     content: str | None = None,
 ) -> dict:
-    target_slug, ok = _resolve_agent_slug(agent_slug)
-    if agent_slug and not ok:
-        return {"error": f"No agent found for agent_slug '{agent_slug}'"}
-    store = SkillStore(target_slug)
-    source = f"agent:{target_slug}" if target_slug else "chat"
+    if scope == "shared":
+        # The shared tier is chat-managed: a launched agent must never hold
+        # the pen on knowledge that feeds every other agent.
+        if settings.agent_slug:
+            return {
+                "error": "the shared skills tier is read-only for agents — it "
+                "is managed from the chat (your shared skills already appear "
+                "in your index; create a local skill to override one)"
+            }
+        if agent_slug:
+            return {"error": "pass either scope='shared' or agent_slug, not both"}
+        store = SkillStore(scope="shared")
+        source = "shared"
+    elif scope:
+        return {"error": f"unknown scope '{scope}' (only 'shared')"}
+    else:
+        target_slug, ok = _resolve_agent_slug(agent_slug)
+        if agent_slug and not ok:
+            return {"error": f"No agent found for agent_slug '{agent_slug}'"}
+        store = SkillStore(target_slug)
+        source = f"agent:{target_slug}" if target_slug else "chat"
 
     if action == "create":
         if not name or not description or not body:
@@ -110,9 +127,6 @@ async def manage_skill(
     elif action == "delete":
         if not name:
             return {"error": "name is required for delete"}
-        ok = store.delete(name)
-        if not ok:
-            return {"error": f"Skill '{name}' not found"}
-        return {"deleted": True, "name": name}
+        return store.delete(name)
 
     return {"error": f"Unknown action: {action}"}

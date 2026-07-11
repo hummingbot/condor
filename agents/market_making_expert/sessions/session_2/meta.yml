@@ -1,0 +1,6 @@
+kind: consult
+status: done
+task: 'In one short paragraph: what regime checks do you run before deploying a PMM
+  Mister bot? Do not call any tools.'
+model: claude-acp:sonnet
+ended_at: '2026-07-11T17:42:37.113372+00:00'

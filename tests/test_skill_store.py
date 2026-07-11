@@ -192,7 +192,7 @@ def test_create_edit_delete_roundtrip(project_root, fake_routines):
     assert edited["description"] == "updated"
     assert "new steps" in s.read("grid-en-band-walk")["body"]
 
-    assert s.delete("Grid en band walk") is True
+    assert s.delete("Grid en band walk")["deleted"] is True
     assert s.read("grid-en-band-walk") is None
     assert s.list_index() == ""
 
@@ -305,7 +305,7 @@ def test_create_requires_all_fields(project_root):
 def test_edit_and_delete_missing_skill(project_root):
     s = SkillStore()
     assert "error" in s.edit("ghost", description="x")
-    assert s.delete("ghost") is False
+    assert "error" in s.delete("ghost")
 
 
 def test_atomic_write_uses_unique_tmp_per_writer(project_root, monkeypatch):
@@ -363,3 +363,83 @@ def test_concurrent_writers_never_leave_a_torn_file(project_root):
     assert meta.get("name") == "shared"
     assert body == "x" * 5000
     assert list(target.parent.glob("*.tmp")) == []
+
+
+# ── shared tier (refactor-05 Phase 2) ──
+
+
+def _write_shared(root, slug, *, description="shared d", body="Shared steps."):
+    import json
+
+    d = root / "agents" / "_shared" / "skills" / slug
+    d.mkdir(parents=True, exist_ok=True)
+    fm = [
+        f"name: {slug}",
+        f"description: {json.dumps(description)}",
+        'metadata: {"condor-source": "shared"}',
+    ]
+    (d / "SKILL.md").write_text("---\n" + "\n".join(fm) + "\n---\n\n" + body + "\n")
+
+
+def test_agent_reads_shared_tier(project_root):
+    _write_shared(project_root, "executor-mechanics")
+    _write_skill(project_root, "mm_expert", "local-only", description="local")
+
+    agent = SkillStore("mm_expert")
+    assert "executor-mechanics" in agent.list_index()
+    assert "local-only" in agent.list_index()
+    read = agent.read("executor-mechanics")
+    assert read is not None
+    assert read["tier"] == "shared"
+
+    # The chat's own library does NOT include the shared tier...
+    assert "executor-mechanics" not in SkillStore().list_index()
+    # ...but the scope='shared' management handle does.
+    shared = SkillStore(scope="shared")
+    assert "executor-mechanics" in shared.list_index()
+
+
+def test_local_shadows_shared_on_name_clash(project_root):
+    _write_shared(project_root, "venue-quirks", description="shared version")
+    _write_skill(project_root, "mm_expert", "venue-quirks", description="local version")
+
+    agent = SkillStore("mm_expert")
+    assert agent.read("venue-quirks")["description"] == "local version"
+    assert "local version" in agent.list_index()
+    assert "shared version" not in agent.list_index()
+
+
+def test_shared_tier_read_only_for_agents(project_root):
+    _write_shared(project_root, "executor-mechanics")
+    agent = SkillStore("mm_expert")
+
+    for res in (
+        agent.edit("executor-mechanics", description="hacked"),
+        agent.delete("executor-mechanics"),
+        agent.write_file("executor-mechanics", "extra.md", "payload"),
+    ):
+        assert "error" in res
+        assert "read-only" in res["error"]
+    # And the shared file is untouched.
+    assert SkillStore(scope="shared").read("executor-mechanics")["description"] == "shared d"
+
+    # An agent CREATE of the same name lands locally (shadowing, not mutation).
+    created = agent.create("executor-mechanics", "local override. Use when local.", "steps")
+    assert created["saved"] is True
+    assert agent.read("executor-mechanics").get("tier") is None  # local now
+    assert SkillStore(scope="shared").read("executor-mechanics")["description"] == "shared d"
+
+
+def test_shared_scope_is_writable_from_chat(project_root):
+    shared = SkillStore(scope="shared")
+    res = shared.create("venue-quirks", "d. Use when venue weirdness.", "steps")
+    assert res["saved"] is True
+    assert "venue-quirks" in SkillStore("any_agent").list_index()
+    assert shared.delete("venue-quirks")["deleted"] is True
+
+
+def test_shared_scope_and_agent_slug_mutually_exclusive(project_root):
+    with pytest.raises(ValueError):
+        SkillStore(agent_slug="x", scope="shared")
+    with pytest.raises(ValueError):
+        SkillStore(scope="bogus")

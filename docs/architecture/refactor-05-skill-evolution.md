@@ -1,6 +1,6 @@
 # Refactor 05 — Skills: one portable format, shared tiers, curated self-improvement
 
-Status: **Phase 1 implemented** (2026-07-11); Phases 2-4 proposed · Builds on:
+Status: **Phases 1-2 implemented** (2026-07-11); Phases 3-4 proposed · Builds on:
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) (implemented) and
 [refactor-04](refactor-04-shared-skills-tier.md) (tabled → absorbed here as
 Phase 2)
@@ -405,7 +405,7 @@ Each phase lands green and independently.
    OpenClaw/Hermes checks run on whichever machine has those harnesses
    installed — recorded as a user-runnable checklist in the PR.
 
-### Phase 2 — Shared tier + dedupe (refactor-04, updated)
+### Phase 2 — Shared tier + dedupe (refactor-04, updated) ✅ (implemented 2026-07-11)
 
 1. `SkillStore` resolution local > shared > builtin; `_shared` writable
    only via chat `scope="shared"`; loud error on agent writes to shared.

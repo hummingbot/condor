@@ -142,35 +142,20 @@ breakeven). Do not panic-close it; the exit rule is:
   and journal the realized loss as an execution learning.
 - Otherwise → hold and wait; state the plan in the journal.
 
-## grid_executor — Full Config Schema
+## grid_executor Schema & Mechanics
 
-(from `manage_executors(executor_type="grid_executor")` — re-fetch on any create error)
+The full grid_executor schema (all fields, direction geometry, density math,
+behavior notes) and the order_executor schema for CLEANUP live in the shared
+`executor-mechanics` skill — read before your first create and after any
+create error:
 
-| Field | Required | Type | Default | Notes |
-|---|---|---|---|---|
-| connector_name | YES | string | — | from [CURRENT CONFIG] |
-| trading_pair | YES | string | — | from [CURRENT CONFIG] |
-| side | no (but SET IT) | enum | 1 | 1=BUY grid, 2=SELL grid; limit_price does NOT set direction |
-| start_price | YES | number/str | — | lower band boundary |
-| end_price | YES | number/str | — | upper band boundary |
-| limit_price | YES | number/str | — | safety stop: LONG below start, SHORT above end |
-| total_amount_quote | YES | number/str | — | grid capital |
-| triple_barrier_config | YES | object | — | take_profit + order types (see template) |
-| min_spread_between_orders | no | number/str | 0.0005 | level spacing (decimal) |
-| min_order_amount_quote | no | number/str | 5 | per-order size floor → level count |
-| max_open_orders | no | int | 5 | concurrent order cap |
-| max_orders_per_batch | no | int | — | batch size |
-| order_frequency | no | int | 0 | seconds between batches |
-| activation_bounds | no | number/str | — | only place orders within this % of price |
-| safe_extra_spread | no | number/str | 0.0001 | extra edge on placement |
-| leverage | no | int | 20 | override per risk rules |
-| keep_position | no | bool | false | ALWAYS true here (hand over inventory) |
-| coerce_tp_to_step | no | bool | false | TP ≥ grid step; set true |
-| deduct_base_fees | no | bool | false | leave default |
+```
+manage_skill(action="read_file", name="executor-mechanics", file="grid_executor.md")
+```
 
-**There is NO stop_loss on a grid.** `limit_price` + `keep_position` is the entire
-risk mechanism: crossing the limit stops the grid; keep_position=true hands the
-accumulated inventory to you for Step-5 recycling.
+**There is NO stop_loss on a grid.** `limit_price` + `keep_position` is the
+entire risk mechanism: crossing the limit stops the grid; keep_position=true
+hands the accumulated inventory to you for Step-5 recycling.
 
 ## Risk Rules
 

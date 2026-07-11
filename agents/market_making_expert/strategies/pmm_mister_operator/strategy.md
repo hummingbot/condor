@@ -3,7 +3,6 @@ name: PMM Mister Operator
 description: Operates pmm_mister controllers for any perp pair — deploys, tunes spreads/inventory
   params per regime, and manages lifecycle.
 agent_key: null
-skills: []
 default_config:
   frequency_sec: 120
   total_amount_quote: 500
@@ -71,106 +70,27 @@ Based on regime + inventory state, decide ONE of:
 Use `manage_controllers` to upsert configs and `manage_bots` to deploy/stop.
 Use `manage_bots(action="update_config")` for live parameter changes.
 
-## pmm_mister Controller — Full Config Schema
+## pmm_mister Config Schema & Mechanics
 
-To create or update a pmm_mister config, use `manage_controllers(action="upsert", target="config")`.
-The config MUST include `controller_type: "generic"` and `controller_name: "pmm_mister"`.
+The full parameter reference (all params, template-verified defaults, band/
+skew/lifecycle mechanics, sizing math) lives in the `pmm-config-playbook`
+skill — read it before creating or updating a config:
 
-### All Parameters
+```
+manage_skill(action="read_file", name="pmm-config-playbook", file="pmm_mister_parameters.md")
+```
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| controller_type | str | "generic" | Always "generic" |
-| controller_name | str | "pmm_mister" | Always "pmm_mister" |
-| connector_name | str | — | Exchange connector — use value from [CURRENT CONFIG] |
-| trading_pair | str | — | Trading pair — use value from [CURRENT CONFIG] |
-| total_amount_quote | Decimal | 100 | Total quote amount for the controller |
-| portfolio_allocation | Decimal | 0.1 | Fraction of total_amount to use (0.1 = 10%) |
-| target_base_pct | Decimal | 0.5 | Target position as % of allocation |
-| min_base_pct | Decimal | 0.3 | Min position % (below → only accumulate) |
-| max_base_pct | Decimal | 0.7 | Max position % (above → only reduce) |
-| buy_spreads | str | "0.0005" | Comma-separated buy spread levels (e.g. "0.001,0.002") |
-| sell_spreads | str | "0.0005" | Comma-separated sell spread levels |
-| buy_amounts_pct | str | "1" | Comma-separated buy amount weights (must match buy_spreads count) |
-| sell_amounts_pct | str | "1" | Comma-separated sell amount weights |
-| executor_refresh_time | int | 30 | Seconds before replacing unfilled orders |
-| buy_cooldown_time | int | 60 | Seconds wait after buy fill before new buy |
-| sell_cooldown_time | int | 60 | Seconds wait after sell fill before new sell |
-| buy_position_effectivization_time | int | 120 | Seconds before hanging buy executor is closed |
-| sell_position_effectivization_time | int | 120 | Seconds before hanging sell executor is closed |
-| price_distance_tolerance | Decimal | 0.0005 | Min distance from price for new orders |
-| refresh_tolerance | Decimal | 0.0005 | Distance deviation before refreshing order |
-| tolerance_scaling | Decimal | 1.2 | Multiplier per level for tolerances |
-| leverage | int | 20 | Leverage |
-| position_mode | str | "ONEWAY" | "ONEWAY" or "HEDGE" |
-| position_side | str | "BUY" | "BUY"/"LONG" (accumulate longs) or "SELL"/"SHORT" |
-| take_profit | Decimal | 0.0001 | TP per executor (as fraction, 0.0001 = 0.01%) |
-| take_profit_order_type | int | 3 | 1=MARKET, 2=LIMIT, 3=LIMIT_MAKER |
-| open_order_type | int | 3 | 1=MARKET, 2=LIMIT, 3=LIMIT_MAKER |
-| max_active_executors_by_level | int | 4 | Max hanging executors per spread level |
-| tick_mode | bool | false | Use min_price_increment as spread multiplier |
-| position_profit_protection | bool | false | Block reductions at unfavorable prices |
-| min_skew | Decimal | 1.0 | Minimum skew multiplier (1.0 = no minimum) |
-| global_take_profit | Decimal | 0.03 | Global TP threshold (3%) |
-| global_stop_loss | Decimal | 0.05 | Global SL threshold (5%) |
-| global_tp_enabled | bool | false | Enable global TP |
-| global_sl_enabled | bool | false | Enable global SL |
-| global_tp_activation_from | str | "min_base" | TP checks from: "always", "min_base", "target_base" |
-| global_sl_activation_from | str | "target_base" | SL checks from: "target_base", "max_base" |
-| global_pnl_reference | str | "position" | PnL calc: "position" or "portfolio" |
-
-### How the Controller Works
-
-**Position bands**: The controller tracks `current_base_pct` = position_value / total_amount_quote.
-- Below min_base_pct → only accumulation side (buys for LONG, sells for SHORT)
-- Above max_base_pct → only reduction side
-- Between min and max → both sides active, with skew
-
-**Skew system**: Buy/sell amounts are multiplied by a skew factor:
-- LONG mode: buy_skew = (max - current) / (max - min), sell_skew = (current - min) / (max - min)
-- When position is small, buy skew is high (more aggressive buying)
-- When position is large, sell skew is high (more aggressive selling)
-- min_skew sets a floor (1.0 = no reduction, <1.0 allows reducing amounts)
-
-**Executor lifecycle**: Place order → if filled, becomes "hanging" → after effectivization_time, closed (keep_position=True) → after cooldown, new order placed. Unfilled orders refresh after executor_refresh_time.
-
-**Multi-level**: Multiple spread levels work independently. Each has its own cooldown, distance check, and max_active_executors cap.
-
-**Global TP/SL**: Two-phase close — first stops all executors (keep_position), then creates a market close executor.
+For vetted starting profiles (aggressive/balanced/conservative by regime),
+read `pmm-config-playbook` itself and fetch the profile companion.
 
 ## Regime → Parameter Mapping
 
-### Quiet (ADX < 18, BBW < 3%)
-- Tight spreads: buy_spreads="0.0008,0.0015", sell_spreads="0.0008,0.0015"
-- Fast refresh: executor_refresh_time=20
-- Short cooldowns: buy/sell_cooldown_time=30
-- Normal inventory: target_base_pct=0.5, min=0.3, max=0.7
+The regime→parameter tables live in the `regime-playbook` skill (single
+source for all of this agent's strategies):
 
-### Ranging (ADX < 25, moderate BBW)
-- Moderate spreads: buy_spreads="0.0012,0.0025", sell_spreads="0.0012,0.0025"
-- Standard refresh: executor_refresh_time=30
-- Standard cooldowns: 60s
-- Normal inventory
-
-### Trending Up (ADX > 25, price > SMA, positive momentum)
-- Asymmetric: buy_spreads="0.001,0.002", sell_spreads="0.002,0.004"
-- Widen sell side to avoid selling into trend
-- Consider position_side="BUY" to accumulate longs
-- Enable position_profit_protection=true
-
-### Trending Down (ADX > 25, price < SMA, negative momentum)
-- Asymmetric: buy_spreads="0.002,0.004", sell_spreads="0.001,0.002"
-- Widen buy side to avoid catching falling knife
-- Consider position_side="SELL" for shorts
-- Enable position_profit_protection=true
-
-### Volatile (ATR expanding, BBW > 6%, volume surge)
-- Wide spreads: buy_spreads="0.003,0.006", sell_spreads="0.003,0.006"
-- Slow refresh: executor_refresh_time=60
-- Long cooldowns: 120s
-- Tight inventory: min=0.35, max=0.65
-- Enable global_sl_enabled=true
-- Consider pausing if extreme
+```
+manage_skill(action="read_file", name="regime-playbook", file="pmm_parameters.md")
+```
 
 ## Deployment Flow
 

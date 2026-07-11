@@ -446,6 +446,7 @@ async def manage_skill(
     query: str | None = None,
     max_entries: int = 30,
     agent_slug: str | None = None,
+    scope: str | None = None,
     file: str | None = None,
     content: str | None = None,
 ) -> dict:
@@ -478,13 +479,17 @@ async def manage_skill(
     with agent_slug — use this to author or inspect an agent's skills while
     building it. Without agent_slug the current assistant's library is used.
 
-    PLACEMENT RULE: the chat's own library is the repo-root skills/ dir, which
-    is HOST-VISIBLE — any harness opened in the Condor repo (Claude Code,
-    OpenClaw, Hermes) indexes it natively. Put only genuinely host-relevant
-    playbooks there; knowledge meant for one agent belongs in that agent's
-    local tier (pass agent_slug). Skills follow the agentskills.io format:
-    hyphenated names, and the description states WHAT the skill does and WHEN
-    to use it (it is the routing trigger for every host).
+    PLACEMENT RULE (three tiers): the chat's own library is the repo-root
+    skills/ dir, which is HOST-VISIBLE — any harness opened in the Condor repo
+    (Claude Code, OpenClaw, Hermes) indexes it natively. Put only genuinely
+    host-relevant playbooks there. Knowledge meant for ONE agent belongs in
+    that agent's local tier (pass agent_slug). Knowledge EVERY domain agent
+    should get (executor mechanics, venue quirks) belongs in the SHARED tier
+    (pass scope="shared" — agents/_shared/skills): domain agents read it
+    automatically (local overrides shared on a name clash) but can never
+    write it — shared edits happen only here in the chat, with the user.
+    Skills follow the agentskills.io format: hyphenated names, and the
+    description states WHAT the skill does and WHEN to use it.
 
     Actions:
     - "read": Get a full playbook + routine validation + companion `files` (requires name).
@@ -507,6 +512,8 @@ async def manage_skill(
         max_entries: Cap for search results (default 30).
         agent_slug: Target a specific agent's local skill library (chat-side
             authoring).
+        scope: "shared" targets the shared tier read by every domain agent
+            (chat-only; mutually exclusive with agent_slug).
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
 
@@ -522,6 +529,7 @@ async def manage_skill(
         query=query,
         max_entries=max_entries,
         agent_slug=agent_slug,
+        scope=scope,
         file=file,
         content=content,
     )

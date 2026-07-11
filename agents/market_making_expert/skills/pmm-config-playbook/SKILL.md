@@ -42,6 +42,15 @@ manage_skill(action="read_file", name="pmm-config-playbook", file="config_aggres
 3. Deploy via the normal flow (`manage_controllers` upsert → `manage_bots` deploy).
    Live retunes go through `manage_bots(action="update_config", confirm_override=true)`.
 
+## Full parameter reference
+
+The canonical, template-verified pmm_mister schema (all parameters, defaults,
+mechanics, sizing math) is the companion `pmm_mister_parameters.md`:
+
+```
+manage_skill(action="read_file", name="pmm-config-playbook", file="pmm_mister_parameters.md")
+```
+
 ## Key parameter reference
 
 Parameters most commonly tuned in real operations:
