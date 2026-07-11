@@ -126,9 +126,15 @@ manage_bots(
   action="deploy",
   bot_name="pmm_<pair>_<timestamp>",
   controllers_config=["<config_name from step 5>"],
-  account_name="master_account"
+  account_name="master_account",
+  max_global_drawdown_quote=<loss cap ≤ max_position_size_quote from your risk limits>
 )
 ```
+
+`max_global_drawdown_quote` is REQUIRED: it is the platform-enforced kill switch
+that bounds the deploy's loss, and the risk engine blocks any deploy that omits
+it (in unattended delegations and tick sessions alike). Set it no larger than
+the `max_position_size_quote` of the risk limits governing this run.
 
 ---
 

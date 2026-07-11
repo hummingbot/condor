@@ -92,6 +92,11 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="font-mono text-sm font-bold text-[var(--color-text)]">{instance.agent_id}</span>
+          {instance.strategy && (
+            <span className="rounded bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-[var(--color-primary)]">
+              {instance.strategy}
+            </span>
+          )}
           <span className={`text-xs font-semibold uppercase ${statusColor}`}>{instance.status}</span>
           <ModeBadge mode={instance.execution_mode} />
         </div>
@@ -154,16 +159,17 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 
 export function PerformancePanel({
   slug,
-  sslug,
+  strategy = "",
   onSessionClick,
 }: {
   slug: string;
-  sslug: string;
+  /** Optional playbook filter — per-playbook track records are a metadata filter. */
+  strategy?: string;
   onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
 }) {
   const { data } = useQuery({
-    queryKey: ["strategy-performance", slug, sslug],
-    queryFn: () => api.getStrategyPerformance(slug, sslug),
+    queryKey: ["agent-performance", slug, strategy],
+    queryFn: () => api.getAgentPerformance(slug, strategy || undefined),
     refetchInterval: 10000,
   });
   const totals = data?.totals || {};
@@ -257,6 +263,7 @@ export function PerformancePanel({
                 <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
                   <th className="px-2 py-1">#</th>
                   <th className="px-2 py-1">Kind</th>
+                  <th className="px-2 py-1">Strategy</th>
                   <th className="px-2 py-1">Status</th>
                   <th className="px-2 py-1 text-right">Total PnL</th>
                   <th className="px-2 py-1 text-right">Realized</th>
@@ -291,6 +298,7 @@ export function PerformancePanel({
                             <span className="text-[var(--color-text-muted)]">{s.kind}</span>
                           )}
                         </td>
+                        <td className="px-2 py-1.5 text-[var(--color-text-muted)]">{s.strategy || "—"}</td>
                         <td className={`px-2 py-1.5 ${s.status === "running" ? "text-emerald-400" : "text-[var(--color-text-muted)]"}`}>
                           {s.status || "—"}
                         </td>

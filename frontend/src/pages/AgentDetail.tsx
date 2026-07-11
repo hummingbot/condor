@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertCircle,
   ArrowLeft,
+  BookOpen,
   Brain,
   ChevronRight,
   CircleDot,
@@ -14,104 +15,86 @@ import {
   Trash2,
   Wrench,
   X,
+  Zap,
 } from "lucide-react";
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useNavigate, useParams } from "react-router-dom";
 
-import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
+import { AgentControls } from "@/components/agent/AgentControls";
+import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
+import {
+  InstanceCard,
+  MarkdownEditor,
+  PerformancePanel,
+} from "@/components/agent/AgentOverviewTab";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { StatusBadge } from "@/components/agent/StatusBadge";
+import { SessionReviewer } from "@/components/agent/SessionReviewer";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
+import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
+import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { type StrategySummary, api } from "@/lib/api";
-import { formatCurrencyPnl } from "@/lib/formatters";
+import { type PlaybookSummary, type SessionInfo, api } from "@/lib/api";
+import { formatDateTime } from "@/lib/formatters";
+import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
-// ── Strategy Card ──
+// ── Playbook Card ──
+// A strategy is a pure playbook template; its history lives on the agent
+// (filter the sessions/performance below by this playbook's slug).
 
-function StrategyCard({
+function PlaybookCard({
   agentSlug,
-  strategy,
+  playbook,
   onDelete,
 }: {
   agentSlug: string;
-  strategy: StrategySummary;
+  playbook: PlaybookSummary;
   onDelete: () => void;
 }) {
   const navigate = useNavigate();
-  const totalPnl = strategy.total_pnl ?? 0;
-  const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const dayPnl = strategy.daily_pnl ?? 0;
-  const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const status = deriveAgentStatus(strategy);
-  const isLive = status === "running";
 
   return (
     <button
-      onClick={() => navigate(`/agents/${agentSlug}/strategies/${strategy.slug}`)}
-      className={`group relative w-full rounded-lg border text-left transition-all duration-200 hover:border-[var(--color-primary)]/40 hover:shadow-lg ${
-        isLive
-          ? "border-emerald-500/20 bg-emerald-500/[0.03]"
-          : "border-[var(--color-border)] bg-[var(--color-surface)]"
-      }`}
+      onClick={() => navigate(`/agents/${agentSlug}/strategies/${playbook.slug}`)}
+      className="group relative w-full rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] text-left transition-all duration-200 hover:border-[var(--color-primary)]/40 hover:shadow-lg"
     >
       <div className="p-4">
-        <div className="mb-3 flex items-start justify-between">
-          <h3 className="text-sm font-semibold text-[var(--color-text)]">{strategy.name}</h3>
-          <div className="flex items-center gap-2">
-            <StatusBadge status={status} />
-            {strategy.status !== "running" && (
-              <div
-                aria-label="Delete strategy"
-                className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
-                onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onDelete(); } }}
-                role="button"
-                tabIndex={0}
-              >
-                <span className="flex h-7 w-7 items-center justify-center rounded-md border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </span>
-              </div>
-            )}
+        <div className="mb-2 flex items-start justify-between">
+          <h3 className="flex items-center gap-1.5 text-sm font-semibold text-[var(--color-text)]">
+            <BookOpen className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+            {playbook.name}
+          </h3>
+          <div
+            aria-label="Delete strategy"
+            className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onDelete(); } }}
+            role="button"
+            tabIndex={0}
+          >
+            <span className="flex h-7 w-7 items-center justify-center rounded-md border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20">
+              <Trash2 className="h-3.5 w-3.5" />
+            </span>
           </div>
         </div>
 
-        {strategy.description && (
-          <p className="mb-3 text-xs text-[var(--color-text-muted)] line-clamp-2">
-            {strategy.description}
+        {playbook.description && (
+          <p className="mb-2 text-xs text-[var(--color-text-muted)] line-clamp-2">
+            {playbook.description}
           </p>
         )}
 
-        <div className="grid grid-cols-4 gap-2 border-t border-[var(--color-border)]/50 pt-3">
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
-            <span className={`text-sm font-mono font-semibold ${totalPnlColor}`}>
-              {formatCurrencyPnl(totalPnl)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Session</span>
-            <span className={`text-sm font-mono ${dayPnlColor}`}>
-              {formatCurrencyPnl(dayPnl)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{strategy.open_positions ?? 0}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Sessions</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{strategy.session_count}</span>
-          </div>
+        <div className="flex items-center gap-3 border-t border-[var(--color-border)]/50 pt-2 text-[11px] text-[var(--color-text-muted)]">
+          <span>{playbook.session_count} session{playbook.session_count !== 1 ? "s" : ""}</span>
+          {playbook.agent_key && <span className="font-mono text-[var(--color-primary)]">{playbook.agent_key}</span>}
         </div>
       </div>
 
-      <div className="flex items-center justify-end border-t border-[var(--color-border)]/30 px-4 py-2 text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100">
-        <span className="text-[11px]">Open</span>
+      <div className="flex items-center justify-end border-t border-[var(--color-border)]/30 px-4 py-1.5 text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100">
+        <span className="text-[11px]">Edit playbook</span>
         <ChevronRight className="h-3.5 w-3.5" />
       </div>
     </button>
@@ -157,7 +140,7 @@ function CreateStrategyDialog({
         className="w-full max-w-md rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
         onClick={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-4 text-lg font-semibold text-[var(--color-text)]">New Strategy</h2>
+        <h2 className="mb-4 text-lg font-semibold text-[var(--color-text)]">New Strategy (Playbook)</h2>
 
         <div className="space-y-4">
           <div>
@@ -180,7 +163,7 @@ function CreateStrategyDialog({
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="What does this strategy do?"
+              placeholder="What does this playbook do?"
               rows={2}
               className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
             />
@@ -272,7 +255,127 @@ function ConsultPanel({ slug, whenToConsult }: { slug: string; whenToConsult: st
   );
 }
 
+// ── Transcript viewer (delegation / consult sessions) ──
+
+function TranscriptModal({
+  slug,
+  session,
+  onClose,
+}: {
+  slug: string;
+  session: SessionInfo;
+  onClose: () => void;
+}) {
+  useEscapeKey(true, onClose);
+  const { data } = useQuery({
+    queryKey: ["agent", slug, "session", session.number, "transcript"],
+    queryFn: () => api.getSessionTranscript(slug, session.number),
+  });
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
+      <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-4xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
+        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-3">
+          <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--color-text)]">
+            <span className="rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-purple-400">
+              {session.kind}
+            </span>
+            {slug}_{session.number}
+            {session.status && (
+              <span className={`text-xs ${session.status === "done" ? "text-emerald-400" : session.status === "error" ? "text-red-400" : "text-[var(--color-text-muted)]"}`}>
+                {session.status}
+              </span>
+            )}
+          </h3>
+          <button
+            onClick={onClose}
+            className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+        <div className="chat-markdown flex-1 overflow-y-auto p-6 text-sm text-[var(--color-text)]">
+          {data ? (
+            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+              {data.content || "(no transcript captured)"}
+            </ReactMarkdown>
+          ) : (
+            <div className="flex h-32 items-center justify-center">
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Background runs (delegations + consults) list ──
+
+function BackgroundRunsPanel({
+  sessions,
+  onOpen,
+}: {
+  sessions: SessionInfo[];
+  onOpen: (s: SessionInfo) => void;
+}) {
+  const rows = sessions.filter((s) => s.kind !== "tick_loop");
+  if (rows.length === 0) return null;
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+      <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+        <MessageSquareText className="h-3.5 w-3.5" /> Delegations & Consults ({rows.length})
+      </h3>
+      <div className="overflow-x-auto">
+        <table className="w-full text-xs">
+          <thead>
+            <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+              <th className="px-2 py-1">#</th>
+              <th className="px-2 py-1">Kind</th>
+              <th className="px-2 py-1">Task</th>
+              <th className="px-2 py-1">Status</th>
+              <th className="px-2 py-1">Ended</th>
+              <th className="px-2 py-1 w-6" />
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((s) => (
+              <tr
+                key={s.number}
+                onClick={() => onOpen(s)}
+                className="cursor-pointer border-t border-[var(--color-border)]/40 transition-colors hover:bg-[var(--color-surface-hover)]"
+              >
+                <td className="px-2 py-1.5 font-mono text-[var(--color-text)]">{s.number}</td>
+                <td className="px-2 py-1.5">
+                  <span className="rounded bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-purple-400">
+                    {s.kind}
+                  </span>
+                </td>
+                <td className="max-w-md truncate px-2 py-1.5 text-[var(--color-text-muted)]">{s.task || "—"}</td>
+                <td className={`px-2 py-1.5 ${s.status === "done" ? "text-emerald-400" : s.status === "error" ? "text-red-400" : s.status === "running" ? "text-amber-400" : "text-[var(--color-text-muted)]"}`}>
+                  {s.status || "—"}
+                </td>
+                <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
+                  {s.ended_at ? formatDateTime(Date.parse(s.ended_at)) : "—"}
+                </td>
+                <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 // ── Agent Detail Page ──
+// The operational hub (refactor-01b): identity + playbooks + ALL history —
+// live instances, per-session performance with a playbook filter, tick
+// sessions/dry runs (SessionReviewer), delegation/consult transcripts, and
+// the agent-level learnings.
 
 export function AgentDetail() {
   const { slug } = useParams<{ slug: string }>();
@@ -280,16 +383,20 @@ export function AgentDetail() {
   const queryClient = useQueryClient();
 
   const [showBrainModal, setShowBrainModal] = useState(false);
-  // Unsaved-edit guard for the Brain (AGENT.md) editor (CORR-093)
+  // Unsaved-edit guard for the Brain (AGENT.md) / Learnings editors (CORR-093)
   const [brainDirty, setBrainDirty] = useState(false);
+  const [learningsDirty, setLearningsDirty] = useState(false);
   const [showBrainDiscardConfirm, setShowBrainDiscardConfirm] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  const [deleteStrategy, setDeleteStrategy] = useState<StrategySummary | null>(null);
+  const [deletePlaybook, setDeletePlaybook] = useState<PlaybookSummary | null>(null);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
+  const [strategyFilter, setStrategyFilter] = useState("");
+  const [reviewerSessionNum, setReviewerSessionNum] = useState<number | null>(null);
+  const [reviewerKind, setReviewerKind] = useState<"session" | "experiment">("session");
+  const [transcriptSession, setTranscriptSession] = useState<SessionInfo | null>(null);
 
-  // Routine instances for ReportBrowser (routines live at the agent level,
-  // shared across all of this agent's strategies)
+  // Routine instances for ReportBrowser (routines live at the agent level)
   const { data: routineInstances = [] } = useQuery({
     queryKey: ["routine-instances"],
     queryFn: api.getRoutineInstances,
@@ -305,11 +412,11 @@ export function AgentDetail() {
     },
   });
 
-  const deleteStrategyMutation = useMutation({
-    mutationFn: () => api.deleteStrategy(slug!, deleteStrategy!.slug),
+  const deletePlaybookMutation = useMutation({
+    mutationFn: () => api.deleteStrategy(slug!, deletePlaybook!.slug),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agent", slug] });
-      setDeleteStrategy(null);
+      setDeletePlaybook(null);
     },
   });
 
@@ -318,20 +425,19 @@ export function AgentDetail() {
     setShowBrainModal(false);
     setShowBrainDiscardConfirm(false);
     setBrainDirty(false);
+    setLearningsDirty(false);
   };
 
   // Backdrop click, Escape and the X button all route through here: with
   // unsaved edits they ask for confirmation instead of silently discarding.
   const requestCloseBrainModal = () => {
-    if (brainDirty) {
+    if (brainDirty || learningsDirty) {
       setShowBrainDiscardConfirm(true);
     } else {
       closeBrainModal();
     }
   };
 
-  // Close modals on Escape (the discard dialog owns Escape while open;
-  // the delete dialogs handle Escape internally via ConfirmDialog).
   useEscapeKey(showBrainModal && !showBrainDiscardConfirm, requestCloseBrainModal);
 
   const { data: agent, isLoading, error } = useQuery({
@@ -340,6 +446,31 @@ export function AgentDetail() {
     enabled: !!slug,
     refetchInterval: 5000,
   });
+
+  // Live executor streaming for running instances
+  const instances = agent?.instances || [];
+  const hasRunning = instances.length > 0;
+  const serverName = instances[0]?.server_name || agent?.server_name || "";
+  const controllerIds = useMemo(
+    () => instances.map((inst) => inst.agent_id).filter(Boolean),
+    [instances],
+  );
+  const { executors: liveExecutors } = useAgentExecutors(
+    hasRunning && serverName ? serverName : null,
+    controllerIds,
+  );
+  const chartGroups = useMemo(
+    () => (serverName ? groupExecutorsByMarket(liveExecutors) : []),
+    [liveExecutors, serverName],
+  );
+
+  const handleSessionClick = useCallback(
+    (sessionNum: number, kind?: "session" | "experiment") => {
+      setReviewerSessionNum(sessionNum);
+      setReviewerKind(kind || "session");
+    },
+    [],
+  );
 
   if (error && !agent) {
     return (
@@ -370,8 +501,12 @@ export function AgentDetail() {
   }
 
   const strategies = agent.strategies || [];
-  const running = strategies.filter((s) => s.status === "running");
-  const isRunning = running.length > 0;
+  const status = deriveAgentStatus(agent);
+  const isRunning = agent.status === "running";
+  const tickSessions = (agent.sessions || []).filter((s) => s.kind === "tick_loop");
+  const reviewerOpen = reviewerSessionNum !== null;
+  const resolvedReviewerSession =
+    reviewerSessionNum ?? (tickSessions.length > 0 ? tickSessions[0].number : 0);
 
   return (
     <div className="w-full">
@@ -422,6 +557,14 @@ export function AgentDetail() {
                   <Server className="h-3 w-3" /> {agent.server_name}
                 </span>
               )}
+              {Object.keys(agent.risk_limits || {}).length > 0 && (
+                <span
+                  className="flex items-center gap-1 rounded border border-amber-500/30 bg-amber-500/10 px-2.5 py-1 font-mono text-amber-400"
+                  title={`Risk baseline (governs unattended delegations): ${JSON.stringify(agent.risk_limits)}`}
+                >
+                  <Zap className="h-3 w-3" /> risk baseline
+                </span>
+              )}
             </div>
           </div>
           <div className="flex items-center gap-2">
@@ -436,7 +579,7 @@ export function AgentDetail() {
             <button
               onClick={() => setShowBrainModal(true)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-              title="Agent brain (AGENT.md)"
+              title="Agent brain (AGENT.md) & learnings"
             >
               <FileText className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Brain</span>
@@ -445,18 +588,19 @@ export function AgentDetail() {
               onClick={() => setShowDeleteConfirm(true)}
               disabled={isRunning}
               className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-30"
-              title={isRunning ? "Stop all strategies before deleting" : "Delete agent"}
+              title={isRunning ? "Stop all sessions before deleting" : "Delete agent"}
             >
               <Trash2 className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">Delete</span>
             </button>
             <button
               onClick={() => setShowCreate(true)}
-              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white transition-all hover:shadow-lg hover:shadow-[var(--color-primary)]/20"
+              className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
             >
-              <Plus className="h-4 w-4" />
-              New Strategy
+              <Plus className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">New Strategy</span>
             </button>
+            <AgentControls slug={agent.slug} strategies={strategies} status={status} />
           </div>
         </div>
       </div>
@@ -468,20 +612,60 @@ export function AgentDetail() {
         </div>
       )}
 
-      {/* Strategies */}
-      <div>
+      {/* Market Context Strip */}
+      {hasRunning && liveExecutors.length > 0 && (
+        <div className="mb-6">
+          <AgentMarketStrip serverName={serverName} executors={liveExecutors} />
+        </div>
+      )}
+
+      {/* Live Executor Charts */}
+      {hasRunning && chartGroups.length > 0 && (
+        <div className="mb-6 space-y-4">
+          <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+            <Zap className="h-3.5 w-3.5" /> Live Executors
+          </h3>
+          {chartGroups.map(([key, group]) => (
+            <ExecutorChart
+              key={key}
+              server={serverName}
+              executors={group}
+              connector={group[0].connector}
+              tradingPair={group[0].trading_pair}
+              height={300}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Running Instances */}
+      {hasRunning && (
+        <div className="mb-6 rounded-lg border border-emerald-500/20 bg-[var(--color-surface)] p-4">
+          <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-emerald-400">
+            <Zap className="h-3.5 w-3.5" /> Active Sessions ({instances.length})
+          </h3>
+          <div className="space-y-3">
+            {instances.map((inst) => (
+              <InstanceCard key={inst.agent_id} instance={inst} />
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Playbooks */}
+      <div className="mb-6">
         <h2 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
           <CircleDot className="h-3 w-3" />
           Strategies ({strategies.length})
         </h2>
         {strategies.length === 0 ? (
-          <div className="flex h-56 flex-col items-center justify-center rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/50">
+          <div className="flex h-40 flex-col items-center justify-center rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/50">
             <CircleDot className="mb-3 h-9 w-9 text-[var(--color-text-muted)]/30" />
             <p className="mb-1 text-sm font-medium text-[var(--color-text)]">No strategies yet</p>
             <p className="mb-4 text-xs text-[var(--color-text-muted)]">
               {agent.consultable
-                ? "This agent is consult-only. Add a strategy to make it loop."
-                : "Add a playbook strategy for this agent to loop."}
+                ? "This agent is consult-only. Add a playbook to make it loop."
+                : "Add a playbook for this agent to loop."}
             </p>
             <button
               onClick={() => setShowCreate(true)}
@@ -493,16 +677,64 @@ export function AgentDetail() {
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {strategies.map((strategy) => (
-              <StrategyCard
-                key={strategy.slug}
+            {strategies.map((playbook) => (
+              <PlaybookCard
+                key={playbook.slug}
                 agentSlug={agent.slug}
-                strategy={strategy}
-                onDelete={() => setDeleteStrategy(strategy)}
+                playbook={playbook}
+                onDelete={() => setDeletePlaybook(playbook)}
               />
             ))}
           </div>
         )}
+      </div>
+
+      {/* Performance & sessions (with playbook filter chips) */}
+      {(tickSessions.length > 0 || agent.experiments.length > 0 || hasRunning) && (
+        <div className="mb-6">
+          {strategies.length > 1 && (
+            <div className="mb-3 flex items-center gap-1.5">
+              <button
+                onClick={() => setStrategyFilter("")}
+                className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                  strategyFilter === ""
+                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                }`}
+              >
+                All
+              </button>
+              {strategies.map((s) => (
+                <button
+                  key={s.slug}
+                  onClick={() => setStrategyFilter(s.slug)}
+                  className={`rounded-full px-3 py-1 text-xs font-medium transition-all ${
+                    strategyFilter === s.slug
+                      ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                  }`}
+                >
+                  {s.name}
+                </button>
+              ))}
+            </div>
+          )}
+          <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+            <PerformancePanel
+              slug={agent.slug}
+              strategy={strategyFilter}
+              onSessionClick={handleSessionClick}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Delegations & consults */}
+      <div className="mb-6">
+        <BackgroundRunsPanel
+          sessions={agent.sessions || []}
+          onOpen={setTranscriptSession}
+        />
       </div>
 
       {/* Routines ReportBrowser (full-screen overlay, filtered to this agent) */}
@@ -514,14 +746,14 @@ export function AgentDetail() {
         />
       )}
 
-      {/* Brain Modal (AGENT.md) */}
+      {/* Brain & Learnings Modal */}
       {showBrainModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
           <div className="absolute inset-0 bg-black/60" onClick={requestCloseBrainModal} />
-          <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-5xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
+          <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-7xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
             <div className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-3">
               <h3 className="text-sm font-semibold text-[var(--color-text)]">
-                Agent Brain — {agent.name}
+                Brain & Learnings — {agent.name}
               </h3>
               <button
                 onClick={requestCloseBrainModal}
@@ -531,20 +763,35 @@ export function AgentDetail() {
               </button>
             </div>
             <div className="flex-1 overflow-y-auto p-6">
-              <MarkdownEditor
-                label="Brain"
-                sublabel="AGENT.md — identity & domain knowledge"
-                content={agent.agent_md}
-                onSave={(value) => api.updateAgentMd(agent.slug, value)}
-                invalidateKey={["agent", slug]}
-                onDirtyChange={setBrainDirty}
-              />
+              <div className="grid h-full grid-cols-1 gap-6 lg:grid-cols-2">
+                <MarkdownEditor
+                  label="Brain"
+                  sublabel="AGENT.md — identity & domain knowledge"
+                  content={agent.agent_md}
+                  onSave={(value) => api.updateAgentMd(agent.slug, value)}
+                  invalidateKey={["agent", slug]}
+                  onDirtyChange={setBrainDirty}
+                />
+                <MarkdownEditor
+                  label="Learnings"
+                  sublabel="agent-level — all playbooks, [strategy]-prefixed"
+                  content={agent.learnings}
+                  onSave={(value) => api.updateAgentLearnings(agent.slug, value)}
+                  invalidateKey={["agent", slug]}
+                  onDirtyChange={setLearningsDirty}
+                />
+              </div>
             </div>
           </div>
-          {/* Unsaved-changes confirmation before discarding edits */}
           {showBrainDiscardConfirm && (
             <DiscardChangesDialog
-              fileName="AGENT.md"
+              fileName={
+                brainDirty && learningsDirty
+                  ? "AGENT.md & learnings"
+                  : brainDirty
+                    ? "AGENT.md"
+                    : "learnings"
+              }
               onDiscard={closeBrainModal}
               onClose={() => setShowBrainDiscardConfirm(false)}
             />
@@ -565,25 +812,49 @@ export function AgentDetail() {
         title="Delete Agent"
         isPending={deleteAgentMutation.isPending}
         isError={deleteAgentMutation.isError}
-        errorText="Failed to delete agent. It may have running strategies."
+        errorText="Failed to delete agent. It may have running sessions."
         onConfirm={() => deleteAgentMutation.mutate()}
         onClose={() => setShowDeleteConfirm(false)}
       >
-        Delete <strong className="text-[var(--color-text)]">{agent.name}</strong> and all its strategies? This cannot be undone.
+        Delete <strong className="text-[var(--color-text)]">{agent.name}</strong>? Its history stays on disk; the identity is removed. This cannot be undone.
       </ConfirmDialog>
 
-      {/* Delete Strategy Confirmation */}
+      {/* Delete Playbook Confirmation */}
       <ConfirmDialog
-        open={!!deleteStrategy}
+        open={!!deletePlaybook}
         title="Delete Strategy"
-        isPending={deleteStrategyMutation.isPending}
-        isError={deleteStrategyMutation.isError}
-        errorText="Failed to delete strategy. It may be running."
-        onConfirm={() => deleteStrategyMutation.mutate()}
-        onClose={() => setDeleteStrategy(null)}
+        isPending={deletePlaybookMutation.isPending}
+        isError={deletePlaybookMutation.isError}
+        errorText="Failed to delete strategy. It may have a running session."
+        onConfirm={() => deletePlaybookMutation.mutate()}
+        onClose={() => setDeletePlaybook(null)}
       >
-        Delete <strong className="text-[var(--color-text)]">{deleteStrategy?.name}</strong>? This cannot be undone.
+        Delete playbook <strong className="text-[var(--color-text)]">{deletePlaybook?.name}</strong>? Its past sessions stay in the agent's history. This cannot be undone.
       </ConfirmDialog>
+
+      {/* Session Reviewer Overlay (tick sessions + dry runs) */}
+      {reviewerOpen && (tickSessions.length > 0 || agent.experiments.length > 0) && (
+        <SessionReviewer
+          slug={agent.slug}
+          agentName={agent.name}
+          sessions={tickSessions}
+          experiments={agent.experiments}
+          initialSessionNum={resolvedReviewerSession}
+          initialKind={reviewerKind}
+          serverName={serverName}
+          controllerIds={controllerIds}
+          onClose={() => setReviewerSessionNum(null)}
+        />
+      )}
+
+      {/* Delegation/consult transcript viewer */}
+      {transcriptSession && (
+        <TranscriptModal
+          slug={agent.slug}
+          session={transcriptSession}
+          onClose={() => setTranscriptSession(null)}
+        />
+      )}
     </div>
   );
 }

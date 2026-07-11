@@ -41,8 +41,11 @@ agents/{slug}/
   AGENT.md                         # identity + role (the brain) — step 1
   routines/*.py                    # agent-scoped analysis scripts — step 3
   skills/{name}/SKILL.md           # the agent's own reusable playbooks
-  strategies/{slug}/strategy.md    # OPTIONAL loop playbook — step 4
-  sessions/session_N/              # run journals/snapshots (created at runtime)
+  strategies/{sslug}/strategy.md   # OPTIONAL loop playbooks (pure templates) — step 4
+  sessions/session_N/              # ALL run history: tick sessions, delegations,
+                                   # consults (meta.yml says kind + strategy)
+  dry_runs/experiment_N.md         # dry-run snapshots
+  learnings.md                     # agent-level learnings ([strategy] prefixed)
 ```
 
 Label each message with the current step, e.g. `[Step 2 — Consult it]`.
@@ -108,16 +111,16 @@ as the upgrade, then guide the user through it one routine at a time:
 
 1. **Define** — agree on what this routine should output and why the agent needs it.
 2. **Create** — write it with the `routine_builder` skill for the API. Routines live at
-   the agent level and are shared across consults and any future loop. Pass the **agent
-   slug** as `strategy_id` (it accepts a bare agent slug or `agent_slug.strategy_slug`):
+   the agent level and are shared across consults and any future loop. Pass the
+   `agent_slug`:
    ```
-   manage_routines(action="create_routine", strategy_id="<agent_slug>",
+   manage_routines(action="create_routine", agent_slug="<agent_slug>",
                    name="band_scanner", code="<python>")
    ```
 3. **Analyze the output** — run it and read it together; iterate until it's clean and
    useful:
    ```
-   manage_trading_agent(action="run_routine", strategy_id="<agent_slug>",
+   manage_trading_agent(action="run_routine", agent_slug="<agent_slug>",
                         name="band_scanner", config={…})
    ```
 
@@ -166,7 +169,8 @@ fix, retry once, journal it).
 
 **Dry run before live** (if it trades):
 ```
-manage_trading_agent(action="start_agent", strategy_id="<agent_slug.strategy_slug>",
+manage_trading_agent(action="start_agent", agent_slug="<agent_slug>",
+    strategy="<strategy_slug>",   # optional when the agent has exactly one strategy
     config={"execution_mode": "dry_run", "agent_key": "ollama:llama3.1",
             "trading_context": "Trade BTC-USDT on binance_perpetual",
             "frequency_sec": 60, "total_amount_quote": 100,
@@ -176,9 +180,12 @@ Review with `trading_agent_journal_read(agent_id=…, section="run:1")`: routine
 right, decision logic sound, conditional language ("would place…"), no real create/stop
 calls, risk rules respected. Don't go live until the user is satisfied.
 
-**Go live:** offer `run_once` (single live tick), `loop` (continuous), or `loop` +
-`max_ticks`. Confirm the live model, start, confirm it's running, give monitoring
-commands. Always include risk limits when a loop agent can trade.
+**Go live:** offer a single live tick (`max_ticks: 1`), `loop` (continuous), or `loop` +
+`max_ticks`. Every live run is a real session — journal, frozen config, risk pre-flight,
+and a `{agent_slug}_{N}` id in the track record. Confirm the live model, start, confirm
+it's running, give monitoring commands. Always include risk limits when a loop agent can
+trade — and set the agent-level `risk_limits` baseline (create/update_agent) so unattended
+delegations to it are risk-gated too.
 
 ## Monitoring existing agents
 1. `manage_trading_agent(action="list_agent_definitions")` — all agents + capabilities
