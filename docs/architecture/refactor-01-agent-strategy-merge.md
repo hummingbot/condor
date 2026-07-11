@@ -100,6 +100,10 @@ server_name: moneymaker
 loopable: true                      # NEW — explicit opt-in to the tick loop
 default_config: {frequency_sec: 120, total_amount_quote: 500, risk_limits: {...}}
 default_trading_context: ""
+launch_presets:                     # NEW (optional) — named launch overlays
+  jto: {trading_context: "Do MM on JTO-USDT on binance_perpetual", total_amount_quote: 300}
+  sol-tight: {trading_context: "Do MM on SOL-USDT on binance_perpetual",
+              risk_limits: {max_open_executors: 6}}
 created_by: ...
 created_at: ...
 ---
@@ -130,6 +134,15 @@ Decisions baked into this shape:
   conflicts with the agent's.
 - **Dropped fields:** `Strategy.skills` (vestigial, see §1). `Strategy.name`/
   `description`/`created_*` are superseded by the agent's own.
+- **`launch_presets` replace "second strategy as saved preset."** Under the
+  two-tier model, the only way to *persist* a per-market setup (same playbook,
+  different capital/context/caps) was to clone the strategy. Post-merge, a
+  preset is a named overlay merged over `default_config` at launch —
+  `start_agent(agent_slug=…, preset="jto")`; an explicit `config` param still
+  wins over the preset. Unknown preset name ⇒ loud error, never a silent
+  fall-through to defaults. This keeps the multi-instance workflow (§8)
+  launchable by name instead of by retyping config, without resurrecting the
+  strategy tier.
 
 ### 3.2 Identity keys
 
@@ -276,7 +289,7 @@ storage, backwards.
 ### MCP server (`mcp_servers/condor/`)
 | File | Change |
 |---|---|
-| `tools/trading_agent.py` | Delete `_manage_strategy` and the 5 strategy actions. `create_agent`/`update_agent` accept `loopable`, `default_config` (as `config`), `default_trading_context`. `start_agent` takes `agent_slug`; lifecycle URLs become `/agents/{slug}/start|stop|pause|resume|shutdown`. `_list_agent_definitions` reports `loopable` from the flag. Journal/monitoring resolve via the new id format. Add a `list_sessions` action (kind-aware) so chat can enumerate any agent's history, including delegations. |
+| `tools/trading_agent.py` | Delete `_manage_strategy` and the 5 strategy actions. `create_agent`/`update_agent` accept `loopable`, `default_config` (as `config`), `default_trading_context`, `launch_presets`. `start_agent` takes `agent_slug` and optional `preset` (§3.1); lifecycle URLs become `/agents/{slug}/start|stop|pause|resume|shutdown`. `_list_agent_definitions` reports `loopable` from the flag. Journal/monitoring resolve via the new id format. Add a `list_sessions` action (kind-aware) so chat can enumerate any agent's history, including delegations. |
 | `tools/routines.py`, `tools/skills.py` | `strategy_id` param → `agent_slug` (the bare-slug fallback already in `_get_agent_routines_dir` becomes the *only* behavior; delete the composite-key branch). No dual-accept: tool schemas are re-injected per session, and in-flight sessions breaking on restart is acceptable. |
 | `condor_client.py` | `runkey_from_agent_id` → `slug_from_agent_id` (strip trailing `_N`/`_eN`); delete `agent_strategy_from_agent_id` and the alias. |
 | `server.py` | Rewrite `manage_trading_agent` / `manage_routines` / `manage_skill` docstrings (this is the LLM-facing API — treat it as a first-class deliverable, not doc polish). |
@@ -365,7 +378,8 @@ Data inventoried on this machine: 2 strategy.md files, 5 experiments,
   This is the one real capability loss. Mitigations: (a) it is unused today —
   every agent has ≤1 strategy; (b) parameterization already covers the common
   case (pmm_mister_operator takes pair/connector from launch config, so "same
-  playbook, different market" is one agent with different session configs);
+  playbook, different market" is one agent with different session configs, now
+  persistable as named `launch_presets`, §3.1);
   (c) the systemic fix is a shared-skills tier, designed in
   [refactor-04](refactor-04-shared-skills-tier.md) but **tabled** — it is
   purely additive and can land whenever a second same-domain agent makes the
@@ -393,6 +407,20 @@ Data inventoried on this machine: 2 strategy.md files, 5 experiments,
 - **Delegation while the tick loop runs.** Both allocate sessions concurrently
   → handled by mkdir-allocation (§4). Delegations never touch `journal.md`
   (only tick sessions have one), so no write contention.
+- **Concurrent tick sessions of one agent are supported today and preserved.**
+  Neither start path has an already-running guard (web `agents.py:1076`, MCP
+  `start_agent` both construct a fresh `TickEngine` unconditionally) and the
+  UI already models `instances: list[RunningInstance]` — "same playbook,
+  three markets" is three launches (now: three presets). Every isolation that
+  makes this work survives the merge: per-session registry entry, journal,
+  frozen config, risk caps, `controller_id`. Two consequences to know:
+  (a) *learnings mixing* — all instances share the agent-level `learnings.md`,
+  so pair-specific learnings surface in every market's ticks; the playbook
+  should prefix market-specific learnings with the pair, and isolation can be
+  revisited if the noise becomes real. (b) *no aggregate exposure cap* — risk
+  caps are per-session, so N instances can hold N× the position cap. This is
+  pre-existing (identical under the strategy tier), but the merged agent is
+  now the natural home for a future agent-level ceiling.
 - **Perf rollups must skip non-tick sessions.** `enumerate_agent_ids` feeding
   `fetch_agent_performance_batch` would otherwise issue pointless backend
   queries for delegation/consult session ids (worse: a delegation session id

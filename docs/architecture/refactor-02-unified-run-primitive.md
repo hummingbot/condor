@@ -388,6 +388,14 @@ budgets) lands once instead of twice.
    existing tick tests.
 4. Flip delegation defaults to zero-seeded `risk_gate` per §4.1 (the one
    deliberate behavior change, in its own PR with its own tests).
+   **Migration item for the flip:** update
+   `agents/market_making_expert/skills/pmm_mister_deploy/SKILL.md` Step 6 —
+   its `manage_bots(action="deploy", …)` example declares **no**
+   `max_global_drawdown_quote`, so the new gate would block the first
+   delegated deployment. The skill must pass the loss cap explicitly (from
+   the agent's `default_config.risk_limits`). Same audit as refactor-01's
+   prose-prompt checklist: grep agent bodies and skills for `deploy` examples
+   before flipping.
 
 Do this after refactor-01 lands: the session-persistence hook in `run_agent`
 assumes the unified `sessions/` envelope, and the file churn overlaps heavily
