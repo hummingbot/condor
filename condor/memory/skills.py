@@ -274,6 +274,67 @@ class SkillStore:
         _atomic_write(path, _render_skill(meta, body))
         return self.read(slug) or {"saved": True, "name": slug}
 
+    def patch(
+        self,
+        name: str,
+        old_string: str,
+        new_string: str,
+        changelog: str,
+        updated_by: str = "",
+    ) -> dict:
+        """Delta-edit a skill's BODY: replace ``old_string`` with ``new_string``.
+
+        The curation loop's only write primitive (refactor-05 Phase 3):
+        full-body rewrites are reserved for humans because one bad rewrite can
+        collapse a playbook (ACE's context-collapse failure). ``old_string``
+        must match the body exactly once; ``changelog`` (one line, required)
+        and ``updated_by`` are stamped into the skill's provenance metadata.
+        """
+        if not self.skills_dir:
+            return {"error": "this assistant has no skills library"}
+        if not old_string or new_string is None:
+            return {"error": "old_string and new_string are required"}
+        if not (changelog or "").strip():
+            return {"error": "changelog (one line: what changed and why) is required"}
+
+        slug = _skill_slug(name)
+        skill_dir = self._locate(slug)
+        if skill_dir is None:
+            return {"error": f"Skill '{name}' not found"}
+        if skill_dir.parent != self.skills_dir:
+            return self._shared_readonly_error(slug)
+
+        path = skill_dir / "SKILL.md"
+        meta, body = _parse_frontmatter(path.read_text())
+        meta.setdefault("name", slug)
+        count = body.count(old_string)
+        if count == 0:
+            return {
+                "error": "old_string not found in the skill body — read the "
+                "skill and copy the exact text to replace"
+            }
+        if count > 1:
+            return {
+                "error": f"old_string matches {count} places — include more "
+                "surrounding context so it is unique"
+            }
+        body = body.replace(old_string, new_string)
+
+        md = dict(meta.get("metadata") or {})
+        stamp = f"{_utcnow()[:10]} {updated_by}".strip()
+        md["condor-updated-by"] = stamp
+        entry = f"[{stamp}] {changelog.strip().splitlines()[0]}"
+        prior = md.get("condor-changelog", "")
+        md["condor-changelog"] = (prior + " | " + entry if prior else entry)[-1000:]
+        meta["metadata"] = md
+
+        _atomic_write(path, _render_skill(meta, body))
+        return {
+            "patched": True,
+            "name": slug,
+            "changelog": entry,
+        }
+
     def delete(self, name: str) -> dict:
         """Delete a skill (and its now-empty folder)."""
         if not self.skills_dir:
@@ -470,7 +531,8 @@ class SkillStore:
         """Yield (meta, body) for every skill across the read tiers.
 
         Sorted by slug (stable injection order); on a name clash the more
-        specific tier wins (local shadows shared).
+        specific tier wins (local shadows shared). ``meta["_tier"]`` marks
+        entries resolved from a secondary (read-only) tier.
         """
         merged: dict[str, Path] = {}
         for root in self._read_dirs:
@@ -485,6 +547,8 @@ class SkillStore:
             except Exception:
                 continue
             meta.setdefault("name", slug)
+            if f.parent.parent != self.skills_dir:
+                meta["_tier"] = "shared"
             yield meta, body
 
     def _index_lines(self) -> list[str]:
@@ -497,5 +561,7 @@ class SkillStore:
             line = f"- [{name}] {desc}"
             if ref:
                 line += f"  (→ routine: {ref})"
+            if meta.get("_tier") == "shared":
+                line += "  [shared — read-only]"
             lines.append(line)
         return lines

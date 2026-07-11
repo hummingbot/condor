@@ -327,6 +327,10 @@ async def manage_trading_agent(
       per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
     - "pause_agent": Pause a running agent (requires agent_id)
     - "resume_agent": Resume a paused agent (requires agent_id)
+    - "curate_skills": Run a skill-curation pass for an agent (requires
+      agent_slug) — folds accumulated learnings/session experience into the
+      agent's LOCAL skills via delta patches; shared-tier promotions are only
+      proposed, never applied (the user approves them in chat)
 
     Actions -- Routines (scoped to an agent):
     - "list_routines": List global + agent-local routines for an agent (requires agent_slug)
@@ -449,6 +453,9 @@ async def manage_skill(
     scope: str | None = None,
     file: str | None = None,
     content: str | None = None,
+    old_string: str | None = None,
+    new_string: str | None = None,
+    changelog: str | None = None,
 ) -> dict:
     """Manage your SKILLS — playbooks (know-how) you can follow and refine.
 
@@ -498,7 +505,12 @@ async def manage_skill(
     - "search": Keyword search over the skills (requires query).
     - "list": Return the skills index (one line per skill).
     - "create": Add/overwrite a skill (requires name, description, body).
-    - "edit": Patch fields of a skill (requires name + any of description/body/references_routine).
+    - "patch": Delta-edit a skill BODY (requires name, old_string, new_string,
+      changelog). old_string must match exactly once; provenance is stamped.
+      This is the ONLY skill-write the curation loop may use.
+    - "edit": Replace fields wholesale (requires name + any of description/body/
+      references_routine). Human-directed use; prefer "patch" for incremental
+      improvements — full-body rewrites lose detail.
     - "delete": Remove a skill (requires name).
 
     Args:
@@ -516,6 +528,9 @@ async def manage_skill(
             (chat-only; mutually exclusive with agent_slug).
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
+        old_string: Exact existing body text to replace (for patch; must be unique).
+        new_string: Replacement text (for patch).
+        changelog: One line — what changed and why (required for patch).
 
     Returns:
         Action-specific result dict.
@@ -532,6 +547,9 @@ async def manage_skill(
         scope=scope,
         file=file,
         content=content,
+        old_string=old_string,
+        new_string=new_string,
+        changelog=changelog,
     )
 
 

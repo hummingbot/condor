@@ -1,6 +1,6 @@
 # Refactor 05 — Skills: one portable format, shared tiers, curated self-improvement
 
-Status: **Phases 1-2 implemented** (2026-07-11); Phases 3-4 proposed · Builds on:
+Status: **Phases 1-3 implemented** (2026-07-11); Phase 4 deferred (skipped by decision until the loop accumulates history) · Builds on:
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) (implemented) and
 [refactor-04](refactor-04-shared-skills-tier.md) (tabled → absorbed here as
 Phase 2)
@@ -418,7 +418,7 @@ Each phase lands green and independently.
    at it. Playbooks slim to decision logic + "read skill X before Y".
 3. Web/MCP: shared-tier listing in the chat's skill management.
 
-### Phase 3 — The curation loop
+### Phase 3 — The curation loop ✅ (implemented 2026-07-11)
 
 1. `SkillStore.patch(name, old, new)` + `manage_skill(action="patch")`;
    provenance fields updated on every write.

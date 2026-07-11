@@ -443,3 +443,55 @@ def test_shared_scope_and_agent_slug_mutually_exclusive(project_root):
         SkillStore(agent_slug="x", scope="shared")
     with pytest.raises(ValueError):
         SkillStore(scope="bogus")
+
+
+# ── patch (delta edits, refactor-05 Phase 3) ──
+
+
+def test_patch_applies_delta_with_provenance(project_root):
+    _write_skill(project_root, "mm_expert", "grid-rules",
+                 description="d", body="Spreads: 0.001 floor.\nLeverage: 5 max.")
+    s = SkillStore("mm_expert")
+    res = s.patch(
+        "grid-rules",
+        "Spreads: 0.001 floor.",
+        "Spreads: 0.0012 floor (fees ate 0.001 twice).",
+        changelog="raise spread floor per fee learnings",
+        updated_by="agent:mm_expert",
+    )
+    assert res["patched"] is True
+    body = s.read("grid-rules")["body"]
+    assert "0.0012 floor" in body
+    assert "Leverage: 5 max." in body  # untouched remainder
+    # Provenance stamped in metadata (visible in the raw file)
+    raw = (project_root / "agents" / "mm_expert" / "skills" / "grid-rules" / "SKILL.md").read_text()
+    assert "condor-updated-by" in raw
+    assert "raise spread floor" in raw
+
+    # A second patch appends to the changelog rather than replacing it.
+    s.patch("grid-rules", "Leverage: 5 max.", "Leverage: 3 max.",
+            changelog="cut leverage", updated_by="agent:mm_expert")
+    raw = (project_root / "agents" / "mm_expert" / "skills" / "grid-rules" / "SKILL.md").read_text()
+    assert "raise spread floor" in raw and "cut leverage" in raw
+
+
+def test_patch_guards(project_root):
+    _write_skill(project_root, "mm_expert", "grid-rules", description="d",
+                 body="alpha beta alpha")
+    _write_shared(project_root, "executor-mechanics")
+    s = SkillStore("mm_expert")
+
+    assert "error" in s.patch("ghost", "x", "y", changelog="c")
+    assert "not found" in s.patch("grid-rules", "zeta", "y", changelog="c")["error"]
+    assert "matches 2" in s.patch("grid-rules", "alpha", "y", changelog="c")["error"]
+    assert "changelog" in s.patch("grid-rules", "beta", "y", changelog="")["error"]
+    assert "read-only" in s.patch("executor-mechanics", "Shared", "x", changelog="c")["error"]
+
+
+def test_shared_skills_marked_in_index(project_root):
+    _write_shared(project_root, "executor-mechanics")
+    _write_skill(project_root, "mm_expert", "local-skill", description="d")
+    index = SkillStore("mm_expert").list_index()
+    assert "[executor-mechanics]" in index and "[shared — read-only]" in index
+    local_line = [l for l in index.splitlines() if "local-skill" in l][0]
+    assert "[shared" not in local_line

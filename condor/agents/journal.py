@@ -499,6 +499,57 @@ class JournalManager:
             new_text = full_text.rstrip() + f"\n\n## {section_header}\n{new_section}\n"
         path.write_text(new_text)
 
+    def promote_learning(self, text_content: str) -> bool:
+        """Move a learning line to the ``## Promoted`` section (curation).
+
+        Called by the skill-curation pass after folding a learning into a
+        skill: the entry stops occupying the capped active sections but stays
+        on record (provenance for what fed which skill). Matches by normalized
+        text against the active category sections. Returns False when nothing
+        matched.
+        """
+        path = self._learnings_path()
+        if not path or not path.exists():
+            return False
+        full_text = path.read_text()
+        target = _normalize(text_content)
+
+        for cat_header in LEARNING_CATEGORIES.values():
+            pattern = rf"(^## {re.escape(cat_header)}\n)(.*?)(?=^## |\Z)"
+            m = re.search(pattern, full_text, re.MULTILINE | re.DOTALL)
+            if not m:
+                continue
+            lines = m.group(2).strip().splitlines()
+            for line in lines:
+                if not line.startswith("- "):
+                    continue
+                stripped = re.sub(
+                    r"^- (\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] |\[\d{2}:\d{2}\] )?",
+                    "",
+                    line,
+                )
+                norm = _normalize(stripped)
+                if norm == target or (target and target in norm):
+                    remaining = [l for l in lines if l != line]
+                    new_text = (
+                        full_text[: m.start(2)]
+                        + ("\n".join(remaining) + "\n\n" if remaining else "")
+                        + full_text[m.end(2) :]
+                    )
+                    if "## Promoted" in new_text:
+                        new_text = re.sub(
+                            r"(^## Promoted\n)",
+                            rf"\g<1>{line}\n",
+                            new_text,
+                            count=1,
+                            flags=re.MULTILINE,
+                        )
+                    else:
+                        new_text = new_text.rstrip() + f"\n\n## Promoted\n{line}\n"
+                    path.write_text(new_text)
+                    return True
+        return False
+
     # ------------------------------------------------------------------
     # Reading (journal)
     # ------------------------------------------------------------------

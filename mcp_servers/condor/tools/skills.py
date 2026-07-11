@@ -45,6 +45,9 @@ async def manage_skill(
     scope: str | None = None,
     file: str | None = None,
     content: str | None = None,
+    old_string: str | None = None,
+    new_string: str | None = None,
+    changelog: str | None = None,
 ) -> dict:
     if scope == "shared":
         # The shared tier is chat-managed: a launched agent must never hold
@@ -109,6 +112,18 @@ async def manage_skill(
 
     elif action == "list":
         return {"index": store.list_index()}
+
+    elif action == "patch":
+        if not name:
+            return {"error": "name is required for patch"}
+        updated_by = f"agent:{settings.agent_slug}" if settings.agent_slug else source
+        return store.patch(
+            name,
+            old_string or "",
+            new_string if new_string is not None else "",
+            changelog or "",
+            updated_by=updated_by,
+        )
 
     elif action == "edit":
         if not name:

@@ -403,6 +403,14 @@ async def _agent_lifecycle(
                 },
             )
 
+        if action == "curate_skills":
+            if not agent_slug:
+                return {"error": "agent_slug is required"}
+            return await call_main_api(
+                "POST",
+                f"/agents/{agent_slug}/curate?chat_id={settings.chat_id}",
+            )
+
         if action in ("stop_agent", "pause_agent", "resume_agent", "shutdown_agent"):
             if not agent_id:
                 return {"error": "agent_id is required"}
@@ -565,6 +573,14 @@ def journal_write(
         return {"error": "no journal available for this agent"}
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
+    if entry_type == "promote_learning":
+        # Curation: move a learning to the Promoted section after folding it
+        # into a skill (frees the active-pool cap, keeps the record).
+        ok = jm.promote_learning(text)
+        return {"promoted": ok} if ok else {
+            "error": "no active learning matched that text — copy it exactly "
+            "from the [LEARNINGS] block"
+        }
     if entry_type == "learning":
         # Provenance: learnings pool at the agent level, so tick-session entries
         # carry their strategy slug (live engine, else the session's meta.yml).
@@ -708,6 +724,7 @@ async def manage_trading_agent(
         "resume_agent",
         "shutdown_agent",
         "list_agents",
+        "curate_skills",
     }
     if action in lifecycle_actions:
         return await _agent_lifecycle(action, agent_slug, strategy, agent_id, config)
