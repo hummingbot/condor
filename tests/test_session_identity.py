@@ -258,3 +258,59 @@ def test_consult_session_persisted_with_retention(tmp_path, monkeypatch):
     assert meta["task"] == "q2"
     transcript = (agent_dir / "sessions" / "session_3" / "transcript.md").read_text()
     assert "the answer" in transcript
+
+
+def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
+    """The /agents/{slug}/start route must resolve risk_limits as
+    request config > strategy default_config > AGENT.md baseline > schema
+    defaults — the baseline must not be masked by load_full_config's 500/5
+    schema defaults (regression: live dry run showed 500/5 for a 0/0 agent)."""
+    from types import SimpleNamespace
+
+    import condor.web.routes.agents as agents_routes
+
+    _patch_roots(monkeypatch, tmp_path)
+    agent_dir = tmp_path / "watcher"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "AGENT.md").write_text(
+        "---\nname: watcher\nserver_required: true\n"
+        "risk_limits:\n  max_position_size_quote: 0\n  max_open_executors: 0\n"
+        "---\n\nBody.\n"
+    )
+    sdir = agent_dir / "strategies" / "snap"
+    sdir.mkdir(parents=True)
+    (sdir / "strategy.md").write_text(
+        "---\nname: snap\ndefault_config:\n  frequency_sec: 120\n---\n\nTick.\n"
+    )
+
+    captured = {}
+
+    class _FakeEngine:
+        def __init__(self, *, agent, strategy, config, chat_id, user_id):
+            captured["config"] = config
+            self.agent_id = "watcher_1"
+            self.session_num = 1
+
+        async def start(self, bot=None):
+            pass
+
+    import condor.agents.engine as engine_module
+
+    monkeypatch.setattr(engine_module, "TickEngine", _FakeEngine)
+
+    req = agents_routes.StartAgentRequest(config={"execution_mode": "dry_run"})
+    user = SimpleNamespace(id=1)
+    result = asyncio.run(agents_routes.start_agent("watcher", req, user=user))
+    assert result["started"] is True
+    assert captured["config"]["risk_limits"] == {
+        "max_position_size_quote": 0,
+        "max_open_executors": 0,
+    }
+
+    # A strategy-level risk_limits wins over the baseline.
+    (sdir / "strategy.md").write_text(
+        "---\nname: snap\ndefault_config:\n  risk_limits:\n"
+        "    max_position_size_quote: 50\n---\n\nTick.\n"
+    )
+    asyncio.run(agents_routes.start_agent("watcher", req, user=user))
+    assert captured["config"]["risk_limits"] == {"max_position_size_quote": 50}

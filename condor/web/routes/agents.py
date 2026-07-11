@@ -1114,7 +1114,14 @@ async def start_agent(
 
     # Playbooks are pure templates: launch config = normalized default_config
     # (+ request overrides). No strategy-level config.yml exists anymore.
-    config_dict = load_full_config(strategy.dir, strategy.default_config)
+    # Risk resolution order: request config > strategy default_config > agent
+    # baseline (AGENT.md risk_limits) > schema defaults. The baseline must be
+    # seeded BEFORE load_full_config fills schema defaults, or the generic
+    # 500/5 defaults would mask it.
+    defaults = dict(strategy.default_config or {})
+    if not defaults.get("risk_limits") and agent.risk_limits:
+        defaults["risk_limits"] = dict(agent.risk_limits)
+    config_dict = load_full_config(strategy.dir, defaults)
     if req.config:
         config_dict.update(req.config)
 
