@@ -251,6 +251,46 @@ citizen of *their* registries, not a competitor to them).
 
 ## 4. How it fits each harness
 
+### 4.0 Deployment assumption: the host opens the Condor repo as its workspace
+
+Users run Claude Code, OpenClaw, and Hermes *in the condor directory*. This
+assumption does two good things and one honest thing:
+
+**It collapses distribution to one git-tracked directory.** All three hosts
+can be served by a single canonical home at the **repo root: `skills/`**:
+- **OpenClaw** scans `<workspace>/skills` by default — automatically
+  discovered, and workspace skills take *top precedence* over user-global
+  duplicates (verified: it scans only designated roots — `<ws>/skills`,
+  `<ws>/.agents/skills`, `~/.agents/skills`, managed/bundled — never the
+  whole workspace).
+- **Hermes** taps expect exactly `skills/<name>/SKILL.md` from the repo
+  root; a local checkout also works via `skills.external_dirs`.
+- **Claude Code** discovers `.claude/skills/` — per-skill symlinks into
+  `../skills/`.
+- **Condor's chat** repoints its builtin root to the same directory.
+One source of truth; `git pull` updates every host at once; no stale copies
+drifting in `~/.claude` or `~/.hermes`. (`assistants/condor/skills/` content
+moves to `skills/` in Phase 1.)
+
+**Index isolation is structural.** None of the hosts' skill roots include
+`agents/{slug}/skills/` or `agents/_shared/skills/`, so agent-internal
+skills stay out of every host's index by construction even with the host
+sitting inside the repo. The estate split survives repo-as-workspace intact.
+
+**File isolation does not exist — say so and design for it.** A host opened
+in the repo is a coding agent with the whole tree as its workspace: it can
+read or edit `agents/*/skills/`, learnings, session state as plain files,
+MCP boundary or not. The boundary isolates Condor's *runtime*, not the
+filesystem. What actually protects the internal estate here: (a) everything
+is git-tracked, so any host-side mutation is a visible diff, never silent;
+(b) every host-facing skill carries an explicit rule — **"Condor's
+`agents/` and `assistants/` trees are runtime state; operate Condor ONLY
+via `mcp__condor__*` tools, never by editing its files"** — which also
+prevents the subtler failure of a host "helpfully" editing a strategy.md
+directly instead of going through `manage_trading_agent`; (c) host and
+Condor run in the same trust domain (the same user), so this is drift
+prevention, not an adversarial boundary.
+
 ### 4.1 Condor's own chat (Telegram / web)
 
 Unchanged consumer, same files: `SkillStore` keeps injecting the
@@ -263,14 +303,14 @@ promotion confirmations happen.
 
 ### 4.2 Claude Code
 
-- **Distribution:** the repo ships `.claude/skills/` containing the
-  host-facing set (implementation choice: per-skill symlinks into
-  `assistants/condor/skills/` so there is one source of truth; fall back to
-  a sync script + CI check if symlink handling proves flaky — verify at
-  implementation). Anyone opening the Condor repo in Claude Code gets
-  `agent-builder` etc. natively, as skills and as `/slash-commands`.
+- **Distribution:** the repo ships `.claude/skills/` as per-skill symlinks
+  into the canonical root `skills/` (one source of truth; fall back to a
+  sync script + CI freshness check if symlink handling proves flaky —
+  verify at implementation). Anyone opening the Condor repo in Claude Code
+  gets `agent-builder` etc. natively, as skills and as `/slash-commands`.
 - **Users outside the repo** copy the skill dirs to `~/.claude/skills/`
-  (or install a future Condor plugin).
+  (or install a future Condor plugin) — secondary path; repo-as-workspace
+  is the primary deployment (§4.0).
 - **Runtime:** the skill instructs driving `mcp__condor__*` tools;
   `compatibility` notes the MCP requirement (Claude Code has no mechanical
   gating; the description tells the model when it applies).
@@ -280,10 +320,10 @@ promotion confirmations happen.
 
 ### 4.3 OpenClaw
 
-- **Distribution:** a Condor checkout inside an OpenClaw workspace is
-  discovered as-is (recursive `SKILL.md` scan under `skills/` roots, ≤6
-  deep) once the workspace's skill root includes it; otherwise
-  `openclaw skills install` / ClawHub publication.
+- **Distribution:** opening the Condor repo as the OpenClaw workspace is
+  sufficient — `<workspace>/skills` is scanned by default (recursively, ≤6
+  levels) and takes top precedence over user-global/bundled duplicates.
+  ClawHub publication remains the path for users not working in the repo.
 - **Conformance specifics honored:** single-line frontmatter values;
   `metadata` as single-line JSON; `metadata.openclaw` requires-gating so
   Condor skills stay **dormant** in workspaces where the Condor MCP server
@@ -293,11 +333,12 @@ promotion confirmations happen.
 
 ### 4.4 Hermes
 
-- **Distribution:** `hermes skills tap add <condor-repo>` — the
-  `skills/<name>/SKILL.md` layout is already tap-shaped; later, the Condor
-  web server can expose `.well-known/skills/`. The community trust tier
-  applies; Hermes's Skills Guard scans at install — spec-clean, script-free
-  markdown skills pass trivially.
+- **Distribution:** the canonical repo-root `skills/` IS the tap layout —
+  `hermes skills tap add <condor-repo>`, or for a local checkout
+  `skills.external_dirs: ["<condor>/skills"]`; later, the Condor web server
+  can expose `.well-known/skills/`. The community trust tier applies;
+  Hermes's Skills Guard scans at install — spec-clean, script-free markdown
+  skills pass trivially.
 - **Runtime:** Hermes's own three-tier disclosure loads them exactly like
   its native skills; slash invocation (`/agent-builder …`) works.
 - **Self-improvement interplay — the one real hazard:** Hermes agents edit
@@ -307,8 +348,10 @@ promotion confirmations happen.
   stays canonical in git), but the Hermes-user docs should recommend
   enabling `skills.write_approval` and treating Condor skills as
   tap-managed (update via tap, don't self-edit). Condor's internal estate
-  is unreachable from Hermes by construction — it lives behind the MCP
-  boundary.
+  is out of Hermes's skill index by construction; under repo-as-workspace
+  it remains *file-reachable* like any workspace file — §4.0's mitigations
+  (git visibility + the "operate via MCP tools only" rule in every
+  host-facing skill) are what cover that residual.
 
 ### 4.5 Any other MCP host
 
@@ -339,7 +382,12 @@ Each phase lands green and independently.
    every AGENT.md / strategy.md / SKILL.md / prompt builder for old skill
    names (`routine_cookbook` → `routine-cookbook`, …) and update — prose
    prompts are invisible to the type checker.
-4. `.claude/skills/` in-repo mapping for the host-facing set.
+4. Canonical host-facing home: move `assistants/condor/skills/*` to
+   repo-root `skills/` (serves OpenClaw workspace discovery + Hermes taps
+   natively); repoint `builtin_skills_root(None)`; add `.claude/skills/`
+   per-skill symlinks. Every host-facing skill body gains the §4.0 rule:
+   operate Condor only via `mcp__condor__*` tools, never by editing its
+   files.
 5. Tests: rewrite `test_skill_store.py` for the new shape; add a
    conformance test enforcing the spec rules (name pattern, dir match,
    description bounds, single-line values) on every SKILL.md in the repo.
@@ -382,9 +430,9 @@ is ceremony.
 
 ## 6. Open decisions
 
-1. **Symlinks vs sync for `.claude/skills/`** — recommend symlinks; verify
-   Claude Code + git behavior, fall back to a checked-in copy + CI
-   freshness check.
+1. **Symlinks vs sync for `.claude/skills/`** — recommend symlinks into
+   the canonical `skills/` root; verify Claude Code + git behavior, fall
+   back to a checked-in copy + CI freshness check.
 2. **Hyphen-rename blast radius** — skill names appear in agent prose and
    both mm_expert playbooks; the audit covers repo files, but users' chat
    habits ("read routine_cookbook") break once. Loud not-found errors plus
