@@ -1,6 +1,6 @@
 # Refactor 04 — Shared skills tier
 
-> **Update (2026-07-11):** absorbed as Phase 1 of
+> **Update (2026-07-11):** absorbed as Phase 2 of
 > [refactor-05](refactor-05-skill-evolution.md) (shared tiers + curated
 > self-improvement), which adds the auto-improvement loop this doc left open.
 
