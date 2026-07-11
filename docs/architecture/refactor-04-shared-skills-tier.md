@@ -1,5 +1,9 @@
 # Refactor 04 — Shared skills tier
 
+> **Update (2026-07-11):** absorbed as Phase 1 of
+> [refactor-05](refactor-05-skill-evolution.md) (shared tiers + curated
+> self-improvement), which adds the auto-improvement loop this doc left open.
+
 Status: **tabled** (2026-07-11) · Branch: `spike/simpler-agent-framework`
 
 ## 0. Decision: tabled, not needed yet
