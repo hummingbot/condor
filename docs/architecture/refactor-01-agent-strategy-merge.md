@@ -1,11 +1,24 @@
 # Refactor 01 — Merge Strategy into Agent (one strategy per agent)
 
-Status: **proposed** · Branch: `spike/simpler-agent-framework` · Scope: first of a
-planned series of framework simplifications. · Alternative under
-consideration: [refactor-01b](refactor-01b-agent-history-multi-strategy.md)
-(same agent-level history unification, but strategies kept as pure playbook
-templates — preserves playbook A/B testing at the cost of keeping a slimmed
-strategy tier).
+Status: **tabled** (2026-07-11) — superseded by
+[refactor-01b](refactor-01b-agent-history-multi-strategy.md) as the plan of
+record. · Branch: `spike/simpler-agent-framework`
+
+## 0. Decision: go with 01b instead
+
+The user-capability review showed this merge's losses (playbook A/B testing
+under one agent; multi-playbook agents sharing one brain) fall on real
+workflows, while nearly all of its wins come from the history unification —
+which 01b delivers without the merge. Items from this plan that **carry into
+01b**: agent-level sessions/learnings/dry_runs, `{slug}_{N}` ids + full
+legacy-plumbing deletion, delegations → sessions, `run_once` → `max_ticks: 1`
+session, the migration backup preflight, the `routine_builder` prose fix.
+Not carried: `launch_presets` (a second strategy *is* the persistent preset),
+the `loopable` flag (stays derived), the AGENT.md body merge itself. This doc
+remains the record of the considered design; its migration-script details
+still inform 01b's (same skeleton, files move *up* instead of merging).
+
+---
 
 ## 1. Goal
 

@@ -1,6 +1,7 @@
 # Refactor 01b — Agent-level history, strategies kept as playbooks
 
-Status: **proposed alternative** to [refactor-01](refactor-01-agent-strategy-merge.md)
+Status: **accepted — plan of record** (2026-07-11), superseding
+[refactor-01](refactor-01-agent-strategy-merge.md) (tabled)
 · Branch: `spike/simpler-agent-framework`
 
 ## 1. The reframe
@@ -116,6 +117,13 @@ Two triads that refactor-01 deleted get decided separately here:
   proliferate; not part of 01b.
 - **`loopable` flag: not needed.** Derivation stays what it is today —
   an agent with ≥1 strategy can loop. No new frontmatter.
+- **`run_once` moves to the sessions side (carried from refactor-01 §4).**
+  The engine maps `execution_mode: run_once` to an ordinary tick session with
+  `max_ticks: 1`; `is_experiment` narrows to `dry_run` alone. A run_once run
+  gets a journal, frozen config, real risk pre-flight, `_N` attribution, and
+  a place in the track record; `_eN` is reserved for true dry runs. Boundary:
+  *dry_runs = scratch that never touches capital; sessions = anything that
+  does* — which also keeps tick vs delegation crisp under refactor-02.
 - **Concurrent instances (multi-controller): unchanged** from the 01 analysis
   — no start guard, per-session isolation, agent-level session counter with
   mkdir-allocation handles two strategies (or two markets) starting at once.
@@ -176,6 +184,22 @@ Migration: identical script skeleton (backup first — same untracked-`agents/`
 warning), moving `sessions/`/`learnings.md`/`dry_runs/` **up** instead of
 merging AGENT.md; with ≤1 strategy per agent today the learnings move is a
 plain rename (the multi-strategy concat branch exists but is unexercised).
+Delegation transcripts convert as in refactor-01 §6.4, with `ended_at` taken
+from file mtime and `started_at` omitted (the flat header has no timestamps —
+record what's known, fabricate nothing; readers must tolerate the absent
+field anyway for crashed-husk sessions).
+
+**Editorial checklist item (no forcing step under 01b):** the drifted
+pmm_mister parameter knowledge stays split across two files that 01b does
+*not* merge (mm_expert's AGENT.md guide vs strategy.md schema —
+`total_amount_quote` 1000 vs 100, leverage "1–5x" vs "default 20"). Reconcile
+both against `manage_controllers(action="describe")` during the migration
+pass; under 01b nothing else will ever force this.
+
+Refactor-01 §10's open decisions carry over unchanged: consult persistence
+(*recommend yes, step 2*), `agent_id` → `session_id` rename (*recommend yes*),
+delegation learnings access (*fast-follow*); §10.4 is resolved (dry runs stay;
+run_once adopted, §4).
 
 ## 7. Tradeoffs vs refactor-01
 
@@ -228,3 +252,35 @@ They are mutually exclusive as written, but 01b → 01 remains cheap later: if
 multi-strategy stays unused after 01b, collapsing a pure-template playbook
 into AGENT.md is a small editorial migration (the state is already
 agent-level — exactly the hard part 01's migration script exists for).
+
+## 9. Implementation sequence
+
+Reviewable increments, each leaving the tree green; refactor-02 follows per
+its own §8 once steps 1–2 land.
+
+1. **Core identity & storage.** `journal.py`: single `{slug}_{N}`/`{slug}_eN`
+   → `agents/{slug}/…` resolution, delete dot-branches and legacy read paths
+   (`trading_sessions/`, `runs/`, `experiments/`, journal-embedded learnings).
+   `allocate_session_dir` (mkdir-atomic, per refactor-01 §4). `engine.py`:
+   session dir/journal/ids resolve via the agent dir; write `meta.yml`
+   (`kind: tick_loop`, `strategy:`); `run_once` → `max_ticks: 1` session,
+   `is_experiment` narrows to `dry_run`. Slim `strategy.py` (drop `skills` +
+   all dir-resolution helpers). `shutdown.py`: walk `agent → _defaults`.
+   `condor_client.py`: `slug_from_agent_id`, delete composite parsing.
+   Migration script (backup → preflight → move up → convert delegations →
+   summary). Rewrite `tests/test_agents.py` accordingly.
+2. **Session unification.** Delegate persistence → `sessions/session_N/`
+   (allocate at start, finalize in `finally`); kind/strategy-aware
+   `sessions_index` (perf rollups filter `kind == tick_loop`); consult
+   persistence + retention cap; learnings strategy-prefix provenance in
+   `append_learning`.
+3. **MCP surface.** `strategy_id` → `agent_slug` on `manage_routines`/
+   `manage_skill`; `start_agent(agent_slug, strategy=…)`; agent-level
+   `risk_limits` frontmatter on create/update; rewrite tool docstrings;
+   fix `agents/routine_builder/AGENT.md` prose (6 refs) and
+   `agent_builder` SKILL.md (5 refs); grep-audit all agent bodies/skills.
+4. **Web + frontend.** Sessions/experiments/learnings tabs move to
+   `AgentDetail` with a strategy filter chip; `StrategyDetail` slims to a
+   playbook editor; flatten session/lifecycle routes to `/agents/{slug}/…`;
+   `api.ts` types.
+5. **Docs.** `agent-framework.md`, strategy-engine doc cross-references.

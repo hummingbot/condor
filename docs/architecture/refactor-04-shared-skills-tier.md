@@ -16,7 +16,10 @@ Two consequences of tabling, reassigned:
 
 1. **Refactor-01's §7 capability loss stands unmitigated for now** — a second
    agent in the same domain copies knowledge. Acceptable until a second such
-   agent actually exists.
+   agent actually exists. (Further reduced by the pivot to
+   [refactor-01b](refactor-01b-agent-history-multi-strategy.md): a second
+   *playbook* in the same domain shares the agent's brain without any copying
+   — only a genuinely separate agent still copies.)
 2. **The mm_expert duplication (§2.2) still needs reconciling** — refactor-01's
    merge concatenates AGENT.md and strategy.md into one body, putting the two
    *conflicting* pmm_mister parameter guides in the same file. That

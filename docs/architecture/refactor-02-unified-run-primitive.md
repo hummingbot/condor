@@ -1,9 +1,11 @@
 # Refactor 02 — One run primitive under tick / delegation / consult
 
 Status: **proposed** · Branch: `spike/simpler-agent-framework` · Depends on:
-[refactor-01](refactor-01-agent-strategy-merge.md) (agent/strategy merge +
-unified sessions). Refactor-01 unifies what runs *leave behind*; this one
-unifies *how they run*.
+[refactor-01b](refactor-01b-agent-history-multi-strategy.md) (agent-level
+history + unified sessions; the original
+[refactor-01](refactor-01-agent-strategy-merge.md) is tabled — both variants
+provide the same session envelope this refactor needs). 01b unifies what runs
+*leave behind*; this one unifies *how they run*.
 
 ## 1. Goal
 
@@ -375,7 +377,7 @@ budgets) lands once instead of twice.
   state and delegation's `RiskState()` are the same gate), the old storage
   made them look nearly convergent — differing mainly in that the
   *attributed, capital-touching* run_once landed journal-less in `dry_runs/`
-  while the *unattributed* delegation got a proper session. Refactor-01 §4
+  while the *unattributed* delegation got a proper session. Refactor-01b §4
   fixes the storage (run_once = ordinary tick session with `max_ticks: 1`),
   which keeps the boundary semantic and crisp: **tick (any duration) =
   standing playbook + injected market state + journal + `controller_id`
@@ -407,7 +409,7 @@ budgets) lands once instead of twice.
    prose-prompt checklist: grep agent bodies and skills for `deploy` examples
    before flipping.
 
-Do this after refactor-01 lands: the session-persistence hook in `run_agent`
+Do this after refactor-01b lands: the session-persistence hook in `run_agent`
 assumes the unified `sessions/` envelope, and the file churn overlaps heavily
 (engine/consult/delegate are all touched by both).
 

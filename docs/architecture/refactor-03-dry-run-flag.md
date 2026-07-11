@@ -29,9 +29,10 @@ Salvageable micro-improvements (independent of any merge):
    `dry_runs/` with no journal. If the boundary is "dry_runs = safe scratch,
    sessions = anything touching capital", `run_once` belongs on the sessions
    side (safety-based boundary, not duration-based).
-   **Adopted into refactor-01 §4 (2026-07-11):** `run_once` becomes an
-   ordinary tick session with `max_ticks: 1`; `is_experiment` narrows to
-   `dry_run` alone, and `dry_runs/` holds only true dry runs.
+   **Adopted into refactor-01 §4 (2026-07-11), carried into refactor-01b §4
+   (the plan of record):** `run_once` becomes an ordinary tick session with
+   `max_ticks: 1`; `is_experiment` narrows to `dry_run` alone, and
+   `dry_runs/` holds only true dry runs.
 
 The original proposal is preserved below as the record of the considered
 design and its tradeoffs.
