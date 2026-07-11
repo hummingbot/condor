@@ -1,10 +1,39 @@
 # Refactor 04 — Shared skills tier
 
-Status: **proposed** · Branch: `spike/simpler-agent-framework` · Relationship:
-independent mechanism, but it directly resolves the one real capability loss in
-[refactor-01](refactor-01-agent-strategy-merge.md) §7 ("a second playbook means
-its domain knowledge must be **copied**"). The demo below assumes refactor-01's
-merged AGENT.md so the mm_expert body is only rewritten once.
+Status: **tabled** (2026-07-11) · Branch: `spike/simpler-agent-framework`
+
+## 0. Decision: tabled, not needed yet
+
+Deferred by decision. Rationale: the problem it solves (knowledge shared
+across agents) has workable interim answers — skills can be pulled in from
+elsewhere, or shared knowledge can live at the root agent level — and the
+mechanism is **purely additive**: `agents/_shared/skills/` can land at any
+later point without breaking or migrating anything (an empty shared tier is a
+no-op; existing local skills and agent bodies are untouched). Nothing in
+refactors 01–02 depends on it.
+
+Two consequences of tabling, reassigned:
+
+1. **Refactor-01's §7 capability loss stands unmitigated for now** — a second
+   agent in the same domain copies knowledge. Acceptable until a second such
+   agent actually exists.
+2. **The mm_expert duplication (§2.2) still needs reconciling** — refactor-01's
+   merge concatenates AGENT.md and strategy.md into one body, putting the two
+   *conflicting* pmm_mister parameter guides in the same file. That
+   reconciliation now happens as an editorial step of refactor-01's mm_expert
+   rewrite (verify against `manage_controllers(action="describe")`), not here.
+
+The proposal below is preserved as the record of the considered design; the
+mm_expert decomposition demo (§4) remains the blueprint for whenever the tier
+is picked up.
+
+---
+
+Original proposal — independent mechanism; directly resolves the one real
+capability loss in [refactor-01](refactor-01-agent-strategy-merge.md) §7 ("a
+second playbook means its domain knowledge must be **copied**"). The demo
+below assumes refactor-01's merged AGENT.md so the mm_expert body is only
+rewritten once.
 
 ## 1. Goal
 

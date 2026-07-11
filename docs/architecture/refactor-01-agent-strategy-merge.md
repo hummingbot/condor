@@ -330,6 +330,13 @@ the script is the single place legacy formats are understood.
    `default_trading_context` (drop `skills`, strategy `name`/`description`/
    `created_*`); append the strategy body under `\n\n## Tick Playbook\n`.
    Agents with no strategy get no new frontmatter (absent `loopable` ⇒ false).
+   **Editorial follow-up for mm_expert:** the concatenation puts its two
+   *conflicting* pmm_mister parameter guides in one file (AGENT.md guide says
+   `total_amount_quote` default 1000 / leverage "1–5x"; strategy.md schema
+   says 100 / "default 20") — dedupe into one section, verifying defaults
+   against `manage_controllers(action="describe", controller_name=
+   "pmm_mister")` rather than trusting either copy. (This was refactor-04's
+   §2.2/§6 reconciliation step; with r04 tabled it belongs here.)
 3. **Move files up:** `config.yml`, `learnings.md`, `shutdown.md`, `dry_runs/`,
    `sessions/` from the strategy dir to the agent dir (error on collision —
    today none of these exist at agent level); remove the empty `strategies/` tree.
@@ -359,10 +366,10 @@ Data inventoried on this machine: 2 strategy.md files, 5 experiments,
   every agent has ≤1 strategy; (b) parameterization already covers the common
   case (pmm_mister_operator takes pair/connector from launch config, so "same
   playbook, different market" is one agent with different session configs);
-  (c) the systemic fix is the shared-skills tier, now specified as
-  [refactor-04](refactor-04-shared-skills-tier.md) — after which a second
-  agent in the same domain is just identity + playbook + shared skill
-  references, zero copied knowledge.
+  (c) the systemic fix is a shared-skills tier, designed in
+  [refactor-04](refactor-04-shared-skills-tier.md) but **tabled** — it is
+  purely additive and can land whenever a second same-domain agent makes the
+  copying real. Until then this loss is accepted.
 - *Per-strategy model override.* Chain shrinks to config > agent. Unused.
 - *Per-strategy shutdown override.* Walk shrinks to agent → default. Unused.
 
