@@ -366,11 +366,15 @@ Each phase lands green and independently.
 
 ### Phase 1 — Format conformance + host distribution
 
-1. `condor/memory/skills.py`: hyphen slugs for skills; writer emits spec
-   frontmatter (single-line `description` with the folded trigger,
-   `compatibility`, flat `metadata` `condor-*` string keys); `create`/`edit`
+1. `condor/memory/skills.py`: hyphen slugs for skills (skills-only — the
+   memory store keeps its underscore slugs); a **skill-specific frontmatter
+   renderer** — the shared `store._render` emits block-style YAML
+   (`yaml.dump(default_flow_style=False)`), which violates OpenClaw's
+   single-line constraint, so skills get their own writer emitting
+   single-line values and `metadata` as flow-style/JSON; `create`/`edit`
    lose the `when_to_use` param (description carries it); `list_index` and
-   `read` handle the new shape only.
+   `read` handle the new shape only (`read` keeps resolving
+   `condor-references-routine` for the routine_ok check).
 2. `mcp_servers/condor/server.py` + `tools/skills.py`: `manage_skill`
    signature/docstring updates.
 3. Migration script (`scripts/migrate_skill_frontmatter.py`): rename
@@ -381,7 +385,11 @@ Each phase lands green and independently.
    everything. Then a **reference audit** (the refactor-01b lesson): grep
    every AGENT.md / strategy.md / SKILL.md / prompt builder for old skill
    names (`routine_cookbook` → `routine-cookbook`, …) and update — prose
-   prompts are invisible to the type checker.
+   prompts are invisible to the type checker. Audited blast radius: live
+   references in mm_expert AGENT.md (2), routine_builder AGENT.md (3),
+   condor AGENT.md (1) plus comment-level code mentions; **historical
+   artifacts (dry_runs snapshots, session transcripts) are records and are
+   NOT rewritten**.
 4. Canonical host-facing home: move `assistants/condor/skills/*` to
    repo-root `skills/` (serves OpenClaw workspace discovery + Hermes taps
    natively); repoint `builtin_skills_root(None)`; add `.claude/skills/`
@@ -393,7 +401,9 @@ Each phase lands green and independently.
    description bounds, single-line values) on every SKILL.md in the repo.
 6. Acceptance: install and route the host-facing set in Claude Code
    (`.claude/skills/`), OpenClaw (workspace discovery + gating), and
-   Hermes (tap) — a manual checklist recorded in the PR.
+   Hermes (tap). Claude Code is verifiable immediately in this repo; the
+   OpenClaw/Hermes checks run on whichever machine has those harnesses
+   installed — recorded as a user-runnable checklist in the PR.
 
 ### Phase 2 — Shared tier + dedupe (refactor-04, updated)
 
@@ -442,6 +452,14 @@ is ceremony.
    is staging the diff and having the chat ask — decide at Phase 3.
 4. **`allowed-tools` on host-facing skills** — experimental in the spec;
    revisit when host support stabilizes.
+5. **Chat-created skills are host-visible by definition** *(resolved)*:
+   after the move, the chat's `manage_skill(action="create")` writes into
+   repo-root `skills/` — i.e. every host's index. Accepted: chat authoring
+   is user-supervised and git-visible, and the rule is placement-based —
+   knowledge meant for one agent belongs in that agent's local tier (the
+   chat authors there via `agent_slug`); only genuinely host-relevant
+   playbooks belong in `skills/`. The `manage_skill` docstring states this
+   so the chat model places skills deliberately.
 
 ## 7. Sources
 
