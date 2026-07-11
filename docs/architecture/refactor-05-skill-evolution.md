@@ -127,14 +127,27 @@ the design:
 
 - **Host-facing skills** (`assistants/condor/skills/`: agent_builder,
   log_analyzer, …) teach *how to drive Condor's MCP tools*. Their natural
-  home in a Hermes/Claude Code deployment is the **host's own skills
-  system**, discovered by the host's index — not tunneled through
-  `manage_skill`. They must therefore be strictly agentskills.io-conformant.
-  The directory layout (`skills/<name>/SKILL.md`) is already tap-compatible;
-  a Hermes user can `hermes skills tap add` the Condor repo (or we expose
-  `.well-known/skills/` from the web server later) and install them
-  natively. Condor's own Telegram/web chat keeps loading them exactly as
-  today — same files, two consumers.
+  home is the **host's own skills system** — Hermes, OpenClaw, Claude Code,
+  anything speaking the agentskills.io standard — discovered by the host's
+  index, not tunneled through `manage_skill`. They must therefore be
+  strictly spec-conformant. Per-host reality check (all verified against
+  current docs):
+  - **Claude Code**: project scope is `.claude/skills/` — ship the
+    host-facing set there (or symlink it to `assistants/condor/skills/`),
+    and anyone running Claude Code in the Condor repo gets them natively.
+  - **OpenClaw**: discovers any `SKILL.md` under a configured workspace
+    `skills/` root up to 6 levels deep, so a checked-out Condor repo is
+    discoverable as-is; `clawhub` install lands in the workspace `skills/`
+    dir. Two conformance constraints matter: its embedded parser wants
+    **single-line frontmatter values** (`metadata` as single-line JSON),
+    and it gates loading via `metadata.openclaw.requires` (env vars,
+    binaries) — our skills should declare their Condor-MCP dependency
+    there so they stay dormant in hosts without the server.
+  - **Hermes**: tap-compatible layout already (`skills/<name>/SKILL.md`);
+    `hermes skills tap add <condor repo>` works once frontmatter conforms;
+    `.well-known/skills/` from the web server is a later option.
+  Condor's own Telegram/web chat keeps loading the same files exactly as
+  today — same skills, N consumers.
 - **Agent-internal skills** (`agents/{slug}/skills/`, and Phase-1's
   `_shared` tier) are the domain agents' brains, consumed by Condor's own
   tick/consult/delegation runs behind the MCP boundary. They are never
@@ -145,12 +158,18 @@ the design:
 
 **Spec alignment (one-time migration, no dual-format reader):** `name` and
 `description` stay top-level per the spec, with the routing trigger folded
-into `description` (the spec's description IS the when-to-use signal);
-Condor-specific fields — `when_to_use`, `references_routine`, `source`,
-`created`, and Phase-2's `updated_by`/`changelog` — move under the spec's
-vendor namespace as `metadata.condor.*` (the same mechanism Hermes uses for
-`metadata.hermes`). `SkillStore` reads/writes the new shape only; the
-migration script rewrites the existing ~10 skills in place.
+into `description` (the spec's description IS the when-to-use signal, ≤160
+chars and single-line for OpenClaw's parser); Condor-specific fields —
+`when_to_use`, `references_routine`, `source`, `created`, and Phase-2's
+`updated_by`/`changelog` — move under the spec's vendor namespace as
+`metadata.condor` (kept single-line-JSON-safe; the same mechanism Hermes
+and OpenClaw use for `metadata.hermes`/`metadata.openclaw`). Host-facing
+skills additionally declare their runtime dependency on the Condor MCP
+server via the host gating fields where supported. `SkillStore`
+reads/writes the new shape only; the migration script rewrites the
+existing ~10 skills in place. Acceptance test for the phase: the
+host-facing set installs and routes correctly in Claude Code
+(`.claude/skills/`), OpenClaw (workspace discovery), and Hermes (tap).
 
 **Self-improvement stays domain-side.** The curation loop (Phase 2) edits
 agent-internal skills only. Host-level skill learning (Hermes `/learn`,
