@@ -1,25 +1,22 @@
 """Strategy definitions and persistence — a *playbook* owned by an Agent.
 
-Each strategy is a tick-loop playbook that lives **under its owning Agent**, as
-``strategy.md`` (YAML frontmatter + markdown body) inside a per-strategy folder::
+A strategy is a pure playbook template (refactor-01b): ``strategy.md`` (YAML
+frontmatter + markdown body) is the ONLY thing in its folder — all operational
+state (sessions, learnings, dry runs) lives at the agent level::
 
     agents/
         {agent_slug}/
             AGENT.md                       # the owning Agent (see agent.py)
-            routines/                      # routines shared by all of this agent's strategies
-            skills/                        # skill playbooks (the agent "brain")
+            learnings.md  sessions/  dry_runs/   # agent-level history (journal.py)
+            routines/  skills/  store/           # the shared brain
             strategies/
                 {strategy_slug}/
-                    strategy.md            # this playbook: tactics + config
-                    learnings.md           # cross-session learnings of this strategy
-                    sessions/session_N/    # per-run journal (format unchanged)
-                    dry_runs/              # experiment snapshots
+                    strategy.md            # this playbook: tactics + default_config
 
 A strategy is identified by the pair ``(agent_slug, slug)``; its opaque composite
-key ``"{agent_slug}.{slug}"`` is what MCP tools pass around as ``strategy_id``.
-The Agent's memory/skills/routines (the "brain") are shared across all of its
-strategies and its consults — they live one level up, at
-``agents/{agent_slug}/``.
+key ``"{agent_slug}.{slug}"`` is what MCP strategy-CRUD passes around as
+``strategy_id``. It is a start-time selector plus session metadata — never part
+of a session's identity (session ids are ``"{agent_slug}_{N}"``).
 """
 
 from __future__ import annotations
@@ -87,7 +84,6 @@ class Strategy:
     description: str = ""
     instructions: str = ""  # body: the TACTIC of the tick (not the identity)
     agent_key: str | None = None  # optional model override of the Agent's default
-    skills: list[str] = field(default_factory=list)
     default_config: dict[str, Any] = field(default_factory=dict)
     default_trading_context: str = ""
     created_by: int = 0  # user_id
@@ -135,7 +131,6 @@ def _load_strategy_from_file(path: Path, agent_slug: str) -> Strategy | None:
             description=meta.get("description", ""),
             instructions=body,
             agent_key=meta.get("agent_key") or None,
-            skills=meta.get("skills", []) or [],
             default_config=meta.get("default_config", {}) or {},
             default_trading_context=meta.get("default_trading_context", ""),
             created_by=meta.get("created_by", 0),
@@ -167,7 +162,6 @@ class StrategyStore:
         description: str = "",
         instructions: str = "",
         agent_key: str | None = None,
-        skills: list[str] | None = None,
         default_config: dict | None = None,
         default_trading_context: str = "",
         created_by: int = 0,
@@ -178,7 +172,6 @@ class StrategyStore:
             description=description,
             instructions=instructions,
             agent_key=agent_key,
-            skills=skills or [],
             default_config=default_config or {},
             default_trading_context=default_trading_context,
             created_by=created_by,
@@ -252,7 +245,6 @@ class StrategyStore:
             "name": strategy.name,
             "description": strategy.description,
             "agent_key": strategy.agent_key,
-            "skills": strategy.skills,
             "default_config": strategy.default_config,
             "default_trading_context": strategy.default_trading_context,
             "created_by": strategy.created_by,

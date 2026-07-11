@@ -119,6 +119,7 @@ async def delegate(
     agent: str = "",
     task: str = "",
     task_id: str = "",
+    risk_limits: dict | None = None,
 ) -> dict:
     """Delegate a one-off task to a background agent instance.
 
@@ -127,8 +128,16 @@ async def delegate(
     goal-oriented task to a DETACHED agent that works autonomously until done, then
     notifies the user with the result — while you stay free to do other things. Use
     it for "go build/scan/produce X and ping me when finished" (e.g. "create a
-    routine that scans SOL pools"). The agent runs unrestricted with full
-    auto-approve, so delegate only to trusted agents/tasks.
+    routine that scans SOL pools").
+
+    Authorization: a delegation to a TRADING agent (server_required) runs under a
+    zero-seeded risk gate — tool calls auto-approve within caps, uncapped bot
+    deploys and place_order are blocked. The caps come from the optional
+    risk_limits arg when given (it REPLACES the agent's AGENT.md baseline for
+    this one run — what you pass is exactly what governs), else the baseline. A
+    trading delegation with neither errors at start; "unbounded" is expressed by
+    passing explicitly large caps. Serverless agents (e.g. routine_builder) run
+    with full auto-approve.
 
     The user tracks a delegation in Telegram with the /delegations command (NOT
     "/task" — that does not exist) and is pinged automatically when it finishes.
@@ -147,11 +156,14 @@ async def delegate(
         agent: Agent slug to delegate to (for start).
         task: The one-off task, in plain language (for start).
         task_id: Delegation id returned by start (for get/stop).
+        risk_limits: Per-delegation risk caps override (for start; trading agents
+            only). Keys: max_position_size_quote, max_open_executors,
+            max_drawdown_pct, shutdown_drawdown_pct. Replaces the agent baseline.
 
     Returns:
         Action-specific result dict.
     """
-    return await delegate_tool.delegate(action, agent, task, task_id)
+    return await delegate_tool.delegate(action, agent, task, task_id, risk_limits)
 
 
 @mcp.tool()
@@ -178,7 +190,7 @@ async def manage_routines(
     action: str,
     name: str | None = None,
     config: dict | None = None,
-    strategy_id: str | None = None,
+    agent_slug: str | None = None,
     code: str | None = None,
 ) -> dict:
     """Manage and run Condor routines (auto-discoverable Python scripts).
@@ -191,27 +203,27 @@ async def manage_routines(
     - "stop": Stop a running routine instance (requires name=instance_id)
     - "list_instances": List all running/scheduled routine instances
 
-    Actions -- Agent-Local Routine CRUD (requires strategy_id or CONDOR_AGENT_SLUG):
+    Actions -- Agent-Local Routine CRUD (requires agent_slug or CONDOR_AGENT_SLUG):
     - "create_routine": Create a new agent-local routine (requires name, code)
     - "read_routine": Read source code of a routine (requires name)
     - "edit_routine": Update an agent-local routine (requires name, code)
     - "delete_routine": Delete an agent-local routine (requires name)
 
-    Agent-local routines live in agents/{slug}/routines/ and are only
-    visible to that strategy's agent. They follow the same pattern as global
-    routines: a Config(BaseModel) class and an async run(config, context) function.
+    Agent-local routines live in agents/{slug}/routines/ and are only visible
+    to that agent. They follow the same pattern as global routines: a
+    Config(BaseModel) class and an async run(config, context) function.
 
     Args:
         action: The action to perform.
         name: Routine name (required for all except list/list_instances). For "stop", pass the instance_id as name.
         config: Config overrides for run/start (optional, merged with defaults).
-        strategy_id: Strategy ID for agent-local routine CRUD operations.
+        agent_slug: Target agent for agent-local routine CRUD operations.
         code: Python source code for create_routine / edit_routine.
 
     Returns:
         Action-specific result dict.
     """
-    return await routines.manage_routines(action, name, config, strategy_id, code)
+    return await routines.manage_routines(action, name, config, agent_slug, code)
 
 
 @mcp.tool()
@@ -257,16 +269,17 @@ async def manage_trading_agent(
     agent_id: str | None = None,
     strategy_id: str | None = None,
     agent_slug: str | None = None,
+    strategy: str | None = None,
     name: str | None = None,
     description: str | None = None,
     instructions: str | None = None,
     agent_key: str | None = None,
-    skills: list[str] | None = None,
     config: dict | None = None,
     tools: list[str] | None = None,
     when_to_consult: str | None = None,
     server_required: bool | None = None,
     server_name: str | None = None,
+    risk_limits: dict | None = None,
 ) -> dict:
     """Manage trading agents and strategies.
 
@@ -277,7 +290,10 @@ async def manage_trading_agent(
     is consultable (on any model); an agent that owns ≥1 strategy is loopeable; it can
     be both. Create the agent FIRST, then add its routines and (optionally) a strategy.
     ``strategy_id`` is the opaque key returned by list_strategies/create_strategy
-    (form "agent_slug.strategy_slug").
+    (form "agent_slug.strategy_slug") — used ONLY by strategy CRUD. Running
+    sessions are identified as "{agent_slug}_{N}" ("{agent_slug}_e{N}" for
+    dry-run experiments); which strategy a session ran is session metadata, and
+    all history (sessions, learnings, dry runs) lives at the agent level.
 
     Actions -- Agents (identities):
     - "list_agent_definitions": List all agents (AGENT.md identities) with their
@@ -303,16 +319,18 @@ async def manage_trading_agent(
 
     Actions -- Lifecycle:
     - "list_agents": List all running agent instances with status
-    - "start_agent": Start a new agent session (requires strategy_id, optional config overrides)
+    - "start_agent": Start a new agent session (requires agent_slug; strategy=<slug>
+      selects the playbook — optional when the agent has exactly one, required when
+      it has several; optional config overrides)
     - "stop_agent": Stop a running agent, KEEPING its open positions (requires agent_id)
     - "shutdown_agent": Emergency stop that WINDS DOWN this session's positions/executors
       per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
     - "pause_agent": Pause a running agent (requires agent_id)
     - "resume_agent": Resume a paused agent (requires agent_id)
 
-    Actions -- Routines (scoped to a strategy):
-    - "list_routines": List global + agent-local routines for a strategy (requires strategy_id)
-    - "run_routine": Execute a one-shot routine (requires strategy_id, name, optional config)
+    Actions -- Routines (scoped to an agent):
+    - "list_routines": List global + agent-local routines for an agent (requires agent_slug)
+    - "run_routine": Execute a one-shot routine (requires agent_slug, name, optional config)
 
     Journal reads/writes are the dedicated trading_agent_journal_read /
     trading_agent_journal_write tools, not actions of this tool.
@@ -323,15 +341,16 @@ async def manage_trading_agent(
 
     Args:
         action: The action to perform.
-        agent_id: Agent instance ID (for lifecycle/monitoring/journal actions).
-        strategy_id: Strategy key "agent_slug.strategy_slug" (for strategy/routine/start actions).
-        agent_slug: Owning Agent slug — required for create_strategy and for the
-            agent CRUD actions get_agent/update_agent/delete_agent.
+        agent_id: Agent session ID "{agent_slug}_{N}" (for lifecycle/monitoring/journal actions).
+        strategy_id: Strategy key "agent_slug.strategy_slug" (strategy CRUD only).
+        agent_slug: Owning Agent slug — required for create_strategy, start_agent,
+            routine actions, and the agent CRUD actions get/update/delete_agent.
+        strategy: Strategy slug selecting the playbook for start_agent (optional
+            when the agent has exactly one strategy).
         name: Agent name (create_agent), strategy name (create/update_strategy), or routine name (run_routine).
         description: Agent or strategy description (for create/update).
         instructions: AGENT.md body (create/update_agent) or strategy instructions text (create/update_strategy).
         agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Any model can be consulted; a pydantic-ai key (e.g. "ollama:...") additionally enforces the tools allowlist on consult. Default "claude-code".
-        skills: List of optional skill names to enable (for create/update_strategy).
         config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
             For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
             execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
@@ -339,6 +358,10 @@ async def manage_trading_agent(
         when_to_consult: Trigger describing when to consult the agent (create/update_agent). Set it to make the agent consultable — recommended for every agent, on any model.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
         server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
+        risk_limits: Agent-level risk baseline dict (create/update_agent). Keys:
+            max_position_size_quote, max_open_executors, max_drawdown_pct,
+            shutdown_drawdown_pct. Governs unattended delegations and is the
+            fallback for tick sessions without their own risk_limits.
 
     Returns:
         Action-specific result dict.
@@ -348,16 +371,17 @@ async def manage_trading_agent(
         agent_id,
         strategy_id,
         agent_slug,
+        strategy,
         name,
         description,
         instructions,
         agent_key,
-        skills,
         config,
         tools=tools,
         when_to_consult=when_to_consult,
         server_required=server_required,
         server_name=server_name,
+        risk_limits=risk_limits,
     )
 
 
@@ -422,7 +446,7 @@ async def manage_skill(
     references_routine: str | None = None,
     query: str | None = None,
     max_entries: int = 30,
-    strategy_id: str | None = None,
+    agent_slug: str | None = None,
     file: str | None = None,
     content: str | None = None,
 ) -> dict:
@@ -452,9 +476,8 @@ async def manage_skill(
 
     Skills are scoped per-assistant: a launched agent reads/writes ONLY its own
     library. From the chat you can target a specific agent's local skill library
-    with strategy_id (an "agent_slug.strategy_slug" key, or a bare agent slug) —
-    use this to author or inspect an agent's skills while building it. Without
-    strategy_id the current assistant's library is used.
+    with agent_slug — use this to author or inspect an agent's skills while
+    building it. Without agent_slug the current assistant's library is used.
 
     Actions:
     - "read": Get a full playbook + routine validation + companion `files` (requires name).
@@ -475,8 +498,8 @@ async def manage_skill(
         references_routine: Optional routine name to link; "" clears it (create/edit).
         query: Search string (for search).
         max_entries: Cap for search results (default 30).
-        strategy_id: Target a specific agent's local skill library (chat-side
-            authoring). Composite "agent_slug.strategy_slug" key or bare agent slug.
+        agent_slug: Target a specific agent's local skill library (chat-side
+            authoring).
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
 
@@ -492,7 +515,7 @@ async def manage_skill(
         references_routine=references_routine,
         query=query,
         max_entries=max_entries,
-        strategy_id=strategy_id,
+        agent_slug=agent_slug,
         file=file,
         content=content,
     )

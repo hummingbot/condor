@@ -6,32 +6,22 @@ from pathlib import Path
 from mcp_servers.condor.settings import settings
 
 
-def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
+def _get_agent_routines_dir(agent_slug: str | None) -> Path | None:
     """Resolve the routines directory to write to.
 
-    Routines live at the **Agent** level (``agents/<slug>/routines``),
-    shared across all of that agent's strategies. A strategy_id (composite key
-    "agent_slug.strategy_slug") resolves to its owning agent's routines dir; a
-    bare agent slug ("agent_slug", no dot) resolves to that agent directly —
-    used in the expert-first flow where routines are created before any strategy
-    exists. Otherwise the current assistant's own dir — the general library
-    (root ``routines/``) for the chat, or the launched Agent's
-    (``agents/<slug>/routines``, ``settings.agent_slug``).
+    Routines live at the **Agent** level (``agents/<slug>/routines``), shared
+    across all of that agent's strategies. An explicit ``agent_slug`` targets
+    that agent (chat-side authoring); otherwise the current assistant's own dir
+    — the general library (root ``routines/``) for the chat, or the launched
+    Agent's (``agents/<slug>/routines``, ``settings.agent_slug``).
     """
     from routines.base import assistant_routines_dir
 
-    if strategy_id:
-        from condor.agents.strategy import StrategyStore
-
-        s = StrategyStore().get_by_key(strategy_id)
-        if s:
-            return assistant_routines_dir(s.agent_slug)
-        # Fall back: treat strategy_id as a bare agent slug so routines can be
-        # created/run for a consult-only expert that owns no strategy yet.
+    if agent_slug:
         from condor.agents.agent import AgentStore
 
-        if AgentStore().get(strategy_id):
-            return assistant_routines_dir(strategy_id)
+        if AgentStore().get(agent_slug):
+            return assistant_routines_dir(agent_slug)
         return None
 
     return assistant_routines_dir(settings.agent_slug or None)
@@ -60,7 +50,7 @@ def _resolve_routine(name: str):
     return discover_routines(force_reload=True).get(name)
 
 
-def list_routines(strategy_id: str | None = None) -> dict:
+def list_routines(agent_slug: str | None = None) -> dict:
     from routines.base import discover_routines, discover_routines_from_path
 
     result = []
@@ -92,8 +82,8 @@ def list_routines(strategy_id: str | None = None) -> dict:
             }
         )
 
-    if strategy_id:
-        agent_routines_dir = _get_agent_routines_dir(strategy_id)
+    if agent_slug:
+        agent_routines_dir = _get_agent_routines_dir(agent_slug)
         if agent_routines_dir and agent_routines_dir.exists():
             for name, routine in sorted(
                 discover_routines_from_path(agent_routines_dir).items()
@@ -104,7 +94,7 @@ def list_routines(strategy_id: str | None = None) -> dict:
                         "description": routine.description,
                         "type": "continuous" if routine.is_continuous else "one-shot",
                         "scope": "agent",
-                        "agent": strategy_id,
+                        "agent": agent_slug,
                     }
                 )
     else:
@@ -162,13 +152,13 @@ class MCPContext:
 
 
 async def run_routine(
-    name: str, config: dict | None, strategy_id: str | None = None
+    name: str, config: dict | None, agent_slug: str | None = None
 ) -> dict:
     """Execute a one-shot routine and return its result."""
     routine = None
 
-    if strategy_id:
-        routines_dir = _get_agent_routines_dir(strategy_id)
+    if agent_slug:
+        routines_dir = _get_agent_routines_dir(agent_slug)
         if routines_dir and routines_dir.exists():
             from routines.base import discover_routines_from_path
 
@@ -194,23 +184,16 @@ async def run_routine(
 
     context = MCPContext()
 
-    # Attribute the report to its producer: an explicit strategy's owning agent
-    # (the bare agent slug, the canonical attribution unit shared with the
-    # web/Telegram runner's _agent_of and the agent index), else the run context
-    # (Agent consult -> its slug; chat condor -> "condor").
+    # Attribute the report to its producer: the explicitly-targeted agent (the
+    # canonical attribution unit shared with the web/Telegram runner's
+    # _agent_of and the agent index), else the run context (Agent consult ->
+    # its slug; chat condor -> "condor").
     agent = settings.agent_slug or "condor"
-    if strategy_id:
-        from condor.agents.strategy import StrategyStore
+    if agent_slug:
+        from condor.agents.agent import AgentStore
 
-        s = StrategyStore().get_by_key(strategy_id)
-        if s:
-            agent = s.agent_slug
-        else:
-            from condor.agents.agent import AgentStore
-
-            if AgentStore().get(strategy_id):
-                # bare agent slug (expert-first flow): attribute to the agent
-                agent = strategy_id
+        if AgentStore().get(agent_slug):
+            agent = agent_slug
 
     try:
         from condor.reports import attribute_to
@@ -285,7 +268,7 @@ def list_instances() -> dict:
     return {"instances": instances}
 
 
-def create_routine(name: str, code: str, strategy_id: str | None) -> dict:
+def create_routine(name: str, code: str, agent_slug: str | None) -> dict:
     """Create a new agent-local routine file."""
     import re
 
@@ -296,12 +279,11 @@ def create_routine(name: str, code: str, strategy_id: str | None) -> dict:
     if not code:
         return {"error": "code is required"}
 
-    routines_dir = _get_agent_routines_dir(strategy_id)
+    routines_dir = _get_agent_routines_dir(agent_slug)
     if not routines_dir:
         return {
-            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
-            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
-            "resolve to an existing agent."
+            "error": "Pass agent_slug (or CONDOR_AGENT_SLUG must be set), and it "
+            "must resolve to an existing agent."
         }
 
     file_path = routines_dir / f"{name}.py"
@@ -336,9 +318,9 @@ def create_routine(name: str, code: str, strategy_id: str | None) -> dict:
     }
 
 
-def read_routine(name: str, strategy_id: str | None) -> dict:
+def read_routine(name: str, agent_slug: str | None) -> dict:
     """Read the source code of a routine."""
-    routines_dir = _get_agent_routines_dir(strategy_id)
+    routines_dir = _get_agent_routines_dir(agent_slug)
     if routines_dir:
         file_path = routines_dir / f"{name}.py"
         if file_path.exists():
@@ -351,14 +333,13 @@ def read_routine(name: str, strategy_id: str | None) -> dict:
     return {"error": f"Routine '{name}' not found"}
 
 
-def edit_routine(name: str, code: str, strategy_id: str | None) -> dict:
+def edit_routine(name: str, code: str, agent_slug: str | None) -> dict:
     """Update the source code of an agent-local routine."""
-    routines_dir = _get_agent_routines_dir(strategy_id)
+    routines_dir = _get_agent_routines_dir(agent_slug)
     if not routines_dir:
         return {
-            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
-            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
-            "resolve to an existing agent."
+            "error": "Pass agent_slug (or CONDOR_AGENT_SLUG must be set), and it "
+            "must resolve to an existing agent."
         }
 
     file_path = routines_dir / f"{name}.py"
@@ -390,14 +371,13 @@ def edit_routine(name: str, code: str, strategy_id: str | None) -> dict:
     }
 
 
-def delete_routine(name: str, strategy_id: str | None) -> dict:
+def delete_routine(name: str, agent_slug: str | None) -> dict:
     """Delete an agent-local routine."""
-    routines_dir = _get_agent_routines_dir(strategy_id)
+    routines_dir = _get_agent_routines_dir(agent_slug)
     if not routines_dir:
         return {
-            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
-            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
-            "resolve to an existing agent."
+            "error": "Pass agent_slug (or CONDOR_AGENT_SLUG must be set), and it "
+            "must resolve to an existing agent."
         }
 
     file_path = routines_dir / f"{name}.py"
@@ -412,11 +392,11 @@ async def manage_routines(
     action: str,
     name: str | None = None,
     config: dict | None = None,
-    strategy_id: str | None = None,
+    agent_slug: str | None = None,
     code: str | None = None,
 ) -> dict:
     if action == "list":
-        return list_routines(strategy_id)
+        return list_routines(agent_slug)
     if action == "describe":
         if not name:
             return {"error": "name is required"}
@@ -424,23 +404,23 @@ async def manage_routines(
     if action == "run":
         if not name:
             return {"error": "name is required"}
-        return await run_routine(name, config, strategy_id)
+        return await run_routine(name, config, agent_slug)
     if action == "create_routine":
         if not name:
             return {"error": "name is required"}
-        return create_routine(name, code or "", strategy_id)
+        return create_routine(name, code or "", agent_slug)
     if action == "read_routine":
         if not name:
             return {"error": "name is required"}
-        return read_routine(name, strategy_id)
+        return read_routine(name, agent_slug)
     if action == "edit_routine":
         if not name:
             return {"error": "name is required"}
-        return edit_routine(name, code or "", strategy_id)
+        return edit_routine(name, code or "", agent_slug)
     if action == "delete_routine":
         if not name:
             return {"error": "name is required"}
-        return delete_routine(name, strategy_id)
+        return delete_routine(name, agent_slug)
     if action == "start":
         if not name:
             return {"error": "name is required"}

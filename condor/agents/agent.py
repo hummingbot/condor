@@ -57,6 +57,11 @@ class Agent:
     # mcp-hummingbot subprocess is initialized against THIS server regardless of
     # the chat's active server. Empty => fall back to the ambient chat server.
     server_name: str = ""
+    # Agent-level risk baseline (RiskLimits keys). Governs unattended delegations
+    # (zero-seeded risk_gate) and is the fallback for tick sessions whose strategy
+    # default_config declares no risk_limits of its own. Empty dict => no baseline:
+    # a trading delegation then REQUIRES a per-call risk_limits override.
+    risk_limits: dict = field(default_factory=dict)
     created_by: int = 0
     created_at: str = ""
 
@@ -102,6 +107,7 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
             when_to_consult=meta.get("when_to_consult", ""),
             server_required=meta.get("server_required", True),
             server_name=meta.get("server_name", "") or "",
+            risk_limits=meta.get("risk_limits", {}) or {},
             created_by=meta.get("created_by", 0),
             created_at=meta.get("created_at", ""),
         )
@@ -153,6 +159,7 @@ class AgentStore:
         when_to_consult: str = "",
         server_required: bool = True,
         server_name: str = "",
+        risk_limits: dict | None = None,
         created_by: int = 0,
     ) -> Agent:
         agent = Agent(
@@ -165,6 +172,7 @@ class AgentStore:
             when_to_consult=when_to_consult,
             server_required=server_required,
             server_name=server_name,
+            risk_limits=risk_limits or {},
             created_by=created_by,
         )
         self._save(agent)
@@ -199,6 +207,7 @@ class AgentStore:
             "when_to_consult": agent.when_to_consult,
             "server_required": agent.server_required,
             "server_name": agent.server_name,
+            "risk_limits": agent.risk_limits,
             "created_by": agent.created_by,
             "created_at": agent.created_at,
         }

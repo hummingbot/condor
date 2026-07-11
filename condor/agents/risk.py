@@ -208,12 +208,18 @@ class RiskEngine:
         return True, ""
 
 
-def auto_approve_with_risk_check(
+def risk_gate(
     risk_engine: RiskEngine,
     risk_state: RiskState,
-    execution_mode: str = "loop",
+    dry_run: bool = False,
 ):
-    """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones."""
+    """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
+
+    The ONE shared risk policy (refactor-02 §4.1) — the caller chooses the state
+    seed: journal-derived for tick sessions (real exposure/count carried over),
+    ``RiskState()`` at zero for delegations (the caps act as a per-run budget).
+    ``dry_run=True`` additionally cancels every mutating action (tick-only).
+    """
     from handlers.agents._shared import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
@@ -222,7 +228,7 @@ def auto_approve_with_risk_check(
             tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
 
             # Dry-run mode: block ALL mutating actions
-            if execution_mode == "dry_run":
+            if dry_run:
                 if tool_name == "manage_executors":
                     input_data = tool_call.get("input", {})
                     action = input_data.get("action", "")

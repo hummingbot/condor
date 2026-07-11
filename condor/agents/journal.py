@@ -1,20 +1,27 @@
 """JournalManager -- compact persistent memory for trading agents.
 
-Data is organized by strategy (a playbook owned by an Agent) and session::
+All operational history lives at the **agent** level; strategies are pure
+playbook templates (refactor-01b)::
 
     agents/
         {agent_slug}/
+            AGENT.md               # identity + domain knowledge
+            learnings.md           # agent-level, all strategies & run kinds
+            dry_runs/              # experiment snapshots (experiment_N.md)
+            sessions/
+                session_1/
+                    meta.yml       # kind + strategy + status + timestamps
+                    journal.md     # tick sessions: summary/decisions/ticks
+                    config.yml     # frozen launch config (tick)
+                    snapshots/     # tick: snapshot_N.md
+                    transcript.md  # delegation / consult
             strategies/
                 {strategy_slug}/
-                    strategy.md        # strategy definition (tactic + config)
-                    config.yml         # runtime config
-                    learnings.md       # cross-session learnings
-                    dry_runs/          # experiment snapshots (experiment_N.md)
-                    sessions/
-                        session_1/
-                            journal.md  # summary + decisions + ticks + executors
-                            snapshots/
-                                snapshot_1.md
+                    strategy.md    # playbook body + default_config — nothing else
+
+Session identity is ``"{agent_slug}_{N}"`` (``"..._e{N}"`` for dry-run
+experiments). The strategy a tick session ran is *metadata* (``meta.yml``),
+not part of the address.
 """
 
 from __future__ import annotations
@@ -26,56 +33,101 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 log = logging.getLogger(__name__)
 
 _DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
 
 MAX_LEARNINGS = 20
 
+# Session id suffix: "_{N}" for sessions, "_e{N}" for dry-run experiments.
+_AGENT_ID_RE = re.compile(r"^(?P<slug>.+)_(?P<exp>e?)(?P<num>\d+)$")
 
-def _strategy_base_dir(prefix: str) -> Path:
-    """Resolve the per-strategy base dir from an agent_id prefix.
 
-    New format prefixes are ``"{agent_slug}.{strategy_slug}"`` →
-    ``agents/{agent_slug}/strategies/{strategy_slug}/``. Legacy flat
-    prefixes (no dot) fall back to ``agents/{slug}/`` so old ids still
-    resolve.
+def split_agent_id(agent_id: str) -> tuple[str, int, bool] | None:
+    """Parse ``"{slug}_{N}"`` / ``"{slug}_e{N}"`` → (slug, num, is_experiment).
+
+    Returns None when the id doesn't match the single supported format.
     """
-    if "." in prefix:
-        agent_slug, sslug = prefix.split(".", 1)
-        return _DATA_ROOT / agent_slug / "strategies" / sslug
-    return _DATA_ROOT / prefix
+    m = _AGENT_ID_RE.match(agent_id)
+    if not m:
+        return None
+    return m.group("slug"), int(m.group("num")), bool(m.group("exp"))
 
 
 def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
-    """Derive (session_dir, base_dir) from an agent_id.
+    """Derive (session_dir, agent_dir) from an agent_id.
 
-    agent_id format: ``"{agent_slug}.{strategy_slug}_{N}"`` (session) or
-    ``"..._e{N}"`` (experiment). ``base_dir`` is the strategy folder that holds
-    ``sessions/`` and ``learnings.md``.
-
-    Returns (None, None) if the path doesn't exist on disk.
+    ``agent_dir`` is ``agents/{slug}/`` (holds ``sessions/``, ``learnings.md``,
+    ``dry_runs/``). Experiments have no session dir → (None, agent_dir).
+    Returns (None, None) if the agent dir doesn't exist on disk.
     """
-    last_sep = agent_id.rfind("_")
-    if last_sep == -1:
+    parsed = split_agent_id(agent_id)
+    if parsed is None:
         return None, None
-    prefix = agent_id[:last_sep]
-    num_part = agent_id[last_sep + 1 :]
+    slug, num, is_experiment = parsed
 
-    base_dir = _strategy_base_dir(prefix)
-    if not base_dir.is_dir():
+    agent_dir = _DATA_ROOT / slug
+    if not agent_dir.is_dir():
         return None, None
 
-    # Experiments (e.g. "e3") are flat files, not directories
-    if num_part.startswith("e"):
-        return None, base_dir
+    if is_experiment:
+        return None, agent_dir
+    return agent_dir / "sessions" / f"session_{num}", agent_dir
 
+
+# ---------------------------------------------------------------------------
+# Session allocation + meta.yml
+# ---------------------------------------------------------------------------
+
+SESSION_META_FILE = "meta.yml"
+
+
+def allocate_session_dir(agent_dir: Path) -> tuple[int, Path]:
+    """Atomically allocate the next ``sessions/session_N`` directory.
+
+    Uses mkdir (exist_ok=False) as the allocation lock so two concurrent
+    starts under the same agent can never claim the same number.
+    """
+    sessions_dir = agent_dir / "sessions"
+    sessions_dir.mkdir(parents=True, exist_ok=True)
+    n = next_session_number(agent_dir)
+    while True:
+        candidate = sessions_dir / f"session_{n}"
+        try:
+            candidate.mkdir()
+            return n, candidate
+        except FileExistsError:
+            n += 1
+
+
+def write_session_meta(session_dir: Path, meta: dict[str, Any]) -> None:
+    """Write/overwrite a session's ``meta.yml``."""
+    (session_dir / SESSION_META_FILE).write_text(
+        yaml.dump(meta, default_flow_style=False, sort_keys=False)
+    )
+
+
+def read_session_meta(session_dir: Path) -> dict[str, Any]:
+    """Read a session's ``meta.yml``; {} when absent/unparseable (crash husk)."""
+    path = session_dir / SESSION_META_FILE
+    if not path.exists():
+        return {}
     try:
-        session_num = int(num_part)
-    except ValueError:
-        return None, None
-    session_dir = base_dir / "sessions" / f"session_{session_num}"
-    return session_dir, base_dir
+        return yaml.safe_load(path.read_text()) or {}
+    except Exception:
+        log.warning("Unparseable meta.yml at %s", path)
+        return {}
+
+
+def finalize_session_meta(session_dir: Path, status: str, **extra: Any) -> None:
+    """Update a session's meta.yml with a terminal status + ended_at."""
+    meta = read_session_meta(session_dir)
+    meta["status"] = status
+    meta["ended_at"] = datetime.now(timezone.utc).isoformat()
+    meta.update(extra)
+    write_session_meta(session_dir, meta)
 
 
 MAX_SNAPSHOTS = 100
@@ -138,44 +190,32 @@ Duration: {duration:.1f}s
 """
 
 
-def get_session_dir(run_key: str, session_number: int) -> Path:
-    """Build the path for a specific session directory.
-
-    ``run_key`` is the ``"{agent_slug}.{strategy_slug}"`` prefix (legacy flat
-    slugs without a dot still resolve to ``agents/{slug}/``).
-    """
-    return _strategy_base_dir(run_key) / "sessions" / f"session_{session_number}"
+def get_session_dir(agent_slug: str, session_number: int) -> Path:
+    """Build the path for a specific session directory."""
+    return _DATA_ROOT / agent_slug / "sessions" / f"session_{session_number}"
 
 
 def next_session_number(agent_dir: Path) -> int:
     """Determine the next session number by scanning existing session_* dirs."""
-    # Check new location first
     sessions_dir = agent_dir / "sessions"
     if not sessions_dir.exists():
-        # Check legacy location
-        legacy_dir = agent_dir / "trading_sessions"
-        if legacy_dir.exists():
-            sessions_dir = legacy_dir
-        else:
-            return 1
-    existing = [
-        int(d.name.split("_", 1)[1])
-        for d in sessions_dir.iterdir()
-        if d.is_dir() and d.name.startswith("session_")
-    ]
+        return 1
+    existing = []
+    for d in sessions_dir.iterdir():
+        if not d.is_dir() or not d.name.startswith("session_"):
+            continue
+        try:
+            existing.append(int(d.name.split("_", 1)[1]))
+        except ValueError:
+            continue
     return max(existing, default=0) + 1
 
 
 def next_experiment_number(agent_dir: Path) -> int:
-    """Determine the next experiment number by scanning experiment_*.md files.
-
-    Checks both dry_runs/ (new) and experiments/ (legacy) directories.
-    """
+    """Determine the next experiment number by scanning dry_runs/experiment_*.md."""
     existing = []
-    for dir_name in ("dry_runs", "experiments"):
-        d = agent_dir / dir_name
-        if not d.exists():
-            continue
+    d = agent_dir / "dry_runs"
+    if d.exists():
         for f in d.iterdir():
             if f.is_file() and f.suffix == ".md":
                 m = re.match(r"experiment_(\d+)\.md", f.name)
@@ -330,9 +370,6 @@ class JournalManager:
         self._snapshots_dir = self._session_dir / "snapshots"
         self._session_dir.mkdir(parents=True, exist_ok=True)
 
-        # Also support legacy runs/ dir for reading
-        self._legacy_runs_dir = self._session_dir / "runs"
-
         # Read cache: journal.md text keyed by (mtime_ns, size), plus parsed
         # sections derived from that text. Invalidated when the stamp changes
         # (external writers, e.g. the MCP journal_write tool) or explicitly on
@@ -357,55 +394,55 @@ class JournalManager:
     # ------------------------------------------------------------------
 
     def _learnings_path(self) -> Path | None:
-        """Get the learnings file path."""
+        """Get the learnings file path (agent-level)."""
         if self._agent_dir:
             return self._agent_dir / "learnings.md"
-        # Fallback: try to find learnings in session dir parent
+        # Fallback: derive the agent dir from the session dir layout
         parent = self._session_dir.parent
-        if parent.name == "sessions" or parent.name == "trading_sessions":
+        if parent.name == "sessions":
             return parent.parent / "learnings.md"
         return None
 
     def read_learnings(self) -> str:
         """Return the learnings content (cross-session), grouped by category."""
         path = self._learnings_path()
-        if path and path.exists():
-            text = path.read_text()
-            parts = []
-            # Read each category section
-            for cat_key, cat_header in LEARNING_CATEGORIES.items():
-                m = re.search(
-                    rf"^## {re.escape(cat_header)}\n(.*?)(?=^## |\Z)",
-                    text,
-                    re.MULTILINE | re.DOTALL,
-                )
-                if m and m.group(1).strip():
-                    parts.append(f"**{cat_header}:**\n{m.group(1).strip()}")
-            if parts:
-                return "\n\n".join(parts)
-            # Legacy fallback: try Active Insights
+        if not path or not path.exists():
+            return ""
+        text = path.read_text()
+        parts = []
+        # Read each category section
+        for cat_key, cat_header in LEARNING_CATEGORIES.items():
             m = re.search(
-                r"^## Active Insights\n(.*?)(?=^## |\Z)", text, re.MULTILINE | re.DOTALL
+                rf"^## {re.escape(cat_header)}\n(.*?)(?=^## |\Z)",
+                text,
+                re.MULTILINE | re.DOTALL,
             )
-            if m:
-                return m.group(1).strip()
-            lines = text.strip().splitlines()
-            content = [l for l in lines if not l.startswith("# ")]
-            return "\n".join(content).strip()
-        # Fallback: read from journal Learnings section (legacy)
-        return self._get_section("Learnings")
+            if m and m.group(1).strip():
+                parts.append(f"**{cat_header}:**\n{m.group(1).strip()}")
+        return "\n\n".join(parts)
 
-    def append_learning(self, text_content: str, category: str = "") -> None:
+    def append_learning(
+        self, text_content: str, category: str = "", strategy: str = ""
+    ) -> None:
         """Add a learning under a category, deduplicating against existing ones.
 
         Args:
             text_content: The learning text.
             category: "market" or "execution". Defaults to "market".
+            strategy: Provenance — the strategy slug of the tick session that
+                learned it. Learnings pool at the agent level, so entries are
+                prefixed ``[{strategy}] …`` to keep mixing visible/filterable.
+                Empty for delegation/consult learnings (no strategy scope).
         """
         path = self._learnings_path()
         if not path:
-            self._append_learning_to_journal(text_content)
+            log.warning(
+                "append_learning: no agent dir for %s; learning dropped", self.agent_id
+            )
             return
+
+        if strategy:
+            text_content = f"[{strategy}] {text_content}"
 
         if not path.exists():
             path.write_text(LEARNINGS_TEMPLATE)
@@ -462,27 +499,6 @@ class JournalManager:
             new_text = full_text.rstrip() + f"\n\n## {section_header}\n{new_section}\n"
         path.write_text(new_text)
 
-    def _append_learning_to_journal(self, text_content: str) -> None:
-        """Legacy: append learning to journal's Learnings section."""
-        section = self._get_section("Learnings")
-        existing_lines = [l for l in section.splitlines() if l.startswith("- ")]
-
-        normalized_new = _normalize(text_content)
-        for line in existing_lines:
-            existing_text = re.sub(r"^- (\[\d{2}:\d{2}\] )?", "", line)
-            if _normalize(existing_text) == normalized_new:
-                return
-            if _word_overlap(normalized_new, _normalize(existing_text)) > 0.5:
-                return
-
-        now = datetime.now(timezone.utc).strftime("%H:%M")
-        existing_lines.append(f"- [{now}] {text_content}")
-
-        if len(existing_lines) > MAX_LEARNINGS:
-            existing_lines = existing_lines[-MAX_LEARNINGS:]
-
-        self._replace_section("Learnings", "\n".join(existing_lines))
-
     # ------------------------------------------------------------------
     # Reading (journal)
     # ------------------------------------------------------------------
@@ -511,52 +527,24 @@ class JournalManager:
         return self._get_section("Summary")
 
     def read_state(self) -> str:
-        """Return the summary (backwards compat alias for read_summary)."""
-        summary = self._get_section("Summary")
-        if summary:
-            return summary
-        return self._get_section("State")
+        """Return the summary (alias for read_summary, kept for the MCP tool)."""
+        return self._get_section("Summary")
 
     def read_recent(self, max_entries: int = 10) -> str:
         """Return recent decisions from snapshots."""
-        snapshots = self.list_snapshots(limit=max_entries)
-        if snapshots:
-            parts = []
-            for snap in snapshots:
-                content = self.read_snapshot(snap["tick"])
-                if content:
-                    m = re.search(
-                        r"^## Agent Response\n(.*?)(?=^## |\Z|^<details)",
-                        content,
-                        re.MULTILINE | re.DOTALL,
-                    )
-                    if m:
-                        decision = m.group(1).strip()[:200]
-                        parts.append(f"- **#{snap['tick']}** {decision}")
-            if parts:
-                return "\n".join(parts)
-
-        # Legacy: check runs/ and Recent Actions
-        runs = self._list_legacy_runs(limit=max_entries)
-        if runs:
-            parts = []
-            for run in runs:
-                content = self._read_legacy_run(run["tick"])
-                if content:
-                    m = re.search(
-                        r"^## Decision\n(.*?)(?=^## |\Z)",
-                        content,
-                        re.MULTILINE | re.DOTALL,
-                    )
-                    if m:
-                        parts.append(f"- **#{run['tick']}** {m.group(1).strip()}")
-            if parts:
-                return "\n".join(parts)
-
-        content = self._get_section("Recent Actions")
-        if not content:
-            content = self._get_section("Actions Log")
-        return content
+        parts = []
+        for snap in self.list_snapshots(limit=max_entries):
+            content = self.read_snapshot(snap["tick"])
+            if content:
+                m = re.search(
+                    r"^## Agent Response\n(.*?)(?=^## |\Z|^<details)",
+                    content,
+                    re.MULTILINE | re.DOTALL,
+                )
+                if m:
+                    decision = m.group(1).strip()[:200]
+                    parts.append(f"- **#{snap['tick']}** {decision}")
+        return "\n".join(parts)
 
     # ------------------------------------------------------------------
     # Snapshots (full context dumps)
@@ -631,14 +619,11 @@ class JournalManager:
         path = self._snapshots_dir / f"snapshot_{tick}.md"
         if path.exists():
             return path.read_text()
-        # Legacy fallback
-        return self._read_legacy_run(tick)
+        return ""
 
     def list_snapshots(self, limit: int = 10) -> list[dict[str, Any]]:
         """List recent snapshots, newest first."""
         results = []
-
-        # Check new snapshots/ dir
         if self._snapshots_dir.exists():
             files = sorted(
                 self._snapshots_dir.glob("snapshot_*.md"),
@@ -655,11 +640,6 @@ class JournalManager:
                             "size": f.stat().st_size,
                         }
                     )
-
-        # If none found, check legacy runs/
-        if not results:
-            return self._list_legacy_runs(limit=limit)
-
         return results
 
     def get_recent_decisions(self, count: int = 3) -> str:
@@ -685,45 +665,6 @@ class JournalManager:
                 f.unlink()
 
     # ------------------------------------------------------------------
-    # Legacy run support (reads from runs/ dir)
-    # ------------------------------------------------------------------
-
-    def _read_legacy_run(self, tick: int) -> str:
-        path = self._legacy_runs_dir / f"run_{tick}.md"
-        if path.exists():
-            return path.read_text()
-        return ""
-
-    def _list_legacy_runs(self, limit: int = 10) -> list[dict[str, Any]]:
-        if not self._legacy_runs_dir.exists():
-            return []
-        files = sorted(
-            self._legacy_runs_dir.glob("run_*.md"),
-            key=lambda f: f.stat().st_mtime,
-            reverse=True,
-        )
-        results = []
-        for f in files[:limit]:
-            m = re.match(r"run_(\d+)\.md", f.name)
-            if m:
-                results.append(
-                    {
-                        "tick": int(m.group(1)),
-                        "file": f.name,
-                        "size": f.stat().st_size,
-                    }
-                )
-        return results
-
-    def read_run_snapshot(self, tick: int) -> str:
-        """Legacy compat: try snapshots first, then runs."""
-        return self.read_snapshot(tick)
-
-    def list_runs(self, limit: int = 10) -> list[dict[str, Any]]:
-        """Legacy compat: try snapshots first, then runs."""
-        return self.list_snapshots(limit=limit)
-
-    # ------------------------------------------------------------------
     # Writing (journal)
     # ------------------------------------------------------------------
 
@@ -740,11 +681,8 @@ class JournalManager:
         self._replace_section("Summary", summary)
 
     def write_state(self, state_text: str) -> None:
-        """Overwrite the Summary section (backwards compat for write via MCP)."""
-        if self._get_section("State"):
-            self._replace_section("State", state_text.strip())
-        else:
-            self._replace_section("Summary", state_text.strip())
+        """Overwrite the Summary section (the MCP journal_write "state" entry)."""
+        self._replace_section("Summary", state_text.strip())
 
     def append_action(
         self,
@@ -769,15 +707,6 @@ class JournalManager:
         if len(lines) > 20:
             lines = lines[-20:]
         self._replace_section("Decisions", "\n".join(lines))
-
-        # Also write to Recent Actions if it exists (legacy compat)
-        if "## Recent Actions" in self.read_full():
-            ra_section = self._get_section("Recent Actions")
-            ra_lines = [l for l in ra_section.splitlines() if l.strip()]
-            ra_lines.append(entry)
-            if len(ra_lines) > 10:
-                ra_lines = ra_lines[-10:]
-            self._replace_section("Recent Actions", "\n".join(ra_lines))
 
     def append_error(self, error: str) -> None:
         """Append an error as a decision entry."""
@@ -1054,11 +983,7 @@ class JournalManager:
 
     def entry_count(self) -> int:
         """Count snapshots."""
-        snaps = self.list_snapshots(limit=1000)
-        if snaps:
-            return len(snaps)
-        section = self._get_section("Recent Actions")
-        return len([l for l in section.splitlines() if l.startswith("- ")])
+        return len(self.list_snapshots(limit=1000))
 
     def get_data_dir(self) -> Path:
         """Return the session data directory."""
@@ -1067,6 +992,79 @@ class JournalManager:
     def size_bytes(self) -> int:
         """Current file size."""
         return self._path.stat().st_size if self._path.exists() else 0
+
+
+def render_transcript(events: list[dict]) -> str:
+    """Render a chronological run transcript (thoughts, tool calls, text).
+
+    Shared by delegation and consult session persistence (``transcript.md``).
+    """
+    parts: list[str] = []
+    tool_n = 0
+    for ev in events:
+        kind = ev.get("type")
+        if kind == "thought":
+            text = (ev.get("text") or "").strip()
+            if text:
+                quoted = "\n".join(f"> {line}" for line in text.splitlines())
+                parts.append(f"💭 **Reasoning**\n\n{quoted}")
+        elif kind == "text":
+            text = (ev.get("text") or "").strip()
+            if text:
+                parts.append(f"💬 {text}")
+        elif kind == "tool":
+            tool_n += 1
+            name = ev.get("name") or "unknown"
+            status = ev.get("status") or ""
+            block = [f"🔧 **{tool_n}. {name}** ({status})"]
+            if ev.get("input"):
+                inp = ev["input"]
+                inp_str = (
+                    json.dumps(inp, indent=2, default=str)
+                    if isinstance(inp, dict)
+                    else str(inp)
+                )
+                block.append(f"**Input:**\n```json\n{inp_str}\n```")
+            if ev.get("output"):
+                out_str = str(ev["output"])
+                if len(out_str) > 2000:
+                    out_str = out_str[:2000] + "\n… (truncated)"
+                block.append(f"**Output:**\n```\n{out_str}\n```")
+            parts.append("\n".join(block))
+    return "\n\n".join(parts)
+
+
+def prune_sessions(agent_dir: Path, kind: str, keep: int) -> int:
+    """Delete the oldest sessions of ``kind`` beyond ``keep`` (retention cap).
+
+    Only sessions whose meta.yml declares exactly that kind are candidates —
+    tick sessions (the track record) are never touched by consult retention.
+    Returns the number of sessions removed.
+    """
+    import shutil
+
+    sessions_dir = agent_dir / "sessions"
+    if not sessions_dir.exists():
+        return 0
+    matching: list[tuple[int, Path]] = []
+    for d in sessions_dir.iterdir():
+        if not d.is_dir() or not d.name.startswith("session_"):
+            continue
+        if read_session_meta(d).get("kind") != kind:
+            continue
+        try:
+            matching.append((int(d.name.split("_", 1)[1]), d))
+        except ValueError:
+            continue
+    matching.sort()
+    removed = 0
+    for _, d in matching[: max(0, len(matching) - keep)]:
+        try:
+            shutil.rmtree(d)
+            removed += 1
+        except Exception:
+            log.exception("Failed to prune session %s", d)
+    return removed
 
 
 def _normalize(text: str) -> str:

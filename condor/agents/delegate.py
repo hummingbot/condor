@@ -1,30 +1,35 @@
 """DELEGATE -- fire-and-forget background agent tasks.
 
 DELEGATE is the async, *unattended* sibling of CONSULT
-(:mod:`condor.agents.consult`). Where CONSULT runs an Agent's brain to completion
-and blocks until it can return an answer (mutations human-gated), DELEGATE hands a
-one-off, goal-oriented task to a *detached* Agent instance that works autonomously
-until ``client.prompt()`` returns -- the natural "task done" signal -- then notifies
-the user with the result.
+(:mod:`condor.agents.consult`). Where CONSULT blocks until it can return an
+answer (mutations human-gated), DELEGATE hands a one-off, goal-oriented task to
+a *detached* Agent instance that works autonomously until the run completes --
+the natural "task done" signal -- then notifies the user with the result.
 
-It is NOT a new engine. It reuses 100% of consult's client/toolset/prompt wiring
-via :func:`condor.agents.consult._run_agent_to_completion`, passing
-``permission_callback=None`` so an ACP agent auto-approves its own tool calls
-(:meth:`condor.acp.client.ACPClient._on_request_permission`). This is the user's
-chosen authorization model: full auto-approve, no sandbox (see FEAT-006 Risks).
+It is NOT a new engine: it drives the same :func:`condor.agents.run.run_agent`
+primitive under an unattended policy (refactor-02 §4.1):
 
-The registry is in-memory and ephemeral -- a delegation dies with the process, like
-a running ``TickEngine`` in ``_engines``. The *result transcript* is persisted to a
-flat file under ``agents/{slug}/delegations/{task_id}.md`` so nothing is lost if you
-weren't watching, but an unfinished task does not resume after a restart.
+- **Trading agents** (``server_required: true``) run under a zero-seeded
+  ``risk_gate``: tool calls auto-approve *within caps* (the caps act as a
+  per-run budget), uncapped bot deploys and ``place_order`` are blocked. The
+  limits come from the per-call ``risk_limits`` override when given (it
+  REPLACES the baseline — what you pass is exactly what governs), else the
+  agent's AGENT.md ``risk_limits:`` baseline. A trading delegation with
+  NEITHER errors loudly at start.
+- **Serverless specialists** (e.g. ``routine_builder``) keep full auto-approve.
+
+The in-memory registry dies with the process, like a running ``TickEngine`` in
+``_engines``. Each delegation is persisted as a ``kind: delegation`` session
+under ``agents/{slug}/sessions/session_N/`` (meta.yml written at start — a
+crash leaves an inspectable husk; transcript.md + final status in ``finally``).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -32,18 +37,20 @@ log = logging.getLogger(__name__)
 # Module-level registry of live delegations (mirrors engine._engines).
 _delegations: dict[str, "DelegateTask"] = {}
 
-# Default per-task wall-clock budget; a hung ACP subprocess is cancelled after this.
+# Default per-task wall-clock budget; a hung subprocess is cancelled after this.
 DEFAULT_TIMEOUT_S = 900
 
 
 @dataclass
 class DelegateTask:
-    task_id: str
+    task_id: str  # == the session id "{agent_slug}_{N}"
     agent_slug: str
     user_id: int
     chat_id: int
     server_name: str | None
     task: str
+    session_dir: Path | None = None
+    risk_limits: dict | None = None  # per-call override; None → agent baseline
     status: str = "running"  # running | done | error | stopped
     result: str = ""  # final answer text once done
     error: str = ""
@@ -74,6 +81,27 @@ def get_all_delegations() -> dict[str, DelegateTask]:
     return dict(_delegations)
 
 
+def _resolve_delegation_limits(agent, risk_limits: dict | None) -> dict | None:
+    """Resolve the risk caps governing an unattended run of ``agent``.
+
+    Returns the caps dict for trading agents, or None for serverless agents
+    (full auto-approve). Raises when a trading delegation has neither a
+    baseline nor an override — unbounded-capital delegations must say their
+    numbers out loud.
+    """
+    if not agent.server_required:
+        return None
+    limits = risk_limits or agent.risk_limits
+    if not limits:
+        raise ValueError(
+            f"Agent '{agent.slug}' can touch live trading but has no risk baseline: "
+            "set `risk_limits:` in its AGENT.md frontmatter, or pass an explicit "
+            "risk_limits dict on this delegation (e.g. "
+            '{"max_position_size_quote": 500, "max_open_executors": 5}).'
+        )
+    return dict(limits)
+
+
 async def start_delegation(
     *,
     agent_slug: str,
@@ -83,34 +111,62 @@ async def start_delegation(
     task: str,
     bot=None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
+    risk_limits: dict | None = None,
 ) -> DelegateTask:
     """Create a DelegateTask, spawn the detached runner, register it, return now.
 
     Returns immediately -- the caller gets a ``task_id`` to poll/stop while the
     agent works in the background.
+
+    Raises:
+        ValueError: unknown agent, or a trading delegation with neither an
+            AGENT.md ``risk_limits`` baseline nor a per-call override.
     """
-    short_id = uuid.uuid4().hex[:8]
+    from condor.agents.agent import AgentStore
+    from condor.agents.journal import allocate_session_dir, write_session_meta
+
+    agent = AgentStore().get(agent_slug)
+    if agent is None:
+        raise ValueError(f"No agent named '{agent_slug}' exists.")
+
+    # Validate the policy up front so the caller gets the loud error, not a
+    # background failure notification.
+    effective_limits = _resolve_delegation_limits(agent, risk_limits)
+
+    num, session_dir = allocate_session_dir(agent.agent_dir)
+    task_id = f"{agent_slug}_{num}"
+    write_session_meta(
+        session_dir,
+        {
+            "kind": "delegation",
+            "status": "running",
+            "task": task[:500],
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            **({"risk_limits": effective_limits} if effective_limits else {}),
+        },
+    )
+
     dt = DelegateTask(
-        task_id=f"{agent_slug}-delegate-{short_id}",
+        task_id=task_id,
         agent_slug=agent_slug,
         user_id=user_id,
         chat_id=chat_id,
         server_name=server_name,
         task=task,
+        session_dir=session_dir,
+        risk_limits=effective_limits,
     )
     _delegations[dt.task_id] = dt
-    dt._task = asyncio.create_task(_run(dt, bot, timeout_s))
+    dt._task = asyncio.create_task(_run(dt, agent, bot, timeout_s))
     return dt
 
 
 def _make_event_sink(dt: DelegateTask):
-    """Build a callback that folds streamed ACP events into ``dt.events``.
+    """Build a callback that folds streamed events into ``dt.events`` live.
 
-    Consecutive thought/text chunks are merged here; the tool-call create/patch
-    reduction (a ``ToolCallUpdate`` patches the matching ``ToolCallEvent`` entry in
-    place so each tool call shows its final input/output) is shared with
-    :class:`condor.agents.engine.TickEngine` via
-    :func:`condor.acp.client.fold_tool_call_event`.
+    ``run_agent`` folds the same stream into ``RunResult.events`` for the
+    persisted transcript; this sink keeps the in-memory task record streaming
+    for pollers (``delegate(action="get")``) while the run is in flight.
     """
     from condor.acp.client import (
         TextChunk,
@@ -143,32 +199,46 @@ def _make_event_sink(dt: DelegateTask):
     return sink
 
 
-async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
+async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
     """Background runner: drive the agent to completion, persist, notify."""
-    from condor.agents.consult import _run_agent_to_completion
+    from condor.agents.policies import AUTO, risk_gate
+    from condor.agents.run import run_agent
+    from handlers.agents._shared import build_agent_context
+
+    if dt.risk_limits is not None:
+        policy = risk_gate(dt.risk_limits)  # zero-seeded: caps = per-run budget
+    else:
+        policy = AUTO  # serverless specialist — full auto-approve
+
+    effective_server = (
+        (agent.server_name or dt.server_name) if agent.server_required else None
+    )
+    prompt = build_agent_context(agent, dt.user_id, dt.task)
 
     try:
-        dt.result = await asyncio.wait_for(
-            _run_agent_to_completion(
-                slug=dt.agent_slug,
-                user_id=dt.user_id,
-                chat_id=dt.chat_id,
-                server_name=dt.server_name,
-                task=dt.task,
-                context="",
-                permission_callback=None,  # unattended -> ACP auto-approves
-                event_sink=_make_event_sink(dt),
-            ),
-            timeout=timeout_s,
+        result = await run_agent(
+            agent,
+            prompt,
+            permission_policy=policy,
+            user_id=dt.user_id,
+            chat_id=dt.chat_id,
+            server_name=effective_server,
+            timeout_s=timeout_s,
+            event_sink=_make_event_sink(dt),
+            fallback_on_unhealthy=True,
         )
-        dt.status = "done"
+        if result.timed_out:
+            dt.status = "error"
+            dt.error = result.error
+            log.warning("Delegation %s timed out after %ss", dt.task_id, timeout_s)
+        else:
+            dt.result = result.fallback_note + (
+                result.text or "(the agent returned no answer)"
+            )
+            dt.status = "done"
     except asyncio.CancelledError:
         dt.status = "stopped"
         raise
-    except asyncio.TimeoutError:
-        dt.status = "error"
-        dt.error = f"Timed out after {timeout_s}s"
-        log.warning("Delegation %s timed out after %ss", dt.task_id, timeout_s)
     except Exception as e:  # noqa: BLE001 -- surface any runtime failure as task error
         dt.status = "error"
         dt.error = str(e)
@@ -195,64 +265,21 @@ async def stop_delegation(task_id: str) -> bool:
     return True
 
 
-def _render_session(events: list[dict]) -> str:
-    """Render the chronological session transcript (thoughts, tool calls, text)."""
-    import json
-
-    parts: list[str] = []
-    tool_n = 0
-    for ev in events:
-        kind = ev.get("type")
-        if kind == "thought":
-            text = (ev.get("text") or "").strip()
-            if text:
-                quoted = "\n".join(f"> {line}" for line in text.splitlines())
-                parts.append(f"💭 **Reasoning**\n\n{quoted}")
-        elif kind == "text":
-            text = (ev.get("text") or "").strip()
-            if text:
-                parts.append(f"💬 {text}")
-        elif kind == "tool":
-            tool_n += 1
-            name = ev.get("name") or "unknown"
-            status = ev.get("status") or ""
-            block = [f"🔧 **{tool_n}. {name}** ({status})"]
-            if ev.get("input"):
-                inp = ev["input"]
-                inp_str = (
-                    json.dumps(inp, indent=2, default=str)
-                    if isinstance(inp, dict)
-                    else str(inp)
-                )
-                block.append(f"**Input:**\n```json\n{inp_str}\n```")
-            if ev.get("output"):
-                out_str = str(ev["output"])
-                if len(out_str) > 2000:
-                    out_str = out_str[:2000] + "\n… (truncated)"
-                block.append(f"**Output:**\n```\n{out_str}\n```")
-            parts.append("\n".join(block))
-    return "\n\n".join(parts)
-
-
 def _persist_transcript(dt: DelegateTask) -> None:
-    """Write a session transcript under agents/{slug}/delegations/{task_id}.md.
+    """Finalize the delegation's session: transcript.md + terminal meta status.
 
-    Mirrors the ``dry_runs/experiment_N.md`` flat-file convention, not the
-    heavyweight ``sessions/`` tree -- a delegate has no ticks to journal. Captures
-    the full session: the agent's reasoning, every tool call (with input/output),
-    and the final result, so nothing about *how* the task was solved is lost.
+    Captures the full session — the agent's reasoning, every tool call (with
+    input/output), and the final result — so nothing about *how* the task was
+    solved is lost.
     """
-    from condor.agents.agent import AgentStore
+    from condor.agents.journal import finalize_session_meta, render_transcript
 
-    agent = AgentStore().get(dt.agent_slug)
-    if agent is None:
+    if dt.session_dir is None:
         return
-    delegations_dir = agent.agent_dir / "delegations"
-    delegations_dir.mkdir(parents=True, exist_ok=True)
 
-    tool_count = sum(1 for e in dt.events if e.get("type") == "tool")
     body = dt.error if dt.status == "error" else dt.result
-    session = _render_session(dt.events)
+    tool_count = sum(1 for e in dt.events if e.get("type") == "tool")
+    session = render_transcript(dt.events)
 
     content = (
         f"# Delegation {dt.task_id}\n\n"
@@ -265,7 +292,12 @@ def _persist_transcript(dt: DelegateTask) -> None:
         f"## {'Error' if dt.status == 'error' else 'Result'}\n\n"
         f"{body or '(none)'}\n"
     )
-    (delegations_dir / f"{dt.task_id}.md").write_text(content)
+    (dt.session_dir / "transcript.md").write_text(content)
+    finalize_session_meta(
+        dt.session_dir,
+        dt.status,
+        **({"error": dt.error} if dt.error else {}),
+    )
 
 
 async def _notify_done(dt: DelegateTask, bot) -> None:

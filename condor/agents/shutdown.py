@@ -1,14 +1,15 @@
-"""Emergency shutdown -- declarative winddown policy for a strategy.
+"""Emergency shutdown -- declarative winddown policy for an agent session.
 
-When a strategy hits a kill-switch (a hard risk breach or a manual emergency
+When a session hits a kill-switch (a hard risk breach or a manual emergency
 stop) its open **positions and executors** must be wound down, not left stranded.
-The policy is declared per strategy in a ``shutdown.md`` file that reuses the exact
-YAML-frontmatter + markdown-body format of ``strategy.md`` and the same
-strategy-over-agent-over-default inheritance chain:
+The policy is declared per agent in a ``shutdown.md`` file that reuses the exact
+YAML-frontmatter + markdown-body format of ``strategy.md``:
 
-    agents/{slug}/strategies/{sslug}/shutdown.md   # this strategy
-    agents/{slug}/shutdown.md                       # this agent (all its strategies)
-    agents/_defaults/shutdown.md                    # shipped default
+    agents/{slug}/shutdown.md      # this agent (all its sessions)
+    agents/_defaults/shutdown.md   # shipped default
+
+(Winddown is session-scoped and positions don't care which playbook opened
+them, so there is no per-strategy tier — refactor-01b.)
 
 The front-matter is a machine-executable policy the deterministic winddown reads;
 the body is free-form instructions handed to the bounded LLM cleanup pass.
@@ -20,7 +21,8 @@ import asyncio
 import logging
 from typing import Any
 
-from .strategy import Strategy, _parse_frontmatter
+from .agent import Agent
+from .strategy import _parse_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -70,20 +72,17 @@ class ShutdownPolicy:
         )
 
 
-def load_shutdown_policy(strategy: Strategy) -> tuple[ShutdownPolicy, str]:
-    """Resolve the shutdown policy + LLM body for ``strategy``.
+def load_shutdown_policy(agent: Agent) -> tuple[ShutdownPolicy, str]:
+    """Resolve the shutdown policy + LLM body for ``agent``.
 
-    Walks strategy → agent → shipped default, returning the first ``shutdown.md``
-    found. Paths are derived from ``strategy.dir`` (``.../agents/{slug}/strategies/
-    {sslug}``) so the resolution follows the same (possibly test-patched) data root
-    as the rest of the agent store. If nothing is on disk, returns the built-in
-    default policy with an empty body.
+    Walks agent → shipped default, returning the first ``shutdown.md`` found.
+    Paths are derived from ``agent.agent_dir`` so the resolution follows the
+    same (possibly test-patched) data root as the rest of the agent store. If
+    nothing is on disk, returns the built-in default policy with an empty body.
     """
-    # strategy.dir == {root}/{agent_slug}/strategies/{sslug}
-    agent_dir = strategy.dir.parent.parent  # {root}/{agent_slug}
+    agent_dir = agent.agent_dir  # {root}/{agent_slug}
     data_root = agent_dir.parent  # {root}
     candidates = [
-        strategy.dir / "shutdown.md",
         agent_dir / "shutdown.md",
         data_root / "_defaults" / "shutdown.md",
     ]
@@ -306,20 +305,26 @@ async def _run_llm_cleanup(
     if not body or agent is None:
         return
     try:
-        from .consult import _run_agent_to_completion
+        from .policies import AUTO
+        from .run import run_agent
+        from handlers.agents._shared import build_agent_context
 
         running = await _get_running_executors(engine, client)
         positions = await _fetch_positions(client, engine.agent_id)
         context = _build_llm_context(policy, running, positions, failures)
+        prompt = build_agent_context(agent, engine.user_id, body, context)
         async with asyncio.timeout(300):
-            await _run_agent_to_completion(
-                slug=agent.slug,
+            # Unattended auto-approve: the cleanup pass must be able to close
+            # positions without a human in the loop (that is its whole point);
+            # the deterministic floor already ran, so this can only reduce risk.
+            await run_agent(
+                agent,
+                prompt,
+                permission_policy=AUTO,
                 user_id=engine.user_id,
                 chat_id=engine.chat_id,
-                server_name=engine.config.get("server_name"),
-                task=body,
-                context=context,
-                permission_callback=None,  # unattended auto-approve, like DELEGATE
+                server_name=engine.config.get("server_name") or None,
+                timeout_s=300,
             )
     except asyncio.TimeoutError:
         log.warning(
@@ -349,7 +354,7 @@ async def run_shutdown(engine: Any, reason: str) -> None:
     the self-stop; this function performs the winddown itself and never raises for
     an individual API failure -- failures are collected and surfaced.
     """
-    policy, body = load_shutdown_policy(engine.strategy)
+    policy, body = load_shutdown_policy(engine.agent)
     agent_id = engine.agent_id
     log.warning(
         "TickEngine %s: SHUTDOWN starting -- %s (policy=%s)",

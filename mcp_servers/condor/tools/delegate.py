@@ -15,6 +15,7 @@ async def delegate(
     agent: str = "",
     task: str = "",
     task_id: str = "",
+    risk_limits: dict | None = None,
 ) -> dict:
     """Dispatch a delegate action (start | list | get | stop)."""
     action = (action or "").lower()
@@ -30,6 +31,7 @@ async def delegate(
                 "chat_id": settings.chat_id,
                 "user_id": settings.user_id,
                 "server_name": settings.active_server or None,
+                "risk_limits": risk_limits,
             },
         )
         # Spell out how the user tracks this so the model never INVENTS a status

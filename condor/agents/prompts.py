@@ -75,10 +75,11 @@ NOTIFICATIONS:
 - Use send_notification(text="...") to message the user on Telegram.
 """
 
-# Journal guidance. In experiment modes (dry_run / run_once) the engine keeps NO
-# journal — the whole tick is captured in a dry-run snapshot instead — so the agent
-# must not call trading_agent_journal_write (it would fail with "no journal
-# available"). Loop mode gets the full journal protocol.
+# Journal guidance. In dry-run experiments the engine keeps NO journal — the
+# whole tick is captured in a dry-run snapshot instead — so the agent must not
+# call trading_agent_journal_write (it would fail with "no journal available").
+# Everything else (loop, incl. max_ticks=1 run-once sessions) gets the full
+# journal protocol.
 JOURNAL_SECTION_LIVE = """\
 JOURNAL:
 - Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
@@ -93,7 +94,7 @@ JOURNAL:
 
 JOURNAL_SECTION_EXPERIMENT = """\
 JOURNAL:
-- This is an experiment (dry-run / run-once): there is NO journal this tick.
+- This is a dry-run experiment: there is NO journal this tick.
 - Do NOT call trading_agent_journal_write or trading_agent_journal_read — they are
   unavailable here and will error.
 - Put all observations, reasoning, and what you WOULD record straight into your
@@ -101,11 +102,11 @@ JOURNAL:
 """
 
 
-def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
+def _build_tool_preload(*, is_dry_run: bool) -> str:
     """ToolSearch preload line for ACP sessions.
 
-    Dry-run omits manage_executors (read-only). Experiment modes (dry_run /
-    run_once) omit trading_agent_journal_write since they have no journal.
+    Dry-run omits manage_executors (read-only) and trading_agent_journal_write
+    (experiments keep no journal).
     """
     tools = ["mcp__mcp-hummingbot__get_market_data"]
     if not is_dry_run:
@@ -114,7 +115,7 @@ def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
         "mcp__mcp-hummingbot__search_history",
         "mcp__mcp-hummingbot__explore_geckoterminal",
     ]
-    if not is_experiment:
+    if not is_dry_run:
         tools.append("mcp__condor__trading_agent_journal_write")
     tools += [
         "mcp__condor__send_notification",
@@ -129,7 +130,7 @@ def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
     )
 
 
-def _build_routines_section(strategy: Strategy) -> str:
+def _build_routines_section(agent_slug: str) -> str:
     """Build an [AVAILABLE ROUTINES] section listing this agent's own routines.
 
     Domain experts/trading agents are isolated: they see only their own routines
@@ -139,13 +140,13 @@ def _build_routines_section(strategy: Strategy) -> str:
 
     lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
-        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.key}", config={{...}})'
+        f'Call via: manage_routines(action="run", name="<name>", agent_slug="{agent_slug}", config={{...}})'
     )
     lines.append("")
 
     # Agent-level routines (shared across this agent's strategies, isolated from
     # the chat's general library).
-    routines_dir = assistant_routines_dir(strategy.agent_slug)
+    routines_dir = assistant_routines_dir(agent_slug)
     local = discover_routines_from_path(routines_dir) if routines_dir.exists() else {}
     if local:
         for name, r in sorted(local.items()):
@@ -181,24 +182,19 @@ def build_tick_prompt(
 
     execution_mode = config.get("execution_mode", "loop")
     is_dry_run = execution_mode == "dry_run"
-    # Experiments (dry_run + run_once) keep no journal — the tick is captured as a
-    # dry-run snapshot instead. Mirrors TickEngine.is_experiment in engine.py.
-    is_experiment = execution_mode in ("dry_run", "run_once")
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
     # Select base prompt and journal protocol based on mode
     base_prompt = BASE_PROMPT_DRY_RUN if is_dry_run else BASE_PROMPT_LIVE
     journal_section = (
-        JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
+        JOURNAL_SECTION_EXPERIMENT if is_dry_run else JOURNAL_SECTION_LIVE
     )
     sections: list[str] = [base_prompt, journal_section, BASE_PROMPT_COMMON]
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
-        sections.append(
-            _build_tool_preload(is_dry_run=is_dry_run, is_experiment=is_experiment)
-        )
+        sections.append(_build_tool_preload(is_dry_run=is_dry_run))
     else:
         sections.append(
             "TOOLS:\n"
@@ -213,10 +209,10 @@ def build_tick_prompt(
             tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
     sections.append(tick_info)
 
-    # Run-once mode note
-    if execution_mode == "run_once":
+    # Single-tick session note (run_once maps to max_ticks=1)
+    if not is_dry_run and config.get("max_ticks") == 1:
         sections.append(
-            "[EXECUTION MODE — RUN ONCE]\n"
+            "[EXECUTION MODE — SINGLE TICK]\n"
             "Single-tick session with LIVE execution. The engine will stop after this tick. "
             "Make your best move now — there will be no follow-up ticks."
         )
@@ -236,7 +232,7 @@ def build_tick_prompt(
     routines_section = cached_routines_section
     if routines_section is None:
         try:
-            routines_section = _build_routines_section(strategy)
+            routines_section = _build_routines_section(agent.slug)
         except Exception:
             routines_section = ""  # Don't fail the tick if discovery fails
     skills_routines = ["[AVAILABLE SKILLS & ROUTINES]"]

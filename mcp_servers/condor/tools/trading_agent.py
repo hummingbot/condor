@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from mcp_servers.condor.condor_client import agent_strategy_from_agent_id, call_main_api
+from mcp_servers.condor.condor_client import call_main_api, slug_from_agent_id
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
 
@@ -23,7 +23,6 @@ def _manage_strategy(
     description: str | None,
     instructions: str | None,
     agent_key: str | None,
-    skills: list[str] | None,
     config: dict | None,
 ) -> dict:
     from condor.agents.strategy import StrategyStore, split_key
@@ -40,7 +39,6 @@ def _manage_strategy(
                     "name": s.name,
                     "description": s.description,
                     "agent_key": s.agent_key,
-                    "skills": s.skills,
                     "default_config": s.default_config,
                 }
                 for s in strategies
@@ -60,7 +58,6 @@ def _manage_strategy(
             "description": s.description,
             "agent_key": s.agent_key,
             "instructions": s.instructions,
-            "skills": s.skills,
             "default_config": s.default_config,
             "created_by": s.created_by,
             "created_at": s.created_at,
@@ -83,7 +80,6 @@ def _manage_strategy(
             description=description or "",
             agent_key=agent_key,
             instructions=instructions,
-            skills=skills,
             default_config=config,
             created_by=settings.user_id,
         )
@@ -103,8 +99,6 @@ def _manage_strategy(
             s.instructions = instructions
         if agent_key:
             s.agent_key = agent_key
-        if skills is not None:
-            s.skills = skills
         if config:
             s.default_config = config
         store.update(s)
@@ -182,6 +176,7 @@ def _manage_agent(
     when_to_consult: str | None,
     server_required: bool | None,
     server_name: str | None,
+    risk_limits: dict | None,
 ) -> dict:
     from condor.agents.agent import AgentStore
 
@@ -199,6 +194,7 @@ def _manage_agent(
             when_to_consult=when_to_consult or "",
             server_required=True if server_required is None else server_required,
             server_name=server_name or "",
+            risk_limits=risk_limits,
             created_by=settings.user_id,
         )
         return {
@@ -224,6 +220,7 @@ def _manage_agent(
             "when_to_consult": a.when_to_consult,
             "server_required": a.server_required,
             "server_name": a.server_name,
+            "risk_limits": a.risk_limits,
             "consultable": a.consultable,
             "created_by": a.created_by,
             "created_at": a.created_at,
@@ -251,6 +248,8 @@ def _manage_agent(
             a.server_required = server_required
         if server_name is not None:
             a.server_name = server_name
+        if risk_limits is not None:
+            a.risk_limits = risk_limits
         store.update(a)
         return {"updated": True, "agent_slug": a.slug, "consultable": a.consultable}
 
@@ -273,12 +272,12 @@ def _manage_agent(
 
 
 # ---------------------------------------------------------------------------
-# Strategy-scoped routine listing
+# Agent-scoped routine listing
 # ---------------------------------------------------------------------------
 
 
-def _strategy_list_routines(strategy_id: str) -> dict:
-    """List global + agent-local routines for a strategy, with scope labels."""
+def _agent_list_routines(agent_slug: str) -> dict:
+    """List global + agent-local routines for an agent, with scope labels."""
     from routines.base import discover_routines, discover_routines_from_path
 
     result = []
@@ -295,7 +294,7 @@ def _strategy_list_routines(strategy_id: str) -> dict:
 
     from mcp_servers.condor.tools.routines import _get_agent_routines_dir
 
-    routines_dir = _get_agent_routines_dir(strategy_id)
+    routines_dir = _get_agent_routines_dir(agent_slug)
     if routines_dir and routines_dir.exists():
         for name, routine in sorted(discover_routines_from_path(routines_dir).items()):
             result.append(
@@ -317,7 +316,8 @@ def _strategy_list_routines(strategy_id: str) -> dict:
 
 async def _agent_lifecycle(
     action: str,
-    strategy_id: str | None,
+    agent_slug: str | None,
+    strategy: str | None,
     agent_id: str | None,
     config: dict | None,
 ) -> dict:
@@ -327,28 +327,49 @@ async def _agent_lifecycle(
             agents = []
             if isinstance(result, list):
                 for agent_summary in result:
-                    for strat in agent_summary.get("strategies", []):
-                        for inst in strat.get("instances", []):
-                            agents.append(inst)
+                    for inst in agent_summary.get("instances", []):
+                        agents.append(inst)
             if not agents:
                 return {"agents": [], "message": "No agents running"}
             return {"agents": agents}
 
         if action == "start_agent":
-            if not strategy_id:
-                return {"error": "strategy_id is required"}
+            if not agent_slug:
+                return {"error": "agent_slug is required"}
 
+            from condor.agents.agent import AgentStore
             from condor.agents.strategy import StrategyStore
 
-            store = StrategyStore()
-            strategy = store.get_by_key(strategy_id)
-            if not strategy:
-                return {"error": f"Strategy '{strategy_id}' not found"}
+            owner = AgentStore().get(agent_slug)
+            if owner is None:
+                return {"error": f"Agent '{agent_slug}' not found"}
 
-            from condor.agents.config import load_full_config
+            # The strategy is a start-time selector: optional when the agent has
+            # exactly one, REQUIRED (with the options listed) when it has several.
+            strategies = StrategyStore().list(agent_slug)
+            if strategy:
+                selected = next((s for s in strategies if s.slug == strategy), None)
+                if selected is None:
+                    return {
+                        "error": f"Agent '{agent_slug}' has no strategy '{strategy}'. "
+                        f"Available: {[s.slug for s in strategies] or 'none'}"
+                    }
+            elif len(strategies) == 1:
+                selected = strategies[0]
+            elif not strategies:
+                return {
+                    "error": f"Agent '{agent_slug}' has no strategies — create one "
+                    "with create_strategy before starting it."
+                }
+            else:
+                return {
+                    "error": f"Agent '{agent_slug}' has several strategies — pass "
+                    f"strategy=<slug>. Available: {[s.slug for s in strategies]}"
+                }
+
             from config_manager import get_config_manager, get_effective_server
 
-            config_dict = load_full_config(strategy.dir, strategy.default_config)
+            config_dict = dict(selected.default_config or {})
             if config:
                 if config.get("dry_run") and "execution_mode" not in config:
                     config["execution_mode"] = "dry_run"
@@ -356,11 +377,8 @@ async def _agent_lifecycle(
             if not config or "server_name" not in config:
                 # A server pinned on the owning Agent wins over the ambient chat
                 # server, mirroring consult/delegate resolution.
-                from condor.agents.agent import AgentStore
-
-                owner = AgentStore().get(strategy.agent_slug)
                 effective = (
-                    (owner.server_name if owner else "")
+                    owner.server_name
                     or settings.active_server
                     or get_effective_server(settings.chat_id)
                 )
@@ -375,8 +393,9 @@ async def _agent_lifecycle(
 
             return await call_main_api(
                 "POST",
-                f"/agents/{strategy.agent_slug}/strategies/{strategy.slug}/start",
+                f"/agents/{agent_slug}/start",
                 {
+                    "strategy": selected.slug,
                     "config": config_dict,
                     "trading_context": trading_context,
                     "chat_id": settings.chat_id,
@@ -395,10 +414,10 @@ async def _agent_lifecycle(
                 "resume_agent": "resume",
                 "shutdown_agent": "shutdown",
             }[action]
-            aslug, sslug = agent_strategy_from_agent_id(agent_id)
+            slug = slug_from_agent_id(agent_id)
             return await call_main_api(
                 "POST",
-                f"/agents/{aslug}/strategies/{sslug}/{verb}?agent_id={agent_id}",
+                f"/agents/{slug}/{verb}?agent_id={agent_id}",
             )
 
         return {"error": f"Unknown lifecycle action: {action}"}
@@ -423,7 +442,7 @@ def _resolve_journal_manager(agent_id: str):
                 "content": "(experiment mode — no journal, results saved to dry_runs/)"
             }
         session_dir = engine.session_dir
-        agent_dir = engine.strategy.dir
+        agent_dir = engine.agent.agent_dir
     else:
         from condor.agents.journal import resolve_agent_dirs
 
@@ -434,33 +453,26 @@ def _resolve_journal_manager(agent_id: str):
 
 
 def _resolve_experiment_file(agent_id: str):
-    """For an experiment agent_id ("..._eN"), locate its saved snapshot.
+    """For an experiment agent_id ("{slug}_eN"), locate its saved snapshot.
 
-    Experiments (dry_run / run_once) keep no journal — the tick is saved as a
-    flat ``dry_runs/experiment_N.md`` (legacy: ``experiments/``). Returns
-    (path | None, num | None); num is set even when the file isn't on disk yet
-    so callers can distinguish "experiment in progress" from "not an experiment".
+    Dry-run experiments keep no journal — the tick is saved as a flat
+    ``dry_runs/experiment_N.md``. Returns (path | None, num | None); num is
+    set even when the file isn't on disk yet so callers can distinguish
+    "experiment in progress" from "not an experiment".
     """
-    from condor.agents.journal import resolve_agent_dirs
+    from condor.agents.journal import resolve_agent_dirs, split_agent_id
 
-    last_sep = agent_id.rfind("_")
-    if last_sep == -1:
+    parsed = split_agent_id(agent_id)
+    if parsed is None or not parsed[2]:
         return None, None
-    num_part = agent_id[last_sep + 1 :]
-    if not num_part.startswith("e"):
-        return None, None
-    try:
-        num = int(num_part[1:])
-    except ValueError:
-        return None, None
+    num = parsed[1]
 
-    _, base_dir = resolve_agent_dirs(agent_id)
-    if base_dir is None:
+    _, agent_dir = resolve_agent_dirs(agent_id)
+    if agent_dir is None:
         return None, num
-    for dirname in ("dry_runs", "experiments"):
-        path = base_dir / dirname / f"experiment_{num}.md"
-        if path.exists():
-            return path, num
+    path = agent_dir / "dry_runs" / f"experiment_{num}.md"
+    if path.exists():
+        return path, num
     return None, num
 
 
@@ -493,7 +505,7 @@ def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) 
     elif section in ("state", "summary"):
         return {"content": jm.read_state()}
     elif section == "runs":
-        runs = jm.list_runs(limit=max_entries)
+        runs = jm.list_snapshots(limit=max_entries)
         return {"runs": runs}
     elif section.startswith("run:"):
         try:
@@ -502,7 +514,7 @@ def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) 
             return {
                 "error": "Invalid run format. Use 'run:N' where N is the tick number."
             }
-        content = jm.read_run_snapshot(tick_num)
+        content = jm.read_snapshot(tick_num)
         if not content:
             return {"error": f"No run snapshot found for tick #{tick_num}"}
         return {"content": content}
@@ -537,14 +549,14 @@ def journal_write(
                 "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
             }
         session_dir = engine.session_dir
-        agent_dir = engine.strategy.dir
+        agent_dir = engine.agent.agent_dir
     else:
         from condor.agents.journal import resolve_agent_dirs
 
         session_dir, agent_dir = resolve_agent_dirs(agent_id)
-        # resolve_agent_dirs returns (None, base_dir) for an experiment id ("..._eN")
-        # but (None, None) for a genuinely unknown agent. Skip benignly for the
-        # former, error for the latter.
+        # resolve_agent_dirs returns (None, agent_dir) for an experiment id
+        # ("{slug}_eN") but (None, None) for a genuinely unknown agent. Skip
+        # benignly for the former, error for the latter.
         if session_dir is None and agent_dir is not None:
             return {
                 "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
@@ -554,7 +566,16 @@ def journal_write(
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     if entry_type == "learning":
-        jm.append_learning(text, category=category or "market")
+        # Provenance: learnings pool at the agent level, so tick-session entries
+        # carry their strategy slug (live engine, else the session's meta.yml).
+        strategy_slug = ""
+        if engine is not None:
+            strategy_slug = engine.strategy.slug
+        elif session_dir is not None:
+            from condor.agents.journal import read_session_meta
+
+            strategy_slug = read_session_meta(session_dir).get("strategy", "")
+        jm.append_learning(text, category=category or "market", strategy=strategy_slug)
     elif entry_type == "state":
         jm.write_state(text)
     else:
@@ -605,17 +626,18 @@ async def manage_trading_agent(
     agent_id: str | None = None,
     strategy_id: str | None = None,
     agent_slug: str | None = None,
+    strategy: str | None = None,
     name: str | None = None,
     description: str | None = None,
     instructions: str | None = None,
     agent_key: str | None = None,
-    skills: list[str] | None = None,
     config: dict | None = None,
     # Agent-definition params (for create_agent/update_agent actions)
     tools: list[str] | None = None,
     when_to_consult: str | None = None,
     server_required: bool | None = None,
     server_name: str | None = None,
+    risk_limits: dict | None = None,
 ) -> dict:
     # Agent definitions (identities) — distinct from strategies and instances
     if action == "list_agent_definitions":
@@ -640,6 +662,7 @@ async def manage_trading_agent(
             when_to_consult,
             server_required,
             server_name,
+            risk_limits,
         )
 
     # Strategy operations
@@ -659,24 +682,23 @@ async def manage_trading_agent(
             description,
             instructions,
             agent_key,
-            skills,
             config,
         )
 
-    # Routine actions scoped to a strategy
+    # Routine actions scoped to an agent
     if action == "list_routines":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        return _strategy_list_routines(strategy_id)
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
+        return _agent_list_routines(agent_slug)
 
     if action == "run_routine":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
+        if not agent_slug:
+            return {"error": "agent_slug is required"}
         if not name:
             return {"error": "name is required"}
         from mcp_servers.condor.tools.routines import run_routine
 
-        return await run_routine(name, config, strategy_id)
+        return await run_routine(name, config, agent_slug)
 
     # Agent lifecycle actions
     lifecycle_actions = {
@@ -688,7 +710,7 @@ async def manage_trading_agent(
         "list_agents",
     }
     if action in lifecycle_actions:
-        return await _agent_lifecycle(action, strategy_id, agent_id, config)
+        return await _agent_lifecycle(action, agent_slug, strategy, agent_id, config)
 
     # Journal reads/writes are the standalone trading_agent_journal_read /
     # trading_agent_journal_write tools — the canonical interface used by live

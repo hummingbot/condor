@@ -12,7 +12,7 @@ from condor.agents.risk import (
     RiskEngine,
     RiskLimits,
     RiskState,
-    auto_approve_with_risk_check,
+    risk_gate,
 )
 
 
@@ -87,7 +87,7 @@ def test_non_create_actions_do_not_accumulate():
 
 
 # ---------------------------------------------------------------------------
-# auto_approve_with_risk_check driven twice with the same RiskState instance
+# risk_gate driven twice with the same RiskState instance
 # ---------------------------------------------------------------------------
 
 
@@ -95,7 +95,7 @@ def test_callback_second_create_cancelled_same_tick():
     """Driving the permission callback twice with one RiskState: second create is cancelled."""
     engine = RiskEngine(RiskLimits(max_open_executors=5))
     state = RiskState(executor_count=4)
-    callback = auto_approve_with_risk_check(engine, state)
+    callback = risk_gate(engine, state)
 
     async def _drive():
         first = await callback(_create_call(), _OPTIONS)
@@ -149,7 +149,7 @@ def test_get_state_null_tracker_stays_unblocked():
 def test_callback_cumulative_exposure_cancelled_same_tick():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState(total_exposure=250.0)
-    callback = auto_approve_with_risk_check(engine, state)
+    callback = risk_gate(engine, state)
 
     async def _drive():
         first = await callback(_create_call(150.0), _OPTIONS)
@@ -175,7 +175,7 @@ def _bot_call(action: str, **extra) -> dict:
 def test_dry_run_blocks_manage_bots_deploy():
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+    callback = risk_gate(engine, state, dry_run=True)
 
     result = asyncio.run(
         callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
@@ -186,7 +186,7 @@ def test_dry_run_blocks_manage_bots_deploy():
 def test_dry_run_blocks_manage_bots_update_config():
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+    callback = risk_gate(engine, state, dry_run=True)
 
     result = asyncio.run(callback(_bot_call("update_config", bot_name="x"), _OPTIONS))
     assert result["outcome"]["outcome"] == "cancelled"
@@ -196,7 +196,7 @@ def test_dry_run_allows_manage_bots_status():
     """Read-only manage_bots actions must not be blocked in dry_run."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+    callback = risk_gate(engine, state, dry_run=True)
 
     result = asyncio.run(callback(_bot_call("status"), _OPTIONS))
     assert result["outcome"]["outcome"] == "selected"
@@ -213,7 +213,7 @@ def test_loop_mode_blocks_bot_deploy_without_loss_cap():
     """A deploy with no declared max_global_drawdown_quote is blocked."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
@@ -224,7 +224,7 @@ def test_loop_mode_blocks_bot_deploy_without_loss_cap():
 def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(
@@ -243,7 +243,7 @@ def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():
 def test_loop_mode_blocks_bot_deploy_with_excessive_loss_cap():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(
@@ -262,7 +262,7 @@ def test_loop_mode_blocks_bot_deploy_with_excessive_loss_cap():
 def test_loop_mode_blocks_update_config_raising_amount_beyond_limit():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(
@@ -281,7 +281,7 @@ def test_loop_mode_blocks_update_config_raising_amount_beyond_limit():
 def test_loop_mode_approves_update_config_within_limit():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(
@@ -301,7 +301,7 @@ def test_loop_mode_still_approves_bot_stop():
     """Stops are risk-reducing — never blocked by the loss-cap gate."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(callback(_bot_call("stop_bot", bot_name="x"), _OPTIONS))
     assert result["outcome"]["outcome"] == "selected"
