@@ -1,8 +1,7 @@
 ---
-name: routine_cookbook
-description: The single reference for writing Condor routines — fetching Hummingbot data, parallel calls, reports/charts, continuous loops, and candlestick charts. Routes to a companion file per topic.
-when_to_use: Before implementing or debugging ANY routine. Read this first, then pull the specific companion file(s) for what your routine actually does (data, async, reports, continuous, charts).
-source: agent:routine_builder
+name: routine-cookbook
+description: "The single reference for writing Condor routines — fetching Hummingbot data, parallel calls, reports/charts, continuous loops, and candlestick charts. Routes to a companion file per topic. Use when before implementing or debugging ANY routine. Read this first, then pull the specific companion file(s) for what your routine actually does (data, async, reports, continuous, charts)."
+metadata: {"condor-source": "agent:routine_builder"}
 ---
 
 # Routine Cookbook
@@ -11,7 +10,7 @@ The patterns for building routines, split into **companion files** so you load
 only what your task needs. Read this overview, then fetch the relevant file(s):
 
 ```
-manage_skill(action="read_file", name="routine_cookbook", file="hummingbot_client.md")
+manage_skill(action="read_file", name="routine-cookbook", file="hummingbot_client.md")
 ```
 
 ## Which companion file to read

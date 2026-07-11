@@ -1,13 +1,7 @@
 ---
-name: capital_allocation
-description: How total_amount_quote and initial_positions define a controller's isolated
-  capital — the budget a single pmm_mister controller trades with, and how to seed it
-  with base assets you already hold so each controller is independent from the wider portfolio.
-when_to_use: When sizing a controller, deciding total_amount_quote, splitting one market
-  into several controllers, or when the user already holds the base asset (spot) and wants
-  to fund the strategy with existing inventory instead of buying fresh. Also read this
-  before answering "how much capital does this bot use" or "how do I use the BTC I already have".
-source: agent:market_making_expert
+name: capital-allocation
+description: "How total_amount_quote and initial_positions define a controller's isolated capital — the budget a single pmm_mister controller trades with, and how to seed it with base assets you already hold so each controller is independent from the wider portfolio. Use when sizing a controller, deciding total_amount_quote, splitting one market into several controllers, or when the user already holds the base asset (spot) and wants to fund the strategy with existing inventory instead of buying fresh. Also read this before answering \"how much capital does this bot use\" or \"how do I use the BTC I already have\"."
+metadata: {"condor-source": "agent:market_making_expert"}
 ---
 
 # Capital Allocation: total_amount_quote & initial_positions

@@ -37,7 +37,6 @@ async def manage_skill(
     action: str,
     name: str | None = None,
     description: str | None = None,
-    when_to_use: str | None = None,
     body: str | None = None,
     references_routine: str | None = None,
     query: str | None = None,
@@ -53,14 +52,14 @@ async def manage_skill(
     source = f"agent:{target_slug}" if target_slug else "chat"
 
     if action == "create":
-        if not name or not description or not when_to_use or not body:
+        if not name or not description or not body:
             return {
-                "error": "name, description, when_to_use and body are required for create"
+                "error": "name, description and body are required for create "
+                "(description must state WHAT the skill does and WHEN to use it)"
             }
         return store.create(
             name,
             description,
-            when_to_use,
             body,
             references_routine=references_routine,
             source=source,
@@ -100,8 +99,6 @@ async def manage_skill(
         fields = {}
         if description is not None:
             fields["description"] = description
-        if when_to_use is not None:
-            fields["when_to_use"] = when_to_use
         if body is not None:
             fields["body"] = body
         if references_routine is not None:

@@ -1,9 +1,8 @@
 ---
-name: agent_builder
-description: Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by consulting it, then progressively improve it with routines and (optionally) a loop strategy.
-when_to_use: The user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — whether it's used purely by consulting it or also runs a strategy on a loop.
-created: 2026-06-18
-source: builtin
+name: agent-builder
+description: "Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by consulting it, then progressively improve it with routines and (optionally) a loop strategy. Use when the user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — whether it's used purely by consulting it or also runs a strategy on a loop."
+compatibility: "Requires the Condor MCP server (mcp__condor__* tools) connected"
+metadata: {"condor-source": "builtin", "condor-created": "2026-06-18"}
 ---
 
 You are helping the user build or operate an **autonomous trading agent**. Agents live
@@ -209,7 +208,7 @@ against this string, so vague ones cause misses. Rules:
 - **Name the concrete verbs + nouns** the user would actually say (deploy/tune/stop,
   executor, grid, spread, inventory) so keyword overlap is high.
 - **State the boundary** when two agents are close ("…executor deployment — NOT
-  controller backtesting"). Same shape applies to a skill's `when_to_use`.
+  controller backtesting"). Same shape applies to a skill's `description` trigger.
 
 **Model selection:** Set per session, not baked in. The agent/strategy `agent_key` is the
 default; override at launch via `config={"agent_key": "…"}`.
@@ -245,3 +244,10 @@ owns strategies — delete those first (`delete_strategy`).
 - A loop doesn't have to trade — it can report or watch. Always include risk limits when
   it can trade, and dry-run before going live.
 - Guide one step at a time and offer concrete proposals.
+
+## Operating rule (host deployments)
+
+Condor's `agents/` and `assistants/` trees are its runtime state. Operate
+Condor ONLY via the `mcp__condor__*` tools — never by reading or editing
+those files directly. If the Condor MCP server is not connected, tell the
+user to connect it instead of improvising against the filesystem.

@@ -1,6 +1,6 @@
 # Refactor 05 — Skills: one portable format, shared tiers, curated self-improvement
 
-Status: **proposed — full plan** (2026-07-11) · Builds on:
+Status: **Phase 1 implemented** (2026-07-11); Phases 2-4 proposed · Builds on:
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) (implemented) and
 [refactor-04](refactor-04-shared-skills-tier.md) (tabled → absorbed here as
 Phase 2)
@@ -364,7 +364,7 @@ Condor's MCP instructions block, unchanged.
 
 Each phase lands green and independently.
 
-### Phase 1 — Format conformance + host distribution
+### Phase 1 — Format conformance + host distribution ✅ (implemented 2026-07-11)
 
 1. `condor/memory/skills.py`: hyphen slugs for skills (skills-only — the
    memory store keeps its underscore slugs); a **skill-specific frontmatter

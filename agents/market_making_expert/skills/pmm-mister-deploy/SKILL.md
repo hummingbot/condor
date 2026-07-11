@@ -1,11 +1,7 @@
 ---
-name: pmm_mister_deploy
-description: End-to-end playbook for deploying a pmm_mister bot on a token — regime
-  analysis, profile selection, config creation, and bot deployment.
-when_to_use: When asked to set up, deploy, or launch a market making bot on a token/pair.
-  This is the autonomous deployment flow — follow it when running as a delegate task.
-created: '2026-07-02T10:31:11Z'
-source: agent:market_making_expert
+name: pmm-mister-deploy
+description: "End-to-end playbook for deploying a pmm_mister bot on a token — regime analysis, profile selection, config creation, and bot deployment. Use when asked to set up, deploy, or launch a market making bot on a token/pair. This is the autonomous deployment flow — follow it when running as a delegate task."
+metadata: {"condor-source": "agent:market_making_expert", "condor-created": "2026-07-02T10:31:11Z"}
 ---
 
 # PMM Mister Deploy Playbook
@@ -63,10 +59,10 @@ When in doubt, default to **Balanced**.
 
 ## Step 3 — Read the matching profile template
 
-Load the profile companion file from the `pmm_config_playbook` skill:
+Load the profile companion file from the `pmm-config-playbook` skill:
 
 ```
-manage_skill(action="read_file", name="pmm_config_playbook", file="config_<profile>.md")
+manage_skill(action="read_file", name="pmm-config-playbook", file="config_<profile>.md")
 ```
 
 Where `<profile>` is `aggressive`, `balanced`, or `conservative`.
@@ -268,7 +264,7 @@ manage_controllers(
 )
 ```
 
-**Proactive monitoring:** when checking bot health (e.g. via the `mm_bot_report` skill),
+**Proactive monitoring:** when checking bot health (e.g. via the `mm-bot-report` skill),
 always note the current base/quote split from `get_portfolio_overview`. If base holdings
 are near or above `max_base_pct`, flag it and suggest raising the band or lowering target.
 If the bot is far below `min_base_pct`, flag it and suggest lowering the band.

@@ -89,12 +89,12 @@ manage_routines(action="run", name="x", agent_slug="<agent_slug>", config={})
 
 ## Reference: the routine cookbook
 
-All routine patterns live in ONE skill, `routine_cookbook`. Read its overview
+All routine patterns live in ONE skill, `routine-cookbook`. Read its overview
 first, then pull the companion file for what your routine actually does:
 
 ```python
-manage_skill(action="read", name="routine_cookbook")                          # overview + file map
-manage_skill(action="read_file", name="routine_cookbook", file="report_builder.md")
+manage_skill(action="read", name="routine-cookbook")                          # overview + file map
+manage_skill(action="read_file", name="routine-cookbook", file="report_builder.md")
 ```
 
 Companion files (pull only what you need):

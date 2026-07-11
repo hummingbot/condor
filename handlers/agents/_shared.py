@@ -341,7 +341,7 @@ def build_mcp_servers_for_session(
     condor's stores — correct for chat sessions, wrong for an Agent run: a
     serverless consult/tick would silently read and write the CHAT's memory
     and skills instead of the Agent's own (e.g. routine_builder unable to
-    find its routine_cookbook skill).
+    find its routine-cookbook skill).
     """
     from config_manager import get_config_manager, get_effective_server
 

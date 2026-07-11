@@ -441,7 +441,6 @@ async def manage_skill(
     action: str,
     name: str | None = None,
     description: str | None = None,
-    when_to_use: str | None = None,
     body: str | None = None,
     references_routine: str | None = None,
     query: str | None = None,
@@ -479,21 +478,29 @@ async def manage_skill(
     with agent_slug — use this to author or inspect an agent's skills while
     building it. Without agent_slug the current assistant's library is used.
 
+    PLACEMENT RULE: the chat's own library is the repo-root skills/ dir, which
+    is HOST-VISIBLE — any harness opened in the Condor repo (Claude Code,
+    OpenClaw, Hermes) indexes it natively. Put only genuinely host-relevant
+    playbooks there; knowledge meant for one agent belongs in that agent's
+    local tier (pass agent_slug). Skills follow the agentskills.io format:
+    hyphenated names, and the description states WHAT the skill does and WHEN
+    to use it (it is the routing trigger for every host).
+
     Actions:
     - "read": Get a full playbook + routine validation + companion `files` (requires name).
     - "read_file": Get the contents of one bundled companion file (requires name + file).
     - "write_file": Create/overwrite one bundled companion file (requires name + file + content).
     - "search": Keyword search over the skills (requires query).
     - "list": Return the skills index (one line per skill).
-    - "create": Add/overwrite a skill (requires name, description, when_to_use, body).
-    - "edit": Patch fields of a skill (requires name + any of description/when_to_use/body/references_routine).
+    - "create": Add/overwrite a skill (requires name, description, body).
+    - "edit": Patch fields of a skill (requires name + any of description/body/references_routine).
     - "delete": Remove a skill (requires name).
 
     Args:
         action: read | read_file | write_file | search | list | create | edit | delete
-        name: Short kebab/snake name (e.g. "grid-en-band-walk").
-        description: One-line summary (create/edit).
-        when_to_use: The trigger/condition for the playbook (create/edit).
+        name: Short kebab-case name (e.g. "grid-en-band-walk").
+        description: Single line stating what the skill does AND when to use
+            it (create/edit) — the routing trigger, ≤1024 chars.
         body: The steps / playbook text (create/edit).
         references_routine: Optional routine name to link; "" clears it (create/edit).
         query: Search string (for search).
@@ -510,7 +517,6 @@ async def manage_skill(
         action,
         name=name,
         description=description,
-        when_to_use=when_to_use,
         body=body,
         references_routine=references_routine,
         query=query,

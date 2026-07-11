@@ -1,10 +1,8 @@
 ---
-name: log_analyzer
-description: AI-driven log analysis for active bots, executors, and gateway — anomaly detection and failure pattern recognition over Hummingbot logs, for both real-time monitoring and retrospective diagnostics.
-when_to_use: ANY request about the state/health of bot or system logs, errors, or warnings — checking, summarizing, triaging, finding recurring failure patterns, diagnosing why a bot is failing, or live log monitoring. Run the logs_summary routine for these, do NOT hand-roll with raw manage_bots. Triggers — "how are the logs", "how are the bots' logs", "any errors in the logs", "logs summary", "what's failing", "why is my bot erroring", "diagnose this bot", "watch the logs"; ES — "cómo están los logs", "hay errores", "resumen de logs", "por qué falla el bot".
-created: 2026-06-26
-source: builtin
-references_routine: logs_summary
+name: log-analyzer
+description: "AI-driven log analysis for active bots, executors, and gateway — anomaly detection and failure pattern recognition over Hummingbot logs, for both real-time monitoring and retrospective diagnostics. Use when aNY request about the state/health of bot or system logs, errors, or warnings — checking, summarizing, triaging, finding recurring failure patterns, diagnosing why a bot is failing, or live log monitoring. Run the logs_summary routine for these, do NOT hand-roll with raw manage_bots. Triggers — \"how are the logs\", \"how are the bots' logs\", \"any errors in the logs\", \"logs summary\", \"what's failing\", \"why is my bot erroring\", \"diagnose this bot\", \"watch the logs\"; ES — \"cómo están los logs\", \"hay errores\", \"resumen de logs\", \"por qué falla el bot\"."
+compatibility: "Requires the Condor MCP server (mcp__condor__* tools) connected"
+metadata: {"condor-source": "builtin", "condor-created": "2026-06-26", "condor-references-routine": "logs_summary"}
 ---
 
 You are doing **AI-driven log analysis** over Hummingbot logs surfaced by the
@@ -120,3 +118,10 @@ incident board. Use the `routine_builder` skill for the mechanics; reuse the
   it over (use `routine_builder`).
 - Diagnosis is the deliverable — the counts are evidence, the cause + fix is the
   answer.
+
+## Operating rule (host deployments)
+
+Condor's `agents/` and `assistants/` trees are its runtime state. Operate
+Condor ONLY via the `mcp__condor__*` tools — never by reading or editing
+those files directly. If the Condor MCP server is not connected, tell the
+user to connect it instead of improvising against the filesystem.

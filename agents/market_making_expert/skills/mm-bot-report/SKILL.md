@@ -1,14 +1,7 @@
 ---
-name: mm_bot_report
-description: 'Run the MM bot status report: running bots, open/hold-mode positions,
-  closed position breakdown (TP/SL/Early/Hold), PnL, volume, and error summary.'
-when_to_use: When the user asks for a bot status report, "how is the bot doing", "show
-  me the report", "what's the PnL", "any errors", "how are positions", "closed positions
-  breakdown", or any general health/status check on the running MM bots. Also use
-  after deploying a new bot to verify it's running correctly.
-created: '2026-07-02T15:46:08Z'
-source: agent:market_making_expert
-references_routine: mm_bot_report
+name: mm-bot-report
+description: "Run the MM bot status report: running bots, open/hold-mode positions, closed position breakdown (TP/SL/Early/Hold), PnL, volume, and error summary. Use when the user asks for a bot status report, \"how is the bot doing\", \"show me the report\", \"what's the PnL\", \"any errors\", \"how are positions\", \"closed positions breakdown\", or any general health/status check on the running MM bots. Also use after deploying a new bot to verify it's running correctly."
+metadata: {"condor-source": "agent:market_making_expert", "condor-created": "2026-07-02T15:46:08Z", "condor-references-routine": "mm_bot_report"}
 ---
 
 ## MM Bot Report

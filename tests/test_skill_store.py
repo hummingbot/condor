@@ -37,26 +37,27 @@ def _write_skill(
     agent_slug,
     slug,
     *,
-    when_to_use,
     description="d",
     body="Steps.",
     references_routine=None,
 ):
-    """Author a builtin SKILL.md under the right assistant home."""
+    """Author a builtin spec-shaped SKILL.md under the right skills root."""
+    import json
+
     if agent_slug:
         base = root / "agents" / agent_slug / "skills"
     else:
-        base = root / "assistants" / "condor" / "skills"
+        base = root / "skills"  # host-facing root (refactor-05 Phase 1)
     d = base / slug
     d.mkdir(parents=True, exist_ok=True)
     fm = [
         f"name: {slug}",
-        f"description: {description}",
-        f"when_to_use: {when_to_use}",
-        "source: builtin",
+        f"description: {json.dumps(description)}",
     ]
+    md = {"condor-source": "builtin"}
     if references_routine:
-        fm.append(f"references_routine: {references_routine}")
+        md["condor-references-routine"] = references_routine
+    fm.append(f"metadata: {json.dumps(md)}")
     (d / "SKILL.md").write_text("---\n" + "\n".join(fm) + "\n---\n\n" + body + "\n")
 
 
@@ -64,15 +65,15 @@ def test_read_returns_builtin_with_flag(project_root, fake_routines):
     _write_skill(
         project_root,
         None,
-        "grid_en_band_walk",
-        when_to_use="Precio toca banda inferior",
+        "grid-en-band-walk",
+        description="Abrir grid. Use when precio toca banda inferior.",
         body="1. Correr band_scanner.\n2. Abrir grid.",
         references_routine="band_scanner",
     )
     s = SkillStore()
     read = s.read("Grid en band walk")
     assert read is not None
-    assert read["name"] == "grid_en_band_walk"
+    assert read["name"] == "grid-en-band-walk"
     assert "Abrir grid" in read["body"]
     assert read["references_routine"] == "band_scanner"
     assert read["routine_ok"] is True
@@ -82,12 +83,12 @@ def test_list_index_lists_builtins(project_root, fake_routines):
     _write_skill(
         project_root,
         None,
-        "grid_en_band_walk",
-        when_to_use="banda inferior",
+        "grid-en-band-walk",
+        description="banda inferior",
         references_routine="band_scanner",
     )
     index = SkillStore().list_index()
-    assert "[grid_en_band_walk] banda inferior" in index
+    assert "[grid-en-band-walk] banda inferior" in index
     assert "→ routine: band_scanner" in index
 
 
@@ -103,18 +104,17 @@ def test_broken_routine_reference_marked_not_fatal(project_root, fake_routines):
     _write_skill(
         project_root,
         None,
-        "broken_ref",
-        when_to_use="never",
+        "broken-ref",
         references_routine="ghost_routine",
     )
-    read = SkillStore().read("broken_ref")
+    read = SkillStore().read("broken-ref")
     assert read["references_routine"] == "ghost_routine"
     assert read["routine_ok"] is False  # marked, but read still works
 
 
 def test_skill_without_reference_has_no_routine_fields(project_root):
     _write_skill(
-        project_root, None, "pure_playbook", when_to_use="before raising leverage"
+        project_root, None, "pure-playbook", description="before raising leverage"
     )
     s = SkillStore()
     read = s.read("Pure playbook")
@@ -123,19 +123,19 @@ def test_skill_without_reference_has_no_routine_fields(project_root):
     assert "→ routine:" not in s.list_index()
 
 
-def test_search_matches_when_to_use_and_body(project_root):
+def test_search_matches_description_and_body(project_root):
     _write_skill(
         project_root,
         None,
         "alpha",
-        when_to_use="when alpha condition",
+        description="when alpha condition",
         body="body alpha",
     )
     _write_skill(
         project_root,
         None,
         "beta",
-        when_to_use="when beta condition",
+        description="when beta condition",
         body="body beta unique",
     )
     s = SkillStore()
@@ -153,16 +153,16 @@ def test_search_matches_when_to_use_and_body(project_root):
 
 def test_per_agent_libraries_are_isolated(project_root):
     """A trading agent's skills are separate from the chat's."""
-    _write_skill(project_root, None, "chat_only", when_to_use="chat")
-    _write_skill(project_root, "executor_manager", "agent_only", when_to_use="agent")
+    _write_skill(project_root, None, "chat-only", description="chat")
+    _write_skill(project_root, "executor_manager", "agent-only", description="agent")
 
     chat = SkillStore()
     agent = SkillStore("executor_manager")
-    assert "chat_only" in chat.list_index()
-    assert "agent_only" not in chat.list_index()
-    assert "agent_only" in agent.list_index()
-    assert chat.read("agent_only") is None
-    assert agent.read("agent_only") is not None
+    assert "chat-only" in chat.list_index()
+    assert "agent-only" not in chat.list_index()
+    assert "agent-only" in agent.list_index()
+    assert chat.read("agent-only") is None
+    assert agent.read("agent-only") is not None
 
 
 def test_assistant_without_skills_is_empty(project_root):
@@ -179,59 +179,58 @@ def test_create_edit_delete_roundtrip(project_root, fake_routines):
 
     res = s.create(
         "Grid en band walk",
-        description="Abrir grid en banda inferior",
-        when_to_use="Precio toca banda inferior",
+        description="Abrir grid en banda inferior. Use when precio toca banda.",
         body="1. Correr band_scanner.\n2. Abrir grid.",
         references_routine="band_scanner",
     )
     assert res["saved"] is True
-    assert res["name"] == "grid_en_band_walk"
+    assert res["name"] == "grid-en-band-walk"
     assert res["routine_ok"] is True
-    assert "[grid_en_band_walk] Precio toca banda inferior" in s.list_index()
+    assert "[grid-en-band-walk] Abrir grid en banda inferior" in s.list_index()
 
-    edited = s.edit("grid_en_band_walk", description="updated", body="new steps")
+    edited = s.edit("grid-en-band-walk", description="updated", body="new steps")
     assert edited["description"] == "updated"
-    assert "new steps" in s.read("grid_en_band_walk")["body"]
+    assert "new steps" in s.read("grid-en-band-walk")["body"]
 
     assert s.delete("Grid en band walk") is True
-    assert s.read("grid_en_band_walk") is None
+    assert s.read("grid-en-band-walk") is None
     assert s.list_index() == ""
 
 
 def test_read_lists_companion_files(project_root):
     """read() surfaces bundled companion files but not SKILL.md or temp files."""
-    _write_skill(project_root, None, "pmm_playbook", when_to_use="pick a config")
-    skill_dir = SkillStore().skills_dir / "pmm_playbook"
+    _write_skill(project_root, None, "pmm-playbook", description="pick a config")
+    skill_dir = SkillStore().skills_dir / "pmm-playbook"
     (skill_dir / "config_aggressive.md").write_text("aggressive body")
     (skill_dir / "config_conservative.md").write_text("conservative body")
     (skill_dir / ".hidden.tmp").write_text("ignore me")
 
-    read = SkillStore().read("pmm_playbook")
+    read = SkillStore().read("pmm-playbook")
     assert read["files"] == ["config_aggressive.md", "config_conservative.md"]
 
 
 def test_read_omits_files_when_no_companions(project_root):
-    _write_skill(project_root, None, "plain", when_to_use="x")
+    _write_skill(project_root, None, "plain", description="x")
     assert "files" not in SkillStore().read("plain")
 
 
 def test_read_file_returns_companion_content(project_root):
-    _write_skill(project_root, None, "pmm_playbook", when_to_use="pick a config")
-    skill_dir = SkillStore().skills_dir / "pmm_playbook"
+    _write_skill(project_root, None, "pmm-playbook", description="pick a config")
+    skill_dir = SkillStore().skills_dir / "pmm-playbook"
     (skill_dir / "config_aggressive.md").write_text("tight spreads")
 
     res = SkillStore().read_file("PMM Playbook", "config_aggressive.md")
-    assert res["skill"] == "pmm_playbook"
+    assert res["skill"] == "pmm-playbook"
     assert res["file"] == "config_aggressive.md"
     assert res["content"] == "tight spreads"
 
 
 def test_read_file_missing_file_lists_available(project_root):
-    _write_skill(project_root, None, "pmm_playbook", when_to_use="x")
-    skill_dir = SkillStore().skills_dir / "pmm_playbook"
+    _write_skill(project_root, None, "pmm-playbook", description="x")
+    skill_dir = SkillStore().skills_dir / "pmm-playbook"
     (skill_dir / "config_balanced.md").write_text("body")
 
-    res = SkillStore().read_file("pmm_playbook", "ghost.md")
+    res = SkillStore().read_file("pmm-playbook", "ghost.md")
     assert "error" in res
     assert res["files"] == ["config_balanced.md"]
 
@@ -242,7 +241,7 @@ def test_read_file_missing_skill_errors(project_root):
 
 def test_read_file_rejects_path_traversal(project_root):
     """A companion read must never escape the skill folder."""
-    _write_skill(project_root, None, "pmm_playbook", when_to_use="x")
+    _write_skill(project_root, None, "pmm-playbook", description="x")
     # Plant a secret beside the skills dir to prove it stays unreachable.
     (SkillStore().skills_dir / "secret.md").write_text("top secret")
 
@@ -254,27 +253,27 @@ def test_read_file_rejects_path_traversal(project_root):
         "sub/x.md",
         "SKILL.md",
     ):
-        res = s.read_file("pmm_playbook", bad)
+        res = s.read_file("pmm-playbook", bad)
         assert "error" in res, bad
         assert "content" not in res, bad
 
 
 def test_write_file_creates_and_overwrites_companion(project_root):
     """write_file authors a companion beside SKILL.md and read_file reads it back."""
-    _write_skill(project_root, None, "pmm_playbook", when_to_use="pick a config")
+    _write_skill(project_root, None, "pmm-playbook", description="pick a config")
     s = SkillStore()
 
     res = s.write_file("PMM Playbook", "config_aggressive.md", "tight spreads")
     assert res["saved"] is True
     assert res["created"] is True
-    assert res["skill"] == "pmm_playbook"
+    assert res["skill"] == "pmm-playbook"
     assert res["files"] == ["config_aggressive.md"]
-    assert s.read_file("pmm_playbook", "config_aggressive.md")["content"] == "tight spreads"
+    assert s.read_file("pmm-playbook", "config_aggressive.md")["content"] == "tight spreads"
 
     # Second write to the same name overwrites (created flips to False).
-    res2 = s.write_file("pmm_playbook", "config_aggressive.md", "wider spreads")
+    res2 = s.write_file("pmm-playbook", "config_aggressive.md", "wider spreads")
     assert res2["created"] is False
-    assert s.read_file("pmm_playbook", "config_aggressive.md")["content"] == "wider spreads"
+    assert s.read_file("pmm-playbook", "config_aggressive.md")["content"] == "wider spreads"
 
 
 def test_write_file_missing_skill_errors(project_root):
@@ -282,16 +281,16 @@ def test_write_file_missing_skill_errors(project_root):
 
 
 def test_write_file_requires_content(project_root):
-    _write_skill(project_root, None, "pmm_playbook", when_to_use="x")
-    assert "error" in SkillStore().write_file("pmm_playbook", "x.md", None)
+    _write_skill(project_root, None, "pmm-playbook", description="x")
+    assert "error" in SkillStore().write_file("pmm-playbook", "x.md", None)
 
 
 def test_write_file_rejects_skill_md_and_traversal(project_root):
     """A companion write must never clobber SKILL.md or escape the skill folder."""
-    _write_skill(project_root, None, "pmm_playbook", when_to_use="x")
+    _write_skill(project_root, None, "pmm-playbook", description="x")
     s = SkillStore()
     for bad in ("SKILL.md", "../secret.md", "/etc/passwd", "sub/x.md", ""):
-        res = s.write_file("pmm_playbook", bad, "payload")
+        res = s.write_file("pmm-playbook", bad, "payload")
         assert "error" in res, bad
         assert "saved" not in res, bad
     # The traversal target must not have been created outside the skill folder.
@@ -299,7 +298,7 @@ def test_write_file_rejects_skill_md_and_traversal(project_root):
 
 
 def test_create_requires_all_fields(project_root):
-    err = SkillStore().create("only_name", "", "", "")
+    err = SkillStore().create("only_name", "", "")
     assert "error" in err
 
 

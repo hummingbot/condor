@@ -273,28 +273,28 @@ def test_routines_dir_resolves_bare_agent_slug(tmp_path, monkeypatch):
 
 
 def test_agent_skill_library_read_and_edit(tmp_path, monkeypatch):
-    """An Agent's skills/<slug>/SKILL.md library is readable and editable."""
+    """An Agent's skills/<name>/SKILL.md library is readable and editable."""
     from condor.memory import paths as paths_module
     from condor.memory.skills import SkillStore
 
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    skill_dir = tmp_path / "agents" / "executor_manager" / "skills" / "size_grid"
+    skill_dir = tmp_path / "agents" / "executor_manager" / "skills" / "size-grid"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: size_grid\ndescription: d\nwhen_to_use: before a grid\n"
-        "source: builtin\n---\n\nSteps.\n"
+        '---\nname: size-grid\ndescription: "Size a grid. Use when before a grid."\n'
+        'metadata: {"condor-source": "builtin"}\n---\n\nSteps.\n'
     )
 
     store = SkillStore(agent_slug="executor_manager")
-    assert "[size_grid] before a grid" in store.list_index()
-    read = store.read("size_grid")
-    assert read is not None and read["when_to_use"] == "before a grid"
+    assert "[size-grid] Size a grid. Use when before a grid." in store.list_index()
+    read = store.read("size grid")
+    assert read is not None and "Use when before a grid" in read["description"]
 
-    assert store.create("stop or widen", "d2", "when underwater", "steps")["saved"]
-    assert "[stop_or_widen] when underwater" in store.list_index()
-    assert store.edit("size_grid", description="updated")["description"] == "updated"
-    assert store.delete("stop_or_widen") is True
-    assert "stop_or_widen" not in store.list_index()
+    assert store.create("stop or widen", "d2. Use when underwater.", "steps")["saved"]
+    assert "[stop-or-widen] d2. Use when underwater." in store.list_index()
+    assert store.edit("size-grid", description="updated")["description"] == "updated"
+    assert store.delete("stop-or-widen") is True
+    assert "stop-or-widen" not in store.list_index()
 
 
 # ── pydantic-ai tool allowlist (enforced on consult) ──

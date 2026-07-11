@@ -1,12 +1,7 @@
 ---
-name: pmm_config_playbook
-description: Ready-to-deploy pmm_mister config profiles (aggressive / balanced / conservative)
-  — full parameter coverage including spreads, effectivization times, tolerance, order
-  types, skew, and global TP/SL.
-when_to_use: When you need a starting pmm_mister controller config and want a vetted
-  template instead of hand-tuning every parameter — pick a profile by regime, fetch
-  its template, then adapt the connector/pair/amount.
-source: builtin
+name: pmm-config-playbook
+description: "Ready-to-deploy pmm_mister config profiles (aggressive / balanced / conservative) — full parameter coverage including spreads, effectivization times, tolerance, order types, skew, and global TP/SL. Use when you need a starting pmm_mister controller config and want a vetted template instead of hand-tuning every parameter — pick a profile by regime, fetch its template, then adapt the connector/pair/amount."
+metadata: {"condor-source": "builtin"}
 ---
 
 # pmm_mister Config Playbook
@@ -16,7 +11,7 @@ Three vetted `pmm_mister` profiles, one per risk posture. Each profile lives in 
 context:
 
 ```
-manage_skill(action="read_file", name="pmm_config_playbook", file="config_aggressive.md")
+manage_skill(action="read_file", name="pmm-config-playbook", file="config_aggressive.md")
 ```
 
 ## Pick a profile by regime

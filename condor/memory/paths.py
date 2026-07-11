@@ -43,16 +43,18 @@ def store_root(user_id: int, agent_slug: str | None = None) -> Path:
 
 
 def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
-    """Repo-shipped skills library for an agent (FEAT-004).
+    """Skills library root for an assistant (FEAT-004, refactor-05 Phase 1).
 
-    These are authored playbooks that ship with Condor and are available without
-    being copied into the mutable per-user store. They live *beside* the agent's
-    store, not inside it — one ``skills/<slug>/SKILL.md`` per playbook:
+    One ``skills/<name>/SKILL.md`` (agentskills.io format) per playbook:
 
-    - chat ``condor`` (``agent_slug`` None) → ``assistants/condor/skills/``
-      (e.g. agent_builder, routine_builder)
+    - chat ``condor`` (``agent_slug`` None) → the repo-root ``skills/`` — the
+      HOST-FACING library. This single directory serves every consumer at
+      once: Condor's own chat, Claude Code (via ``.claude/skills`` symlinks),
+      OpenClaw (default ``<workspace>/skills`` scan), and Hermes (tap
+      layout). Anything here is visible to any host opened in the repo.
     - a trading agent / domain expert (``agent_slug`` set) →
-      ``agents/<slug>/skills/`` (e.g. an executor_manager's playbooks)
+      ``agents/<slug>/skills/`` — AGENT-INTERNAL, consumed only by Condor's
+      own runs behind the MCP boundary, never surfaced to host indexes.
 
     Merged into the agent's [SKILLS]/[DOMAIN SKILLS] index alongside its learned
     skills. The library is editable at runtime: ``SkillStore`` create/edit/delete
@@ -61,7 +63,7 @@ def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
     """
     if agent_slug:
         return _PROJECT_ROOT / "agents" / agent_slug / "skills"
-    return _PROJECT_ROOT / "assistants" / _CHAT_ASSISTANT / "skills"
+    return _PROJECT_ROOT / "skills"
 
 
 def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:
