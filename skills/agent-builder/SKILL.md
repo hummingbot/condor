@@ -41,9 +41,9 @@ agents/{slug}/
   routines/*.py                    # agent-scoped analysis scripts — step 3
   skills/{name}/SKILL.md           # the agent's own reusable playbooks
   strategies/{sslug}/strategy.md   # OPTIONAL loop playbooks (pure templates) — step 4
-  sessions/session_N/              # ALL run history: tick sessions, delegations,
-                                   # consults (meta.yml says kind + strategy)
-  experiments/experiment_N.md      # experiment snapshots (a.k.a. dry runs)
+  sessions/session_N/              # real sessions only — the stateful track record
+  delegations/{date}-dN.md         # flat delegation transcripts
+  experiments/{date}-eN.md         # experiment snapshots (a.k.a. dry runs)
   learnings.md                     # agent-level learnings ([strategy] prefixed)
 ```
 
@@ -168,9 +168,9 @@ fix, retry once, journal it).
 
 **Experiment before live** (a.k.a. dry run — if it trades):
 ```
-manage_trading_agent(action="start_agent", agent_slug="<agent_slug>",
+manage_trading_agent(action="start_experiment", agent_slug="<agent_slug>",
     strategy="<strategy_slug>",   # optional when the agent has exactly one strategy
-    config={"execution_mode": "experiment", "agent_key": "ollama:llama3.1",
+    config={"agent_key": "ollama:llama3.1",
             "trading_context": "Trade BTC-USDT on binance_perpetual",
             "frequency_sec": 60, "total_amount_quote": 100,
             "risk_limits": {"max_position_size_quote": 200, "max_open_executors": 3}})
@@ -179,8 +179,8 @@ Review with `trading_agent_journal_read(agent_id=…, section="run:1")`: routine
 right, decision logic sound, conditional language ("would place…"), no real create/stop
 calls, risk rules respected. Don't go live until the user is satisfied.
 
-**Go live:** offer a single live tick (`max_ticks: 1`), `loop` (continuous), or `loop` +
-`max_ticks`. Every live run is a real session — journal, frozen config, risk pre-flight,
+**Go live** (`action="start_session"`): offer a single live tick (`max_ticks: 1`), `loop`
+(continuous), or `loop` + `max_ticks`. Every live run is a real session — journal, frozen config, risk pre-flight,
 and a `{agent_slug}_{N}` id in the track record. Confirm the live model, start, confirm
 it's running, give monitoring commands. Always include risk limits when a loop agent can
 trade — and set the agent-level `risk_limits` baseline (create/update_agent) so unattended

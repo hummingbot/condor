@@ -1,6 +1,11 @@
 # Refactor 07 — consult / delegate / experiment / session: four verbs, four artifacts
 
-Status: **proposed** (2026-07-11) · Amends the implemented
+Status: **IMPLEMENTED** (2026-07-11; migration ran, backup at
+`agents.pre-07.bak/`). Deviations from the proposal: none material —
+`start_agent` renamed to `start_session` plus a dedicated `start_experiment`
+MCP action (§7.3/7.4 recommendations adopted); `consults.log` not built
+(§7.1, deferred as recommended); `TickEngine` name kept (§7.2).
+· Amends the implemented
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) storage model;
 leaves [refactor-02](refactor-02-unified-run-primitive.md)'s execution core
 and [refactor-05](refactor-05-skill-evolution.md)'s skill format intact.

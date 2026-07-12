@@ -7,14 +7,14 @@ playbook templates (refactor-01b)::
         {agent_slug}/
             AGENT.md               # identity + domain knowledge
             learnings.md           # agent-level, all strategies & run kinds
-            experiments/           # experiment snapshots (experiment_N.md)
-            sessions/
+            experiments/           # experiment snapshots ({date}-eN.md)
+            delegations/           # delegation transcripts ({date}-dN.md)
+            sessions/              # ONLY real (stateful) sessions
                 session_1/
-                    meta.yml       # kind + strategy + status + timestamps
-                    journal.md     # tick sessions: summary/decisions/ticks
-                    config.yml     # frozen launch config (tick)
-                    snapshots/     # tick: snapshot_N.md
-                    transcript.md  # delegation / consult
+                    meta.yml       # strategy + status + timestamps
+                    journal.md     # summary / decisions / ticks / executors
+                    config.yml     # frozen launch config
+                    snapshots/     # snapshot_N.md
             strategies/
                 {strategy_slug}/
                     strategy.md    # playbook body + default_config — nothing else
@@ -211,17 +211,66 @@ def next_session_number(agent_dir: Path) -> int:
     return max(existing, default=0) + 1
 
 
+# Flat one-shot artifact filenames (refactor-07): {date}-e{N}.md experiments,
+# {date}-d{N}.md delegations — date-first so ls sorts chronologically; the
+# short id suffix stays the lookup handle.
+_EXPERIMENT_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-e(\d+)\.md$")
+_DELEGATION_FILE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-d(\d+)\.md$")
+
+
 def next_experiment_number(agent_dir: Path) -> int:
-    """Determine the next experiment number by scanning experiments/experiment_*.md."""
+    """Determine the next experiment number by scanning experiments/*-eN.md."""
     existing = []
     d = agent_dir / "experiments"
     if d.exists():
         for f in d.iterdir():
-            if f.is_file() and f.suffix == ".md":
-                m = re.match(r"experiment_(\d+)\.md", f.name)
-                if m:
-                    existing.append(int(m.group(1)))
+            m = _EXPERIMENT_FILE_RE.match(f.name)
+            if m:
+                existing.append(int(m.group(2)))
     return max(existing, default=0) + 1
+
+
+def next_delegation_number(agent_dir: Path) -> int:
+    """Determine the next delegation number by scanning delegations/*-dN.md."""
+    existing = []
+    d = agent_dir / "delegations"
+    if d.exists():
+        for f in d.iterdir():
+            m = _DELEGATION_FILE_RE.match(f.name)
+            if m:
+                existing.append(int(m.group(2)))
+    return max(existing, default=0) + 1
+
+
+def find_delegation_file(agent_dir: Path, num: int) -> Path | None:
+    """Locate the transcript of delegation ``num`` (filename carries the date)."""
+    d = agent_dir / "delegations"
+    if not d.exists():
+        return None
+    for f in d.iterdir():
+        m = _DELEGATION_FILE_RE.match(f.name)
+        if m and int(m.group(2)) == num:
+            return f
+    return None
+
+
+def allocate_delegation_file(agent_dir: Path, started_at: str) -> tuple[int, Path]:
+    """Reserve the next delegation number by exclusively creating its file.
+
+    Mirrors ``allocate_session_dir``'s mkdir-atomicity: the ``touch(exist_ok=
+    False)`` claims the number, so concurrent starts never collide.
+    """
+    d = agent_dir / "delegations"
+    d.mkdir(parents=True, exist_ok=True)
+    date = started_at[:10]
+    while True:
+        num = next_delegation_number(agent_dir)
+        path = d / f"{date}-d{num}.md"
+        try:
+            path.touch(exist_ok=False)
+            return num, path
+        except FileExistsError:
+            continue
 
 
 # Line format written by JournalManager.record_tick; count_journal_ticks and
@@ -332,7 +381,7 @@ def save_experiment_snapshot(
         duration=duration,
     )
 
-    path = experiments_dir / f"experiment_{experiment_num}.md"
+    path = experiments_dir / f"{timestamp[:10]}-e{experiment_num}.md"
     path.write_text(content)
     return path
 
@@ -500,54 +549,11 @@ class JournalManager:
         path.write_text(new_text)
 
     def promote_learning(self, text_content: str) -> bool:
-        """Move a learning line to the ``## Promoted`` section.
-
-        Used after folding a learning into a skill: the entry stops occupying
-        the capped active sections but stays on record (provenance for what
-        fed which skill). Matches by normalized text against the active
-        category sections. Returns False when nothing matched.
-        """
+        """Move a learning line to the ``## Promoted`` section (agent-level)."""
         path = self._learnings_path()
-        if not path or not path.exists():
+        if not path:
             return False
-        full_text = path.read_text()
-        target = _normalize(text_content)
-
-        for cat_header in LEARNING_CATEGORIES.values():
-            pattern = rf"(^## {re.escape(cat_header)}\n)(.*?)(?=^## |\Z)"
-            m = re.search(pattern, full_text, re.MULTILINE | re.DOTALL)
-            if not m:
-                continue
-            lines = m.group(2).strip().splitlines()
-            for line in lines:
-                if not line.startswith("- "):
-                    continue
-                stripped = re.sub(
-                    r"^- (\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] |\[\d{2}:\d{2}\] )?",
-                    "",
-                    line,
-                )
-                norm = _normalize(stripped)
-                if norm == target or (target and target in norm):
-                    remaining = [l for l in lines if l != line]
-                    new_text = (
-                        full_text[: m.start(2)]
-                        + ("\n".join(remaining) + "\n\n" if remaining else "")
-                        + full_text[m.end(2) :]
-                    )
-                    if "## Promoted" in new_text:
-                        new_text = re.sub(
-                            r"(^## Promoted\n)",
-                            rf"\g<1>{line}\n",
-                            new_text,
-                            count=1,
-                            flags=re.MULTILINE,
-                        )
-                    else:
-                        new_text = new_text.rstrip() + f"\n\n## Promoted\n{line}\n"
-                    path.write_text(new_text)
-                    return True
-        return False
+        return promote_agent_learning(path.parent, text_content)
 
     # ------------------------------------------------------------------
     # Reading (journal)
@@ -1084,37 +1090,56 @@ def render_transcript(events: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
-def prune_sessions(agent_dir: Path, kind: str, keep: int) -> int:
-    """Delete the oldest sessions of ``kind`` beyond ``keep`` (retention cap).
+def promote_agent_learning(agent_dir: Path, text_content: str) -> bool:
+    """Move a learning line to learnings.md's ``## Promoted`` section.
 
-    Only sessions whose meta.yml declares exactly that kind are candidates —
-    tick sessions (the track record) are never touched by consult retention.
-    Returns the number of sessions removed.
+    Used after folding a learning into a skill: the entry stops occupying the
+    capped active sections but stays on record (provenance for what fed which
+    skill). Learnings are agent-level, so this takes the bare agent dir — no
+    session handle required. Matches by normalized text against the active
+    category sections. Returns False when nothing matched.
     """
-    import shutil
+    path = agent_dir / "learnings.md"
+    if not path.exists():
+        return False
+    full_text = path.read_text()
+    target = _normalize(text_content)
 
-    sessions_dir = agent_dir / "sessions"
-    if not sessions_dir.exists():
-        return 0
-    matching: list[tuple[int, Path]] = []
-    for d in sessions_dir.iterdir():
-        if not d.is_dir() or not d.name.startswith("session_"):
+    for cat_header in LEARNING_CATEGORIES.values():
+        pattern = rf"(^## {re.escape(cat_header)}\n)(.*?)(?=^## |\Z)"
+        m = re.search(pattern, full_text, re.MULTILINE | re.DOTALL)
+        if not m:
             continue
-        if read_session_meta(d).get("kind") != kind:
-            continue
-        try:
-            matching.append((int(d.name.split("_", 1)[1]), d))
-        except ValueError:
-            continue
-    matching.sort()
-    removed = 0
-    for _, d in matching[: max(0, len(matching) - keep)]:
-        try:
-            shutil.rmtree(d)
-            removed += 1
-        except Exception:
-            log.exception("Failed to prune session %s", d)
-    return removed
+        lines = m.group(2).strip().splitlines()
+        for line in lines:
+            if not line.startswith("- "):
+                continue
+            stripped = re.sub(
+                r"^- (\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}\] |\[\d{2}:\d{2}\] )?",
+                "",
+                line,
+            )
+            norm = _normalize(stripped)
+            if norm == target or (target and target in norm):
+                remaining = [l for l in lines if l != line]
+                new_text = (
+                    full_text[: m.start(2)]
+                    + ("\n".join(remaining) + "\n\n" if remaining else "")
+                    + full_text[m.end(2) :]
+                )
+                if "## Promoted" in new_text:
+                    new_text = re.sub(
+                        r"(^## Promoted\n)",
+                        rf"\g<1>{line}\n",
+                        new_text,
+                        count=1,
+                        flags=re.MULTILINE,
+                    )
+                else:
+                    new_text = new_text.rstrip() + f"\n\n## Promoted\n{line}\n"
+                path.write_text(new_text)
+                return True
+    return False
 
 
 def _normalize(text: str) -> str:

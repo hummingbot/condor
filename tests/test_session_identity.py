@@ -1,7 +1,7 @@
 """Unit tests for the refactor-01b identity & storage layer.
 
 Session ids are ``{slug}_{N}`` / ``{slug}_e{N}`` resolving to agent-level
-dirs; allocation is mkdir-atomic; meta.yml carries kind/strategy/status;
+dirs; allocation is mkdir-atomic; meta.yml carries strategy/status;
 learnings pool at the agent with strategy-prefix provenance; run_once maps to
 an ordinary tick session with max_ticks=1.
 """
@@ -17,9 +17,11 @@ from condor.agents import strategy as strategy_module
 from condor.agents.agent import Agent
 from condor.agents.journal import (
     JournalManager,
+    allocate_delegation_file,
     allocate_session_dir,
     finalize_session_meta,
-    prune_sessions,
+    find_delegation_file,
+    next_delegation_number,
     read_session_meta,
     resolve_agent_dirs,
     split_agent_id,
@@ -92,9 +94,8 @@ def test_allocate_session_dir_sequential_and_concurrent(tmp_path):
 
 def test_session_meta_roundtrip_and_finalize(tmp_path):
     _, session_dir = allocate_session_dir(tmp_path / "acme")
-    write_session_meta(session_dir, {"kind": "tick_loop", "strategy": "pmm", "status": "running"})
+    write_session_meta(session_dir, {"strategy": "pmm", "status": "running"})
     meta = read_session_meta(session_dir)
-    assert meta["kind"] == "tick_loop"
     assert meta["strategy"] == "pmm"
 
     finalize_session_meta(session_dir, "stopped")
@@ -107,16 +108,20 @@ def test_session_meta_roundtrip_and_finalize(tmp_path):
     assert read_session_meta(husk) == {}
 
 
-def test_prune_sessions_only_touches_matching_kind(tmp_path):
+def test_delegation_file_allocation(tmp_path):
+    """Delegations get their own {date}-dN.md namespace — never session numbers."""
     agent_dir = tmp_path / "acme"
-    for kind in ("consult", "tick_loop", "consult", "consult"):
-        _, d = allocate_session_dir(agent_dir)
-        write_session_meta(d, {"kind": kind, "status": "done"})
-    removed = prune_sessions(agent_dir, kind="consult", keep=1)
-    assert removed == 2
-    remaining = sorted(d.name for d in (agent_dir / "sessions").iterdir())
-    # tick session (2) untouched; newest consult (4) kept
-    assert remaining == ["session_2", "session_4"]
+    n1, p1 = allocate_delegation_file(agent_dir, "2026-07-11T10:00:00+00:00")
+    n2, p2 = allocate_delegation_file(agent_dir, "2026-07-12T10:00:00+00:00")
+    assert (n1, n2) == (1, 2)
+    assert p1.name == "2026-07-11-d1.md"
+    assert p2.name == "2026-07-12-d2.md"
+    assert next_delegation_number(agent_dir) == 3
+    assert find_delegation_file(agent_dir, 2) == p2
+    assert find_delegation_file(agent_dir, 9) is None
+    # Session numbering is untouched by delegation traffic.
+    num, _ = allocate_session_dir(agent_dir)
+    assert num == 1
 
 
 # ── learnings provenance ──
@@ -141,6 +146,23 @@ def test_learnings_pool_at_agent_with_strategy_prefix(tmp_path, monkeypatch):
     _, s2 = allocate_session_dir(agent_dir)
     jm2 = JournalManager("acme_2", session_dir=s2, agent_dir=agent_dir)
     assert "JTO book is thin" in jm2.read_learnings()
+
+
+def test_promote_agent_learning_takes_bare_agent_dir(tmp_path):
+    """Promotion is agent-level: no session handle involved (refactor-07)."""
+    from condor.agents.journal import promote_agent_learning
+
+    agent_dir = tmp_path / "acme"
+    _, session_dir = allocate_session_dir(agent_dir)
+    jm = JournalManager("acme_1", session_dir=session_dir, agent_dir=agent_dir)
+    jm.append_learning("JTO book is thin after 22:00 UTC", category="market")
+
+    assert promote_agent_learning(agent_dir, "JTO book is thin after 22:00 UTC")
+    text = (agent_dir / "learnings.md").read_text()
+    assert "## Promoted" in text
+    assert text.index("## Promoted") < text.index("JTO book is thin")
+    # A second promote of the same line finds nothing active.
+    assert not promote_agent_learning(agent_dir, "JTO book is thin after 22:00 UTC")
 
 
 # ── engine: run_once mapping + agent-level storage ──
@@ -168,7 +190,7 @@ def test_run_once_becomes_max_ticks_1_session(tmp_path, monkeypatch):
     assert engine.journal is not None
 
     meta = read_session_meta(engine.session_dir)
-    assert meta["kind"] == "tick_loop"
+    assert "kind" not in meta  # every sessions/ entry IS a session (refactor-07)
     assert meta["strategy"] == "scalper"
     assert meta["status"] == "running"
     # Frozen launch config saved in the session dir
@@ -223,8 +245,8 @@ def test_engine_stop_finalizes_meta(tmp_path, monkeypatch):
     assert meta["ended_at"]
 
 
-def test_consult_session_persisted_with_retention(tmp_path, monkeypatch):
-    """run_consult leaves a kind:consult session behind and prunes old ones."""
+def test_consult_persists_nothing(tmp_path, monkeypatch):
+    """run_consult returns the answer inline and leaves NO disk state (refactor-07)."""
     from condor.agents import consult as consult_module
     from condor.agents import run as run_module
     from condor.agents.run import RunResult
@@ -240,24 +262,14 @@ def test_consult_session_persisted_with_retention(tmp_path, monkeypatch):
         return RunResult(text="the answer", events=[{"type": "text", "text": "the answer"}])
 
     monkeypatch.setattr(run_module, "run_agent", fake_run)
-    monkeypatch.setattr(consult_module, "CONSULT_SESSIONS_KEEP", 2)
 
-    for i in range(3):
-        answer = asyncio.run(
-            consult_module.run_consult(
-                slug="oracle", user_id=1, chat_id=2, server_name=None, task=f"q{i}"
-            )
+    answer = asyncio.run(
+        consult_module.run_consult(
+            slug="oracle", user_id=1, chat_id=2, server_name=None, task="q"
         )
-        assert answer == "the answer"
-
-    sessions = sorted(d.name for d in (agent_dir / "sessions").iterdir())
-    assert sessions == ["session_2", "session_3"]  # retention cap = 2
-    meta = yaml.safe_load((agent_dir / "sessions" / "session_3" / "meta.yml").read_text())
-    assert meta["kind"] == "consult"
-    assert meta["status"] == "done"
-    assert meta["task"] == "q2"
-    transcript = (agent_dir / "sessions" / "session_3" / "transcript.md").read_text()
-    assert "the answer" in transcript
+    )
+    assert answer == "the answer"
+    assert not (agent_dir / "sessions").exists()
 
 
 def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
@@ -300,7 +312,7 @@ def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
 
     req = agents_routes.StartAgentRequest(config={"execution_mode": "experiment"})
     user = SimpleNamespace(id=1)
-    result = asyncio.run(agents_routes.start_agent("watcher", req, user=user))
+    result = asyncio.run(agents_routes.start_session("watcher", req, user=user))
     assert result["started"] is True
     assert captured["config"]["risk_limits"] == {
         "max_position_size_quote": 0,
@@ -312,5 +324,5 @@ def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
         "---\nname: snap\ndefault_config:\n  risk_limits:\n"
         "    max_position_size_quote: 50\n---\n\nTick.\n"
     )
-    asyncio.run(agents_routes.start_agent("watcher", req, user=user))
+    asyncio.run(agents_routes.start_session("watcher", req, user=user))
     assert captured["config"]["risk_limits"] == {"max_position_size_quote": 50}

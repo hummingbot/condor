@@ -415,15 +415,23 @@ export interface AgentPerformanceResponse {
 
 export interface SessionInfo {
   number: number;
-  kind: "tick_loop" | "delegation" | "consult" | "curation";
   strategy: string;
   status: string;
-  task: string;
   snapshot_count: number;
   created_at: string;
   ended_at: string;
-  has_transcript: boolean;
   has_journal: boolean;
+}
+
+// One flat delegation transcript (agents/{slug}/delegations/{date}-dN.md).
+export interface DelegationFileInfo {
+  number: number;
+  task_id: string;
+  status: string;
+  task: string;
+  created_at: string;
+  ended_at: string;
+  file: string;
 }
 
 export interface ExperimentInfo {
@@ -455,6 +463,7 @@ export interface AgentDetail {
   agent_id: string;
   sessions: SessionInfo[];
   experiments: ExperimentInfo[];
+  delegations: DelegationFileInfo[];
   instances: RunningInstance[];
 }
 
@@ -1119,10 +1128,9 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
 
-  getAgentSessions: (slug: string, opts: { strategy?: string; kind?: string } = {}) => {
+  getAgentSessions: (slug: string, opts: { strategy?: string } = {}) => {
     const params = new URLSearchParams();
     if (opts.strategy) params.set("strategy", opts.strategy);
-    if (opts.kind) params.set("kind", opts.kind);
     const qs = params.toString();
     return apiFetch<{ sessions: SessionInfo[] }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/sessions${qs ? `?${qs}` : ""}`,
@@ -1134,9 +1142,9 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/journal`,
     ),
 
-  getSessionTranscript: (slug: string, sessionNum: number) =>
-    apiFetch<{ content: string; meta: Record<string, unknown> }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/transcript`,
+  getDelegationTranscript: (slug: string, num: number) =>
+    apiFetch<{ content: string; file: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/delegation-files/${num}`,
     ),
 
   getSessionSnapshots: (slug: string, sessionNum: number) =>

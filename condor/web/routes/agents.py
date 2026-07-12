@@ -12,7 +12,8 @@ so per-playbook views are a filter, not a separate tree. Route shape::
     /agents/{slug}/consult|delegate  -> run the Agent's brain
     /agents/{slug}/strategies...     -> playbook CRUD (strategy.md + default_config)
     /agents/{slug}/start|stop|...    -> session lifecycle
-    /agents/{slug}/sessions/...      -> journals, snapshots, transcripts, executors
+    /agents/{slug}/sessions/...      -> journals, snapshots, executors
+    /agents/{slug}/delegation-files  -> flat delegation transcripts
     /agents/{slug}/performance       -> per-session perf + rollup (?strategy= filter)
 """
 
@@ -27,7 +28,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from condor.agents.journal import read_session_meta
+from condor.agents.journal import find_delegation_file, read_session_meta
 from condor.agents.sessions_index import (
     count_experiments,
     count_sessions,
@@ -35,6 +36,7 @@ from condor.agents.sessions_index import (
     find_experiment_file,
     find_session_dir,
     infer_latest_session_status,
+    list_delegations_on_disk,
     list_experiments,
     list_sessions,
 )
@@ -158,15 +160,24 @@ class AgentPerformanceResponse(BaseModel):
 
 class SessionInfo(BaseModel):
     number: int
-    kind: str = "tick_loop"
     strategy: str = ""
     status: str = ""
-    task: str = ""
     snapshot_count: int = 0
     created_at: str = ""
     ended_at: str = ""
-    has_transcript: bool = False
     has_journal: bool = False
+
+
+class DelegationInfo(BaseModel):
+    """One flat delegation transcript (delegations/{date}-dN.md)."""
+
+    number: int
+    task_id: str = ""
+    status: str = ""
+    task: str = ""
+    created_at: str = ""
+    ended_at: str = ""
+    file: str = ""
 
 
 class ExperimentInfo(BaseModel):
@@ -196,6 +207,7 @@ class AgentDetail(BaseModel):
     agent_id: str = ""
     sessions: list[SessionInfo] = []
     experiments: list[ExperimentInfo] = []
+    delegations: list[DelegationInfo] = []
     instances: list[RunningInstance] = []
 
 
@@ -556,9 +568,7 @@ def _playbook_summary(strategy, agent_dir: Path) -> PlaybookSummary:
         description=strategy.description,
         agent_key=strategy.agent_key,
         default_config=strategy.default_config or {},
-        session_count=len(
-            list_sessions(agent_dir, strategy=strategy.slug, kind="tick_loop")
-        ),
+        session_count=len(list_sessions(agent_dir, strategy=strategy.slug)),
     )
 
 
@@ -610,7 +620,7 @@ async def _build_agent_summary(agent, strategies: list) -> AgentSummary:
         strategy_count=len(strategies),
         strategies=[_playbook_summary(s, agent_dir) for s in strategies],
         status=status,
-        session_count=count_sessions(agent_dir, kind="tick_loop"),
+        session_count=count_sessions(agent_dir),
         experiment_count=count_experiments(agent_dir),
         tick_count=tick_count,
         daily_pnl=latest_session_pnl,
@@ -663,13 +673,31 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
 async def get_delegation_status(
     task_id: str, user: WebUser = Depends(get_current_user)
 ):
-    """Get a delegation's status + result/error."""
+    """Get a delegation's status + result/error.
+
+    Live tasks come from the in-process registry; after a restart the flat
+    transcript file (``agents/{slug}/delegations/{date}-dN.md``) still
+    resolves, so a task_id never goes dark just because the process died.
+    """
+    import re as _re
+
     from condor.agents.delegate import get_delegation
 
     dt = get_delegation(task_id)
-    if dt is None:
-        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
-    return dt.to_dict()
+    if dt is not None:
+        return dt.to_dict()
+
+    m = _re.match(r"^(?P<slug>.+)-d(?P<num>\d+)$", task_id)
+    if m:
+        try:
+            agent = _get_agent(m.group("slug"))
+        except HTTPException:
+            agent = None
+        if agent is not None:
+            path = find_delegation_file(agent.agent_dir, int(m.group("num")))
+            if path:
+                return {"task_id": task_id, "transcript": path.read_text()}
+    raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
 
 
 @router.post("/delegations/{task_id}/stop")
@@ -741,6 +769,9 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         agent_id=agent_id,
         sessions=[SessionInfo(**s) for s in list_sessions(agent_dir)],
         experiments=[ExperimentInfo(**e) for e in list_experiments(agent_dir)],
+        delegations=[
+            DelegationInfo(**d) for d in list_delegations_on_disk(agent_dir)
+        ],
         instances=instances,
     )
 
@@ -937,9 +968,7 @@ async def get_strategy(
         default_config=strategy.default_config or {},
         default_trading_context=strategy.default_trading_context,
         agent_key=strategy.agent_key,
-        session_count=len(
-            list_sessions(agent.agent_dir, strategy=sslug, kind="tick_loop")
-        ),
+        session_count=len(list_sessions(agent.agent_dir, strategy=sslug)),
     )
 
 
@@ -1077,12 +1106,14 @@ async def get_session_executors(
 
 
 @router.post("/{slug}/start")
-async def start_agent(
+async def start_session(
     slug: str,
     req: StartAgentRequest,
     user: WebUser = Depends(get_current_user),
 ):
-    """Start an agent session (a new tick session under the agent).
+    """Start a session — the stateful unit of capital engagement — or, with
+    ``execution_mode: "experiment"``, one simulated tick that leaves only a
+    flat snapshot.
 
     ``strategy`` selects the playbook — optional when the agent has exactly
     one, required (400 listing the options) when it has several.
@@ -1254,12 +1285,11 @@ async def update_learnings(
 async def list_agent_sessions(
     slug: str,
     strategy: str | None = None,
-    kind: str | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """List an agent's sessions (all kinds), with optional strategy/kind filters."""
+    """List an agent's sessions, optionally filtered to one playbook."""
     agent = _get_agent(slug)
-    sessions = list_sessions(agent.agent_dir, strategy=strategy, kind=kind)
+    sessions = list_sessions(agent.agent_dir, strategy=strategy)
     return {"sessions": [SessionInfo(**s).model_dump() for s in sessions]}
 
 
@@ -1284,17 +1314,32 @@ async def get_journal(
     return {"content": content}
 
 
-@router.get("/{slug}/sessions/{session_num}/transcript")
-async def get_transcript(
+@router.get("/{slug}/delegation-files")
+async def list_agent_delegations(
+    slug: str, user: WebUser = Depends(get_current_user)
+):
+    """List an agent's delegation transcripts (flat files, newest first)."""
+    agent = _get_agent(slug)
+    return {
+        "delegations": [
+            DelegationInfo(**d).model_dump()
+            for d in list_delegations_on_disk(agent.agent_dir)
+        ]
+    }
+
+
+@router.get("/{slug}/delegation-files/{num}")
+async def get_agent_delegation(
     slug: str,
-    session_num: int,
+    num: int,
     user: WebUser = Depends(get_current_user),
 ):
-    """Read transcript.md + meta for a delegation/consult session."""
-    session_dir = _get_session_dir_or_404(slug, session_num)
-    transcript_path = session_dir / "transcript.md"
-    content = transcript_path.read_text() if transcript_path.exists() else ""
-    return {"content": content, "meta": read_session_meta(session_dir)}
+    """Read one delegation transcript."""
+    agent = _get_agent(slug)
+    path = find_delegation_file(agent.agent_dir, num)
+    if not path:
+        raise HTTPException(status_code=404, detail=f"Delegation {num} not found")
+    return {"content": path.read_text(), "file": path.name}
 
 
 @router.get("/{slug}/sessions/{session_num}/snapshots")

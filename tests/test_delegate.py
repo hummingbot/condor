@@ -1,16 +1,16 @@
 """Unit tests for DELEGATE -- fire-and-forget background agent tasks.
 
-Covers the lifecycle (running -> done/error/stopped), result capture, session
-persistence (kind: delegation, meta at start / transcript+status in finally),
-the completion notification, and the refactor-02 authorization flip: trading
-agents run under a zero-seeded risk_gate (AGENT.md baseline or per-call
-override, loud error with neither), serverless agents keep full auto-approve.
+Covers the lifecycle (running -> done/error/stopped), result capture, the flat
+transcript persistence (delegations/{date}-dN.md: husk at start, full rewrite
+in finally — refactor-07), the completion notification, and the refactor-02
+authorization flip: trading agents run under a zero-seeded risk_gate (AGENT.md
+baseline or per-call override, loud error with neither), serverless agents
+keep full auto-approve.
 """
 
 import asyncio
 
 import pytest
-import yaml
 
 from condor.agents import agent as agent_module
 from condor.agents import delegate as delegate_module
@@ -96,30 +96,28 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
         # Returns immediately, still running before we await it.
         assert dt.status == "running"
         assert get_delegation(dt.task_id) is dt
-        # The session husk exists from the start (crash-inspectable).
-        meta = yaml.safe_load((dt.session_dir / "meta.yml").read_text())
-        assert meta["kind"] == "delegation"
-        assert meta["status"] == "running"
+        # The flat-file husk exists from the start (crash-inspectable).
+        husk = dt.file_path.read_text()
+        assert "**Status:** running" in husk
         await _drain(dt)
         return dt
 
     dt = asyncio.run(scenario())
 
-    # Session id IS the task id: "{slug}_{N}".
-    assert dt.task_id == "scout_1"
+    # Delegations have their own id namespace: "{slug}-d{N}", not a session id.
+    assert dt.task_id == "scout-d1"
     # Lifecycle + result capture.
     assert dt.status == "done"
     assert dt.result == "scan complete: 3 pools"
     # Serverless agent → AUTO policy (no permission callback).
     assert seen["permission_policy"] is None
     assert "scan SOL pools" in seen["prompt"]
-    # Transcript + finalized meta under agents/{slug}/sessions/session_N/.
-    transcript = tmp_path / "scout" / "sessions" / "session_1" / "transcript.md"
-    assert transcript.exists()
-    assert "scan complete: 3 pools" in transcript.read_text()
-    meta = yaml.safe_load((dt.session_dir / "meta.yml").read_text())
-    assert meta["status"] == "done"
-    assert meta["ended_at"]
+    # One flat transcript; NO session dir was consumed.
+    text = dt.file_path.read_text()
+    assert "scan complete: 3 pools" in text
+    assert "**Status:** done" in text
+    assert "**Ended:**" in text and "**Ended:** -" not in text
+    assert not (tmp_path / "scout" / "sessions").exists()
     # Notification delivered.
     assert any("done" in m for m in bot.messages)
 
@@ -151,8 +149,9 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
     assert dt.status == "error"
     assert "model exploded" in dt.error
     assert any("failed" in m for m in bot.messages)
-    meta = yaml.safe_load((dt.session_dir / "meta.yml").read_text())
-    assert meta["status"] == "error"
+    text = dt.file_path.read_text()
+    assert "**Status:** error" in text
+    assert "model exploded" in text
 
 
 def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
@@ -187,9 +186,8 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
     assert dt.status == "stopped"
     # A stopped task does not spam a completion notification.
     assert bot.messages == []
-    # But its session meta records the terminal state.
-    meta = yaml.safe_load((dt.session_dir / "meta.yml").read_text())
-    assert meta["status"] == "stopped"
+    # But its transcript records the terminal state.
+    assert "**Status:** stopped" in dt.file_path.read_text()
 
 
 def test_stop_unknown_returns_false():
@@ -228,8 +226,8 @@ def test_trading_delegation_without_limits_errors_loudly(tmp_path, monkeypatch):
             )
         )
     # No husk left behind for a rejected start.
-    assert not (tmp_path / "trader" / "sessions").exists() or not list(
-        (tmp_path / "trader" / "sessions").iterdir()
+    assert not (tmp_path / "trader" / "delegations").exists() or not list(
+        (tmp_path / "trader" / "delegations").iterdir()
     )
 
 
@@ -297,10 +295,10 @@ def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
         return dt
 
     dt = asyncio.run(scenario())
-    # REPLACE, not merge: exactly what was passed governs the run.
+    # REPLACE, not merge: exactly what was passed governs the run — and the
+    # transcript header records exactly those numbers.
     assert dt.risk_limits == {"max_position_size_quote": 2000}
-    meta = yaml.safe_load((dt.session_dir / "meta.yml").read_text())
-    assert meta["risk_limits"] == {"max_position_size_quote": 2000}
+    assert '"max_position_size_quote": 2000' in dt.file_path.read_text()
 
 
 def test_zero_seeded_gate_blocks_uncapped_deploy_and_place_order(tmp_path, monkeypatch):
@@ -408,7 +406,7 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
     assert tool_ev["output"] == "3 pools found"
 
     # Transcript renders the full session, not just the result.
-    text = (dt.session_dir / "transcript.md").read_text()
+    text = dt.file_path.read_text()
     assert "## Session" in text
     assert "I should scan the pools first." in text
     assert "get_market_data" in text

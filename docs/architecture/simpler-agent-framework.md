@@ -4,9 +4,12 @@ Architectural reference for the agent system as of 2026-07-11, after
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) (agent-level
 history), [refactor-02](refactor-02-unified-run-primitive.md) (one run
 primitive), and [refactor-05](refactor-05-skill-evolution.md) (portable
-skills) — all implemented and live. (Refactor-05's Phase 3 automatic
-curation loop was implemented, then removed 2026-07-11 as over-complex;
-skill improvement is human-directed in chat.) This supersedes the
+skills), and
+[refactor-07](refactor-07-session-as-primitive.md) (session as the stateful
+primitive; consult/delegate/experiment leave non-session artifacts) — all
+implemented and live. (Refactor-05's Phase 3 automatic curation loop was
+implemented, then removed 2026-07-11 as over-complex; skill improvement is
+human-directed in chat.) This supersedes the
 descriptive parts of [agent-framework.md](agent-framework.md); that
 document's §6 (session & turn mechanics — the chat process model) is
 unchanged and still authoritative.
@@ -22,7 +25,7 @@ artifacts any host harness can install.**
 |---|---|---|
 | **Agent** (`agents/{slug}/AGENT.md`) | The unit of identity, attribution, and accumulation: tools allowlist, consult trigger, server pin, **risk baseline**, plus ALL operational history | A per-task construct; there is exactly one history per agent |
 | **Strategy** (`strategies/{sslug}/strategy.md`) | A pure **playbook template**: tick tactic + `default_config`. A start-time selector recorded as session metadata | A state owner. No sessions/learnings/config.yml/shutdown.md live under it |
-| **Session** (`sessions/session_N/`) | One run of the agent's brain, of any kind: `tick_loop`, `delegation`, `consult` — same envelope, same numbering | Strategy-scoped. Sessions belong to the agent; the strategy is a `meta.yml` field |
+| **Session** (`sessions/session_N/`) | The **stateful** unit of capital engagement: frozen config, journal, risk carry-over, `controller_id` attribution, a track-record entry. Ticks are how the scheduler advances it | An envelope for every brain invocation. Consults return an inline answer (no disk); delegations leave a flat transcript; experiments leave a flat snapshot |
 
 Supporting artifacts (owned by the agent, shared across all its playbooks):
 **skills** (markdown procedures, three tiers — §6), **routines** (executable
@@ -54,17 +57,17 @@ agents/{slug}/
     skills/  routines/  store/  # the shared brain
     strategies/
         {sslug}/strategy.md     # playbook + default_config — NOTHING else
-    sessions/
-        session_1/              # kind: tick_loop
-            meta.yml            #   kind, strategy, status, model, timestamps
+    sessions/                   # ONLY real sessions — every entry is track record
+        session_N/
+            meta.yml            #   strategy, status, model, timestamps
             config.yml          #   frozen launch config
             journal.md          #   summary / decisions / ticks / executors
             snapshots/          #   full per-tick dumps
-        session_2/              # kind: delegation | consult
-            meta.yml            #   kind, status, task, risk_limits (delegations)
-            transcript.md       #   full reasoning + tool calls + result
+    delegations/
+        2026-07-11-d3.md        # flat transcript per delegation ({date}-dN.md;
+                                #   parseable header: status/task/risk/started/ended)
     experiments/
-        experiment_N.md         # experiments only — scratch that never touches capital
+        2026-07-11-e2.md        # flat snapshot per experiment ({date}-eN.md)
 ```
 
 Allocation is mkdir-atomic (`allocate_session_dir`), so concurrent starts
@@ -150,10 +153,8 @@ run_agent(policy=human_gate(chat_id), timeout=900s)
      |                    |   blocks until tapped (registry is process-global)
      |                    `-- no chat/bot? -> deny_gate: mutation cancelled
      v
-persist kind:consult session (transcript + meta), retention cap 20
-     |
-     v
 return answer text inline (caller was blocking the whole time)
+     — nothing persists: the ANSWER is the artifact (refactor-07)
 ```
 
 ### 4.2 Delegation — background, unattended, **risk-gated**
@@ -171,8 +172,9 @@ start_delegation()                            condor/agents/delegate.py
      |       policy = risk_gate(limits, RiskState())   # zero seed = per-run budget
      |    serverless specialist? policy = AUTO
      |
-     |  allocate sessions/session_N NOW (kind:delegation, status:running
-     |  -> a crash leaves an inspectable husk); task_id == session id
+     |  allocate delegations/{date}-dN.md NOW (husk with Status: running
+     |  -> a crash leaves an inspectable record); task_id = "{slug}-dN" —
+     |  its own namespace, session numbering untouched
      |
      |  detached asyncio.Task ------------------> caller gets task_id immediately
      v
@@ -181,7 +183,7 @@ run_agent(policy, event_sink -> live dt.events, timeout=900s)
      |            |-- deploy w/o loss cap    -> blocked
      |            `-- executor creates       -> counted against the budget
      v
-finally: transcript.md + finalize meta (done|error|stopped)
+finally: rewrite the flat file — full transcript + terminal status
      |
      v
 notify user on Telegram (the notification IS the return path)
@@ -223,7 +225,7 @@ TickEngine (owns loop/pause/max_ticks, the _engines registry entry,
     finalize meta.yml                                       |
 ```
 
-Launch resolution: `start_agent(agent_slug, strategy=...)` — the strategy is
+Launch resolution: `start_session(agent_slug, strategy=...)` — the strategy is
 optional with exactly one playbook, a loud error listing options with
 several. Risk limits resolve **request config > strategy default_config >
 AGENT.md baseline > schema defaults**.
@@ -346,7 +348,7 @@ User request
 +-- [AGENTS] domain match?    --> consult (quick, user watching, human-gated)
 |                                 or delegate (long/fire-and-forget,
 |                                 RISK-GATED for trading agents; per-call
-|                                 risk_limits override available; session +
+|                                 risk_limits override available; flat
 |                                 transcript + notification)
 `-- nothing matches           --> raw tools
 ```
@@ -360,7 +362,7 @@ User request
    v
 ╌ MCP boundary ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
    |
-   |   consult(human_gate)   delegate(risk_gate|AUTO)   start_agent
+   |   consult(human_gate)   delegate(risk_gate|AUTO)   start_session
    |          \                    |                    /
    |           v                   v                   v
    |          .-------------------------------------------.
@@ -368,11 +370,11 @@ User request
    |          '-------------------------------------------'
    |                               |
    v                               v
- agents/{slug}/          sessions/session_N (meta.yml: kind+strategy+status)
-   AGENT.md (risk baseline)  ├ tick_loop:  journal + snapshots + frozen config
-   strategies/{sslug}/       ├ delegation: transcript (+ per-run risk budget)
-     strategy.md (playbook)  └ consult:    transcript (retention 20)
-   skills/ (local>_shared)
+ agents/{slug}/          sessions/session_N   <- stateful: journal + snapshots
+   AGENT.md (risk baseline)                        + frozen config (track record)
+   strategies/{sslug}/       delegations/{date}-dN.md  <- flat transcript
+     strategy.md (playbook)  experiments/{date}-eN.md  <- flat snapshot
+   skills/ (local>_shared)                          (consults persist nothing)
    learnings.md   <── capture (in-run); folded into skills by the
    routines/  store/          user in chat (manage_skill patch, provenance)
 

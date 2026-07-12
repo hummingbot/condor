@@ -37,7 +37,7 @@ import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { type PlaybookSummary, type SessionInfo, api } from "@/lib/api";
+import { type DelegationFileInfo, type PlaybookSummary, api } from "@/lib/api";
 import { formatDateTime } from "@/lib/formatters";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
@@ -255,21 +255,21 @@ function ConsultPanel({ slug, whenToConsult }: { slug: string; whenToConsult: st
   );
 }
 
-// ── Transcript viewer (delegation / consult sessions) ──
+// ── Transcript viewer (flat delegation files) ──
 
 function TranscriptModal({
   slug,
-  session,
+  delegation,
   onClose,
 }: {
   slug: string;
-  session: SessionInfo;
+  delegation: DelegationFileInfo;
   onClose: () => void;
 }) {
   useEscapeKey(true, onClose);
   const { data } = useQuery({
-    queryKey: ["agent", slug, "session", session.number, "transcript"],
-    queryFn: () => api.getSessionTranscript(slug, session.number),
+    queryKey: ["agent", slug, "delegation", delegation.number, "transcript"],
+    queryFn: () => api.getDelegationTranscript(slug, delegation.number),
   });
 
   return (
@@ -279,12 +279,12 @@ function TranscriptModal({
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-3">
           <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--color-text)]">
             <span className="rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-purple-400">
-              {session.kind}
+              delegation
             </span>
-            {slug}_{session.number}
-            {session.status && (
-              <span className={`text-xs ${session.status === "done" ? "text-emerald-400" : session.status === "error" ? "text-red-400" : "text-[var(--color-text-muted)]"}`}>
-                {session.status}
+            {delegation.task_id}
+            {delegation.status && (
+              <span className={`text-xs ${delegation.status === "done" ? "text-emerald-400" : delegation.status === "error" ? "text-red-400" : "text-[var(--color-text-muted)]"}`}>
+                {delegation.status}
               </span>
             )}
           </h3>
@@ -311,28 +311,26 @@ function TranscriptModal({
   );
 }
 
-// ── Background runs (delegations + consults) list ──
+// ── Delegation transcripts list (flat files — refactor-07) ──
 
 function BackgroundRunsPanel({
-  sessions,
+  delegations,
   onOpen,
 }: {
-  sessions: SessionInfo[];
-  onOpen: (s: SessionInfo) => void;
+  delegations: DelegationFileInfo[];
+  onOpen: (d: DelegationFileInfo) => void;
 }) {
-  const rows = sessions.filter((s) => s.kind !== "tick_loop");
-  if (rows.length === 0) return null;
+  if (delegations.length === 0) return null;
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
       <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-        <MessageSquareText className="h-3.5 w-3.5" /> Delegations & Consults ({rows.length})
+        <MessageSquareText className="h-3.5 w-3.5" /> Delegations ({delegations.length})
       </h3>
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
             <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
               <th className="px-2 py-1">#</th>
-              <th className="px-2 py-1">Kind</th>
               <th className="px-2 py-1">Task</th>
               <th className="px-2 py-1">Status</th>
               <th className="px-2 py-1">Ended</th>
@@ -340,24 +338,19 @@ function BackgroundRunsPanel({
             </tr>
           </thead>
           <tbody>
-            {rows.map((s) => (
+            {delegations.map((d) => (
               <tr
-                key={s.number}
-                onClick={() => onOpen(s)}
+                key={d.number}
+                onClick={() => onOpen(d)}
                 className="cursor-pointer border-t border-[var(--color-border)]/40 transition-colors hover:bg-[var(--color-surface-hover)]"
               >
-                <td className="px-2 py-1.5 font-mono text-[var(--color-text)]">{s.number}</td>
-                <td className="px-2 py-1.5">
-                  <span className="rounded bg-purple-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase text-purple-400">
-                    {s.kind}
-                  </span>
-                </td>
-                <td className="max-w-md truncate px-2 py-1.5 text-[var(--color-text-muted)]">{s.task || "—"}</td>
-                <td className={`px-2 py-1.5 ${s.status === "done" ? "text-emerald-400" : s.status === "error" ? "text-red-400" : s.status === "running" ? "text-amber-400" : "text-[var(--color-text-muted)]"}`}>
-                  {s.status || "—"}
+                <td className="px-2 py-1.5 font-mono text-[var(--color-text)]">{d.task_id}</td>
+                <td className="max-w-md truncate px-2 py-1.5 text-[var(--color-text-muted)]">{d.task || "—"}</td>
+                <td className={`px-2 py-1.5 ${d.status === "done" ? "text-emerald-400" : d.status === "error" ? "text-red-400" : d.status === "running" ? "text-amber-400" : "text-[var(--color-text-muted)]"}`}>
+                  {d.status || "—"}
                 </td>
                 <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
-                  {s.ended_at ? formatDateTime(Date.parse(s.ended_at)) : "—"}
+                  {d.ended_at ? formatDateTime(Date.parse(d.ended_at)) : "—"}
                 </td>
                 <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
                   <ChevronRight className="h-3.5 w-3.5" />
@@ -394,7 +387,7 @@ export function AgentDetail() {
   const [strategyFilter, setStrategyFilter] = useState("");
   const [reviewerSessionNum, setReviewerSessionNum] = useState<number | null>(null);
   const [reviewerKind, setReviewerKind] = useState<"session" | "experiment">("session");
-  const [transcriptSession, setTranscriptSession] = useState<SessionInfo | null>(null);
+  const [transcriptDelegation, setTranscriptDelegation] = useState<DelegationFileInfo | null>(null);
 
   // Routine instances for ReportBrowser (routines live at the agent level)
   const { data: routineInstances = [] } = useQuery({
@@ -503,7 +496,7 @@ export function AgentDetail() {
   const strategies = agent.strategies || [];
   const status = deriveAgentStatus(agent);
   const isRunning = agent.status === "running";
-  const tickSessions = (agent.sessions || []).filter((s) => s.kind === "tick_loop");
+  const tickSessions = agent.sessions || [];
   const reviewerOpen = reviewerSessionNum !== null;
   const resolvedReviewerSession =
     reviewerSessionNum ?? (tickSessions.length > 0 ? tickSessions[0].number : 0);
@@ -729,11 +722,11 @@ export function AgentDetail() {
         </div>
       )}
 
-      {/* Delegations & consults */}
+      {/* Delegation transcripts */}
       <div className="mb-6">
         <BackgroundRunsPanel
-          sessions={agent.sessions || []}
-          onOpen={setTranscriptSession}
+          delegations={agent.delegations || []}
+          onOpen={setTranscriptDelegation}
         />
       </div>
 
@@ -847,12 +840,12 @@ export function AgentDetail() {
         />
       )}
 
-      {/* Delegation/consult transcript viewer */}
-      {transcriptSession && (
+      {/* Delegation transcript viewer */}
+      {transcriptDelegation && (
         <TranscriptModal
           slug={agent.slug}
-          session={transcriptSession}
-          onClose={() => setTranscriptSession(null)}
+          delegation={transcriptDelegation}
+          onClose={() => setTranscriptDelegation(null)}
         />
       )}
     </div>

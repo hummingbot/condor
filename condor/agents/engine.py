@@ -139,7 +139,6 @@ class TickEngine:
             write_session_meta(
                 self.session_dir,
                 {
-                    "kind": "tick_loop",
                     "strategy": self.strategy.slug,
                     "status": "running",
                     "model": self._agent_key(),

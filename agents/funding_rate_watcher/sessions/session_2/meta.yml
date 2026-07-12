@@ -1,4 +1,3 @@
-kind: tick_loop
 strategy: funding_snapshot
 status: stopped
 model: claude-acp:sonnet

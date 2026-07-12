@@ -1,15 +1,15 @@
-"""Read-only index over the on-disk session/experiment layout of an agent.
+"""Read-only index over an agent's on-disk history layout.
 
-The layout itself (directory names, ``session_N`` / ``experiment_N.md`` naming,
-``meta.yml``, journal and experiment file formats) is owned by
-:mod:`condor.agents.journal`; this module provides the enumeration and lookup
-helpers that consumers (web routes, MCP tools) use to browse that layout
-without re-implementing it.
+The layout itself (``sessions/session_N``, ``experiments/{date}-eN.md``,
+``delegations/{date}-dN.md``, ``meta.yml``, journal and snapshot formats) is
+owned by :mod:`condor.agents.journal`; this module provides the enumeration
+and lookup helpers that consumers (web routes, MCP tools) use to browse that
+layout without re-implementing it.
 
 All helpers take the agent dir (``agents/{agent_slug}``) and return plain data
-— no FastAPI/Pydantic dependencies. Sessions carry their ``meta.yml`` fields
-(``kind``, ``strategy``, ``status``, …); readers tolerate missing metas
-(crashed husks) by treating them as ``kind: tick_loop`` with unknown status.
+— no FastAPI/Pydantic dependencies. Every ``sessions/session_N`` dir IS a real
+session (refactor-07): delegations and experiments live in their own flat
+dirs, so there is no ``kind`` field and no kind filtering.
 """
 
 from __future__ import annotations
@@ -18,12 +18,12 @@ import re
 from pathlib import Path
 from typing import Any
 
-from condor.agents.journal import count_journal_ticks, read_session_meta
-
-_EXPERIMENT_FILE_RE = re.compile(r"experiment_(\d+)\.md")
-
-# Session kinds that represent attributed trading runs (perf rollups, status).
-TICK_KIND = "tick_loop"
+from condor.agents.journal import (
+    _DELEGATION_FILE_RE,
+    _EXPERIMENT_FILE_RE,
+    count_journal_ticks,
+    read_session_meta,
+)
 
 
 def _iter_session_dirs(agent_dir: Path):
@@ -40,23 +40,13 @@ def _iter_session_dirs(agent_dir: Path):
         yield num, d
 
 
-def _session_kind(meta: dict) -> str:
-    # Metaless husks predate meta.yml or crashed before writing it; every one
-    # of those was a tick session (delegations/consults always write meta first).
-    return meta.get("kind") or TICK_KIND
-
-
 def infer_latest_session_status(agent_dir: Path, slug: str) -> dict[str, Any] | None:
-    """Infer status from the latest tick session on disk when no engine is in memory."""
-    tick_sessions = [
-        (num, d)
-        for num, d in _iter_session_dirs(agent_dir)
-        if _session_kind(read_session_meta(d)) == TICK_KIND
-    ]
-    if not tick_sessions:
+    """Infer status from the latest session on disk when no engine is in memory."""
+    sessions = list(_iter_session_dirs(agent_dir))
+    if not sessions:
         return None
 
-    num, latest = max(tick_sessions, key=lambda t: t[1].stat().st_mtime)
+    num, latest = max(sessions, key=lambda t: t[1].stat().st_mtime)
     # If no engine is in memory, the agent is not running — idle metadata only.
     return {
         "agent_id": f"{slug}_{num}",
@@ -67,44 +57,29 @@ def infer_latest_session_status(agent_dir: Path, slug: str) -> dict[str, Any] | 
     }
 
 
-def count_sessions(agent_dir: Path, kind: str | None = None) -> int:
-    if kind is None:
-        return sum(1 for _ in _iter_session_dirs(agent_dir))
-    return sum(
-        1
-        for _, d in _iter_session_dirs(agent_dir)
-        if _session_kind(read_session_meta(d)) == kind
-    )
+def count_sessions(agent_dir: Path) -> int:
+    return sum(1 for _ in _iter_session_dirs(agent_dir))
 
 
 def count_experiments(agent_dir: Path) -> int:
     d = agent_dir / "experiments"
     if not d.exists():
         return 0
-    return len(
-        [
-            f
-            for f in d.iterdir()
-            if f.is_file() and f.suffix == ".md" and f.name.startswith("experiment_")
-        ]
-    )
+    return sum(1 for f in d.iterdir() if _EXPERIMENT_FILE_RE.match(f.name))
 
 
 def list_sessions(
-    agent_dir: Path, strategy: str | None = None, kind: str | None = None
+    agent_dir: Path, strategy: str | None = None
 ) -> list[dict[str, Any]]:
-    """List sessions as dicts (number, kind, strategy, status, …), newest first.
+    """List sessions as dicts (number, strategy, status, …), newest first.
 
-    ``strategy``/``kind`` filter on the meta.yml fields — the strategy filter is
-    what gives per-playbook track records under the agent-level pool.
+    ``strategy`` filters on the meta.yml field — that filter is what gives
+    per-playbook track records under the agent-level pool.
     """
     sessions: list[dict[str, Any]] = []
     for num, d in sorted(_iter_session_dirs(agent_dir), reverse=True):
         meta = read_session_meta(d)
-        s_kind = _session_kind(meta)
         s_strategy = meta.get("strategy", "")
-        if kind is not None and s_kind != kind:
-            continue
         if strategy is not None and s_strategy != strategy:
             continue
         snap_dir = d / "snapshots"
@@ -112,14 +87,11 @@ def list_sessions(
         sessions.append(
             {
                 "number": num,
-                "kind": s_kind,
                 "strategy": s_strategy,
                 "status": meta.get("status", ""),
-                "task": meta.get("task", ""),
                 "snapshot_count": snap_count,
                 "created_at": meta.get("started_at", ""),
                 "ended_at": meta.get("ended_at", ""),
-                "has_transcript": (d / "transcript.md").exists(),
                 "has_journal": (d / "journal.md").exists(),
             }
         )
@@ -173,12 +145,12 @@ def list_experiments(agent_dir: Path) -> list[dict[str, Any]]:
     d = agent_dir / "experiments"
     if not d.exists():
         return experiments
-    stated = [(f, f.stat().st_mtime) for f in d.glob("experiment_*.md")]
+    stated = [(f, f.stat().st_mtime) for f in d.iterdir() if f.suffix == ".md"]
     for f, mtime in sorted(stated, key=lambda x: x[1], reverse=True):
         m = _EXPERIMENT_FILE_RE.match(f.name)
         if not m:
             continue
-        num = int(m.group(1))
+        num = int(m.group(2))
         cached = _experiment_info_cache.get(f)
         if cached is not None and cached[0] == mtime:
             info = cached[1]
@@ -189,21 +161,74 @@ def list_experiments(agent_dir: Path) -> list[dict[str, Any]]:
     return experiments
 
 
+# ── Delegations (flat transcripts — refactor-07) ──
+
+# Header lines written by delegate._write_transcript, e.g. "- **Status:** done"
+_DELEGATION_FIELD_RE = re.compile(r"^- \*\*(\w[\w ]*):\*\* (.*)$", re.MULTILINE)
+
+
+def _parse_delegation_file(f: Path, num: int) -> dict[str, Any]:
+    content = f.read_text(errors="replace")
+    fields = {
+        m.group(1): m.group(2).strip()
+        for m in _DELEGATION_FIELD_RE.finditer(content)
+    }
+    task = ""
+    task_match = re.search(
+        r"^## Task\s*\n+(.+?)(?=\n## |\Z)", content, re.MULTILINE | re.DOTALL
+    )
+    if task_match:
+        task = " ".join(task_match.group(1).strip().split())[:500]
+    agent_slug = fields.get("Agent", "")
+
+    def _field(name: str) -> str:
+        v = fields.get(name, "")
+        return "" if v == "-" else v
+
+    return {
+        "number": num,
+        "task_id": f"{agent_slug}-d{num}" if agent_slug else f"d{num}",
+        "status": fields.get("Status", ""),
+        "task": task,
+        "created_at": _field("Started"),
+        "ended_at": _field("Ended"),
+        "file": f.name,
+    }
+
+
+def list_delegations_on_disk(agent_dir: Path) -> list[dict[str, Any]]:
+    """List delegation transcripts (number, status, task, …), newest first.
+
+    A file whose Status is still ``running`` with no live registry entry is a
+    crash husk — surfaced as-is; the caller decides how to present it.
+    """
+    out: list[dict[str, Any]] = []
+    d = agent_dir / "delegations"
+    if not d.exists():
+        return out
+    entries = []
+    for f in d.iterdir():
+        m = _DELEGATION_FILE_RE.match(f.name)
+        if m:
+            entries.append((int(m.group(2)), f))
+    for num, f in sorted(entries, reverse=True):
+        out.append(_parse_delegation_file(f, num))
+    return out
+
+
 def enumerate_run_ids(slug: str, agent_dir: Path) -> list[dict[str, Any]]:
-    """Enumerate attributed runs (tick sessions + experiments) for perf rollups.
+    """Enumerate attributed runs (sessions + experiments) for perf rollups.
 
     Returns dicts with ``agent_id``, ``controller_id`` (the executor tag —
     normally == agent_id, but migrated sessions keep their legacy composite tag
     in meta.yml so historical executors still attribute), ``num``, ``kind``
-    ("session" | "experiment") and ``strategy``. Delegations/consults are
-    excluded: they never tag ``controller_id``.
+    ("session" | "experiment") and ``strategy``. Delegations are excluded:
+    they never tag ``controller_id``.
     """
     runs: list[dict[str, Any]] = []
     seen: set[str] = set()
     for num, d in _iter_session_dirs(agent_dir):
         meta = read_session_meta(d)
-        if _session_kind(meta) != TICK_KIND:
-            continue
         agent_id = f"{slug}_{num}"
         if agent_id in seen:
             continue
@@ -219,11 +244,11 @@ def enumerate_run_ids(slug: str, agent_dir: Path) -> list[dict[str, Any]]:
         )
     d = agent_dir / "experiments"
     if d.exists():
-        for f in d.glob("experiment_*.md"):
+        for f in d.iterdir():
             m = _EXPERIMENT_FILE_RE.match(f.name)
             if not m:
                 continue
-            n = int(m.group(1))
+            n = int(m.group(2))
             agent_id = f"{slug}_e{n}"
             if agent_id in seen:
                 continue
@@ -246,5 +271,11 @@ def find_session_dir(agent_dir: Path, session_num: int) -> Path | None:
 
 
 def find_experiment_file(agent_dir: Path, experiment_num: int) -> Path | None:
-    path = agent_dir / "experiments" / f"experiment_{experiment_num}.md"
-    return path if path.exists() else None
+    d = agent_dir / "experiments"
+    if not d.exists():
+        return None
+    for f in d.iterdir():
+        m = _EXPERIMENT_FILE_RE.match(f.name)
+        if m and int(m.group(2)) == experiment_num:
+            return f
+    return None

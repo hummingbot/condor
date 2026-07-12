@@ -1,6 +1,0 @@
-kind: delegation
-status: done
-task: 'Health check: list your available routines with manage_routines(action=''list'')
-  and reply with a one-line summary of what you found. Create or modify NOTHING.'
-started_at: '2026-07-11T17:45:24.323304+00:00'
-ended_at: '2026-07-11T17:45:35.883368+00:00'

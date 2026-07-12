@@ -319,9 +319,14 @@ async def manage_trading_agent(
 
     Actions -- Lifecycle:
     - "list_agents": List all running agent instances with status
-    - "start_agent": Start a new agent session (requires agent_slug; strategy=<slug>
-      selects the playbook — optional when the agent has exactly one, required when
-      it has several; optional config overrides)
+    - "start_session": Start a new agent SESSION — the stateful unit of capital
+      engagement: frozen config, journal, risk state, its own track-record entry
+      (requires agent_slug; strategy=<slug> selects the playbook — optional when
+      the agent has exactly one, required when it has several; optional config
+      overrides, e.g. execution_mode "run_once" for a single live tick)
+    - "start_experiment": Run ONE simulated tick with every mutation blocked —
+      a.k.a. a dry run — saved as a flat experiment snapshot, never a session
+      (requires agent_slug; same strategy/config args as start_session)
     - "stop_agent": Stop a running agent, KEEPING its open positions (requires agent_id)
     - "shutdown_agent": Emergency stop that WINDS DOWN this session's positions/executors
       per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
@@ -343,16 +348,17 @@ async def manage_trading_agent(
         action: The action to perform.
         agent_id: Agent session ID "{agent_slug}_{N}" (for lifecycle/monitoring/journal actions).
         strategy_id: Strategy key "agent_slug.strategy_slug" (strategy CRUD only).
-        agent_slug: Owning Agent slug — required for create_strategy, start_agent,
-            routine actions, and the agent CRUD actions get/update/delete_agent.
-        strategy: Strategy slug selecting the playbook for start_agent (optional
-            when the agent has exactly one strategy).
+        agent_slug: Owning Agent slug — required for create_strategy,
+            start_session/start_experiment, routine actions, and the agent CRUD
+            actions get/update/delete_agent.
+        strategy: Strategy slug selecting the playbook for start_session /
+            start_experiment (optional when the agent has exactly one strategy).
         name: Agent name (create_agent), strategy name (create/update_strategy), or routine name (run_routine).
         description: Agent or strategy description (for create/update).
         instructions: AGENT.md body (create/update_agent) or strategy instructions text (create/update_strategy).
         agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Any model can be consulted; a pydantic-ai key (e.g. "ollama:...") additionally enforces the tools allowlist on consult. Default "claude-code".
         config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
-            For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
+            For start_session, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
             execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
         when_to_consult: Trigger describing when to consult the agent (create/update_agent). Set it to make the agent consultable — recommended for every agent, on any model.
@@ -626,12 +632,16 @@ async def trading_agent_journal_write(
     """Write to the trading agent's journal. Keep entries SHORT (one line).
 
     Args:
-        agent_id: The trading agent instance ID.
-        entry_type: "action", "learning", or "state".
+        agent_id: The trading agent instance ID ("{slug}_{N}"). For
+            entry_type="promote_learning" the bare agent slug also works —
+            learnings live at the agent level, no session handle needed.
+        entry_type: "action", "learning", "state", or "promote_learning".
             - "action": What you did this tick (auto-trimmed to last 10).
             - "learning": A new insight. Duplicates are auto-filtered. Only write
               if this is genuinely new and not already in learnings (max 20).
             - "state": Overwrite the current state snapshot (e.g. price, position, grids).
+            - "promote_learning": Move an existing learning to the Promoted
+              section after folding it into a skill (text must match the line).
         text: The entry content. Keep it to ONE short line.
         reasoning: One-sentence reasoning (for actions only).
         risk_note: Optional risk note (for actions only).

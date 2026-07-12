@@ -333,7 +333,7 @@ async def _agent_lifecycle(
                 return {"agents": [], "message": "No agents running"}
             return {"agents": agents}
 
-        if action == "start_agent":
+        if action in ("start_session", "start_experiment"):
             if not agent_slug:
                 return {"error": "agent_slug is required"}
 
@@ -374,6 +374,9 @@ async def _agent_lifecycle(
                 if config.get("dry_run") and "execution_mode" not in config:
                     config["execution_mode"] = "experiment"
                 config_dict.update(config)
+            if action == "start_experiment":
+                # The experiment verb IS the mode — no config knob to get wrong.
+                config_dict["execution_mode"] = "experiment"
             if not config or "server_name" not in config:
                 # A server pinned on the owning Agent wins over the ambient chat
                 # server, mirroring consult/delegate resolution.
@@ -536,6 +539,26 @@ def journal_write(
     if not text:
         return {"error": "text is required"}
 
+    if entry_type == "promote_learning":
+        # Learnings live at the AGENT level, so promotion takes the bare agent
+        # slug — no session handle required (a session id also resolves, for
+        # convenience). Moves the matched line to the Promoted section after
+        # it was folded into a skill (frees the active-pool cap, keeps the
+        # record).
+        from condor.agents.agent import AgentStore
+        from condor.agents.journal import promote_agent_learning, split_agent_id
+
+        parsed = split_agent_id(agent_id)
+        slug = parsed[0] if parsed else agent_id
+        target = AgentStore().get(slug)
+        if target is None:
+            return {"error": f"unknown agent '{slug}'"}
+        ok = promote_agent_learning(target.agent_dir, text)
+        return {"promoted": ok} if ok else {
+            "error": "no active learning matched that text — copy it exactly "
+            "from the [LEARNINGS] block"
+        }
+
     from condor.agents.engine import get_engine
     from condor.agents.journal import JournalManager
 
@@ -565,14 +588,6 @@ def journal_write(
         return {"error": "no journal available for this agent"}
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
-    if entry_type == "promote_learning":
-        # Curation: move a learning to the Promoted section after folding it
-        # into a skill (frees the active-pool cap, keeps the record).
-        ok = jm.promote_learning(text)
-        return {"promoted": ok} if ok else {
-            "error": "no active learning matched that text — copy it exactly "
-            "from the [LEARNINGS] block"
-        }
     if entry_type == "learning":
         # Provenance: learnings pool at the agent level, so tick-session entries
         # carry their strategy slug (live engine, else the session's meta.yml).
@@ -710,7 +725,8 @@ async def manage_trading_agent(
 
     # Agent lifecycle actions
     lifecycle_actions = {
-        "start_agent",
+        "start_session",
+        "start_experiment",
         "stop_agent",
         "pause_agent",
         "resume_agent",

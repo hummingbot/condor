@@ -19,9 +19,12 @@ primitive under an unattended policy (refactor-02 §4.1):
 - **Serverless specialists** (e.g. ``routine_builder``) keep full auto-approve.
 
 The in-memory registry dies with the process, like a running ``TickEngine`` in
-``_engines``. Each delegation is persisted as a ``kind: delegation`` session
-under ``agents/{slug}/sessions/session_N/`` (meta.yml written at start — a
-crash leaves an inspectable husk; transcript.md + final status in ``finally``).
+``_engines``. Each delegation is persisted as ONE flat transcript file,
+``agents/{slug}/delegations/{date}-dN.md`` (refactor-07): written at start
+with ``Status: running`` — a crash leaves an inspectable husk — and rewritten
+in ``finally`` with the full transcript and terminal status. Delegations are
+NOT sessions: they own no journal, carry no state, and never consume a
+session number.
 """
 
 from __future__ import annotations
@@ -43,13 +46,15 @@ DEFAULT_TIMEOUT_S = 900
 
 @dataclass
 class DelegateTask:
-    task_id: str  # == the session id "{agent_slug}_{N}"
+    task_id: str  # "{agent_slug}-d{N}" — its own namespace, not a session id
     agent_slug: str
     user_id: int
     chat_id: int
     server_name: str | None
     task: str
-    session_dir: Path | None = None
+    file_path: Path | None = None  # delegations/{date}-dN.md transcript
+    started_at: str = ""
+    ended_at: str = ""
     risk_limits: dict | None = None  # per-call override; None → agent baseline
     status: str = "running"  # running | done | error | stopped
     result: str = ""  # final answer text once done
@@ -70,6 +75,8 @@ class DelegateTask:
             "status": self.status,
             "result": self.result,
             "error": self.error,
+            "started_at": self.started_at,
+            "ended_at": self.ended_at,
         }
 
 
@@ -123,7 +130,7 @@ async def start_delegation(
             AGENT.md ``risk_limits`` baseline nor a per-call override.
     """
     from condor.agents.agent import AgentStore
-    from condor.agents.journal import allocate_session_dir, write_session_meta
+    from condor.agents.journal import allocate_delegation_file
 
     agent = AgentStore().get(agent_slug)
     if agent is None:
@@ -133,29 +140,21 @@ async def start_delegation(
     # background failure notification.
     effective_limits = _resolve_delegation_limits(agent, risk_limits)
 
-    num, session_dir = allocate_session_dir(agent.agent_dir)
-    task_id = f"{agent_slug}_{num}"
-    write_session_meta(
-        session_dir,
-        {
-            "kind": "delegation",
-            "status": "running",
-            "task": task[:500],
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            **({"risk_limits": effective_limits} if effective_limits else {}),
-        },
-    )
-
+    started_at = datetime.now(timezone.utc).isoformat()
+    num, file_path = allocate_delegation_file(agent.agent_dir, started_at)
     dt = DelegateTask(
-        task_id=task_id,
+        task_id=f"{agent_slug}-d{num}",
         agent_slug=agent_slug,
         user_id=user_id,
         chat_id=chat_id,
         server_name=server_name,
         task=task,
-        session_dir=session_dir,
+        file_path=file_path,
+        started_at=started_at,
         risk_limits=effective_limits,
     )
+    # Start-husk: written before the run so a crash leaves an inspectable record.
+    _write_transcript(dt)
     _delegations[dt.task_id] = dt
     dt._task = asyncio.create_task(_run(dt, agent, bot, timeout_s))
     return dt
@@ -244,8 +243,9 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
         dt.error = str(e)
         log.exception("Delegation %s failed", dt.task_id)
     finally:
+        dt.ended_at = datetime.now(timezone.utc).isoformat()
         try:
-            _persist_transcript(dt)
+            _write_transcript(dt)
         except Exception:
             log.exception("Failed to persist delegation transcript for %s", dt.task_id)
         if dt.status != "stopped":
@@ -265,16 +265,19 @@ async def stop_delegation(task_id: str) -> bool:
     return True
 
 
-def _persist_transcript(dt: DelegateTask) -> None:
-    """Finalize the delegation's session: transcript.md + terminal meta status.
+def _write_transcript(dt: DelegateTask) -> None:
+    """Write the delegation's flat transcript file (husk at start, full at end).
 
-    Captures the full session — the agent's reasoning, every tool call (with
-    input/output), and the final result — so nothing about *how* the task was
-    solved is lost.
+    The parseable header (Status/Agent/Started/…) is the delegation's only
+    metadata — there is no meta.yml. The body captures the full run: the
+    agent's reasoning, every tool call (with input/output), and the final
+    result, so nothing about *how* the task was solved is lost.
     """
-    from condor.agents.journal import finalize_session_meta, render_transcript
+    import json
 
-    if dt.session_dir is None:
+    from condor.agents.journal import render_transcript
+
+    if dt.file_path is None:
         return
 
     body = dt.error if dt.status == "error" else dt.result
@@ -286,18 +289,17 @@ def _persist_transcript(dt: DelegateTask) -> None:
         f"- **Status:** {dt.status}\n"
         f"- **Agent:** {dt.agent_slug}\n"
         f"- **Server:** {dt.server_name or '-'}\n"
+        f"- **Risk limits:** "
+        f"{json.dumps(dt.risk_limits) if dt.risk_limits else '-'}\n"
+        f"- **Started:** {dt.started_at or '-'}\n"
+        f"- **Ended:** {dt.ended_at or '-'}\n"
         f"- **Tool calls:** {tool_count}\n\n"
         f"## Task\n\n{dt.task}\n\n"
         f"## Session\n\n{session or '(no events captured)'}\n\n"
         f"## {'Error' if dt.status == 'error' else 'Result'}\n\n"
         f"{body or '(none)'}\n"
     )
-    (dt.session_dir / "transcript.md").write_text(content)
-    finalize_session_meta(
-        dt.session_dir,
-        dt.status,
-        **({"error": dt.error} if dt.error else {}),
-    )
+    dt.file_path.write_text(content)
 
 
 async def _notify_done(dt: DelegateTask, bot) -> None:

@@ -1,6 +1,0 @@
-kind: consult
-status: done
-task: 'Do you have any open revival positions right now? Answer briefly in your key:
-  value style. Take no action.'
-model: claude-acp:sonnet
-ended_at: '2026-07-11T17:42:24.496908+00:00'

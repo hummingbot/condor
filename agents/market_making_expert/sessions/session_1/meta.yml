@@ -1,8 +1,0 @@
-kind: delegation
-status: done
-task: 'Set up a new market making bot on Backpack for BP-USDC. Deploy a PMM Mister
-  strategy with 50% of the user''s Backpack balance: ~121 BP and ~148 USDC. Current
-  price is $0.62, min order size ~1 BP, price tick $0.01. Configure appropriate spreads
-  and notify the user when done.'
-legacy_task_id: market_making_expert-delegate-93059eed
-ended_at: '2026-07-03T01:15:14.234034+00:00'
