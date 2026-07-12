@@ -1,15 +1,23 @@
 # Condor agent framework — the simplified architecture
 
-Architectural reference for the agent system as of 2026-07-11, after
+Architectural reference for the agent system as of 2026-07-12, after
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) (agent-level
 history), [refactor-02](refactor-02-unified-run-primitive.md) (one run
-primitive), and [refactor-05](refactor-05-skill-evolution.md) (portable
-skills), and
+primitive), [refactor-05](refactor-05-skill-evolution.md) (portable
+skills),
+[refactor-06](refactor-06-dissolve-assistants-layer.md) (assistants layer
+dissolved; `CONDOR.md` at repo root),
 [refactor-07](refactor-07-session-as-primitive.md) (session as the stateful
-primitive; consult/delegate/experiment leave non-session artifacts) — all
-implemented and live. (Refactor-05's Phase 3 automatic curation loop was
-implemented, then removed 2026-07-11 as over-complex; skill improvement is
-human-directed in chat.) This supersedes the
+primitive; consult/delegate/experiment leave non-session artifacts), and
+[refactor-10](refactor-10-onboarding-harness-selection.md) (onboarding by
+harness selection: `install.sh` + `condor init`) — all implemented and
+live. (Refactor-05's Phase 3 automatic curation loop was implemented, then
+removed 2026-07-11 as over-complex; skill improvement is human-directed in
+chat. [Refactor-08](refactor-08-notification-channels.md) decided
+Telegram-first notifications — no bus layer.
+[Refactor-09](refactor-09-hermes-default-harness.md) — drop Condor's own
+harness for Hermes — was proposed and REJECTED: no harness is privileged,
+ours stays as the batteries-included default; see §10.) This supersedes the
 descriptive parts of [agent-framework.md](agent-framework.md); that
 document's §6 (session & turn mechanics — the chat process model) is
 unchanged and still authoritative.
@@ -353,7 +361,56 @@ User request
 `-- nothing matches           --> raw tools
 ```
 
-## 10. Summary diagram
+## 10. Harnesses, identity, onboarding — the outer tier
+
+The framework runs behind an MCP boundary, which makes the *conversation*
+layer swappable (validated live in the `spike/mcp-harness-validation`
+base: sessions survived harness swaps mid-flight). Three tiers:
+
+```
+Tier 1  interactive harnesses — NONE privileged (refactor-09 rejected)
+        Condor's own chat (Telegram + web)  <- batteries-included default;
+                                               owns the approval surface
+                                               (DANGEROUS_TOOLS confirms)
+        Claude Code / OpenClaw / Hermes     <- drive the same Tier 2 via
+                                               mcp_servers/condor + the
+                                               host-facing skills (§6)
+Tier 2  the persistent Condor process — TickEngine, gates, journals,
+        MCP servers, web API. Every gate that matters lives HERE, so it
+        is indifferent to which harness invoked it.
+```
+
+**Identity.** `user_id` is an integer at every call site (historically a
+Telegram id — Telegram remains the IdP for multi-user installs). Tier-A
+auto-bind: an MCP server spawned *without* identity args binds to the sole
+approved user in config.yml — on a single-user box the OS user already
+holds every secret, so the id is an identifier, not a credential. Multiple
+approved users deliberately disable auto-bind; each harness registration
+must then pass explicit identity args.
+
+**Onboarding (refactor-10).** `install.sh` is bash bootstrap only (git/uv,
+clone-or-update, `uv sync`, `.env` template, API probe; `--stage-json` for
+agent-driven installs); every product question lives in `condor init`
+(`python -m condor.cli`, `make init`), which is idempotent and handed the
+terminal via `/dev/tty`. Init anchors identity ("Do you use Telegram?" →
+TG id, else a minted integer), registers + probes hummingbot-api loudly,
+then offers a harness **multi-select**: the Condor harness (Telegram + web
+bundled — web works with zero config, Telegram lights up when a token is
+added) is selected by default; external harnesses are detected on the box
+and get their config **emitted, never installed**. `condor login-token`
+mints a stateless, purpose-tagged, 5-minute JWT the token-login route
+redeems, so Telegram-free installs reach the dashboard; `decode_jwt`
+rejects purpose-tagged tokens as session bearers on both the HTTP and WS
+paths.
+
+**Notifications (refactor-08).** Telegram-first, by decision: TG is the
+notification spine (all six emitters), no bus/inbox/mailbox layer. The
+full bus design is kept in that doc as design-of-record for TG-free
+installs. Known accepted gap, fix decided but pending: runs launched with
+`chat_id=0` (web starts) notify no one — resolve the TG chat from
+`user_id` (in DMs `chat_id == user_id`).
+
+## 11. Summary diagram
 
 ```
  HOSTS (Claude Code / OpenClaw / Hermes / Condor chat+web)
