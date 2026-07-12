@@ -61,8 +61,8 @@ it. No silent "configure later" path.
 | **Claude Code** | Nothing to write — repo already carries `.mcp.json` + `.claude/skills`. Verify both, print "open this repo in Claude Code and ask it to `list_agents`". Offer `claude mcp add` for use outside the repo. | Tier-A auto-bind (stdio subprocess, no identity args) |
 | **OpenClaw** | Emit its workspace/MCP config snippet pointing at `uv run python -m mcp_servers.condor`; skills found by its directory scan. | Tier-A auto-bind |
 | **Hermes** | Emit the MCP config + `hermes skills tap add <this repo>` (our repo-root `skills/` is already tap-layout). Label **supported pending the refactor-09 §7 spike** — the approval-posture test still gates *recommending* it, just no longer gates anything of ours. | Tier-A auto-bind |
-| **Condor's own** (TG chat + web chat) | Require `TELEGRAM_TOKEN` (walk through BotFather if missing) and require the Step-1 id to be a real TG id. Start/verify the bot; print the `/start` first-steps. | TG id + approved-users check; web via `/login` |
-| **None of the above** | Valid: Tier 2 + dashboard only. Print the dashboard URL and a login token (below). | Tier-A / terminal token |
+| **Condor harness** (Telegram + web, **selected by default**) | One option, not a choice between surfaces (§9.1). Web works immediately: dashboard URL + terminal-minted login token, web-native `human_gate`. Telegram lights up when a token exists: offer the BotFather walk (validate with `getMe`), skippable and addable later by re-running init. | Web: Step-1 id + `condor login-token`. TG: TG id + approved-users check |
+| **None** (deselect the default) | Valid: Tier 2 + monitoring dashboard only, driven entirely from external harnesses. | Tier-A / terminal token |
 
 ### Step 4 — print "first thing to try" per selection
 
@@ -187,12 +187,13 @@ machine"). Then the §2 writers run per selection:
   (exact config path pinned during implementation); else print the
   snippet.
 - **hermes** — append the MCP server to its config +
-  `hermes skills tap add <repo>`. If not installed, offer their
-  one-liner and run it only on explicit yes — never silently install
-  someone else's software.
-- **condor's own** — the BotFather walk (validate the token with
-  `getMe` before writing it), start the tmux session.
-- **none** — dashboard URL + `condor login-token`.
+  `hermes skills tap add <repo>`. If not installed: emit the config,
+  print their install command, never run it (§9.2 — applies to every
+  harness).
+- **condor harness** (default-selected) — start the tmux session,
+  print dashboard URL + `condor login-token`; offer the BotFather walk
+  (validate the token with `getMe` before writing it), skippable.
+- **none** — dashboard URL + `condor login-token`, monitoring only.
 
 **Why `--stage-json` earns its place here** when it might look like
 gold-plating: Condor's audience *is* agent harnesses. "Ask Claude Code
@@ -207,14 +208,27 @@ point hummingbot/deploy's setup.sh at it; update the docs page so
 "Create a Telegram Bot" moves *inside* the Condor-harness branch
 instead of being a prerequisite for everyone.
 
-## 9. Open questions
+## 9. Decisions (resolved 2026-07-12)
 
-1. Does the web **chat** panel stay part of "Condor's own harness"
-   bundled with TG, or become selectable alone? (It shares the session
-   machinery; alone-selectable implies web-native `human_gate` is the
-   only approval surface — it exists, but is the least exercised.)
-2. Should init offer to install Hermes (`pipx install hermes-agent`?)
-   or only emit config for an existing install? Lean: config only —
-   installing other people's software is the installer's job, not ours.
-3. Where does `condor init` document the multi-user path (Tier B+)?
-   Out of scope here; the tiered-identity doc owns it.
+1. **The Condor harness bundles Telegram + web and is selected by
+   default.** Users never pick between Condor surfaces — it is one
+   option covering both, preselected in the menu. Web works the moment
+   init finishes (no bot token: Step-1 id + `condor login-token`,
+   web-native `human_gate` as the approval surface — least exercised,
+   so it joins the QA list). Telegram activates whenever a token is
+   provided — during init via the skippable BotFather walk, or later by
+   re-running init. Deselecting the default (external harnesses only)
+   remains valid.
+2. **Emit config only — for every harness, no exceptions.** init never
+   installs another project's software. If a selected harness is not on
+   the box, init writes/prints the config it *would* use and prints
+   that harness's own install command; the user runs it themselves and
+   re-runs `condor init` (idempotent) to verify.
+3. **Multi-user is an option inside init, not out of scope.** Step 1
+   grows a mode question: single user (default — sole approved user,
+   Tier-A auto-bind fires for every MCP host) or multi-user (multiple
+   approved users written to config.yml; auto-bind deliberately does
+   NOT fire, so init prints the explicit identity args each user's MCP
+   server registration must carry, and the Telegram path identifies
+   users natively). The tiered-identity doc still owns the design;
+   init owns the on-ramp.
