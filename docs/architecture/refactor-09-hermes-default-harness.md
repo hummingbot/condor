@@ -154,3 +154,81 @@ matrix on hermes-agent:
 The freeze step is what makes this reversible: if Hermes stalls or the
 approval posture disappoints, we un-freeze a working harness instead of
 resurrecting a deleted one.
+
+## 9. Variant considered: our own UI as a TUI, Telegram demoted to optional
+
+Question raised against this proposal: if we keep any surface of our own,
+should it be a TUI instead of the slim Telegram bot? Standing assumption:
+condor + hummingbot-api run on the same box (local, or hosted with SSH).
+
+### 9.1 What a Condor TUI is — and is not
+
+It is **not a chat harness.** Hermes owns the conversation (that is this
+whole proposal), and Hermes already ships its own TUI and CLI modes — a
+Condor chat TUI would be rebuilding §2's ~3.9k lines in a different
+medium, competing with the harness we just adopted. It **is an ops
+panel**: k9s-for-agents. Pending approvals, a notifications tail,
+sessions/experiments/delegations with status, start/stop, log tail — all
+reads the existing REST API; only approvals and the inbox need anything
+new.
+
+### 9.2 Scoring the slim TG bot's three jobs under the same-box assumption
+
+§4 kept Telegram for exactly three jobs:
+
+| Job | TUI replacement | Verdict |
+|---|---|---|
+| Async pings (delegation done, tick error) | none — a TUI is pull-only; it informs only while attached | TG (or a webhook sink) still needed for away-from-box; the phone is the point |
+| `human_gate` Approve/Reject | approvals queue + keypress; timeout → deny (fail closed, the `deny_gate` precedent) | works attached; detached = deny or phone |
+| `/login` token minting | print the login URL to the terminal — same box, trivial | TUI wins outright; TG-as-IdP was already softened by Tier-A auto-bind |
+
+### 9.3 The Hermes twist: where the user runs Hermes decides
+
+The refactor-08 §8 argument for Telegram-as-spine was that the Hermes
+conversation and Condor's pings share a phone. That holds only when the
+user runs Hermes **on Telegram**. If they run Hermes's TUI/CLI on the
+same box, everything is already terminal-local and our TG bot becomes
+the odd surface out — a Condor TUI is the natural sibling pane. Both
+deployments are real, so the answer is not *replace*, it is **demote**:
+
+- **TUI = the default, zero-config surface.** First run needs no bot
+  token, no chat id — `condor tui` works the moment the process is up.
+  This also softens §6.2 (onboarding through another project's door).
+- **Telegram = an optional sink**, enabled by one `.env` line, for
+  anyone who wants pings and approvals on a phone — which includes
+  everyone running Hermes-on-Telegram.
+
+### 9.4 The honest cost: it resurrects part of refactor-08
+
+Refactor-08 §8 skipped the notification bus *because* TG was the
+mandatory spine. Making TG optional revives the minimal core of it: a
+persisted notifications inbox, and a pending-approvals queue —
+`confirmation.py`'s in-memory `_pending` futures must become answerable
+from any surface, not just a TG callback. Roughly two small tables + a
+queue API + a Textual app (~600–1,000 lines). Refactor-09 as written is
+pure deletion plus a bug fix; this variant adds a modest build back.
+(The mailbox and webhook/desktop sinks stay skipped.)
+
+### 9.5 The convergence that can make it free
+
+§6.1's mitigation (c) — a server-side confirm on `place_order`-class
+tools if the spike shows Hermes auto-approves — needs **the same
+pending-approvals queue**. If the spike forces (c), the queue gets built
+regardless, the TUI is merely its cheapest first surface, and the same
+tables later back an approvals/inbox view in the kept web dashboard
+(covering hosted boxes without SSH). It also fixes refactor-08 §1's
+wrong-surface confirmation: a consult launched from Claude Code stops
+sending its buttons to a phone nobody is holding.
+
+### 9.6 Recommendation and sequencing
+
+1. Run the §7 spike first — the go/no-go is unchanged.
+2. **If the spike forces server-side confirm**: build the queue + inbox,
+   ship the TUI as their first surface, demote TG to an optional sink.
+   The variant costs almost nothing extra on top of code we must write.
+3. **If Hermes's approval posture is solid**: the TUI is optional polish;
+   keep the slim TG bot per §4 and revisit only if TG-free onboarding
+   becomes a goal.
+
+Either way §2's deletion list is untouched — the TUI never replaces the
+conversation, only the pager.
