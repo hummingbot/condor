@@ -1,6 +1,16 @@
 # Refactor 09 — drop Condor's own harness: Hermes as the default Tier 1
 
-Status: **proposed** (2026-07-12), gated on a Hermes validation spike (§7).
+Status: **rejected** (2026-07-12) — decision: keep Condor's own harness.
+The real goal is reframed as **onboarding by harness selection**: the user
+installs Condor and chooses how to talk to it — an existing harness they
+already run (Claude Code, OpenClaw, Hermes), or Condor's own if none. No
+harness is privileged; ours is the batteries-included fallback that also
+keeps the approval surface (§6.1) and the onboarding funnel (§6.2) in our
+hands. What survives from this doc: §3 (Hermes facts) and §7 (the spike,
+now as validation of a *supported* harness rather than a deletion gate),
+and §9's TUI-as-zero-config-surface analysis, which gets stronger under
+the new frame. Original proposal kept below for the record.
+
 Extends the Telegram-first decision (refactor-08 §8) to its radical
 conclusion: Condor stops maintaining an interactive chat harness at all.
 Condor = the trading backend (Tier 2) + skills tap + monitoring dashboard;
