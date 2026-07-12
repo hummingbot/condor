@@ -48,9 +48,10 @@ class AgentConfig(BaseModel):
         default="",
         description="Natural language session context that guides the agent's trading decisions",
     )
-    execution_mode: Literal["dry_run", "run_once", "loop"] = Field(
+    execution_mode: Literal["experiment", "run_once", "loop"] = Field(
         default="loop",
-        description="Execution mode: dry_run (simulate), run_once (single live tick), loop (continuous)",
+        description="Execution mode: experiment (simulate — a.k.a. dry run), "
+        "run_once (single live tick), loop (continuous)",
     )
     max_ticks: int = Field(
         default=0, description="Max ticks before auto-stop; 0 = unlimited"
@@ -72,9 +73,9 @@ class AgentConfig(BaseModel):
     def from_dict(cls, d: dict[str, Any]) -> AgentConfig:
         """Create from a raw dict (e.g. strategy.default_config)."""
         cleaned = {k: v for k, v in d.items() if k in cls.model_fields}
-        # Translate dry_run shorthand → execution_mode
+        # Translate the dry_run shorthand (users still say "dry run") → experiment
         if d.get("dry_run") and "execution_mode" not in d:
-            cleaned["execution_mode"] = "dry_run"
+            cleaned["execution_mode"] = "experiment"
         return cls(**cleaned)
 
 

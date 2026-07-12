@@ -28,8 +28,8 @@ to fetch the full config schema, compare it against what you sent, fix the missi
 fields, and retry ONCE. Journal the error and fix as a learning.
 """
 
-BASE_PROMPT_DRY_RUN = """\
-You are an autonomous trading agent running inside Condor in 🧪 DRY RUN mode.
+BASE_PROMPT_EXPERIMENT = """\
+You are an autonomous trading agent running inside Condor in 🧪 EXPERIMENT mode.
 
 RULES:
 - This is OBSERVATION ONLY. Do NOT create or stop executors, and do NOT deploy,
@@ -39,10 +39,10 @@ RULES:
   (performance_report; status/logs/get_config).
 - Analyze the market and describe what you WOULD do, but take NO trading action.
 
-DRY RUN MESSAGING:
+EXPERIMENT MESSAGING:
 - Use conditional language: "Would place grid..." not "Grid placed"
-- Prefix actions with 🧪 to signal dry-run
-- End with: "No executors were created (dry run)"
+- Prefix actions with 🧪 to signal the experiment
+- End with: "No executors were created (experiment)"
 """
 
 BASE_PROMPT_COMMON = """\
@@ -75,8 +75,8 @@ NOTIFICATIONS:
 - Use send_notification(text="...") to message the user on Telegram.
 """
 
-# Journal guidance. In dry-run experiments the engine keeps NO journal — the
-# whole tick is captured in a dry-run snapshot instead — so the agent must not
+# Journal guidance. In experiments the engine keeps NO journal — the whole
+# tick is captured in an experiment snapshot instead — so the agent must not
 # call trading_agent_journal_write (it would fail with "no journal available").
 # Everything else (loop, incl. max_ticks=1 run-once sessions) gets the full
 # journal protocol.
@@ -94,28 +94,28 @@ JOURNAL:
 
 JOURNAL_SECTION_EXPERIMENT = """\
 JOURNAL:
-- This is a dry-run experiment: there is NO journal this tick.
+- This is an experiment: there is NO journal this tick.
 - Do NOT call trading_agent_journal_write or trading_agent_journal_read — they are
   unavailable here and will error.
 - Put all observations, reasoning, and what you WOULD record straight into your
-  response. The full tick is saved automatically as a dry-run snapshot.
+  response. The full tick is saved automatically as an experiment snapshot.
 """
 
 
-def _build_tool_preload(*, is_dry_run: bool) -> str:
+def _build_tool_preload(*, is_experiment: bool) -> str:
     """ToolSearch preload line for ACP sessions.
 
-    Dry-run omits manage_executors (read-only) and trading_agent_journal_write
+    Experiments omit manage_executors (read-only) and trading_agent_journal_write
     (experiments keep no journal).
     """
     tools = ["mcp__mcp-hummingbot__get_market_data"]
-    if not is_dry_run:
+    if not is_experiment:
         tools.append("mcp__mcp-hummingbot__manage_executors")
     tools += [
         "mcp__mcp-hummingbot__search_history",
         "mcp__mcp-hummingbot__explore_geckoterminal",
     ]
-    if not is_dry_run:
+    if not is_experiment:
         tools.append("mcp__condor__trading_agent_journal_write")
     tools += [
         "mcp__condor__send_notification",
@@ -181,20 +181,20 @@ def build_tick_prompt(
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     execution_mode = config.get("execution_mode", "loop")
-    is_dry_run = execution_mode == "dry_run"
+    is_experiment = execution_mode == "experiment"
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
     # Select base prompt and journal protocol based on mode
-    base_prompt = BASE_PROMPT_DRY_RUN if is_dry_run else BASE_PROMPT_LIVE
+    base_prompt = BASE_PROMPT_EXPERIMENT if is_experiment else BASE_PROMPT_LIVE
     journal_section = (
-        JOURNAL_SECTION_EXPERIMENT if is_dry_run else JOURNAL_SECTION_LIVE
+        JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
     )
     sections: list[str] = [base_prompt, journal_section, BASE_PROMPT_COMMON]
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
-        sections.append(_build_tool_preload(is_dry_run=is_dry_run))
+        sections.append(_build_tool_preload(is_experiment=is_experiment))
     else:
         sections.append(
             "TOOLS:\n"
@@ -205,12 +205,12 @@ def build_tick_prompt(
     tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in journal entries and notifications."
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
-        if not is_dry_run:
+        if not is_experiment:
             tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
     sections.append(tick_info)
 
     # Single-tick session note (run_once maps to max_ticks=1)
-    if not is_dry_run and config.get("max_ticks") == 1:
+    if not is_experiment and config.get("max_ticks") == 1:
         sections.append(
             "[EXECUTION MODE — SINGLE TICK]\n"
             "Single-tick session with LIVE execution. The engine will stop after this tick. "

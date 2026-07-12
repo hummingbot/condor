@@ -1,6 +1,6 @@
 ---
 name: agent-builder
-description: "Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by consulting it, then progressively improve it with routines and (optionally) a loop strategy. Use when the user wants to create, edit, dry-run, launch, monitor, or delete an autonomous trading agent — whether it's used purely by consulting it or also runs a strategy on a loop."
+description: "Create and operate autonomous trading agents the minimal way — create the agent from just its role + purpose, prove it's alive by consulting it, then progressively improve it with routines and (optionally) a loop strategy. Use when the user wants to create, edit, experiment with (dry-run), launch, monitor, or delete an autonomous trading agent — whether it's used purely by consulting it or also runs a strategy on a loop."
 compatibility: "Requires the Condor MCP server (mcp__condor__* tools) connected"
 metadata: {"condor-source": "builtin", "condor-created": "2026-06-18"}
 ---
@@ -43,7 +43,7 @@ agents/{slug}/
   strategies/{sslug}/strategy.md   # OPTIONAL loop playbooks (pure templates) — step 4
   sessions/session_N/              # ALL run history: tick sessions, delegations,
                                    # consults (meta.yml says kind + strategy)
-  dry_runs/experiment_N.md         # dry-run snapshots
+  experiments/experiment_N.md      # experiment snapshots (a.k.a. dry runs)
   learnings.md                     # agent-level learnings ([strategy] prefixed)
 ```
 
@@ -166,11 +166,11 @@ prices/side/TP from routine output + market data), **Risk rules** (max position,
 limits, stop behaviour), and **Error recovery** (on a failed create, re-fetch the schema,
 fix, retry once, journal it).
 
-**Dry run before live** (if it trades):
+**Experiment before live** (a.k.a. dry run — if it trades):
 ```
 manage_trading_agent(action="start_agent", agent_slug="<agent_slug>",
     strategy="<strategy_slug>",   # optional when the agent has exactly one strategy
-    config={"execution_mode": "dry_run", "agent_key": "ollama:llama3.1",
+    config={"execution_mode": "experiment", "agent_key": "ollama:llama3.1",
             "trading_context": "Trade BTC-USDT on binance_perpetual",
             "frequency_sec": 60, "total_amount_quote": 100,
             "risk_limits": {"max_position_size_quote": 200, "max_open_executors": 3}})
@@ -242,7 +242,7 @@ owns strategies — delete those first (`delete_strategy`).
 - Create the AGENT.md FIRST — routines and strategies require an existing agent_slug.
 - One routine per analysis task; run it and show the output before moving on.
 - A loop doesn't have to trade — it can report or watch. Always include risk limits when
-  it can trade, and dry-run before going live.
+  it can trade, and run an experiment before going live.
 - Guide one step at a time and offer concrete proposals.
 
 ## Operating rule (host deployments)

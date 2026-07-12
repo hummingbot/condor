@@ -1,0 +1,7 @@
+kind: consult
+status: done
+task: "Is a symmetric 2% grid on SOL-USD (hyperliquid) worth running right now? Use\
+  \ your methodology and your grid_backtest routine \u2014 test at least two windows\
+  \ and give me your verdict in your standard format."
+model: claude-acp:sonnet
+ended_at: '2026-07-11T22:20:10.881548+00:00'

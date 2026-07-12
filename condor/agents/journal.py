@@ -7,7 +7,7 @@ playbook templates (refactor-01b)::
         {agent_slug}/
             AGENT.md               # identity + domain knowledge
             learnings.md           # agent-level, all strategies & run kinds
-            dry_runs/              # experiment snapshots (experiment_N.md)
+            experiments/           # experiment snapshots (experiment_N.md)
             sessions/
                 session_1/
                     meta.yml       # kind + strategy + status + timestamps
@@ -19,9 +19,9 @@ playbook templates (refactor-01b)::
                 {strategy_slug}/
                     strategy.md    # playbook body + default_config — nothing else
 
-Session identity is ``"{agent_slug}_{N}"`` (``"..._e{N}"`` for dry-run
-experiments). The strategy a tick session ran is *metadata* (``meta.yml``),
-not part of the address.
+Session identity is ``"{agent_slug}_{N}"`` (``"..._e{N}"`` for experiments).
+The strategy a tick session ran is *metadata* (``meta.yml``), not part of
+the address.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ _DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
 
 MAX_LEARNINGS = 20
 
-# Session id suffix: "_{N}" for sessions, "_e{N}" for dry-run experiments.
+# Session id suffix: "_{N}" for sessions, "_e{N}" for experiments.
 _AGENT_ID_RE = re.compile(r"^(?P<slug>.+)_(?P<exp>e?)(?P<num>\d+)$")
 
 
@@ -60,7 +60,7 @@ def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
     """Derive (session_dir, agent_dir) from an agent_id.
 
     ``agent_dir`` is ``agents/{slug}/`` (holds ``sessions/``, ``learnings.md``,
-    ``dry_runs/``). Experiments have no session dir → (None, agent_dir).
+    ``experiments/``). Experiments have no session dir → (None, agent_dir).
     Returns (None, None) if the agent dir doesn't exist on disk.
     """
     parsed = split_agent_id(agent_id)
@@ -212,9 +212,9 @@ def next_session_number(agent_dir: Path) -> int:
 
 
 def next_experiment_number(agent_dir: Path) -> int:
-    """Determine the next experiment number by scanning dry_runs/experiment_*.md."""
+    """Determine the next experiment number by scanning experiments/experiment_*.md."""
     existing = []
-    d = agent_dir / "dry_runs"
+    d = agent_dir / "experiments"
     if d.exists():
         for f in d.iterdir():
             if f.is_file() and f.suffix == ".md":
@@ -280,7 +280,7 @@ def save_experiment_snapshot(
     agent_key: str = "",
 ) -> Path:
     """Save a single experiment snapshot as a flat .md file."""
-    experiments_dir = agent_dir / "dry_runs"
+    experiments_dir = agent_dir / "experiments"
     experiments_dir.mkdir(parents=True, exist_ok=True)
 
     # Format risk state

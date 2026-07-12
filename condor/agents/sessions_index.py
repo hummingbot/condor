@@ -78,7 +78,7 @@ def count_sessions(agent_dir: Path, kind: str | None = None) -> int:
 
 
 def count_experiments(agent_dir: Path) -> int:
-    d = agent_dir / "dry_runs"
+    d = agent_dir / "experiments"
     if not d.exists():
         return 0
     return len(
@@ -170,7 +170,7 @@ def _parse_experiment_file(f: Path, num: int) -> dict[str, Any]:
 def list_experiments(agent_dir: Path) -> list[dict[str, Any]]:
     """List experiments as dicts (number, execution_mode, ...), newest first."""
     experiments: list[dict[str, Any]] = []
-    d = agent_dir / "dry_runs"
+    d = agent_dir / "experiments"
     if not d.exists():
         return experiments
     stated = [(f, f.stat().st_mtime) for f in d.glob("experiment_*.md")]
@@ -217,7 +217,7 @@ def enumerate_run_ids(slug: str, agent_dir: Path) -> list[dict[str, Any]]:
                 "strategy": meta.get("strategy", ""),
             }
         )
-    d = agent_dir / "dry_runs"
+    d = agent_dir / "experiments"
     if d.exists():
         for f in d.glob("experiment_*.md"):
             m = _EXPERIMENT_FILE_RE.match(f.name)
@@ -246,5 +246,5 @@ def find_session_dir(agent_dir: Path, session_num: int) -> Path | None:
 
 
 def find_experiment_file(agent_dir: Path, experiment_num: int) -> Path | None:
-    path = agent_dir / "dry_runs" / f"experiment_{experiment_num}.md"
+    path = agent_dir / "experiments" / f"experiment_{experiment_num}.md"
     return path if path.exists() else None

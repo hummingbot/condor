@@ -1,0 +1,10 @@
+kind: delegation
+status: done
+task: 'Health check: report how many revival positions/executors you currently have
+  open (use your executors view or manage_executors read-only). Take NO trading action.'
+started_at: '2026-07-11T17:45:24.329673+00:00'
+risk_limits:
+  max_position_size_quote: 500
+  max_open_executors: 5
+  max_drawdown_pct: 20
+ended_at: '2026-07-11T17:45:36.963556+00:00'

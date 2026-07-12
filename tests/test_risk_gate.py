@@ -162,7 +162,7 @@ def test_callback_cumulative_exposure_cancelled_same_tick():
 
 
 # ---------------------------------------------------------------------------
-# dry_run must block manage_bots deploy/mutate actions too, not just
+# experiment mode must block manage_bots deploy/mutate actions too, not just
 # manage_executors/place_order/gateway swaps — manage_bots(deploy) places real
 # capital via a controller-based bot, a separate path from manage_executors.
 # ---------------------------------------------------------------------------
@@ -172,10 +172,10 @@ def _bot_call(action: str, **extra) -> dict:
     return {"tool": "mcp__mcp-hummingbot__manage_bots", "input": {"action": action, **extra}}
 
 
-def test_dry_run_blocks_manage_bots_deploy():
+def test_experiment_blocks_manage_bots_deploy():
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = risk_gate(engine, state, dry_run=True)
+    callback = risk_gate(engine, state, experiment=True)
 
     result = asyncio.run(
         callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
@@ -183,20 +183,20 @@ def test_dry_run_blocks_manage_bots_deploy():
     assert result["outcome"]["outcome"] == "cancelled"
 
 
-def test_dry_run_blocks_manage_bots_update_config():
+def test_experiment_blocks_manage_bots_update_config():
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = risk_gate(engine, state, dry_run=True)
+    callback = risk_gate(engine, state, experiment=True)
 
     result = asyncio.run(callback(_bot_call("update_config", bot_name="x"), _OPTIONS))
     assert result["outcome"]["outcome"] == "cancelled"
 
 
-def test_dry_run_allows_manage_bots_status():
-    """Read-only manage_bots actions must not be blocked in dry_run."""
+def test_experiment_allows_manage_bots_status():
+    """Read-only manage_bots actions must not be blocked in an experiment."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = risk_gate(engine, state, dry_run=True)
+    callback = risk_gate(engine, state, experiment=True)
 
     result = asyncio.run(callback(_bot_call("status"), _OPTIONS))
     assert result["outcome"]["outcome"] == "selected"

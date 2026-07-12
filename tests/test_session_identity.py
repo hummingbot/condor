@@ -175,8 +175,8 @@ def test_run_once_becomes_max_ticks_1_session(tmp_path, monkeypatch):
     assert (engine.session_dir / "config.yml").exists()
 
 
-def test_dry_run_is_the_only_experiment(tmp_path, monkeypatch):
-    engine = _make_engine(tmp_path, monkeypatch, {"execution_mode": "dry_run"})
+def test_experiment_mode_is_the_only_experiment(tmp_path, monkeypatch):
+    engine = _make_engine(tmp_path, monkeypatch, {"execution_mode": "experiment"})
     assert engine.is_experiment is True
     assert engine.agent_id == "acme_e1"
     assert engine.session_dir is None
@@ -264,7 +264,7 @@ def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
     """The /agents/{slug}/start route must resolve risk_limits as
     request config > strategy default_config > AGENT.md baseline > schema
     defaults — the baseline must not be masked by load_full_config's 500/5
-    schema defaults (regression: live dry run showed 500/5 for a 0/0 agent)."""
+    schema defaults (regression: a live experiment showed 500/5 for a 0/0 agent)."""
     from types import SimpleNamespace
 
     import condor.web.routes.agents as agents_routes
@@ -298,7 +298,7 @@ def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
 
     monkeypatch.setattr(engine_module, "TickEngine", _FakeEngine)
 
-    req = agents_routes.StartAgentRequest(config={"execution_mode": "dry_run"})
+    req = agents_routes.StartAgentRequest(config={"execution_mode": "experiment"})
     user = SimpleNamespace(id=1)
     result = asyncio.run(agents_routes.start_agent("watcher", req, user=user))
     assert result["started"] is True

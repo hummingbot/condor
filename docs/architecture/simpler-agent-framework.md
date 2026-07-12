@@ -38,8 +38,8 @@ pending cleanup, refactor-06.)
 
 ## 2. Identity & storage — one dir, one numbering, metadata not addresses
 
-Session identity is `{agent_slug}_{N}` (`{agent_slug}_e{N}` for dry-run
-experiments). The strategy slug is **not part of the address** — which
+Session identity is `{agent_slug}_{N}` (`{agent_slug}_e{N}` for
+experiments — a.k.a. dry runs). The strategy slug is **not part of the address** — which
 playbook a session ran is metadata, so per-playbook track records are a
 filter over one comparable list, not separate trees.
 
@@ -63,17 +63,17 @@ agents/{slug}/
         session_2/              # kind: delegation | consult
             meta.yml            #   kind, status, task, risk_limits (delegations)
             transcript.md       #   full reasoning + tool calls + result
-    dry_runs/
-        experiment_N.md         # dry runs only — scratch that never touches capital
+    experiments/
+        experiment_N.md         # experiments only — scratch that never touches capital
 ```
 
 Allocation is mkdir-atomic (`allocate_session_dir`), so concurrent starts
 never collide. `run_once` is not a storage mode: it maps to an ordinary
 `tick_loop` session with `max_ticks: 1` — journal, frozen config, risk
-pre-flight, and a place in the track record. `_eN` is reserved for true dry
-runs (mutations cancelled by the gate; a flat snapshot, never a session).
+pre-flight, and a place in the track record. `_eN` is reserved for true
+experiments (mutations cancelled by the gate; a flat snapshot, never a session).
 
-Boundary worth memorizing: **dry_runs = scratch that never touches capital;
+Boundary worth memorizing: **experiments = scratch that never touches capital;
 sessions = anything that does (or could).**
 
 ## 3. One execution primitive: `run_agent` + the policy lattice
@@ -123,7 +123,7 @@ The policy lattice — the ONE axis that genuinely differs between run kinds:
                     |                           as a per-run budget)
                     |             Blocks: place_order (always), uncapped bot
                     |             deploys, executor creates past caps.
-                    |             dry_run=True additionally cancels ALL
+                    |             experiment=True additionally cancels ALL
                     |             mutations.
                     |
      AUTO (None)                  serverless specialists (routine_builder)
@@ -319,7 +319,7 @@ manage_bots deploy    must declare bounded max_global_drawdown_quote
                       <= position limit (platform-enforced kill switch)
 executor create       count + exposure vs caps; approvals accumulate into
                       the running state within the run
-dry_run               ALL mutations cancelled
+experiment            ALL mutations cancelled (a.k.a. dry run)
 
                       escalation (tick-only, scheduler-level)
                       ---------------------------------------

@@ -1,0 +1,6 @@
+kind: tick_loop
+strategy: funding_snapshot
+status: stopped
+model: claude-acp:sonnet
+started_at: '2026-07-11T17:44:55.879634+00:00'
+ended_at: '2026-07-11T17:45:14.685304+00:00'

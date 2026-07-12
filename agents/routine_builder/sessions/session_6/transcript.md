@@ -1,0 +1,109 @@
+# Delegation routine_builder_6
+
+- **Status:** done
+- **Agent:** routine_builder
+- **Server:** -
+- **Tool calls:** 8
+
+## Task
+
+Create an agent-local routine named `funding_logger` for the agent with slug `funding_rate_watcher` (pass agent_slug="funding_rate_watcher" on create/run).
+
+Purpose: DATA COLLECTION — append a timestamped funding-rate snapshot to a durable CSV so the agent builds its own funding history dataset (the exchange API only shows current rates).
+
+Config fields (with defaults):
+- connector_name: str = "hyperliquid_perpetual"
+- trading_pairs: str = "SOL-USD,BTC-USD,ETH-USD"   # comma-separated
+
+Behavior:
+- For each pair, fetch the current funding rate + mark price via the hummingbot client (see routine_cookbook hummingbot_client companion).
+- Append one row per pair to `agents/funding_rate_watcher/store/funding_history.csv` with columns: ts_iso, connector, pair, funding_rate, mark_price. Create the file with a header if missing. Use pathlib relative to the project root the same way other routines locate files.
+- Return a short summary string like "logged 3 pairs @ <ts>; file now N rows" AND build a small ReportBuilder report titled "Funding snapshot" with the rows just logged.
+- Keep it fast (<10s) — it is meant to run on a schedule (continuous routines / cron).
+
+Test it after creating (run it twice, agent_slug="funding_rate_watcher") and verify the CSV grows. Show the final output.
+
+## Session
+
+💭 **Reasoning**
+
+> The user wants me to create an agent-local routine called `funding_logger` for the `funding_rate_watcher` agent. Let me follow the routine builder workflow:
+> 
+> 1. Check existing routines
+> 2. Read the routine cookbook
+> 3. Create the routine
+> 4. Test it
+> 
+> Let me start by checking existing routines and reading the cookbook.
+
+🔧 **1. ToolSearch** (completed)
+
+💭 **Reasoning**
+
+> Now let me check existing routines and read the cookbook in parallel.
+
+💬 Checking existing routines and reading the cookbook in parallel.
+
+🔧 **2. mcp__condor__manage_routines** (completed)
+
+🔧 **3. mcp__condor__manage_skill** (completed)
+
+💬 No existing routines. Fetching the two companion files I need.
+
+🔧 **4. mcp__condor__manage_skill** (completed)
+
+🔧 **5. mcp__condor__manage_skill** (completed)
+
+💭 **Reasoning**
+
+> Now I have everything I need. Let me create the `funding_logger` routine for the `funding_rate_watcher` agent. 
+> 
+> Key things to include:
+> 1. `Config` with `connector_name` and `trading_pairs` fields
+> 2. Fetch funding info for each pair using `client.market_data.get_funding_info(connector, pair)`
+> 3. Append rows to `agents/funding_rate_watcher/store/funding_history.csv` with columns: `ts_iso, connector, pair, funding_rate, mark_price`
+> 4. Create the file with header if missing
+> 5. Return a short summary string AND build a ReportBuilder report
+> 6. Use pathlib to resolve the project root by navigating up from the routine's file location—since the file sits at `agents/funding_rate_watcher/routines/funding_logger.py`, I need to go up three levels to reach the project root.
+> 
+> Writing the routine... Writing CSV logic... Building the report with funding metrics...
+
+💬 Good. Now I'll create the routine.
+
+🔧 **6. mcp__condor__manage_routines** (completed)
+
+💬 Created. Running the first test.
+
+🔧 **7. mcp__condor__manage_routines** (completed)
+
+💭 **Reasoning**
+
+> First run logged 3 rows. Now let me run it a second time to verify the CSV grows.
+
+💬 First run: 3 rows. Running a second time to verify the CSV grows.
+
+🔧 **8. mcp__condor__manage_routines** (completed)
+
+💬 Both runs clean. Here's the summary:
+
+**`funding_logger`** — agent-local to `funding_rate_watcher`
+
+- Run 1: logged 3 pairs @ `22:13:41`; file now **3 rows**
+- Run 2: logged 3 pairs @ `22:13:45`; file now **6 rows** ✓ CSV is growing
+
+The CSV lives at `agents/funding_rate_watcher/store/funding_history.csv` with columns `ts_iso, connector, pair, funding_rate, mark_price`. A "Funding Snapshot" ReportBuilder report is generated each run with KPI cards + the logged-pairs table.
+
+To run it on a schedule, wire it up via `manage_routines(action="start", name="funding_logger", agent_slug="funding_rate_watcher")` with a continuous wrapper, or add it to a cron via the `schedule` skill.
+
+## Result
+
+Checking existing routines and reading the cookbook in parallel.No existing routines. Fetching the two companion files I need.Good. Now I'll create the routine.Created. Running the first test.First run: 3 rows. Running a second time to verify the CSV grows.Both runs clean. Here's the summary:
+
+**`funding_logger`** — agent-local to `funding_rate_watcher`
+
+- Run 1: logged 3 pairs @ `22:13:41`; file now **3 rows**
+- Run 2: logged 3 pairs @ `22:13:45`; file now **6 rows** ✓ CSV is growing
+
+The CSV lives at `agents/funding_rate_watcher/store/funding_history.csv` with columns `ts_iso, connector, pair, funding_rate, mark_price`. A "Funding Snapshot" ReportBuilder report is generated each run with KPI cards + the logged-pairs table.
+
+To run it on a schedule, wire it up via `manage_routines(action="start", name="funding_logger", agent_slug="funding_rate_watcher")` with a continuous wrapper, or add it to a cron via the `schedule` skill.

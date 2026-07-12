@@ -91,7 +91,7 @@ def human_gate(chat_id: int):
 def risk_gate(
     limits: RiskLimits | dict,
     state: RiskState | None = None,
-    dry_run: bool = False,
+    experiment: bool = False,
 ):
     """Auto-approve within risk caps; block breaches (the shared trading policy).
 
@@ -101,4 +101,4 @@ def risk_gate(
     """
     if isinstance(limits, dict):
         limits = RiskLimits.from_dict(limits)
-    return _risk_gate_callback(RiskEngine(limits), state or RiskState(), dry_run=dry_run)
+    return _risk_gate_callback(RiskEngine(limits), state or RiskState(), experiment=experiment)

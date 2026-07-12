@@ -52,7 +52,7 @@ interface SidebarItem {
 // specific to this sidebar.
 function expDisplay(mode?: string): { Icon: typeof FlaskConical; label: string; color: string } {
   if (mode === "run_once") return { Icon: Zap, label: "Run", color: MODE_STYLES.run_once.text };
-  if (mode === "dry_run") return { Icon: FlaskConical, label: "Dry", color: MODE_STYLES.dry_run.text };
+  if (mode === "experiment") return { Icon: FlaskConical, label: "Exp", color: MODE_STYLES.experiment.text };
   return { Icon: FlaskConical, label: "Exp", color: "text-amber-400" };
 }
 
@@ -65,7 +65,7 @@ function formatCreatedAt(value: string): string {
   return value;
 }
 
-// A dry-run / run-once tick whose model call failed writes the raw error string
+// An experiment / run-once tick whose model call failed writes the raw error string
 // as its "Agent Response" (e.g. "(error: status_code: 404, model_name: ...)").
 // Detect that so we render it as an error banner instead of a normal analysis.
 function isErrorResponse(text: string): boolean {
@@ -303,7 +303,7 @@ export function SessionReviewer({
                   )}
                   {isExp && item.execution_mode && (
                     <span className="rounded bg-amber-500/10 px-1 py-0.5 text-[8px] font-bold uppercase text-amber-400">
-                      {item.execution_mode === "dry_run" ? "dry" : item.execution_mode === "run_once" ? "once" : item.execution_mode}
+                      {item.execution_mode === "experiment" ? "exp" : item.execution_mode === "run_once" ? "once" : item.execution_mode}
                     </span>
                   )}
                   {isExp && item.error && (

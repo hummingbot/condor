@@ -2,12 +2,12 @@
 
 A strategy is a pure playbook template (refactor-01b): ``strategy.md`` (YAML
 frontmatter + markdown body) is the ONLY thing in its folder — all operational
-state (sessions, learnings, dry runs) lives at the agent level::
+state (sessions, learnings, experiments) lives at the agent level::
 
     agents/
         {agent_slug}/
             AGENT.md                       # the owning Agent (see agent.py)
-            learnings.md  sessions/  dry_runs/   # agent-level history (journal.py)
+            learnings.md  sessions/  experiments/ # agent-level history (journal.py)
             routines/  skills/  store/           # the shared brain
             strategies/
                 {strategy_slug}/

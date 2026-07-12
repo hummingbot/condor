@@ -2,8 +2,8 @@
 
 An **Agent** is the top-level unit: identity + shared brain (memory/skills) that
 ``condor`` can *consult*, plus ALL of its operational history (refactor-01b) —
-sessions of every kind (tick loops, delegations, consults), learnings, and dry
-runs live at ``agents/{slug}/``. Strategies are pure playbook templates the
+sessions (tick loops), delegations, consults, learnings, and experiments all
+live at ``agents/{slug}/``. Strategies are pure playbook templates the
 agent selects at start time; which playbook a session ran is session metadata,
 so per-playbook views are a filter, not a separate tree. Route shape::
 
@@ -171,7 +171,7 @@ class SessionInfo(BaseModel):
 
 class ExperimentInfo(BaseModel):
     number: int
-    execution_mode: str = ""  # dry_run
+    execution_mode: str = ""  # experiment | run_once | loop
     agent_key: str = ""
     snapshot_count: int = 0
     created_at: str = ""
@@ -1347,7 +1347,7 @@ async def get_snapshot(
 async def list_agent_experiments(
     slug: str, user: WebUser = Depends(get_current_user)
 ):
-    """List an agent's dry-run experiments."""
+    """List an agent's experiments."""
     agent = _get_agent(slug)
     experiments = list_experiments(agent.agent_dir)
     return {"experiments": [ExperimentInfo(**e).model_dump() for e in experiments]}

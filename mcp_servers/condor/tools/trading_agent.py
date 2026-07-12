@@ -372,7 +372,7 @@ async def _agent_lifecycle(
             config_dict = dict(selected.default_config or {})
             if config:
                 if config.get("dry_run") and "execution_mode" not in config:
-                    config["execution_mode"] = "dry_run"
+                    config["execution_mode"] = "experiment"
                 config_dict.update(config)
             if not config or "server_name" not in config:
                 # A server pinned on the owning Agent wins over the ambient chat
@@ -439,7 +439,7 @@ def _resolve_journal_manager(agent_id: str):
     if engine:
         if engine.is_experiment:
             return None, {
-                "content": "(experiment mode — no journal, results saved to dry_runs/)"
+                "content": "(experiment mode — no journal, results saved to experiments/)"
             }
         session_dir = engine.session_dir
         agent_dir = engine.agent.agent_dir
@@ -456,7 +456,7 @@ def _resolve_experiment_file(agent_id: str):
     """For an experiment agent_id ("{slug}_eN"), locate its saved snapshot.
 
     Dry-run experiments keep no journal — the tick is saved as a flat
-    ``dry_runs/experiment_N.md``. Returns (path | None, num | None); num is
+    ``experiments/experiment_N.md``. Returns (path | None, num | None); num is
     set even when the file isn't on disk yet so callers can distinguish
     "experiment in progress" from "not an experiment".
     """
@@ -470,7 +470,7 @@ def _resolve_experiment_file(agent_id: str):
     _, agent_dir = resolve_agent_dirs(agent_id)
     if agent_dir is None:
         return None, num
-    path = agent_dir / "dry_runs" / f"experiment_{num}.md"
+    path = agent_dir / "experiments" / f"experiment_{num}.md"
     if path.exists():
         return path, num
     return None, num
@@ -480,8 +480,8 @@ def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) 
     if not agent_id:
         return {"error": "agent_id is required"}
 
-    # Experiments (dry_run / run_once) have no journal — surface the saved
-    # dry-run snapshot instead of the misleading "no journal available" error.
+    # Experiments have no journal — surface the saved experiment
+    # snapshot instead of the misleading "no journal available" error.
     exp_path, exp_num = _resolve_experiment_file(agent_id)
     if exp_num is not None:
         if exp_path is None:
@@ -542,11 +542,11 @@ def journal_write(
     engine = get_engine(agent_id)
     if engine:
         if engine.is_experiment:
-            # Experiments (dry_run / run_once) keep no journal — the whole tick is
-            # captured in the dry-run snapshot. Treat a stray write as a benign
+            # Experiments keep no journal — the whole tick is captured in
+            # the experiment snapshot. Treat a stray write as a benign
             # skip so it never derails the (possibly live) run_once tick.
             return {
-                "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
+                "skipped": "experiment mode — no journal; the tick is saved as an experiment snapshot"
             }
         session_dir = engine.session_dir
         agent_dir = engine.agent.agent_dir
@@ -559,7 +559,7 @@ def journal_write(
         # benignly for the former, error for the latter.
         if session_dir is None and agent_dir is not None:
             return {
-                "skipped": "experiment mode — no journal; the tick is saved as a dry-run snapshot"
+                "skipped": "experiment mode — no journal; the tick is saved as an experiment snapshot"
             }
     if not session_dir:
         return {"error": "no journal available for this agent"}
@@ -605,7 +605,7 @@ def _agent_monitoring(action: str, agent_id: str | None) -> dict:
         # For monitoring, convert experiment/missing journal to error
         if "experiment" in str(err.get("content", "")):
             return {
-                "error": "experiments don't have a journal — use dry_runs/ for results"
+                "error": "experiments don't have a journal — use experiments/ for results"
             }
         return {"error": "no journal available for this agent"}
 

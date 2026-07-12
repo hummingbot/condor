@@ -374,7 +374,7 @@ function BackgroundRunsPanel({
 // ── Agent Detail Page ──
 // The operational hub (refactor-01b): identity + playbooks + ALL history —
 // live instances, per-session performance with a playbook filter, tick
-// sessions/dry runs (SessionReviewer), delegation/consult transcripts, and
+// sessions/experiments (SessionReviewer), delegation/consult transcripts, and
 // the agent-level learnings.
 
 export function AgentDetail() {
@@ -832,7 +832,7 @@ export function AgentDetail() {
         Delete playbook <strong className="text-[var(--color-text)]">{deletePlaybook?.name}</strong>? Its past sessions stay in the agent's history. This cannot be undone.
       </ConfirmDialog>
 
-      {/* Session Reviewer Overlay (tick sessions + dry runs) */}
+      {/* Session Reviewer Overlay (tick sessions + experiments) */}
       {reviewerOpen && (tickSessions.length > 0 || agent.experiments.length > 0) && (
         <SessionReviewer
           slug={agent.slug}

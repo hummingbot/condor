@@ -111,7 +111,7 @@ class TickEngine:
             self.config["max_ticks"] = 1
 
         mode = self.config.get("execution_mode", "loop")
-        self.is_experiment = mode == "dry_run"
+        self.is_experiment = mode == "experiment"
 
         # Tick sessions whose config declares no risk_limits fall back to the
         # agent-level baseline (AGENT.md `risk_limits:`), the same numbers that
@@ -120,7 +120,7 @@ class TickEngine:
             self.config["risk_limits"] = dict(self.agent.risk_limits)
 
         # agent_id == controller_id tag: "{agent_slug}_{N}" (sessions) or
-        # "{agent_slug}_e{N}" (dry-run experiments).
+        # "{agent_slug}_e{N}" (experiments).
         if self.is_experiment:
             self.session_num = next_experiment_number(agent_dir)
             self.agent_id = f"{self.agent.slug}_e{self.session_num}"
@@ -321,13 +321,13 @@ class TickEngine:
                         self.journal.append_error(str(e))
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
 
-                # Dry-run experiments: single tick, then self-stop
-                if mode == "dry_run":
+                # Experiments: single tick, then self-stop
+                if mode == "experiment":
                     log.info(
-                        "TickEngine %s: dry run complete, self-stopping",
+                        "TickEngine %s: experiment complete, self-stopping",
                         self.agent_id,
                     )
-                    await self._notify(f"Agent {self.agent_id}: Dry run complete.")
+                    await self._notify(f"Agent {self.agent_id}: Experiment complete.")
                     self._running = False
                     _engines.pop(self.agent_id, None)
                     return
@@ -474,7 +474,7 @@ class TickEngine:
         result = await run_agent(
             self.agent,
             prompt,
-            permission_policy=risk_gate(self.risk, risk_state, dry_run=self.is_experiment),
+            permission_policy=risk_gate(self.risk, risk_state, experiment=self.is_experiment),
             user_id=self.user_id,
             chat_id=self.chat_id,
             server_name=self.config.get("server_name") or None,

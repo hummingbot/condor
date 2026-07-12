@@ -331,7 +331,7 @@ export interface RunningInstance {
   total_amount_quote: number;
   trading_context: string;
   frequency_sec: number;
-  execution_mode: "dry_run" | "run_once" | "loop";
+  execution_mode: "experiment" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
 }
 
@@ -1189,7 +1189,7 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  // ── Experiments (agent-level dry runs) ──
+  // ── Experiments (agent-level experiment snapshots) ──
 
   getAgentExperiments: (slug: string) =>
     apiFetch<{ experiments: ExperimentInfo[] }>(

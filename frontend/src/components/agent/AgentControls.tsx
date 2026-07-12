@@ -38,7 +38,7 @@ export function StartSessionDialog({
   const agentConfig = (selected?.default_config || {}) as Record<string, unknown>;
   const riskDefaults = (agentConfig.risk_limits || {}) as Record<string, unknown>;
 
-  const [executionMode, setExecutionMode] = useState<"dry_run" | "run_once" | "loop">("loop");
+  const [executionMode, setExecutionMode] = useState<"experiment" | "run_once" | "loop">("loop");
   const [context, setContext] = useState((agentConfig.trading_context as string) || "");
   const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
   const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
@@ -120,7 +120,7 @@ export function StartSessionDialog({
             <label className={labelClass}>Execution Mode</label>
             <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
               {([
-                { value: "dry_run", label: "Dry Run", desc: "Simulate" },
+                { value: "experiment", label: "Experiment", desc: "Simulate" },
                 { value: "run_once", label: "Run Once", desc: "Single tick" },
                 { value: "loop", label: "Loop", desc: "Continuous" },
               ] as const).map((opt) => (
@@ -130,7 +130,7 @@ export function StartSessionDialog({
                   onClick={() => setExecutionMode(opt.value)}
                   className={`flex-1 rounded-md px-3 py-2 text-center text-xs font-medium transition-all ${
                     executionMode === opt.value
-                      ? opt.value === "dry_run"
+                      ? opt.value === "experiment"
                         ? "bg-blue-500/15 text-blue-400"
                         : opt.value === "run_once"
                           ? "bg-amber-500/15 text-amber-400"
@@ -267,14 +267,14 @@ export function StartSessionDialog({
             onClick={() => startMut.mutate()}
             disabled={startMut.isPending || (strategies.length > 1 && !strategySlug)}
             className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white transition-all disabled:opacity-40 ${
-              executionMode === "dry_run" ? "bg-blue-600 hover:bg-blue-500" : executionMode === "run_once" ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"
+              executionMode === "experiment" ? "bg-blue-600 hover:bg-blue-500" : executionMode === "run_once" ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"
             }`}
           >
             <Play className="h-3.5 w-3.5" />
             {startMut.isPending
               ? "Starting..."
-              : executionMode === "dry_run"
-                ? "Run Dry Test"
+              : executionMode === "experiment"
+                ? "Run Experiment"
                 : executionMode === "run_once"
                   ? "Execute Once"
                   : "Start Session"}

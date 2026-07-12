@@ -211,14 +211,14 @@ class RiskEngine:
 def risk_gate(
     risk_engine: RiskEngine,
     risk_state: RiskState,
-    dry_run: bool = False,
+    experiment: bool = False,
 ):
     """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
 
     The ONE shared risk policy (refactor-02 §4.1) — the caller chooses the state
     seed: journal-derived for tick sessions (real exposure/count carried over),
     ``RiskState()`` at zero for delegations (the caps act as a per-run budget).
-    ``dry_run=True`` additionally cancels every mutating action (tick-only).
+    ``experiment=True`` additionally cancels every mutating action (tick-only).
     """
     from handlers.agents._shared import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
 
@@ -227,26 +227,26 @@ def risk_gate(
             raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
             tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
 
-            # Dry-run mode: block ALL mutating actions
-            if dry_run:
+            # Experiment mode: block ALL mutating actions
+            if experiment:
                 if tool_name == "manage_executors":
                     input_data = tool_call.get("input", {})
                     action = input_data.get("action", "")
                     if action in ("create", "stop"):
-                        log.info("Dry-run mode: blocked manage_executors(%s)", action)
+                        log.info("Experiment mode: blocked manage_executors(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
                 elif tool_name == "manage_bots":
                     input_data = tool_call.get("input", {})
                     action = input_data.get("action", "")
                     if action in DANGEROUS_BOT_ACTIONS:
-                        log.info("Dry-run mode: blocked manage_bots(%s)", action)
+                        log.info("Experiment mode: blocked manage_bots(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
                 elif tool_name in (
                     "place_order",
                     "manage_gateway_swaps",
                     "manage_gateway_clmm",
                 ):
-                    log.info("Dry-run mode: blocked %s", tool_name)
+                    log.info("Experiment mode: blocked %s", tool_name)
                     return {"outcome": {"outcome": "cancelled"}}
 
             # For executor actions, run risk check

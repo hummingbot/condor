@@ -292,8 +292,8 @@ async def manage_trading_agent(
     ``strategy_id`` is the opaque key returned by list_strategies/create_strategy
     (form "agent_slug.strategy_slug") — used ONLY by strategy CRUD. Running
     sessions are identified as "{agent_slug}_{N}" ("{agent_slug}_e{N}" for
-    dry-run experiments); which strategy a session ran is session metadata, and
-    all history (sessions, learnings, dry runs) lives at the agent level.
+    experiments); which strategy a session ran is session metadata, and
+    all history (sessions, learnings, experiments) lives at the agent level.
 
     Actions -- Agents (identities):
     - "list_agent_definitions": List all agents (AGENT.md identities) with their

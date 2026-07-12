@@ -1,0 +1,5 @@
+kind: consult
+status: done
+task: What is the current funding rate on SOL-USD? One short paragraph.
+model: claude-acp:sonnet
+ended_at: '2026-07-11T17:41:25.772177+00:00'
