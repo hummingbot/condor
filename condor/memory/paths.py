@@ -1,16 +1,21 @@
-"""Per-assistant store path resolver.
+"""Per-agent store path resolver.
 
 Memory (FEAT-001) and skills (FEAT-002) used to be **per-user and shared**: the
-``/agent`` chat and every trading agent of a user read/wrote the same store. This
-module makes them **per-assistant**: each assistant gets its own store, co-located
-with its definition, and nothing is shared across assistants (FEAT-003).
+``/agent`` chat and every trading agent of a user read/wrote the same store.
+This module makes them **per-agent**: each agent gets its own store, co-located
+with its definition, and nothing is shared across agents (FEAT-003).
 
-The key of a store is ``(assistant, user_id)`` — "per-assistant" *composes with*
-``user_id``, it does not replace it (group chats share a chat but each user keeps
-their own memory). Two assistants never resolve to the same root: the chat lives
-under ``assistants/condor/`` and trading agents under ``agents/{slug}/``,
-which are different top-level dirs, so even a strategy literally named ``condor``
-cannot collide with the chat.
+The repo root IS the chat coordinator's agent-home (refactor-06): its brain is
+``CONDOR.md``, its skills the repo-root ``skills/``, its routines the repo-root
+``routines/``, and its store the repo-root ``store/`` — mirroring
+``agents/{slug}/{AGENT.md, skills/, routines/, store/}`` one-for-one. Two
+stores never resolve to the same root: the chat's lives at the root and
+trading agents' under ``agents/{slug}/``, so even an agent literally named
+``condor`` cannot collide with the chat.
+
+The key of a store is ``(agent, user_id)`` — "per-agent" *composes with*
+``user_id``, it does not replace it (group chats share a chat but each user
+keeps their own memory).
 
 Pure filesystem logic with **no** MCP/Telegram deps, so it runs from the main
 process (prompt injection) and from the MCP subprocess (the tools) alike.
@@ -23,22 +28,17 @@ from pathlib import Path
 # Anchor to the project root (…/condor) so paths are stable regardless of cwd.
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 
-# Sentinel home for the interactive chat assistant. It is the single
-# interactive agent; its builder capabilities ship as built-in skills (FEAT-004,
-# see ``builtin_skills_root``) rather than as separate selectable assistants.
-_CHAT_ASSISTANT = "condor"
-
 
 def store_root(user_id: int, agent_slug: str | None = None) -> Path:
-    """Root of an assistant's per-user store.
+    """Root of an agent's per-user store.
 
     ``agent_slug`` set  -> trading agent: ``agents/{slug}/store/user_{id}``
-    ``agent_slug`` None  -> chat condor:   ``assistants/condor/store/user_{id}``
+    ``agent_slug`` None  -> chat condor:   ``store/user_{id}`` (repo root)
     """
     if agent_slug:
         base = _PROJECT_ROOT / "agents" / agent_slug
     else:
-        base = _PROJECT_ROOT / "assistants" / _CHAT_ASSISTANT
+        base = _PROJECT_ROOT
     return base / "store" / f"user_{user_id}"
 
 
@@ -80,20 +80,18 @@ def shared_skills_root() -> Path:
 def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:
     """``(label, agent_slug, root)`` for each existing store of ``user_id``.
 
-    Used by ``/memory`` to show one section per assistant. Scans
-    ``assistants/*/store/user_{id}`` and ``agents/*/store/user_{id}`` and
-    returns only the stores that exist on disk (so empty assistants don't clutter
+    Used by ``/memory`` to show one section per agent. Scans the root
+    ``store/user_{id}`` (the chat's) and ``agents/*/store/user_{id}`` and
+    returns only the stores that exist on disk (so empty agents don't clutter
     the view). ``agent_slug`` is ``None`` for the chat and the slug for a trading
     agent, so a caller can rebuild the store via ``MemoryStore(user_id, agent_slug)``.
     The chat is labelled ``condor (chat)`` and listed first, then agents alphabetically.
     """
     found: list[tuple[str, str | None, Path]] = []
 
-    chat_root = (
-        _PROJECT_ROOT / "assistants" / _CHAT_ASSISTANT / "store" / f"user_{user_id}"
-    )
+    chat_root = _PROJECT_ROOT / "store" / f"user_{user_id}"
     if chat_root.exists():
-        found.append((f"{_CHAT_ASSISTANT} (chat)", None, chat_root))
+        found.append(("condor (chat)", None, chat_root))
 
     agents_dir = _PROJECT_ROOT / "agents"
     if agents_dir.exists():

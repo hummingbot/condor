@@ -25,12 +25,9 @@ from condor.acp.client import (
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import (
-    AGENT_MODES,
     AGENT_OPTIONS,
     DEFAULT_AGENT,
-    DEFAULT_MODE,
     is_dangerous_tool_call,
-    load_assistant,
 )
 from handlers.agents.confirmation import _format_tool_summary
 from handlers.agents.session import destroy_session, get_or_create_session, get_session
@@ -69,7 +66,6 @@ def _get_user_sessions(user_id: int) -> list[dict]:
                 {
                     "slot_id": slot_id,
                     "agent_key": session.agent_key,
-                    "mode": session.mode,
                     "is_busy": session.is_busy,
                     "server_name": session.server_name,
                 }
@@ -221,7 +217,6 @@ async def _handle_start_session(
     msg: dict,
 ) -> None:
     agent_key = msg.get("agent_key", DEFAULT_AGENT)
-    mode = msg.get("mode", DEFAULT_MODE)
     server_name = msg.get("server_name")  # From frontend's selected server
 
     # Check slot limit
@@ -252,20 +247,10 @@ async def _handle_start_session(
             agent_key=agent_key,
             permission_callback=perm_cb,
             user_id=user_id,
-            mode=mode,
             platform="web",
             lazy_context=True,  # Don't block — inject context on first message
             server_name=server_name,
         )
-
-        # Append mode-specific assistant context (e.g. agent_builder instructions)
-        if mode != DEFAULT_MODE:
-            mode_context = load_assistant(mode)
-            if mode_context:
-                existing = session.pending_context or ""
-                session.pending_context = (
-                    f"{existing}\n\n{mode_context}".strip() or None
-                )
 
         _user_slots.setdefault(user_id, []).append(slot_id)
         await _send(
@@ -274,7 +259,6 @@ async def _handle_start_session(
                 "event": "session_started",
                 "slot_id": slot_id,
                 "agent_key": agent_key,
-                "mode": mode,
                 "server_name": session.server_name,
             },
         )
@@ -477,13 +461,8 @@ def _handle_resolve_permission(user_id: int, msg: dict) -> None:
 
 @router.get("/chat/options")
 async def get_chat_options(user: WebUser = Depends(get_current_user)):
-    """Return available agent models and modes."""
+    """Return available agent models."""
     return {
         "agents": [{"key": k, "label": v["label"]} for k, v in AGENT_OPTIONS.items()],
-        "modes": [
-            {"key": k, "label": v["label"], "description": v["description"]}
-            for k, v in AGENT_MODES.items()
-        ],
         "default_agent": DEFAULT_AGENT,
-        "default_mode": DEFAULT_MODE,
     }

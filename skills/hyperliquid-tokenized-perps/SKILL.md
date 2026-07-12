@@ -37,7 +37,7 @@ order, or deploying an executor/controller.
 
 ## Operating rule (host deployments)
 
-Condor's `agents/` and `assistants/` trees are its runtime state. Operate
+Condor's `agents/` tree, `CONDOR.md`, and root `store/` are its runtime state. Operate
 Condor ONLY via the `mcp__condor__*` tools — never by reading or editing
 those files directly. If the Condor MCP server is not connected, tell the
 user to connect it instead of improvising against the filesystem.

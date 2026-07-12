@@ -1,6 +1,12 @@
 # Refactor 06 — dissolve the assistants layer: `CONDOR.md` at repo root
 
-Status: **proposed** (2026-07-11) · The refactor that was deferred during the
+Status: **IMPLEMENTED** (2026-07-11; user-store backup at
+`assistants.pre-06.bak/`). All four steps landed, including the full mode-
+machinery removal (Telegram menu, `AGENT_MODES`, `normalize_mode`, the
+threaded `mode` value, and the web chat's mode picker). One extra win found
+during implementation: the Telegram path was injecting the brain TWICE (once
+via the session's initial context, once as a mode-context prompt) — dissolved
+along with the machinery. · The refactor was originally deferred during the
 01b/02 series because "root AGENT.md collides with host conventions" — the
 `CONDOR.md` naming resolves exactly that hazard.
 

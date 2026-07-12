@@ -667,17 +667,9 @@ export interface ChatAgentOption {
   label: string;
 }
 
-export interface ChatModeOption {
-  key: string;
-  label: string;
-  description: string;
-}
-
 export interface ChatOptionsResponse {
   agents: ChatAgentOption[];
-  modes: ChatModeOption[];
   default_agent: string;
-  default_mode: string;
 }
 
 // ── Backtesting ──

@@ -34,10 +34,10 @@ Python), **learnings** (`learnings.md`, the capped semantic capture pool),
 what the field converged on independently: journal = episodic, learnings =
 semantic, skills = procedural.
 
-The chat coordinator (`assistants/condor/`) remains a separate schema — it
-routes to agents and is not itself consultable. (Its skills moved to the
-repo-root `skills/` in refactor-05; the rest of the assistants layer is a
-pending cleanup, refactor-06.)
+The chat coordinator's agent-home is the **repo root** (refactor-06):
+`CONDOR.md` (its brain — deliberately not a host-owned name like AGENT.md) +
+`skills/` + `routines/` + `store/`, mirroring `agents/{slug}/` one-for-one.
+It routes to agents and is not itself consultable.
 
 ## 2. Identity & storage — one dir, one numbering, metadata not addresses
 
