@@ -105,6 +105,7 @@ def test_agent_crud_roundtrip(tmp_path, monkeypatch):
         instructions="identity body",
         agent_key="ollama:x",
         when_to_consult="ask me",
+        risk_limits={"max_position_size_quote": 500, "max_open_executors": 3},
     )
     assert a.slug == "river_maker"
     assert (tmp_path / "river_maker" / "AGENT.md").exists()
@@ -119,6 +120,36 @@ def test_agent_crud_roundtrip(tmp_path, monkeypatch):
 
     assert store.delete("river_maker") is True
     assert store.get("river_maker") is None
+
+
+def test_server_backed_agent_requires_risk_baseline(tmp_path, monkeypatch):
+    """The AGENT.md defines what the agent does — a server-backed agent
+    without a risk baseline is an incomplete definition and must not save.
+    {0, 0} is the explicit read-only statement and is accepted."""
+    import pytest
+
+    _patch_roots(monkeypatch, tmp_path)
+    store = AgentStore()
+
+    with pytest.raises(ValueError, match="risk_limits"):
+        store.create(name="No Budget", instructions="x")
+
+    # Explicit read-only baseline is a complete definition.
+    ro = store.create(
+        name="Read Only",
+        instructions="x",
+        risk_limits={"max_position_size_quote": 0, "max_open_executors": 0},
+    )
+    assert store.get(ro.slug).risk_limits["max_open_executors"] == 0
+
+    # Serverless specialists need no baseline (nothing they touch trades).
+    s = store.create(name="Specialist", instructions="x", server_required=False)
+    assert store.get(s.slug).risk_limits == {}
+
+    # update() goes through the same check: stripping the baseline must fail.
+    ro.risk_limits = {}
+    with pytest.raises(ValueError, match="risk_limits"):
+        store.update(ro)
 
 
 # ── Strategy as an Agent sub-resource ──
@@ -192,6 +223,7 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
             agent_key="ollama:qwen3:32b",
             when_to_consult="when sizing a position",
             tools=["get_market_data"],
+            risk_limits={"max_position_size_quote": 0, "max_open_executors": 0},
         )
     )
     assert created["created"] is True

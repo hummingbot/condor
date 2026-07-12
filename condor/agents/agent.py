@@ -59,8 +59,11 @@ class Agent:
     server_name: str = ""
     # Agent-level risk baseline (RiskLimits keys). Governs unattended delegations
     # (zero-seeded risk_gate) and is the fallback for tick sessions whose strategy
-    # default_config declares no risk_limits of its own. Empty dict => no baseline:
-    # a trading delegation then REQUIRES a per-call risk_limits override.
+    # default_config declares no risk_limits of its own. The AGENT.md defines what
+    # the agent does — a server-backed agent MUST declare a baseline (enforced on
+    # save); {max_position_size_quote: 0, max_open_executors: 0} is the explicit
+    # "read-only, never trades" statement. An empty dict survives only in
+    # hand-written legacy files, where delegate still errors loudly at start.
     risk_limits: dict = field(default_factory=dict)
     created_by: int = 0
     created_at: str = ""
@@ -199,6 +202,17 @@ class AgentStore:
         return True
 
     def _save(self, agent: Agent) -> None:
+        # The AGENT.md defines what the agent does — for a server-backed agent
+        # that includes how much it may do unattended. Refusing to save an
+        # incomplete definition moves the loud error from delegate time to
+        # authoring time.
+        if agent.server_required and not agent.risk_limits:
+            raise ValueError(
+                f"Agent '{agent.slug}' is server-backed but declares no "
+                "risk_limits baseline. Say the numbers in AGENT.md — use "
+                "{'max_position_size_quote': 0, 'max_open_executors': 0} "
+                "for a read-only agent that must never trade."
+            )
         meta = {
             "name": agent.name,
             "description": agent.description,

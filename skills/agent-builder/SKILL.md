@@ -72,9 +72,16 @@ manage_trading_agent(
     agent_key="ollama:qwen3:32b",          # default model; change anytime
     when_to_consult="When the user wants to deploy, tune, or stop an executor",
     tools=[],                              # leave open unless the user named tools
+    risk_limits={"max_position_size_quote": 200, "max_open_executors": 3},
     instructions="<AGENT.md body — the agent's system prompt>"
 )
 ```
+
+The AGENT.md defines what the agent does — for a server-backed agent that includes
+**how much it may do unattended**: `risk_limits` is REQUIRED at creation (the save
+fails loudly without it). Ask the user for the numbers; for an agent that must never
+trade, `{"max_position_size_quote": 0, "max_open_executors": 0}` is the explicit
+read-only statement. Serverless specialists (`server_required=False`) need none.
 
 The **AGENT.md body (`instructions`)** is the brain — write it as the agent's own system
 prompt, kept tight: **who it is** (its domain + what it explicitly does NOT handle),
