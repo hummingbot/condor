@@ -165,6 +165,24 @@ def test_promote_agent_learning_takes_bare_agent_dir(tmp_path):
     assert not promote_agent_learning(agent_dir, "JTO book is thin after 22:00 UTC")
 
 
+def test_mcp_resolves_experiment_by_date_filename(tmp_path, monkeypatch):
+    """journal_read must find experiments under the {date}-eN.md convention."""
+    import condor.agents.journal as journal_module
+    from mcp_servers.condor.tools.trading_agent import _resolve_experiment_file
+
+    monkeypatch.setattr(journal_module, "_DATA_ROOT", tmp_path)
+    exp_dir = tmp_path / "acme" / "experiments"
+    exp_dir.mkdir(parents=True)
+    (exp_dir / "2026-07-12-e4.md").write_text("# Experiment #4\nMode: experiment\n")
+
+    path, num = _resolve_experiment_file("acme_e4")
+    assert num == 4
+    assert path is not None and path.name == "2026-07-12-e4.md"
+    # Missing number → (None, num), i.e. "in progress", not "not an experiment".
+    path, num = _resolve_experiment_file("acme_e9")
+    assert path is None and num == 9
+
+
 # ── engine: run_once mapping + agent-level storage ──
 
 

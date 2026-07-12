@@ -458,12 +458,13 @@ def _resolve_journal_manager(agent_id: str):
 def _resolve_experiment_file(agent_id: str):
     """For an experiment agent_id ("{slug}_eN"), locate its saved snapshot.
 
-    Dry-run experiments keep no journal — the tick is saved as a flat
-    ``experiments/experiment_N.md``. Returns (path | None, num | None); num is
+    Experiments keep no journal — the tick is saved as a flat
+    ``experiments/{date}-eN.md``. Returns (path | None, num | None); num is
     set even when the file isn't on disk yet so callers can distinguish
     "experiment in progress" from "not an experiment".
     """
     from condor.agents.journal import resolve_agent_dirs, split_agent_id
+    from condor.agents.sessions_index import find_experiment_file
 
     parsed = split_agent_id(agent_id)
     if parsed is None or not parsed[2]:
@@ -473,10 +474,7 @@ def _resolve_experiment_file(agent_id: str):
     _, agent_dir = resolve_agent_dirs(agent_id)
     if agent_dir is None:
         return None, num
-    path = agent_dir / "experiments" / f"experiment_{num}.md"
-    if path.exists():
-        return path, num
-    return None, num
+    return find_experiment_file(agent_dir, num), num
 
 
 def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) -> dict:
