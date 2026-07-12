@@ -64,12 +64,12 @@ In short: executors give us the cleanest possible boundary between "what this ag
 | `policies.py` | The permission-policy lattice: `human_gate(chat_id)` (consult), `risk_gate(limits, state)` (ticks with journal-seeded state; delegations zero-seeded), `AUTO` (serverless specialists). |
 | `engine.py` | `TickEngine` — one instance per running session. A **scheduler**: pre-flight (providers, journal readback, risk state) → `run_agent` under a `risk_gate` → journal write-back. Owns loop/pause/max_ticks, the registry, directive injection, and the shutdown escalation. |
 | `agent.py` | `Agent` + `AgentStore` — identity (AGENT.md), tool allowlist, consult trigger, server pin, and the `risk_limits` baseline that governs unattended delegations. |
-| `strategy.py` | `Strategy` + `StrategyStore`. Pure playbook templates (refactor-01b): `strategy.md` (frontmatter + body) under `agents/{slug}/strategies/{sslug}/` — no state of their own. |
-| `journal.py` | `JournalManager` + the session layout owners: `allocate_session_dir` (mkdir-atomic), `meta.yml` read/write, transcript rendering, retention pruning. Learnings live at the agent (`[strategy]`-prefixed provenance). |
-| `consult.py` / `delegate.py` | The two unattended-vs-interactive call sites of `run_agent`. Both persist sessions (`kind: consult` capped by retention; `kind: delegation` with a start-time husk). |
+| `strategy.py` | `Strategy` + `StrategyStore`. Pure playbook templates (refactor-01b): flat `{sslug}.md` (frontmatter + body) under `agents/{slug}/strategies/` — no state of their own. |
+| `journal.py` | `JournalManager` + the layout owners: `allocate_session_dir` (mkdir-atomic), `meta.yml` read/write, flat delegation/experiment file allocation, transcript rendering. Learnings live at the agent (`[strategy]`-prefixed provenance; `promote_agent_learning` moves one to `## Promoted`). |
+| `consult.py` / `delegate.py` | The interactive-vs-unattended call sites of `run_agent`. A consult persists NOTHING (the answer is the artifact); a delegation leaves ONE flat transcript `delegations/{date}-dN.md` (husk at start, rewritten on completion) — refactor-07. |
 | `prompts.py` | Builds the per-tick prompt: system prompt + strategy + provider summaries + journal context + risk state + user directives. |
 | `risk.py` | `RiskEngine` + `RiskLimits` + `risk_gate(...)`. Hard guardrails (max exposure, max drawdown, max open executors) and the permission callback that auto-approves tool calls only if they pass the risk check. |
-| `sessions_index.py` | Read-only enumeration of the agent-level session/experiment layout for web routes and MCP tools. |
+| `sessions_index.py` | Read-only enumeration of the agent-level session/experiment/delegation layout for web routes and MCP tools. |
 | `providers/` | Deterministic pre-tick data fetchers. Two core providers ship: `executors.py` (filtered by `controller_id`) and `positions.py` (positions summary, also filtered by `controller_id`). |
 | `config.py` | `AgentConfig` schema persisted per session. |
 
@@ -82,23 +82,21 @@ agents/
     learnings.md              # agent-level lessons, [strategy]-prefixed provenance
     routines/  skills/  store/  # the shared brain
     strategies/
-      scalp_v1/
-        strategy.md           # the playbook: tactic + default_config — nothing else
-    sessions/                 # ALL run history, every kind, one numbering
+      scalp_v1.md             # the playbook: tactic + default_config — nothing else
+    sessions/                 # ONLY real sessions — the stateful track record
       session_1/
-        meta.yml              # kind (tick_loop|delegation|consult) + strategy + status
-        config.yml            # frozen runtime config (tick sessions)
-        journal.md            # summary, decisions, ticks (tick sessions)
+        meta.yml              # strategy + status + timestamps
+        config.yml            # frozen runtime config
+        journal.md            # summary, decisions, ticks
         snapshots/
           snapshot_1.md       # full prompt + response + tool calls for tick 1
-      session_2/
-        meta.yml              # kind: delegation
-        transcript.md         # full reasoning + tool calls + result
-    dry_runs/
-      experiment_1.md         # dry-run snapshots (never touch capital)
+    delegations/
+      2026-07-11-d1.md        # flat delegation transcript (husk at start)
+    experiments/
+      2026-07-11-e1.md        # experiment snapshots (never touch capital)
 ```
 
-Session identity is `{agent_slug}_{N}` (`{agent_slug}_e{N}` for dry runs). Which
+Session identity is `{agent_slug}_{N}` (`{agent_slug}_e{N}` for experiments). Which
 playbook a tick session ran is **metadata** (`meta.yml: strategy`), not part of
 the address — per-playbook track records are a filter over the agent's one list.
 
@@ -110,13 +108,13 @@ the address — per-playbook track records are a filter over the agent's one lis
 4. **Get risk state** from `RiskEngine` (exposure, drawdown, open count). If the agent is blocked, log it and return without invoking the LLM.
 5. **Build the prompt** via `build_tick_prompt(...)`, optionally appending any user directives queued via `inject_directive()`.
 6. **Spawn an ACP session** for the strategy's `agent_key` (claude-code, gemini, copilot…) with MCP servers wired in (Hummingbot tools, market data, notifications, journal writes). Stream events, capture text and tool calls.
-7. **Persist** — for sessions, write `snapshot_N.md`, append a tick to the journal, and update the running summary. For dry-runs / run-once, write a flat `experiment_N.md`.
+7. **Persist** — for sessions, write `snapshot_N.md`, append a tick to the journal, and update the running summary. For experiments, write a flat `experiments/{date}-eN.md`.
 
 ### Run modes
 
 | Mode | Behavior |
 |---|---|
-| `dry_run` | One tick, mutating actions cancelled by the risk gate. Pure reasoning test. Saves a flat `dry_runs/experiment_N.md` — never a session. |
+| `experiment` | One tick, mutating actions cancelled by the risk gate (a.k.a. dry run). Pure reasoning test. Saves a flat `experiments/{date}-eN.md` — never a session. |
 | `run_once` | Sugar for `loop` + `max_ticks: 1`: one LIVE tick as an ordinary session — journal, frozen config, risk pre-flight, `_N` attribution, a place in the track record. |
 | `loop` | Standard mode. Ticks every `frequency_sec` until stopped or `max_ticks` reached. Creates a session folder with full journal. |
 
@@ -172,7 +170,7 @@ default_config:
 
 ### 4.1 Create a strategy
 
-A strategy is just `agents/{slug}/strategies/{sslug}/strategy.md`:
+A strategy is just `agents/{slug}/strategies/{sslug}.md`:
 
 ```markdown
 ---
@@ -215,7 +213,7 @@ The `trading-agent-builder` skill walks you through the canonical 5-phase flow:
 1. **Strategy design** — describe edge, timeframe, instruments.
 2. **Market data selection & processing** — pick the routines / MCP tools.
 3. **Strategy logic definition** — write `agent.md`.
-4. **Test in dry-run** — one tick, no trading. Inspect reasoning in the experiment snapshot.
+4. **Test with an experiment** — one tick, no trading. Inspect reasoning in the snapshot.
 5. **Test in run-once** — one tick, real trading, controlled.
 6. **Deploy live** — `loop` mode with a frequency and risk limits.
 
@@ -233,7 +231,7 @@ engine = TickEngine(
     agent=agent,
     strategy=strategy,
     config={
-        "execution_mode": "loop",         # or "dry_run" / "run_once"
+        "execution_mode": "loop",         # or "experiment" / "run_once"
         "frequency_sec": 60,
         "server_name": "binance_main",
         "total_amount_quote": 500,
@@ -255,12 +253,12 @@ In production, agents are normally started/stopped from the Telegram `/agent` fl
 
 ### 4.4 Inspecting what the agent did
 
-- `agents/{slug}/sessions/session_N/meta.yml` — what this session was (`kind`, `strategy`, `status`, timestamps).
+- `agents/{slug}/sessions/session_N/meta.yml` — what this session was (`strategy`, `status`, timestamps).
 - `agents/{slug}/sessions/session_N/journal.md` — chronological summary, last decisions, tick log, executors, snapshot index.
 - `agents/{slug}/sessions/session_N/snapshots/snapshot_K.md` — the *full* tick: system prompt, response text, every tool call with arguments and status, executor snapshot, risk state, duration.
-- `agents/{slug}/sessions/session_N/transcript.md` — a delegation/consult session's full reasoning + tool calls + result.
+- `agents/{slug}/delegations/{date}-dN.md` — a delegation's full reasoning + tool calls + result (flat file).
 - `agents/{slug}/learnings.md` — lessons the agent keeps across sessions (`[strategy]`-prefixed for tick sessions).
-- `agents/{slug}/dry_runs/experiment_N.md` — dry-run results.
+- `agents/{slug}/experiments/{date}-eN.md` — experiment results.
 
 ### 4.5 Injecting directives mid-flight
 

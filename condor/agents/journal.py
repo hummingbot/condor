@@ -16,8 +16,7 @@ playbook templates (refactor-01b)::
                     config.yml     # frozen launch config
                     snapshots/     # snapshot_N.md
             strategies/
-                {strategy_slug}/
-                    strategy.md    # playbook body + default_config — nothing else
+                {strategy_slug}.md # playbook body + default_config — nothing else
 
 Session identity is ``"{agent_slug}_{N}"`` (``"..._e{N}"`` for experiments).
 The strategy a tick session ran is *metadata* (``meta.yml``), not part of

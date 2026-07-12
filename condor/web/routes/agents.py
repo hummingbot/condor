@@ -10,7 +10,7 @@ so per-playbook views are a filter, not a separate tree. Route shape::
     /agents                          -> list Agents (rollups + playbooks)
     /agents/{slug}                   -> Agent detail (sessions/experiments/learnings)
     /agents/{slug}/consult|delegate  -> run the Agent's brain
-    /agents/{slug}/strategies...     -> playbook CRUD (strategy.md + default_config)
+    /agents/{slug}/strategies...     -> playbook CRUD ({sslug}.md + default_config)
     /agents/{slug}/start|stop|...    -> session lifecycle
     /agents/{slug}/sessions/...      -> journals, snapshots, executors
     /agents/{slug}/delegation-files  -> flat delegation transcripts
@@ -956,8 +956,7 @@ async def get_strategy(
     agent = _get_agent(slug)
     strategy = _get_strategy(slug, sslug)
 
-    md_path = strategy.dir / "strategy.md"
-    strategy_md = md_path.read_text() if md_path.exists() else ""
+    strategy_md = strategy.path.read_text() if strategy.path.exists() else ""
 
     return PlaybookDetail(
         slug=sslug,
@@ -979,9 +978,9 @@ async def update_strategy_md(
     req: UpdateStrategyMdRequest,
     user: WebUser = Depends(get_current_user),
 ):
-    """Update strategy.md content."""
+    """Update the playbook's {sslug}.md content."""
     strategy = _get_strategy(slug, sslug)
-    (strategy.dir / "strategy.md").write_text(req.content)
+    strategy.path.write_text(req.content)
     return {"updated": True}
 
 
@@ -1118,7 +1117,7 @@ async def start_session(
     ``strategy`` selects the playbook — optional when the agent has exactly
     one, required (400 listing the options) when it has several.
     """
-    from condor.agents.config import load_full_config
+    from condor.agents.config import normalize_config
     from condor.agents.engine import TickEngine
 
     agent = _get_agent(slug)
@@ -1150,12 +1149,12 @@ async def start_session(
     # (+ request overrides). No strategy-level config.yml exists anymore.
     # Risk resolution order: request config > strategy default_config > agent
     # baseline (AGENT.md risk_limits) > schema defaults. The baseline must be
-    # seeded BEFORE load_full_config fills schema defaults, or the generic
+    # seeded BEFORE normalize_config fills schema defaults, or the generic
     # 500/5 defaults would mask it.
     defaults = dict(strategy.default_config or {})
     if not defaults.get("risk_limits") and agent.risk_limits:
         defaults["risk_limits"] = dict(agent.risk_limits)
-    config_dict = load_full_config(strategy.dir, defaults)
+    config_dict = normalize_config(defaults)
     if req.config:
         config_dict.update(req.config)
 

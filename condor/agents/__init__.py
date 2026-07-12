@@ -10,7 +10,7 @@ from .config import (
     AgentConfig,
     RiskLimitsConfig,
     load_agent_config,
-    load_full_config,
+    normalize_config,
     save_agent_config,
     save_full_config,
 )
@@ -25,7 +25,7 @@ __all__ = [
     "AgentConfig",
     "RiskLimitsConfig",
     "load_agent_config",
-    "load_full_config",
+    "normalize_config",
     "save_agent_config",
     "save_full_config",
     "TickEngine",

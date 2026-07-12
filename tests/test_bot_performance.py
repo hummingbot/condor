@@ -8,7 +8,7 @@ controller-mode block.
 import asyncio
 from types import SimpleNamespace
 
-from condor.agents.config import AgentConfig, load_full_config
+from condor.agents.config import AgentConfig, normalize_config
 from condor.agents.performance import (
     AgentPerformance,
     fetch_agent_performance,
@@ -186,10 +186,10 @@ def test_bot_name_config_field_defaults_empty():
 
 
 def test_bot_name_round_trips_through_full_config(tmp_path):
-    cfg = load_full_config(tmp_path, {"bot_name": "river", "frequency_sec": 30})
+    cfg = normalize_config({"bot_name": "river", "frequency_sec": 30})
     assert cfg["bot_name"] == "river"
     # absent default → empty string from AgentConfig defaults
-    cfg2 = load_full_config(tmp_path, {})
+    cfg2 = normalize_config({})
     assert cfg2["bot_name"] == ""
 
 

@@ -40,7 +40,7 @@ agents/{slug}/
   AGENT.md                         # identity + role (the brain) — step 1
   routines/*.py                    # agent-scoped analysis scripts — step 3
   skills/{name}/SKILL.md           # the agent's own reusable playbooks
-  strategies/{sslug}/strategy.md   # OPTIONAL loop playbooks (pure templates) — step 4
+  strategies/{sslug}.md            # OPTIONAL loop playbooks (pure templates) — step 4
   sessions/session_N/              # real sessions only — the stateful track record
   delegations/{date}-dN.md         # flat delegation transcripts
   experiments/{date}-eN.md         # experiment snapshots (a.k.a. dry runs)

@@ -1,8 +1,8 @@
 """Strategy definitions and persistence — a *playbook* owned by an Agent.
 
-A strategy is a pure playbook template (refactor-01b): ``strategy.md`` (YAML
-frontmatter + markdown body) is the ONLY thing in its folder — all operational
-state (sessions, learnings, experiments) lives at the agent level::
+A strategy is a pure playbook template (refactor-01b): ONE flat file of YAML
+frontmatter + markdown body — all operational state (sessions, learnings,
+experiments) lives at the agent level::
 
     agents/
         {agent_slug}/
@@ -10,8 +10,7 @@ state (sessions, learnings, experiments) lives at the agent level::
             learnings.md  sessions/  experiments/ # agent-level history (journal.py)
             routines/  skills/  store/           # the shared brain
             strategies/
-                {strategy_slug}/
-                    strategy.md            # this playbook: tactics + default_config
+                {strategy_slug}.md         # this playbook: tactics + default_config
 
 A strategy is identified by the pair ``(agent_slug, slug)``; its opaque composite
 key ``"{agent_slug}.{slug}"`` is what MCP strategy-CRUD passes around as
@@ -23,7 +22,6 @@ from __future__ import annotations
 
 import logging
 import re
-import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -104,9 +102,9 @@ class Strategy:
         return f"{self.agent_slug}.{self.slug}"
 
     @property
-    def dir(self) -> Path:
-        """This strategy's folder: agents/{agent_slug}/strategies/{slug}/."""
-        return _DATA_ROOT / self.agent_slug / "strategies" / self.slug
+    def path(self) -> Path:
+        """This strategy's file: agents/{agent_slug}/strategies/{slug}.md."""
+        return _DATA_ROOT / self.agent_slug / "strategies" / f"{self.slug}.md"
 
 
 def split_key(key: str) -> tuple[str, str] | None:
@@ -122,12 +120,12 @@ def split_key(key: str) -> tuple[str, str] | None:
 
 
 def _load_strategy_from_file(path: Path, agent_slug: str) -> Strategy | None:
-    """Load a Strategy from a ``strategy.md`` file under an agent."""
+    """Load a Strategy from its ``{slug}.md`` file under an agent."""
     try:
         meta, body = _parse_frontmatter(path.read_text())
         return Strategy(
             agent_slug=agent_slug,
-            name=meta.get("name", path.parent.name),
+            name=meta.get("name", path.stem),
             description=meta.get("description", ""),
             instructions=body,
             agent_key=meta.get("agent_key") or None,
@@ -142,7 +140,8 @@ def _load_strategy_from_file(path: Path, agent_slug: str) -> Strategy | None:
 
 
 class StrategyStore:
-    """CRUD for strategies stored as ``strategy.md`` under ``{agent}/strategies/``.
+    """CRUD for strategies stored as flat ``{slug}.md`` files under
+    ``{agent}/strategies/``.
 
     Every method is scoped to an owning ``agent_slug``; ``list_all`` and
     ``get_by_key`` span all agents for callers (overviews, MCP) that need a flat
@@ -151,9 +150,6 @@ class StrategyStore:
 
     def _strategies_root(self, agent_slug: str) -> Path:
         return _DATA_ROOT / agent_slug / "strategies"
-
-    def _strategy_md_path(self, strategy: Strategy) -> Path:
-        return strategy.dir / "strategy.md"
 
     def create(
         self,
@@ -178,15 +174,15 @@ class StrategyStore:
         )
         self._save(strategy)
         log.info(
-            "Created strategy %s under agent %s (dir: %s)",
+            "Created strategy %s under agent %s (%s)",
             strategy.slug,
             agent_slug,
-            strategy.dir,
+            strategy.path,
         )
         return strategy
 
     def get(self, agent_slug: str, sslug: str) -> Strategy | None:
-        path = self._strategies_root(agent_slug) / sslug / "strategy.md"
+        path = self._strategies_root(agent_slug) / f"{sslug}.md"
         if not path.exists():
             return None
         return _load_strategy_from_file(path, agent_slug)
@@ -203,12 +199,7 @@ class StrategyStore:
         root = self._strategies_root(agent_slug)
         if not root.exists():
             return strategies
-        for d in sorted(root.iterdir()):
-            if not d.is_dir():
-                continue
-            md = d / "strategy.md"
-            if not md.exists():
-                continue
+        for md in sorted(root.glob("*.md")):
             s = _load_strategy_from_file(md, agent_slug)
             if s is not None:
                 strategies.append(s)
@@ -229,13 +220,13 @@ class StrategyStore:
         self._save(strategy)
 
     def delete(self, agent_slug: str, sslug: str) -> bool:
-        strategy = self.get(agent_slug, sslug)
-        if not strategy:
+        path = self._strategies_root(agent_slug) / f"{sslug}.md"
+        if not path.exists():
             return False
         try:
-            shutil.rmtree(strategy.dir)
+            path.unlink()
         except Exception:
-            log.exception("Failed to remove strategy dir %s", strategy.dir)
+            log.exception("Failed to remove strategy file %s", path)
             return False
         log.info("Deleted strategy %s under agent %s", sslug, agent_slug)
         return True
@@ -250,7 +241,5 @@ class StrategyStore:
             "created_by": strategy.created_by,
             "created_at": strategy.created_at,
         }
-        strategy.dir.mkdir(parents=True, exist_ok=True)
-        self._strategy_md_path(strategy).write_text(
-            _render_frontmatter(meta, strategy.instructions)
-        )
+        strategy.path.parent.mkdir(parents=True, exist_ok=True)
+        strategy.path.write_text(_render_frontmatter(meta, strategy.instructions))

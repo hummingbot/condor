@@ -275,7 +275,7 @@ def test_consult_persists_nothing(tmp_path, monkeypatch):
 def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
     """The /agents/{slug}/start route must resolve risk_limits as
     request config > strategy default_config > AGENT.md baseline > schema
-    defaults — the baseline must not be masked by load_full_config's 500/5
+    defaults — the baseline must not be masked by normalize_config's 500/5
     schema defaults (regression: a live experiment showed 500/5 for a 0/0 agent)."""
     from types import SimpleNamespace
 
@@ -289,9 +289,9 @@ def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
         "risk_limits:\n  max_position_size_quote: 0\n  max_open_executors: 0\n"
         "---\n\nBody.\n"
     )
-    sdir = agent_dir / "strategies" / "snap"
+    sdir = agent_dir / "strategies"
     sdir.mkdir(parents=True)
-    (sdir / "strategy.md").write_text(
+    (sdir / "snap.md").write_text(
         "---\nname: snap\ndefault_config:\n  frequency_sec: 120\n---\n\nTick.\n"
     )
 
@@ -320,7 +320,7 @@ def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
     }
 
     # A strategy-level risk_limits wins over the baseline.
-    (sdir / "strategy.md").write_text(
+    (sdir / "snap.md").write_text(
         "---\nname: snap\ndefault_config:\n  risk_limits:\n"
         "    max_position_size_quote: 50\n---\n\nTick.\n"
     )

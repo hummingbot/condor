@@ -24,7 +24,7 @@ artifacts any host harness can install.**
 | Entity | Is | Is NOT |
 |---|---|---|
 | **Agent** (`agents/{slug}/AGENT.md`) | The unit of identity, attribution, and accumulation: tools allowlist, consult trigger, server pin, **risk baseline**, plus ALL operational history | A per-task construct; there is exactly one history per agent |
-| **Strategy** (`strategies/{sslug}/strategy.md`) | A pure **playbook template**: tick tactic + `default_config`. A start-time selector recorded as session metadata | A state owner. No sessions/learnings/config.yml/shutdown.md live under it |
+| **Strategy** (`strategies/{sslug}.md`) | A pure **playbook template**: tick tactic + `default_config`. A start-time selector recorded as session metadata | A state owner. No sessions/learnings/config.yml/shutdown.md live under it |
 | **Session** (`sessions/session_N/`) | The **stateful** unit of capital engagement: frozen config, journal, risk carry-over, `controller_id` attribution, a track-record entry. Ticks are how the scheduler advances it | An envelope for every brain invocation. Consults return an inline answer (no disk); delegations leave a flat transcript; experiments leave a flat snapshot |
 
 Supporting artifacts (owned by the agent, shared across all its playbooks):
@@ -56,7 +56,7 @@ agents/{slug}/
     shutdown.md                 # optional winddown override (walk: agent → _defaults)
     skills/  routines/  store/  # the shared brain
     strategies/
-        {sslug}/strategy.md     # playbook + default_config — NOTHING else
+        {sslug}.md              # playbook + default_config — NOTHING else
     sessions/                   # ONLY real sessions — every entry is track record
         session_N/
             meta.yml            #   strategy, status, model, timestamps
@@ -372,8 +372,8 @@ User request
    v                               v
  agents/{slug}/          sessions/session_N   <- stateful: journal + snapshots
    AGENT.md (risk baseline)                        + frozen config (track record)
-   strategies/{sslug}/       delegations/{date}-dN.md  <- flat transcript
-     strategy.md (playbook)  experiments/{date}-eN.md  <- flat snapshot
+   strategies/{sslug}.md     delegations/{date}-dN.md  <- flat transcript
+     (playbook template)     experiments/{date}-eN.md  <- flat snapshot
    skills/ (local>_shared)                          (consults persist nothing)
    learnings.md   <── capture (in-run); folded into skills by the
    routines/  store/          user in chat (manage_skill patch, provenance)

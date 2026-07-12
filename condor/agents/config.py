@@ -104,23 +104,15 @@ def save_agent_config(agent_dir: Path, config: AgentConfig) -> None:
     )
 
 
-def load_full_config(
-    agent_dir: Path, defaults: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Load config preserving both AgentConfig fields and strategy-specific keys.
+def normalize_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Normalize a launch config: validate core fields, fill schema defaults.
 
-    Starts from strategy defaults, overlays saved config.yml, then validates
-    core fields via AgentConfig and merges defaults for any missing core fields.
+    Preserves strategy-specific extra keys alongside the validated AgentConfig
+    fields. Strategies are pure templates with no config.yml of their own
+    (refactor-01b), so there is nothing to load from disk — the caller passes
+    the merged defaults (strategy default_config + risk baseline seeding).
     """
-    result = dict(defaults or {})
-
-    config_path = agent_dir / "config.yml"
-    if config_path.exists():
-        try:
-            saved = yaml.safe_load(config_path.read_text()) or {}
-            result.update(saved)
-        except Exception:
-            pass
+    result = dict(config or {})
 
     # Validate core fields and fill in any missing AgentConfig defaults
     core = AgentConfig.from_dict(result)

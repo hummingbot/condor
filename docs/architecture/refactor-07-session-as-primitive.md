@@ -109,7 +109,7 @@ flat dirs — one per one-shot artifact kind, one file per invocation:
 ```
 agents/{slug}/
     AGENT.md  learnings.md  shutdown.md  skills/  routines/  store/
-    strategies/{sslug}/strategy.md
+    strategies/{sslug}.md
     sessions/                        <- ONLY real sessions. Gapless numbering
         session_N/                      going forward; every entry is track
             meta.yml                    record. No `kind` field needed —

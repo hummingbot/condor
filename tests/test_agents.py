@@ -138,8 +138,8 @@ def test_strategy_crud_under_agent(tmp_path, monkeypatch):
     )
     assert s.slug == "brl_mm"
     assert s.key == "brigado.brl_mm"
-    assert s.dir == tmp_path / "brigado" / "strategies" / "brl_mm"
-    assert (s.dir / "strategy.md").exists()
+    assert s.path == tmp_path / "brigado" / "strategies" / "brl_mm.md"
+    assert s.path.exists()
 
     # get / get_by_key / list
     assert store.get("brigado", "brl_mm").instructions.strip() == "do the thing"

@@ -9,7 +9,7 @@ import { api } from "@/lib/api";
 
 // ── Strategy (Playbook) Detail Page ──
 //
-// A strategy is a pure playbook template (refactor-01b): strategy.md (the tick
+// A strategy is a pure playbook template (refactor-01b): {sslug}.md (the tick
 // tactic) + default_config. ALL operational history — sessions, experiments,
 // learnings, live instances — lives at the agent level (/agents/:slug), where
 // this playbook's sessions are just a filter.
@@ -191,7 +191,7 @@ export function StrategyDetail() {
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
         <MarkdownEditor
           label="Playbook"
-          sublabel="strategy.md — the tick tactic (frontmatter + body)"
+          sublabel="{sslug}.md — the tick tactic (frontmatter + body)"
           content={playbook.strategy_md}
           onSave={(value) => api.updateStrategyMd(slug!, sslug!, value)}
           invalidateKey={["strategy", slug, sslug]}

@@ -18,7 +18,7 @@ Disk layout::
         AGENT.md                       # Agent identity + domain knowledge (no `role`)
         skills/<slug>/SKILL.md         # shared skills (consult + every strategy) [FEAT-002/003]
         store/user_{id}/               # learned memory (the shared brain) [FEAT-003]
-        strategies/{sslug}/            # owned playbooks (see strategy.py)
+        strategies/{sslug}.md          # owned playbooks (see strategy.py)
 
 An Agent may be **authored in the repo** (e.g. ``executor_manager``) or **created
 at runtime**; either way ``AgentStore`` can create/update/delete it.
