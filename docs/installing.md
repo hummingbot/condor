@@ -125,6 +125,7 @@ terminal access to the box already implies ownership of the secrets.
 - [`install.sh`](../install.sh) — Stage-A bootstrap + handoff
 - [`condor/cli.py`](../condor/cli.py) — `init` and `login-token`
   (`make init` / `make login-token`, or `uv run python -m condor.cli …`)
-- [refactor-10](architecture/refactor-10-onboarding-harness-selection.md)
-  — the design rationale, including the field study of the OpenClaw and
-  Hermes installers this flow is modeled on
+- [changes-from-main.md](changes-from-main.md) — how this flow came to
+  be, including the field study of the OpenClaw and Hermes installers it
+  is modeled on; [simpler-agent-framework.md](simpler-agent-framework.md)
+  — the architecture the install sets up

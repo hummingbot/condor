@@ -1,26 +1,10 @@
 # Condor agent framework — the simplified architecture
 
-Architectural reference for the agent system as of 2026-07-12, after
-[refactor-01b](refactor-01b-agent-history-multi-strategy.md) (agent-level
-history), [refactor-02](refactor-02-unified-run-primitive.md) (one run
-primitive), [refactor-05](refactor-05-skill-evolution.md) (portable
-skills),
-[refactor-06](refactor-06-dissolve-assistants-layer.md) (assistants layer
-dissolved; `CONDOR.md` at repo root),
-[refactor-07](refactor-07-session-as-primitive.md) (session as the stateful
-primitive; consult/delegate/experiment leave non-session artifacts), and
-[refactor-10](refactor-10-onboarding-harness-selection.md) (onboarding by
-harness selection: `install.sh` + `condor init`) — all implemented and
-live. (Refactor-05's Phase 3 automatic curation loop was implemented, then
-removed 2026-07-11 as over-complex; skill improvement is human-directed in
-chat. [Refactor-08](refactor-08-notification-channels.md) decided
-Telegram-first notifications — no bus layer.
-[Refactor-09](refactor-09-hermes-default-harness.md) — drop Condor's own
-harness for Hermes — was proposed and REJECTED: no harness is privileged,
-ours stays as the batteries-included default; see §10.) This supersedes the
-descriptive parts of [agent-framework.md](agent-framework.md); that
-document's §6 (session & turn mechanics — the chat process model) is
-unchanged and still authoritative.
+Architectural reference for the Condor agent system as of 2026-07-12 —
+the single description of how the system works today. How it got here
+from `main` (the harness-validation spike and the refactor series that
+followed) is recorded in [changes-from-main.md](changes-from-main.md);
+user-facing install docs are in [installing.md](installing.md).
 
 The one-sentence version: **an Agent is one identity with one history; every
 way of invoking its brain is the same primitive under a different permission
@@ -42,10 +26,13 @@ Python), **learnings** (`learnings.md`, the capped semantic capture pool),
 what the field converged on independently: journal = episodic, learnings =
 semantic, skills = procedural.
 
-The chat coordinator's agent-home is the **repo root** (refactor-06):
-`CONDOR.md` (its brain — deliberately not a host-owned name like AGENT.md) +
+The chat coordinator's agent-home is the **repo root**: `CONDOR.md` (its
+brain — deliberately not a host-owned name like AGENT.md or AGENTS.md,
+which a harness opened in this repo would load as *its own* instructions) +
 `skills/` + `routines/` + `store/`, mirroring `agents/{slug}/` one-for-one.
-It routes to agents and is not itself consultable.
+It routes to agents and is not itself consultable. There is no separate
+"assistants" layer: the root IS the chat agent, `agents/` are the domain
+agents it routes to.
 
 ## 2. Identity & storage — one dir, one numbering, metadata not addresses
 
@@ -162,7 +149,7 @@ run_agent(policy=human_gate(chat_id), timeout=900s)
      |                    `-- no chat/bot? -> deny_gate: mutation cancelled
      v
 return answer text inline (caller was blocking the whole time)
-     — nothing persists: the ANSWER is the artifact (refactor-07)
+     — nothing persists: the ANSWER is the artifact
 ```
 
 ### 4.2 Delegation — background, unattended, **risk-gated**
@@ -175,8 +162,10 @@ start_delegation()                            condor/agents/delegate.py
      |  resolve policy FIRST (loud error before anything runs):
      |    trading agent (server_required)?
      |       limits = per-call risk_limits override   <- REPLACES baseline
-     |             or AGENT.md risk_limits baseline
-     |       neither? -> ValueError (say the numbers out loud)
+     |             or AGENT.md risk_limits baseline   <- REQUIRED at agent
+     |                                                   save time (see §8)
+     |       neither? -> ValueError — only reachable via hand-written
+     |                   legacy AGENT.md files (defense in depth)
      |       policy = risk_gate(limits, RiskState())   # zero seed = per-run budget
      |    serverless specialist? policy = AUTO
      |
@@ -255,11 +244,10 @@ but stays on record). Shared-tier writes remain chat-only
 
 Why delta patches: full-rewrite self-editing measurably collapses playbooks
 (ACE's brevity bias / context collapse), so `patch` is the preferred edit
-even for humans. An automatic session-end curation pass (refactor-05
-Phase 3: evidence-gated delta patches by the agent itself under a
-restricted tool profile) was implemented, live-validated, and then
-**removed** (2026-07-11) — the machinery outweighed the benefit at this
-scale. The capture side and the patch/promote primitives it used remain.
+even for humans. An automatic session-end curation pass (evidence-gated
+delta patches by the agent itself) was implemented, live-validated, and
+then **removed** — the machinery outweighed the benefit at this scale. The
+capture side and the patch/promote primitives it used remain.
 
 ## 6. Skills — one portable format, three tiers, two estates
 
@@ -304,21 +292,39 @@ create/edit/fix goes through the `routine_builder` agent — typically as a
 delegation, which is also how the framework builds its own examples
 (`grid_backtest`, `funding_logger` were authored and tested by it).
 
-The routine/skill/agent decision framework, with worked examples
-(backtesting, data collection), lives in
-[usage-patterns.md](usage-patterns.md): routine = deterministic *how*,
-skill = judgment *how*, agent = *ownership/accumulation*; a loop only for
-scheduled work.
+**The routine/skill/agent decision framework** (validated end-to-end by
+building real examples through the system itself):
+
+```
+routine  = deterministic HOW   (same inputs, same steps: a report, a fetch)
+skill    = judgment HOW        (a procedure that needs a model to apply it)
+agent    = ownership + accumulation (someone must hold history/learnings)
+loop     = ONLY for scheduled work — not a synonym for "agent exists"
+```
+
+Worked examples that set the pattern: backtesting became a `backtest_lab`
+agent (zero-trade `{0, 0}` baseline) + a methodology skill + candle-sim
+routines — the platform's own `run_backtest` was unusable here (binance
+geo-blocked with 451, hyperliquid has no backtest connector, and
+hyperliquid 3m candles cap at ~3 days: use 15m for month windows). Data
+collection became routines owned by the *consuming* agent, writing to its
+own `store/` (`funding_logger` under `funding_rate_watcher`).
 
 ## 8. Risk model — one gate, many seats
 
 ```
                       where the numbers come from
                       ----------------------------
+AGENT.md baseline     REQUIRED for every server-backed agent — the save
+                      itself fails without one (AgentStore._save): the
+                      AGENT.md defines what the agent does, including how
+                      much it may do unattended. {0, 0} is the explicit
+                      "read-only, never trades" statement.
 tick session          request config > strategy default_config
                       > AGENT.md risk_limits baseline > schema defaults
 delegation            per-call risk_limits override (REPLACES, never merges)
-                      > AGENT.md baseline; NEITHER -> loud error at start
+                      > AGENT.md baseline (present by construction; a loud
+                      delegate-time error survives for hand-written files)
 read-only agent       baseline {0, 0} -> every order-shaped action blocked
                       by construction (funding_rate_watcher, backtest_lab)
 
@@ -343,10 +349,10 @@ Known, accepted gap: no aggregate exposure cap *across* concurrent sessions
 of one agent — each session's budget is its own (the platform-side deploy
 loss cap is the cross-cutting bound).
 
-## 9. Routing (chat) — updated decision tree
+## 9. Routing (chat) — the decision tree
 
-Unchanged in spirit from the original doc; the one material change is that
-DELEGATE is no longer "full auto-approve, no sandbox":
+The chat coordinator (and any external harness following the MCP server
+instructions) routes requests in this priority order:
 
 ```
 User request
@@ -364,11 +370,12 @@ User request
 ## 10. Harnesses, identity, onboarding — the outer tier
 
 The framework runs behind an MCP boundary, which makes the *conversation*
-layer swappable (validated live in the `spike/mcp-harness-validation`
-base: sessions survived harness swaps mid-flight). Three tiers:
+layer swappable (validated live: sessions survived harness swaps
+mid-flight — start from Claude Code, stop from Telegram). Two tiers:
 
 ```
-Tier 1  interactive harnesses — NONE privileged (refactor-09 rejected)
+Tier 1  interactive harnesses — NONE privileged (a proposal to drop ours
+        for Hermes was evaluated and rejected)
         Condor's own chat (Telegram + web)  <- batteries-included default;
                                                owns the approval surface
                                                (DANGEROUS_TOOLS confirms)
@@ -380,6 +387,15 @@ Tier 2  the persistent Condor process — TickEngine, gates, journals,
         is indifferent to which harness invoked it.
 ```
 
+**Chat sessions are Tier-1 conversation state, not §2 sessions.** Condor's
+own harness keeps a per-user `AgentSession` (`handlers/agents/session.py`):
+conversation history with compaction, streaming to Telegram/web, and the
+DANGEROUS_TOOLS confirmation flow (`confirmation.py` — asyncio futures
+answered by inline Approve/Reject buttons, 120s timeout). The brain it
+loads is repo-root `CONDOR.md`. This is the same *kind* of thing as a
+Claude Code session — a conversation that steers Tier 2 — and shares
+nothing with `sessions/session_N/` (the capital-engagement record).
+
 **Identity.** `user_id` is an integer at every call site (historically a
 Telegram id — Telegram remains the IdP for multi-user installs). Tier-A
 auto-bind: an MCP server spawned *without* identity args binds to the sole
@@ -388,7 +404,7 @@ holds every secret, so the id is an identifier, not a credential. Multiple
 approved users deliberately disable auto-bind; each harness registration
 must then pass explicit identity args.
 
-**Onboarding (refactor-10).** `install.sh` is bash bootstrap only (git/uv,
+**Onboarding.** `install.sh` is bash bootstrap only (git/uv,
 clone-or-update, `uv sync`, `.env` template, API probe; `--stage-json` for
 agent-driven installs); every product question lives in `condor init`
 (`python -m condor.cli`, `make init`), which is idempotent and handed the
@@ -401,14 +417,14 @@ and get their config **emitted, never installed**. `condor login-token`
 mints a stateless, purpose-tagged, 5-minute JWT the token-login route
 redeems, so Telegram-free installs reach the dashboard; `decode_jwt`
 rejects purpose-tagged tokens as session bearers on both the HTTP and WS
-paths.
+paths. Full walkthrough: [installing.md](installing.md).
 
-**Notifications (refactor-08).** Telegram-first, by decision: TG is the
-notification spine (all six emitters), no bus/inbox/mailbox layer. The
-full bus design is kept in that doc as design-of-record for TG-free
-installs. Known accepted gap, fix decided but pending: runs launched with
-`chat_id=0` (web starts) notify no one — resolve the TG chat from
-`user_id` (in DMs `chat_id == user_id`).
+**Notifications.** Telegram-first, by decision: TG is the notification
+spine (all six emitters — MCP `send_notification`, `engine._notify`,
+`delegate._notify_done`, shutdown alerts, routines, login tokens), no
+bus/inbox/mailbox layer. Known accepted gap, fix decided but pending: runs
+launched with `chat_id=0` (web starts) notify no one — resolve the TG chat
+from `user_id` (in DMs `chat_id == user_id`).
 
 ## 11. Summary diagram
 

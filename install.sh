@@ -4,7 +4,7 @@
 #   curl -fsSL https://condor.hummingbot.org/install.sh | bash
 #   curl -fsSL ... | bash -s -- --harness claude-code,hermes
 #
-# Architecture (docs/architecture/refactor-10-onboarding-harness-selection.md):
+# Architecture (docs/installing.md, docs/changes-from-main.md §5):
 # Stage A (this script) does bootstrap only — deps, clone-or-update, venv,
 # .env template. Every product question (identity, harness selection,
 # Telegram) lives in `condor init`, which is re-runnable forever without
