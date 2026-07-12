@@ -101,7 +101,113 @@ reference implementation, funnel) while making the Telegram bot a
 *choice* — and it costs one CLI command plus a terminal token mint,
 because every underlying path already exists.
 
-## 6. Open questions
+## 6. Field study: how OpenClaw and Hermes install themselves
+
+Read in full 2026-07-12 (`openclaw.ai/install.sh`, ~3,500 lines;
+`hermes-agent.nousresearch.com/install.sh`, ~3,100 lines). Different
+codebases, same converged architecture:
+
+1. **Bash is bootstrap only.** OS/arch detection, dependency install
+   with auto-repair (OpenClaw detects npm build-tool failures and
+   installs compilers; Hermes installs uv/python/node/git itself),
+   fetch code, venv, PATH, config *templates* (never overwrite user
+   config). Not one product question is asked in bash.
+2. **Product questions live in the product's own CLI.** OpenClaw ends
+   with `exec </dev/tty; exec openclaw onboard`; Hermes runs
+   `hermes setup < /dev/tty`. The `/dev/tty` rebind is what makes
+   prompts work under `curl | bash` — and both probe by actually
+   *opening* /dev/tty first (a bare existence test passes inside Docker
+   builds where the open then fails).
+3. **Idempotent via config-presence branching.** Config present →
+   skip onboarding, run `doctor`/verify, restart the daemon if one is
+   loaded. Fresh → onboard. Re-running the installer is always safe.
+4. **Every prompt has a flag** (`--no-onboard`, `--skip-setup`,
+   non-interactive detection); no TTY never hangs — it prints the
+   command to finish setup later.
+5. **Post-install actions key off wizard outcomes.** Hermes starts its
+   gateway only if messaging tokens were actually configured.
+6. **Hermes extra: a machine-readable stage protocol** — each stage
+   emits `{"ok":true,"stage":"deps","skipped":false}` JSON lines, with
+   `stage_needs_user_input` marking where a driver must attach a TTY.
+   The installer is designed to be driven *by a program*.
+
+## 7. Condor's current installer, measured against that bar
+
+Today (`make install` → `setup-environment.sh`, 1,101 lines; the
+hummingbot/deploy setup.sh wraps the same flow; docs at
+condor.hummingbot.org/getting-started/installing): one bash script does
+**both halves** — bootstrap (uv sync, node/nvm, the ACP bridge npm
+package, TypeScript, optional hummingbot-api Docker stack, Tailscale)
+*and* product questions (Telegram token + admin id via `/dev/tty`
+prompts, `.env` and config.yml writes). BotFather and @userinfobot are
+mandatory documented steps before anything runs.
+
+What it already does right: `/dev/tty` prompts, idempotent `.env`
+updates (sed-replace vs append), Docker/Tailscale treated as infra.
+What breaks the studied pattern: product questions in bash mean
+changing an answer requires re-running the installer, `condor init`
+cannot exist while bash owns the config writes, Telegram is assumed
+rather than chosen, and there is no non-interactive or
+machine-drivable path.
+
+## 8. The Condor install script
+
+```
+curl -fsSL https://condor.hummingbot.org/install.sh | bash
+# flags after `bash -s --`:
+#   --harness claude-code,openclaw,hermes,condor   preseed selection
+#   --user-id <int>          identity for non-interactive runs
+#   --hummingbot-api / --no-hummingbot-api
+#   --no-init                bootstrap only
+#   --non-interactive        fail rather than prompt
+#   --stage-json             Hermes-style stage lines for agent drivers
+```
+
+**Stage A — bash bootstrap** (a refactor of setup-environment.sh, not
+a rewrite): detect OS, ensure uv/node, clone-or-update the repo
+(config.yml present → upgrade path: sync deps, verify, restart the
+tmux session), optional hummingbot-api Docker + Tailscale (infra stays
+in bash), copy `.env.example` → `.env` if missing. **All Telegram
+prompts removed from bash.**
+
+**Stage B — handoff**: `exec </dev/tty; uv run condor init [--harness …]`
+— everything in §2 runs here, in Python, re-runnable forever without
+the installer.
+
+**Harness detection makes selection concrete**: before showing the
+menu, probe for evidence of each harness on the box — `claude` on PATH,
+`openclaw` on PATH / its config dir, `~/.hermes` or `hermes` on PATH —
+and preselect what's found ("Found Claude Code and Hermes on this
+machine"). Then the §2 writers run per selection:
+
+- **claude-code** — repo `.mcp.json` already works in-repo; offer
+  `claude mcp add --scope user condor -- uv run --directory <repo>
+  python -m mcp_servers.condor` for use outside it.
+- **openclaw** — write the server into its MCP config when installed
+  (exact config path pinned during implementation); else print the
+  snippet.
+- **hermes** — append the MCP server to its config +
+  `hermes skills tap add <repo>`. If not installed, offer their
+  one-liner and run it only on explicit yes — never silently install
+  someone else's software.
+- **condor's own** — the BotFather walk (validate the token with
+  `getMe` before writing it), start the tmux session.
+- **none** — dashboard URL + `condor login-token`.
+
+**Why `--stage-json` earns its place here** when it might look like
+gold-plating: Condor's audience *is* agent harnesses. "Ask Claude Code
+to install Condor" becomes a real path — the agent runs the installer
+with flags, parses the stage lines, and attaches the human only at the
+`init` stage. The two projects we studied ship this for exactly that
+reason.
+
+**Sequencing**: split setup-environment.sh (product prompts → `condor
+init`, the rest stays); ship `install.sh` at condor.hummingbot.org;
+point hummingbot/deploy's setup.sh at it; update the docs page so
+"Create a Telegram Bot" moves *inside* the Condor-harness branch
+instead of being a prerequisite for everyone.
+
+## 9. Open questions
 
 1. Does the web **chat** panel stay part of "Condor's own harness"
    bundled with TG, or become selectable alone? (It shares the session
