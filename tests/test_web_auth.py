@@ -62,3 +62,46 @@ def test_expired_redemptions_do_not_block_later_valid_redemption():
     info = redeem_login_token(valid)
     assert info is not None
     assert info["user_id"] == user_id
+
+
+# ── CLI login tokens (`condor login-token`) ──
+
+
+def test_cli_login_token_roundtrip(monkeypatch):
+    """A CLI-minted token redeems to the right user via the stateless path."""
+    monkeypatch.setenv("WEB_JWT_SECRET", "test-secret")
+    token = auth.create_cli_login_token(456, username="feng")
+    info = auth.redeem_cli_login_token(token)
+    assert info is not None
+    assert info["user_id"] == 456
+    assert info["username"] == "feng"
+
+
+def test_cli_login_token_rejected_as_session_bearer(monkeypatch):
+    """Purpose-tagged tokens must never pass the session-JWT decoder,
+    while ordinary session JWTs still do."""
+    monkeypatch.setenv("WEB_JWT_SECRET", "test-secret")
+    cli_token = auth.create_cli_login_token(456)
+    assert auth.decode_jwt(cli_token) is None
+
+    session = auth.create_jwt(456, username="feng")
+    payload = auth.decode_jwt(session)
+    assert payload is not None
+    assert payload["sub"] == "456"
+
+
+def test_session_jwt_not_redeemable_as_cli_login(monkeypatch):
+    """The reverse direction is also closed: a session JWT (no purpose
+    claim) is not a valid login token, and garbage is rejected."""
+    monkeypatch.setenv("WEB_JWT_SECRET", "test-secret")
+    session = auth.create_jwt(456)
+    assert auth.redeem_cli_login_token(session) is None
+    assert auth.redeem_cli_login_token("garbage") is None
+
+
+def test_cli_login_token_expires(monkeypatch):
+    """An expired CLI token is rejected."""
+    monkeypatch.setenv("WEB_JWT_SECRET", "test-secret")
+    monkeypatch.setattr(auth, "_CLI_LOGIN_TOKEN_TTL", -1)
+    token = auth.create_cli_login_token(456)
+    assert auth.redeem_cli_login_token(token) is None
