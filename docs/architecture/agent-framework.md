@@ -7,10 +7,13 @@
 > transcripts, ungated delegations, or `run_once` as an experiment mode, the
 > current system differs: all history lives at `agents/{slug}/sessions/` with
 > `meta.yml` (kind + strategy), ids are `{slug}_{N}`, delegations are risk-gated
-> sessions, and run_once is `loop` + `max_ticks: 1`. See
-> [refactor-01b](refactor-01b-agent-history-multi-strategy.md) and
-> [refactor-02](refactor-02-unified-run-primitive.md), and
-> `condor/agents/README.md` for the current layout.
+> sessions, and run_once is `loop` + `max_ticks: 1`. The current-system
+> reference is [simpler-agent-framework.md](simpler-agent-framework.md);
+> §6 of THIS document (session & turn mechanics / process model) remains
+> authoritative and unchanged. Design records:
+> [refactor-01b](refactor-01b-agent-history-multi-strategy.md),
+> [refactor-02](refactor-02-unified-run-primitive.md),
+> [refactor-05](refactor-05-skill-evolution.md).
 
 Architectural reference for how Condor's assistant/agent/skill/routine/strategy
 system fits together, as of PR #135 (`feature/FEAT-003-stores-por-asistente`,
