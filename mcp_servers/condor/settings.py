@@ -12,10 +12,6 @@ class Settings:
     bot_token: str
     agent_slug: str
     active_server: str
-    # Named tool profile restricting which MCP tools this subprocess serves
-    # (e.g. "curation"). Empty = all tools. Enforced in middleware.handle_errors
-    # — call-time, so it binds ACP models that can't be allowlisted client-side.
-    tool_profile: str = ""
 
 
 def _parse_settings() -> Settings:
@@ -25,7 +21,6 @@ def _parse_settings() -> Settings:
     parser.add_argument("--agent-slug", default=None)
     parser.add_argument("--bot-token", default=None)
     parser.add_argument("--server-name", default=None)
-    parser.add_argument("--tool-profile", default=None)
     args, _ = parser.parse_known_args()
 
     return Settings(
@@ -34,7 +29,6 @@ def _parse_settings() -> Settings:
         bot_token=args.bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         agent_slug=args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", ""),
         active_server=args.server_name or os.environ.get("CONDOR_SERVER_NAME", ""),
-        tool_profile=args.tool_profile or os.environ.get("CONDOR_TOOL_PROFILE", ""),
     )
 
 

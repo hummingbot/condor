@@ -284,11 +284,11 @@ class SkillStore:
     ) -> dict:
         """Delta-edit a skill's BODY: replace ``old_string`` with ``new_string``.
 
-        The curation loop's only write primitive (refactor-05 Phase 3):
-        full-body rewrites are reserved for humans because one bad rewrite can
-        collapse a playbook (ACE's context-collapse failure). ``old_string``
-        must match the body exactly once; ``changelog`` (one line, required)
-        and ``updated_by`` are stamped into the skill's provenance metadata.
+        Safer than a full-body rewrite for incremental improvements: one bad
+        rewrite can collapse a playbook (ACE's context-collapse failure).
+        ``old_string`` must match the body exactly once; ``changelog`` (one
+        line, required) and ``updated_by`` are stamped into the skill's
+        provenance metadata.
         """
         if not self.skills_dir:
             return {"error": "this assistant has no skills library"}

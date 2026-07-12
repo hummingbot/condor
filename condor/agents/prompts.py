@@ -265,7 +265,6 @@ def build_tick_prompt(
         "server_name",
         "frequency_sec",
         "execution_mode",  # noise / internal
-        "curate_on_stop",  # engine-internal; not a trading decision input
     }
     config_lines = [
         "[CURRENT CONFIG]",

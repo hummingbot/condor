@@ -299,7 +299,6 @@ def _condor_mcp_args(
     user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
-    tool_profile: str | None = None,
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess."""
     import os
@@ -319,8 +318,6 @@ def _condor_mcp_args(
         args.extend(["--agent-slug", agent_slug])
     if server_name:
         args.extend(["--server-name", server_name])
-    if tool_profile:
-        args.extend(["--tool-profile", tool_profile])
     return args
 
 
@@ -331,7 +328,6 @@ def build_mcp_servers_for_session(
     execution_mode: str = "loop",
     server_name: str | None = None,
     agent_slug: str | None = None,
-    tool_profile: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -364,10 +360,7 @@ def build_mcp_servers_for_session(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(
-            chat_id, user_id, agent_slug, server_name=server_name,
-            tool_profile=tool_profile,
-        ),
+        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
         "env": [],
     }
 
@@ -421,7 +414,6 @@ def build_mcp_servers_for_agent(
     chat_id: int,
     agent_slug: str | None = None,
     execution_mode: str = "loop",
-    tool_profile: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build MCP server configs for a trading agent bound to a specific server.
 
@@ -437,10 +429,7 @@ def build_mcp_servers_for_agent(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(
-            chat_id, user_id, agent_slug, server_name=server_name,
-            tool_profile=tool_profile,
-        ),
+        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
         "env": [],
     }
 

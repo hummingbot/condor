@@ -1223,37 +1223,6 @@ async def resume_agent(
     return {"resumed": True}
 
 
-# ── Skill curation (refactor-05 Phase 3) ──
-
-
-@router.post("/{slug}/curate")
-async def curate_agent_skills(
-    slug: str,
-    chat_id: int = 0,
-    user: WebUser = Depends(get_current_user),
-):
-    """Run a skill-curation pass for this agent (explicit trigger).
-
-    The pass runs in the background as a ``kind: curation`` session: it reads
-    learnings + recent session journals and applies delta patches to the
-    agent's LOCAL skills, ending with a scoped git commit and a notification
-    carrying any shared-tier promotion proposals.
-    """
-    from condor.agents.curation import start_skill_curation
-
-    _get_agent(slug)
-    try:
-        session_id = await start_skill_curation(
-            agent_slug=slug,
-            user_id=user.id,
-            chat_id=chat_id,
-            trigger="explicit request",
-        )
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    return {"started": True, "session_id": session_id}
-
-
 # ── Learnings (agent-level) ──
 
 

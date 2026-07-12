@@ -3,7 +3,10 @@
 Status: **proposed** (2026-07-11) · Amends the implemented
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) storage model;
 leaves [refactor-02](refactor-02-unified-run-primitive.md)'s execution core
-and [refactor-05](refactor-05-skill-evolution.md)'s curation loop intact.
+and [refactor-05](refactor-05-skill-evolution.md)'s skill format intact.
+(The historical references to curation below describe the since-removed
+automatic curation pass — kept where they explain how the disk got into
+its current state.)
 
 ## 1. The problem with "everything is a session"
 
@@ -44,9 +47,9 @@ increasing commitment — and each leaves exactly one kind of artifact:
 | **dry_run** | "would these orders work?" | No (one rehearsal tick) | risk_gate(`dry_run=True`) — **every** mutation cancelled | a **snapshot** — flat file, `dry_runs/` |
 | **session** | "engage capital under these orders" | **Yes** | risk_gate (journal-seeded) | a **journal** — `sessions/session_N/` with config, snapshots, meta |
 
-(Curation is the fifth invocation shape, but the *framework* invokes it, not
-the user — it's housekeeping, not a verb in the user's vocabulary. Its
-transcript lands in `curation/`.)
+(The automatic curation pass — formerly a fifth, framework-invoked shape —
+was removed on 2026-07-11 as over-complex, which simplifies this refactor:
+no `curation/` dir, no curation migration.)
 
 **Session — not tick — is the stateful primitive.** A session is the unit
 of stateful engagement: frozen config, journal, risk state carried across
@@ -62,7 +65,7 @@ the one invocation shape 01b never sucked into the session envelope:
   `is_experiment`, allocates **no** session dir and **no** journal; the id
   is `{slug}_e{N}` from `next_experiment_number()` (its own counter — never
   consumed a session number).
-- `_loop()`: one tick, then self-stop. `_maybe_curate` skips experiments.
+- `_loop()`: one tick, then self-stop.
 - `risk.py _risk_gate_callback(dry_run=True)`: cancels every mutating
   action, so nothing ever reaches the exchange — which is why the `_eN` id
   never becomes on-exchange identity and dry-run files are freely movable
@@ -78,7 +81,7 @@ the right shape, and delegations are being restored to it.
 `execution_mode: run_once` → `loop` + `max_ticks: 1` *before* the
 experiment check and session allocation, so a run_once gets a real
 `sessions/session_N/`: frozen config, journal, meta, baseline-seeded risk,
-`controller_id` attribution, finalize + curation trigger on stop. It is a
+`controller_id` attribution, meta finalized on stop. It is a
 session advanced exactly once — in the track record, as it should be
 (run_once can place real orders).
 
@@ -93,7 +96,7 @@ execution.
 
 ## 3. What each verb leaves behind (target design)
 
-Sessions (the stateful primitive, dir-per-session) sit alongside three
+Sessions (the stateful primitive, dir-per-session) sit alongside two
 flat dirs — one per one-shot artifact kind, one file per invocation:
 
 ```
@@ -108,9 +111,9 @@ agents/{slug}/
     delegations/                     <- flat, one file per one-shot
         2026-07-11-d3.md                invocation, named {date}-{id}.md —
     dry_runs/                           date-first so ls sorts chrono-
-        2026-07-11-e2.md                logically; the short id (d3/e2/c1)
-    curation/                           stays the lookup handle
-        2026-07-11-c1.md                (glob *-d3.md).
+        2026-07-11-e2.md                logically; the short id (d3/e2)
+                                        stays the lookup handle
+                                        (glob *-d3.md).
 ```
 
 - **Naming**: sessions keep `session_N` — those names are identity
@@ -128,24 +131,23 @@ agents/{slug}/
   as today; only the filename changes (from `experiment_N.md`) to match
   the convention. Ids stay `{slug}_e{N}` (they're embedded in
   `split_agent_id` and the MCP read path).
-- **Curation transcripts** (`curation/{date}-c{N}.md`): keep last ~10.
-  The real audit trail stays the scoped git commit.
 
 - **Consult persists nothing.** The answer returns inline; done. *Optional
   mitigation for the one real loss (see §5): a single rolling
   `consults.log` per agent — timestamped task + answer lines, no
   transcripts, no numbering — is a cheap opt-in if the record proves
   missed. Not part of the base design.*
-- **Curation** keeps its trigger, lock, tool profile, mandates, provenance
-  stamps, and git commit exactly as implemented; only its transcript's home
-  moves into `curation/`.
 
 ## 4. Code change inventory
 
 - `journal.py`: `allocate_session_dir` and meta helpers now serve sessions
-  only; drop `prune_sessions` kind machinery (curation keeps a simple
-  keep-last-K on its flat dir); `resolve_agent_dirs` unchanged
-  (`{slug}_{N}` still resolves — and now always means a real session).
+  only; delete `prune_sessions` (its last caller was consult retention);
+  `resolve_agent_dirs` unchanged (`{slug}_{N}` still resolves — and now
+  always means a real session). `promote_learning` moves to a bare
+  agent-slug handle: learnings live at the agent, so a session handle was
+  never semantically required — `journal_write` accepts the slug for
+  agent-level entry types, loud error if a bare slug is used for
+  session-scoped ones.
 - `sessions_index.py`: **shrinks** — no `kind`, no `TICK_KIND`, no
   kind-aware counting; `list_sessions`/`enumerate_run_ids` lose their
   filters; `infer_latest_session_status` loses the kind check.
@@ -159,13 +161,6 @@ agents/{slug}/
   `dry_runs/*-e{N}.md`; `sessions_index.py` `_EXPERIMENT_FILE_RE` + its
   globs update; `trading_agent.py` `_resolve_experiment_file` resolves
   `{slug}_eN` by glob (`*-e{N}.md`). Dir, engine, gate, ids untouched.
-- `curation.py`: transcript path changes; `keep-last-K` prune of the flat
-  dir. One design point to settle: the curator's `promote_learning` calls
-  currently authenticate with the curation *session id* — with no session,
-  the journal tools accept the bare agent slug for **agent-level**
-  operations (learnings live at the agent; a session handle was never
-  semantically required). `journal_write` gains that path; loud error if a
-  bare slug is used for session-scoped entry types.
 - `engine.py`: unchanged except vocabulary (docstrings; optionally rename
   `TickEngine` → `SessionEngine` — cosmetic, defer).
 - Web/MCP: sessions list is now only sessions (the "Delegations & Consults"
@@ -174,8 +169,7 @@ agents/{slug}/
 - Frontend: `SessionInfo.kind` disappears; the background-runs panel
   switches data source.
 - Tests: consult-persistence and kind-filter tests removed; delegation
-  flat-file tests restored (main's shape, plus the start-husk); curation
-  tests re-pointed.
+  flat-file tests restored (main's shape, plus the start-husk).
 
 Net: **negative LOC.** This deletes more compensating machinery than it
 adds (kind filters, per-kind retention, kind-aware indexes, the web split).
@@ -189,7 +183,7 @@ adds (kind filters, per-kind retention, kind-aware indexes, the web split).
    that long consults are delegation-shaped anyway — the router's own rule
    (">1-2 min → delegate") already points the durable path.
 2. **Uniform session analytics.** "Show me everything this agent did" is no
-   longer one list — it is `sessions/` plus the three flat dirs. The
+   longer one list — it is `sessions/` plus the two flat dirs. The
    agent detail page still shows everything; they're just separate
    sources now.
 3. **meta.yml queryability for delegations** (status/task as YAML) becomes
@@ -207,11 +201,12 @@ exists, `funding_rate_watcher_2`, which placed no orders; thirteen
 non-tick sessions across five agents):
 
 1. Back up `agents/` (same preflight as 01b).
-2. For every `sessions/session_N` with `kind: delegation|consult|curation`:
-   move `transcript.md` + meta header → `delegations/{date}-d{K}.md` /
-   `curation/{date}-c{K}.md` (consults: drop, or fold into `consults.log`
-   if the option is adopted); delete the session dir. Dates come from the
-   meta's `started_at`.
+2. For every `sessions/session_N` with `kind: delegation`: move
+   `transcript.md` + meta header → `delegations/{date}-d{K}.md`; delete the
+   session dir. `kind: consult|curation` sessions: drop (consults
+   optionally fold into `consults.log` if that option is adopted; the
+   curation feature is removed and its audit trail is the git history).
+   Dates come from the meta's `started_at`.
 3. Rename `dry_runs/experiment_N.md` → `dry_runs/{date}-e{N}.md` —
    **numbers preserved** (they're the `{slug}_eN` ids), date from the
    snapshot header. Safe to rename freely: dry runs cancel all mutations,
@@ -235,4 +230,4 @@ non-tick sessions across five agents):
    surfacing it as its own verb/action (`dry_run`) at the MCP/web layer at
    implementation time, even if the engine keeps the mode flag internally.
 5. Delegation transcript cap: recommend none for now (they are the durable
-   task record); curation keeps last 10.
+   task record).

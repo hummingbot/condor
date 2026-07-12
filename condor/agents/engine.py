@@ -177,38 +177,6 @@ class TickEngine:
             self.config.get("frequency_sec", 60),
         )
 
-    def _maybe_curate(self, trigger: str) -> None:
-        """Fire the skill-curation pass after a tick session ends (Phase 3).
-
-        Fire-and-forget: the pass is its own session and must never block or
-        fail the stop path. Skipped for experiments, when disabled by config,
-        or when the preconditions say a pass would find nothing.
-        """
-        if self.is_experiment or not self.config.get("curate_on_stop", True):
-            return
-        try:
-            from .curation import (
-                is_curation_inflight,
-                should_curate,
-                start_skill_curation,
-            )
-
-            if is_curation_inflight(self.agent.slug):
-                return
-            if not should_curate(self.agent.agent_dir):
-                return
-            asyncio.create_task(
-                start_skill_curation(
-                    agent_slug=self.agent.slug,
-                    user_id=self.user_id,
-                    chat_id=self.chat_id,
-                    trigger=f"session end: {self.agent_id} ({trigger})",
-                    bot=getattr(self, "_bot", None),
-                )
-            )
-        except Exception:
-            log.exception("TickEngine %s: failed to start curation", self.agent_id)
-
     def _finalize_meta(self, status: str) -> None:
         """Record the terminal status in the session's meta.yml."""
         if self.session_dir is None:
@@ -243,7 +211,6 @@ class TickEngine:
             self.journal.close()
         if _engines.pop(self.agent_id, None) is not None:
             self._finalize_meta("stopped")
-            self._maybe_curate("manual stop")
         log.info("TickEngine %s stopped", self.agent_id)
 
     async def _run_shutdown(self, reason: str) -> None:
@@ -380,7 +347,6 @@ class TickEngine:
                     self.journal.close()
                     _engines.pop(self.agent_id, None)
                     self._finalize_meta("stopped")
-                    self._maybe_curate("max_ticks reached")
                     return
 
             try:

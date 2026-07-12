@@ -61,11 +61,6 @@ class AgentConfig(BaseModel):
         "(deploy/retune) instead of creating standalone executors, and the bot's "
         "PnL is merged into the agent's reported performance. Empty = executor mode.",
     )
-    curate_on_stop: bool = Field(
-        default=True,
-        description="Run the skill-curation pass when this tick session ends "
-        "(skipped unless enough unpromoted learnings have accumulated)",
-    )
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 
     def to_engine_dict(self) -> dict[str, Any]:

@@ -4,16 +4,17 @@ Architectural reference for the agent system as of 2026-07-11, after
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) (agent-level
 history), [refactor-02](refactor-02-unified-run-primitive.md) (one run
 primitive), and [refactor-05](refactor-05-skill-evolution.md) (portable
-skills + curated self-improvement) — all implemented and live. This
-supersedes the descriptive parts of
-[agent-framework.md](agent-framework.md); that document's §6 (session &
-turn mechanics — the chat process model) is unchanged and still authoritative.
+skills) — all implemented and live. (Refactor-05's Phase 3 automatic
+curation loop was implemented, then removed 2026-07-11 as over-complex;
+skill improvement is human-directed in chat.) This supersedes the
+descriptive parts of [agent-framework.md](agent-framework.md); that
+document's §6 (session & turn mechanics — the chat process model) is
+unchanged and still authoritative.
 
 The one-sentence version: **an Agent is one identity with one history; every
 way of invoking its brain is the same primitive under a different permission
-policy; everything it learns flows learnings → skills through a curated,
-git-audited loop; and its skills are portable artifacts any host harness can
-install.**
+policy; it captures what it learns as learnings; and its skills are portable
+artifacts any host harness can install.**
 
 ## 1. Ontology — three things, not five
 
@@ -21,7 +22,7 @@ install.**
 |---|---|---|
 | **Agent** (`agents/{slug}/AGENT.md`) | The unit of identity, attribution, and accumulation: tools allowlist, consult trigger, server pin, **risk baseline**, plus ALL operational history | A per-task construct; there is exactly one history per agent |
 | **Strategy** (`strategies/{sslug}/strategy.md`) | A pure **playbook template**: tick tactic + `default_config`. A start-time selector recorded as session metadata | A state owner. No sessions/learnings/config.yml/shutdown.md live under it |
-| **Session** (`sessions/session_N/`) | One run of the agent's brain, of any kind: `tick_loop`, `delegation`, `consult`, `curation` — same envelope, same numbering | Strategy-scoped. Sessions belong to the agent; the strategy is a `meta.yml` field |
+| **Session** (`sessions/session_N/`) | One run of the agent's brain, of any kind: `tick_loop`, `delegation`, `consult` — same envelope, same numbering | Strategy-scoped. Sessions belong to the agent; the strategy is a `meta.yml` field |
 
 Supporting artifacts (owned by the agent, shared across all its playbooks):
 **skills** (markdown procedures, three tiers — §6), **routines** (executable
@@ -48,7 +49,7 @@ agents/{slug}/
                                 #   frontmatter: tools, when_to_consult,
                                 #   server_required/name, risk_limits (baseline)
     learnings.md                # agent-level; entries [strategy]-prefixed;
-                                #   Promoted section = consumed by curation
+                                #   Promoted section = folded into a skill
     shutdown.md                 # optional winddown override (walk: agent → _defaults)
     skills/  routines/  store/  # the shared brain
     strategies/
@@ -59,7 +60,7 @@ agents/{slug}/
             config.yml          #   frozen launch config
             journal.md          #   summary / decisions / ticks / executors
             snapshots/          #   full per-tick dumps
-        session_2/              # kind: delegation | consult | curation
+        session_2/              # kind: delegation | consult
             meta.yml            #   kind, status, task, risk_limits (delegations)
             transcript.md       #   full reasoning + tool calls + result
     dry_runs/
@@ -87,9 +88,7 @@ run_agent(agent, prompt, *, permission_policy, ...) -> RunResult
   |  resolve model (caller passes the triad winner:               |
   |    config > strategy > agent) --- healthcheck / fallback      |
   |            |                                                  |
-  |  build MCP servers (server pin > ambient; agent_slug scope;   |
-  |    optional --tool-profile — call-time tool restriction       |
-  |    that binds even ACP models)                                |
+  |  build MCP servers (server pin > ambient; agent_slug scope)   |
   |            |                                                  |
   |  make client: pydantic-ai (tools allowlist enforced)          |
   |               OR ACP subprocess (claude-acp / gemini / ...)   |
@@ -128,21 +127,14 @@ The policy lattice — the ONE axis that genuinely differs between run kinds:
                     |             mutations.
                     |
      AUTO (None)                  serverless specialists (routine_builder)
-                loosest           and curation — where the enforcement lives
-                                  elsewhere (tier guards, tool profiles).
+                loosest           — enforcement lives elsewhere (tier guards).
 ```
 
 A `None` permission callback means the client auto-approves everything — so
 a gate that cannot be built must return `deny_gate`, never `None`. This was
 a real, live bug class; it is now tested against.
 
-**Tool profiles** are the second enforcement line: the condor MCP subprocess
-accepts `--tool-profile` and refuses out-of-profile tools at call time
-(`middleware.py`). This binds ACP models, which cannot be client-side
-allowlisted. The `curation` profile permits only skills/journal/memory
-tools; unknown profiles fail closed.
-
-## 4. The four run kinds — one primitive, four call sites
+## 4. The three run kinds — one primitive, three call sites
 
 ### 4.1 Consult — synchronous, human-gated ("watch me do this")
 
@@ -228,7 +220,7 @@ TickEngine (owns loop/pause/max_ticks, the _engines registry entry,
     save_full_snapshot / write_summary                      |
        |                                                    |
   session end (stop / max_ticks reached):                   |
-    finalize meta.yml -> _maybe_curate() --------------> §5 curation
+    finalize meta.yml                                       |
 ```
 
 Launch resolution: `start_agent(agent_slug, strategy=...)` — the strategy is
@@ -236,62 +228,28 @@ optional with exactly one playbook, a loud error listing options with
 several. Risk limits resolve **request config > strategy default_config >
 AGENT.md baseline > schema defaults**.
 
-### 4.4 Curation — the sleep-time pass (see §5)
-
-Runs as its own `kind: curation` session under AUTO + the `curation` tool
-profile. Not schedulable by the user directly against markets — it never
-touches them.
-
-## 5. Self-improvement: capture → curate → promote
+## 5. Self-improvement: capture, then human curation
 
 The pen is never held by the in-run agent. Ticks are told skills are
 read-only; their write channel is learnings (one-line facts, deduped,
 `[strategy]`-provenance-prefixed, capped at 20).
 
-```
-      IN-RUN (capture)                 BETWEEN RUNS (curate)               HUMAN (promote)
- .----------------------.      .--------------------------------.      .------------------.
- | tick/delegation runs |      | trigger: tick session end       |      | notification     |
- |  journal.md entries  |      |  (curate_on_stop, gated: >=3    |      | carries          |
- |  learnings.md bullets|----->|  unpromoted learnings AND >=2   |      | PROMOTION        |
- |  transcripts         |      |  tick sessions; per-agent       |      | PROPOSALS        |
- '----------------------'      |  in-flight lock), or /curate,   |      |    |             |
-                               |  or MCP curate_skills           |      |    v             |
-                               |                                 |      | user confirms in |
-                               | kind:curation session, AUTO +   |      | chat -> skill    |
-                               | 'curation' tool profile         |      | copied to        |
-                               |                                 |      | _shared tier     |
-                               | inputs: ACTIVE learnings only + |      | (or host-facing) |
-                               |  last-5 tick session digests +  |      '------------------'
-                               |  skills index ([shared] marked) |
-                               |                                 |
-                               | mandates (store-enforced):      |
-                               |  - patch ONLY (old->new string, |
-                               |    must match exactly once;     |
-                               |    full rewrites are human-only)|
-                               |  - >=2-session evidence         |
-                               |  - dedup before adding          |
-                               |  - LOCAL tier only (shared      |
-                               |    writes rejected by store)    |
-                               |  - changing nothing is a GOOD   |
-                               |    outcome                      |
-                               |                                 |
-                               | every patch stamps provenance   |
-                               | (condor-updated-by / changelog);|
-                               | consumed learnings move to the  |
-                               | Promoted section;               |
-                               | pass ends with a git commit     |
-                               | scoped to agents/{slug}/skills  |
-                               '--------------------------------'
-```
+Folding learnings into skills is **human-directed, in chat**: review an
+agent's learnings, then use `manage_skill(action="patch")` — a delta edit
+(old→new string, must match exactly once) that stamps provenance
+(`condor-updated-by` + an appending `condor-changelog`) — and optionally
+mark the consumed learning via the journal's `promote_learning` (moves it
+to the `## Promoted` section: it stops occupying the capped active pool
+but stays on record). Shared-tier writes remain chat-only
+(`scope="shared"`); agents get a loud read-only error.
 
-Why this shape: full-rewrite self-editing measurably collapses playbooks
-(ACE's brevity bias / context collapse); single-episode writes overfit and
-poison (Reflexion, memory-management studies); so the loop is delta-only,
-evidence-gated, provenance-stamped, and git-audited — guardrails on by
-construction, not configuration. Phase 4 (outcome-weighted retention via
-skills-sha in session meta) is designed but deferred until the loop has
-history.
+Why delta patches: full-rewrite self-editing measurably collapses playbooks
+(ACE's brevity bias / context collapse), so `patch` is the preferred edit
+even for humans. An automatic session-end curation pass (refactor-05
+Phase 3: evidence-gated delta patches by the agent itself under a
+restricted tool profile) was implemented, live-validated, and then
+**removed** (2026-07-11) — the machinery outweighed the benefit at this
+scale. The capture side and the patch/promote primitives it used remain.
 
 ## 6. Skills — one portable format, three tiers, two estates
 
@@ -314,7 +272,7 @@ HOST (Claude Code / OpenClaw / Hermes — opened in the condor repo)
 ╌╌╌  MCP boundary (mcp_servers/condor)  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
 │
 └── AGENT-INTERNAL         consumed only by Condor's own runs
-      agents/{slug}/skills/      local tier   (agent-writable via curation)
+      agents/{slug}/skills/      local tier   (the agent's own playbooks)
       agents/_shared/skills/     shared tier  (chat-writable only, via
                                   manage_skill(scope="shared"); agents get
                                   a loud read-only error; local shadows
@@ -404,24 +362,19 @@ User request
    |
    |   consult(human_gate)   delegate(risk_gate|AUTO)   start_agent
    |          \                    |                    /
-   |           \                   |                   /        curate_skills
-   |            v                  v                  v          (AUTO+profile)
-   |          .-------------------------------------------.        |
-   |          |            run_agent + policies            |<------'
+   |           v                   v                   v
+   |          .-------------------------------------------.
+   |          |            run_agent + policies            |
    |          '-------------------------------------------'
    |                               |
    v                               v
  agents/{slug}/          sessions/session_N (meta.yml: kind+strategy+status)
    AGENT.md (risk baseline)  ├ tick_loop:  journal + snapshots + frozen config
    strategies/{sslug}/       ├ delegation: transcript (+ per-run risk budget)
-     strategy.md (playbook)  ├ consult:    transcript (retention 20)
-   skills/ (local>_shared)   └ curation:   transcript (retention 10)
-   learnings.md  ────────────────────────────┐
-   routines/  store/                         │ capture
-                                             v
-                       curation pass: delta patches -> local skills
-                       (provenance + scoped git commit; promotion to
-                        _shared/host-facing only with the user, in chat)
+     strategy.md (playbook)  └ consult:    transcript (retention 20)
+   skills/ (local>_shared)
+   learnings.md   <── capture (in-run); folded into skills by the
+   routines/  store/          user in chat (manage_skill patch, provenance)
 
  tick sessions --controller_id == {slug}_N--> Hummingbot executors/bots
                                               (the isolated virtual portfolio)

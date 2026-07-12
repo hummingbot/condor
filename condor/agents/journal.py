@@ -500,13 +500,12 @@ class JournalManager:
         path.write_text(new_text)
 
     def promote_learning(self, text_content: str) -> bool:
-        """Move a learning line to the ``## Promoted`` section (curation).
+        """Move a learning line to the ``## Promoted`` section.
 
-        Called by the skill-curation pass after folding a learning into a
-        skill: the entry stops occupying the capped active sections but stays
-        on record (provenance for what fed which skill). Matches by normalized
-        text against the active category sections. Returns False when nothing
-        matched.
+        Used after folding a learning into a skill: the entry stops occupying
+        the capped active sections but stays on record (provenance for what
+        fed which skill). Matches by normalized text against the active
+        category sections. Returns False when nothing matched.
         """
         path = self._learnings_path()
         if not path or not path.exists():

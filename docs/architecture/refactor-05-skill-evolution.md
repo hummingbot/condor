@@ -1,6 +1,11 @@
 # Refactor 05 — Skills: one portable format, shared tiers, curated self-improvement
 
-Status: **Phases 1-3 implemented** (2026-07-11); Phase 4 deferred (skipped by decision until the loop accumulates history) · Builds on:
+Status: **Phases 1-2 implemented** (2026-07-11). Phase 3 (automatic curation
+loop) was implemented, live-validated, then **REMOVED the same day** by user
+decision — too complex for the benefit at this scale; the capture side
+(learnings) and the primitives it used (`manage_skill patch` with
+provenance, `promote_learning`) remain, and skill improvement is
+human-directed in chat. Phase 4 skipped. · Builds on:
 [refactor-01b](refactor-01b-agent-history-multi-strategy.md) (implemented) and
 [refactor-04](refactor-04-shared-skills-tier.md) (tabled → absorbed here as
 Phase 2)
