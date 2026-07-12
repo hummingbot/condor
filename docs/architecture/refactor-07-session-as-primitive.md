@@ -40,13 +40,13 @@ increasing commitment — and each leaves exactly one kind of artifact:
 | Verb | Question it answers | Stateful? | Gate | Artifact |
 |---|---|---|---|---|
 | **consult** | "what do you think?" | No | human_gate (fail-closed) | the **answer**, returned inline — nothing on disk |
-| **delegate** | "go do this, tell me when done" | No (one-shot) | risk_gate (zero-seeded) / AUTO | a **transcript** — flat file, `activity/delegations/` |
-| **dry_run** | "would these orders work?" | No (one rehearsal tick) | risk_gate(`dry_run=True`) — **every** mutation cancelled | a **snapshot** — flat file, `activity/dry_runs/` |
+| **delegate** | "go do this, tell me when done" | No (one-shot) | risk_gate (zero-seeded) / AUTO | a **transcript** — flat file, `delegations/` |
+| **dry_run** | "would these orders work?" | No (one rehearsal tick) | risk_gate(`dry_run=True`) — **every** mutation cancelled | a **snapshot** — flat file, `dry_runs/` |
 | **session** | "engage capital under these orders" | **Yes** | risk_gate (journal-seeded) | a **journal** — `sessions/session_N/` with config, snapshots, meta |
 
 (Curation is the fifth invocation shape, but the *framework* invokes it, not
 the user — it's housekeeping, not a verb in the user's vocabulary. Its
-transcript lands in `activity/curation/`.)
+transcript lands in `curation/`.)
 
 **Session — not tick — is the stateful primitive.** A session is the unit
 of stateful engagement: frozen config, journal, risk state carried across
@@ -93,10 +93,8 @@ execution.
 
 ## 3. What each verb leaves behind (target design)
 
-The agent dir splits into definition (`AGENT.md`, `skills/`, `routines/`,
-`strategies/`), memory (`learnings.md`, `store/`), **track record**
-(`sessions/` — the stateful primitive, top billing), and **activity log**
-(`activity/` — every one-shot invocation, one flat file each):
+Sessions (the stateful primitive, dir-per-session) sit alongside three
+flat dirs — one per one-shot artifact kind, one file per invocation:
 
 ```
 agents/{slug}/
@@ -107,34 +105,31 @@ agents/{slug}/
             meta.yml                    record. No `kind` field needed —
             config.yml                  meta = strategy, status, model,
             journal.md  snapshots/      timestamps, controller_id.
-    activity/                        <- one-shot invocations, one flat file
-        delegations/                    each, named {date}-{id}.md — date-
-            2026-07-11-d3.md            first so ls sorts chronologically;
-        dry_runs/                       the short id (d3 / e2 / c1) stays
-            2026-07-11-e2.md            the lookup handle (glob *-d3.md).
-        curation/                       No type prefix in filenames — the
-            2026-07-11-c1.md            subfolder already says the type.
+    delegations/                     <- flat, one file per one-shot
+        2026-07-11-d3.md                invocation, named {date}-{id}.md —
+    dry_runs/                           date-first so ls sorts chrono-
+        2026-07-11-e2.md                logically; the short id (d3/e2/c1)
+    curation/                           stays the lookup handle
+        2026-07-11-c1.md                (glob *-d3.md).
 ```
 
-- **Sessions stay OUT of `activity/`** — deliberately. A session isn't a
-  one-shot activity (a *tick* is; a session is the thing many ticks
-  advance), and session dirs can't adopt the date-name convention anyway:
-  `session_N` names are identity (`controller_id` tags on the exchange
-  reference `{slug}_{N}`, and MCP/journal handles derive the path from the
-  id). Keeping them top-level avoids one subfolder silently violating the
-  naming rule — and gives the product (the track record) top billing.
-- **Delegation transcripts** (`activity/delegations/{date}-d{N}.md`): header =
+- **Naming**: sessions keep `session_N` — those names are identity
+  (`controller_id` tags on the exchange reference `{slug}_{N}`, and
+  MCP/journal handles derive the path from the id), so they can't take
+  the date convention. The flat dirs all use `{date}-{id}.md` — no type
+  prefix; the dir already says the type.
+- **Delegation transcripts** (`delegations/{date}-d{N}.md`): header =
   status, task, risk_limits, started/ended; body = full transcript +
   result. Written AT START with `status: running` and rewritten on
   completion — keeps the crash-husk property without session machinery.
   Ids get their own namespace again (`{slug}-d{N}`, monotonic per agent)
   and stop consuming session numbers.
-- **Dry-run snapshots** (`activity/dry_runs/{date}-e{N}.md`): same content as
-  today's `experiment_N.md`; ids stay `{slug}_e{N}` (they're embedded in
-  `split_agent_id` and the MCP read path). Only the file's home and name
-  change.
-- **Curation transcripts** (`activity/curation/{date}-c{N}.md`): keep last
-  ~10. The real audit trail stays the scoped git commit.
+- **Dry-run snapshots** (`dry_runs/{date}-e{N}.md`): same dir and content
+  as today; only the filename changes (from `experiment_N.md`) to match
+  the convention. Ids stay `{slug}_e{N}` (they're embedded in
+  `split_agent_id` and the MCP read path).
+- **Curation transcripts** (`curation/{date}-c{N}.md`): keep last ~10.
+  The real audit trail stays the scoped git commit.
 
 - **Consult persists nothing.** The answer returns inline; done. *Optional
   mitigation for the one real loss (see §5): a single rolling
@@ -143,7 +138,7 @@ agents/{slug}/
   missed. Not part of the base design.*
 - **Curation** keeps its trigger, lock, tool profile, mandates, provenance
   stamps, and git commit exactly as implemented; only its transcript's home
-  moves into `activity/curation/`.
+  moves into `curation/`.
 
 ## 4. Code change inventory
 
@@ -159,11 +154,11 @@ agents/{slug}/
   (baseline/override, loud error) unchanged; `risk_limits` recorded in the
   file header instead of meta.yml.
 - `consult.py`: delete `_persist_consult_session` + retention constants.
-- **dry_run — path/name only, zero semantic change**: `journal.py`
+- **dry_run — filename only, zero semantic change**: `journal.py`
   `save_experiment_snapshot` + `next_experiment_number` write/scan
-  `activity/dry_runs/*-e{N}.md`; `sessions_index.py` `_EXPERIMENT_FILE_RE` +
-  its globs update; `trading_agent.py` `_resolve_experiment_file` resolves
-  `{slug}_eN` by glob (`*-e{N}.md`). Engine, gate, ids untouched.
+  `dry_runs/*-e{N}.md`; `sessions_index.py` `_EXPERIMENT_FILE_RE` + its
+  globs update; `trading_agent.py` `_resolve_experiment_file` resolves
+  `{slug}_eN` by glob (`*-e{N}.md`). Dir, engine, gate, ids untouched.
 - `curation.py`: transcript path changes; `keep-last-K` prune of the flat
   dir. One design point to settle: the curator's `promote_learning` calls
   currently authenticate with the curation *session id* — with no session,
@@ -194,18 +189,16 @@ adds (kind filters, per-kind retention, kind-aware indexes, the web split).
    that long consults are delegation-shaped anyway — the router's own rule
    (">1-2 min → delegate") already points the durable path.
 2. **Uniform session analytics.** "Show me everything this agent did" is no
-   longer one list — it is `sessions/` + `activity/`. Softened by the
-   grouping: one glob (`activity/**/*.md`) covers every one-shot
-   invocation, and the agent detail page still shows everything; they're
-   just two sources instead of one.
+   longer one list — it is `sessions/` plus the three flat dirs. The
+   agent detail page still shows everything; they're just separate
+   sources now.
 3. **meta.yml queryability for delegations** (status/task as YAML) becomes
    header-parsing of flat files. Acceptable at current scale; revisit only
    if delegation analytics become a real need.
 
 What we get: session means something again; gapless track-record numbering
 going forward; less machinery; the four verbs finally map one-to-one onto
-four artifacts a user can name — and the agent dir reads as definition /
-memory / track record / activity log.
+four artifacts a user can name, each in its own top-level dir.
 
 ## 6. Migration
 
@@ -215,14 +208,14 @@ non-tick sessions across five agents):
 
 1. Back up `agents/` (same preflight as 01b).
 2. For every `sessions/session_N` with `kind: delegation|consult|curation`:
-   move `transcript.md` + meta header → `activity/delegations/{date}-d{K}.md` /
-   `activity/curation/{date}-c{K}.md` (consults: drop, or fold into
-   `consults.log` if the option is adopted); delete the session dir. Dates
-   come from the meta's `started_at`.
-3. Move `dry_runs/experiment_N.md` → `activity/dry_runs/{date}-e{N}.md` —
+   move `transcript.md` + meta header → `delegations/{date}-d{K}.md` /
+   `curation/{date}-c{K}.md` (consults: drop, or fold into `consults.log`
+   if the option is adopted); delete the session dir. Dates come from the
+   meta's `started_at`.
+3. Rename `dry_runs/experiment_N.md` → `dry_runs/{date}-e{N}.md` —
    **numbers preserved** (they're the `{slug}_eN` ids), date from the
-   snapshot header. Safe to move freely: dry runs cancel all mutations, so
-   `_eN` ids never became on-exchange identity.
+   snapshot header. Safe to rename freely: dry runs cancel all mutations,
+   so `_eN` ids never became on-exchange identity.
 4. **Never renumber surviving tick sessions** — `controller_id` tags on
    the exchange reference `{slug}_{N}`; numbers are identity. Legacy gaps
    in the low numbers remain as history; numbering is gapless from here on.
