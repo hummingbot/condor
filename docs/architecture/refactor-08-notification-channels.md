@@ -1,9 +1,11 @@
 # Refactor 08 — notifications follow the user, not Telegram
 
-Status: **proposed** (2026-07-12) · Research into how wedded Condor is to
-Telegram, whether async messages (delegation done, tick errors, agent
-reports) can land in the host the user is actually using, and where the
-destination should be configured.
+Status: **superseded by the Telegram-first decision (§8)** (2026-07-12) —
+the full bus is shelved; only the two §8 fixes are on the table. Research
+into how wedded Condor is to Telegram, whether async messages (delegation
+done, tick errors, agent reports) can land in the host the user is actually
+using, and where the destination should be configured. Kept as the design
+of record for if/when Telegram-free installs become a goal.
 
 ## 1. How wedded are we to Telegram? A layer-by-layer inventory
 
@@ -160,3 +162,55 @@ remaining TG dependency there would be the historical user id itself.
 
 Each phase is independently shippable; 1+2 alone would have made today's
 experiment pings visible in the dashboard where the work was started.
+
+## 8. DECISION — Telegram-first, Hermes as the preferred external harness
+
+Re-examined against the Hermes design (Nous Research `hermes-agent`, the
+Telegram-first harness from refactor-05 §2.1/§4.4): if Hermes is the
+*preferred* external harness, Telegram stops being coupling debt and
+becomes the platform bet — and most of this refactor becomes unnecessary.
+
+**What Hermes-first makes true:**
+
+- **Notifications land on the surface the user lives in.** The user works
+  in a Telegram chat (Hermes bot); Condor's pings arrive in a Telegram
+  chat (Condor bot). Same app, same phone, one tap apart — the
+  wrong-surface problem shrinks from "silent/other device" to "adjacent
+  thread", which is how every alerting system works.
+- **Identity unifies instead of fragmenting.** A Telegram user id is
+  stable across bots: the id Hermes sees IS Condor's `user_id`. The IdP
+  coupling (§1) turns from debt into shared infrastructure — no mapping
+  layer, ever, for Hermes users.
+- **Confirmations land right too.** `human_gate`'s Approve/Reject buttons
+  arrive on the same phone the Hermes conversation is on.
+- Claude Code / OpenClaw users still get TG pings on their phone — the
+  standard alerting posture, acceptable because onboarding already
+  requires the Telegram bot (identity bootstrap).
+
+**Maintenance-cost check — can we skip the layer entirely? Almost.**
+
+Weighing each surviving piece by what it costs to *keep*, not to build:
+
+1. **MCP mailbox — SKIP.** It's the one piece with real ongoing cost: it
+   decorates every condor tool result (a shape every host's model parses —
+   change it and every harness integration wiggles), needs unread/ack
+   bookkeeping, and risks polluting model context with stale pings. Under
+   Hermes the human already got the message in the adjacent chat, and the
+   agent-awareness case is covered at zero maintenance by what exists:
+   `delegate(action="get")` polling, which the delegate tool's
+   `next_steps` hint already teaches the model. Same platform ≠ same
+   conversation remains true — we accept it.
+2. **Web chat-id fallback — KEEP, but it isn't a layer.** When a run is
+   launched with `chat_id=0` and a known `user_id`, deliver to the user's
+   Telegram chat (in DMs `chat_id == user_id` — the same binding Tier-A
+   auto-bind uses). A few lines inside the *existing* Telegram path in
+   `engine._notify` / `_notify_done`; a bug fix with no new abstraction
+   and no ongoing cost. Without it, web-launched runs notify no one.
+
+**Net: no notifications layer at all.** The notifications table, web
+inbox/WS sink, webhook/desktop sinks, per-user `notify:` config, and the
+mailbox — all skipped. One small bug fix to the existing Telegram path is
+the entire implementation. §4–§7 stand as the design of record for the day
+Condor wants Telegram-free installs (SaaS, Slack-native teams); until then
+the platform bet is explicit: **Telegram is the notification spine, Hermes
+is the recommended way to bring your own model/harness to it.**
