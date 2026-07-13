@@ -1,0 +1,2027 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Robinhood Chain Launch Scout</title>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117; --surface: #161b22; --border: #30363d;
+    --text: #e6edf3; --text-muted: #8b949e;
+    --green: #3fb950; --red: #f85149; --blue: #58a6ff;
+  }
+  :root.light {
+    --bg: #ffffff; --surface: #f6f8fa; --border: #d0d7de;
+    --text: #1f2328; --text-muted: #656d76;
+    --green: #1a7f37; --red: #cf222e; --blue: #0969da;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    font-size: 14px; line-height: 1.6; padding: 24px; max-width: 1400px; margin: 0 auto;
+  }
+  .report-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px;
+  }
+  .report-header h1 { font-size: 20px; }
+  .report-header .meta { color: var(--text-muted); font-size: 12px; }
+  .report-header .meta span { margin-left: 16px; }
+  .kpi-bar { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+  .kpi-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px 20px; min-width: 150px; flex: 1;
+  }
+  .kpi-card .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }
+  .kpi-card .value { font-size: 24px; font-weight: 700; margin: 4px 0; }
+  .kpi-card .delta { font-size: 12px; }
+  .kpi-card .delta.up { color: var(--green); }
+  .kpi-card .delta.down { color: var(--red); }
+  .section { margin-bottom: 32px; }
+  .section-md { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px 20px; }
+  .section-md h1, .section-md h2, .section-md h3 { color: var(--text); margin: 12px 0 6px; }
+  .section-md h1 { font-size: 18px; } .section-md h2 { font-size: 16px; } .section-md h3 { font-size: 14px; }
+  .section-md p { margin: 6px 0; }
+  .section-md pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; overflow-x: auto; font-size: 13px; }
+  .section-md code { background: var(--bg); padding: 2px 6px; border-radius: 3px; font-size: 13px; }
+  .section-md pre code { background: none; padding: 0; }
+  .section-md ul, .section-md ol { padding-left: 20px; }
+  .section-md a { color: var(--blue); }
+  .section-table { overflow-x: auto; }
+  .section-table table {
+    width: 100%; border-collapse: collapse; font-size: 13px;
+    background: var(--surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden;
+  }
+  .section-table th {
+    background: var(--bg); text-align: left; padding: 8px 12px;
+    font-weight: 600; font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px;
+    color: var(--text-muted); border-bottom: 1px solid var(--border);
+  }
+  .section-table td { padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  .section-table tr:nth-child(even) td { background: rgba(255,255,255,0.02); }
+  .section-table tr:last-child td { border-bottom: none; }
+  .plotly-chart { min-height: 400px; margin-bottom: 24px; width: 100%; overflow: hidden; }
+  .plotly-chart .js-plotly-plot, .plotly-chart .plot-container, .plotly-chart .plotly { width: 100% !important; }
+</style>
+</head>
+<body>
+<div class="report-header">
+  <h1>Robinhood Chain Launch Scout</h1>
+  <div class="meta">
+    <span>2026-07-12 08:34 UTC</span>
+    <span>routine: robinhood_launch_scan</span><span>#robinhood-chain</span><span>#launches</span><span>#memecoin</span><span>#nft</span><span>#security</span>
+  </div>
+</div>
+<div class="kpi-bar"><div class="kpi-card"><div class="label">Candidates</div><div class="value">40</div></div><div class="kpi-card"><div class="label">Ranked</div><div class="value">15</div></div><div class="kpi-card"><div class="label">Eligible</div><div class="value">0</div></div><div class="kpi-card"><div class="label">Manual Review</div><div class="value">11</div></div></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Scope and safety boundary
+Observed at `2026-07-12T08:33:29.937114+00:00`. Sources observed: blockscout, dexscreener, geckoterminal. X attention: manual-verification fallback. NFT discovery covers recent ERC-721-style Transfer activity; ERC-1155 and pre-mint social leads require seed contracts.
+
+The routine queried read-only market, explorer, RPC, and optional X endpoints. It did **not** fetch candidate websites, execute project JavaScript, connect a wallet, sign, mint, approve, trade, or call contract write methods. A high score is triage evidence, not proof of safety or financial advice.</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### ERC-20 candidates</pre></div>
+<div class="section section-table"><table><thead><tr><th>Rank</th><th>Project</th><th>Type</th><th>Contract</th><th>Decision</th><th>Total</th><th>Virality /30</th><th>Credibility /20</th><th>Market /20</th><th>Security /30</th><th>Valuation</th><th>Basis</th><th>Liquidity</th><th>24h Volume</th><th>Flags</th></tr></thead><tbody><tr><td>1</td><td>Robin Hood (FOX)</td><td>token</td><td>0x2103faa9d1762e27a716c61718b3acf3ec1f9bf1</td><td>manual_verification_required</td><td>55.84</td><td>4.0</td><td>10.0</td><td>19.84</td><td>22.0</td><td>$522.7K</td><td>circulating_market_cap</td><td>$74.2K</td><td>$497.7K</td><td>none</td></tr>
+<tr><td>2</td><td>Exterminate All Humans (HOODBOT)</td><td>token</td><td>0x32758ae8e02b0a2cb6b802b6aaeaf74158c169f7</td><td>manual_verification_required</td><td>55.63</td><td>4.0</td><td>10.0</td><td>19.63</td><td>22.0</td><td>$265.5K</td><td>circulating_market_cap</td><td>$49.4K</td><td>$637.4K</td><td>none</td></tr>
+<tr><td>3</td><td>Naven Network (NAVEN)</td><td>token</td><td>0xeafa804083a4886a9460b5b19557334a652beba8</td><td>manual_verification_required</td><td>53.85</td><td>2.0</td><td>10.0</td><td>19.85</td><td>22.0</td><td>$525.7K</td><td>circulating_market_cap</td><td>$75.0K</td><td>$1.16M</td><td>none</td></tr>
+<tr><td>4</td><td>BOW (BOW)</td><td>token</td><td>0x9fb101579e716b2571ab069c2718cd06b69ffdd7</td><td>manual_verification_required</td><td>53.8</td><td>2.0</td><td>10.0</td><td>19.8</td><td>22.0</td><td>$410.2K</td><td>circulating_market_cap</td><td>$68.7K</td><td>$1.91M</td><td>none</td></tr>
+<tr><td>5</td><td>NOOT NOOT (NOOT)</td><td>token</td><td>0xa59cdba947ba5736820ac281465daddd84670598</td><td>manual_verification_required</td><td>52.79</td><td>4.0</td><td>12.0</td><td>18.79</td><td>18.0</td><td>$13.5K</td><td>circulating_market_cap</td><td>$9.8K</td><td>$359.0K</td><td>thin_liquidity</td></tr>
+<tr><td>6</td><td>Mystery (MYSTERY)</td><td>token</td><td>0xa5bac17a919a10ba0628cda5bcf273681e1a8d4e</td><td>manual_verification_required</td><td>51.82</td><td>4.0</td><td>10.0</td><td>15.82</td><td>22.0</td><td>$720.8K</td><td>circulating_market_cap</td><td>$70.9K</td><td>$470.7K</td><td>none</td></tr>
+<tr><td>7</td><td>moonfart (moonfart)</td><td>token</td><td>0x198b8afc695ac2b46002c55f55e76f1a367fbf2d</td><td>manual_verification_required</td><td>50.59</td><td>0.0</td><td>16.0</td><td>13.59</td><td>21.0</td><td>$8.3K</td><td>circulating_market_cap</td><td>$5.5K</td><td>$3.4K</td><td>thin_liquidity</td></tr>
+<tr><td>8</td><td>Ranger AI (RANGER)</td><td>token</td><td>0xf132bd1d1770d42cf4ec8659b9077d0d1c197cc1</td><td>manual_verification_required</td><td>49.87</td><td>2.0</td><td>10.0</td><td>15.87</td><td>22.0</td><td>$569.1K</td><td>circulating_market_cap</td><td>$77.8K</td><td>$1.12M</td><td>none</td></tr>
+<tr><td>9</td><td>RobinhoodieLife (RobinhoodieLife)</td><td>token</td><td>0xd5261312b8b7be03ebc07a1d2eb64dd50da2be8e</td><td>manual_verification_required</td><td>45.0</td><td>0.0</td><td>6.0</td><td>20</td><td>19.0</td><td>$216.5K</td><td>circulating_market_cap</td><td>$108.2K</td><td>$141.8K</td><td>elevated_holder_concentration</td></tr>
+<tr><td>10</td><td>Yan (YAN)</td><td>token</td><td>0xe2928334299e610df189bb69819beb60669e77cc</td><td>manual_verification_required</td><td>40.09</td><td>0.0</td><td>6.0</td><td>15.09</td><td>19.0</td><td>$36.2K</td><td>circulating_market_cap</td><td>$17.5K</td><td>$80.1K</td><td>elevated_holder_concentration</td></tr>
+<tr><td>11</td><td>Robinhood Life (ROBINHOODLIFE)</td><td>token</td><td>0x0a8f5a2c630b2cae8e3226b7ce46cbd5c8358bd4</td><td>manual_verification_required</td><td>40.01</td><td>0.0</td><td>4.0</td><td>17.01</td><td>19.0</td><td>$180.9K</td><td>circulating_market_cap</td><td>$67.0K</td><td>$47.3K</td><td>elevated_holder_concentration, name_ticker_collision</td></tr>
+<tr><td>12</td><td>Robinhood Life (ROBINHOODLIFE)</td><td>token</td><td>0xf50b7f1e6ab79a2da9b5f9b0dec73ea73ca9c25c</td><td>watch</td><td>38.01</td><td>0.0</td><td>14.0</td><td>10.01</td><td>14.0</td><td>$14.5K</td><td>circulating_market_cap</td><td>$14.6K</td><td>$14.39</td><td>extreme_holder_concentration, name_ticker_collision, thin_liquidity</td></tr>
+<tr><td>13</td><td>RobinhoodieLife (Robinhoodi)</td><td>token</td><td>0x7d918ecb6fe806e9ad2cb2148b473937cf02fcd1</td><td>watch</td><td>37.31</td><td>0.0</td><td>0</td><td>15.31</td><td>22.0</td><td>$19.9K</td><td>circulating_market_cap</td><td>$26.6K</td><td>$17.8K</td><td>name_ticker_collision</td></tr>
+<tr><td>14</td><td>RobinhoodieLife (Robinhoodi)</td><td>token</td><td>0x8d620b9aa2fc9836f55885d8301bffff7f09fcd1</td><td>watch</td><td>37.29</td><td>0.0</td><td>0</td><td>15.29</td><td>22.0</td><td>$18.5K</td><td>circulating_market_cap</td><td>$25.5K</td><td>$10.8K</td><td>name_ticker_collision</td></tr>
+<tr><td>15</td><td>AN (AN)</td><td>token</td><td>0xec6cbbdf714f8dc7d3c975b1a4e8525a3b4691b7</td><td>watch</td><td>36.44</td><td>0.0</td><td>4.0</td><td>15.44</td><td>17.0</td><td>$50.3K</td><td>circulating_market_cap</td><td>$34.0K</td><td>$112.1K</td><td>none</td></tr></tbody></table></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Manual verification queue</pre></div>
+<div class="section section-table"><table><thead><tr><th>Project</th><th>Contract</th><th>Decision</th><th>Checks required</th></tr></thead><tbody><tr><td>Robin Hood</td><td>0x2103faa9d1762e27a716c61718b3acf3ec1f9bf1</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, verify_x_attention_manually</td></tr>
+<tr><td>Exterminate All Humans</td><td>0x32758ae8e02b0a2cb6b802b6aaeaf74158c169f7</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, verify_x_attention_manually</td></tr>
+<tr><td>Naven Network</td><td>0xeafa804083a4886a9460b5b19557334a652beba8</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, verify_x_attention_manually</td></tr>
+<tr><td>BOW</td><td>0x9fb101579e716b2571ab069c2718cd06b69ffdd7</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, verify_x_attention_manually</td></tr>
+<tr><td>NOOT NOOT</td><td>0xa59cdba947ba5736820ac281465daddd84670598</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, verify_x_attention_manually</td></tr>
+<tr><td>Mystery</td><td>0xa5bac17a919a10ba0628cda5bcf273681e1a8d4e</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, verify_x_attention_manually</td></tr>
+<tr><td>moonfart</td><td>0x198b8afc695ac2b46002c55f55e76f1a367fbf2d</td><td>manual_verification_required</td><td>verify_holder_concentration_and_insider_wallets, verify_honeypot_tax_blacklist_mint_and_pause_controls, resolve_canonical_website_from_official_social_and_contract, resolve_canonical_social_account, verify_x_attention_manually</td></tr>
+<tr><td>Ranger AI</td><td>0xf132bd1d1770d42cf4ec8659b9077d0d1c197cc1</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, verify_x_attention_manually</td></tr>
+<tr><td>RobinhoodieLife</td><td>0xd5261312b8b7be03ebc07a1d2eb64dd50da2be8e</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, resolve_canonical_website_from_official_social_and_contract, resolve_canonical_social_account, verify_x_attention_manually</td></tr>
+<tr><td>Yan</td><td>0xe2928334299e610df189bb69819beb60669e77cc</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, resolve_canonical_website_from_official_social_and_contract, resolve_canonical_social_account, verify_x_attention_manually</td></tr>
+<tr><td>Robinhood Life</td><td>0x0a8f5a2c630b2cae8e3226b7ce46cbd5c8358bd4</td><td>manual_verification_required</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, resolve_canonical_website_from_official_social_and_contract, resolve_canonical_social_account, resolve_name_ticker_collision, verify_x_attention_manually</td></tr>
+<tr><td>Robinhood Life</td><td>0xf50b7f1e6ab79a2da9b5f9b0dec73ea73ca9c25c</td><td>watch</td><td>verify_honeypot_tax_blacklist_mint_and_pause_controls, resolve_canonical_website_from_official_social_and_contract, resolve_canonical_social_account, resolve_name_ticker_collision, verify_x_attention_manually</td></tr>
+<tr><td>RobinhoodieLife</td><td>0x7d918ecb6fe806e9ad2cb2148b473937cf02fcd1</td><td>watch</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, resolve_canonical_website_from_official_social_and_contract, resolve_canonical_social_account, resolve_name_ticker_collision, verify_x_attention_manually</td></tr>
+<tr><td>RobinhoodieLife</td><td>0x8d620b9aa2fc9836f55885d8301bffff7f09fcd1</td><td>watch</td><td>verify_contract_source_and_privileged_functions, verify_honeypot_tax_blacklist_mint_and_pause_controls, resolve_canonical_website_from_official_social_and_contract, resolve_canonical_social_account, resolve_name_ticker_collision, verify_x_attention_manually</td></tr>
+<tr><td>AN</td><td>0xec6cbbdf714f8dc7d3c975b1a4e8525a3b4691b7</td><td>watch</td><td>verify_contract_source_and_privileged_functions, verify_holder_concentration_and_insider_wallets, verify_honeypot_tax_blacklist_mint_and_pause_controls, resolve_canonical_website_from_official_social_and_contract, resolve_canonical_social_account, verify_x_attention_manually</td></tr></tbody></table></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Blocked or excluded</pre></div>
+<div class="section section-table"><table><thead><tr><th>Rank</th><th>Project</th><th>Type</th><th>Contract</th><th>Decision</th><th>Total</th><th>Virality /30</th><th>Credibility /20</th><th>Market /20</th><th>Security /30</th><th>Valuation</th><th>Basis</th><th>Liquidity</th><th>24h Volume</th><th>Flags</th></tr></thead><tbody><tr><td>1</td><td>Cash Cat (CASHCAT)</td><td>token</td><td>0x020bfc650a365f8bb26819deaabf3e21291018b4</td><td>excluded</td><td>40.42</td><td>4.0</td><td>12.0</td><td>7.42</td><td>17.0</td><td>$185.71M</td><td>circulating_market_cap</td><td>$11.67M</td><td>$26.44M</td><td>valuation_above_target</td></tr>
+<tr><td>2</td><td>ProjectVex (VEX)</td><td>token</td><td>0x8ff92566f2e81bdd68edfaa8cde73942a723796b</td><td>excluded</td><td>39.79</td><td>4.0</td><td>10.0</td><td>10.79</td><td>15.0</td><td>$5.57M</td><td>circulating_market_cap</td><td>$291.2K</td><td>$2.67M</td><td>high_holder_concentration, valuation_above_target</td></tr>
+<tr><td>3</td><td>The Green Bull (VLAD)</td><td>token</td><td>0x31be8f7485e36928c9de86566c62da82d4b6bf81</td><td>excluded</td><td>38.0</td><td>2.0</td><td>10.0</td><td>11.0</td><td>15.0</td><td>$1.28M</td><td>circulating_market_cap</td><td>$158.6K</td><td>$5.31M</td><td>high_holder_concentration, valuation_above_target, website_uses_http</td></tr>
+<tr><td>4</td><td>RETURN TO MEMES (RTM)</td><td>token</td><td>0xc4e6d35f684ede816079e3eed10fd4f3e81e5075</td><td>excluded</td><td>24.0</td><td>0.0</td><td>8.0</td><td>6.0</td><td>10.0</td><td>$3.27M</td><td>circulating_market_cap</td><td>$1.64M</td><td>$14.59</td><td>extreme_holder_concentration, valuation_above_target</td></tr>
+<tr><td>5</td><td>TOES (TOESCOIN)</td><td>token</td><td>0xab683dd98bf5f9519f992137146ac8c8ee685de4</td><td>excluded</td><td>22.0</td><td>0.0</td><td>6.0</td><td>6.0</td><td>10.0</td><td>$8.52M</td><td>circulating_market_cap</td><td>$4.26M</td><td>$0.18</td><td>extreme_holder_concentration, valuation_above_target</td></tr>
+<tr><td>6</td><td>catwifhat (CATWIF)</td><td>token</td><td>0x9da2bb41a9ea3c1953b96c755db5981536538189</td><td>excluded</td><td>22.0</td><td>0.0</td><td>6.0</td><td>6.0</td><td>10.0</td><td>$1.80M</td><td>circulating_market_cap</td><td>$900.8K</td><td>$0.21</td><td>extreme_holder_concentration, valuation_above_target</td></tr></tbody></table></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Data gaps
+- nft_rpc_discovery: RPC eth_getLogs: {'code': -32000, 'message': 'logs matched by query exceeds limit of 10000'}
+- x_api_unavailable: set X_BEARER_TOKEN in the Condor runtime environment for authenticated attention scoring</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Score interpretation
+- Virality: 30 points from linked social metadata and, when configured, recent X mentions, engagement, author diversity, and acceleration.
+- Credibility: 20 points from contract verification, canonical links, identity completeness, and independent source coverage.
+- Market: 20 points from valuation fit, liquidity, turnover, traders, or NFT holder/transfer activity.
+- Security: 30 points minus explorer, verification, concentration, liquidity, URL, collision, and data-gap penalties.
+- Default token focus: circulating market cap, or FDV fallback, at or below $1 million. NFT valuation is reported as not comparable.</pre></div>
+<div class="section section-md"><pre style='white-space:pre-wrap'>### Debug JSON Payload
+```json
+{
+  "candidate_count": 40,
+  "chain": {
+    "chain_id": 4663,
+    "name": "Robinhood Chain",
+    "slug": "robinhood"
+  },
+  "config_summary": {
+    "candidate_websites_fetched": false,
+    "exclude_above_max_valuation": true,
+    "max_valuation_usd": 1000000.0,
+    "min_liquidity_usd": 5000.0,
+    "new_pool_pages": 2,
+    "nft_lookback_blocks": 5000,
+    "require_x_for_eligible": true
+  },
+  "coverage_summary": "Sources observed: blockscout, dexscreener, geckoterminal. X attention: manual-verification fallback. NFT discovery covers recent ERC-721-style Transfer activity; ERC-1155 and pre-mint social leads require seed contracts.",
+  "data_gaps": [
+    "nft_rpc_discovery: RPC eth_getLogs: {'code': -32000, 'message': 'logs matched by query exceeds limit of 10000'}",
+    "x_api_unavailable: set X_BEARER_TOKEN in the Condor runtime environment for authenticated attention scoring"
+  ],
+  "excluded": [
+    {
+      "address": "0x020bfc650a365f8bb26819deaabf3e21291018b4",
+      "contract": {
+        "is_scam": false,
+        "is_verified": false,
+        "name": "Cash Cat",
+        "proxy_type": null,
+        "reputation": "ok"
+      },
+      "data_gaps": [
+        "blockscout_holders: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/tokens/0x020bfc650a365f8bb26819deaabf3e21291018b4/holders: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "excluded",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0xa70fc67c9f69da90b63a0e4c05d229954574e313",
+        "https://dexscreener.com/robinhood/0xa70fc67c9f69da90b63a0e4c05d229954574e313",
+        "https://robinhoodchain.blockscout.com/token/0x020bfc650a365f8bb26819deaabf3e21291018b4"
+      ],
+      "fdv_usd": 190450753.0,
+      "holders": {},
+      "holders_count": 23471,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 11674633.78,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_holder_concentration_and_insider_wallets",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 185713683.67721003,
+      "name": "Cash Cat",
+      "pool_address": "0xA70fc67C9F69da90B63a0e4C05D229954574E313",
+      "pool_created_at": 1781812885000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($185.71M)",
+          "24h volume/valuation turnover: 0.14x"
+        ],
+        "security": [
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "valuation_above_target"
+      ],
+      "scores": {
+        "credibility": 12.0,
+        "market": 7.42,
+        "security": 17.0,
+        "virality": 4.0
+      },
+      "socials": [
+        "https://x.com/i/communities/2034764480534782275",
+        "https://t.me/cashcat_robinhood",
+        "https://www.reddit.com/r/cashcattoken/comments/1ujng24/cashcat_is_back/"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "CASHCAT",
+      "token_type": "ERC-20",
+      "total_score": 40.42,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 11530,
+        "sellers": 0,
+        "sells": 6469
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "above_target",
+      "valuation_usd": 185713683.67721003,
+      "volume_24h_usd": 26435467.41,
+      "websites": [
+        "https://cashcattoken.xyz/"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x8ff92566f2e81bdd68edfaa8cde73942a723796b",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: Request failed for https://robinhoodchain.blockscout.com/api/v2/addresses/0x8ff92566f2e81bdd68edfaa8cde73942a723796b: ",
+        "x_api_unavailable"
+      ],
+      "decision": "excluded",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0x817f16f5d8da83d1b089b082c0172af3923618da",
+        "https://dexscreener.com/robinhood/0x817f16f5d8da83d1b089b082c0172af3923618da",
+        "https://robinhoodchain.blockscout.com/token/0x8ff92566f2e81bdd68edfaa8cde73942a723796b"
+      ],
+      "fdv_usd": 5572550.0,
+      "holders": {
+        "holders_count": 3143,
+        "pool_pct": 0.05884396710390062,
+        "top10_non_pool_pct": 0.5220411991699688
+      },
+      "holders_count": 3143,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 291186.31,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 5572550.0,
+      "name": "ProjectVex",
+      "pool_address": "0x817f16F5D8da83d1B089B082c0172af3923618dA",
+      "pool_created_at": 1783096491000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($5.57M)",
+          "24h volume/valuation turnover: 0.48x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 52.2%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "high_holder_concentration",
+        "valuation_above_target"
+      ],
+      "scores": {
+        "credibility": 10.0,
+        "market": 10.79,
+        "security": 15.0,
+        "virality": 4.0
+      },
+      "socials": [
+        "https://x.com/ProjectVEXai",
+        "https://discord.com/invite/wXRNPkw7z"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "VEX",
+      "token_type": "ERC-20",
+      "total_score": 39.79,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 4304,
+        "sellers": 0,
+        "sells": 3280
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "above_target",
+      "valuation_usd": 5572550.0,
+      "volume_24h_usd": 2669661.44,
+      "websites": [
+        "https://www.projectvex.ai/"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x31be8f7485e36928c9de86566c62da82d4b6bf81",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: Request failed for https://robinhoodchain.blockscout.com/api/v2/addresses/0x31be8f7485e36928c9de86566c62da82d4b6bf81: ",
+        "x_api_unavailable"
+      ],
+      "decision": "excluded",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0x8f450b8ee34f07681b68bbb97729fcd4e8778417",
+        "https://dexscreener.com/robinhood/0x8f450b8ee34f07681b68bbb97729fcd4e8778417",
+        "https://robinhoodchain.blockscout.com/token/0x31be8f7485e36928c9de86566c62da82d4b6bf81"
+      ],
+      "fdv_usd": 1279325.0,
+      "holders": {
+        "holders_count": 1431,
+        "pool_pct": 0.059610365246330024,
+        "top10_non_pool_pct": 0.7975786156459116
+      },
+      "holders_count": 1431,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 158557.41,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 1279325.0,
+      "name": "The Green Bull",
+      "pool_address": "0x8f450B8EE34F07681B68bbb97729FCD4e8778417",
+      "pool_created_at": 1783483013000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($1.28M)",
+          "24h volume/valuation turnover: 4.15x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 79.8%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "high_holder_concentration",
+        "valuation_above_target",
+        "website_uses_http"
+      ],
+      "scores": {
+        "credibility": 10.0,
+        "market": 11.0,
+        "security": 15.0,
+        "virality": 2.0
+      },
+      "socials": [
+        "https://x.com/GreenBullHood"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "VLAD",
+      "token_type": "ERC-20",
+      "total_score": 38.0,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 15681,
+        "sellers": 0,
+        "sells": 11498
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "above_target",
+      "valuation_usd": 1279325.0,
+      "volume_24h_usd": 5309470.89,
+      "websites": [
+        "http://fxtwitter.com/vladtenev/status/2074695821896065360?s=20"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xc4e6d35f684ede816079e3eed10fd4f3e81e5075",
+      "contract": {
+        "is_scam": false,
+        "is_verified": false,
+        "name": "RETURN TO MEMES",
+        "proxy_type": null,
+        "reputation": "ok"
+      },
+      "data_gaps": [
+        "x_api_unavailable"
+      ],
+      "decision": "excluded",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0x491e9c2dfa69f0825eb8b37a263c18548fb59559",
+        "https://dexscreener.com/robinhood/0x491e9c2dfa69f0825eb8b37a263c18548fb59559",
+        "https://robinhoodchain.blockscout.com/token/0xc4e6d35f684ede816079e3eed10fd4f3e81e5075"
+      ],
+      "fdv_usd": 3272251.0,
+      "holders": {
+        "holders_count": 2,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 1.0
+      },
+      "holders_count": 2,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 1636125.34,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 3272251.0,
+      "name": "RETURN TO MEMES",
+      "pool_address": "0x491e9c2DfA69F0825eB8b37a263C18548fb59559",
+      "pool_created_at": 1783844954000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($3.27M)",
+          "24h volume/valuation turnover: 0.00x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 100.0%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "extreme_holder_concentration",
+        "valuation_above_target"
+      ],
+      "scores": {
+        "credibility": 8.0,
+        "market": 6.0,
+        "security": 10.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "RTM",
+      "token_type": "ERC-20",
+      "total_score": 24.0,
+      "total_supply_raw": 9.39149824e+26,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 2,
+        "sellers": 0,
+        "sells": 1
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "above_target",
+      "valuation_usd": 3272251.0,
+      "volume_24h_usd": 14.59,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xab683dd98bf5f9519f992137146ac8c8ee685de4",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0xab683dd98bf5f9519f992137146ac8c8ee685de4: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "excluded",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0xacb56513c967e072c55036922895db28dcd2c188",
+        "https://dexscreener.com/robinhood/0xacb56513c967e072c55036922895db28dcd2c188",
+        "https://robinhoodchain.blockscout.com/token/0xab683dd98bf5f9519f992137146ac8c8ee685de4"
+      ],
+      "fdv_usd": 8521164.0,
+      "holders": {
+        "holders_count": 2,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 1.0
+      },
+      "holders_count": 2,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 4260581.94,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 8521164.0,
+      "name": "TOES",
+      "pool_address": "0xaCB56513c967e072C55036922895Db28dCD2C188",
+      "pool_created_at": 1783844608000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($8.52M)",
+          "24h volume/valuation turnover: 0.00x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 100.0%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "extreme_holder_concentration",
+        "valuation_above_target"
+      ],
+      "scores": {
+        "credibility": 6.0,
+        "market": 6.0,
+        "security": 10.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "TOESCOIN",
+      "token_type": "ERC-20",
+      "total_score": 22.0,
+      "total_supply_raw": 9.9994611e+26,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 1,
+        "sellers": 0,
+        "sells": 0
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "above_target",
+      "valuation_usd": 8521164.0,
+      "volume_24h_usd": 0.18,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x9da2bb41a9ea3c1953b96c755db5981536538189",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0x9da2bb41a9ea3c1953b96c755db5981536538189: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "excluded",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0x70ff5721d5dd9ce9c6ceeb4d0aa7c446cbf19fe5",
+        "https://dexscreener.com/robinhood/0x70ff5721d5dd9ce9c6ceeb4d0aa7c446cbf19fe5",
+        "https://robinhoodchain.blockscout.com/token/0x9da2bb41a9ea3c1953b96c755db5981536538189"
+      ],
+      "fdv_usd": 1801528.0,
+      "holders": {
+        "holders_count": 2,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 1.0
+      },
+      "holders_count": 2,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 900763.8,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 1801528.0,
+      "name": "catwifhat",
+      "pool_address": "0x70fF5721d5DD9Ce9C6cEEB4d0aA7c446cBf19fE5",
+      "pool_created_at": 1783844726000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($1.80M)",
+          "24h volume/valuation turnover: 0.00x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 100.0%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "extreme_holder_concentration",
+        "valuation_above_target"
+      ],
+      "scores": {
+        "credibility": 6.0,
+        "market": 6.0,
+        "security": 10.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "CATWIF",
+      "token_type": "ERC-20",
+      "total_score": 22.0,
+      "total_supply_raw": 9.99955601e+26,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 1,
+        "sellers": 0,
+        "sells": 0
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "above_target",
+      "valuation_usd": 1801528.0,
+      "volume_24h_usd": 0.21,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    }
+  ],
+  "observed_at": "2026-07-12T08:33:29.937114+00:00",
+  "ranked": [
+    {
+      "address": "0x2103faa9d1762e27a716c61718b3acf3ec1f9bf1",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: Request failed for https://robinhoodchain.blockscout.com/api/v2/addresses/0x2103faa9d1762e27a716c61718b3acf3ec1f9bf1: ",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0x9c49f21adda14af527bc56c2a8fab854f6248685",
+        "https://dexscreener.com/robinhood/0x9c49f21adda14af527bc56c2a8fab854f6248685",
+        "https://robinhoodchain.blockscout.com/token/0x2103faa9d1762e27a716c61718b3acf3ec1f9bf1"
+      ],
+      "fdv_usd": 527528.659404195,
+      "holders": {
+        "holders_count": 1273,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 0.2254149817287625
+      },
+      "holders_count": 1273,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 74212.2774,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 522660.0,
+      "name": "Robin Hood",
+      "pool_address": "0x9c49f21adda14af527bc56c2a8fab854f6248685",
+      "pool_created_at": "2026-07-10T22:29:23Z",
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($522.7K)",
+          "24h volume/valuation turnover: 0.95x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 22.5%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [],
+      "scores": {
+        "credibility": 10.0,
+        "market": 19.84,
+        "security": 22.0,
+        "virality": 4.0
+      },
+      "socials": [
+        "https://x.com/fox_onrh",
+        "https://t.me/fox_rh"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "FOX",
+      "token_type": "ERC-20",
+      "total_score": 55.84,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 751,
+        "buys": 2442,
+        "sellers": 579,
+        "sells": 1650
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 522660.0,
+      "volume_24h_usd": 497708.234551506,
+      "websites": [
+        "https://robinhoodfox.com"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x32758ae8e02b0a2cb6b802b6aaeaf74158c169f7",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0x32758ae8e02b0a2cb6b802b6aaeaf74158c169f7: ",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0xb8da49462268959635c2f769eb2dce158041e2e3",
+        "https://dexscreener.com/robinhood/0xb8da49462268959635c2f769eb2dce158041e2e3",
+        "https://robinhoodchain.blockscout.com/token/0x32758ae8e02b0a2cb6b802b6aaeaf74158c169f7"
+      ],
+      "fdv_usd": 267797.7183,
+      "holders": {
+        "holders_count": 697,
+        "pool_pct": 0.09551496367129056,
+        "top10_non_pool_pct": 0.18162694676944388
+      },
+      "holders_count": 697,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 49360.6938,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 265509.0,
+      "name": "Exterminate All Humans",
+      "pool_address": "0xb8da49462268959635c2f769eb2dce158041e2e3",
+      "pool_created_at": "2026-07-11T07:59:30Z",
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($265.5K)",
+          "24h volume/valuation turnover: 2.40x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 18.2%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [],
+      "scores": {
+        "credibility": 10.0,
+        "market": 19.63,
+        "security": 22.0,
+        "virality": 4.0
+      },
+      "socials": [
+        "https://x.com/HoodbotRH",
+        "https://t.me/Hoodbotcoin"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "HOODBOT",
+      "token_type": "ERC-20",
+      "total_score": 55.63,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 1096,
+        "buys": 2563,
+        "sellers": 850,
+        "sells": 1684
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 265509.0,
+      "volume_24h_usd": 637413.669075316,
+      "websites": [
+        "https://www.hoodbot.io/",
+        "https://robinhood.com/robots.txt"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xeafa804083a4886a9460b5b19557334a652beba8",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0xeafa804083a4886a9460b5b19557334a652beba8: ",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0x7b6081ea2fd94efe918f8aeda91bc31e613a7a95",
+        "https://dexscreener.com/robinhood/0x7b6081ea2fd94efe918f8aeda91bc31e613a7a95",
+        "https://robinhoodchain.blockscout.com/token/0xeafa804083a4886a9460b5b19557334a652beba8"
+      ],
+      "fdv_usd": 530392.16880739,
+      "holders": {
+        "holders_count": 1452,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 0.2592417069548453
+      },
+      "holders_count": 1452,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 75001.6431,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 525702.0,
+      "name": "Naven Network",
+      "pool_address": "0x7b6081ea2fd94efe918f8aeda91bc31e613a7a95",
+      "pool_created_at": "2026-07-10T13:33:26Z",
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($525.7K)",
+          "24h volume/valuation turnover: 2.20x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 25.9%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [],
+      "scores": {
+        "credibility": 10.0,
+        "market": 19.85,
+        "security": 22.0,
+        "virality": 2.0
+      },
+      "socials": [
+        "https://x.com/NavenNetwork"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "NAVEN",
+      "token_type": "ERC-20",
+      "total_score": 53.85,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 896,
+        "buys": 3007,
+        "sellers": 933,
+        "sells": 2244
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 525702.0,
+      "volume_24h_usd": 1158846.84784802,
+      "websites": [
+        "https://naven.network/"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x9fb101579e716b2571ab069c2718cd06b69ffdd7",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: Request failed for https://robinhoodchain.blockscout.com/api/v2/addresses/0x9fb101579e716b2571ab069c2718cd06b69ffdd7: ",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0x1a4c1bb24eee4c8d82ceabaef9a18143de511470",
+        "https://dexscreener.com/robinhood/0x1a4c1bb24eee4c8d82ceabaef9a18143de511470",
+        "https://robinhoodchain.blockscout.com/token/0x9fb101579e716b2571ab069c2718cd06b69ffdd7"
+      ],
+      "fdv_usd": 375733.431184331,
+      "holders": {
+        "holders_count": 2190,
+        "pool_pct": 0.08581016123971656,
+        "top10_non_pool_pct": 0.1527254097699911
+      },
+      "holders_count": 2190,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 68656.6001,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 410234.17274665926,
+      "name": "BOW",
+      "pool_address": "0x1a4c1bb24eee4c8d82ceabaef9a18143de511470",
+      "pool_created_at": "2026-07-11T10:00:57Z",
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($410.2K)",
+          "24h volume/valuation turnover: 4.66x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 15.3%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [],
+      "scores": {
+        "credibility": 10.0,
+        "market": 19.8,
+        "security": 22.0,
+        "virality": 2.0
+      },
+      "socials": [
+        "https://x.com/bowscan"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "BOW",
+      "token_type": "ERC-20",
+      "total_score": 53.8,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 2448,
+        "buys": 10369,
+        "sellers": 1924,
+        "sells": 7019
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 410234.17274665926,
+      "volume_24h_usd": 1912278.76958396,
+      "websites": [
+        "https://bowscan.io",
+        "https://bowscan.io/#docs"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xa59cdba947ba5736820ac281465daddd84670598",
+      "contract": {
+        "is_scam": false,
+        "is_verified": false,
+        "name": "NOOT NOOT",
+        "proxy_type": null,
+        "reputation": "ok"
+      },
+      "data_gaps": [
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0x1a43b1097812a43753e8527d713a1ef96de34ab5",
+        "https://dexscreener.com/robinhood/0x1a43b1097812a43753e8527d713a1ef96de34ab5",
+        "https://robinhoodchain.blockscout.com/token/0xa59cdba947ba5736820ac281465daddd84670598"
+      ],
+      "fdv_usd": 15093.87756,
+      "holders": {
+        "holders_count": 2625,
+        "pool_pct": 0.407250306156247,
+        "top10_non_pool_pct": 0.1295105706455005
+      },
+      "holders_count": 2625,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 9768.0461,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 13514.0,
+      "name": "NOOT NOOT",
+      "pool_address": "0x1a43b1097812a43753e8527d713a1ef96de34ab5",
+      "pool_created_at": "2026-07-10T22:23:24Z",
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($13.5K)",
+          "24h volume/valuation turnover: 26.57x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 13.0%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "thin_liquidity"
+      ],
+      "scores": {
+        "credibility": 12.0,
+        "market": 18.79,
+        "security": 18.0,
+        "virality": 4.0
+      },
+      "socials": [
+        "https://x.com/nootonhood",
+        "https://t.me/hoodnoot"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "NOOT",
+      "token_type": "ERC-20",
+      "total_score": 52.79,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 1271,
+        "buys": 3357,
+        "sellers": 1549,
+        "sells": 2299
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 13514.0,
+      "volume_24h_usd": 359033.004510658,
+      "websites": [
+        "https://nootonhood.xyz/"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xa5bac17a919a10ba0628cda5bcf273681e1a8d4e",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0xa5bac17a919a10ba0628cda5bcf273681e1a8d4e: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0x9a7013172083f275142ce0cdec6d172ebbe68114",
+        "https://dexscreener.com/robinhood/0x9a7013172083f275142ce0cdec6d172ebbe68114",
+        "https://robinhoodchain.blockscout.com/token/0xa5bac17a919a10ba0628cda5bcf273681e1a8d4e"
+      ],
+      "fdv_usd": 583621.0,
+      "holders": {
+        "holders_count": 937,
+        "pool_pct": 0.060774586057922055,
+        "top10_non_pool_pct": 0.12360462545447122
+      },
+      "holders_count": 937,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 70939.07,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 720809.259981404,
+      "name": "Mystery",
+      "pool_address": "0x9a7013172083F275142CE0CDec6d172EbBE68114",
+      "pool_created_at": 1783535579000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($720.8K)",
+          "24h volume/valuation turnover: 0.65x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 12.4%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [],
+      "scores": {
+        "credibility": 10.0,
+        "market": 15.82,
+        "security": 22.0,
+        "virality": 4.0
+      },
+      "socials": [
+        "https://x.com/Mystery_RH",
+        "https://t.me/mystery_robinhood"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "MYSTERY",
+      "token_type": "ERC-20",
+      "total_score": 51.82,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 1592,
+        "sellers": 0,
+        "sells": 1177
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 720809.259981404,
+      "volume_24h_usd": 470712.17,
+      "websites": [
+        "https://mystery-hood.com"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x198b8afc695ac2b46002c55f55e76f1a367fbf2d",
+      "contract": {
+        "is_scam": false,
+        "is_verified": true,
+        "name": "moonfart",
+        "proxy_type": null,
+        "reputation": "ok"
+      },
+      "data_gaps": [
+        "blockscout_holders: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/tokens/0x198b8afc695ac2b46002c55f55e76f1a367fbf2d/holders: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0x0f127de4873bbe74bfabe8ace5fe96985afb183c",
+        "https://dexscreener.com/robinhood/0x0f127de4873bbe74bfabe8ace5fe96985afb183c",
+        "https://robinhoodchain.blockscout.com/token/0x198b8afc695ac2b46002c55f55e76f1a367fbf2d"
+      ],
+      "fdv_usd": 8343.0,
+      "holders": {},
+      "holders_count": 24,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 5500.59,
+      "manual_checks": [
+        "verify_holder_concentration_and_insider_wallets",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 8343.0,
+      "name": "moonfart",
+      "pool_address": "0x0f127dE4873bBe74BfAbe8ACe5fE96985AfB183C",
+      "pool_created_at": 1783844633000,
+      "reasoning": {
+        "credibility": [
+          "Explorer reports verified contract source",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($8.3K)",
+          "24h volume/valuation turnover: 0.41x"
+        ],
+        "security": [
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "thin_liquidity"
+      ],
+      "scores": {
+        "credibility": 16.0,
+        "market": 13.59,
+        "security": 21.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "moonfart",
+      "token_type": "ERC-20",
+      "total_score": 50.59,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 23,
+        "sellers": 0,
+        "sells": 3
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 8343.0,
+      "volume_24h_usd": 3424.93,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xf132bd1d1770d42cf4ec8659b9077d0d1c197cc1",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: Request failed for https://robinhoodchain.blockscout.com/api/v2/addresses/0xf132bd1d1770d42cf4ec8659b9077d0d1c197cc1: ",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal trending_pools: https://www.geckoterminal.com/robinhood/pools/0x9e9038860b777b977eb08421eeaf99bc8673bacf",
+        "https://dexscreener.com/robinhood/0x9e9038860b777b977eb08421eeaf99bc8673bacf",
+        "https://robinhoodchain.blockscout.com/token/0xf132bd1d1770d42cf4ec8659b9077d0d1c197cc1"
+      ],
+      "fdv_usd": 569087.0,
+      "holders": {
+        "holders_count": 1825,
+        "pool_pct": 0.06806965645863482,
+        "top10_non_pool_pct": 0.18755338831467475
+      },
+      "holders_count": 1825,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 77770.39,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 569087.0,
+      "name": "Ranger AI",
+      "pool_address": "0x9e9038860B777B977eb08421EEaf99Bc8673bacf",
+      "pool_created_at": 1783704617000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($569.1K)",
+          "24h volume/valuation turnover: 1.97x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 18.8%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [],
+      "scores": {
+        "credibility": 10.0,
+        "market": 15.87,
+        "security": 22.0,
+        "virality": 2.0
+      },
+      "socials": [
+        "https://x.com/RangerAI_tech"
+      ],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "RANGER",
+      "token_type": "ERC-20",
+      "total_score": 49.87,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 4276,
+        "sellers": 0,
+        "sells": 3008
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 569087.0,
+      "volume_24h_usd": 1122474.86,
+      "websites": [
+        "https://www.rangerai.tech/",
+        "https://docs.rangerai.tech/"
+      ],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xd5261312b8b7be03ebc07a1d2eb64dd50da2be8e",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0xd5261312b8b7be03ebc07a1d2eb64dd50da2be8e: ",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0xc0e143858eeb1b3e8389fdd8a4623bb9ee438b37",
+        "https://dexscreener.com/robinhood/0xc0e143858eeb1b3e8389fdd8a4623bb9ee438b37",
+        "https://robinhoodchain.blockscout.com/token/0xd5261312b8b7be03ebc07a1d2eb64dd50da2be8e"
+      ],
+      "fdv_usd": 217791.7388,
+      "holders": {
+        "holders_count": 221,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 0.4515618206366383
+      },
+      "holders_count": 221,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 108189.1771,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 216523.0,
+      "name": "RobinhoodieLife",
+      "pool_address": "0xc0e143858eeb1b3e8389fdd8a4623bb9ee438b37",
+      "pool_created_at": "2026-07-12T08:26:37Z",
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($216.5K)",
+          "24h volume/valuation turnover: 0.65x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 45.2%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "elevated_holder_concentration"
+      ],
+      "scores": {
+        "credibility": 6.0,
+        "market": 20,
+        "security": 19.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "RobinhoodieLife",
+      "token_type": "ERC-20",
+      "total_score": 45.0,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 230,
+        "buys": 277,
+        "sellers": 100,
+        "sells": 151
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 216523.0,
+      "volume_24h_usd": 141817.123215693,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xe2928334299e610df189bb69819beb60669e77cc",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: Request failed for https://robinhoodchain.blockscout.com/api/v2/addresses/0xe2928334299e610df189bb69819beb60669e77cc: ",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0x22bdaee6f8c78788a13f0ff97cd9d380fd3f8d1621bbb46279438356788edfe5",
+        "https://dexscreener.com/robinhood/0x22bdaee6f8c78788a13f0ff97cd9d380fd3f8d1621bbb46279438356788edfe5",
+        "https://robinhoodchain.blockscout.com/token/0xe2928334299e610df189bb69819beb60669e77cc"
+      ],
+      "fdv_usd": 36247.0,
+      "holders": {
+        "holders_count": 95,
+        "pool_pct": 0.2440524516261069,
+        "top10_non_pool_pct": 0.366726719112015
+      },
+      "holders_count": 95,
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 17525.24,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 36247.0,
+      "name": "Yan",
+      "pool_address": "0x22bdaee6f8c78788a13f0ff97cd9d380fd3f8d1621bbb46279438356788edfe5",
+      "pool_created_at": 1783844549000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($36.2K)",
+          "24h volume/valuation turnover: 2.21x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 36.7%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "elevated_holder_concentration"
+      ],
+      "scores": {
+        "credibility": 6.0,
+        "market": 15.09,
+        "security": 19.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "YAN",
+      "token_type": "ERC-20",
+      "total_score": 40.09,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 280,
+        "sellers": 0,
+        "sells": 242
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 36247.0,
+      "volume_24h_usd": 80141.05,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x0a8f5a2c630b2cae8e3226b7ce46cbd5c8358bd4",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0x0a8f5a2c630b2cae8e3226b7ce46cbd5c8358bd4: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "manual_verification_required",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0x1bec11dc8106107d8f95b9bb8fb107ea977c3e20",
+        "https://dexscreener.com/robinhood/0x1bec11dc8106107d8f95b9bb8fb107ea977c3e20",
+        "https://robinhoodchain.blockscout.com/token/0x0a8f5a2c630b2cae8e3226b7ce46cbd5c8358bd4"
+      ],
+      "fdv_usd": 187778.5495,
+      "holders": {
+        "holders_count": 151,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 0.3567693386929395
+      },
+      "holders_count": 151,
+      "identity_collision_count": 2,
+      "kind": "token",
+      "liquidity_usd": 66986.5737,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "resolve_name_ticker_collision",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 180874.0,
+      "name": "Robinhood Life",
+      "pool_address": "0x1bec11dc8106107d8f95b9bb8fb107ea977c3e20",
+      "pool_created_at": "2026-07-12T08:26:53Z",
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Name/ticker identity collides across 2 contracts",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($180.9K)",
+          "24h volume/valuation turnover: 0.26x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 35.7%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "elevated_holder_concentration",
+        "name_ticker_collision"
+      ],
+      "scores": {
+        "credibility": 4.0,
+        "market": 17.01,
+        "security": 19.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "ROBINHOODLIFE",
+      "token_type": "ERC-20",
+      "total_score": 40.01,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 153,
+        "buys": 159,
+        "sellers": 17,
+        "sells": 22
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 180874.0,
+      "volume_24h_usd": 47343.6827938742,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xf50b7f1e6ab79a2da9b5f9b0dec73ea73ca9c25c",
+      "contract": {
+        "is_scam": false,
+        "is_verified": true,
+        "name": "ERC20Token",
+        "proxy_type": null,
+        "reputation": "ok"
+      },
+      "data_gaps": [
+        "x_api_unavailable"
+      ],
+      "decision": "watch",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0xfc7632c6a5346abb78b7f0d46cad4673c3e2c13f",
+        "https://dexscreener.com/robinhood/0xfc7632c6a5346abb78b7f0d46cad4673c3e2c13f",
+        "https://robinhoodchain.blockscout.com/token/0xf50b7f1e6ab79a2da9b5f9b0dec73ea73ca9c25c"
+      ],
+      "fdv_usd": 14477.0,
+      "holders": {
+        "holders_count": 11,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 1.0
+      },
+      "holders_count": 11,
+      "identity_collision_count": 2,
+      "kind": "token",
+      "liquidity_usd": 14599.53,
+      "manual_checks": [
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "resolve_name_ticker_collision",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 14477.0,
+      "name": "Robinhood Life",
+      "pool_address": "0xfc7632c6A5346abb78B7f0d46cad4673C3E2c13f",
+      "pool_created_at": 1783845183000,
+      "reasoning": {
+        "credibility": [
+          "Explorer reports verified contract source",
+          "Name/ticker identity collides across 2 contracts",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($14.5K)",
+          "24h volume/valuation turnover: 0.00x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 100.0%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "extreme_holder_concentration",
+        "name_ticker_collision",
+        "thin_liquidity"
+      ],
+      "scores": {
+        "credibility": 14.0,
+        "market": 10.01,
+        "security": 14.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "ROBINHOODLIFE",
+      "token_type": "ERC-20",
+      "total_score": 38.01,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 1,
+        "sellers": 0,
+        "sells": 1
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 14477.0,
+      "volume_24h_usd": 14.39,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x7d918ecb6fe806e9ad2cb2148b473937cf02fcd1",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0x7d918ecb6fe806e9ad2cb2148b473937cf02fcd1: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "watch",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0xb83bc53e8e787434604a82caa5ed9ee2a13dbc269c067c5585f25f345d6eef3a",
+        "https://dexscreener.com/robinhood/0xb83bc53e8e787434604a82caa5ed9ee2a13dbc269c067c5585f25f345d6eef3a",
+        "https://robinhoodchain.blockscout.com/token/0x7d918ecb6fe806e9ad2cb2148b473937cf02fcd1"
+      ],
+      "fdv_usd": 19906.0,
+      "holders": {
+        "holders_count": 148,
+        "pool_pct": 0.15698235195510363,
+        "top10_non_pool_pct": 0.03715077685298231
+      },
+      "holders_count": 148,
+      "identity_collision_count": 7,
+      "kind": "token",
+      "liquidity_usd": 26552.69,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "resolve_name_ticker_collision",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 19906.0,
+      "name": "RobinhoodieLife",
+      "pool_address": "0xb83bc53e8e787434604a82caa5ed9ee2a13dbc269c067c5585f25f345d6eef3a",
+      "pool_created_at": 1783845057000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Name/ticker identity collides across 7 contracts",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($19.9K)",
+          "24h volume/valuation turnover: 0.89x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 3.7%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "name_ticker_collision"
+      ],
+      "scores": {
+        "credibility": 0,
+        "market": 15.31,
+        "security": 22.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "Robinhoodi",
+      "token_type": "ERC-20",
+      "total_score": 37.31,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 68,
+        "sellers": 0,
+        "sells": 54
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 19906.0,
+      "volume_24h_usd": 17763.03,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0x8d620b9aa2fc9836f55885d8301bffff7f09fcd1",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_contract: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/addresses/0x8d620b9aa2fc9836f55885d8301bffff7f09fcd1: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "watch",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0x430df688f3a15a203adeaf3c02920dc23d42c587434c695b995c8d0955365393",
+        "https://dexscreener.com/robinhood/0x430df688f3a15a203adeaf3c02920dc23d42c587434c695b995c8d0955365393",
+        "https://robinhoodchain.blockscout.com/token/0x8d620b9aa2fc9836f55885d8301bffff7f09fcd1"
+      ],
+      "fdv_usd": 18528.0,
+      "holders": {
+        "holders_count": 138,
+        "pool_pct": 0.0,
+        "top10_non_pool_pct": 0.20938754278151553
+      },
+      "holders_count": 138,
+      "identity_collision_count": 7,
+      "kind": "token",
+      "liquidity_usd": 25537.07,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "resolve_name_ticker_collision",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 18528.0,
+      "name": "RobinhoodieLife",
+      "pool_address": "0x430df688f3a15a203adeaf3c02920dc23d42c587434c695b995c8d0955365393",
+      "pool_created_at": 1783844694000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Name/ticker identity collides across 7 contracts",
+          "Evidence merged from 3 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($18.5K)",
+          "24h volume/valuation turnover: 0.58x"
+        ],
+        "security": [
+          "Top 10 non-pool holders: 20.9%",
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [
+        "name_ticker_collision"
+      ],
+      "scores": {
+        "credibility": 0,
+        "market": 15.29,
+        "security": 22.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "blockscout",
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "Robinhoodi",
+      "token_type": "ERC-20",
+      "total_score": 37.29,
+      "total_supply_raw": 1e+27,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 46,
+        "sellers": 0,
+        "sells": 40
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 18528.0,
+      "volume_24h_usd": 10775.26,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    },
+    {
+      "address": "0xec6cbbdf714f8dc7d3c975b1a4e8525a3b4691b7",
+      "contract": {},
+      "data_gaps": [
+        "blockscout_token: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/tokens/0xec6cbbdf714f8dc7d3c975b1a4e8525a3b4691b7: \"Internal server error\"",
+        "blockscout_contract: Request failed for https://robinhoodchain.blockscout.com/api/v2/addresses/0xec6cbbdf714f8dc7d3c975b1a4e8525a3b4691b7: ",
+        "blockscout_holders: HTTP 500 from https://robinhoodchain.blockscout.com/api/v2/tokens/0xec6cbbdf714f8dc7d3c975b1a4e8525a3b4691b7/holders: \"Internal server error\"",
+        "x_api_unavailable"
+      ],
+      "decision": "watch",
+      "evidence": [
+        "GeckoTerminal new_pools: https://www.geckoterminal.com/robinhood/pools/0xfe86f42a99833346a6107df248de1b17f33a63177994dbf1e69ee2df881eea13",
+        "https://dexscreener.com/robinhood/0xfe86f42a99833346a6107df248de1b17f33a63177994dbf1e69ee2df881eea13"
+      ],
+      "fdv_usd": 50340.0,
+      "holders": {},
+      "identity_collision_count": 1,
+      "kind": "token",
+      "liquidity_usd": 34043.2,
+      "manual_checks": [
+        "verify_contract_source_and_privileged_functions",
+        "verify_holder_concentration_and_insider_wallets",
+        "verify_honeypot_tax_blacklist_mint_and_pause_controls",
+        "resolve_canonical_website_from_official_social_and_contract",
+        "resolve_canonical_social_account",
+        "verify_x_attention_manually"
+      ],
+      "market_cap_usd": 50340.0,
+      "name": "AN",
+      "pool_address": "0xfe86f42a99833346a6107df248de1b17f33a63177994dbf1e69ee2df881eea13",
+      "pool_created_at": 1783844696000,
+      "reasoning": {
+        "credibility": [
+          "Contract source is not verified",
+          "Evidence merged from 2 source classes"
+        ],
+        "market": [
+          "Valuation basis: circulating_market_cap ($50.3K)",
+          "24h volume/valuation turnover: 2.23x"
+        ],
+        "security": [
+          "Candidate websites were not fetched or executed",
+          "Automated honeypot/drainer clearance is unavailable on chain ID 4663; manual checks remain mandatory"
+        ],
+        "virality": [
+          "X API evidence unavailable; score is limited to linked social metadata"
+        ]
+      },
+      "risk_flags": [],
+      "scores": {
+        "credibility": 4.0,
+        "market": 15.44,
+        "security": 17.0,
+        "virality": 0.0
+      },
+      "socials": [],
+      "sources": [
+        "dexscreener",
+        "geckoterminal"
+      ],
+      "symbol": "AN",
+      "total_score": 36.44,
+      "transactions_24h": {
+        "buyers": 0,
+        "buys": 209,
+        "sellers": 0,
+        "sells": 181
+      },
+      "valuation_basis": "circulating_market_cap",
+      "valuation_status": "under_target",
+      "valuation_usd": 50340.0,
+      "volume_24h_usd": 112133.83,
+      "websites": [],
+      "x_metrics": {
+        "available": false
+      }
+    }
+  ]
+}
+```</pre></div>
+<script>
+window.addEventListener('message', function(e) {
+  if (e.data && e.data.type === 'set-theme') {
+    document.documentElement.classList.toggle('light', e.data.theme === 'light');
+  }
+});
+window.addEventListener('load', function() {
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {
+    if (window.Plotly) Plotly.relayout(el, { autosize: true, width: undefined });
+  });
+});
+window.addEventListener('resize', function() {
+  document.querySelectorAll('.plotly-chart .js-plotly-plot').forEach(function(el) {
+    if (window.Plotly) Plotly.Plots.resize(el);
+  });
+});
+</script>
+</body>
+</html>

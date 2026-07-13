@@ -1429,5 +1429,21 @@
       "agent"
     ],
     "agent": "lpmaxxing"
+  },
+  {
+    "id": "92e5f5",
+    "title": "Robinhood Chain Launch Scout",
+    "filename": "20260712_083448_robinhood_chain_launch_scout_92e5f5.html",
+    "created_at": "2026-07-12T08:34:48.988621+00:00",
+    "source_type": "routine",
+    "source_name": "robinhood_launch_scan",
+    "tags": [
+      "robinhood-chain",
+      "launches",
+      "memecoin",
+      "nft",
+      "security"
+    ],
+    "agent": "robinhood_launch_scout"
   }
 ]
