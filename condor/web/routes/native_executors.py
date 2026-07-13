@@ -24,7 +24,10 @@ router = APIRouter(tags=["native-executors"])
 class CreateExecutorRequest(BaseModel):
     type: str
     config: dict
+    # Attribution: WHO / WHICH RUN / WHICH PLAYBOOK (see ExecutorConfig)
+    agent_slug: str = ""
     agent_id: str = ""
+    strategy: str = ""
 
 
 class StopExecutorRequest(BaseModel):
@@ -36,7 +39,9 @@ def _record_to_dict(record) -> dict:
         "id": record.id,
         "type": record.type,
         "status": record.status,
+        "agent_slug": record.agent_slug,
         "agent_id": record.agent_id,
+        "strategy": record.strategy,
         "config": record.config,
         "state": record.state,
         "close_reason": record.close_reason,
@@ -57,6 +62,26 @@ async def list_executors(
     )
     return {"executors": [_record_to_dict(r) for r in records],
             "running": get_executor_runtime().list_running()}
+
+
+@router.get("/executors/performance")
+async def executors_performance(
+    group_by: str = "agent",
+    agent_id: Optional[str] = None,
+    agent_slug: Optional[str] = None,
+    user: WebUser = Depends(get_current_user),
+):
+    from condor.executors.performance import GROUP_KEYS, aggregate_performance
+
+    if group_by not in GROUP_KEYS:
+        raise HTTPException(status_code=422, detail=f"group_by must be one of {GROUP_KEYS}")
+    return {
+        "group_by": group_by,
+        "groups": aggregate_performance(
+            get_executor_runtime().store, group_by=group_by,
+            agent_id=agent_id, agent_slug=agent_slug,
+        ),
+    }
 
 
 @router.get("/executors/{executor_id}")
@@ -80,7 +105,9 @@ async def create_executor(
     runtime = get_executor_runtime()
 
     config_data = dict(req.config)
+    config_data["agent_slug"] = req.agent_slug
     config_data["agent_id"] = req.agent_id
+    config_data["strategy"] = req.strategy
 
     # Swaps: fill the declared notional from a live quote when omitted, so
     # the risk declaration below is always computable.

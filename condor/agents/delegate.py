@@ -233,6 +233,9 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
             timeout_s=timeout_s,
             event_sink=_make_event_sink(dt),
             fallback_on_unhealthy=True,
+            # Executor attribution: this delegation's id is the run key
+            # ("{slug}-dN"), consistent with sessions' "{slug}_{N}".
+            agent_id=dt.task_id,
         )
         if result.timed_out:
             dt.status = "error"

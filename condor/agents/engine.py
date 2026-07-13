@@ -484,6 +484,7 @@ class TickEngine:
             timeout_s=300,
             on_client=_hold_client,
             agent_id=self.agent_id,
+            strategy=self.strategy.slug,
         )
 
         response_text = result.text

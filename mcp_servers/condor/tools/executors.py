@@ -15,6 +15,7 @@ async def manage_executors(
     executor_id: str | None = None,
     agent_id: str | None = None,
     keep_position: bool = True,  # stop: True = detach (position stays open), False = close on-chain
+    group_by: str | None = None,  # performance: agent | run | strategy | venue | type
 ) -> dict | list:
     if action == "create":
         if not executor_type or config is None:
@@ -22,10 +23,12 @@ async def manage_executors(
         body = {
             "type": executor_type,
             "config": config,
-            # Attribution: session id ("{slug}_{N}") for ticks — the same key
-            # the journal/provider/hummingbot controller_id use — falling
-            # back to the slug for delegations and "" for chat sessions.
-            "agent_id": agent_id or settings.agent_id or settings.agent_slug or "",
+            # Attribution trio threaded into this subprocess by the run:
+            # slug = WHO, agent_id = WHICH RUN (session "{slug}_{N}" or
+            # delegation "{slug}-dN"), strategy = WHICH PLAYBOOK (ticks only).
+            "agent_slug": settings.agent_slug or "",
+            "agent_id": agent_id or settings.agent_id or "",
+            "strategy": settings.strategy or "",
         }
         return await call_main_api("POST", "/executors", body, timeout=60)
 
@@ -47,4 +50,10 @@ async def manage_executors(
             path += f"?agent_id={agent_id}"
         return await call_main_api("GET", path)
 
-    return {"error": f"Unknown action: {action} (create|stop|get|list)"}
+    if action == "performance":
+        params = [f"group_by={group_by or 'agent'}"]
+        if agent_id:
+            params.append(f"agent_id={agent_id}")
+        return await call_main_api("GET", f"/executors/performance?{'&'.join(params)}")
+
+    return {"error": f"Unknown action: {action} (create|stop|get|list|performance)"}

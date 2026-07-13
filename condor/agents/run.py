@@ -79,15 +79,19 @@ async def run_agent(
     fallback_on_unhealthy: bool = False,
     on_client: Callable[[Any], None] | None = None,
     agent_id: str = "",
+    strategy: str = "",
 ) -> RunResult:
     """Run ``agent``'s brain to completion on ``prompt``; return a RunResult.
 
     Args:
         permission_policy: ``None`` (AUTO) or a permission callback — see
             :mod:`condor.agents.policies`.
-        agent_id: Session id ("{slug}_{N}") for tick runs — threaded into the
-            condor MCP subprocess so native executors are attributed to the
-            session that created them (ticks only; empty elsewhere).
+        agent_id: Run id threaded into the condor MCP subprocess so native
+            executors are attributed to the run that created them: session id
+            ("{slug}_{N}") for ticks, delegation id ("{slug}-dN") for
+            delegations, empty for chat/consults.
+        strategy: Strategy slug for tick runs (executor attribution only;
+            empty for delegations — they run no playbook).
         server_name: The EFFECTIVE hummingbot server for this run (caller
             resolves pin-vs-ambient). None → session wiring (ambient server,
             or none for serverless agents).
@@ -154,6 +158,7 @@ async def run_agent(
             agent_slug=agent.slug,
             execution_mode=execution_mode,
             agent_id=agent_id,
+            strategy=strategy,
         )
     else:
         mcp_servers = build_mcp_servers_for_session(
@@ -162,6 +167,7 @@ async def run_agent(
             execution_mode=execution_mode,
             agent_slug=agent.slug,
             agent_id=agent_id,
+            strategy=strategy,
         )
 
     # -- client factory: pydantic-ai (allowlist enforced) or ACP subprocess --

@@ -60,9 +60,15 @@ class ExecutorConfig(BaseModel):
     type: str
     chain_network: str  # gateway format, e.g. "solana-mainnet-beta"
     wallet_address: str
-    # Session id of the owning agent ("{agent_slug}_{N}"), "" for manual runs.
-    # Attribution key for the journal/provider — NOT a permission boundary.
+    # Attribution (tracking keys, NOT permission boundaries):
+    #   agent_slug — WHO:      "lp_rebalancer";           "" for chat/manual
+    #   agent_id   — WHICH RUN: session "{slug}_{N}" or delegation
+    #                "{slug}-dN";                          "" for chat/manual
+    #   strategy   — WHICH PLAYBOOK: session-created only; "" otherwise
+    #                (delegations run no playbook — that is the truth)
+    agent_slug: str = ""
     agent_id: str = ""
+    strategy: str = ""
     update_interval: float = 5.0
     max_retries: int = 3
 

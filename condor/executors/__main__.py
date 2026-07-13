@@ -137,6 +137,18 @@ async def cmd_pnl(args) -> None:
     from decimal import Decimal
 
     store = ExecutorStore()
+
+    if args.group_by:
+        from condor.executors.performance import aggregate_performance
+
+        for g in aggregate_performance(store, group_by=args.group_by,
+                                       agent_id=args.agent_id, limit=args.limit):
+            wr = f"{g['win_rate']:.0%}" if g["win_rate"] is not None else "-"
+            print(f"{g['key']:30s} open {g['open_count']}  closed {g['closed_count']}"
+                  f"  failed {g['failed_count']}  pnl {g['realized_pnl_quote']:+.6f}"
+                  f"  costs -{g['costs_quote']:.6f}  win {wr}  {g['close_types']}")
+        return
+
     records = [r for r in store.list_all(limit=args.limit) if r.status == "CLOSED"]
     if args.agent_id:
         records = [r for r in records if r.agent_id == args.agent_id]
@@ -237,6 +249,9 @@ def main() -> None:
     p = sub.add_parser("pnl", help="realized P&L per closed executor, from the store")
     p.add_argument("--limit", type=int, default=100)
     p.add_argument("--agent-id", default=None)
+    p.add_argument("--group-by", default=None,
+                   choices=["agent", "run", "strategy", "venue", "type"],
+                   help="aggregate instead of listing per-executor")
     p.set_defaults(func=cmd_pnl)
 
     p = sub.add_parser(

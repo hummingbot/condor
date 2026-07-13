@@ -259,6 +259,7 @@ async def manage_executors(
     executor_id: str | None = None,
     agent_id: str | None = None,
     keep_position: bool = True,
+    group_by: str | None = None,
 ) -> dict | list:
     """Manage Condor-native executors (gateway-backed DEX execution).
 
@@ -280,20 +281,27 @@ async def manage_executors(
       closes the position on-chain. Requires executor_id.
     - "get": fetch one executor's full state. Requires executor_id.
     - "list": list executors (optionally filtered by agent_id).
+    - "performance": rolled-up scorecard — open/closed/failed counts,
+      realized PnL, costs, win rate, close-type breakdown — grouped by
+      group_by: "agent" (per agent, all its runs), "run" (per
+      session/delegation), "strategy" (compare playbooks), "venue", or
+      "type". Use this to answer "how is agent X doing" or "compare
+      strategy A vs B" in one call.
 
     Args:
-        action: create | stop | get | list
-        executor_type: "swap" or "lp" (create only)
+        action: create | stop | get | list | performance
+        executor_type: "swap", "lp", or "position" (create only)
         config: executor config dict (create only)
         executor_id: target executor (stop/get)
         agent_id: attribution/filter; defaults to this session's agent
         keep_position: on stop, keep net position (True) or swap back (False)
+        group_by: performance grouping (default "agent")
 
     Returns:
         Action-specific result dict.
     """
     return await executors_tool.manage_executors(
-        action, executor_type, config, executor_id, agent_id, keep_position
+        action, executor_type, config, executor_id, agent_id, keep_position, group_by
     )
 
 

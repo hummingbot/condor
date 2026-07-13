@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS executors (
     id           TEXT PRIMARY KEY,
     type         TEXT NOT NULL,
     status       TEXT NOT NULL,
+    agent_slug   TEXT NOT NULL DEFAULT '',
     agent_id     TEXT NOT NULL DEFAULT '',
+    strategy     TEXT NOT NULL DEFAULT '',
     config       TEXT NOT NULL,
     state        TEXT NOT NULL,
     close_reason TEXT,
@@ -37,6 +39,8 @@ CREATE INDEX IF NOT EXISTS idx_executors_status ON executors(status);
 # Applied after column migrations (references columns older tables lack)
 _POST_MIGRATION_SCHEMA = """
 CREATE INDEX IF NOT EXISTS idx_executors_agent ON executors(agent_id);
+CREATE INDEX IF NOT EXISTS idx_executors_agent_slug ON executors(agent_slug);
+CREATE INDEX IF NOT EXISTS idx_executors_strategy ON executors(strategy);
 """
 
 
@@ -45,7 +49,9 @@ class ExecutorRecord:
     id: str
     type: str
     status: str
+    agent_slug: str
     agent_id: str
+    strategy: str
     config: dict
     state: dict
     close_reason: Optional[str]
@@ -54,8 +60,18 @@ class ExecutorRecord:
     heartbeat_at: float
 
 
-_COLUMNS = ("id, type, status, agent_id, config, state, close_reason,"
-            " created_at, updated_at, heartbeat_at")
+_COLUMNS = ("id, type, status, agent_slug, agent_id, strategy, config, state,"
+            " close_reason, created_at, updated_at, heartbeat_at")
+
+
+def _slug_from_run_id(run_id: str) -> str:
+    """Derive the agent slug from a run id: strips a trailing session
+    ``_N``/``_eN`` or delegation ``-dN`` suffix. Slugs may contain
+    underscores, so only the rightmost suffix is stripped."""
+    import re
+
+    m = re.match(r"^(.+?)(?:_e?\d+|-d\d+)$", run_id)
+    return m.group(1) if m else run_id
 
 
 class ExecutorStore:
@@ -71,6 +87,22 @@ class ExecutorStore:
             self._conn.execute(
                 "ALTER TABLE executors ADD COLUMN agent_id TEXT NOT NULL DEFAULT ''"
             )
+        # M2 -> M3 migration: agent_slug + strategy columns; backfill slug
+        # from existing run ids (strategy stays '' — unknowable after the fact)
+        if "agent_slug" not in cols:
+            self._conn.execute(
+                "ALTER TABLE executors ADD COLUMN agent_slug TEXT NOT NULL DEFAULT ''"
+            )
+            self._conn.execute(
+                "ALTER TABLE executors ADD COLUMN strategy TEXT NOT NULL DEFAULT ''"
+            )
+            for (eid, run_id) in self._conn.execute(
+                "SELECT id, agent_id FROM executors WHERE agent_id != ''"
+            ).fetchall():
+                self._conn.execute(
+                    "UPDATE executors SET agent_slug = ? WHERE id = ?",
+                    (_slug_from_run_id(run_id), eid),
+                )
         self._conn.executescript(_POST_MIGRATION_SCHEMA)
         self._conn.commit()
 
@@ -81,9 +113,10 @@ class ExecutorStore:
         with self._lock:
             self._conn.execute(
                 """
-                INSERT INTO executors (id, type, status, agent_id, config, state,
-                                       close_reason, created_at, updated_at, heartbeat_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO executors (id, type, status, agent_slug, agent_id, strategy,
+                                       config, state, close_reason,
+                                       created_at, updated_at, heartbeat_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(id) DO UPDATE SET
                     status = excluded.status,
                     state = excluded.state,
@@ -95,7 +128,10 @@ class ExecutorStore:
                     executor.id,
                     executor.config.type,
                     executor.status.value,
+                    executor.config.agent_slug
+                    or _slug_from_run_id(executor.config.agent_id),
                     executor.config.agent_id,
+                    executor.config.strategy,
                     config_json,
                     state_json,
                     executor.close_reason,
@@ -138,6 +174,15 @@ class ExecutorStore:
         ).fetchall()
         return [self._to_record(r) for r in rows]
 
+    def load_by_slug(self, agent_slug: str, limit: int = 500) -> list[ExecutorRecord]:
+        """Everything an agent ever did, across all its sessions and delegations."""
+        rows = self._conn.execute(
+            f"SELECT {_COLUMNS} FROM executors WHERE agent_slug = ?"
+            " ORDER BY created_at DESC LIMIT ?",
+            (agent_slug, limit),
+        ).fetchall()
+        return [self._to_record(r) for r in rows]
+
     def list_all(self, limit: int = 50) -> list[ExecutorRecord]:
         rows = self._conn.execute(
             f"SELECT {_COLUMNS} FROM executors ORDER BY created_at DESC LIMIT ?",
@@ -151,13 +196,15 @@ class ExecutorStore:
             id=row[0],
             type=row[1],
             status=row[2],
-            agent_id=row[3],
-            config=json.loads(row[4]),
-            state=json.loads(row[5]),
-            close_reason=row[6],
-            created_at=row[7],
-            updated_at=row[8],
-            heartbeat_at=row[9],
+            agent_slug=row[3],
+            agent_id=row[4],
+            strategy=row[5],
+            config=json.loads(row[6]),
+            state=json.loads(row[7]),
+            close_reason=row[8],
+            created_at=row[9],
+            updated_at=row[10],
+            heartbeat_at=row[11],
         )
 
     def close(self) -> None:
