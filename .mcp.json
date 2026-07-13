@@ -17,6 +17,12 @@
       "command": "npx",
       "args": ["@playwright/mcp@latest"],
       "env": {}
+    },
+    "condor-notifications": {
+      "type": "stdio",
+      "command": "bun",
+      "args": ["integrations/claude_channel/condor-channel.ts"],
+      "env": {}
     }
   }
 }
