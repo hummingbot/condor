@@ -41,6 +41,11 @@ class Config(BaseModel):
     sell_price_min: Optional[float] = None
     sell_price_max: Optional[float] = None
     slippage_pct: float = Field(default=1.0)
+    auto_swap: bool = Field(
+        default=True,
+        description="When the wallet lacks one side, plan a pre-swap from the "
+        "other (True) or report BLOCKED and stand down (False)",
+    )
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -112,6 +117,24 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         base_short = max(Decimal("0"), plan.base_amount - base_avail)
         quote_short = max(Decimal("0"), plan.quote_amount - quote_avail)
 
+        # Dust shortfall (≤1% of the side): clamp the deposit to what the
+        # wallet holds instead of swapping — this is what killed the exact-
+        # sizing plan (pre-swap slippage left the wallet 0.4c short and
+        # gateway rejected with INSUFFICIENT_BALANCE).
+        clamped = []
+        base_amount, quote_amount = plan.base_amount, plan.quote_amount
+        if 0 < base_short <= plan.base_amount * Decimal("0.01"):
+            base_amount = base_avail * Decimal("0.995")
+            clamped.append(base_token)
+            base_short = Decimal("0")
+        if 0 < quote_short <= plan.quote_amount * Decimal("0.01"):
+            quote_amount = quote_avail * Decimal("0.995")
+            clamped.append(quote_token)
+            quote_short = Decimal("0")
+
+        # Pre-swaps buy a 2% buffer over the shortfall so slippage + fees
+        # can't leave the deposit short again.
+        SWAP_BUFFER = Decimal("1.02")
         pre_swap = None
         blocked = None
         if base_short > 0 and quote_short > 0:
@@ -119,20 +142,26 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 f"insufficient funds: need {plan.base_amount:.6f} {base_token} + "
                 f"{plan.quote_amount:.4f} {quote_token}, have {base_avail:.6f} + {quote_avail:.4f}"
             )
+        elif (base_short > 0 or quote_short > 0) and not config.auto_swap:
+            short_desc = (
+                f"{base_short:.6f} {base_token}" if base_short > 0
+                else f"{quote_short:.4f} {quote_token}"
+            )
+            blocked = f"short {short_desc} and auto_swap is disabled — not converting inventory"
         elif base_short > 0:
             # Buy the missing base with excess quote (controller autoswap)
-            cost = base_short * price
-            if quote_avail - plan.quote_amount >= cost:
+            buy_amount = base_short * SWAP_BUFFER
+            if quote_avail - plan.quote_amount >= buy_amount * price:
                 pre_swap = {"executor_type": "swap", "config": {
                     "chain_network": config.chain_network, "wallet_address": wallet,
                     "base_token": base_token, "quote_token": quote_token,
-                    "amount": str(base_short), "side": "BUY",
+                    "amount": str(buy_amount), "side": "BUY",
                     "slippage_pct": str(config.slippage_pct),
                 }}
             else:
                 blocked = f"short {base_short:.6f} {base_token} and no excess {quote_token} to swap"
         elif quote_short > 0:
-            need_base_sold = quote_short / price
+            need_base_sold = (quote_short / price) * SWAP_BUFFER
             if base_avail - plan.base_amount >= need_base_sold:
                 pre_swap = {"executor_type": "swap", "config": {
                     "chain_network": config.chain_network, "wallet_address": wallet,
@@ -151,8 +180,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         }
         if blocked:
             result["reason"] = blocked
+        if clamped:
+            result["clamped_to_balance"] = clamped
         if pre_swap:
             result["pre_swap_create_args"] = pre_swap
+            result["note"] = (
+                "execute the pre-swap first, then RE-RUN this routine and use "
+                "the fresh lp_create_args — do not reuse these amounts"
+            )
         result["lp_create_args"] = {
             "executor_type": "lp",
             "config": {
@@ -163,8 +198,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 "trading_pair": config.trading_pair,
                 "lower_price": f"{plan.lower_price:.10f}",
                 "upper_price": f"{plan.upper_price:.10f}",
-                "base_amount": f"{plan.base_amount:.10f}",
-                "quote_amount": f"{plan.quote_amount:.10f}",
+                "base_amount": f"{base_amount:.10f}",
+                "quote_amount": f"{quote_amount:.10f}",
                 "lower_limit_price": f"{plan.lower_limit_price:.10f}",
                 "upper_limit_price": f"{plan.upper_limit_price:.10f}",
                 "slippage_pct": str(config.slippage_pct),

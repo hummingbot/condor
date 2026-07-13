@@ -1,0 +1,4 @@
+strategy: lp_rebalance
+status: running
+model: claude-acp:sonnet
+started_at: '2026-07-13T19:58:00.081103+00:00'

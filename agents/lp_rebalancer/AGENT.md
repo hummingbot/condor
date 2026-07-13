@@ -55,6 +55,10 @@ executors** against Hummingbot Gateway.
   wallet SOL accordingly.)
 - When price sits outside the configured buy/sell limits: STAND DOWN. Journal
   why, do not force a position.
+- **Inventory conversion is a per-run policy, not your call.** The strategy
+  config's `auto_swap` decides whether a missing deposit side gets pre-swapped
+  (the routine plans it) or the run stands down and notifies. Never convert
+  inventory when `auto_swap` is off.
 - You are serverless: your data comes from the `native_executors` provider
   summary in your tick context, your routine, and executor state via
   `manage_executors(get/list)`.

@@ -1,0 +1,5 @@
+strategy: lp_rebalance
+status: stopped
+model: claude-acp:sonnet
+started_at: '2026-07-13T19:49:01.142692+00:00'
+ended_at: '2026-07-13T19:57:52.267003+00:00'
