@@ -267,6 +267,105 @@ def test_trading_delegation_uses_agent_baseline(tmp_path, monkeypatch):
     assert seen["permission_policy"] is not None
 
 
+def test_serverless_agent_with_baseline_is_risk_gated(tmp_path, monkeypatch):
+    """A SERVERLESS agent with an AGENT.md risk baseline must be gated: it can
+    trade through condor-native executors (gateway venues), so server_required
+    alone is not the trading test."""
+    _patch_roots(monkeypatch, tmp_path)
+    _write_agent(
+        tmp_path,
+        "lp_agent",
+        server_required=False,
+        risk_limits={"max_position_size_quote": 50, "max_open_executors": 2},
+    )
+
+    seen = {}
+
+    async def fake_run(agent, prompt, *, permission_policy, **kw):
+        seen["permission_policy"] = permission_policy
+        return RunResult(text="ok")
+
+    monkeypatch.setattr(run_module, "run_agent", fake_run)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="lp_agent",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="open an LP position",
+            bot=_FakeBot(),
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+    assert dt.risk_limits == {"max_position_size_quote": 50, "max_open_executors": 2}
+    assert seen["permission_policy"] is not None  # gated, never AUTO
+
+
+def test_serverless_agent_explicit_caps_not_discarded(tmp_path, monkeypatch):
+    """Per-call caps on a serverless delegation must govern the run (they were
+    silently dropped before the condor-simple fix)."""
+    _patch_roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "lp_agent", server_required=False)  # no baseline
+
+    seen = {}
+
+    async def fake_run(agent, prompt, *, permission_policy, **kw):
+        seen["permission_policy"] = permission_policy
+        return RunResult(text="ok")
+
+    monkeypatch.setattr(run_module, "run_agent", fake_run)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="lp_agent",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="open an LP position",
+            bot=_FakeBot(),
+            risk_limits={"max_position_size_quote": 5},
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+    assert dt.risk_limits == {"max_position_size_quote": 5}
+    assert seen["permission_policy"] is not None
+
+
+def test_serverless_agent_without_baseline_stays_auto(tmp_path, monkeypatch):
+    """True serverless specialists (no baseline, no caps) keep full auto-approve."""
+    _patch_roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "builder", server_required=False)
+
+    seen = {}
+
+    async def fake_run(agent, prompt, *, permission_policy, **kw):
+        seen["permission_policy"] = permission_policy
+        return RunResult(text="ok")
+
+    monkeypatch.setattr(run_module, "run_agent", fake_run)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="builder",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="build a routine",
+            bot=_FakeBot(),
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+    assert dt.risk_limits is None
+    assert seen["permission_policy"] is None  # AUTO
+
+
 def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(

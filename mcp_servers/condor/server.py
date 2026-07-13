@@ -131,7 +131,8 @@ async def delegate(
     it for "go build/scan/produce X and ping me when finished" (e.g. "create a
     routine that scans SOL pools").
 
-    Authorization: a delegation to a TRADING agent (server_required) runs under a
+    Authorization: a delegation to a TRADING agent (one that needs a hummingbot
+    server, has an AGENT.md risk_limits baseline, or is given caps here) runs under a
     zero-seeded risk gate — tool calls auto-approve within caps, uncapped bot
     deploys and place_order are blocked. The caps come from the optional
     risk_limits arg when given (it REPLACES the agent's AGENT.md baseline for

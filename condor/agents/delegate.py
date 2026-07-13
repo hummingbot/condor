@@ -9,14 +9,17 @@ the natural "task done" signal -- then notifies the user with the result.
 It is NOT a new engine: it drives the same :func:`condor.agents.run.run_agent`
 primitive under an unattended policy (refactor-02 §4.1):
 
-- **Trading agents** (``server_required: true``) run under a zero-seeded
-  ``risk_gate``: tool calls auto-approve *within caps* (the caps act as a
-  per-run budget), uncapped bot deploys and ``place_order`` are blocked. The
-  limits come from the per-call ``risk_limits`` override when given (it
-  REPLACES the baseline — what you pass is exactly what governs), else the
-  agent's AGENT.md ``risk_limits:`` baseline. A trading delegation with
-  NEITHER errors loudly at start.
-- **Serverless specialists** (e.g. ``routine_builder``) keep full auto-approve.
+- **Trading agents** run under a zero-seeded ``risk_gate``: tool calls
+  auto-approve *within caps* (the caps act as a per-run budget), uncapped bot
+  deploys and ``place_order`` are blocked. "Trading" means: needs a hummingbot
+  server, OR carries an AGENT.md ``risk_limits:`` baseline, OR the caller
+  passed caps — serverless agents can trade via condor-native executors, so
+  ``server_required`` alone is not the test. The limits come from the per-call
+  ``risk_limits`` override when given (it REPLACES the baseline — what you
+  pass is exactly what governs), else the baseline. A server-backed
+  delegation with NEITHER errors loudly at start.
+- **Serverless specialists with no baseline** (e.g. ``routine_builder``) keep
+  full auto-approve.
 
 The in-memory registry dies with the process, like a running ``TickEngine`` in
 ``_engines``. Each delegation is persisted as ONE flat transcript file,
@@ -91,22 +94,27 @@ def get_all_delegations() -> dict[str, DelegateTask]:
 def _resolve_delegation_limits(agent, risk_limits: dict | None) -> dict | None:
     """Resolve the risk caps governing an unattended run of ``agent``.
 
-    Returns the caps dict for trading agents, or None for serverless agents
-    (full auto-approve). Raises when a trading delegation has neither a
-    baseline nor an override — unbounded-capital delegations must say their
-    numbers out loud.
+    An agent counts as TRADING when it needs a hummingbot server, carries an
+    AGENT.md ``risk_limits:`` baseline, or the caller passed caps — NOT just
+    ``server_required``: serverless agents can trade through condor-native
+    executors (gateway venues), so a baseline or override must gate them too.
+    Returns the caps dict for trading agents, or None only for true
+    serverless specialists with no baseline and no override (full
+    auto-approve, e.g. routine_builder). Raises when a server-backed
+    delegation has neither a baseline nor an override — unbounded-capital
+    delegations must say their numbers out loud.
     """
+    limits = risk_limits or agent.risk_limits
+    if limits:
+        return dict(limits)
     if not agent.server_required:
         return None
-    limits = risk_limits or agent.risk_limits
-    if not limits:
-        raise ValueError(
-            f"Agent '{agent.slug}' can touch live trading but has no risk baseline: "
-            "set `risk_limits:` in its AGENT.md frontmatter, or pass an explicit "
-            "risk_limits dict on this delegation (e.g. "
-            '{"max_position_size_quote": 500, "max_open_executors": 5}).'
-        )
-    return dict(limits)
+    raise ValueError(
+        f"Agent '{agent.slug}' can touch live trading but has no risk baseline: "
+        "set `risk_limits:` in its AGENT.md frontmatter, or pass an explicit "
+        "risk_limits dict on this delegation (e.g. "
+        '{"max_position_size_quote": 500, "max_open_executors": 5}).'
+    )
 
 
 async def start_delegation(
