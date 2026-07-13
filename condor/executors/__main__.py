@@ -126,6 +126,64 @@ async def cmd_status(args) -> None:
             print(f"  state:  {json.dumps(r.state)}")
 
 
+async def cmd_pnl(args) -> None:
+    """Realized P&L per closed executor, from the store alone.
+
+    LP P&L = (final amounts + fees earned, valued at add-time price) −
+    initial value − tx fees − unrefunded rent (native costs valued at the
+    executor's own add_mid_price — exact for USD-quoted pairs). Swaps are
+    conversions, not P&L: only their fee counts as cost.
+    """
+    from decimal import Decimal
+
+    store = ExecutorStore()
+    records = [r for r in store.list_all(limit=args.limit) if r.status == "CLOSED"]
+    if args.agent_id:
+        records = [r for r in records if r.agent_id == args.agent_id]
+
+    def _decimals(state: dict) -> dict:
+        out = {}
+        for k, v in state.items():
+            if isinstance(v, (int, float, str)):
+                try:
+                    out[k] = Decimal(str(v))
+                except Exception:
+                    pass
+        return out
+
+    total_pnl = Decimal("0")
+    total_costs = Decimal("0")
+    for r in reversed(records):  # oldest first
+        s = _decimals(r.state)
+        if r.type == "lp":
+            add_price = s.get("add_mid_price", Decimal("0"))
+            if add_price <= 0:
+                print(f"{r.id}: no add_mid_price — skipped")
+                continue
+            initial = s.get("initial_base_amount", 0) * add_price + s.get("initial_quote_amount", 0)
+            final = (s.get("base_amount", 0) + s.get("base_fee", 0)) * add_price \
+                + s.get("quote_amount", 0) + s.get("quote_fee", 0)
+            rent_lost = s.get("position_rent", 0) - s.get("position_rent_refunded", 0)
+            costs = (s.get("tx_fee", 0) + rent_lost) * add_price
+            pnl = final - initial - costs
+            total_pnl += pnl
+            total_costs += costs
+            print(f"{r.id}  [{r.config.get('connector')}] {r.config.get('trading_pair')}  "
+                  f"agent={r.agent_id or '-'}")
+            print(f"   position P&L: {final - initial:+.6f}  costs (tx+rent burn): "
+                  f"-{costs:.6f}  net: {pnl:+.6f} quote")
+        elif r.type == "swap":
+            fee = s.get("fee", Decimal("0"))
+            quoted = s.get("quoted_price", Decimal("0"))
+            cost = fee * quoted  # fee is native; approximate at quoted price
+            total_costs += cost
+            total_pnl -= cost
+            print(f"{r.id}  [swap] {r.config.get('base_token')}-{r.config.get('quote_token')} "
+                  f"{r.config.get('side')} {r.config.get('amount')}  agent={r.agent_id or '-'}")
+            print(f"   conversion (not P&L); tx fee cost: -{cost:.6f} quote")
+    print(f"\nTOTAL net realized: {total_pnl:+.6f} quote  (of which costs: -{total_costs:.6f})")
+
+
 async def cmd_stop(args) -> None:
     # Out-of-process stop: adopt via reconcile, request stop, run to completion.
     runtime = ExecutorRuntime()
@@ -175,6 +233,11 @@ def main() -> None:
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(func=cmd_status)
+
+    p = sub.add_parser("pnl", help="realized P&L per closed executor, from the store")
+    p.add_argument("--limit", type=int, default=100)
+    p.add_argument("--agent-id", default=None)
+    p.set_defaults(func=cmd_pnl)
 
     p = sub.add_parser(
         "stop",
