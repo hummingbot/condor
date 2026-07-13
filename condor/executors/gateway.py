@@ -79,6 +79,15 @@ class GatewayClient:
     async def get_wallets(self) -> list[dict]:
         return await self._get("/wallet/")
 
+    async def save_token(self, chain_network: str, address: str) -> dict:
+        """Fetch a token's on-chain metadata and register it in gateway's
+        token list — required before quoting/swapping arbitrary mints."""
+        return await self._request(
+            "POST",
+            f"/tokens/save/{address}",
+            params={"chainNetwork": chain_network, "address": address},
+        )
+
     # -- swap ---------------------------------------------------------------
 
     async def quote_swap(

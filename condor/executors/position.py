@@ -120,38 +120,48 @@ class PositionExecutor(ExecutorBase):
                 self.fail(self.close_reason or "position state machine failed")
 
     async def _open(self) -> None:
-        """BUY base spending amount_quote of the quote token.
+        """Enter by SELLING amount_quote of the quote token for the base.
 
-        Gateway swap 'amount' is in BASE units, so first quote a unit
-        price, then execute a BUY for the base amount amount_quote buys.
+        Inverted on purpose: an exact-base BUY quotes as ExactOut, which
+        Jupiter frequently cannot route for memecoins ("No route found").
+        Selling an exact quote amount is ExactIn — routable whenever
+        liquidity exists — and it spends exactly what we budgeted.
+
+        Fresh mints are auto-registered in gateway's token list on the
+        first "Token not found" and retried once.
         """
+        from condor.executors.gateway import GatewayError
+
         cfg = self.config
         s = self.state
-        quote = await self.gateway.quote_swap(
-            chain_network=cfg.chain_network,
-            base_token=cfg.base_token,
-            quote_token=cfg.quote_token,
-            amount=1.0,
-            side="BUY",
-        )
-        unit_price = Decimal(str(quote["price"]))  # quote per base
-        base_amount = cfg.amount_quote / unit_price
 
-        result = await self.gateway.execute_swap(
-            chain_network=cfg.chain_network,
-            wallet_address=cfg.wallet_address,
-            base_token=cfg.base_token,
-            quote_token=cfg.quote_token,
-            amount=float(base_amount),
-            side="BUY",
-            connector=cfg.connector,
-            slippage_pct=float(cfg.slippage_pct),
-        )
+        async def _swap_in():
+            return await self.gateway.execute_swap(
+                chain_network=cfg.chain_network,
+                wallet_address=cfg.wallet_address,
+                base_token=cfg.quote_token,   # sell SOL/USDC...
+                quote_token=cfg.base_token,   # ...for the memecoin
+                amount=float(cfg.amount_quote),
+                side="SELL",
+                connector=cfg.connector,
+                slippage_pct=float(cfg.slippage_pct),
+            )
+
+        try:
+            result = await _swap_in()
+        except GatewayError as e:
+            if "token not found" not in (e.body or "").lower():
+                raise
+            logger.info("position %s: registering unknown token %s in gateway",
+                        self.id, cfg.base_token)
+            await self.gateway.save_token(cfg.chain_network, cfg.base_token)
+            result = await _swap_in()
+
         data = result.get("data") or {}
         s.open_tx_hash = result["signature"]
-        # BUY: amountIn = quote spent, amountOut = base received
+        # SELL of quote side: amountIn = quote spent, amountOut = base received
         s.quote_spent = Decimal(str(data.get("amountIn", cfg.amount_quote)))
-        s.base_bought = Decimal(str(data.get("amountOut", base_amount)))
+        s.base_bought = Decimal(str(data.get("amountOut", 0)))
         s.tx_fee += Decimal(str(data.get("fee", 0)))
         if s.base_bought <= 0:
             raise RuntimeError(f"buy returned no base: {result}")
@@ -217,18 +227,30 @@ class PositionExecutor(ExecutorBase):
         s.state = PositionStates.CLOSING
 
     async def _close(self) -> None:
+        from condor.executors.gateway import GatewayError
+
         cfg = self.config
         s = self.state
-        result = await self.gateway.execute_swap(
-            chain_network=cfg.chain_network,
-            wallet_address=cfg.wallet_address,
-            base_token=cfg.base_token,
-            quote_token=cfg.quote_token,
-            amount=float(s.base_bought),
-            side="SELL",
-            connector=cfg.connector,
-            slippage_pct=float(cfg.slippage_pct),
-        )
+
+        async def _swap_out():
+            return await self.gateway.execute_swap(
+                chain_network=cfg.chain_network,
+                wallet_address=cfg.wallet_address,
+                base_token=cfg.base_token,
+                quote_token=cfg.quote_token,
+                amount=float(s.base_bought),
+                side="SELL",
+                connector=cfg.connector,
+                slippage_pct=float(cfg.slippage_pct),
+            )
+
+        try:
+            result = await _swap_out()
+        except GatewayError as e:
+            if "token not found" not in (e.body or "").lower():
+                raise
+            await self.gateway.save_token(cfg.chain_network, cfg.base_token)
+            result = await _swap_out()
         data = result.get("data") or {}
         s.close_tx_hash = result["signature"]
         s.quote_returned = Decimal(str(data.get("amountOut", 0)))

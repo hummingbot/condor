@@ -15,7 +15,12 @@ MINT = "MemeCoinMint1111111111111111111111111111111"
 
 
 class FakeGateway:
-    """Buy at prices[0]; each subsequent quote pops the next price."""
+    """Entry/exit at prices[0]; each monitoring quote pops the next price.
+
+    Prices are the memecoin's price in quote units. The executor enters
+    by SELLING the quote token (ExactIn), so an entry execute has
+    base_token == the QUOTE symbol ("SOL") and amountOut in memecoins.
+    """
 
     def __init__(self, prices):
         self.prices = list(prices)
@@ -33,12 +38,13 @@ class FakeGateway:
         return {"price": price}
 
     async def execute_swap(self, **kw):
-        self.calls.append(("execute", kw["side"], kw["amount"]))
-        price = self.prices[0] if kw["side"] == "SELL" else self.prices[0]
-        if kw["side"] == "BUY":
+        self.calls.append(("execute", kw["side"], kw["base_token"], kw["amount"]))
+        price = self.prices[0]
+        if kw["base_token"] == "SOL":  # entry: sell SOL for the memecoin
             return {"signature": "sig-buy", "status": 1,
-                    "data": {"amountIn": kw["amount"] * price, "amountOut": kw["amount"],
+                    "data": {"amountIn": kw["amount"], "amountOut": kw["amount"] / price,
                              "fee": 0.0001}}
+        # exit: sell the memecoin for SOL
         return {"signature": "sig-sell", "status": 1,
                 "data": {"amountIn": kw["amount"], "amountOut": kw["amount"] * price,
                          "fee": 0.0001}}
@@ -74,7 +80,7 @@ def test_take_profit_closes(tmp_path):
     assert rec.status == "CLOSED"
     assert rec.state["close_type"] == "take_profit"
     assert rec.state["close_tx_hash"] == "sig-sell"
-    assert ("execute", "SELL", pytest.approx(0.0002)) in gw.calls
+    assert ("execute", "SELL", MINT, pytest.approx(0.0002)) in gw.calls
 
 
 def test_stop_loss_closes(tmp_path):
@@ -125,7 +131,8 @@ def test_detach_on_stop_keeps_tokens(tmp_path):
     rec = store.load(eid)
     assert rec.status == "CLOSED"
     assert rec.state["close_type"] == "detached"
-    assert not any(c[0] == "execute" and c[1] == "SELL" for c in gateway.calls)
+    # tokens were never sold: no execute against the memecoin mint
+    assert not any(c[0] == "execute" and c[2] == MINT for c in gateway.calls)
 
 
 def test_reconcile_readopts_active_position(tmp_path):
