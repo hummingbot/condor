@@ -1,0 +1,5 @@
+strategy: trend_position
+status: stopped
+model: claude-acp:sonnet
+started_at: '2026-07-13T22:10:40.433288+00:00'
+ended_at: '2026-07-13T22:22:06.091847+00:00'

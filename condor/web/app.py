@@ -21,6 +21,7 @@ from condor.web.routes import (
     executors,
     market,
     native_executors,
+    notifications,
     portfolio,
     positions,
     reports,
@@ -91,6 +92,7 @@ def create_app() -> FastAPI:
     app.include_router(chat_ws.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
     app.include_router(native_executors.router, prefix="/api/v1")
+    app.include_router(notifications.router, prefix="/api/v1")
 
     # ── Serve report HTML files ──
     reports_dir = Path(__file__).resolve().parent.parent.parent / "reports"

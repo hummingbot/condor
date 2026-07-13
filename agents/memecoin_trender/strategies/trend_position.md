@@ -5,13 +5,13 @@ description: One barrier-protected position at a time on a trending Solana
   native position executor with TP/SL/time-limit, learn from every close.
 agent_key: null
 default_config:
-  frequency_sec: 300
+  frequency_sec: 60
   execution_mode: loop
   amount_quote: 0.02
-  take_profit_pct: 0.10
-  stop_loss_pct: 0.05
-  time_limit_s: 3600
-  min_liquidity_usd: 200000
+  take_profit_pct: 0.01
+  stop_loss_pct: 0.01
+  time_limit_s: 600
+  min_liquidity_usd: 100000
   min_volume_24h_usd: 500000
   risk_limits:
     max_position_size_quote: 0.1

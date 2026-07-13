@@ -616,12 +616,20 @@ class TickEngine:
             return None
 
     async def _notify(self, message: str) -> None:
-        """Send a notification to the user via Telegram."""
-        if hasattr(self, "_bot") and self._bot:
-            try:
-                await self._bot.send_message(chat_id=self.chat_id, text=message)
-            except Exception:
-                log.exception("Failed to send notification to chat %s", self.chat_id)
+        """Notify the user: outbox + Telegram mirror (condor.notifications)."""
+        from condor.notifications import notify
+
+        try:
+            await notify(
+                message,
+                user_id=self.user_id,
+                chat_id=self.chat_id if isinstance(self.chat_id, int) else 0,
+                agent_id=self.agent_id,
+                kind="session",
+                bot=getattr(self, "_bot", None),
+            )
+        except Exception:
+            log.exception("Failed to send notification for %s", self.agent_id)
 
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""

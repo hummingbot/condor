@@ -258,8 +258,14 @@ def build_mcp_servers_for_session(
     agent_slug: str | None = None,
     agent_id: str | None = None,
     strategy: str | None = None,
+    include_hummingbot: bool = True,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
+
+    ``include_hummingbot=False`` returns the condor MCP alone — REQUIRED for
+    serverless agents: with both servers wired, the model sees two
+    ``manage_executors`` tools (condor-native vs hummingbot-api) with
+    incompatible schemas and picks wrong.
 
     Resolves the user's default Condor server and returns ACP-format mcpServers
     that override the static .mcp.json entries by name.
@@ -276,6 +282,19 @@ def build_mcp_servers_for_session(
     from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
+
+    if not include_hummingbot:
+        return [
+            {
+                "name": "condor",
+                "command": "uv",
+                "args": ["run", "python", "-m", "mcp_servers.condor"]
+                + _condor_mcp_args(
+                    chat_id, user_id, agent_slug, agent_id=agent_id, strategy=strategy
+                ),
+                "env": [],
+            }
+        ]
 
     # Resolve which hummingbot server to use (explicit override > user preferences)
     if not server_name:

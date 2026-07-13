@@ -168,6 +168,9 @@ async def run_agent(
             agent_slug=agent.slug,
             agent_id=agent_id,
             strategy=strategy,
+            # Serverless agents run condor-only: wiring mcp-hummingbot too
+            # exposes a second manage_executors with an incompatible schema.
+            include_hummingbot=agent.server_required,
         )
 
     # -- client factory: pydantic-ai (allowlist enforced) or ACP subprocess --

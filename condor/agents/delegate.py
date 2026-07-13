@@ -314,15 +314,8 @@ def _write_transcript(dt: DelegateTask) -> None:
 
 
 async def _notify_done(dt: DelegateTask, bot) -> None:
-    """Notify the user the delegation finished.
-
-    Prefer the passed live ``bot``; otherwise fall back to the registered routine
-    bot, and finally the ``_HttpBot`` Telegram-HTTP path (``TELEGRAM_TOKEN``) that
-    routines/notification already use, so a process with no live bot still delivers.
-    """
-    if not dt.chat_id:
-        return
-
+    """Notify the user the delegation finished: outbox + Telegram mirror
+    (bot fallbacks live in condor.notifications)."""
     if dt.status == "error":
         text = f"❌ Delegated task {dt.task_id} failed: {dt.error}"
     else:
@@ -331,17 +324,13 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
             snippet = snippet[:1500] + "…"
         text = f"✅ Delegated task {dt.task_id} done\n\n{snippet}".rstrip()
 
-    target = bot
-    if target is None:
-        try:
-            from condor.routine_store import get_routine_store
+    from condor.notifications import notify
 
-            target = get_routine_store().get_bot()
-        except Exception:
-            target = None
-    if target is None:
-        from condor.routine_store import _HttpBot
-
-        target = _HttpBot()
-
-    await target.send_message(chat_id=dt.chat_id, text=text)
+    await notify(
+        text,
+        user_id=dt.user_id,
+        chat_id=dt.chat_id,
+        agent_id=dt.task_id,
+        kind="delegation",
+        bot=bot,
+    )

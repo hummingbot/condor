@@ -187,6 +187,32 @@ async def send_notification(
 
 
 @mcp.tool()
+@handle_errors("get notifications")
+async def get_notifications(
+    limit: int = 30,
+    since_ts: float | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Read recent Condor notifications from the outbox (oldest first).
+
+    Every user-facing notification (session ticks, delegation results,
+    agent pings) is recorded in the outbox regardless of Telegram
+    delivery. Use this to catch up on what agents reported — e.g. after
+    starting a session or delegation from this harness — or to poll for
+    new entries by passing the last seen ``ts`` as ``since_ts``.
+
+    Args:
+        limit: Max entries returned.
+        since_ts: Only entries with ts strictly greater than this.
+        agent_id: Filter to one run (session or delegation id).
+
+    Returns:
+        {"notifications": [{ts, user_id, agent_id, kind, text, ...}]}
+    """
+    return await notification.get_notifications(limit, since_ts, agent_id)
+
+
+@mcp.tool()
 @handle_errors("manage routines")
 async def manage_routines(
     action: str,
