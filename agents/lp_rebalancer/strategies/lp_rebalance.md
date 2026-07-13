@@ -56,10 +56,12 @@ state and unrealized PnL. Do not re-query what it already tells you.
    trading_pair, total_amount_quote, width/offset/threshold, any price
    limits). Never compute bounds yourself.
 2. If the plan says `STAND_DOWN` or `BLOCKED`: journal the reason and wait.
-3. **Cycle-cost check** — this is your edge over the mechanical controller:
-   a raydium open/close cycle costs ~0.0166 SOL (~$1.2) non-refundable rent
-   plus fees. If the previous position's realized fees didn't cover its cycle
-   cost and price is still churning near a range edge, prefer waiting a tick
+3. **Cycle-cost check** — this is your edge over the mechanical controller.
+   Verified per-cycle costs: meteora and orca refund ALL position rent
+   (true cost ≈ tx fees, ~$0.003); raydium BURNS ~0.0166 SOL (~$1.2) per
+   cycle. On meteora/orca, rebalancing on every range exit is economically
+   fine; on raydium, if the previous position's realized fees didn't cover
+   the burn and price is churning near a range edge, prefer waiting a tick
    over cycling again; consider a wider `position_width_pct` and record a
    learning.
 4. If the plan includes `pre_swap_create_args`: create that swap executor

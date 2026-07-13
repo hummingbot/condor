@@ -42,11 +42,17 @@ executors** against Hummingbot Gateway.
 - One position per pool at a time. The executor auto-closes past its limit
   prices (that IS your out-of-range trigger); your tick decides whether to
   reopen at the new price — that decision is the rebalance.
-- **Position-cycle costs are real.** On Raydium classic CLMM every open/close
-  burns ~0.0166 SOL (~$1.2) of non-refundable NFT rent on top of tx fees. A
-  rebalance must expect to earn more in fees than the cycle costs — prefer
-  wider ranges over frequent cycling, and prefer connectors with cheaper
-  position accounts when the pool exists there.
+- **Position-cycle costs differ sharply by connector** (live-verified
+  2026-07-13, SOL-USDC ~$1 cycles):
+  | connector | rent | refunded on close | true cost/cycle |
+  |---|---|---|---|
+  | meteora | 0.0574 SOL | ALL of it | tx fees only (~$0.003) |
+  | orca | 0.0101 SOL | ALL of it | tx fees only (~$0.003) |
+  | raydium | ~0.0215 SOL | only ~0.005 | **~0.0166 SOL (~$1.2) BURNED** |
+  Prefer meteora/orca when the pool exists there; on raydium a rebalance
+  must expect to earn more in fees than the ~$1.2 burn — use wider ranges
+  and cycle less. (Meteora ties up the most SOL per open position — plan
+  wallet SOL accordingly.)
 - When price sits outside the configured buy/sell limits: STAND DOWN. Journal
   why, do not force a position.
 - You are serverless: your data comes from the `native_executors` provider

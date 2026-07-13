@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
-  Brain,
   ChevronDown,
   Loader2,
   MessageSquare,

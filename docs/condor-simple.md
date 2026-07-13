@@ -261,9 +261,34 @@ Two connector-semantics findings the live run surfaced (both fixed):
   stays open and the executor ends; `keep_position=False` closes the
   position on-chain. The config-level `keep_position` (close-out swap
   after limit-price auto-closes) is unchanged.
-- 309 tests green. Not yet done live: an actual agent
-  experiment/session driving `manage_executors` end-to-end (needs the
-  main Condor server restarted onto this branch).
+- 309 tests green.
+
+### M2 live validation (2026-07-13) — PASSED
+
+Two risk-capped delegations to `lp_rebalancer` (main server restarted
+onto the branch) each ran a full agent-driven CLMM cycle: routine plan
+→ native `manage_executors(create)` → IN_RANGE → `stop
+keep_position=false` → closed on-chain — the complete
+agent→MCP→REST→runtime→gateway path, live. Store records verified
+against the agents' reports.
+
+Venue rent economics (SOL-USDC, ~$1 cycles, wallet-verified):
+
+| venue | rent paid | refunded on close | true cost/cycle |
+|---|---|---|---|
+| meteora | 0.0574 SOL | all | tx fees (~$0.003) |
+| orca | 0.0101 SOL | all | tx fees (~$0.003) |
+| raydium (M0) | 0.0215 SOL | 0.005 | **~0.0166 SOL (~$1.2) burned** |
+
+Raydium's Metaplex NFT metadata burn is the outlier; on meteora/orca
+rebalancing on every range exit is economically free. Agent playbook +
+AGENT.md updated with the verified numbers.
+
+Noted gap: `delegate` treats `server_required` as the "is trading
+agent" proxy, so a SERVERLESS trading agent (lp_rebalancer) delegated
+WITHOUT explicit risk_limits runs AUTO (no gate). Mitigation used:
+always pass risk_limits. Fix candidate: key the trading-delegation
+check on AGENT.md risk_limits presence instead of server_required.
 
 ### Original plan (for reference)
 
