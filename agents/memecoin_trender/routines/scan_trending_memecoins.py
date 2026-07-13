@@ -12,6 +12,7 @@ skeleton for the entry.
 
 import json
 import logging
+import os
 from typing import Any, Optional
 
 import aiohttp
@@ -22,8 +23,25 @@ logger = logging.getLogger(__name__)
 
 CATEGORY = "Analysis"
 
-GT_BASE_URL = "https://api.geckoterminal.com/api/v2"
-GT_HEADERS = {"Accept": "application/json;version=20230302"}
+# CoinGecko onchain (GeckoTerminal) backend, chosen by the configured key:
+#   - Pro key   → pro-api.coingecko.com  + x-cg-pro-api-key
+#   - Demo key  → api.coingecko.com      + x-cg-demo-api-key (authenticated quota)
+#   - No key    → api.geckoterminal.com  (anonymous, ~30 req/min, throttles fast)
+# Onchain route paths are identical across all three; only base URL + header differ.
+# CONDOR_COINGECKO_PLAN forces "pro"/"demo" when the CG- key prefix is ambiguous.
+GT_PUBLIC_BASE = "https://api.geckoterminal.com/api/v2"
+GT_DEMO_BASE = "https://api.coingecko.com/api/v3/onchain"
+GT_PRO_BASE = "https://pro-api.coingecko.com/api/v3/onchain"
+
+
+def _gt_backend() -> tuple[str, dict]:
+    key = os.environ.get("COINGECKO_API_KEY", "").strip()
+    if not key:
+        return GT_PUBLIC_BASE, {"Accept": "application/json;version=20230302"}
+    plan = os.environ.get("CONDOR_COINGECKO_PLAN", "demo").strip().lower()
+    if plan == "pro":
+        return GT_PRO_BASE, {"accept": "application/json", "x-cg-pro-api-key": key}
+    return GT_DEMO_BASE, {"accept": "application/json", "x-cg-demo-api-key": key}
 
 # Never trade the plumbing
 EXCLUDED_SYMBOLS = {"SOL", "WSOL", "USDC", "USDT", "JITOSOL", "MSOL", "BSOL", "JUPSOL"}
@@ -40,7 +58,8 @@ class Config(BaseModel):
 
 
 async def _gt_get(session: aiohttp.ClientSession, path: str, params: Optional[dict] = None) -> dict:
-    async with session.get(f"{GT_BASE_URL}/{path}", params=params or {}, headers=GT_HEADERS) as resp:
+    base, headers = _gt_backend()
+    async with session.get(f"{base}/{path}", params=params or {}, headers=headers) as resp:
         if resp.status != 200:
             body = await resp.text()
             raise RuntimeError(f"geckoterminal {path} -> HTTP {resp.status}: {body[:300]}")

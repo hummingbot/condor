@@ -88,3 +88,30 @@ def test_serverless_session_builds_condor_only():
     args = servers[0]["args"]
     assert "--agent-id" in args and "memecoin_trender_1" in args
     assert "--strategy" in args and "trend_position" in args
+
+
+def test_serverless_prompt_has_no_hummingbot_refs():
+    """The prompt must match the condor-only wiring: no mcp-hummingbot tools,
+    the condor-native manage_executors instead, no controller_id line."""
+    from types import SimpleNamespace
+
+    from condor.agents.prompts import build_tick_prompt
+
+    def prompt(server_required):
+        agent = SimpleNamespace(slug="memecoin_trender", server_required=server_required,
+                                agent_key="claude-acp:sonnet", instructions="hunt memecoins")
+        strat = SimpleNamespace(agent_key=None, instructions="trend playbook",
+                                slug="trend_position", agent_slug="memecoin_trender", dir=None)
+        return build_tick_prompt(agent, strat, {"execution_mode": "loop"}, {}, "", "", "", {},
+                                 tick_number=1, agent_id="memecoin_trender_2")
+
+    serverless = prompt(False)
+    assert "mcp-hummingbot" not in serverless
+    assert "mcp__mcp-hummingbot" not in serverless
+    assert "mcp__condor__manage_executors" in serverless
+    assert "controller_id" not in serverless
+
+    backed = prompt(True)
+    assert "mcp__mcp-hummingbot__manage_executors" in backed
+    assert "pre-configured" in backed
+    assert "controller_id" in backed

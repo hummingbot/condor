@@ -45,9 +45,15 @@ EXPERIMENT MESSAGING:
 - End with: "No executors were created (experiment)"
 """
 
+# The mcp-hummingbot line is added only for server-backed agents (see
+# build_tick_prompt); serverless agents run condor-only and must not be told a
+# hummingbot server exists — they'd otherwise reach for its tools.
+HUMMINGBOT_PRECONFIGURED_LINE = (
+    "- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.\n"
+)
+
 BASE_PROMPT_COMMON = """\
 GENERAL:
-- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
 - Keep tool chains short (1-5 calls per tick).
 - Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
 
@@ -102,19 +108,26 @@ JOURNAL:
 """
 
 
-def _build_tool_preload(*, is_experiment: bool) -> str:
+def _build_tool_preload(*, is_experiment: bool, uses_hummingbot: bool = True) -> str:
     """ToolSearch preload line for ACP sessions.
 
     Experiments omit manage_executors (read-only) and trading_agent_journal_write
-    (experiments keep no journal).
+    (experiments keep no journal). Serverless agents (``uses_hummingbot=False``)
+    load the CONDOR-native manage_executors and NO mcp-hummingbot tools — wiring
+    both would expose two manage_executors with incompatible schemas, and market
+    data comes from the agent's own routines.
     """
-    tools = ["mcp__mcp-hummingbot__get_market_data"]
-    if not is_experiment:
-        tools.append("mcp__mcp-hummingbot__manage_executors")
-    tools += [
-        "mcp__mcp-hummingbot__search_history",
-        "mcp__mcp-hummingbot__explore_geckoterminal",
-    ]
+    tools: list[str] = []
+    if uses_hummingbot:
+        tools.append("mcp__mcp-hummingbot__get_market_data")
+        if not is_experiment:
+            tools.append("mcp__mcp-hummingbot__manage_executors")
+        tools += [
+            "mcp__mcp-hummingbot__search_history",
+            "mcp__mcp-hummingbot__explore_geckoterminal",
+        ]
+    elif not is_experiment:
+        tools.append("mcp__condor__manage_executors")
     if not is_experiment:
         tools.append("mcp__condor__trading_agent_journal_write")
     tools += [
@@ -184,17 +197,28 @@ def build_tick_prompt(
     is_experiment = execution_mode == "experiment"
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
+    # Serverless agents run condor-only (no mcp-hummingbot); the prompt must
+    # match the actual wiring (condor/agents/run.py) or the model reaches for
+    # tools that aren't there — or, worse, a second manage_executors that is.
+    uses_hummingbot = getattr(agent, "server_required", True)
 
     # Select base prompt and journal protocol based on mode
     base_prompt = BASE_PROMPT_EXPERIMENT if is_experiment else BASE_PROMPT_LIVE
     journal_section = (
         JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
     )
-    sections: list[str] = [base_prompt, journal_section, BASE_PROMPT_COMMON]
+    common = BASE_PROMPT_COMMON
+    if uses_hummingbot:
+        common = common.replace(
+            "GENERAL:\n", "GENERAL:\n" + HUMMINGBOT_PRECONFIGURED_LINE
+        )
+    sections: list[str] = [base_prompt, journal_section, common]
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
-        sections.append(_build_tool_preload(is_experiment=is_experiment))
+        sections.append(
+            _build_tool_preload(is_experiment=is_experiment, uses_hummingbot=uses_hummingbot)
+        )
     else:
         sections.append(
             "TOOLS:\n"
@@ -205,7 +229,9 @@ def build_tick_prompt(
     tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in journal entries and notifications."
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
-        if not is_experiment:
+        # controller_id is the hummingbot-executors attribution arg; condor-native
+        # executors are attributed automatically (agent_slug/agent_id/strategy).
+        if not is_experiment and uses_hummingbot:
             tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
     sections.append(tick_info)
 

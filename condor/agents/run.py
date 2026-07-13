@@ -150,7 +150,10 @@ async def run_agent(
     result.model = model_key
 
     # -- MCP toolset wiring (agent_slug scopes memory/skills to this Agent) --
-    if server_name:
+    # A serverless agent runs condor-only on EITHER branch: build_mcp_servers_for_agent
+    # wires hummingbot unconditionally, so route serverless agents to the session
+    # builder (include_hummingbot=False) even when a server_name is present.
+    if server_name and agent.server_required:
         mcp_servers = build_mcp_servers_for_agent(
             server_name,
             user_id,
