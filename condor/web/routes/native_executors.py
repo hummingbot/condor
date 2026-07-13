@@ -28,6 +28,9 @@ class CreateExecutorRequest(BaseModel):
     agent_slug: str = ""
     agent_id: str = ""
     strategy: str = ""
+    # Trade-notification routing (0 = outbox-only, no Telegram mirror)
+    user_id: int = 0
+    chat_id: int = 0
 
 
 class StopExecutorRequest(BaseModel):
@@ -108,6 +111,8 @@ async def create_executor(
     config_data["agent_slug"] = req.agent_slug
     config_data["agent_id"] = req.agent_id
     config_data["strategy"] = req.strategy
+    config_data["user_id"] = req.user_id
+    config_data["chat_id"] = req.chat_id
 
     # Swaps: fill the declared notional from a live quote when omitted, so
     # the risk declaration below is always computable.

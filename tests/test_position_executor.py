@@ -183,3 +183,28 @@ def test_risk_declaration_full_loss():
     decl = config(amount_quote=Decimal("0.05")).risk_declaration()
     assert decl.max_notional_quote == Decimal("0.05")
     assert decl.max_loss_quote == Decimal("0.05")  # SL is intent, not a bound
+
+
+def _outbox_texts():
+    import condor.notifications as notifications
+
+    if not notifications.OUTBOX_PATH.exists():
+        return []
+    import json
+    return [json.loads(l)["text"] for l in notifications.OUTBOX_PATH.read_text().splitlines() if l.strip()]
+
+
+def test_trade_notifications_on_entry_and_exit(tmp_path):
+    # take profit at +10%: expect an entry AND an exit notification
+    run_executor(tmp_path, FakeGateway([100.0, 100.0, 111.0]),
+                 config(user_id=7, chat_id=7))
+    texts = _outbox_texts()
+    assert any(t.startswith("🟢 Entered") for t in texts), texts
+    assert any("Exited" in t and "take_profit" in t for t in texts), texts
+
+
+def test_trade_notifications_off_by_flag(tmp_path):
+    run_executor(tmp_path, FakeGateway([100.0, 100.0, 111.0]),
+                 config(user_id=7, chat_id=7, notify_trades=False))
+    texts = _outbox_texts()
+    assert not any("Entered" in t or "Exited" in t for t in texts), texts

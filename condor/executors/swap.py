@@ -107,6 +107,11 @@ class SwapExecutor(ExecutorBase):
                     self.id, self.config.side, self.config.amount,
                     self.config.base_token, self.config.quote_token, self.state.signature,
                 )
+                await self.notify_trade(
+                    f"🔄 Swap {self.config.side} {self.config.amount} "
+                    f"{self.config.base_token}→{self.config.quote_token} "
+                    f"(out {self.state.amount_out})"
+                )
             else:
                 self.state.phase = "confirming"
 

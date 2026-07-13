@@ -282,6 +282,11 @@ class LpExecutor(ExecutorBase):
             self.id, position_address, s.position_rent, s.base_amount, s.quote_amount,
             s.open_tx_hash,
         )
+        await self.notify_trade(
+            f"🟢 LP opened {cfg.trading_pair} on {cfg.connector} — "
+            f"[{s.lower_price:.6g} – {s.upper_price:.6g}], "
+            f"{s.base_amount:.6g} base + {s.quote_amount:.6g} quote"
+        )
 
     async def _close_position(self) -> None:
         s = self.state
@@ -325,6 +330,12 @@ class LpExecutor(ExecutorBase):
             s.position_rent_refunded, s.close_tx_hash,
         )
         self._record_net_trade()
+        pnl = self.net_pnl_quote()
+        emoji = "🔴" if pnl < 0 else "🟢"
+        await self.notify_trade(
+            f"{emoji} LP closed {self.config.trading_pair} — "
+            f"pnl {pnl:+.6g} quote, fees {s.base_fee:.6g}/{s.quote_fee:.6g}"
+        )
         s.position_address = None
 
         if not self.config.keep_position and abs(self._net_base_difference()) > SWAP_DUST_THRESHOLD:

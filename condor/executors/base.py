@@ -69,6 +69,13 @@ class ExecutorConfig(BaseModel):
     agent_slug: str = ""
     agent_id: str = ""
     strategy: str = ""
+    # Notification routing for trade events (open/close). 0 = outbox-only
+    # (no Telegram mirror), e.g. CLI-created executors.
+    user_id: int = 0
+    chat_id: int = 0
+    # Emit a notification on position open/close. Default on; set false to
+    # silence a high-frequency strategy that would otherwise spam every fill.
+    notify_trades: bool = True
     update_interval: float = 5.0
     max_retries: int = 3
 
@@ -136,6 +143,26 @@ class ExecutorBase:
 
     def persist(self) -> None:
         self.store.save(self)
+
+    async def notify_trade(self, text: str) -> None:
+        """Emit a trade event (position open/close) to the notifications
+        outbox + Telegram mirror. No-op when notify_trades is off. Fail-soft:
+        a notify error never touches the executor's lifecycle."""
+        if not self.config.notify_trades:
+            return
+        try:
+            from condor.notifications import notify
+
+            await notify(
+                text,
+                user_id=self.config.user_id,
+                chat_id=self.config.chat_id,
+                agent_id=self.config.agent_id,
+                kind="trade",
+                origin=self.config.type,
+            )
+        except Exception:
+            logger.warning("trade notify failed for %s", self.id, exc_info=True)
 
     async def run(self) -> None:
         """Run the control loop until a terminal state.

@@ -64,6 +64,10 @@ Create the executor with `manage_executors`:
 
 ### Step 5: Journal
 One line: candidates seen, pick (or why none), entry price and barriers.
+Note: entries and exits are auto-notified by the executor runtime (a trade
+event lands in the user's notifications) — do NOT also send_notification for
+a routine open/close. Reserve send_notification for the stand-down / FAILED
+conditions below.
 
 ## Stand-down conditions
 - Two consecutive stop-loss closes → skip entries for the next 6 ticks and

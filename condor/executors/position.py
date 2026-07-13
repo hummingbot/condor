@@ -173,6 +173,13 @@ class PositionExecutor(ExecutorBase):
             self.id, s.base_bought, cfg.base_token, s.entry_price,
             s.quote_spent, cfg.quote_token, s.open_tx_hash,
         )
+        tp = f"+{cfg.take_profit_pct * 100:.1f}%" if cfg.take_profit_pct is not None else "—"
+        sl = f"-{cfg.stop_loss_pct * 100:.1f}%" if cfg.stop_loss_pct is not None else "—"
+        ttl = f"{cfg.time_limit_s}s" if cfg.time_limit_s is not None else "—"
+        await self.notify_trade(
+            f"🟢 Entered {cfg.base_token[:8]} — {cfg.amount_quote} {cfg.quote_token} "
+            f"@ {s.entry_price:.6g} (TP {tp} / SL {sl} / TTL {ttl})"
+        )
 
     async def _control_barriers(self) -> None:
         """Hummingbot barrier order: SL -> trailing -> TP, then time limit.
@@ -260,6 +267,13 @@ class PositionExecutor(ExecutorBase):
         logger.info(
             "position %s: closed (%s) returned %s %s sig=%s",
             self.id, s.close_type, s.quote_returned, cfg.quote_token, s.close_tx_hash,
+        )
+        pnl = self.net_pnl_quote()
+        pnl_pct = (pnl / s.quote_spent * 100) if s.quote_spent else Decimal("0")
+        emoji = "🔴" if pnl < 0 else "🟢"
+        await self.notify_trade(
+            f"{emoji} Exited {cfg.base_token[:8]} ({s.close_type}) — "
+            f"{pnl:+.6g} {cfg.quote_token} ({pnl_pct:+.2f}%)"
         )
         s.state = PositionStates.COMPLETE
 

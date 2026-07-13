@@ -29,6 +29,9 @@ async def manage_executors(
             "agent_slug": settings.agent_slug or "",
             "agent_id": agent_id or settings.agent_id or "",
             "strategy": settings.strategy or "",
+            # Trade-notification routing back to this run's owner
+            "user_id": settings.user_id or 0,
+            "chat_id": settings.chat_id or 0,
         }
         return await call_main_api("POST", "/executors", body, timeout=60)
 
