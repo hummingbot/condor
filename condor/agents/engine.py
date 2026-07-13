@@ -483,6 +483,7 @@ class TickEngine:
             tool_filter_mode=self.config.get("tool_filter_mode") or None,
             timeout_s=300,
             on_client=_hold_client,
+            agent_id=self.agent_id,
         )
 
         response_text = result.text
