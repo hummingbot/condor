@@ -11,11 +11,13 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from decimal import Decimal
 from typing import Optional
 
 from condor.executors.base import ExecutorBase, ExecutorConfig, ExecutorStatus, new_executor_id
 from condor.executors.gateway import GatewayClient, GatewayError
 from condor.executors.lp import LpConfig, LpExecutor, LpStates
+from condor.executors.position import PositionConfig, PositionExecutor, PositionStates
 from condor.executors.store import ExecutorRecord, ExecutorStore
 from condor.executors.swap import SwapConfig, SwapExecutor
 
@@ -24,6 +26,7 @@ logger = logging.getLogger(__name__)
 _EXECUTOR_TYPES: dict[str, tuple[type[ExecutorConfig], type[ExecutorBase]]] = {
     "swap": (SwapConfig, SwapExecutor),
     "lp": (LpConfig, LpExecutor),
+    "position": (PositionConfig, PositionExecutor),
 }
 
 # Heartbeat staler than this many update_intervals trips the watchdog
@@ -139,6 +142,36 @@ class ExecutorRuntime:
                             "reconciled: no position was opened")
             return "settled"
 
+        if record.type == "position":
+            state = record.state.get("state")
+            if state == PositionStates.ACTIVE.value and Decimal(str(record.state.get("base_bought", 0))) > 0:
+                executor = executor_cls(record.id, config, self.gateway, self.store)
+                executor.restore_state(record.state)
+                executor.status = ExecutorStatus.ACTIVE
+                self._start_task(executor)
+                logger.info("reconcile %s: re-adopted open position (%s %s)",
+                            record.id, record.state.get("base_bought"), config.base_token)
+                return "resumed"
+            if state == PositionStates.CLOSING.value:
+                # Close may or may not have landed; re-adopt and let the
+                # close retry — an already-sold balance fails loudly.
+                executor = executor_cls(record.id, config, self.gateway, self.store)
+                executor.restore_state(record.state)
+                executor.status = ExecutorStatus.CLOSING
+                self._start_task(executor)
+                logger.warning("reconcile %s: re-adopted mid-CLOSING position — close will retry",
+                               record.id)
+                return "resumed"
+            if state == PositionStates.OPENING.value:
+                self.store.mark(record.id, ExecutorStatus.FAILED.value,
+                                "reconciled: died mid-OPENING — verify wallet balance manually")
+                logger.critical("reconcile %s: position died mid-OPENING, manual check required",
+                                record.id)
+                return "settled"
+            self.store.mark(record.id, ExecutorStatus.CLOSED.value,
+                            "reconciled: never opened")
+            return "settled"
+
         if record.type == "swap":
             signature = record.state.get("signature")
             if signature:
@@ -208,6 +241,26 @@ class ExecutorRuntime:
                 )
                 logger.warning("watchdog: flattened position %s of %s",
                                executor.state.position_address, executor.id)
+            except GatewayError as e:
+                logger.critical("watchdog: FLATTEN FAILED for %s: %s — manual intervention required",
+                                executor.id, e)
+                self.store.mark(executor.id, ExecutorStatus.FAILED.value,
+                                f"watchdog flatten FAILED ({reason}): {e}")
+                return
+        elif isinstance(executor, PositionExecutor) and executor.state.base_bought > 0 \
+                and executor.state.quote_returned is None:
+            try:
+                await self.gateway.execute_swap(
+                    chain_network=executor.config.chain_network,
+                    wallet_address=executor.config.wallet_address,
+                    base_token=executor.config.base_token,
+                    quote_token=executor.config.quote_token,
+                    amount=float(executor.state.base_bought),
+                    side="SELL",
+                    connector=executor.config.connector,
+                    slippage_pct=float(executor.config.slippage_pct),
+                )
+                logger.warning("watchdog: market-sold position of %s", executor.id)
             except GatewayError as e:
                 logger.critical("watchdog: FLATTEN FAILED for %s: %s — manual intervention required",
                                 executor.id, e)

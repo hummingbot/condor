@@ -45,16 +45,30 @@ def _notional(record, live_price: float | None) -> float:
             return base * price + quote
         if record.type == "swap":
             return float(record.config.get("notional_quote") or 0)
+        if record.type == "position":
+            return float(state.get("quote_spent") or record.config.get("amount_quote") or 0)
     except (TypeError, ValueError):
         pass
     return 0.0
 
 
 def _unrealized_pnl(record, live_price: float | None) -> float | None:
-    """Open LP PnL at the live price — same math as LpExecutor.net_pnl_quote.
-
-    None when the live price is unavailable (reported, never guessed).
+    """Open PnL. LP: live pool price (same math as LpExecutor.net_pnl_quote);
+    position: the executor's own last barrier-check price (refreshed every
+    few seconds by its loop). None when no price is available.
     """
+    if record.type == "position":
+        s = record.state
+        try:
+            last = s.get("last_price")
+            if last is None:
+                return None
+            return float(
+                Decimal(str(s.get("base_bought", 0))) * Decimal(str(last))
+                - Decimal(str(s.get("quote_spent", 0)))
+            )
+        except (TypeError, ValueError, ArithmeticError):
+            return None
     if record.type != "lp" or not live_price:
         return None
     s = record.state

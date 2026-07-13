@@ -8,6 +8,7 @@ schema, lifecycle, risk declaration, reporting); Gateway owns the keys.
 from condor.executors.base import ExecutorBase, ExecutorConfig, ExecutorStatus, RiskDeclaration
 from condor.executors.gateway import GatewayClient, GatewayError
 from condor.executors.lp import LpConfig, LpExecutor, LpState, LpStates
+from condor.executors.position import PositionConfig, PositionExecutor, PositionState, PositionStates
 from condor.executors.runtime import ExecutorRuntime
 from condor.executors.store import ExecutorRecord, ExecutorStore
 from condor.executors.swap import SwapConfig, SwapExecutor
@@ -25,6 +26,10 @@ __all__ = [
     "LpExecutor",
     "LpState",
     "LpStates",
+    "PositionConfig",
+    "PositionExecutor",
+    "PositionState",
+    "PositionStates",
     "RiskDeclaration",
     "SwapConfig",
     "SwapExecutor",
