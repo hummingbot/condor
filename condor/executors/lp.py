@@ -405,13 +405,23 @@ class LpExecutor(ExecutorBase):
     # -- stop / reporting ---------------------------------------------------------
 
     def early_stop(self, keep_position: bool = True) -> None:
+        """Stop the executor.
+
+        keep_position=True: DETACH — the on-chain position stays open and
+        the executor ends; the position address stays in the final state
+        for the record. keep_position=False: close the position on-chain
+        (the config's keep_position still governs the close-out swap).
+        """
         s = self.state
-        if not keep_position:
-            # Force close-out swap path regardless of config
-            self.config = self.config.model_copy(update={"keep_position": False})
         if s.state in (LpStates.IN_RANGE, LpStates.OUT_OF_RANGE):
-            self.close_reason = "early stop"
-            s.state = LpStates.CLOSING
+            if keep_position:
+                self.close_reason = (
+                    f"stopped — position {s.position_address} left open on-chain (detached)"
+                )
+                s.state = LpStates.COMPLETE
+            else:
+                self.close_reason = "early stop (closing position)"
+                s.state = LpStates.CLOSING
         elif s.state == LpStates.OPENING:
             self.fail("stopped while opening — verify on-chain state manually")
             s.state = LpStates.FAILED

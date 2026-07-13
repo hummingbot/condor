@@ -176,7 +176,11 @@ def main() -> None:
     p.add_argument("-v", "--verbose", action="store_true")
     p.set_defaults(func=cmd_status)
 
-    p = sub.add_parser("stop", help="stop a running (or resumable) executor")
+    p = sub.add_parser(
+        "stop",
+        help="stop an executor: default detaches (position stays open on-chain); "
+        "--no-keep-position closes the position",
+    )
     p.add_argument("id")
     p.add_argument("--no-keep-position", action="store_true")
     p.set_defaults(func=cmd_stop)

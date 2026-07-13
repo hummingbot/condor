@@ -190,6 +190,8 @@ def _seed_store(tmp_path) -> ExecutorStore:
     open_ex.state.position_address = "Pos1"
     open_ex.state.base_amount = Decimal("0.01")
     open_ex.state.quote_amount = Decimal("1")
+    open_ex.state.initial_base_amount = Decimal("0.01")
+    open_ex.state.initial_quote_amount = Decimal("1")
     open_ex.state.add_mid_price = Decimal("100")
     store.save(open_ex)
 
@@ -206,19 +208,52 @@ def _seed_store(tmp_path) -> ExecutorStore:
     return store
 
 
+class _PoolPriceGateway:
+    def __init__(self, price=110.0, fail=False):
+        self.price = price
+        self.fail = fail
+
+    async def clmm_pool_info(self, connector, chain_network, pool_address):
+        if self.fail:
+            raise RuntimeError("pool feed down")
+        return {"price": self.price}
+
+
 def test_native_provider_reports_exposure_and_realized(tmp_path, monkeypatch):
     from condor.agents.providers.native_executors import NativeExecutorsProvider
 
     store = _seed_store(tmp_path)
-    monkeypatch.setattr(service, "_runtime", SimpleNamespace(store=store))
+    monkeypatch.setattr(
+        service, "_runtime", SimpleNamespace(store=store, gateway=_PoolPriceGateway(110.0))
+    )
 
     result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="agent_x_1"))
     assert result.data["open_count"] == 1
-    # open notional: 0.01 * 100 + 1 = 2
-    assert result.data["total_exposure"] == pytest.approx(2.0)
+    # open notional at LIVE price: 0.01 * 110 + 1 = 2.1
+    assert result.data["total_exposure"] == pytest.approx(2.1)
+    # unrealized: (0.01*110 + 1) - (0.01*100 + 1) = 0.1  (no fees in seed)
+    assert result.data["unrealized_pnl"] == pytest.approx(0.1)
     # realized: (0.011*100 + 0.95 + 0.05) - (0.01*100 + 1) = 0.1
     assert result.data["realized_pnl"] == pytest.approx(0.1)
     assert "lp_open" in result.summary
+    assert "uPnL +0.1000" in result.summary
+
+
+def test_native_provider_fails_soft_without_price(tmp_path, monkeypatch):
+    from condor.agents.providers.native_executors import NativeExecutorsProvider
+
+    store = _seed_store(tmp_path)
+    monkeypatch.setattr(
+        service, "_runtime",
+        SimpleNamespace(store=store, gateway=_PoolPriceGateway(fail=True)),
+    )
+
+    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="agent_x_1"))
+    assert result.data["open_count"] == 1
+    # falls back to add-time price for notional; pnl reported unavailable
+    assert result.data["total_exposure"] == pytest.approx(2.0)
+    assert result.data["executors"][0]["pnl"] is None
+    assert "n/a (no price)" in result.summary
 
 
 def test_native_provider_registered_as_core():

@@ -238,7 +238,34 @@ Two connector-semantics findings the live run surfaced (both fixed):
   matching how hummingbot executors are keyed (`controller_id` =
   session id). Fallback: slug for delegations, "" for chat.
 
-## M2 (planned) — LP agent + provider PnL
+## M2 — LP agent + provider PnL
+
+### M2 results (2026-07-13) — built
+
+- **Provider PnL**: `native_executors` now fetches one live
+  `pool-info` per unique open pool and reports per-executor unrealized
+  PnL (`LpExecutor.net_pnl_quote` math) and live-priced exposure;
+  fail-soft per pool (pnl `None`, never a blocked tick).
+- **LP agent**: `agents/lp_rebalancer/` — serverless
+  (`server_required: false`; the condor MCP server alone suffices,
+  proving the no-hummingbot-api thesis at the agent tier). Risk
+  baseline {50, 2, 10%, 20%}. Playbook
+  `strategies/lp_rebalance.md` (one position, executor limit prices
+  are the out-of-range trigger, each reopen is a deliberate
+  cycle-cost-aware decision). Deterministic planning routine
+  `routines/plan_lp_position.py` (ranges.py + live pool price +
+  balance/autoswap check → verbatim create args) — smoke-tested
+  against the live gateway.
+- **Stop semantics changed** (user decision): on the stop command,
+  `keep_position=True` (default) now DETACHES — the on-chain position
+  stays open and the executor ends; `keep_position=False` closes the
+  position on-chain. The config-level `keep_position` (close-out swap
+  after limit-price auto-closes) is unchanged.
+- 309 tests green. Not yet done live: an actual agent
+  experiment/session driving `manage_executors` end-to-end (needs the
+  main Condor server restarted onto this branch).
+
+### Original plan (for reference)
 
 Decision: **no runtime-level rebalancing loop.** Rebalancing is an
 agent concern — an LP agent's tick decides close/reopen, mirroring the

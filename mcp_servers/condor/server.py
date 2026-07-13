@@ -274,8 +274,9 @@ async def manage_executors(
         connector (raydium|meteora|orca), pool_address, trading_pair,
         lower_price, upper_price, base_amount?, quote_amount?,
         lower_limit_price?, upper_limit_price?, keep_position?}
-    - "stop": stop an executor (closes its position; keep_position=False
-      additionally swaps back to the entry asset mix). Requires executor_id.
+    - "stop": stop an executor. keep_position=True (default) DETACHES —
+      the on-chain position stays open and unmanaged; keep_position=False
+      closes the position on-chain. Requires executor_id.
     - "get": fetch one executor's full state. Requires executor_id.
     - "list": list executors (optionally filtered by agent_id).
 

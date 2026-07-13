@@ -14,7 +14,7 @@ async def manage_executors(
     config: dict | None = None,
     executor_id: str | None = None,
     agent_id: str | None = None,
-    keep_position: bool = True,
+    keep_position: bool = True,  # stop: True = detach (position stays open), False = close on-chain
 ) -> dict | list:
     if action == "create":
         if not executor_type or config is None:

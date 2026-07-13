@@ -178,7 +178,7 @@ def test_swap_reconcile_confirms_by_signature(tmp_path):
 # -- lp ------------------------------------------------------------------------
 
 
-def test_lp_opens_and_monitors_in_range(tmp_path):
+def test_lp_opens_and_stop_detaches_leaving_position_open(tmp_path):
     gateway = FakeGateway(prices=[100.0])
     runtime = make_runtime(tmp_path, gateway)
 
@@ -187,7 +187,7 @@ def test_lp_opens_and_monitors_in_range(tmp_path):
         await asyncio.sleep(0.2)
         ex = runtime._executors[eid]
         state = ex.state.state
-        ex.early_stop(keep_position=True)
+        ex.early_stop(keep_position=True)  # detach: position stays open on-chain
         await runtime.wait_all()
         return eid, state
 
@@ -195,12 +195,32 @@ def test_lp_opens_and_monitors_in_range(tmp_path):
     assert mid_state == LpStates.IN_RANGE
     rec = runtime.store.load(eid)
     assert rec.status == "CLOSED"
-    assert rec.state["close_tx_hash"] == "sig-close"
-    assert any(c[0] == "clmm_close" for c in gateway.calls)
+    assert "left open on-chain" in rec.close_reason
+    assert not any(c[0] == "clmm_close" for c in gateway.calls)
+    assert gateway.position_open  # still live on-chain
     # Initials must come from position-info, never the (negative,
     # balance-change) amounts in the open response
     assert Decimal(rec.state["initial_base_amount"]) == Decimal("0.005")
     assert Decimal(rec.state["initial_quote_amount"]) == Decimal("0.5")
+
+
+def test_lp_stop_without_keep_position_closes_onchain(tmp_path):
+    gateway = FakeGateway(prices=[100.0])
+    runtime = make_runtime(tmp_path, gateway)
+
+    async def run():
+        eid = runtime.create_executor(lp_config())
+        await asyncio.sleep(0.2)
+        runtime._executors[eid].early_stop(keep_position=False)
+        await runtime.wait_all()
+        return eid
+
+    eid = asyncio.run(run())
+    rec = runtime.store.load(eid)
+    assert rec.status == "CLOSED"
+    assert rec.state["close_tx_hash"] == "sig-close"
+    assert any(c[0] == "clmm_close" for c in gateway.calls)
+    assert not gateway.position_open
 
 
 def test_lp_closes_on_upper_limit(tmp_path):
@@ -258,7 +278,7 @@ def test_lp_reconcile_readopts_live_position(tmp_path):
         resumed = await runtime.reconcile()
         assert resumed == ["lp_live"]
         await asyncio.sleep(0.05)
-        runtime._executors["lp_live"].early_stop()
+        runtime._executors["lp_live"].early_stop(keep_position=False)
         await runtime.wait_all()
 
     asyncio.run(run())
