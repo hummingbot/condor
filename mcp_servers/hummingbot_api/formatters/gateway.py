@@ -141,3 +141,25 @@ def format_gateway_clmm_pool_result(action: str, result: dict[str, Any]) -> str:
         )
 
     return f"Gateway CLMM Pool Exploration Result: {result}"
+
+
+def format_gateway_clmm_position_result(action: str, result: dict[str, Any]) -> str:
+    """Format gateway CLMM position management results into a human-readable string."""
+    payload = result.get("result", result)
+
+    if action == "positions_owned" and isinstance(payload, list):
+        if not payload:
+            return "No on-chain positions found for this pool/wallet."
+        lines = []
+        for pos in payload:
+            lines.append(
+                f"- {pos.get('position_address', 'N/A')}: "
+                f"{pos.get('base_token_amount', '?')} base / {pos.get('quote_token_amount', '?')} quote, "
+                f"range [{pos.get('lower_price', '?')}, {pos.get('upper_price', '?')}], "
+                f"price {pos.get('current_price', '?')}, "
+                f"{'IN RANGE' if pos.get('in_range') else 'OUT OF RANGE'}, "
+                f"pending fees: {pos.get('base_fee_amount', 0)} base / {pos.get('quote_fee_amount', 0)} quote"
+            )
+        return f"On-chain CLMM Positions ({len(payload)}):\n" + "\n".join(lines)
+
+    return f"Gateway CLMM {action} result: {payload}"

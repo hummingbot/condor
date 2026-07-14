@@ -402,8 +402,8 @@ class GatewaySwapRequest(BaseModel):
     # Common swap parameters (required for quote/execute)
     connector: str | None = Field(
         default=None,
-        description="DEX router connector (required for quote/execute). "
-        "Examples: 'jupiter' (Solana), '0x' (Ethereum)",
+        description="Swap provider (required for quote/execute). Bare name or 'name/type': "
+        "'jupiter', 'jupiter/router', 'meteora/clmm', 'raydium/amm', '0x' (Ethereum)",
     )
 
     network: str | None = Field(
@@ -563,4 +563,93 @@ class GatewayCLMMRequest(BaseModel):
     detailed: bool = Field(
         default=False,
         description="Return detailed table with more columns (default: False)",
+    )
+
+
+# ==============================================================================
+# Gateway CLMM Position Schemas
+# ==============================================================================
+
+
+class GatewayCLMMPositionRequest(BaseModel):
+    """Request model for Gateway CLMM position management.
+
+    This model supports direct CLMM position operations via Gateway
+    (for automated LP strategies, prefer `manage_executors` with `lp_executor`):
+    - open_position: Open a new position with initial liquidity
+    - add_liquidity: Add liquidity to an existing position
+    - remove_liquidity: Remove a percentage of liquidity from a position
+    - close_position: Close a position completely (removes liquidity + collects fees)
+    - collect_fees: Collect accumulated fees from a position
+    - positions_owned: List on-chain positions owned by a wallet for a pool
+    """
+
+    action: Literal[
+        "open_position",
+        "add_liquidity",
+        "remove_liquidity",
+        "close_position",
+        "collect_fees",
+        "positions_owned",
+    ] = Field(description="Action to perform on CLMM positions")
+
+    connector: str = Field(
+        description="CLMM connector name (e.g., 'meteora', 'raydium', 'orca', 'uniswap')",
+        examples=["meteora", "raydium", "orca"],
+    )
+
+    network: str = Field(
+        description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')",
+        examples=["solana-mainnet-beta", "ethereum-mainnet"],
+    )
+
+    pool_address: str | None = Field(
+        default=None,
+        description="Pool contract address (required for open_position and positions_owned)",
+    )
+
+    position_address: str | None = Field(
+        default=None,
+        description="Position NFT address (required for add/remove/close/collect actions)",
+    )
+
+    lower_price: str | None = Field(
+        default=None,
+        description="Lower price bound (required for open_position). Example: '150'",
+    )
+
+    upper_price: str | None = Field(
+        default=None,
+        description="Upper price bound (required for open_position). Example: '250'",
+    )
+
+    base_token_amount: str | None = Field(
+        default=None,
+        description="Base token amount for open_position/add_liquidity (at least one amount required)",
+    )
+
+    quote_token_amount: str | None = Field(
+        default=None,
+        description="Quote token amount for open_position/add_liquidity (at least one amount required)",
+    )
+
+    percentage: str | None = Field(
+        default=None,
+        description="Percentage of liquidity to remove, 0-100 (required for remove_liquidity)",
+    )
+
+    slippage_pct: str | None = Field(
+        default="1.0",
+        description="Maximum slippage percentage (optional, default: 1.0)",
+    )
+
+    wallet_address: str | None = Field(
+        default=None,
+        description="Wallet address (optional, uses default wallet if not provided)",
+    )
+
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Connector-specific parameters for open_position "
+        "(e.g., {\"strategyType\": 0} for Meteora: 0=Spot, 1=Curve)",
     )

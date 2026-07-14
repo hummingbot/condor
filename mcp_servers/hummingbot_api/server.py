@@ -13,6 +13,7 @@ from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_bot_logs_as_table,
     format_gateway_clmm_pool_result,
+    format_gateway_clmm_position_result,
     format_gateway_config_result,
     format_gateway_container_result,
     format_gateway_swap_result,
@@ -21,6 +22,7 @@ from mcp_servers.hummingbot_api.formatters import (
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
 from mcp_servers.hummingbot_api.schemas import (
+    GatewayCLMMPositionRequest,
     GatewayCLMMRequest,
     GatewayConfigRequest,
     GatewayContainerRequest,
@@ -51,6 +53,9 @@ from mcp_servers.hummingbot_api.tools.gateway import (
 )
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
     explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway_clmm import (
+    manage_gateway_clmm as manage_gateway_clmm_impl,
 )
 from mcp_servers.hummingbot_api.tools.gateway_swap import (
     manage_gateway_swaps as manage_gateway_swaps_impl,
@@ -851,6 +856,266 @@ async def explore_dex_pools(
     client = await hummingbot_client.get_client()
     result = await explore_gateway_clmm_pools_impl(client, request)
     return format_gateway_clmm_pool_result(action, result)
+
+
+# Gateway Tools
+
+
+@mcp.tool()
+@handle_errors("manage gateway swaps", GATEWAY_LOG_HINT)
+async def manage_gateway_swaps(
+    action: Literal["quote", "execute", "search", "get_status"],
+    connector: str | None = None,
+    network: str | None = None,
+    trading_pair: str | None = None,
+    side: Literal["BUY", "SELL"] | None = None,
+    amount: str | None = None,
+    slippage_pct: str | None = "1.0",
+    wallet_address: str | None = None,
+    transaction_hash: str | None = None,
+    search_connector: str | None = None,
+    search_network: str | None = None,
+    search_wallet_address: str | None = None,
+    search_trading_pair: str | None = None,
+    status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    limit: int | None = 50,
+    offset: int | None = 0,
+) -> str:
+    """Manage DEX swap operations via Gateway: quote, execute, search, and status tracking.
+
+    - quote: Get a price quote before swapping (requires connector, network, trading_pair, side, amount)
+    - execute: Execute a swap on a DEX (same params as quote; wallet_address optional). Requires user confirmation.
+    - search: Query swap history with filters
+    - get_status: Check a swap by transaction_hash
+
+    Connector accepts a bare name ('jupiter', 'meteora') or typed provider
+    ('jupiter/router', 'meteora/clmm', 'raydium/amm').
+
+    Args:
+        action: Action to perform.
+        connector: Swap provider (required for quote/execute).
+        network: Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta').
+        trading_pair: BASE-QUOTE, symbols or addresses (e.g., 'SOL-USDC').
+        side: 'BUY' or 'SELL'.
+        amount: Base token amount as a string (e.g., '1.5').
+        slippage_pct: Max slippage percentage (default '1.0').
+        wallet_address: Wallet for execute (default wallet if omitted).
+        transaction_hash: Required for get_status.
+        search_connector: Filter by connector for search.
+        search_network: Filter by network for search.
+        search_wallet_address: Filter by wallet for search.
+        search_trading_pair: Filter by trading pair for search.
+        status: Filter by tx status for search.
+        start_time: Unix-second lower bound for search.
+        end_time: Unix-second upper bound for search.
+        limit: Max results for search (default 50).
+        offset: Pagination offset for search.
+    """
+    request = GatewaySwapRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        trading_pair=trading_pair,
+        side=side,
+        amount=amount,
+        slippage_pct=slippage_pct,
+        wallet_address=wallet_address,
+        transaction_hash=transaction_hash,
+        search_connector=search_connector,
+        search_network=search_network,
+        search_wallet_address=search_wallet_address,
+        search_trading_pair=search_trading_pair,
+        status=status,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        offset=offset,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result(action, result)
+
+
+@mcp.tool()
+@handle_errors("manage gateway CLMM positions", GATEWAY_LOG_HINT)
+async def manage_gateway_clmm(
+    action: Literal[
+        "open_position",
+        "add_liquidity",
+        "remove_liquidity",
+        "close_position",
+        "collect_fees",
+        "positions_owned",
+    ],
+    connector: str,
+    network: str,
+    pool_address: str | None = None,
+    position_address: str | None = None,
+    lower_price: str | None = None,
+    upper_price: str | None = None,
+    base_token_amount: str | None = None,
+    quote_token_amount: str | None = None,
+    percentage: str | None = None,
+    slippage_pct: str | None = "1.0",
+    wallet_address: str | None = None,
+    extra_params: dict | None = None,
+) -> str:
+    """Manage CLMM liquidity positions directly via Gateway.
+
+    - open_position: Open a new position (pool_address, lower_price, upper_price, at least one token amount).
+      Requires user confirmation.
+    - add_liquidity: Add to an existing position (position_address + at least one token amount)
+    - remove_liquidity: Remove a percentage of liquidity (position_address + percentage 0-100)
+    - close_position: Close completely — removes all liquidity and collects fees (position_address).
+      Requires user confirmation.
+    - collect_fees: Collect accumulated fees (position_address)
+    - positions_owned: List on-chain positions for a pool (pool_address)
+
+    For automated LP strategies with rebalancing, prefer `manage_executors` with `lp_executor` type.
+    Use `explore_dex_pools` to find pools and check prices first.
+
+    Args:
+        action: Position action to perform.
+        connector: CLMM connector (e.g., 'meteora', 'raydium', 'orca').
+        network: Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta').
+        pool_address: Pool contract address (open_position, positions_owned).
+        position_address: Position NFT address (add/remove/close/collect).
+        lower_price: Lower price bound for open_position.
+        upper_price: Upper price bound for open_position.
+        base_token_amount: Base token amount for open/add.
+        quote_token_amount: Quote token amount for open/add.
+        percentage: Liquidity percentage to remove (0-100).
+        slippage_pct: Max slippage percentage (default '1.0').
+        wallet_address: Wallet address (default wallet if omitted).
+        extra_params: Connector-specific params for open_position (e.g., {"strategyType": 0} for Meteora).
+    """
+    request = GatewayCLMMPositionRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        pool_address=pool_address,
+        position_address=position_address,
+        lower_price=lower_price,
+        upper_price=upper_price,
+        base_token_amount=base_token_amount,
+        quote_token_amount=quote_token_amount,
+        percentage=percentage,
+        slippage_pct=slippage_pct,
+        wallet_address=wallet_address,
+        extra_params=extra_params,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_clmm_impl(client, request)
+    return format_gateway_clmm_position_result(action, result)
+
+
+@mcp.tool()
+@handle_errors("manage gateway config", GATEWAY_LOG_HINT)
+async def manage_gateway_config(
+    resource_type: Literal["chains", "networks", "tokens", "connectors", "pools", "wallets"],
+    action: Literal["list", "get", "update", "add", "delete", "save"],
+    network_id: str | None = None,
+    connector_name: str | None = None,
+    config_updates: dict | None = None,
+    token_address: str | None = None,
+    token_symbol: str | None = None,
+    token_decimals: int | None = None,
+    token_name: str | None = None,
+    pool_type: str | None = None,
+    pool_base: str | None = None,
+    pool_quote: str | None = None,
+    pool_address: str | None = None,
+    search: str | None = None,
+    network: str | None = None,
+    chain: str | None = None,
+    private_key: str | None = None,
+    wallet_address: str | None = None,
+) -> str:
+    """Manage Gateway configuration: chains, networks, tokens, connectors, pools, and wallets.
+
+    Resource types and their actions:
+    - chains: list
+    - networks: list, get (network_id), update (network_id + config_updates)
+    - tokens: list/add/delete/save per network_id
+    - connectors: list, get (connector_name), update (connector_name + config_updates)
+    - pools: list/add/delete/save per network_id (+ connector_name filter)
+    - wallets: add (chain + private_key), delete (chain + wallet_address)
+
+    Args:
+        resource_type: Type of resource to manage.
+        action: Action to perform on the resource.
+        network_id: 'chain-network' ID for network/token/pool operations.
+        connector_name: DEX connector for connector/pool operations.
+        config_updates: Key-value updates for 'update' actions.
+        token_address: Token contract address for add/delete/save.
+        token_symbol: Token symbol for add.
+        token_decimals: Token decimals for add.
+        token_name: Token name for add (defaults to symbol).
+        pool_type: 'CLMM' or 'AMM' for pool add/delete.
+        pool_base: Base token symbol for pool add.
+        pool_quote: Quote token symbol for pool add.
+        pool_address: Pool contract address for pool add/delete/save.
+        search: Filter term for token list.
+        network: Bare network name for pool list.
+        chain: Blockchain chain for wallet operations.
+        private_key: Private key for wallet add.
+        wallet_address: Wallet address for wallet delete.
+    """
+    request = GatewayConfigRequest(
+        resource_type=resource_type,
+        action=action,
+        network_id=network_id,
+        connector_name=connector_name,
+        config_updates=config_updates,
+        token_address=token_address,
+        token_symbol=token_symbol,
+        token_decimals=token_decimals,
+        token_name=token_name,
+        pool_type=pool_type,
+        pool_base=pool_base,
+        pool_quote=pool_quote,
+        pool_address=pool_address,
+        search=search,
+        network=network,
+        chain=chain,
+        private_key=private_key,
+        wallet_address=wallet_address,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_config_impl(client, request)
+    return format_gateway_config_result(result)
+
+
+@mcp.tool()
+@handle_errors("manage gateway container")
+async def manage_gateway_container(
+    action: Literal["get_status", "start", "stop", "restart", "get_logs"],
+    config: dict | None = None,
+    tail: int = 100,
+) -> str:
+    """Manage the Gateway Docker container: status, lifecycle, and logs.
+
+    - get_status: Check if Gateway is running and get container details
+    - start: Start Gateway (config optional: {image, port})
+    - stop: Stop Gateway
+    - restart: Restart Gateway (config optional)
+    - get_logs: Fetch recent container logs
+
+    Args:
+        action: Container action to perform.
+        config: Optional container configuration for start/restart (image, port).
+        tail: Number of log lines for get_logs (default 100, max 200).
+    """
+    request = GatewayContainerRequest(action=action, config=config, tail=tail)
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_container_impl(client, request)
+    return format_gateway_container_result(result)
 
 
 # GeckoTerminal Tools

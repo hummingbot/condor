@@ -2,7 +2,7 @@
 Gateway Trading tools for Hummingbot MCP Server
 
 Handles DEX trading operations via Hummingbot Gateway:
-- Swap quote/execute (Router: Jupiter, 0x)
+- Swap quote/execute (any provider: jupiter/router, 0x/router, meteora/clmm, raydium/amm, ...)
 - Swap search and status tracking
 """
 import logging
@@ -25,9 +25,11 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
     - search: Search swap history with various filters
     - get_status: Get status of a specific swap by transaction hash
 
-    Supported DEX Connectors:
-    - jupiter (Solana): Router for Solana swaps
-    - 0x (Ethereum): Aggregator for EVM chains
+    Supported swap providers (bare name or 'name/type'):
+    - jupiter / jupiter/router (Solana router)
+    - 0x (Ethereum aggregator)
+    - meteora/clmm, raydium/amm, raydium/clmm, orca/clmm (pool-based swaps)
+    - uniswap/router, pancakeswap/router (EVM routers)
     """
     # ============================================
     # QUOTE - Get swap price quote

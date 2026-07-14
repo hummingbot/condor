@@ -8,11 +8,12 @@ Handles DEX CLMM read-only operations via Hummingbot Gateway:
 For opening/closing LP positions, use `manage_executors` with `lp_executor` type.
 """
 import logging
+from decimal import Decimal
 from typing import Any
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters.base import format_number, get_field
-from mcp_servers.hummingbot_api.schemas import GatewayCLMMRequest
+from mcp_servers.hummingbot_api.schemas import GatewayCLMMPositionRequest, GatewayCLMMRequest
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -193,3 +194,104 @@ async def explore_gateway_clmm_pools(client: Any, request: GatewayCLMMRequest) -
         raise ToolError(f"Unknown action: {request.action}")
 
 
+
+
+async def manage_gateway_clmm(client: Any, request: GatewayCLMMPositionRequest) -> dict[str, Any]:
+    """
+    Manage Gateway CLMM positions: open, add/remove liquidity, close, collect fees,
+    and list on-chain positions.
+
+    Maps 1:1 onto hummingbot-api's /gateway/clmm/* endpoints. For automated LP
+    strategies, prefer `manage_executors` with `lp_executor` type.
+    """
+    if request.action == "open_position":
+        if not request.pool_address:
+            raise ToolError("pool_address is required for open_position")
+        if request.lower_price is None or request.upper_price is None:
+            raise ToolError("lower_price and upper_price are required for open_position")
+        if request.base_token_amount is None and request.quote_token_amount is None:
+            raise ToolError("At least one of base_token_amount / quote_token_amount is required for open_position")
+
+        result = await client.gateway_clmm.open_position(
+            connector=request.connector,
+            network=request.network,
+            pool_address=request.pool_address,
+            lower_price=Decimal(request.lower_price),
+            upper_price=Decimal(request.upper_price),
+            base_token_amount=Decimal(request.base_token_amount) if request.base_token_amount is not None else None,
+            quote_token_amount=Decimal(request.quote_token_amount) if request.quote_token_amount is not None else None,
+            slippage_pct=Decimal(request.slippage_pct) if request.slippage_pct is not None else None,
+            wallet_address=request.wallet_address,
+            extra_params=request.extra_params,
+        )
+        return {"action": "open_position", "result": result}
+
+    if request.action == "add_liquidity":
+        if not request.position_address:
+            raise ToolError("position_address is required for add_liquidity")
+        if request.base_token_amount is None and request.quote_token_amount is None:
+            raise ToolError("At least one of base_token_amount / quote_token_amount is required for add_liquidity")
+
+        result = await client.gateway_clmm.add_liquidity(
+            connector=request.connector,
+            network=request.network,
+            position_address=request.position_address,
+            base_token_amount=Decimal(request.base_token_amount) if request.base_token_amount is not None else None,
+            quote_token_amount=Decimal(request.quote_token_amount) if request.quote_token_amount is not None else None,
+            slippage_pct=Decimal(request.slippage_pct) if request.slippage_pct is not None else None,
+            wallet_address=request.wallet_address,
+        )
+        return {"action": "add_liquidity", "result": result}
+
+    if request.action == "remove_liquidity":
+        if not request.position_address:
+            raise ToolError("position_address is required for remove_liquidity")
+        if request.percentage is None:
+            raise ToolError("percentage (0-100) is required for remove_liquidity")
+
+        result = await client.gateway_clmm.remove_liquidity(
+            connector=request.connector,
+            network=request.network,
+            position_address=request.position_address,
+            percentage=Decimal(request.percentage),
+            wallet_address=request.wallet_address,
+        )
+        return {"action": "remove_liquidity", "result": result}
+
+    if request.action == "close_position":
+        if not request.position_address:
+            raise ToolError("position_address is required for close_position")
+
+        result = await client.gateway_clmm.close_position(
+            connector=request.connector,
+            network=request.network,
+            position_address=request.position_address,
+            wallet_address=request.wallet_address,
+        )
+        return {"action": "close_position", "result": result}
+
+    if request.action == "collect_fees":
+        if not request.position_address:
+            raise ToolError("position_address is required for collect_fees")
+
+        result = await client.gateway_clmm.collect_fees(
+            connector=request.connector,
+            network=request.network,
+            position_address=request.position_address,
+            wallet_address=request.wallet_address,
+        )
+        return {"action": "collect_fees", "result": result}
+
+    if request.action == "positions_owned":
+        if not request.pool_address:
+            raise ToolError("pool_address is required for positions_owned")
+
+        result = await client.gateway_clmm.get_positions_owned(
+            connector=request.connector,
+            network=request.network,
+            pool_address=request.pool_address,
+            wallet_address=request.wallet_address,
+        )
+        return {"action": "positions_owned", "result": result}
+
+    raise ToolError(f"Unknown action: {request.action}")
