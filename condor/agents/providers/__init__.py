@@ -16,7 +16,6 @@ _REGISTRY: dict[str, BaseProvider] = {}
 def _auto_register() -> None:
     """Import built-in provider modules."""
     from . import executors  # noqa: F401
-    from . import native_executors  # noqa: F401
     from . import positions  # noqa: F401
 
 

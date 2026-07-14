@@ -1,9 +1,9 @@
 ---
 name: LP Rebalance
-description: Agent-driven CLMM rebalancing on Solana via native executors — plan
-  with plan_lp_position, open one position, let its limit prices trigger the close,
-  decide each reopen deliberately. The agent-shaped counterpart of the hummingbot
-  lp_rebalancer controller.
+description: Agent-driven CLMM rebalancing on Solana via hummingbot-api
+  lp_executor — plan with plan_lp_position, open one position, rebalance on
+  range exit, decide each reopen deliberately. The agent-shaped counterpart of
+  the hummingbot lp_rebalancer controller.
 agent_key: null
 default_config:
   frequency_sec: 300
@@ -26,10 +26,11 @@ created_by: 456181693
 # LP Rebalance
 
 You run ONE concentrated-liquidity position at a time in the configured pool,
-through Condor-native executors. The executor manages the position at machine
-speed (auto-closes past its limit prices); your tick makes the judgment calls
-the controller version couldn't: whether reopening is worth the cycle cost,
-and when to stand down.
+through hummingbot-api's `lp_executor`. The executor holds the on-chain
+position; your tick makes the judgment calls the controller version couldn't:
+whether reopening is worth the cycle cost, and when to stand down. You detect a
+range exit yourself each tick (compare the live pool price to the position's
+bounds) — do not assume a machine-speed auto-close.
 
 ## Configuration at launch
 
@@ -40,23 +41,25 @@ abort the tick and notify the user:
 ## Each tick — decide ONE action
 
 ### Step 1: Read your state
-The `[CORE DATA - native_executors]` summary lists your open executors with
-state and unrealized PnL. Do not re-query what it already tells you.
+Query your open positions with `manage_executors(action="positions_summary")`
+(and `action="search"` for executor state/PnL). Fetch the live pool price via
+hummingbot-api market data.
 
 ### Step 2: Branch on state
 
 | Situation | Action |
 |---|---|
-| An LP executor is open, `IN_RANGE` | Nothing. Note fees accrued in the journal. |
-| An LP executor is open, `OUT_OF_RANGE` | Nothing — the executor closes itself past its limit prices. Journal how long it has been out. |
-| No open LP executor (first tick, or it CLOSED since last tick) | Consider (re)opening — Step 3. |
+| A position is open and price is INSIDE its range | Nothing. Note fees accrued in the journal. |
+| A position is open and price is OUTSIDE its range | Close it (`manage_executors(action="stop")`), then decide whether to reopen at the new price — Step 3. Journal how long it was out. |
+| No open position (first tick, or it closed since last tick) | Consider (re)opening — Step 3. |
 | An executor shows `FAILED` | Stop and notify the user with its close_reason. Do NOT retry blindly. |
 
 ### Step 3: (Re)opening — the rebalance decision
 1. Run `plan_lp_position` with the config values (connector, pool_address,
    trading_pair, total_amount_quote, width/offset/threshold, any price
-   limits, and `auto_swap` from `[CURRENT CONFIG]`). Never compute bounds
-   yourself.
+   limits, `auto_swap`) PLUS the live `current_price` and your `base_available`
+   / `quote_available` balances (both from hummingbot-api). Never compute
+   bounds yourself.
 2. If the plan says `STAND_DOWN` or `BLOCKED`: journal the reason and wait.
    With `auto_swap: false`, a missing-inventory situation returns BLOCKED —
    that is the configured behavior, not an error: notify the user once
@@ -71,15 +74,14 @@ state and unrealized PnL. Do not re-query what it already tells you.
    over cycling again; consider a wider `position_width_pct` and record a
    learning.
 4. If the plan includes `pre_swap_create_args` (only happens when
-   `auto_swap: true`): create that swap executor first via
-   `manage_executors(action="create", ...)`, confirm it CLOSED
-   (action="get") — then **RE-RUN `plan_lp_position` and use the fresh
-   `lp_create_args`**. Never reuse amounts planned before the swap: the
-   swap changes balances and the fresh plan clamps to what the wallet
-   actually holds. (A stale plan is exactly how session 1's first open
-   failed: INSUFFICIENT_BALANCE by $0.004.)
-5. Create the LP executor with the (fresh) plan's `lp_create_args`, passed
-   verbatim.
+   `auto_swap: true`): create that order_executor MARKET swap first via
+   `manage_executors(action="create", ...)`, confirm it filled
+   (action="search") — then **RE-RUN `plan_lp_position` with fresh balances
+   and use the new `lp_create_args`**. Never reuse amounts planned before the
+   swap: the swap changes balances and the fresh plan clamps to what the
+   wallet actually holds.
+5. Create the LP executor with the (fresh) plan's `lp_create_args`
+   (`executor_type: "lp_executor"`), passed verbatim.
 
 ### Step 4: Journal
 One line: state seen, action taken, and why — especially for every reopen

@@ -11,7 +11,6 @@ from mcp_servers.condor.tools import consult as consult_tool
 from mcp_servers.condor.tools import context
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
-    executors as executors_tool,
     memory,
     notes,
     notification,
@@ -274,61 +273,6 @@ async def manage_servers(
         Action-specific result dict.
     """
     return await servers.manage_servers(action, name)
-
-
-@mcp.tool()
-@handle_errors("manage executors")
-async def manage_executors(
-    action: str,
-    executor_type: str | None = None,
-    config: dict | None = None,
-    executor_id: str | None = None,
-    agent_id: str | None = None,
-    keep_position: bool = True,
-    group_by: str | None = None,
-) -> dict | list:
-    """Manage Condor-native executors (gateway-backed DEX execution).
-
-    These run in the persistent Condor process against Hummingbot Gateway
-    (keys never leave Gateway). Creates and stops are risk- and
-    human-gated; experiments cancel them automatically.
-
-    Actions:
-    - "create": start an executor. Requires executor_type + config.
-      - executor_type "swap": config {chain_network, wallet_address,
-        base_token, quote_token, amount, side (BUY|SELL), slippage_pct?,
-        notional_quote? (quote-unit value; auto-priced when omitted)}
-      - executor_type "lp": config {chain_network, wallet_address,
-        connector (raydium|meteora|orca), pool_address, trading_pair,
-        lower_price, upper_price, base_amount?, quote_amount?,
-        lower_limit_price?, upper_limit_price?, keep_position?}
-    - "stop": stop an executor. keep_position=True (default) DETACHES —
-      the on-chain position stays open and unmanaged; keep_position=False
-      closes the position on-chain. Requires executor_id.
-    - "get": fetch one executor's full state. Requires executor_id.
-    - "list": list executors (optionally filtered by agent_id).
-    - "performance": rolled-up scorecard — open/closed/failed counts,
-      realized PnL, costs, win rate, close-type breakdown — grouped by
-      group_by: "agent" (per agent, all its runs), "run" (per
-      session/delegation), "strategy" (compare playbooks), "venue", or
-      "type". Use this to answer "how is agent X doing" or "compare
-      strategy A vs B" in one call.
-
-    Args:
-        action: create | stop | get | list | performance
-        executor_type: "swap", "lp", or "position" (create only)
-        config: executor config dict (create only)
-        executor_id: target executor (stop/get)
-        agent_id: attribution/filter; defaults to this session's agent
-        keep_position: on stop, keep net position (True) or swap back (False)
-        group_by: performance grouping (default "agent")
-
-    Returns:
-        Action-specific result dict.
-    """
-    return await executors_tool.manage_executors(
-        action, executor_type, config, executor_id, agent_id, keep_position, group_by
-    )
 
 
 @mcp.tool()

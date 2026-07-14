@@ -147,22 +147,15 @@ class RiskEngine:
                 f"Max open executors ({self.limits.max_open_executors}) reached",
             )
 
-        # Check position size. Two call shapes:
-        # - hummingbot-api (mcp-hummingbot manage_executors): amount is in
-        #   executor_config.total_amount_quote
-        # - condor-native (condor manage_executors): the executor type's own
-        #   RiskDeclaration computes the notional from the declared config;
-        #   if it can't be computed, fail CLOSED.
-        if "executor_config" in input_data:
-            config = input_data.get("executor_config", {})
-            amount = float(
-                config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
-            )
-        else:
-            try:
-                amount = self._native_notional(input_data)
-            except Exception as exc:
-                return False, f"Cannot compute risk for native executor: {exc}"
+        # Position size (hummingbot-api manage_executors): the notional is in
+        # executor_config.total_amount_quote (or amount). A create must carry
+        # executor_config; otherwise fail CLOSED.
+        config = input_data.get("executor_config")
+        if not config:
+            return False, "Cannot compute risk: create is missing executor_config"
+        amount = float(
+            config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
+        )
 
         if current_state.total_exposure + amount > self.limits.max_position_size_quote:
             return False, (
@@ -176,23 +169,6 @@ class RiskEngine:
         current_state.total_exposure += amount
 
         return True, ""
-
-    @staticmethod
-    def _native_notional(input_data: dict) -> float:
-        """Notional of a condor-native create, from the type's RiskDeclaration.
-
-        Note: the declaration is in the pool's QUOTE units; the position
-        limit is nominally USD. Exact for USD-quoted pools, approximate
-        otherwise.
-        """
-        from condor.executors.runtime import _EXECUTOR_TYPES
-
-        executor_type = input_data.get("executor_type", "")
-        if executor_type not in _EXECUTOR_TYPES:
-            raise ValueError(f"unknown native executor type: {executor_type!r}")
-        config_cls, _ = _EXECUTOR_TYPES[executor_type]
-        config = config_cls(**(input_data.get("config") or {}))
-        return float(config.risk_declaration().max_notional_quote)
 
     def check_bot_action(self, tool_call: dict) -> tuple[bool, str]:
         """Check a manage_bots call against risk limits.
@@ -282,9 +258,8 @@ def risk_gate(
                 input_data = tool_call.get("input", {})
                 action = input_data.get("action", "")
 
-                # Validate controller_id on create (hummingbot-api shape only;
-                # condor-native creates carry "config" and are bounded by
-                # their RiskDeclaration in check_executor_action)
+                # Validate controller_id on create (executors are attributed
+                # to a controller on the hummingbot-api side)
                 if action == "create" and "executor_config" in input_data:
                     executor_config = input_data.get("executor_config", {})
                     if not executor_config.get("controller_id"):

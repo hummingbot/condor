@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -20,7 +19,6 @@ from condor.web.routes import (
     controller_performance,
     executors,
     market,
-    native_executors,
     notifications,
     portfolio,
     positions,
@@ -50,19 +48,8 @@ def _build_cors_origins() -> list[str]:
     return origins
 
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    # Native executor runtime (docs/condor-simple.md): reconcile persisted
-    # executors + start the watchdog in this (main) process.
-    from condor.executors.service import start_executor_service, stop_executor_service
-
-    await start_executor_service()
-    yield
-    await stop_executor_service()
-
-
 def create_app() -> FastAPI:
-    app = FastAPI(title="Condor Dashboard API", version="0.1.0", lifespan=_lifespan)
+    app = FastAPI(title="Condor Dashboard API", version="0.1.0")
 
     # CORS – allow Vite dev server, local origins, and WEB_URL origin (e.g. Tailscale hostname)
     app.add_middleware(
@@ -91,7 +78,6 @@ def create_app() -> FastAPI:
     app.include_router(settings.router, prefix="/api/v1")
     app.include_router(chat_ws.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
-    app.include_router(native_executors.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")
 
     # ── Serve report HTML files ──

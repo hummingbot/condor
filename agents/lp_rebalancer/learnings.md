@@ -3,7 +3,6 @@
 ## Market Observations
 
 ## Execution Notes
-- [2026-07-13 19:52] [lp_rebalance] Use mcp__condor__manage_executors (not mcp__mcp-hummingbot__manage_executors) for all executor creates/stops — the condor tool uses chain_network/connector field names and supports executor_type "swap" and "lp".
-- [2026-07-13 19:53] [lp_rebalance] plan_lp_position lp_create_args use executor_type "lp" with chain_network/connector/wallet_address fields — pass verbatim to mcp__condor__manage_executors, do not remap to hummingbot schema.
+- [2026-07-13 21:30] [lp_rebalance] Executor management is hummingbot-api now (mcp-hummingbot manage_executors), executor_type "lp_executor". The condor-native executor layer (executor_type "lp"/"swap") was removed. plan_lp_position emits `lp_create_args` as {executor_type:"lp_executor", executor_config:{...}} — pass to manage_executors(action="create") verbatim. The exact lp_executor config field names are unconfirmed on the first live run; verify against the schema (manage_executors(executor_type="lp_executor")) and journal the correct names.
 
 ## Retired Insights
