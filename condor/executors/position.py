@@ -159,8 +159,15 @@ class PositionExecutor(ExecutorBase):
 
         data = result.get("data") or {}
         s.open_tx_hash = result["signature"]
-        # SELL of quote side: amountIn = quote spent, amountOut = base received
-        s.quote_spent = Decimal(str(data.get("amountIn", cfg.amount_quote)))
+        # Cost basis = the exact amount we routed INTO the swap. This is an
+        # ExactIn SELL of cfg.amount_quote, so that is the swap input by
+        # construction. Do NOT use gateway's amountIn here: for a SOL-input
+        # swap it reports the gross wallet debit (swap + refundable token-
+        # account rent + network fee), which inflates entry_price ~10-20% and
+        # makes a fresh position read as an instant stop-loss against its own
+        # sell quote. Rent is a refundable deposit, not part of the price; the
+        # network fee is tracked separately in tx_fee.
+        s.quote_spent = cfg.amount_quote
         s.base_bought = Decimal(str(data.get("amountOut", 0)))
         s.tx_fee += Decimal(str(data.get("fee", 0)))
         if s.base_bought <= 0:

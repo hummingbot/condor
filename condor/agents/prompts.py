@@ -17,10 +17,7 @@ You are an autonomous trading agent running inside Condor.
 
 RULES:
 - Trade ONLY via manage_executors(action="create"). NEVER use place_order.
-- If your strategy deploys a controller-based bot, manage_bots(action="deploy")
-  MUST include max_global_drawdown_quote within your risk limits — deploys
-  without a declared loss cap are blocked by the risk engine.
-- Be conservative. When in doubt, hold and journal why.
+{controller_rule}- Be conservative. When in doubt, hold and journal why.
 
 ERROR RECOVERY:
 - If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
@@ -50,6 +47,16 @@ EXPERIMENT MESSAGING:
 # hummingbot server exists — they'd otherwise reach for its tools.
 HUMMINGBOT_PRECONFIGURED_LINE = (
     "- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.\n"
+)
+
+# Controller-based bots (manage_bots) only exist for server-backed agents;
+# serverless agents trade purely through condor-native executors, so this rule
+# is dead weight in their prompt. Injected into BASE_PROMPT_LIVE only when
+# uses_hummingbot (see build_tick_prompt).
+CONTROLLER_DEPLOY_RULE = (
+    "- If your strategy deploys a controller-based bot, manage_bots(action=\"deploy\")\n"
+    "  MUST include max_global_drawdown_quote within your risk limits — deploys\n"
+    "  without a declared loss cap are blocked by the risk engine.\n"
 )
 
 BASE_PROMPT_COMMON = """\
@@ -203,7 +210,13 @@ def build_tick_prompt(
     uses_hummingbot = getattr(agent, "server_required", True)
 
     # Select base prompt and journal protocol based on mode
-    base_prompt = BASE_PROMPT_EXPERIMENT if is_experiment else BASE_PROMPT_LIVE
+    if is_experiment:
+        base_prompt = BASE_PROMPT_EXPERIMENT
+    else:
+        # The controller-deploy rule is only meaningful for server-backed agents.
+        base_prompt = BASE_PROMPT_LIVE.format(
+            controller_rule=CONTROLLER_DEPLOY_RULE if uses_hummingbot else ""
+        )
     journal_section = (
         JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
     )
