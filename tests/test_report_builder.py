@@ -70,6 +70,10 @@ def test_interactive_report_embeds_safe_runtime(reports_dir):
     assert "<script>alert(1)</script>" not in document
     assert "javascript:" not in document
     assert "CondorReportRuntime" in document
+    kpi_value_rule = re.search(r"\.kpi-card \.value \{([^}]+)\}", document)
+    assert kpi_value_rule
+    assert "white-space: normal" in kpi_value_rule.group(1)
+    assert "overflow-wrap: anywhere" in kpi_value_rule.group(1)
     assert spec["datasets"] == {"prices": rows}
     assert {component["id"] for component in spec["components"]} == {
         "period",

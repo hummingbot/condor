@@ -69,7 +69,7 @@ HTML_TEMPLATE = """\
     padding: 16px 20px; min-width: 0;
   }}
   .kpi-card .label {{ font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-muted); }}
-  .kpi-card .value {{ font-size: clamp(20px, 2vw, 24px); font-weight: 700; margin: 4px 0; white-space: nowrap; font-variant-numeric: tabular-nums; }}
+  .kpi-card .value {{ font-size: clamp(20px, 2vw, 24px); font-weight: 700; margin: 4px 0; white-space: normal; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }}
   .kpi-card .delta {{ font-size: 12px; }}
   .kpi-card .delta.up {{ color: var(--green); }}
   .kpi-card .delta.down {{ color: var(--red); }}
