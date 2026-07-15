@@ -20,18 +20,6 @@ from condor.web.models import WebUser
 router = APIRouter(tags=["native-executors"])
 
 
-class CreateExecutorRequest(BaseModel):
-    type: str
-    config: dict
-    # Attribution: WHO / WHICH RUN / WHICH PLAYBOOK (see ExecutorConfig)
-    agent_slug: str = ""
-    agent_id: str = ""
-    strategy: str = ""
-    # Trade-notification routing (0 = outbox-only, no Telegram mirror)
-    user_id: int = 0
-    chat_id: int = 0
-
-
 class StopExecutorRequest(BaseModel):
     keep_position: bool = True
 
@@ -63,6 +51,24 @@ async def executors_performance(
         )
     except ops.ExecutorOpError as e:
         raise _http(e)
+
+
+@router.get("/executors/snapshot")
+async def executors_snapshot(
+    agent_slug: str | None = None,
+    agent_id: str | None = None,
+    venue_id: str | None = None,
+    user: WebUser = Depends(get_current_user),
+):
+    """One portfolio snapshot (§6.3): account view + attribution filters."""
+    from condor.accounts.model import AccountRef
+    from condor.executors.snapshot import snapshot
+
+    ref = AccountRef(venue_id=venue_id, custody_address="_default") if venue_id else None
+    return snapshot(
+        get_executor_runtime(), account_ref=ref,
+        agent_slug=agent_slug, agent_id=agent_id,
+    )
 
 
 @router.get("/executors/{executor_id}")

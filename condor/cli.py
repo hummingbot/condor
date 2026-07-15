@@ -1,6 +1,6 @@
 """Condor command-line entry point (`python -m condor.cli`, or `make init`).
 
-Two subcommands (refactor-10, onboarding by harness selection):
+Subcommands:
 
     init         identity anchor + hummingbot-api probe + harness
                  multi-select; emits per-harness config. Idempotent —
@@ -9,6 +9,15 @@ Two subcommands (refactor-10, onboarding by harness selection):
                  (same trust model as Tier-A auto-bind: whoever runs
                  commands on this box already owns config.yml and the
                  JWT signing secret).
+    account      structured account store (§6.2b) management:
+                   import-env  EXPLICIT one-shot onboarding from the legacy
+                               CONDOR_* env vars (custody derived from the
+                               credentials, read-only probe unless
+                               --no-probe, sealed at rest). Idempotent —
+                               accounts are keyed by custody address. The
+                               loaders themselves never read env vars.
+                   list        redacted listing (venue, custody address,
+                               display name, default marker).
 
 Product questions live here, in Python, re-runnable forever — the bash
 installer (install.sh) only bootstraps and then hands off to `init`.
@@ -372,6 +381,101 @@ def cmd_login_token(args) -> None:
     print("Valid for 5 minutes. Requires the Condor web server to be running.")
 
 
+# ── account store (§6.2b activation) ──
+
+
+def _env_credential_plan() -> list[tuple[str, dict]]:
+    """(venue_id, credentials) for each venue with legacy env creds present —
+    the SAME variables the pre-activation loaders read implicitly."""
+    env = os.environ.get
+    plan: list[tuple[str, dict]] = []
+    if env("CONDOR_HL_AGENT_KEY") or env("CONDOR_HL_ACCOUNT_ADDRESS"):
+        venue_id = (
+            "hyperliquid-testnet" if env("CONDOR_HL_NETWORK") == "testnet" else "hyperliquid"
+        )
+        plan.append((venue_id, {
+            "agent_private_key": env("CONDOR_HL_AGENT_KEY"),
+            "account_address": env("CONDOR_HL_ACCOUNT_ADDRESS"),
+        }))
+    if env("CONDOR_SOLANA_SECRET_KEY") or env("CONDOR_SOLANA_KEYSTORE"):
+        plan.append(("solana", {
+            "secret_key_b58": env("CONDOR_SOLANA_SECRET_KEY"),
+            "keystore_path": env("CONDOR_SOLANA_KEYSTORE"),
+            "keystore_passphrase": env("CONDOR_SOLANA_PASSPHRASE"),
+            "rpc_url": env("CONDOR_SOLANA_RPC"),
+        }))
+    if env("CONDOR_POLYMARKET_KEY"):
+        plan.append(("polymarket", {
+            "private_key": env("CONDOR_POLYMARKET_KEY"),
+            "funder": env("CONDOR_POLYMARKET_FUNDER"),
+            "signature_type": env("CONDOR_POLYMARKET_SIG_TYPE"),
+            "host": env("CONDOR_POLYMARKET_HOST"),
+            "api_key": env("CONDOR_POLYMARKET_API_KEY"),
+            "api_secret": env("CONDOR_POLYMARKET_API_SECRET"),
+            "api_passphrase": env("CONDOR_POLYMARKET_API_PASSPHRASE"),
+            "relayer_api_key": env("CONDOR_POLYMARKET_RELAYER_API_KEY"),
+            "relayer_address": env("CONDOR_POLYMARKET_RELAYER_ADDRESS"),
+        }))
+    return plan
+
+
+def cmd_account_import_env(args) -> None:
+    """Explicit one-shot env→store onboarding. There is NO implicit seeding:
+    this command is the only path from env credentials into the store."""
+    from condor.accounts.onboarding import onboard_account
+
+    probe = not args.no_probe
+    plan = _env_credential_plan()
+    jupiter_key = os.environ.get("CONDOR_JUPITER_API_KEY")
+    if not plan and not jupiter_key:
+        print("no CONDOR_* venue credentials found in the environment — nothing to import")
+        return
+
+    failures: list[str] = []
+    for venue_id, credentials in plan:
+        try:
+            ref = onboard_account(venue_id, credentials, probe=probe)
+            print(f"• {venue_id}: account {ref.custody_address} onboarded"
+                  + ("" if probe else " (probe skipped)"))
+        except Exception as e:
+            failures.append(venue_id)
+            print(f"! {venue_id}: NOT onboarded — {e}", file=sys.stderr)
+    if jupiter_key:
+        from condor.executors.wallets import save_service
+
+        save_service("jupiter", {"api_key": jupiter_key})
+        print("• jupiter: data-API key sealed into the _services block")
+
+    if failures:
+        _die(f"import-env failed for: {', '.join(failures)}")
+    if plan:
+        print(
+            "Done. The matching CONDOR_* lines can be removed from .env — "
+            "loaders read ONLY the store now."
+        )
+
+
+def cmd_account_list(args) -> None:
+    """Redacted listing: venue, custody address, name, default marker."""
+    from condor.executors.wallets import account_store
+
+    data = account_store().load()
+    rows = [
+        (venue_id, addr, acct.get("name", ""), addr == entry.get("default_account"))
+        for venue_id, entry in sorted(data.items())
+        if not venue_id.startswith("_")
+        for addr, acct in entry.get("accounts", {}).items()
+    ]
+    if not rows:
+        print("no accounts configured — onboard via the dashboard or "
+              "`python -m condor.cli account import-env`")
+        return
+    for venue_id, addr, name, is_default in rows:
+        marker = "  (default)" if is_default else ""
+        label = f"  {name}" if name else ""
+        print(f"{venue_id}  {addr}{label}{marker}")
+
+
 def main(argv: list[str] | None = None) -> None:
     # The whole app resolves config.yml, .env and store/ relative to the
     # repo root — anchor there no matter where the CLI is invoked from.
@@ -391,6 +495,20 @@ def main(argv: list[str] | None = None) -> None:
     p_token = sub.add_parser("login-token", help="mint a web dashboard login URL")
     p_token.add_argument("--user-id", type=int, help="user to log in as (default: sole approved user)")
     p_token.set_defaults(func=cmd_login_token)
+
+    p_account = sub.add_parser("account", help="structured account store management (§6.2b)")
+    account_sub = p_account.add_subparsers(dest="account_command", required=True)
+    p_import = account_sub.add_parser(
+        "import-env",
+        help="explicit one-shot onboarding from CONDOR_* env credentials",
+    )
+    p_import.add_argument(
+        "--no-probe", action="store_true",
+        help="skip the read-only venue probe (offline import)",
+    )
+    p_import.set_defaults(func=cmd_account_import_env)
+    p_list = account_sub.add_parser("list", help="redacted account listing")
+    p_list.set_defaults(func=cmd_account_list)
 
     args = parser.parse_args(argv)
     args.func(args)

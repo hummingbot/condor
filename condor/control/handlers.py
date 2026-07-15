@@ -33,8 +33,31 @@ def build_executor_handlers() -> dict[str, Handler]:
         "executor.get": lambda executor_id: ops.get(_rt(), executor_id),
         "executor.list": lambda **kw: ops.list_(_rt(), **kw),
         "executor.performance": lambda **kw: ops.performance(_rt(), **kw),
+        "executor.snapshot": lambda **kw: _snapshot(**kw),
+        # §6.2 stop hierarchy: executor.stop (one), stop_run (every executor
+        # attributed to a run), stop_agent (every executor of the slug).
+        "executor.stop_run": lambda agent_id, keep_position=True: {
+            "stopped": _rt().stop_agent_executors(agent_id, keep_position=keep_position)
+        },
+        "executor.stop_agent": lambda agent_slug, keep_position=True: {
+            "stopped": _rt().stop_slug_executors(agent_slug, keep_position=keep_position)
+        },
         "direct.register": _direct_register,
     }
+
+
+def _snapshot(agent_slug=None, agent_id=None, venue_id=None):
+    from condor.accounts.model import AccountRef
+    from condor.executors.service import get_executor_runtime
+    from condor.executors.snapshot import snapshot
+
+    ref = AccountRef(venue_id=venue_id, custody_address="_default") if venue_id else None
+    return snapshot(
+        get_executor_runtime(),
+        account_ref=ref,
+        agent_slug=agent_slug,
+        agent_id=agent_id,
+    )
 
 
 def build_agent_handlers() -> dict[str, Handler]:

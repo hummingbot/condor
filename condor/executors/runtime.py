@@ -64,10 +64,9 @@ class ExecutorRuntime:
         self._executors: dict[str, ExecutorBase] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._watchdog_task: Optional[asyncio.Task] = None
-        # Lazily-built native connectors (one Solana wallet; one client per perp venue).
-        self._jupiter = None
-        self._hl_clients: dict[str, object] = {}
-        self._polymarket = None
+        # Lazily-built native connectors, cached per (venue, instrument) —
+        # e.g. one Hyperliquid client per product, all from the same creds.
+        self._connectors: dict[tuple[str, str], object] = {}
 
     # -- connector resolution ------------------------------------------------
 
@@ -75,58 +74,30 @@ class ExecutorRuntime:
         return self.connector_for_spec(config.type, config.venue)
 
     def connector_for_spec(self, type_: str, venue: Optional[str]):
-        """Resolve the connector from (type, venue). venue names the exchange;
-        the instrument (from the type) picks which Hyperliquid product client."""
+        """Resolve the connector from (type, venue) through the loaded venue
+        packages (§6.2b): the venue's spec builds the client for the
+        instrument from the resolved account credentials. Unknown venue ids
+        error (UnknownVenueError); a venue that does not claim the instrument
+        errors too."""
         instrument = type_.split("_", 1)[1]
         venue = venue or "solana"
-        if venue == "solana":
-            return self._jupiter_connector()
-        if venue == "hyperliquid":
-            if instrument == "perp":
-                return self._hl_client("perp")
-            if instrument == "pred":
-                return self._hl_client("outcome")
-            return self._hl_client("spot")  # spot (order or position)
-        if venue == "polymarket":
-            return self._pm_client()
-        raise ValueError(f"no connector for type={type_!r} venue={venue!r}")
+        key = (venue, instrument)
+        cached = self._connectors.get(key)
+        if cached is not None:
+            return cached
+        from condor.venues.registry import venue_spec
 
-    def _jupiter_connector(self):
-        if self._jupiter is None:
-            from condor.executors.jupiter import JupiterConnector
-            from condor.executors.wallets import make_solana_connector
-
-            self._jupiter = JupiterConnector(make_solana_connector())
-        return self._jupiter
-
-    _HL_CLIENTS = {
-        "perp": ("condor.executors.hyperliquid", "HyperliquidClient"),
-        "outcome": ("condor.executors.hyperliquid_outcome", "HyperliquidOutcomeClient"),
-        "spot": ("condor.executors.hyperliquid_spot", "HyperliquidSpotClient"),
-    }
-
-    def _hl_client(self, product: str):
-        """One Hyperliquid client per product (perp / spot / outcome), all built
-        from the same agent creds and cached."""
-        if product not in self._hl_clients:
-            import importlib
-
-            from condor.executors.wallets import load_hyperliquid_creds
-
-            module_path, cls_name = self._HL_CLIENTS[product]
-            cls = getattr(importlib.import_module(module_path), cls_name)
-            creds = load_hyperliquid_creds()
-            self._hl_clients[product] = cls(
-                creds["agent_private_key"], creds["account_address"], creds["network"]
+        spec = venue_spec(venue)  # raises UnknownVenueError for unregistered ids
+        if instrument not in spec.adapter_factories:
+            raise ValueError(
+                f"no connector for type={type_!r} venue={venue!r} "
+                f"(supported instruments: {sorted(spec.adapter_factories)})"
             )
-        return self._hl_clients[product]
+        from condor.executors.wallets import account_credentials
 
-    def _pm_client(self):
-        if self._polymarket is None:
-            from condor.executors.wallets import make_polymarket_client
-
-            self._polymarket = make_polymarket_client()
-        return self._polymarket
+        connector = spec.make_connector(instrument, account_credentials(venue))
+        self._connectors[key] = connector
+        return connector
 
     # -- create / stop -------------------------------------------------------
 
@@ -173,6 +144,25 @@ class ExecutorRuntime:
             if task is None or task.done():
                 continue
             if executor.config.agent_id != agent_id:
+                continue
+            executor.early_stop(keep_position=keep_position)
+            executor.persist()
+            stopped.append(eid)
+        return stopped
+
+    def stop_slug_executors(
+        self, agent_slug: str, keep_position: bool = True
+    ) -> list[str]:
+        """AGENT-scoped stop (§6.2 hierarchy): every running executor
+        attributed to the slug, across ALL of its runs. ``keep_position=False``
+        closes each executor's remaining signed inventory (owned_net_base fold
+        — §6.2 close sizing)."""
+        stopped: list[str] = []
+        for eid, executor in list(self._executors.items()):
+            task = self._tasks.get(eid)
+            if task is None or task.done():
+                continue
+            if executor.config.agent_slug != agent_slug:
                 continue
             executor.early_stop(keep_position=keep_position)
             executor.persist()
@@ -232,6 +222,21 @@ class ExecutorRuntime:
 
     @staticmethod
     def _instrument_id_from_config(cfg: dict) -> str:
+        """Canonical instrument id from a RAW config dict (lease release /
+        rebuild) — same venue-package normalization as
+        ``ExecutorConfig.instrument_id`` so lease keys never diverge across a
+        restart; generic identity-field fallback when the venue has no spec."""
+        from condor.accounts.registry import UnknownVenueError
+        from condor.venues.registry import venue_spec
+
+        try:
+            spec = venue_spec(cfg.get("venue") or "solana")
+        except UnknownVenueError:
+            spec = None
+        if spec is not None:
+            normalized = spec.normalize_instrument(cfg)
+            if normalized:
+                return str(normalized)
         base, quote = cfg.get("base_token"), cfg.get("quote_token")
         if base and quote:
             return f"{base}-{quote}"
@@ -504,8 +509,13 @@ class ExecutorRuntime:
             if not task.done():
                 task.cancel()
         await asyncio.gather(*self._tasks.values(), return_exceptions=True)
-        if self._jupiter is not None:
-            await self._jupiter.close()
+        for connector in self._connectors.values():
+            close = getattr(connector, "close", None)
+            if close is None:
+                continue
+            result = close()
+            if asyncio.iscoroutine(result):
+                await result
         self.store.close()
 
     async def wait_all(self) -> None:

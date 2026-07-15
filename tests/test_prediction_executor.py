@@ -92,7 +92,7 @@ class FakeOutcome:
 
 def _run_pm(tmp_path, fake, cfg):
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._polymarket = fake
+    rt._connectors[("polymarket", "pred")] = fake
 
     async def go():
         eid = rt.create_executor(cfg)
@@ -104,7 +104,7 @@ def _run_pm(tmp_path, fake, cfg):
 
 def _run_outcome(tmp_path, fake, cfg):
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._hl_clients["outcome"] = fake
+    rt._connectors[("hyperliquid", "pred")] = fake
 
     async def go():
         eid = rt.create_executor(cfg)
@@ -193,7 +193,7 @@ def test_order_pred_buys_shares(tmp_path):
 
     fake = FakePM(entry="0.5", marks=["0.5"])
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._polymarket = fake
+    rt._connectors[("polymarket", "pred")] = fake
 
     async def go():
         eid = rt.create_executor(OrderPredConfig(
@@ -252,7 +252,7 @@ def test_order_pred_limit_rests_then_fills(tmp_path):
 
     fake = FakePMLimit(fill=True, fill_after=1)
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._polymarket = fake
+    rt._connectors[("polymarket", "pred")] = fake
 
     async def go():
         eid = rt.create_executor(OrderPredConfig(
@@ -274,7 +274,7 @@ def test_order_pred_limit_cancel_on_stop(tmp_path):
 
     fake = FakePMLimit(fill=False)  # never fills — rests until cancelled
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._polymarket = fake
+    rt._connectors[("polymarket", "pred")] = fake
 
     async def go():
         eid = rt.create_executor(OrderPredConfig(

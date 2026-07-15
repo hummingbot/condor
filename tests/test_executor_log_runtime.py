@@ -32,7 +32,7 @@ def _lines(log, slug):
 def test_swap_runs_to_close_via_log(tmp_path):
     log = _log(tmp_path)
     runtime = ExecutorRuntime(store=log)
-    runtime._jupiter = FakeGateway()
+    runtime._connectors[("solana", "spot")] = FakeGateway()
 
     async def run():
         eid = runtime.create_executor(swap_config())
@@ -62,7 +62,7 @@ def test_swap_reconcile_settles_from_log(tmp_path):
     log.save(ex)
 
     runtime = ExecutorRuntime(store=log)
-    runtime._jupiter = gateway
+    runtime._connectors[("solana", "spot")] = gateway
     resumed = asyncio.run(runtime.reconcile())
     assert resumed == []
     rec = log.load("swap_orphan")
@@ -99,7 +99,7 @@ def test_position_reconcile_adopts_opening_fill_not_reopen(tmp_path):
     log.save(ex)
 
     runtime = ExecutorRuntime(store=log)
-    runtime._jupiter = gw
+    runtime._connectors[("solana", "spot")] = gw
 
     async def go():
         resumed = await runtime.reconcile()
@@ -125,7 +125,7 @@ def test_position_reconcile_closing_but_flat_settles_no_resell(tmp_path):
     log.save(ex)
 
     runtime = ExecutorRuntime(store=log)
-    runtime._jupiter = gw
+    runtime._connectors[("solana", "spot")] = gw
     resumed = asyncio.run(runtime.reconcile())
     assert resumed == []  # settled, not resumed
     rec = log.load("pos_closing")
@@ -152,7 +152,7 @@ def test_position_reconcile_does_not_adopt_unattributed_wallet_inventory(tmp_pat
     log.save(ex)
 
     runtime = ExecutorRuntime(store=log)
-    runtime._jupiter = gw
+    runtime._connectors[("solana", "spot")] = gw
 
     async def go():
         resumed = await runtime.reconcile()
@@ -193,7 +193,7 @@ def test_perp_reconcile_restores_missing_native_triggers(tmp_path):
     log.save(ex)
 
     runtime = ExecutorRuntime(store=log)
-    runtime._hl_clients["perp"] = fake
+    runtime._connectors[("hyperliquid", "perp")] = fake
 
     async def go():
         resumed = await runtime.reconcile()
@@ -230,7 +230,7 @@ def test_perp_reconcile_flat_position_settles_fill_history(tmp_path):
     log.save(ex)
 
     runtime = ExecutorRuntime(store=log)
-    runtime._hl_clients["perp"] = fake
+    runtime._connectors[("hyperliquid", "perp")] = fake
     assert asyncio.run(runtime.reconcile()) == []
 
     rec = log.load("perp_closed_offline")

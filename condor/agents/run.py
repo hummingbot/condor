@@ -74,6 +74,7 @@ async def run_agent(
     model: str | None = None,
     model_base_url: str | None = None,
     tool_filter_mode: str | None = None,
+    risk_limits: dict | None = None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     event_sink: Callable[[Any], None] | None = None,
     fallback_on_unhealthy: bool = False,
@@ -129,7 +130,7 @@ async def run_agent(
         from condor.executors.capabilities import get_capability_registry
 
         run_capability = get_capability_registry().mint_run_capability(
-            agent.slug, agent_id
+            agent.slug, agent_id, risk_limits=risk_limits
         )
 
     # -- model resolution (+ optional healthcheck/fallback) --

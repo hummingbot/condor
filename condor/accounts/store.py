@@ -31,9 +31,14 @@ live system still reads the flat file via ``condor/executors/wallets.py``):
   with no default and no selector fails with a clear error.
 - **Single serialized atomic writer** (tmp+rename+fsync, 0700 dir / 0600
   file).
+- Top-level keys starting with ``_`` are reserved non-account blocks and are
+  skipped by validation — today only ``"_services"`` (service-level API keys
+  that are not account credentials, e.g. the Jupiter data-API key, written
+  sealed by ``condor.executors.wallets.save_service``).
 
-Phase 3 adds: onboarding (custody derivation + read-only probe), credential
-binding, busy/lifecycle guards, and the operator cutover.
+Phase 3 (ACTIVE): onboarding (custody derivation + read-only probe) lives in
+``condor.accounts.onboarding``; the loaders in ``condor/executors/wallets.py``
+read THIS store as the sole credential source (env precedence deleted).
 """
 
 from __future__ import annotations
@@ -90,6 +95,12 @@ class AccountStore:
         if not isinstance(data, dict):
             raise AccountStoreError("venues.json root must be an object")
         for venue_id, entry in data.items():
+            if venue_id.startswith("_"):
+                # Reserved non-account block ("_services" et al) — not venue
+                # accounts, not schema-validated here. See module docstring.
+                if not isinstance(entry, dict):
+                    raise AccountStoreError(f"{venue_id}: entry must be an object")
+                continue
             venue = self._registry.get(venue_id)  # raises UnknownVenueError
             if not isinstance(entry, dict):
                 raise AccountStoreError(f"{venue_id}: entry must be an object")
@@ -228,6 +239,24 @@ class AccountStore:
         entry["accounts"][ref.custody_address] = dict(fields)
         if make_default or "default_account" not in entry:
             entry["default_account"] = ref.custody_address
+        self.save(data)
+        return ref
+
+    def account_fields(self, ref: AccountRef) -> dict:
+        """The raw stored fields (sealed secrets untouched) for one account."""
+        data = self.load()
+        try:
+            return dict(data[ref.venue_id]["accounts"][ref.custody_address])
+        except KeyError:
+            raise AccountResolutionError(
+                f"{ref.venue_id}: no account {ref.custody_address!r}"
+            ) from None
+
+    def set_default(self, venue_id: str, selector: str) -> AccountRef:
+        """Point the venue's ``default_account`` at the resolved selector."""
+        ref = self.resolve(venue_id, selector)
+        data = self.load()
+        data[venue_id]["default_account"] = ref.custody_address
         self.save(data)
         return ref
 

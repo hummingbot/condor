@@ -125,10 +125,14 @@ def test_runtime_routes_type_and_venue():
     from condor.executors.runtime import ExecutorRuntime
 
     rt = ExecutorRuntime.__new__(ExecutorRuntime)
-    rt._jupiter = "JUP"
-    rt._polymarket = "PM"
-    rt._hl_clients = {"perp": "PERP", "spot": "SPOT", "outcome": "OUT"}
-    # (instrument-from-type, venue) selects the connector
+    rt._connectors = {
+        ("solana", "spot"): "JUP",
+        ("polymarket", "pred"): "PM",
+        ("hyperliquid", "perp"): "PERP",
+        ("hyperliquid", "spot"): "SPOT",
+        ("hyperliquid", "pred"): "OUT",
+    }
+    # (instrument-from-type, venue) selects the connector through the registry
     assert rt.connector_for_spec("order_spot", "solana") == "JUP"
     assert rt.connector_for_spec("position_spot", "solana") == "JUP"
     assert rt.connector_for_spec("position_spot", "hyperliquid") == "SPOT"

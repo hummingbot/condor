@@ -530,6 +530,7 @@ class TickEngine:
             model=self._agent_key(),
             model_base_url=self.config.get("model_base_url") or None,
             tool_filter_mode=self.config.get("tool_filter_mode") or None,
+            risk_limits=self.config.get("risk_limits") or None,
             timeout_s=300,
             on_client=_hold_client,
             agent_id=self.agent_id,

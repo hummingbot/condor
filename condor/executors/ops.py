@@ -202,7 +202,15 @@ async def create(
     actor = cap.run_id if cap.origin == "agent" else "condor"
     async with _create_lock:
         if cap.origin == "agent":
-            _enforce_agent_caps(runtime, cap.agent_slug, declaration)
+            _enforce_agent_caps(
+                runtime,
+                cap.agent_slug,
+                declaration,
+                cfg=config_data,
+                type_=type,
+                run_id=cap.run_id,
+                run_limits=cap.risk_limits or None,
+            )
         try:
             runtime.leases.acquire(
                 account_ref,
@@ -236,13 +244,185 @@ async def create(
     }
 
 
-def _enforce_agent_caps(runtime: ExecutorRuntime, agent_slug: str, declaration) -> None:
-    """Enforce the owning agent's baseline risk limits against ALL of that
-    agent's open executors (every session/delegation of the slug, not one
-    session's snapshot). Raises :class:`ExecutorOpError` (409) on breach.
+# USD-family stables treated as 1:1 with each other for denomination checks.
+_USD_FAMILY = {"USD", "USDC"}
 
-    No agent baseline (chat-driven / unattributed executors) → nothing to
-    enforce here; those paths are human-gated upstream."""
+
+def _quote_unit(cfg: dict) -> str:
+    """The quote currency an executor's amounts are expressed in."""
+    q = cfg.get("quote_token")
+    if q:
+        return str(q).upper()
+    # perp (Hyperliquid USDC-margined) and pred (USDC-quoted CLOBs)
+    return "USDC"
+
+
+def _assert_denomination_convertible(agent, cfg: dict) -> None:
+    """§6.1: every exposure bucket converts into the agent's declared
+    denomination before caps apply — and pricing FAILS CLOSED. Instruments
+    already quoted in the denomination convert at 1 (the common case).
+    Fresh-price cross conversion arrives with the venue packages' price
+    surface; until then a cross-denomination create is rejected with a clear
+    error, never priced at zero or passed through unconverted."""
+    denom = (getattr(agent, "denomination", "") or "").strip().upper()
+    if not denom:
+        return  # no denomination → no risk limits (validated at spec save)
+    unit = _quote_unit(cfg)
+    if unit == denom:
+        return
+    if unit in _USD_FAMILY and denom in _USD_FAMILY:
+        return
+    raise ExecutorOpError(
+        422,
+        f"denomination conversion unavailable: this executor is quoted in "
+        f"{unit} but agent risk limits are denominated in {denom} — "
+        f"cross-denomination pricing fails closed (§6.1); trade "
+        f"{denom}-quoted instruments or update the agent's denomination",
+    )
+
+
+def _record_exposure(record) -> float:
+    """One open executor's exposure as a DISJOINT projection (§6.1):
+
+    1. pre-ack reservation — no landed orders yet (SUBMITTING/OPENING):
+       reserved at declared size;
+    2. confirmed inventory — cost of landed entry fills minus exit proceeds;
+    3. unfilled risk-increasing remainder of live entry/trade orders.
+
+    A partial fill atomically transfers value from bucket 3 to bucket 2 —
+    total exposure must not jump as an order moves SUBMITTING → OPEN →
+    partially filled → FILLED.
+    """
+    from condor.executors.orders import LandedOrder, OrderRole
+    from condor.executors.performance import open_notional
+
+    raw_orders = (record.state or {}).get("orders") or []
+    if not raw_orders:
+        # Bucket 1: reservation at declared size.
+        try:
+            return float(open_notional(record))
+        except (TypeError, ValueError, ArithmeticError):
+            return 0.0
+
+    entries_quote = 0.0
+    exits_quote = 0.0
+    remainder_quote = 0.0
+    declared = 0.0
+    try:
+        declared = float(open_notional(record))
+    except (TypeError, ValueError, ArithmeticError):
+        pass
+    for raw in raw_orders:
+        o = LandedOrder(**raw)
+        filled_q = float(o.cumulative_filled_quote_qty)
+        if o.role in (OrderRole.ENTRY, OrderRole.TRADE):
+            entries_quote += filled_q
+            if o.status.is_live:
+                # Bucket 3: live unfilled remainder, in quote terms.
+                if o.requested_unit == "quote":
+                    rem = float(o.requested_qty) - filled_q
+                else:
+                    filled_b = float(o.cumulative_filled_base_qty)
+                    req_b = float(o.requested_qty)
+                    frac = 1.0 - (filled_b / req_b) if req_b > 0 else 0.0
+                    rem = declared * max(0.0, min(1.0, frac))
+                remainder_quote += max(0.0, rem)
+        elif o.role == OrderRole.EXIT:
+            exits_quote += filled_q
+    inventory = max(0.0, entries_quote - exits_quote)
+    return inventory + remainder_quote
+
+
+def _scope_open_records(records) -> list:
+    return [r for r in records if r.status in _OPEN_STATUSES]
+
+
+def _is_risk_reducing(records, cfg: dict, type_: str) -> bool:
+    """§6.1 risk-reducing exemption — a PROSPECTIVE predicate at authorization
+    time: the new order must (1) oppose the sign of the scope's current
+    owned_net_base on the SAME instrument, and (2) keep the aggregate
+    projection (position plus EVERY nonterminal owned opposite-side order,
+    protection included, fully filled) at zero or the original sign — never
+    cross it. Anything unresolvable fails closed to the normal cap check."""
+    from condor.executors.orders import LandedOrder, owned_net_base
+
+    instrument = type_.split("_", 1)[1] if "_" in type_ else ""
+    base, quote = cfg.get("base_token"), cfg.get("quote_token")
+    inst_id = (
+        f"{base}-{quote}" if base and quote
+        else str(cfg.get("coin") or cfg.get("market") or "")
+    )
+    if not inst_id:
+        return False
+
+    side = str(cfg.get("side") or cfg.get("position") or "").upper()
+    is_sell = side in ("SELL", "SHORT")
+    try:
+        requested_base = float(cfg.get("amount") or cfg.get("size") or 0)
+    except (TypeError, ValueError):
+        return False
+    if requested_base <= 0:
+        return False
+
+    product = "perp" if instrument == "perp" else instrument or "spot"
+    scope_orders: list[LandedOrder] = []
+    for r in records:
+        rcfg = r.config or {}
+        r_inst = (
+            f"{rcfg.get('base_token')}-{rcfg.get('quote_token')}"
+            if rcfg.get("base_token") and rcfg.get("quote_token")
+            else str(rcfg.get("coin") or rcfg.get("market") or "")
+        )
+        if r_inst != inst_id:
+            continue
+        for raw in (r.state or {}).get("orders") or []:
+            scope_orders.append(LandedOrder(**raw))
+
+    net = float(
+        owned_net_base(scope_orders, product=product, base_asset=str(base or ""))
+    )
+    if net == 0:
+        return False
+    opposes = (net > 0 and is_sell) or (net < 0 and not is_sell)
+    if not opposes:
+        return False
+
+    # Reducing capacity is reserved atomically across EVERY live opposite-side
+    # order in the scope, regardless of label (incl. native TP/SL).
+    from condor.executors.orders import unfilled_remainder
+
+    live_opposite_base = 0.0
+    for o in scope_orders:
+        if not o.status.is_live:
+            continue
+        o_is_sell = o.side == "sell"
+        if (net > 0 and o_is_sell) or (net < 0 and not o_is_sell):
+            if o.requested_unit == "base":
+                live_opposite_base += float(unfilled_remainder(o))
+    projected = abs(net) - live_opposite_base - requested_base
+    # zero or original sign — never crossed
+    return projected >= 0
+
+
+def _enforce_agent_caps(
+    runtime: ExecutorRuntime,
+    agent_slug: str,
+    declaration,
+    *,
+    cfg: dict | None = None,
+    type_: str = "",
+    run_id: str = "",
+    run_limits: dict | None = None,
+) -> None:
+    """Enforce risk caps composed by scope (§6.1) — a platform invariant on
+    the ONLY create path. Both must pass:
+
+    | scope | cap source            | checked against                       |
+    | agent | AGENT.md baseline     | slug-wide attributed exposure/count   |
+    | run   | frozen spec (stricter)| run-attributed exposure/count         |
+
+    Cleanup orders that satisfy the risk-reducing exemption predicate are
+    exempt from both caps (an over-cap agent can always reduce)."""
     if not agent_slug:
         return
     try:
@@ -252,38 +432,43 @@ def _enforce_agent_caps(runtime: ExecutorRuntime, agent_slug: str, declaration) 
     except Exception:
         agent = None
     limits = (agent.risk_limits or {}) if agent else {}
-    if not limits:
+    if not limits and not run_limits:
         return
 
-    from condor.executors.performance import open_notional
+    if agent is not None and cfg is not None:
+        _assert_denomination_convertible(agent, cfg)
 
-    records = runtime.store.load_by_slug(agent_slug)
-    open_records = [r for r in records if r.status in _OPEN_STATUSES]
+    slug_records = runtime.store.load_by_slug(agent_slug)
+    slug_open = _scope_open_records(slug_records)
 
-    max_open = int(limits.get("max_open_executors") or 0)
-    if max_open and len(open_records) + 1 > max_open:
-        raise ExecutorOpError(
-            409,
-            f"risk cap: agent '{agent_slug}' already has {len(open_records)} open "
-            f"executor(s) (baseline max_open_executors={max_open})",
-        )
+    if cfg is not None and _is_risk_reducing(slug_open, cfg, type_):
+        return  # §6.1 exemption: reducing orders bypass the caps
 
-    max_pos = float(limits.get("max_position_size_quote") or 0)
-    if max_pos:
-        exposure = 0.0
-        for r in open_records:
-            try:
-                exposure += float(open_notional(r))
-            except (TypeError, ValueError, ArithmeticError):
-                pass
-        requested = float(declaration.max_notional_quote)
-        if exposure + requested > max_pos:
+    def _check(scope_name: str, scope_limits: dict, open_records: list) -> None:
+        max_open = int(scope_limits.get("max_open_executors") or 0)
+        if max_open and len(open_records) + 1 > max_open:
             raise ExecutorOpError(
                 409,
-                f"risk cap: agent '{agent_slug}' open exposure {exposure:.4f} + "
-                f"requested {requested:.4f} exceeds baseline "
-                f"max_position_size_quote={max_pos:g}",
+                f"risk cap ({scope_name}): {len(open_records)} nonterminal "
+                f"executor(s) already attributed (max_open_executors={max_open})",
             )
+        max_pos = float(scope_limits.get("max_position_size_quote") or 0)
+        if max_pos:
+            exposure = sum(_record_exposure(r) for r in open_records)
+            requested = float(declaration.max_notional_quote)
+            if exposure + requested > max_pos:
+                raise ExecutorOpError(
+                    409,
+                    f"risk cap ({scope_name}): attributed exposure "
+                    f"{exposure:.4f} + requested {requested:.4f} exceeds "
+                    f"max_position_size_quote={max_pos:g}",
+                )
+
+    if limits:
+        _check(f"agent '{agent_slug}'", limits, slug_open)
+    if run_limits and run_id:
+        run_open = [r for r in slug_open if r.agent_id == run_id]
+        _check(f"run '{run_id}'", run_limits, run_open)
 
 
 async def stop(

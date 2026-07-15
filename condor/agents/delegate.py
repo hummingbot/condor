@@ -233,6 +233,7 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
             user_id=dt.user_id,
             chat_id=dt.chat_id,
             server_name=effective_server,
+            risk_limits=dt.risk_limits,
             timeout_s=timeout_s,
             event_sink=_make_event_sink(dt),
             fallback_on_unhealthy=True,

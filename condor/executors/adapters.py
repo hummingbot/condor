@@ -1,10 +1,12 @@
 """Instrument adapters — one per (instrument, venue), wrapping a venue connector.
 
 The kind picks the executor class (OrderExecutor / PositionExecutor); the
-(instrument, venue) pair picks the adapter here. Each adapter normalizes a
-venue's connector to a single interface so the executors never branch on
-instrument. All the venue-specific logic (moved verbatim from the retired
-swap/perp/prediction executors) lives here.
+(instrument, venue) pair picks the adapter via ``make_adapter``, which
+dispatches through the loaded venue packages (§6.2b). This module keeps only
+the venue-agnostic pieces: the ``InstrumentAdapter`` interface, the shared
+``SpotAdapter`` (Jupiter and HL spot speak the same swap interface) and the
+shared prediction base — per-venue adapters live in
+``condor/venues/{hyperliquid,polymarket}/adapters.py``.
 
 Adapters are **bound** to the executor's live state object (``adapter.bind``),
 so methods whose signature carries no ``state`` (``mark_price``, ``enter``,
@@ -39,6 +41,14 @@ import logging
 from decimal import Decimal
 from typing import Any, Optional
 
+from condor.executors.orders import (
+    LandedOrder,
+    OrderRole,
+    OrderStatus,
+    find_order,
+    upsert_landed,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -63,6 +73,59 @@ class InstrumentAdapter:
     def bind(self, state: Any) -> None:
         """Give the adapter a handle to the executor's live state object."""
         self.state = state
+
+    # -- uniform orders[] recording (§6.2b) -----------------------------------
+
+    def record_landed_order(
+        self,
+        state,
+        *,
+        venue_order_id,
+        role,
+        side: str,
+        requested_qty,
+        requested_unit: str = "base",
+        status=OrderStatus.OPEN,
+        filled_base: Decimal = Decimal(0),
+        filled_quote: Decimal = Decimal(0),
+        fees_by_asset: Optional[dict] = None,
+        client_order_id: Optional[str] = None,
+        cursor: Optional[str] = None,
+    ) -> LandedOrder:
+        """Land a venue-ACKNOWLEDGED order into ``state.orders``, idempotent by
+        venue id (an MCP retry re-observing the same id never duplicates it).
+        Rejections/errors record nothing — they are transitions, not orders."""
+        entry = LandedOrder(
+            venue_order_id=str(venue_order_id),
+            client_order_id=client_order_id,
+            role=OrderRole(role),
+            side=side,
+            requested_qty=Decimal(str(requested_qty)),
+            requested_unit=requested_unit,
+            cumulative_filled_base_qty=Decimal(str(filled_base)),
+            cumulative_filled_quote_qty=Decimal(str(filled_quote)),
+            fees_by_asset={k: Decimal(str(v)) for k, v in (fees_by_asset or {}).items()},
+            status=OrderStatus(status),
+            cursor=cursor,
+        )
+        return upsert_landed(state.orders, entry)
+
+    def update_landed_order(self, state, venue_order_id, **absolute) -> None:
+        """Overwrite an existing entry with the venue's ABSOLUTE cumulative view
+        (idempotent). A missing id is logged, never fatal — recording must not
+        break trading."""
+        entry = find_order(state.orders, str(venue_order_id))
+        if entry is None:
+            logger.warning(
+                "orders[]: no landed entry for venue_order_id=%s (update %s ignored)",
+                venue_order_id, sorted(absolute),
+            )
+            return
+        entry.apply_absolute(**absolute)
+
+    def _leg_role(self) -> OrderRole:
+        """TRADE for an order-kind single leg; ENTRY for a position opening leg."""
+        return OrderRole.TRADE if str(getattr(self.cfg, "type", "")).startswith("order") else OrderRole.ENTRY
 
     # -- position kind -------------------------------------------------------
 
@@ -172,6 +235,13 @@ class SpotAdapter(InstrumentAdapter):
         prior = _dec(self.state.extra.get("tx_fee"))
         self.state.extra["tx_fee"] = str(prior + _dec((data or {}).get("fee", 0)))
 
+    @staticmethod
+    def _swap_fees(data: dict) -> Optional[dict]:
+        """Per-swap network fee as fees_by_asset — mirrors extra.tx_fee/extra.fee.
+        Jupiter reports it in SOL (lamports/1e9); HL spot reports 0."""
+        fee = _dec((data or {}).get("fee", 0))
+        return {"SOL": fee} if fee > 0 else None
+
     async def prepare_open(self, state) -> None:
         state.extra["held_before"] = str(await self.held_size())
 
@@ -195,6 +265,22 @@ class SpotAdapter(InstrumentAdapter):
         data = result.get("data") or {}
         ref = result["signature"]
         size = _dec(data.get("amountOut", 0))
+        # A swap is one immediately-executed venue order: the signature is its
+        # id, the measured out-delta its cumulative fill; a failed tx (status
+        # -1) landed but executed nothing economically.
+        confirmed = result.get("status", 1) == 1
+        self.record_landed_order(
+            self.state,
+            venue_order_id=ref,
+            role=self._leg_role(),
+            side="buy",  # entering acquires the base token
+            requested_qty=cfg.amount_quote,
+            requested_unit="quote",
+            status=OrderStatus.FILLED if confirmed else OrderStatus.CANCELED,
+            filled_base=size if confirmed else Decimal(0),
+            filled_quote=cfg.amount_quote if confirmed else Decimal(0),
+            fees_by_asset=self._swap_fees(data),
+        )
         if size <= 0:
             raise RuntimeError(f"buy returned no base: {result}")
         # Cost basis = the exact quote we routed INTO the ExactIn SELL — that is
@@ -233,6 +319,19 @@ class SpotAdapter(InstrumentAdapter):
         data = result.get("data") or {}
         ref = result["signature"]
         proceeds = _dec(data.get("amountOut", 0))
+        confirmed = result.get("status", 1) == 1
+        self.record_landed_order(
+            self.state,
+            venue_order_id=ref,
+            role=OrderRole.EXIT,
+            side="sell",
+            requested_qty=size,
+            requested_unit="base",
+            status=OrderStatus.FILLED if confirmed else OrderStatus.CANCELED,
+            filled_base=(_dec(data.get("amountIn", 0)) or size) if confirmed else Decimal(0),
+            filled_quote=proceeds if confirmed else Decimal(0),
+            fees_by_asset=self._swap_fees(data),
+        )
         self._add_fee(data)
         exit_px = (proceeds / size) if (size > 0 and proceeds) else None
         return exit_px, proceeds, ref
@@ -309,6 +408,33 @@ class SpotAdapter(InstrumentAdapter):
         state.extra["amount_out"] = float(_dec(data.get("amountOut", 0)))
         state.extra["fee"] = float(_dec(data.get("fee", 0)))
         state.state = OrderStates.DONE if result.get("status") == 1 else OrderStates.RESTING
+        # The signature is the landed order id. Confirmed (HL spot always; a
+        # Jupiter tx polled to success inside execute_swap) -> FILLED with the
+        # measured deltas; still in flight -> OPEN, the poll site settles it.
+        confirmed = result.get("status") == 1
+        filled_base, filled_quote = self._swap_leg_fills(state)
+        self.record_landed_order(
+            state,
+            venue_order_id=result["signature"],
+            role=OrderRole.TRADE,
+            side="buy" if cfg.side.upper() == "BUY" else "sell",
+            requested_qty=cfg.amount,
+            requested_unit="base",  # order_spot cfg.amount is base units both ways
+            status=OrderStatus.FILLED if confirmed else OrderStatus.OPEN,
+            filled_base=filled_base if confirmed else Decimal(0),
+            filled_quote=filled_quote if confirmed else Decimal(0),
+            fees_by_asset=self._swap_fees(data),
+        )
+
+    def _swap_leg_fills(self, state) -> tuple[Decimal, Decimal]:
+        """(filled_base, filled_quote) for the one-way swap from the measured
+        amountIn/amountOut persisted at placement (BUY: base out / quote in;
+        SELL: base in / quote out)."""
+        amount_in = _dec(state.extra.get("amount_in", 0))
+        amount_out = _dec(state.extra.get("amount_out", 0))
+        if self.cfg.side.upper() == "BUY":
+            return amount_out, amount_in
+        return (amount_in or _dec(self.cfg.amount)), amount_out
 
     async def poll(self, state) -> None:
         from condor.executors.order import OrderStates
@@ -320,249 +446,23 @@ class SpotAdapter(InstrumentAdapter):
         ts = poll.get("txStatus")
         if ts == 1:
             state.state = OrderStates.DONE
+            filled_base, filled_quote = self._swap_leg_fills(state)
+            self.update_landed_order(
+                state, state.open_ref,
+                status=OrderStatus.FILLED,
+                filled_base=filled_base,
+                filled_quote=filled_quote,
+            )
         elif ts == -1:
             state.state = OrderStates.FAILED
             state.extra["error"] = f"swap tx failed on-chain: {state.open_ref}"
-
-
-# -- perp (Hyperliquid) -------------------------------------------------------
-
-
-class PerpAdapter(InstrumentAdapter):
-    """Leveraged perpetual on Hyperliquid — triple barrier + liquidation guard +
-    optional native reduce-only TP/SL triggers. The connector is a HyperliquidClient."""
-
-    def __init__(self, connector, cfg):
-        super().__init__(connector, cfg)
-        self.hl = connector
-        self._pos = None          # cached each tick via vanished()
-        self._entry_oid = None    # guards against re-placing on OPENING retry
-
-    @property
-    def is_long(self) -> bool:
-        return self.cfg.side == "LONG"
-
-    def pnl_pct(self, entry: Decimal, mark: Decimal) -> Decimal:
-        return (mark - entry) / entry if self.is_long else (entry - mark) / entry
-
-    async def enter(self):
-        cfg, hl = self.cfg, self.hl
-        if self._entry_oid is None:
-            await hl.set_leverage(cfg.coin, cfg.leverage, cfg.cross_margin)
-            entry_ref = cfg.limit_px if (cfg.entry == "limit" and cfg.limit_px) else await hl.mid_price(cfg.coin)
-            size = cfg.notional_quote / entry_ref
-            if cfg.entry == "limit":
-                if cfg.limit_px is None:
-                    raise ValueError("entry='limit' requires limit_px")
-                ack = await hl.place_limit(cfg.coin, self.is_long, size, cfg.limit_px)
-                if ack.status == "error":
-                    raise RuntimeError(f"limit entry rejected: {ack.detail}")
-                self._entry_oid = ack.oid
-            else:
-                fill = await hl.market_open(cfg.coin, self.is_long, size, cfg.slippage_pct)
-                self._entry_oid = fill.oid
-        pos = await hl.position(cfg.coin)
-        if pos is None:
-            # limit still resting — check the order, keep waiting (stay OPENING).
-            if self._entry_oid is not None:
-                status = await hl.order_status(self._entry_oid)
-                if _order_is_open(status):
-                    self.pending = True
-                    return Decimal("0"), None, cfg.notional_quote, self._entry_oid
-            raise RuntimeError("entry order neither filled nor resting — verify on venue")
-        self.pending = False
-        self._pos = pos
-        return pos.size, pos.entry_px, cfg.notional_quote, self._entry_oid
-
-    async def on_open(self, state) -> None:
-        pos = self._pos
-        if pos is not None:
-            state.extra["leverage"] = pos.leverage or self.cfg.leverage
-            if pos.liquidation_px is not None:
-                state.extra["liquidation_px"] = str(pos.liquidation_px)
-        if self.cfg.native_triggers:
-            await self._place_native_triggers(state)
-
-    async def _place_native_triggers(self, state) -> None:
-        cfg = self.cfg
-        entry = state.entry_price
-        if entry is None:
-            return
-        close_is_buy = not self.is_long  # closing a LONG sells; a SHORT buys
-        if cfg.take_profit_pct is not None and not state.extra.get("tp_oid"):
-            tp_px = entry * (1 + cfg.take_profit_pct) if self.is_long else entry * (1 - cfg.take_profit_pct)
-            ack = await self.hl.place_trigger(cfg.coin, close_is_buy, state.size, tp_px, "tp")
-            state.extra["tp_oid"] = ack.oid
-            if ack.status == "error":
-                logger.warning("perp native TP trigger rejected: %s", ack.detail)
-        if cfg.stop_loss_pct is not None and not state.extra.get("sl_oid"):
-            sl_px = entry * (1 - cfg.stop_loss_pct) if self.is_long else entry * (1 + cfg.stop_loss_pct)
-            ack = await self.hl.place_trigger(cfg.coin, close_is_buy, state.size, sl_px, "sl")
-            state.extra["sl_oid"] = ack.oid
-            if ack.status == "error":
-                logger.warning("perp native SL trigger rejected: %s", ack.detail)
-
-    async def reconcile_live(self, state) -> None:
-        """Refresh venue metadata and restore any missing daemon-down guards."""
-        self._pos = await self.hl.position(self.cfg.coin)
-        if self._pos is not None:
-            state.extra["leverage"] = self._pos.leverage or self.cfg.leverage
-            if self._pos.liquidation_px is not None:
-                state.extra["liquidation_px"] = str(self._pos.liquidation_px)
-        if self.cfg.native_triggers:
-            await self._place_native_triggers(state)
-
-    async def mark_price(self) -> Decimal:
-        return await self.hl.mid_price(self.cfg.coin)
-
-    async def vanished(self) -> bool:
-        # Fetch the position once per tick; extra_barriers reuses the cache.
-        self._pos = await self.hl.position(self.cfg.coin)
-        return self._pos is None
-
-    def extra_barriers(self, state) -> Optional[str]:
-        pos = self._pos
-        if pos is not None:
-            state.extra["unrealized_pnl"] = str(pos.unrealized_pnl)
-            if pos.liquidation_px is not None:
-                state.extra["liquidation_px"] = str(pos.liquidation_px)
-        liq = _dec(state.extra["liquidation_px"]) if state.extra.get("liquidation_px") else None
-        mark = state.mark_price
-        # Liquidation guard — highest priority.
-        if liq is not None and mark and mark > 0:
-            dist = abs(mark - liq) / mark
-            if dist <= self.cfg.liquidation_guard_pct:
-                return "liquidation_guard"
-        return None
-
-    async def close(self, size: Decimal):
-        fill = await self.hl.market_close(self.cfg.coin, size)
-        return fill.avg_px, None, fill.oid
-
-    async def on_close(self, state) -> None:
-        for key in ("tp_oid", "sl_oid"):
-            oid = state.extra.get(key)
-            if oid is None:
-                continue
-            try:
-                await self.hl.cancel(self.cfg.coin, oid)
-            except Exception:
-                logger.warning("perp cancel trigger oid=%s failed (may already be gone)", oid)
-        state.extra["tp_oid"] = state.extra["sl_oid"] = None
-
-    async def settle(self, state) -> None:
-        """Sum realized pnl + fees for this coin from the venue's fill history."""
-        try:
-            since = int((state.opened_at or 0) * 1000) or None
-            fills = await self.hl.fills(since_ms=since)
-        except Exception:
-            logger.warning("perp: could not fetch fills for settlement", exc_info=True)
-            return
-        realized = Decimal("0")
-        fee = Decimal("0")
-        for f in fills:
-            if f.get("coin") != self.cfg.coin:
-                continue
-            realized += _dec(f.get("closedPnl", "0"))
-            fee += _dec(f.get("fee", "0"))
-            if str(f.get("dir", "")).lower().startswith("close") and f.get("px"):
-                state.exit_price = _dec(f["px"])
-        state.extra["realized_pnl"] = str(realized - fee)
-        state.extra["close_fee"] = str(fee)
-
-    async def held_size(self) -> Decimal:
-        pos = await self.hl.position(self.cfg.coin)
-        return pos.size if pos else Decimal("0")
-
-    async def venue_entry_price(self) -> Optional[Decimal]:
-        pos = await self.hl.position(self.cfg.coin)
-        return pos.entry_px if pos else None
-
-    def net_pnl(self, state) -> Decimal:
-        r = state.extra.get("realized_pnl")
-        if r is not None:
-            return _dec(r)
-        u = state.extra.get("unrealized_pnl")
-        if u is not None:
-            return _dec(u)
-        return Decimal("0")
-
-    def recovery_ids(self, state) -> tuple:
-        return (str(state.extra.get("tp_oid")), str(state.extra.get("sl_oid")))
-
-    def info(self, state) -> dict:
-        e = state.extra
-        return {
-            "venue": self.cfg.venue,
-            "coin": self.cfg.coin,
-            "side": self.cfg.side,
-            "leverage": e.get("leverage"),
-            "unrealized_pnl": float(_dec(e["unrealized_pnl"])) if e.get("unrealized_pnl") is not None else None,
-            "liquidation_px": float(_dec(e["liquidation_px"])) if e.get("liquidation_px") else None,
-            "realized_pnl": float(_dec(e["realized_pnl"])) if e.get("realized_pnl") is not None else None,
-            "entry_oid": state.open_ref,
-            "close_oid": state.close_ref,
-        }
-
-    def open_note(self, state) -> str:
-        cfg = self.cfg
-        tp = f"+{cfg.take_profit_pct * 100:.1f}%" if cfg.take_profit_pct is not None else "—"
-        sl = f"-{cfg.stop_loss_pct * 100:.1f}%" if cfg.stop_loss_pct is not None else "—"
-        lev = state.extra.get("leverage")
-        return (
-            f"🟢 {cfg.side} {cfg.coin} {state.size} @ {state.entry_price:.6g} "
-            f"({lev}x, TP {tp} / SL {sl})"
-        )
-
-    def close_note(self, state, pnl) -> str:
-        cfg = self.cfg
-        emoji = "🔴" if pnl < 0 else "🟢"
-        return f"{emoji} Closed {cfg.side} {cfg.coin} ({state.close_type}) — {pnl:+.4g} USDC"
-
-    # -- order kind (open a leveraged position and stop) ---------------------
-
-    async def place(self, state) -> None:
-        from condor.executors.order import OrderStates
-
-        cfg, hl = self.cfg, self.hl
-        entry_ref = cfg.limit_px if (cfg.order_type == "limit" and cfg.limit_px) else await hl.mid_price(cfg.coin)
-        size = cfg.notional_quote / entry_ref
-        await hl.set_leverage(cfg.coin, cfg.leverage, cfg.cross_margin)
-        if cfg.order_type == "limit":
-            if cfg.limit_px is None:
-                raise ValueError("order_type='limit' requires limit_px")
-            ack = await hl.place_limit(cfg.coin, self.is_long, size, cfg.limit_px)
-            if ack.status == "error":
-                raise RuntimeError(f"limit order rejected: {ack.detail}")
-            state.open_ref = str(ack.oid)
-            state.size = size
-            state.entry_price = cfg.limit_px
-            state.state = OrderStates.RESTING if ack.status == "resting" else OrderStates.DONE
-        else:
-            fill = await hl.market_open(cfg.coin, self.is_long, size, cfg.slippage_pct)
-            state.open_ref = str(fill.oid)
-            state.size = fill.size
-            state.entry_price = fill.avg_px
-            state.state = OrderStates.DONE
-
-    async def poll(self, state) -> None:
-        from condor.executors.order import OrderStates
-
-        status = await self.hl.order_status(int(state.open_ref))
-        if _order_is_open(status):
-            return
-        # Terminal: distinguish a fill from a cancel so size and labels are honest.
-        order = status.get("order") if isinstance(status, dict) else {}
-        st = ((order or {}).get("status") or "").lower()
-        if st in ("canceled", "cancelled", "rejected", "margincanceled"):
-            state.state = OrderStates.FAILED
-            state.extra["error"] = f"perp limit {st}"
-        else:
-            state.state = OrderStates.DONE
-
-    async def cancel(self, state) -> None:
-        if state.open_ref:
-            await self.hl.cancel(self.cfg.coin, int(state.open_ref))
+            # The signature landed but executed nothing economically.
+            self.update_landed_order(
+                state, state.open_ref,
+                status=OrderStatus.CANCELED,
+                filled_base=Decimal(0),
+                filled_quote=Decimal(0),
+            )
 
 
 # -- prediction (outcome markets) --------------------------------------------
@@ -661,177 +561,46 @@ class _PredAdapter(InstrumentAdapter):
         state.state = OrderStates.DONE
 
 
-class PolymarketPredAdapter(_PredAdapter):
-    """Buy the outcome token to open, sell it to close. Price is the CLOB midpoint
-    on [0, 1]; size is shares, measured from the balance delta (the real fill)."""
-
-    def __init__(self, connector, cfg):
-        super().__init__(connector, cfg)
-        self.client = connector
-
-    async def mark_price(self) -> Decimal:
-        return await self.client.midpoint(self.cfg.market)
-
-    async def enter(self):
-        cfg = self.cfg
-        before = await self.client.shares_balance(cfg.market)
-        ack = await self.client.place_market(cfg.market, "BUY", cfg.amount_quote)
-        if not ack.success and ack.order_id is None:
-            raise RuntimeError(f"polymarket buy rejected: {ack.detail}")
-        after = await self.client.shares_balance(cfg.market)
-        size = after - before
-        entry_px = (cfg.amount_quote / size) if size > 0 else Decimal("0")
-        return size, entry_px, cfg.amount_quote, ack.order_id
-
-    async def close(self, size: Decimal):
-        before = await self.client.usdc_balance()
-        ack = await self.client.place_market(self.cfg.market, "SELL", size)
-        after = await self.client.usdc_balance()
-        proceeds = after - before
-        exit_px = (proceeds / size) if size > 0 else Decimal("0")
-        return exit_px, proceeds, ack.order_id
-
-    async def held_size(self) -> Decimal:
-        return await self.client.shares_balance(self.cfg.market)
-
-    # -- order kind: resting GTC limit buy to accumulate at an attractive price -
-
-    async def place(self, state) -> None:
-        from condor.executors.order import OrderStates
-
-        cfg = self.cfg
-        if getattr(cfg, "order_type", "market") != "limit":
-            return await super().place(state)  # marketable buy (existing path)
-        if cfg.limit_px is None:
-            raise ValueError("order_pred order_type='limit' requires limit_px")
-        size = cfg.amount_quote / cfg.limit_px  # shares this budget buys at the limit
-        # Baseline the held shares so poll() can measure the real fill on the delta.
-        state.extra["shares_before"] = str(await self.client.shares_balance(cfg.market))
-        ack = await self.client.place_limit(cfg.market, "BUY", cfg.limit_px, size, "GTC")
-        if not ack.success and ack.order_id is None:
-            raise RuntimeError(f"polymarket limit rejected: {ack.detail}")
-        state.open_ref = ack.order_id
-        state.size = size
-        state.entry_price = cfg.limit_px
-        # "matched" = crossed on entry (terminal); anything else rests on the book.
-        state.state = OrderStates.DONE if ack.status == "matched" else OrderStates.RESTING
-
-    async def poll(self, state) -> None:
-        from condor.executors.order import OrderStates
-
-        cfg = self.cfg
-        open_orders = await self.client.orders(asset_id=cfg.market)
-        if _pm_order_open(open_orders, state.open_ref):
-            return  # still resting on the book
-        # Left the book: filled (fully or partially) or cancelled/expired. The
-        # held-shares delta is the truth for how much actually filled.
-        after = await self.client.shares_balance(cfg.market)
-        filled = after - _dec(state.extra.get("shares_before"))
-        if filled > 0:
-            state.size = filled
-            state.entry_price = cfg.limit_px  # bought at the limit
-            state.state = OrderStates.DONE
-        else:
-            state.state = OrderStates.FAILED
-            state.extra["error"] = "limit order left the book unfilled (cancelled/expired)"
-
-    async def cancel(self, state) -> None:
-        if state.open_ref:
-            await self.client.cancel(state.open_ref)
-
-
-class HyperliquidPredAdapter(_PredAdapter):
-    """Buy/sell HIP-4 outcome Yes/No shares (spot-like, priced [0,1]).
-    ``market`` is the outcome id or name; LONG=Yes, SHORT=No."""
-
-    def __init__(self, connector, cfg):
-        super().__init__(connector, cfg)
-        self.client = connector
-        self._outcome: Optional[int] = None
-        self._side: Optional[int] = None
-
-    async def _resolve(self) -> tuple[int, int]:
-        if self._outcome is None:
-            outcome = await self.client.find_outcome(self.cfg.market)
-            self._outcome = outcome.id
-            side_name = "Yes" if self.cfg.position == "LONG" else "No"
-            self._side = self.client.side_index(outcome, side_name)
-        return self._outcome, self._side
-
-    async def mark_price(self) -> Decimal:
-        oc, sd = await self._resolve()
-        return await self.client.price(oc, sd, "mid")
-
-    async def enter(self):
-        cfg = self.cfg
-        oc, sd = await self._resolve()
-        ask = await self.client.price(oc, sd, "ask")
-        size = Decimal(int(cfg.amount_quote / ask))  # whole shares
-        if size <= 0:
-            raise RuntimeError(f"amount {cfg.amount_quote} too small at ask {ask}")
-        before = await self.client.shares(oc, sd)
-        ack = await self.client.marketable_buy(oc, sd, size, cfg.slippage_pct)
-        if ack.status == "error":
-            raise RuntimeError(f"outcome buy rejected: {ack.detail}")
-        got = await self.client.shares(oc, sd) - before
-        entry_px = (cfg.amount_quote / got) if got > 0 else ask
-        return got, entry_px, cfg.amount_quote, ack.oid
-
-    async def close(self, size: Decimal):
-        oc, sd = await self._resolve()
-        before = await self.client.usdc_balance()
-        ack = await self.client.marketable_sell(oc, sd, size, self.cfg.slippage_pct)
-        proceeds = await self.client.usdc_balance() - before
-        exit_px = (proceeds / size) if size > 0 else await self.client.price(oc, sd, "bid")
-        return exit_px, proceeds, ack.oid
-
-    async def held_size(self) -> Decimal:
-        oc, sd = await self._resolve()
-        return await self.client.shares(oc, sd)
-
-
-# -- factory ------------------------------------------------------------------
+# -- factory (registry-dispatched, §6.2b) --------------------------------------
 
 
 def make_adapter(instrument: str, venue: str, connector: Any, cfg: Any) -> InstrumentAdapter:
-    """Build the adapter for an (instrument, venue) pair.
+    """Build the adapter for an (instrument, venue) pair by dispatching through
+    the loaded venue packages — core carries no per-venue branches. Unknown
+    venue ids error (UnknownVenueError); a venue that does not claim the
+    instrument errors too."""
+    from condor.venues.registry import venue_spec
 
-    spot -> SpotAdapter (Solana OR Hyperliquid connector); perp -> PerpAdapter;
-    pred + polymarket -> PolymarketPredAdapter; pred + hyperliquid -> HyperliquidPredAdapter.
-    """
-    if instrument == "spot":
-        return SpotAdapter(connector, cfg)
-    if instrument == "perp":
-        return PerpAdapter(connector, cfg)
-    if instrument == "pred":
-        if venue == "polymarket":
-            return PolymarketPredAdapter(connector, cfg)
-        if venue == "hyperliquid":
-            return HyperliquidPredAdapter(connector, cfg)
-        raise ValueError(f"unsupported prediction venue: {venue!r}")
-    raise ValueError(f"unknown instrument: {instrument!r}")
-
-
-def _order_is_open(status: Any) -> bool:
-    """True if an order-status response indicates a still-resting order."""
-    if not isinstance(status, dict):
-        return False
-    order = status.get("order") or {}
-    inner = order.get("order") if isinstance(order.get("order"), dict) else order
-    state = (order.get("status") or inner.get("status") or "").lower()
-    return state in ("open", "resting", "triggered")
+    venue = venue or "solana"
+    spec = venue_spec(venue)  # raises UnknownVenueError for unregistered ids
+    factory = spec.adapter_factories.get(instrument)
+    if factory is None:
+        raise ValueError(
+            f"venue {venue!r} does not support instrument {instrument!r} "
+            f"(supported: {sorted(spec.adapter_factories)})"
+        )
+    return factory(connector, cfg)
 
 
-def _pm_order_open(open_orders: Any, order_id: Optional[str]) -> bool:
-    """True if ``order_id`` is still present in Polymarket's open-orders list.
-    Tolerant of dict or object rows and the id-field naming the client returns."""
-    if not order_id:
-        return False
-    for o in (open_orders or []):
-        if isinstance(o, dict):
-            oid = o.get("id") or o.get("orderID") or o.get("order_id")
-        else:
-            oid = getattr(o, "id", None) or getattr(o, "orderID", None)
-        if oid == order_id:
-            return True
-    return False
+# -- moved per-venue adapters (compat re-exports, §6.2b) ------------------------
+
+# PerpAdapter / HyperliquidPredAdapter / _order_is_open live in
+# condor.venues.hyperliquid.adapters; PolymarketPredAdapter / _pm_order_open in
+# condor.venues.polymarket.adapters. Resolved lazily (PEP 562) so importing a
+# venue package never re-enters this module mid-initialization.
+_MOVED = {
+    "PerpAdapter": "condor.venues.hyperliquid.adapters",
+    "HyperliquidPredAdapter": "condor.venues.hyperliquid.adapters",
+    "_order_is_open": "condor.venues.hyperliquid.adapters",
+    "PolymarketPredAdapter": "condor.venues.polymarket.adapters",
+    "_pm_order_open": "condor.venues.polymarket.adapters",
+}
+
+
+def __getattr__(name: str):
+    module = _MOVED.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+
+    return getattr(importlib.import_module(module), name)

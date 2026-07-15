@@ -1,6 +1,14 @@
 # Condor Simplification Plan (v5)
 
-**Status:** approved direction, not yet implemented (except items marked DONE)
+**Status:** Phases 1–3 IMPLEMENTED (2026-07-15, this branch) — Phase 1
+(boundary + deletions), Phase 2 (AgentService, AgentSpec collapse, dormant
+account foundation), Phase 3 (executor-log durability, creation
+capabilities, idempotent creates, leases, orders[], §6.1 risk buckets,
+owned_net_base stop sizing, snapshot, account-store activation +
+onboarding + `condor account import-env`, venue packages + conformance
+suite). **Operator cutover (§12) is pending the next live restart** — the
+flat `store/venues.json` will be rejected; re-onboard first. Phases 4–6
+not yet implemented.
 **Date:** 2026-07-15
 **Inputs:** two independent full-system surveys + ~27 review rounds
 (scope, account model, ownership, lifecycle) — every finding resolved in

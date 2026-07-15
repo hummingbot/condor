@@ -91,7 +91,7 @@ def test_executor_create_list_stop_over_socket(tmp_path, monkeypatch):
     sock = _sock(tmp_path)
     log = ExecutorLog(tmp_path / "agents")
     runtime = ExecutorRuntime(store=log)
-    runtime._jupiter = FakeGateway(prices=[100.0])
+    runtime._connectors[("solana", "spot")] = FakeGateway(prices=[100.0])
 
     # Point the executor handlers at our test runtime.
     from condor.executors import service

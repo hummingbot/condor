@@ -134,10 +134,25 @@ class ExecutorConfig(BaseModel):
     def instrument_id(self) -> str:
         """Canonical instrument identity for the lease key (§6.2b).
 
-        spot → "BASE-QUOTE"; perp → the coin; pred → the market/outcome id.
-        Venue packages refine this into a full InstrumentRef (alias collapse)
-        when they land; until then this mirrors each config's identity field.
+        Resolved through the venue package's ``normalize_instrument`` when
+        the venue is registered (alias collapse: SOL/WSOL → one mint id, HL
+        coins case-folded, polymarket token_id passthrough), so lease keys
+        and attribution can never split across venue aliases. Falls back to
+        the config's raw identity field (spot → "BASE-QUOTE"; perp → the
+        coin; pred → the market/outcome id) when the venue has no spec or
+        the spec has no opinion.
         """
+        from condor.accounts.registry import UnknownVenueError
+        from condor.venues.registry import venue_spec
+
+        try:
+            spec = venue_spec(self.venue)
+        except UnknownVenueError:
+            spec = None
+        if spec is not None:
+            normalized = spec.normalize_instrument(self)
+            if normalized:
+                return str(normalized)
         base = getattr(self, "base_token", None)
         quote = getattr(self, "quote_token", None)
         if base and quote:

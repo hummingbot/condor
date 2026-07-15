@@ -1,14 +1,22 @@
-"""Account model foundation (simplification plan §6.2b) — DORMANT in Phase 2.
+"""Account model (simplification plan §6.2b) — ACTIVATED in Phase 3.
 
 The structured, custody-address-keyed account store, the minimal
-VenueRegistry, and selector→AccountRef resolution. In Phase 2 these exist as
-code + fixture tests only: the live system keeps booting and trading on the
-existing flat ``store/venues.json`` path (``condor/executors/wallets.py``).
-Phase 3 activates this store as the sole credential source, together with
-the onboarding probe and the operator cutover.
+VenueRegistry, selector→AccountRef resolution, and onboarding (custody
+derivation + read-only probe). Since Phase 3 the store is the SOLE credential
+source: the loaders in ``condor/executors/wallets.py`` resolve accounts here,
+env-var credential precedence is deleted (``condor account import-env`` is
+the explicit one-shot path), and a flat pre-v1 ``store/venues.json`` fails
+with ``PreV1FormatError`` (operator cutover, §12).
 """
 
 from condor.accounts.model import AccountRef, normalize_address
+from condor.accounts.onboarding import (
+    CustodyMismatchError,
+    OnboardingError,
+    ProbeError,
+    derive_custody,
+    onboard_account,
+)
 from condor.accounts.registry import VenueDef, VenueRegistry, default_registry
 from condor.accounts.store import (
     AccountResolutionError,
@@ -22,9 +30,14 @@ __all__ = [
     "AccountResolutionError",
     "AccountStore",
     "AccountStoreError",
+    "CustodyMismatchError",
+    "OnboardingError",
     "PreV1FormatError",
+    "ProbeError",
     "VenueDef",
     "VenueRegistry",
     "default_registry",
+    "derive_custody",
     "normalize_address",
+    "onboard_account",
 ]

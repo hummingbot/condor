@@ -175,14 +175,15 @@ def test_registry_account_ref_normalizes():
         reg.account_ref("hyperliquid-devnet", ADDR_A)
 
 
-def test_live_flat_venues_json_untouched():
-    """Phase 2 is DORMANT: nothing in the accounts package reads or writes the
-    live store/venues.json path unless explicitly constructed against it —
-    the default path is only a fallback constant."""
+def test_store_activated_as_loader_source():
+    """Phase 3 ACTIVATION: the wallets loaders resolve credentials through
+    this store (one path knob, ``wallets._VENUES_PATH``); the flat reader is
+    gone."""
     from condor.accounts import store as store_mod
 
-    # The wallets.py flat reader remains the live credential source.
     import condor.executors.wallets as wallets
 
-    assert wallets.venue_config is not None
     assert store_mod._default_store_path().name == "venues.json"
+    assert wallets.account_store()._path == wallets._VENUES_PATH
+    assert not hasattr(wallets, "save_venue")  # flat writer deleted
+    assert not hasattr(wallets, "import_env_to_store")  # replaced by the CLI

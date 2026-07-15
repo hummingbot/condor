@@ -24,6 +24,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 from condor.executors.adapters import make_adapter
+from condor.executors.orders import LandedOrder, orders_digest
 from condor.executors.base import ExecutorBase, ExecutorConfig, ExecutorStatus, RiskDeclaration
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,10 @@ class OrderState(BaseModel):
     open_ref: Optional[str] = None
     close_type: Optional[str] = None
     extra: dict = Field(default_factory=dict)
+    # The sole durable financial authority (§6.2b): every venue-acknowledged
+    # order, keyed by venue_order_id, cumulative-by-construction. The legacy
+    # scalar fields above become transitional projections of this collection.
+    orders: list[LandedOrder] = Field(default_factory=list)
 
 
 # -- executor -----------------------------------------------------------------
@@ -145,7 +150,13 @@ class OrderExecutor(ExecutorBase):
         self.adapter.bind(self.state)
 
     def _recovery_key(self) -> tuple:
-        return (self.state.state.value, self.state.open_ref)
+        # The orders[] digest is recovery-relevant (§6.2b): a newly landed
+        # venue id or a partial-fill change must never be deduplicated away.
+        return (
+            self.state.state.value,
+            self.state.open_ref,
+            orders_digest(self.state.orders),
+        )
 
     async def control_task(self) -> None:
         s = self.state

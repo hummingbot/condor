@@ -1,142 +1,136 @@
-"""Venue credential loading — Solana keypair + Hyperliquid agent key.
+"""Venue credential loading — the STRUCTURED account store, ACTIVATED (§6.2b).
 
 Condor holds the signing key for native execution. This module is the single
 place keys are loaded, so the rest of the code never touches raw secrets.
 
-Config sources, in priority order (first hit wins), per venue:
-  1. environment variables (below) — for the daemon / CI
-  2. ``store/venues.json`` (git-ignored) — the "import a wallet" MVP target,
-     written by the dashboard; a JSON object keyed by venue name
+The sealed, account-keyed ``store/venues.json`` (see ``condor.accounts``) is
+the ONLY credential source for trading:
 
-No fallbacks: if a required field is missing the loader raises a clear error.
+- **Environment variables are never read by these loaders** — the old
+  env-over-config precedence is deleted, not inverted. ``condor account
+  import-env`` (``python -m condor.cli account import-env``) is the explicit
+  one-shot path from env credentials into the store, through the same
+  onboarding validation (custody derivation + read-only probe) as the
+  dashboard.
+- Every loader takes an optional ``account`` selector (custody address or
+  display name); ``None`` resolves the venue's ``default_account``.
+- A flat pre-v1 ``venues.json`` raises ``PreV1FormatError`` with its clear
+  "unsupported pre-v1 format / re-onboard" message (operator cutover, §12).
 
-Solana env:
-  CONDOR_SOLANA_SECRET_KEY   base58 secret key (64-byte), or JSON int array
-  CONDOR_SOLANA_KEYSTORE     path to a Gateway keystore json (scrypt+aes-256-gcm)
-  CONDOR_SOLANA_PASSPHRASE   passphrase for the keystore
-  CONDOR_SOLANA_RPC          RPC url (else store/venues.json, else public)
-
-Hyperliquid env:
-  CONDOR_HL_AGENT_KEY        agent (API-wallet) private key, 0x…
-  CONDOR_HL_ACCOUNT_ADDRESS  main account address the agent trades for, 0x…
-  CONDOR_HL_NETWORK          "mainnet" | "testnet"
+Service-level API keys that are NOT account credentials (today: the Jupiter
+data-API key) live under a reserved top-level ``"_services"`` block that
+``AccountStore.validate`` skips — read via :func:`venue_config`, written
+sealed via :func:`save_service`.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 from typing import Optional
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from solders.keypair import Keypair
 
+from condor.accounts import AccountRef, AccountResolutionError, AccountStore, default_registry
+
 _VENUES_PATH = Path(__file__).resolve().parents[2] / "store" / "venues.json"
 _SCRYPT_MAXMEM = 512 * 1024 * 1024  # covers Gateway's n=131072,r=8 (~134 MB)
 
-# Secret fields per venue — sealed at rest by save_venue(), decrypted on read.
-# Non-secret fields (addresses, funder, network, rpc_url, signature_type) stay
-# plaintext so the file is still human-inspectable.
-_SECRET_FIELDS: dict[str, set[str]] = {
-    "solana": {"secret_key_b58", "keystore_passphrase"},
-    "hyperliquid": {"agent_private_key"},
-    "polymarket": {"private_key", "api_secret", "api_passphrase", "relayer_api_key"},
+# Sealed fields for service-level (non-account) config under "_services".
+# Account-credential sealing is declared by each venue package's
+# credential_fields metadata (condor.venues.spec.CredField sealed flags).
+_SERVICE_SECRET_FIELDS: dict[str, set[str]] = {
     "jupiter": {"api_key"},
 }
 
 
-def _venues_file() -> dict:
-    if _VENUES_PATH.exists():
-        return json.loads(_VENUES_PATH.read_text())
-    return {}
+def account_store() -> AccountStore:
+    """The live structured store. One knob (``_VENUES_PATH``) for tests."""
+    return AccountStore(path=_VENUES_PATH)
+
+
+def _decrypted(fields: dict) -> dict:
+    from condor.executors.secrets import decrypt_secret, is_encrypted
+
+    return {k: (decrypt_secret(v) if is_encrypted(v) else v) for k, v in fields.items()}
+
+
+def _account_fields(venue_id: str, account: Optional[str]) -> tuple[AccountRef, dict]:
+    """Resolve (venue, selector) → (AccountRef, decrypted account fields).
+
+    PreV1FormatError from AccountStore.load propagates unchanged (its message
+    already says re-onboard); an unresolvable selector gets the onboarding
+    hint appended because "I set the env var, why won't it trade" is the
+    expected post-cutover question.
+    """
+    store = account_store()
+    try:
+        ref = store.resolve(venue_id, account)
+    except AccountResolutionError as e:
+        raise AccountResolutionError(
+            f"{e} — onboard via the dashboard or `python -m condor.cli account "
+            "import-env` (env credentials alone are no longer read)"
+        ) from None
+    return ref, _decrypted(store.account_fields(ref))
+
+
+def account_credentials(venue_id: str, account: Optional[str] = None) -> dict:
+    """Decrypted account fields + resolved identity context for a venue
+    package's ``make_connector`` (§6.2b): the stored fields plus
+    ``custody_address`` (the map key), ``venue_id``, and ``network`` (derived
+    from the venue id — never a mutable account field). Venue-agnostic: any
+    registered venue resolves through the same path."""
+    ref, cfg = _account_fields(venue_id, account)
+    cfg["custody_address"] = ref.custody_address
+    cfg["venue_id"] = ref.venue_id
+    cfg["network"] = default_registry().get(ref.venue_id).network
+    return cfg
+
+
+# -- service config (non-account) ---------------------------------------------
 
 
 def venue_config(name: str) -> dict:
-    """A venue's stored config, with any sealed secret fields decrypted.
+    """Service-level config with sealed fields decrypted; ``{}`` when absent.
 
-    Env vars still override these in each ``load_*`` (env wins) — this is the
-    imported-wallet source the dashboard writes via :func:`save_venue`.
+    This is NOT account credentials — it reads the reserved ``"_services"``
+    block (e.g. ``venue_config("jupiter")`` → the data-API key used by
+    ``JupiterSwap``). Account credentials go through the ``load_*`` loaders.
     """
-    from condor.executors.secrets import decrypt_secret, is_encrypted
-
-    cfg = dict(_venues_file().get(name, {}))
-    return {k: (decrypt_secret(v) if is_encrypted(v) else v) for k, v in cfg.items()}
+    services = account_store().load().get("_services", {})
+    return _decrypted(dict(services.get(name, {})))
 
 
-def save_venue(name: str, fields: dict) -> dict:
-    """Import/update a venue's credentials in ``store/venues.json``, sealing its
-    secret fields with AES-256-GCM at rest. The single writer behind the
-    dashboard's "import a wallet" flow. Returns the stored (sealed) entry.
-
-    Merges into any existing entry; ``None`` values are skipped. Already-sealed
-    values pass through untouched (idempotent re-saves)."""
+def save_service(name: str, fields: dict) -> dict:
+    """Write service-level config under ``"_services"``, sealing its secret
+    fields. Returns the stored (sealed) entry."""
     from condor.executors.secrets import encrypt_secret, is_encrypted
 
-    if name not in _SECRET_FIELDS:
-        raise ValueError(f"unknown venue {name!r} (known: {sorted(_SECRET_FIELDS)})")
-    data = _venues_file()
-    entry = dict(data.get(name, {}))
-    secret_fields = _SECRET_FIELDS[name]
+    if name not in _SERVICE_SECRET_FIELDS:
+        raise ValueError(
+            f"unknown service {name!r} (known: {sorted(_SERVICE_SECRET_FIELDS)})"
+        )
+    store = account_store()
+    data = store.load()
+    entry = dict(data.get("_services", {}).get(name, {}))
+    secret_fields = _SERVICE_SECRET_FIELDS[name]
     for k, v in fields.items():
         if v is None:
             continue
-        entry[k] = encrypt_secret(str(v)) if (k in secret_fields and not is_encrypted(v)) else v
-    data[name] = entry
-
-    _VENUES_PATH.parent.mkdir(parents=True, exist_ok=True)
-    tmp = _VENUES_PATH.with_name(_VENUES_PATH.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2))
-    os.chmod(tmp, 0o600)
-    tmp.replace(_VENUES_PATH)
+        entry[k] = (
+            encrypt_secret(str(v))
+            if (k in secret_fields and not is_encrypted(v))
+            else v
+        )
+    data.setdefault("_services", {})[name] = entry
+    store.save(data)
     return entry
 
 
-def configured_venues() -> dict[str, list[str]]:
-    """Which venues have an imported entry and which fields they carry (names
-    only — never secret values). For the dashboard's status view."""
-    return {name: sorted(entry.keys()) for name, entry in _venues_file().items()}
-
-
-def import_env_to_store() -> dict[str, list[str]]:
-    """One-shot migration: seal any credentials currently in the environment into
-    the encrypted venues store, so they need not live in ``.env`` anymore.
-    Idempotent; returns the fields written per venue. After running, the matching
-    ``CONDOR_*`` lines can be removed from ``.env`` (env still wins when present)."""
-    env = os.environ.get
-    plan = {
-        "solana": {
-            "secret_key_b58": env("CONDOR_SOLANA_SECRET_KEY"),
-            "keystore_path": env("CONDOR_SOLANA_KEYSTORE"),
-            "keystore_passphrase": env("CONDOR_SOLANA_PASSPHRASE"),
-            "rpc_url": env("CONDOR_SOLANA_RPC"),
-        },
-        "hyperliquid": {
-            "agent_private_key": env("CONDOR_HL_AGENT_KEY"),
-            "account_address": env("CONDOR_HL_ACCOUNT_ADDRESS"),
-            "network": env("CONDOR_HL_NETWORK"),
-        },
-        "polymarket": {
-            "private_key": env("CONDOR_POLYMARKET_KEY"),
-            "funder": env("CONDOR_POLYMARKET_FUNDER"),
-            "signature_type": env("CONDOR_POLYMARKET_SIG_TYPE"),
-            "api_key": env("CONDOR_POLYMARKET_API_KEY"),
-            "api_secret": env("CONDOR_POLYMARKET_API_SECRET"),
-            "api_passphrase": env("CONDOR_POLYMARKET_API_PASSPHRASE"),
-        },
-        "jupiter": {"api_key": env("CONDOR_JUPITER_API_KEY")},
-    }
-    written: dict[str, list[str]] = {}
-    for venue, fields in plan.items():
-        present = {k: v for k, v in fields.items() if v}
-        if present:
-            entry = save_venue(venue, present)
-            written[venue] = sorted(entry.keys())
-    return written
-
-
 # -- Solana ------------------------------------------------------------------
+
 
 def decrypt_gateway_keystore(keystore: dict, passphrase: str) -> str:
     """Decrypt a Gateway wallet keystore (scrypt KDF + AES-256-GCM) to its
@@ -162,103 +156,133 @@ def keypair_from_secret(secret: str) -> Keypair:
     return Keypair.from_base58_string(secret)
 
 
-def load_solana_keypair(config: Optional[dict] = None) -> Keypair:
-    """Load the Solana signing key from env / venues.json / an explicit config."""
-    cfg = dict(config or venue_config("solana"))
-    secret = os.environ.get("CONDOR_SOLANA_SECRET_KEY") or cfg.get("secret_key_b58")
+def keypair_from_fields(fields: dict) -> Keypair:
+    """Keypair from decrypted account fields: ``secret_key_b58``, or
+    ``keystore_path`` + ``keystore_passphrase`` (Gateway keystore)."""
+    secret = fields.get("secret_key_b58")
     if secret:
         return keypair_from_secret(secret)
-
-    ks_path = os.environ.get("CONDOR_SOLANA_KEYSTORE") or cfg.get("keystore_path")
-    passphrase = os.environ.get("CONDOR_SOLANA_PASSPHRASE")
-    if passphrase is None:
-        passphrase = cfg.get("keystore_passphrase")
+    ks_path = fields.get("keystore_path")
+    passphrase = fields.get("keystore_passphrase")
     if ks_path and passphrase is not None:
         keystore = json.loads(Path(ks_path).expanduser().read_text())
         return keypair_from_secret(decrypt_gateway_keystore(keystore, passphrase))
-
     raise RuntimeError(
-        "no Solana key configured — set CONDOR_SOLANA_SECRET_KEY, or "
-        "CONDOR_SOLANA_KEYSTORE + CONDOR_SOLANA_PASSPHRASE, or add a 'solana' "
-        "entry to store/venues.json"
+        "solana account has no signing material (secret_key_b58, or "
+        "keystore_path + keystore_passphrase) — re-onboard it"
     )
 
 
-def solana_rpc_url(config: Optional[dict] = None) -> str:
+def load_solana_keypair(account: Optional[str] = None) -> Keypair:
+    """Load a Solana signing key from the structured store.
+
+    The derived pubkey must equal the account's custody address (the map
+    key) — a mismatch means the entry was hand-edited past onboarding's
+    derivation and is refused rather than trading the wrong wallet.
+    """
+    ref, cfg = _account_fields("solana", account)
+    keypair = keypair_from_fields(cfg)
+    derived = str(keypair.pubkey())
+    if derived != ref.custody_address:
+        raise RuntimeError(
+            f"solana account {ref.custody_address}: stored credentials derive "
+            f"{derived} — custody mismatch, re-onboard the account"
+        )
+    return keypair
+
+
+def solana_rpc_url(account: Optional[str] = None) -> str:
+    """The account's configured RPC url, else the public default. With no
+    selector and no configured solana account, market-data reads still get
+    the public RPC (signing loaders are what require an account)."""
     from condor.executors.solana import DEFAULT_RPC
 
-    cfg = dict(config or venue_config("solana"))
-    return os.environ.get("CONDOR_SOLANA_RPC") or cfg.get("rpc_url") or DEFAULT_RPC
+    try:
+        _, cfg = _account_fields("solana", account)
+    except AccountResolutionError:
+        if account is not None:
+            raise
+        return DEFAULT_RPC
+    return cfg.get("rpc_url") or DEFAULT_RPC
 
 
-def make_solana_connector(config: Optional[dict] = None):
-    from condor.executors.solana import SolanaConnector
+def make_solana_connector(account: Optional[str] = None):
+    from condor.executors.solana import DEFAULT_RPC, SolanaConnector
 
-    cfg = dict(config or venue_config("solana"))
-    return SolanaConnector(load_solana_keypair(cfg), rpc_url=solana_rpc_url(cfg))
+    ref, cfg = _account_fields("solana", account)
+    keypair = keypair_from_fields(cfg)
+    if str(keypair.pubkey()) != ref.custody_address:
+        raise RuntimeError(
+            f"solana account {ref.custody_address}: stored credentials derive "
+            f"{keypair.pubkey()} — custody mismatch, re-onboard the account"
+        )
+    return SolanaConnector(keypair, rpc_url=cfg.get("rpc_url") or DEFAULT_RPC)
 
 
 # -- Hyperliquid -------------------------------------------------------------
 
-def load_hyperliquid_creds(config: Optional[dict] = None) -> dict:
-    """Return {agent_private_key, account_address, network}. Raises if incomplete."""
-    cfg = dict(config or venue_config("hyperliquid"))
-    agent_key = os.environ.get("CONDOR_HL_AGENT_KEY") or cfg.get("agent_private_key")
-    account = os.environ.get("CONDOR_HL_ACCOUNT_ADDRESS") or cfg.get("account_address")
-    network = os.environ.get("CONDOR_HL_NETWORK") or cfg.get("network") or "mainnet"
-    if not agent_key or not account:
+
+def load_hyperliquid_creds(
+    account: Optional[str] = None, *, venue_id: str = "hyperliquid"
+) -> dict:
+    """Return {agent_private_key, account_address, network} from the store.
+
+    ``account_address`` is the resolved custody address (the map key);
+    ``network`` derives from ``venue_id`` (``hyperliquid-testnet`` is a
+    different venue, never a mutable account field).
+    """
+    ref, cfg = _account_fields(venue_id, account)
+    agent_key = cfg.get("agent_private_key")
+    if not agent_key:
         raise RuntimeError(
-            "no Hyperliquid creds — set CONDOR_HL_AGENT_KEY + CONDOR_HL_ACCOUNT_ADDRESS, "
-            "or add a 'hyperliquid' entry to store/venues.json"
+            f"{venue_id} account {ref.custody_address} has no "
+            "agent_private_key — re-onboard it"
         )
-    if network not in ("mainnet", "testnet"):
-        raise ValueError(f"CONDOR_HL_NETWORK must be mainnet|testnet, got {network!r}")
-    return {"agent_private_key": agent_key, "account_address": account, "network": network}
+    network = default_registry().get(ref.venue_id).network
+    return {
+        "agent_private_key": agent_key,
+        "account_address": ref.custody_address,
+        "network": network,
+    }
 
 
 # -- Polymarket --------------------------------------------------------------
 
-def load_polymarket_creds(config: Optional[dict] = None) -> dict:
-    """Return the Polymarket connector config. Requires a Polygon signing key;
-    API creds are optional (derived from the key when absent).
 
-    Env: CONDOR_POLYMARKET_KEY, _FUNDER, _SIG_TYPE (0|1|2), _HOST,
-    and optionally _API_KEY / _API_SECRET / _API_PASSPHRASE.
-    """
-    cfg = dict(config or venue_config("polymarket"))
-    key = os.environ.get("CONDOR_POLYMARKET_KEY") or cfg.get("private_key")
+def load_polymarket_creds(account: Optional[str] = None) -> dict:
+    """Return the Polymarket connector config from the store. Requires the
+    Polygon signing key; API creds are optional (derived when absent)."""
+    ref, cfg = _account_fields("polymarket", account)
+    key = cfg.get("private_key")
     if not key:
         raise RuntimeError(
-            "no Polymarket key — set CONDOR_POLYMARKET_KEY, or add a 'polymarket' "
-            "entry to store/venues.json"
+            f"polymarket account {ref.custody_address} has no private_key — "
+            "re-onboard it"
         )
-    sig_type = int(os.environ.get("CONDOR_POLYMARKET_SIG_TYPE") or cfg.get("signature_type") or 0)
     out = {
         "private_key": key,
-        "funder": os.environ.get("CONDOR_POLYMARKET_FUNDER") or cfg.get("funder"),
-        "signature_type": sig_type,
-        "host": os.environ.get("CONDOR_POLYMARKET_HOST") or cfg.get("host") or "https://clob.polymarket.com",
+        "funder": cfg.get("funder"),
+        "signature_type": int(cfg.get("signature_type") or 0),
+        "host": cfg.get("host") or "https://clob.polymarket.com",
     }
-    api_key = os.environ.get("CONDOR_POLYMARKET_API_KEY") or cfg.get("api_key")
-    if api_key:
+    if cfg.get("api_key"):
         out["creds"] = {
-            "api_key": api_key,
-            "api_secret": os.environ.get("CONDOR_POLYMARKET_API_SECRET") or cfg.get("api_secret"),
-            "api_passphrase": os.environ.get("CONDOR_POLYMARKET_API_PASSPHRASE") or cfg.get("api_passphrase"),
+            "api_key": cfg.get("api_key"),
+            "api_secret": cfg.get("api_secret"),
+            "api_passphrase": cfg.get("api_passphrase"),
         }
-    relayer_key = os.environ.get("CONDOR_POLYMARKET_RELAYER_API_KEY") or cfg.get("relayer_api_key")
-    if relayer_key:
+    if cfg.get("relayer_api_key"):
         out["relayer"] = {
-            "api_key": relayer_key,
-            "address": os.environ.get("CONDOR_POLYMARKET_RELAYER_ADDRESS") or cfg.get("relayer_address"),
+            "api_key": cfg.get("relayer_api_key"),
+            "address": cfg.get("relayer_address"),
         }
     return out
 
 
-def make_polymarket_client(config: Optional[dict] = None):
+def make_polymarket_client(account: Optional[str] = None):
     from condor.executors.polymarket import PolymarketClient
 
-    c = load_polymarket_creds(config)
+    c = load_polymarket_creds(account)
     return PolymarketClient(
         c["private_key"], funder=c.get("funder"), signature_type=c["signature_type"],
         creds=c.get("creds"), host=c["host"],

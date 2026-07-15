@@ -4,10 +4,11 @@
 — configs, specs, executor records, leases — resolves venues through it;
 only registered ids are accepted, with no legacy-spelling translation layer.
 
-Phase 3 extends registrations with adapter factories, custody derivation,
-onboarding probes, and credential-field metadata, loaded from venue packages
-under ``condor/venues/`` — this module deliberately carries only what Phase
-2's spec resolution needs (identity + normalization).
+Registrations are supplied by the venue packages under ``condor/venues/``
+(Phase 3, §6.2b): each package's ``VENUE`` spec carries adapter factories,
+custody derivation, the onboarding probe, and credential-field metadata —
+this module keeps only what spec resolution needs (identity + normalization)
+and builds ``default_registry()`` from the loaded packages.
 """
 
 from __future__ import annotations
@@ -59,13 +60,16 @@ class VenueRegistry:
 
 
 def default_registry() -> VenueRegistry:
-    """The built-in venues. Mainnet ids are unsuffixed; a suffixed id is a
-    DIFFERENT venue (deployment encoded in the id, never a mutable field)."""
+    """The registry built from the loaded venue packages (§6.2b): every
+    package under ``condor/venues/`` contributes its venue_ids — adding a
+    venue is adding one folder, no edits here. Mainnet ids are unsuffixed; a
+    suffixed id is a DIFFERENT venue (deployment encoded in the id, never a
+    mutable field)."""
+    from condor.venues.registry import load_venue_packages
+
     return VenueRegistry(
         [
-            VenueDef("hyperliquid", "mainnet", "evm"),
-            VenueDef("hyperliquid-testnet", "testnet", "evm"),
-            VenueDef("solana", "mainnet-beta", "verbatim"),
-            VenueDef("polymarket", "mainnet", "evm"),
+            VenueDef(venue_id, spec.networks[venue_id], spec.address_style)
+            for venue_id, spec in load_venue_packages().items()
         ]
     )

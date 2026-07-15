@@ -69,7 +69,7 @@ def config(**over):
 def run_executor(tmp_path, gateway, cfg):
     store = ExecutorLog(tmp_path)
     runtime = ExecutorRuntime(store=store)
-    runtime._jupiter = gateway
+    runtime._connectors[("solana", "spot")] = gateway
 
     async def run():
         eid = runtime.create_executor(cfg)
@@ -125,7 +125,7 @@ def test_detach_on_stop_keeps_tokens(tmp_path):
     gateway = FakeGateway([100.0, 100.0])
     store = ExecutorLog(tmp_path)
     runtime = ExecutorRuntime(store=store)
-    runtime._jupiter = gateway
+    runtime._connectors[("solana", "spot")] = gateway
 
     async def run():
         eid = runtime.create_executor(config(take_profit_pct=Decimal("99")))
@@ -157,7 +157,7 @@ def test_reconcile_readopts_active_position(tmp_path):
     store.save(ex)
 
     runtime = ExecutorRuntime(store=store)
-    runtime._jupiter = gateway
+    runtime._connectors[("solana", "spot")] = gateway
 
     async def run():
         resumed = await runtime.reconcile()
@@ -180,7 +180,7 @@ def test_reconcile_fails_loud_mid_opening(tmp_path):
     store.save(ex)
 
     runtime = ExecutorRuntime(store=store)
-    runtime._jupiter = gateway
+    runtime._connectors[("solana", "spot")] = gateway
     resumed = asyncio.run(runtime.reconcile())
     assert resumed == []
     rec = store.load("pos_opening")

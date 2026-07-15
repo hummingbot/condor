@@ -89,7 +89,7 @@ class CancelFailHL(FakeHL):
 def _run(tmp_path, fake, cfg):
     store = ExecutorLog(tmp_path)
     runtime = ExecutorRuntime(store=store)
-    runtime._hl_clients["perp"] = fake
+    runtime._connectors[("hyperliquid", "perp")] = fake
 
     async def go():
         eid = runtime.create_executor(cfg)
@@ -160,7 +160,7 @@ def test_order_perp_market_fills(tmp_path):
     fake = FakeHL(entry=100, marks=[100])
     store = ExecutorLog(tmp_path)
     rt = ExecutorRuntime(store=store)
-    rt._hl_clients["perp"] = fake
+    rt._connectors[("hyperliquid", "perp")] = fake
 
     async def go():
         eid = rt.create_executor(OrderPerpConfig(

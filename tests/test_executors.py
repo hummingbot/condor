@@ -55,7 +55,7 @@ class FakeGateway:
 def make_runtime(tmp_path, gateway=None):
     store = ExecutorLog(tmp_path)
     runtime = ExecutorRuntime(store=store)
-    runtime._jupiter = gateway or FakeGateway()
+    runtime._connectors[("solana", "spot")] = gateway or FakeGateway()
     return runtime
 
 
@@ -123,7 +123,7 @@ def test_swap_reconcile_orphan_submitting(tmp_path):
     store.save(ex)
 
     runtime = ExecutorRuntime(store=store)
-    runtime._jupiter = gateway
+    runtime._connectors[("solana", "spot")] = gateway
     resumed = asyncio.run(runtime.reconcile())
     assert resumed == []
     rec = store.load("order_orphan")
@@ -141,7 +141,7 @@ def test_swap_reconcile_confirms_by_signature(tmp_path):
     store.save(ex)
 
     runtime = ExecutorRuntime(store=store)
-    runtime._jupiter = gateway
+    runtime._connectors[("solana", "spot")] = gateway
 
     async def run():
         resumed = await runtime.reconcile()

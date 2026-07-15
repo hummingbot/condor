@@ -30,6 +30,7 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 from condor.executors.adapters import make_adapter
+from condor.executors.orders import LandedOrder, orders_digest
 from condor.executors.base import (
     BarrierFields,
     ExecutorBase,
@@ -143,6 +144,11 @@ class PositionState(BaseModel):
     close_ref: Optional[str] = None
     close_type: Optional[str] = None
     extra: dict = Field(default_factory=dict)
+    # The sole durable financial authority (§6.2b): every venue-acknowledged
+    # order (entry legs, exit legs, native TP/SL protection), keyed by
+    # venue_order_id. Legacy aggregates (size/amount_spent/proceeds) become
+    # transitional projections of this collection.
+    orders: list[LandedOrder] = Field(default_factory=list)
 
 
 # -- executor -----------------------------------------------------------------
@@ -168,7 +174,15 @@ class PositionExecutor(ExecutorBase):
 
     def _recovery_key(self) -> tuple:
         s = self.state
-        return (s.state.value, s.open_ref, s.close_ref, *self.adapter.recovery_ids(s))
+        # orders[] digest: identifier-only transitions and cumulative-fill
+        # changes are recovery-relevant (§6.2b) and must persist.
+        return (
+            s.state.value,
+            s.open_ref,
+            s.close_ref,
+            orders_digest(s.orders),
+            *self.adapter.recovery_ids(s),
+        )
 
     # -- control loop --------------------------------------------------------
 
@@ -313,8 +327,21 @@ class PositionExecutor(ExecutorBase):
 
     async def _close(self) -> None:
         s = self.state
+        # on_close cancels owned protection triggers FIRST (they reach
+        # CANCELED/CANCEL_PENDING in orders[]); only then is the close sized.
         await self.adapter.on_close(s)
-        exit_px, proceeds, ref = await self.adapter.close(s.size)
+        close_size = self._close_size()
+        if close_size <= 0:
+            # Nothing owned remains (fully exited by triggers/partials) —
+            # settle without placing a close order.
+            logger.info(
+                "position %s: owned_net_base is 0 after cancellations — "
+                "nothing to close", self.id,
+            )
+            await self.adapter.settle(s)
+            s.state = PositionStates.COMPLETE
+            return
+        exit_px, proceeds, ref = await self.adapter.close(close_size)
         s.exit_price = exit_px
         s.proceeds = proceeds
         s.close_ref = str(ref) if ref is not None else None
@@ -324,6 +351,31 @@ class PositionExecutor(ExecutorBase):
                     self.id, s.close_type, exit_px, proceeds, s.close_ref)
         await self.notify_trade(self.adapter.close_note(s, pnl))
         s.state = PositionStates.COMPLETE
+
+    def _close_size(self) -> Decimal:
+        """Close sizing (§6.2): the scope's REMAINING SIGNED inventory folded
+        from orders[] — never raw gross entry fills, which over-close after a
+        partial exit, a cancel/fill race, base-asset fees, or offsetting
+        two-sided fills. Falls back to the legacy scalar while orders[] is
+        empty (pre-§6.2b records); divergence is logged, the fold wins."""
+        from condor.executors.orders import owned_net_base
+
+        s = self.state
+        if not s.orders:
+            return s.size
+        net = owned_net_base(
+            s.orders,
+            product=self.config.instrument or "spot",
+            base_asset=str(getattr(self.config, "base_token", "") or ""),
+        )
+        size = abs(net)
+        if s.size and abs(size - s.size) > abs(s.size) * Decimal("0.001"):
+            logger.warning(
+                "position %s: close sizing from orders[] fold %s diverges from "
+                "legacy scalar %s — using the fold (§6.2)",
+                self.id, size, s.size,
+            )
+        return size
 
     # -- stop / reporting ----------------------------------------------------
 
