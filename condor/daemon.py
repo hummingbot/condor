@@ -34,8 +34,15 @@ async def main() -> None:
     # Control socket FIRST (reads/stops available immediately), then reconcile
     # persisted executors against Gateway in the background — executor CREATE
     # is 503-gated until reconcile finishes (mirrors the web-app lifespan).
-    control = ControlServer(build_all_handlers())
+    from condor.executors.capabilities import get_capability_registry
+
+    registry = get_capability_registry()
+    control = ControlServer(
+        build_all_handlers(),
+        on_conn_close=registry.revoke_connection,
+    )
     await control.start()
+    registry.write_direct_token()  # §6.2 direct bootstrap, rotated per restart
     service_task = asyncio.create_task(start_executor_service())
 
     stop = asyncio.Event()

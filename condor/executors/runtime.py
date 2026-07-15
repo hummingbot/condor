@@ -57,7 +57,10 @@ WATCHDOG_INTERVAL = 30.0
 
 class ExecutorRuntime:
     def __init__(self, store: Optional[ExecutorLog] = None):
+        from condor.executors.leases import LeaseManager
+
         self.store = store or ExecutorLog()
+        self.leases = LeaseManager()
         self._executors: dict[str, ExecutorBase] = {}
         self._tasks: dict[str, asyncio.Task] = {}
         self._watchdog_task: Optional[asyncio.Task] = None
@@ -127,14 +130,21 @@ class ExecutorRuntime:
 
     # -- create / stop -------------------------------------------------------
 
-    def create_executor(self, config: ExecutorConfig) -> str:
-        """Create, persist, and start an executor. Returns its id."""
+    def create_executor(
+        self, config: ExecutorConfig, executor_id: Optional[str] = None
+    ) -> str:
+        """Create, persist, and start an executor. Returns its id.
+
+        ``executor_id``: the client-generated create identity (§6.2) — when
+        given, it IS the id (ops.create has already checked replay/rebind);
+        otherwise one is generated.
+        """
         validate_risk_declaration(config.risk_declaration())
         type_ = config.type
         if type_ not in _EXECUTOR_TYPES:
             raise ValueError(f"unknown executor type: {config.type}")
         _, executor_cls = _EXECUTOR_TYPES[type_]
-        executor_id = new_executor_id(type_)
+        executor_id = executor_id or new_executor_id(type_)
         executor = executor_cls(executor_id, config, self.connector_for(config), self.store)
         executor.persist()
         self._start_task(executor)
@@ -177,7 +187,83 @@ class ExecutorRuntime:
 
     def _start_task(self, executor: ExecutorBase) -> None:
         self._executors[executor.id] = executor
-        self._tasks[executor.id] = asyncio.create_task(executor.run(), name=f"executor-{executor.id}")
+        task = asyncio.create_task(executor.run(), name=f"executor-{executor.id}")
+        task.add_done_callback(lambda _t, eid=executor.id: self._maybe_release_lease(eid))
+        self._tasks[executor.id] = task
+
+    def _maybe_release_lease(self, executor_id: str) -> None:
+        """Release the instrument lease once the executor is terminal AND no
+        owned order is still live (§6.2: the lease is held until every
+        cancellation reaches a confirmed terminal state)."""
+        try:
+            from condor.executors.orders import live_orders
+
+            record = self.store.load(executor_id)
+            if record is None:
+                return
+            if record.status not in ("CLOSED", "FAILED"):
+                return  # cancelled task but nonterminal (process shutdown) — keep
+            raw_orders = (record.state or {}).get("orders") or []
+            from condor.executors.orders import LandedOrder
+
+            landed = [LandedOrder(**o) for o in raw_orders]
+            if live_orders(landed):
+                logger.warning(
+                    "executor %s terminal but %d order(s) still live — lease held "
+                    "(reconcile will retry cancels)",
+                    executor_id,
+                    len(live_orders(landed)),
+                )
+                return
+            self._release_lease_for_record(record)
+        except Exception:
+            logger.exception("lease release check failed for %s", executor_id)
+
+    def _release_lease_for_record(self, record) -> None:
+        from condor.executors import ops
+
+        cfg = record.config or {}
+        try:
+            account_ref = ops._transitional_account_ref(cfg.get("venue", ""))
+            instrument = self._instrument_id_from_config(cfg)
+            self.leases.release(account_ref, instrument, executor_id=record.id)
+        except Exception:
+            logger.exception("lease release failed for %s", record.id)
+
+    @staticmethod
+    def _instrument_id_from_config(cfg: dict) -> str:
+        base, quote = cfg.get("base_token"), cfg.get("quote_token")
+        if base and quote:
+            return f"{base}-{quote}"
+        if cfg.get("coin"):
+            return str(cfg["coin"])
+        if cfg.get("market"):
+            return str(cfg["market"])
+        return cfg.get("type", "")
+
+    def rebuild_leases(self) -> int:
+        """Rebuild the lease table from nonterminal executor records at
+        startup (§12 ordering: before readiness opens). Returns count."""
+        from condor.executors import ops
+
+        count = 0
+        self.leases.clear()
+        for record in self.store.load_non_terminal():
+            cfg = record.config or {}
+            owner = record.agent_id or (
+                "condor" if cfg.get("origin") == "condor" else record.agent_slug or "condor"
+            )
+            try:
+                self.leases.acquire(
+                    ops._transitional_account_ref(cfg.get("venue", "")),
+                    self._instrument_id_from_config(cfg),
+                    owner=owner,
+                    executor_id=record.id,
+                )
+                count += 1
+            except Exception:
+                logger.exception("lease rebuild failed for %s", record.id)
+        return count
 
     # -- reconciliation ---------------------------------------------------------
 

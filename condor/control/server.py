@@ -13,8 +13,9 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 from condor.control import CONTROL_SOCKET_PATH
 
@@ -24,12 +25,19 @@ Handler = Callable[..., object]
 
 
 class ControlServer:
+    # Methods that receive the server-assigned connection id as a parameter —
+    # the condor-direct registration binds a capability's lifetime to its
+    # persistent connection (§6.2).
+    CONNECTION_SCOPED = {"direct.register"}
+
     def __init__(
         self,
         handlers: dict[str, Handler],
         socket_path: str | None = None,
+        on_conn_close: Optional[Callable[[str], None]] = None,
     ):
         self._handlers = handlers
+        self._on_conn_close = on_conn_close
         # Resolve at construction (not import) so tests/deployments that set
         # CONDOR_CONTROL_SOCKET after import still get their own socket —
         # a test app must never contend for the live process's socket.
@@ -90,19 +98,34 @@ class ControlServer:
     async def _handle_conn(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
     ) -> None:
+        """Serve requests on one connection until it closes.
+
+        One-shot clients (send a line, read a line, close) behave exactly as
+        before; a PERSISTENT connection may keep sending requests — that is
+        what binds a condor-direct capability's lifetime (§6.2): the moment
+        the connection drops (including SIGKILL of the wrapper), the on-close
+        hook revokes anything registered on it.
+        """
+        conn_id = uuid.uuid4().hex
         try:
-            line = await reader.readline()
-            if not line:
-                return
-            resp = await self._dispatch(line)
-            writer.write((json.dumps(resp) + "\n").encode())
-            await writer.drain()
+            while True:
+                line = await reader.readline()
+                if not line:
+                    break
+                resp = await self._dispatch(line, conn_id)
+                writer.write((json.dumps(resp) + "\n").encode())
+                await writer.drain()
         except Exception:
             logger.exception("control server: connection error")
         finally:
+            if self._on_conn_close is not None:
+                try:
+                    self._on_conn_close(conn_id)
+                except Exception:
+                    logger.exception("control server: on_conn_close hook failed")
             writer.close()
 
-    async def _dispatch(self, line: bytes) -> dict:
+    async def _dispatch(self, line: bytes, conn_id: str = "") -> dict:
         try:
             req = json.loads(line)
         except json.JSONDecodeError as e:
@@ -114,6 +137,8 @@ class ControlServer:
         if handler is None:
             return {"id": rid, "error": {"status": 404, "message": f"unknown method: {method}"}}
         try:
+            if method in self.CONNECTION_SCOPED:
+                params = {**params, "_connection_id": conn_id}
             result = handler(**params)
             if asyncio.iscoroutine(result):
                 result = await result

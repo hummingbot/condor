@@ -101,6 +101,9 @@ def test_executor_create_list_stop_over_socket(tmp_path, monkeypatch):
     async def run():
         server = await _serve(build_executor_handlers(), sock)
         try:
+            from condor.executors.capabilities import get_capability_registry
+
+            cap = get_capability_registry().mint_run_capability("mm", "mm_1")
             cfg = swap_config(agent_slug="mm", agent_id="mm_1")
             created = await call_control(
                 "executor.create",
@@ -114,8 +117,7 @@ def test_executor_create_list_stop_over_socket(tmp_path, monkeypatch):
                         "amount": str(cfg.amount),
                         "side": cfg.side,
                     },
-                    "agent_slug": "mm",
-                    "agent_id": "mm_1",
+                    "capability": cap.id,
                 },
                 socket_path=sock,
             )

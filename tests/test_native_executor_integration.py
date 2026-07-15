@@ -295,6 +295,26 @@ class _QuoteOnlyGateway:
         return {"price": 100.0}
 
 
+def _make_runtime(tmp_path, monkeypatch):
+    from condor.executors.leases import LeaseManager
+
+    store = ExecutorLog(tmp_path)
+    gateway = _QuoteOnlyGateway()
+
+    def fake_create(config, executor_id=None):
+        return executor_id or "fake_id_1"
+
+    return SimpleNamespace(
+        store=store,
+        gateway=gateway,
+        leases=LeaseManager(),
+        connector_for_spec=lambda type_, venue: gateway,
+        create_executor=fake_create,
+        list_running=lambda: [],
+        stop_executor=lambda eid, keep_position=True: None,
+    )
+
+
 def _make_client(tmp_path, monkeypatch) -> TestClient:
     store = ExecutorLog(tmp_path)
     created = {}
@@ -320,25 +340,42 @@ def _make_client(tmp_path, monkeypatch) -> TestClient:
     return TestClient(app)
 
 
-def test_rest_create_swap_fills_notional_from_quote(tmp_path, monkeypatch):
-    client = _make_client(tmp_path, monkeypatch)
-    resp = client.post("/executors", json={
-        "type": "order_spot",
-        "config": {
+def test_ops_create_swap_fills_notional_from_quote(tmp_path, monkeypatch):
+    """ops.create (the only create path — the dashboard raw-create route is
+    reserved, §6.4) fills the declared notional from a live quote."""
+    import asyncio
+
+    from condor.executors import ops, service
+    from condor.executors.capabilities import get_capability_registry
+
+    runtime = _make_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "_runtime", runtime, raising=False)
+    cap = get_capability_registry().mint_run_capability("mm", "mm_1")
+
+    result = asyncio.run(ops.create(
+        runtime,
+        type="order_spot",
+        config={
             "chain_network": "solana-mainnet-beta", "wallet_address": WALLET,
             "base_token": "SOL", "quote_token": "USDC",
             "amount": "0.5", "side": "SELL",
         },
-    })
-    assert resp.status_code == 200, resp.text
+        capability=cap.id,
+    ))
     # 0.5 SOL @ quoted 100 -> 50 quote notional
-    assert resp.json()["risk_declaration"]["max_notional_quote"] == pytest.approx(50.0)
+    assert result["risk_declaration"]["max_notional_quote"] == pytest.approx(50.0)
 
 
-def test_rest_create_unknown_type_422(tmp_path, monkeypatch):
-    client = _make_client(tmp_path, monkeypatch)
-    resp = client.post("/executors", json={"type": "nope", "config": {}})
-    assert resp.status_code == 422
+def test_ops_create_unknown_type_422(tmp_path, monkeypatch):
+    import asyncio
+
+    from condor.executors import ops, service
+
+    runtime = _make_runtime(tmp_path, monkeypatch)
+    monkeypatch.setattr(service, "_runtime", runtime, raising=False)
+    with pytest.raises(ops.ExecutorOpError) as ei:
+        asyncio.run(ops.create(runtime, type="nope", config={}, capability="x"))
+    assert ei.value.status == 422
 
 
 def test_rest_stop_unknown_404(tmp_path, monkeypatch):

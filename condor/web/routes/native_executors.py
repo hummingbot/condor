@@ -73,19 +73,10 @@ async def get_executor(executor_id: str, user: WebUser = Depends(get_current_use
         raise _http(e)
 
 
-@router.post("/executors")
-async def create_executor(
-    req: CreateExecutorRequest, user: WebUser = Depends(get_current_user)
-):
-    try:
-        return await ops.create(
-            get_executor_runtime(),
-            type=req.type, config=req.config,
-            agent_slug=req.agent_slug, agent_id=req.agent_id, strategy=req.strategy,
-            user_id=req.user_id, chat_id=req.chat_id,
-        )
-    except ops.ExecutorOpError as e:
-        raise _http(e)
+# Dashboard raw create is deliberately NOT exposed (§6.4): the route is
+# reserved for the later direct-creation UI. Browser-side creation happens
+# only through agent runs; direct creation ships via MCP (condor-direct
+# capability). List/performance/get/stop remain the browser transport.
 
 
 @router.post("/executors/{executor_id}/stop")

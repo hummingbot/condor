@@ -12,10 +12,19 @@ from condor.control.server import Handler
 
 def build_executor_handlers() -> dict[str, Handler]:
     from condor.executors import ops
+    from condor.executors.capabilities import get_capability_registry
     from condor.executors.service import get_executor_runtime
 
     def _rt():
         return get_executor_runtime()
+
+    def _direct_register(token: str, _connection_id: str = "", session_capability: str = ""):
+        """Exchange the 0600 direct token for a condor-direct capability bound
+        to THIS persistent connection (§6.2 bootstrap)."""
+        cap = get_capability_registry().register_direct(
+            token, _connection_id, session_capability=session_capability
+        )
+        return {"capability": cap.id}
 
     return {
         "ping": lambda: {"ok": True},
@@ -24,6 +33,7 @@ def build_executor_handlers() -> dict[str, Handler]:
         "executor.get": lambda executor_id: ops.get(_rt(), executor_id),
         "executor.list": lambda **kw: ops.list_(_rt(), **kw),
         "executor.performance": lambda **kw: ops.performance(_rt(), **kw),
+        "direct.register": _direct_register,
     }
 
 

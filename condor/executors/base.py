@@ -92,6 +92,14 @@ class ExecutorConfig(BaseModel):
     agent_slug: str = ""
     agent_id: str = ""
     strategy: str = ""
+    # Creation context (§6.2): "agent" (run capability) or "condor" (direct).
+    # Derived by ops.create from the server-side capability entry — NEVER from
+    # caller-supplied fields. Empty only on legacy records.
+    origin: str = ""
+    # Canonical create-request hash (§6.2): the executor_id is bound to this
+    # at create; a replay with the same id + same hash returns the original
+    # result, a different hash is rejected.
+    request_hash: str = ""
     # Notification routing for trade events (open/close). 0 = outbox-only
     # (no Telegram mirror), e.g. CLI-created executors.
     user_id: int = 0
@@ -122,6 +130,25 @@ class ExecutorConfig(BaseModel):
     def network(self) -> str:
         """Network portion of chain_network ("solana-mainnet-beta" -> "mainnet-beta")."""
         return self.chain_network.split("-", 1)[1]
+
+    def instrument_id(self) -> str:
+        """Canonical instrument identity for the lease key (§6.2b).
+
+        spot → "BASE-QUOTE"; perp → the coin; pred → the market/outcome id.
+        Venue packages refine this into a full InstrumentRef (alias collapse)
+        when they land; until then this mirrors each config's identity field.
+        """
+        base = getattr(self, "base_token", None)
+        quote = getattr(self, "quote_token", None)
+        if base and quote:
+            return f"{base}-{quote}"
+        coin = getattr(self, "coin", None)
+        if coin:
+            return str(coin)
+        market = getattr(self, "market", None)
+        if market:
+            return str(market)
+        return self.type  # last resort — still lease-scoped per venue
 
 
 class BarrierFields(BaseModel):

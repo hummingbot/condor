@@ -23,6 +23,8 @@ locking beyond an in-process lock and no atomic full-file rewrite.
 from __future__ import annotations
 
 import json
+import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -37,6 +39,8 @@ if TYPE_CHECKING:
 _MANUAL_SLUG = "_manual"
 _TERMINAL = {"CLOSED", "FAILED"}
 _LOG_NAME = "executors.jsonl"
+
+log = logging.getLogger(__name__)
 
 
 class ExecutorLog:
@@ -67,12 +71,58 @@ class ExecutorLog:
     # -- write (append-only) -------------------------------------------------
 
     def _append(self, slug: str, obj: dict) -> None:
+        """Serialized durable append (§3 durability contract).
+
+        ``ExecutorBase.persist()`` dedups to transitions, so every append IS a
+        recovery-relevant transition — each one is fsynced. Directories are
+        0700 and files 0600 (same posture as the sealed store and control
+        socket). Before appending, a torn tail left by a crash mid-write is
+        truncated so the file always ends on a complete line.
+        """
         path = self._path_for_slug(slug)
         line = json.dumps(obj)
         with self._lock:
             path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.chmod(path.parent, 0o700)
+            except OSError:
+                pass
+            self._truncate_torn_tail(path)
             with path.open("a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            try:
+                os.chmod(path, 0o600)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _truncate_torn_tail(path: Path) -> None:
+        """Drop a partial final line (crash mid-append) before the next write.
+
+        The fold already ignores it on read; truncating here keeps the file
+        itself always well-formed once a new writer takes over.
+        """
+        if not path.exists():
+            return
+        size = path.stat().st_size
+        if size == 0:
+            return
+        with path.open("rb+") as fh:
+            fh.seek(-1, os.SEEK_END)
+            if fh.read(1) == b"\n":
+                return
+            # Scan back to the last complete line boundary.
+            fh.seek(0)
+            data = fh.read()
+            cut = data.rfind(b"\n")
+            keep = cut + 1 if cut >= 0 else 0
+            fh.truncate(keep)
+        log.warning(
+            "executor log %s: truncated torn tail (%d -> %d bytes)",
+            path, size, keep,
+        )
 
     def save(self, executor: "ExecutorBase") -> None:
         """Append a lifecycle event snapshotting this executor's current state.
@@ -186,14 +236,29 @@ class ExecutorLog:
 
     @staticmethod
     def _read(path: Path) -> list[dict]:
+        """Read + parse events, tolerating a torn FINAL line (§3).
+
+        A partial final line (crash mid-append) is ignored; a corrupt line
+        anywhere else is a real store corruption and still raises.
+        """
         if not path.exists():
             return []
         events: list[dict] = []
         with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if line:
-                    events.append(json.loads(line))
+            lines = fh.readlines()
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                events.append(json.loads(stripped))
+            except json.JSONDecodeError:
+                if i == len(lines) - 1:
+                    log.warning(
+                        "executor log %s: ignoring torn final line", path
+                    )
+                    continue
+                raise
         return events
 
     @staticmethod

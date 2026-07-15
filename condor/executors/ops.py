@@ -48,19 +48,71 @@ def record_to_dict(record) -> dict:
     }
 
 
+def _request_hash(type: str, config: dict) -> str:
+    """Canonical create-request hash (§6.2): the trade intent, excluding
+    attribution/routing fields (those come from the capability, not the
+    caller) — same canonicalization rules as the spec hashes (§5.3)."""
+    from condor.agents.spec import canonical_json
+
+    intent = {
+        k: v
+        for k, v in config.items()
+        if k
+        not in (
+            "agent_slug",
+            "agent_id",
+            "strategy",
+            "origin",
+            "request_hash",
+            "user_id",
+            "chat_id",
+            "notify_trades",
+        )
+    }
+    intent["type"] = type
+    import hashlib
+
+    return hashlib.sha256(canonical_json(intent).encode("utf-8")).hexdigest()[:32]
+
+
+def _transitional_account_ref(venue: str):
+    """AccountRef for the lease key. Until the strict account store is the
+    live credential source, the process trades exactly one account per venue
+    (the flat venues.json / env creds), so a fixed custody placeholder is
+    faithful: one lease space per venue. Account activation replaces this
+    with the executor's resolved custody address."""
+    from condor.accounts.model import AccountRef
+
+    return AccountRef(venue_id=venue or "solana", custody_address="_default")
+
+
 async def create(
     runtime: ExecutorRuntime,
     *,
     type: str,
     config: dict,
-    agent_slug: str = "",
-    agent_id: str = "",
-    strategy: str = "",
+    capability: str = "",
+    executor_id: str = "",
     user_id: int = 0,
     chat_id: int = 0,
 ) -> dict:
+    """Create an executor. Authority comes from ``capability`` — an opaque id
+    minted by the platform (agent run() or condor-direct registration §6.2).
+    Caller-supplied attribution fields are never trusted; absence of a
+    capability is a rejection, not a fallback.
+
+    ``executor_id`` (client-generated) is the create identity: replaying the
+    same id with the same canonical request hash returns the original result;
+    the same id with a DIFFERENT hash is rejected — an id can never be
+    silently rebound to a different trade.
+    """
     from pydantic import ValidationError
 
+    from condor.executors.capabilities import (
+        CapabilityError,
+        get_capability_registry,
+    )
+    from condor.executors.leases import LeaseConflict
     from condor.executors.service import runtime_reconciling
 
     if runtime_reconciling():
@@ -74,11 +126,39 @@ async def create(
         )
     config_cls, _ = _EXECUTOR_TYPES[type]
 
+    # -- creation authority: the server-side capability entry, nothing else --
+    try:
+        cap = get_capability_registry().resolve(capability)
+    except CapabilityError as e:
+        raise ExecutorOpError(403, str(e))
+
+    request_hash = _request_hash(type, config)
+
+    # -- idempotent replay (§6.2) --
+    if executor_id:
+        existing = runtime.store.load(executor_id)
+        if existing is not None:
+            stored_hash = (existing.config or {}).get("request_hash", "")
+            if stored_hash and stored_hash == request_hash:
+                return {
+                    "id": existing.id,
+                    "status": existing.status,
+                    "replayed": True,
+                }
+            raise ExecutorOpError(
+                409,
+                f"executor_id '{executor_id}' is already bound to a different "
+                "create request (same id may never be rebound to a different "
+                "trade) — use a fresh executor_id",
+            )
+
     config_data = dict(config)
     config_data["type"] = type
-    config_data["agent_slug"] = agent_slug
-    config_data["agent_id"] = agent_id
-    config_data["strategy"] = strategy
+    config_data["origin"] = cap.origin
+    config_data["request_hash"] = request_hash
+    config_data["agent_slug"] = cap.agent_slug
+    config_data["agent_id"] = cap.run_id
+    config_data["strategy"] = ""
     config_data["user_id"] = user_id
     config_data["chat_id"] = chat_id
 
@@ -113,13 +193,42 @@ async def create(
 
     # Risk caps are a PLATFORM invariant enforced here — the only create path —
     # not just an LLM permission check (risk_gate remains the early UX check).
-    # The lock makes check-then-create atomic across concurrent creates.
+    # The lock makes check-then-lease-then-create atomic across concurrent
+    # creates. Condor-direct creates are deliberately NOT risk-capped (§6.2 —
+    # the human is the risk authority for their own trades); venue safety
+    # (the lease) applies to every origin.
+    account_ref = _transitional_account_ref(config_data.get("venue", ""))
+    instrument = cfg.instrument_id()
+    actor = cap.run_id if cap.origin == "agent" else "condor"
     async with _create_lock:
-        _enforce_agent_caps(runtime, agent_slug, declaration)
-        executor_id = runtime.create_executor(cfg)
+        if cap.origin == "agent":
+            _enforce_agent_caps(runtime, cap.agent_slug, declaration)
+        try:
+            runtime.leases.acquire(
+                account_ref,
+                instrument,
+                owner=actor,
+                executor_id=executor_id or "pending",
+            )
+        except LeaseConflict as e:
+            raise ExecutorOpError(409, str(e))
+        try:
+            created_id = runtime.create_executor(cfg, executor_id=executor_id or None)
+        except Exception:
+            runtime.leases.release(
+                account_ref, instrument, executor_id=executor_id or "pending"
+            )
+            raise
+        if not executor_id:
+            # Re-key the lease holder from the placeholder to the real id.
+            runtime.leases.release(account_ref, instrument, executor_id="pending")
+            runtime.leases.acquire(
+                account_ref, instrument, owner=actor, executor_id=created_id
+            )
     return {
-        "id": executor_id,
+        "id": created_id,
         "status": "PENDING",
+        "origin": cap.origin,
         "risk_declaration": {
             "max_notional_quote": float(declaration.max_notional_quote),
             "max_loss_quote": float(declaration.max_loss_quote),

@@ -66,12 +66,19 @@ async def start_executor_service() -> None:
     _reconciling = True
     try:
         runtime = get_executor_runtime()
+        # §12 ordering: rebuild leases from durable records BEFORE venue
+        # reconciliation (a create racing startup must see them), then refresh
+        # after reconcile settles records so leases of settled executors drop.
+        held = runtime.rebuild_leases()
+        if held:
+            logger.info("executor service: rebuilt %d lease holder(s)", held)
         try:
             resumed = await runtime.reconcile()
             if resumed:
                 logger.info("executor service: resumed %s", resumed)
         except Exception:
             logger.exception("executor service: reconcile failed at startup")
+        runtime.rebuild_leases()
         runtime.start_watchdog()
         logger.info("executor service: ready")
     finally:

@@ -120,6 +120,18 @@ async def run_agent(
     result = RunResult()
     started = time.time()
 
+    # Mint the run capability (§6.2): the opaque execution authority injected
+    # into the tool session. Only runs with an identity (tick/delegation/
+    # consult ids) get one — plain chat sessions register condor-direct in
+    # the MCP wrapper instead. Revoked in the finally below (run end).
+    run_capability = None
+    if agent_id:
+        from condor.executors.capabilities import get_capability_registry
+
+        run_capability = get_capability_registry().mint_run_capability(
+            agent.slug, agent_id
+        )
+
     # -- model resolution (+ optional healthcheck/fallback) --
     model_key = model or agent.agent_key
     if is_pydantic_ai_model(model_key):
@@ -158,6 +170,7 @@ async def run_agent(
             agent_slug=agent.slug,
             execution_mode=execution_mode,
             agent_id=agent_id,
+            capability=run_capability.id if run_capability else None,
         )
     else:
         mcp_servers = build_mcp_servers_for_session(
@@ -166,6 +179,7 @@ async def run_agent(
             execution_mode=execution_mode,
             agent_slug=agent.slug,
             agent_id=agent_id,
+            capability=run_capability.id if run_capability else None,
             # Serverless agents run condor-only: wiring mcp-hummingbot too
             # exposes a second manage_executors with an incompatible schema.
             include_hummingbot=agent.server_required,
@@ -250,6 +264,11 @@ async def run_agent(
         finally:
             if on_client is not None:
                 on_client(None)
+            # Run ended → its execution capability dies with it (§6.2).
+            if run_capability is not None:
+                from condor.executors.capabilities import get_capability_registry
+
+                get_capability_registry().revoke_run(agent_id)
 
     result.text = "".join(chunks)
     result.duration = time.time() - started

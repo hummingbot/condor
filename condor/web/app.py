@@ -67,8 +67,18 @@ async def _lifespan(app: FastAPI):
     # surface. Reconciliation then runs in the background — reads and stops work
     # immediately; executor CREATE is 503-gated until runtime_ready() (a slow
     # venue once held the socket down ~20 min when this was sequential).
-    control = ControlServer(build_all_handlers())
+    from condor.executors.capabilities import get_capability_registry
+
+    registry = get_capability_registry()
+    control = ControlServer(
+        build_all_handlers(),
+        on_conn_close=registry.revoke_connection,
+    )
     await control.start()
+    # Direct-token bootstrap (§6.2): rotated every restart; a harness-spawned
+    # MCP wrapper exchanges it over a persistent connection for a
+    # condor-direct capability that dies with that connection.
+    registry.write_direct_token()
     service_task = asyncio.create_task(start_executor_service())
     try:
         yield
