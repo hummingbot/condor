@@ -48,7 +48,6 @@ def list_instances() -> list[dict]:
 
 async def start_session(
     agent_slug: str,
-    strategy: Optional[str] = None,
     config: Optional[dict] = None,
     trading_context: str = "",
     chat_id: int = 0,
@@ -57,7 +56,7 @@ async def start_session(
     from condor.agents.agent import AgentStore
     from condor.agents.config import merge_launch_config, normalize_config
     from condor.agents.engine import TickEngine
-    from condor.agents.strategy import StrategyStore
+    from condor.agents.spec import SpecValidationError, merge_risk_stricter
     from condor.executors.service import runtime_reconciling
 
     if runtime_reconciling():
@@ -70,54 +69,43 @@ async def start_session(
     if agent is None:
         raise LifecycleError(404, f"Agent '{agent_slug}' not found")
 
-    strategies = StrategyStore().list(agent_slug)
-    if strategy:
-        selected = next((s for s in strategies if s.slug == strategy), None)
-        if selected is None:
-            raise LifecycleError(
-                404,
-                f"Strategy '{strategy}' not found under agent '{agent_slug}'. "
-                f"Available: {[s.slug for s in strategies] or 'none'}",
-            )
-    elif len(strategies) == 1:
-        selected = strategies[0]
-    elif not strategies:
-        raise LifecycleError(400, f"Agent '{agent_slug}' has no strategies — create one first.")
-    else:
-        raise LifecycleError(
-            400,
-            f"Agent '{agent_slug}' has several strategies — pass strategy=<slug>. "
-            f"Available: {[s.slug for s in strategies]}",
-        )
-
-    # Risk resolution: request config > strategy default_config > agent baseline.
-    # Seed the baseline BEFORE normalize_config fills schema defaults.
-    defaults = dict(selected.default_config or {})
+    # The AGENT.md is the one spec (§5.3): launch defaults come from its
+    # default_config, with the agent risk baseline seeded BEFORE
+    # normalize_config fills schema defaults.
+    defaults = dict(agent.default_config or {})
     if not defaults.get("risk_limits") and agent.risk_limits:
         defaults["risk_limits"] = dict(agent.risk_limits)
     config_dict = normalize_config(defaults)
     if config:
-        # Deep-merge + validate: a partial risk_limits override must merge into
-        # the seeded baseline (a shallow update replaced it, silently restoring
-        # 500/5 schema defaults), and the final object must validate.
+        # Launch risk overrides are STRICTER-ONLY (§5.3): widening any
+        # baseline cap is rejected before the deep merge + validation.
         try:
+            if config.get("risk_limits"):
+                config = dict(config)
+                config["risk_limits"] = merge_risk_stricter(
+                    config_dict.get("risk_limits", {}), config["risk_limits"]
+                )
             config_dict = merge_launch_config(config_dict, config)
+        except SpecValidationError as e:
+            raise LifecycleError(422, str(e))
         except Exception as e:
             raise LifecycleError(422, f"invalid launch config: {e}")
     if trading_context:
         config_dict["trading_context"] = trading_context
-    elif not config_dict.get("trading_context") and selected.default_trading_context:
-        config_dict["trading_context"] = selected.default_trading_context
+    elif not config_dict.get("trading_context") and agent.default_trading_context:
+        config_dict["trading_context"] = agent.default_trading_context
 
-    engine = TickEngine(
-        agent=agent, strategy=selected, config=config_dict, chat_id=chat_id, user_id=user_id
-    )
+    try:
+        engine = TickEngine(
+            agent=agent, config=config_dict, chat_id=chat_id, user_id=user_id
+        )
+    except SpecValidationError as e:
+        raise LifecycleError(422, str(e))
     await engine.start()
     return {
         "started": True,
         "agent_id": engine.agent_id,
         "session_num": engine.session_num,
-        "strategy": selected.slug,
     }
 
 

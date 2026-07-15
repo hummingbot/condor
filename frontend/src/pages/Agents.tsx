@@ -204,7 +204,7 @@ function CreateAgentDialog({
               className="w-full resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
             />
             <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
-              The agent's brain (AGENT.md). Add strategies afterward to make it loop.
+              The agent's brain (AGENT.md).
             </p>
           </div>
           <div>

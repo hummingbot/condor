@@ -323,9 +323,9 @@ async def manage_executors(
     - "performance": rolled-up scorecard — open/closed/failed counts,
       realized PnL, costs, win rate, close-type breakdown — grouped by
       group_by: "agent" (per agent, all its runs), "run" (per
-      session/delegation), "strategy" (compare playbooks), "venue", or
-      "type". Use this to answer "how is agent X doing" or "compare
-      strategy A vs B" in one call.
+      session/delegation), "strategy" (legacy records only — new executors
+      carry no strategy), "venue", or "type". Use this to answer
+      "how is agent X doing" in one call.
 
     Args:
         action: create | stop | get | list | performance
@@ -363,9 +363,7 @@ async def get_user_context() -> dict:
 async def manage_trading_agent(
     action: str,
     agent_id: str | None = None,
-    strategy_id: str | None = None,
     agent_slug: str | None = None,
-    strategy: str | None = None,
     name: str | None = None,
     description: str | None = None,
     instructions: str | None = None,
@@ -376,53 +374,54 @@ async def manage_trading_agent(
     server_required: bool | None = None,
     server_name: str | None = None,
     risk_limits: dict | None = None,
+    denomination: str | None = None,
+    default_config: dict | None = None,
+    default_trading_context: str | None = None,
+    schedule: dict | None = None,
 ) -> dict:
-    """Manage trading agents and strategies.
+    """Manage trading agents (definition, lifecycle, routines, monitoring).
 
     An *agent* (e.g. "executor_manager", "brigado") is an identity defined in
-    agents/{slug}/AGENT.md — the primary artifact and the agent "brain". It is
-    distinct from a *strategy* (a looping playbook it owns) and from a running
-    *instance*. Capability is DERIVED, not flagged: an agent with ``when_to_consult``
-    is consultable (on any model); an agent that owns ≥1 strategy is loopeable; it can
-    be both. Create the agent FIRST, then add its routines and (optionally) a strategy.
-    ``strategy_id`` is the opaque key returned by list_strategies/create_strategy
-    (form "agent_slug.strategy_slug") — used ONLY by strategy CRUD. Running
-    sessions are identified as "{agent_slug}_{N}" ("{agent_slug}_e{N}" for
-    experiments); which strategy a session ran is session metadata, and
-    all history (sessions, learnings, experiments) lives at the agent level.
+    agents/{slug}/AGENT.md — the ONE spec and the agent "brain": identity +
+    strategy body (instructions) + launch defaults (default_config) + risk
+    baseline (risk_limits + denomination) + optional schedule. It is distinct
+    from a running *instance*. Capability is DERIVED, not flagged: an agent
+    with ``when_to_consult`` is consultable (on any model); the same AGENT.md
+    is what a session loops. There is NO separate strategy object.
+    Running sessions are identified as "{agent_slug}_{N}" ("{agent_slug}_e{N}"
+    for experiments); all history (sessions, learnings, experiments) lives at
+    the agent level.
 
     Actions -- Agents (identities):
     - "list_agent_definitions": List all agents (AGENT.md identities) with their
       capabilities — consultable (can be used via the `consult` tool),
-      when_to_consult, loopable, owned strategies, agent_key, tools. Use this to
-      answer "what agents exist?" — list_strategies and list_agents (instances) do
-      NOT show consult-only agents (those that own no loop strategy).
+      when_to_consult, can_trade, denomination, schedule, agent_key, tools. Use
+      this to answer "what agents exist?" — list_agents (instances) does NOT
+      show idle or consult-only agents.
     - "create_agent": Create a new agent (AGENT.md identity + brain). Requires name.
       Optional: description, instructions (the AGENT.md body — identity + domain
-      knowledge), agent_key, tools (tool-name allowlist for pydantic-ai consults),
-      when_to_consult (set it to make the agent consultable — recommended for every
-      agent), server_required. Returns agent_slug — use it for routines/strategies.
+      knowledge + strategy), agent_key, tools (tool-name allowlist for pydantic-ai
+      consults), when_to_consult (set it to make the agent consultable —
+      recommended for every agent), server_required, server_name, risk_limits +
+      denomination, default_config, default_trading_context, schedule.
+      NOTE: a server-backed agent (server_required, the default) or one whose
+      tools include manage_executors MUST declare risk_limits, and risk_limits
+      always require a denomination. Returns agent_slug.
     - "get_agent": Get full agent definition including the AGENT.md body (requires agent_slug)
     - "update_agent": Update an agent's AGENT.md / metadata (requires agent_slug, plus fields to change)
-    - "delete_agent": Delete an agent (requires agent_slug; refuses if it still owns strategies)
-
-    Actions -- Strategies:
-    - "list_strategies": List all strategies (across agents)
-    - "get_strategy": Get full strategy details including instructions (requires strategy_id)
-    - "create_strategy": Create a new strategy under an Agent (requires agent_slug, name, instructions)
-    - "update_strategy": Update an existing strategy (requires strategy_id, plus fields to update)
-    - "delete_strategy": Delete a strategy (requires strategy_id)
+    - "delete_agent": Delete (tombstone) an agent (requires agent_slug). Refused
+      while it has running sessions or open executors; its history stays
+      readable and the slug is reserved forever.
 
     Actions -- Lifecycle:
     - "list_agents": List all running agent instances with status
     - "start_session": Start a new agent SESSION — the stateful unit of capital
       engagement: frozen config, journal, risk state, its own track-record entry
-      (requires agent_slug; strategy=<slug> selects the playbook — optional when
-      the agent has exactly one, required when it has several; optional config
-      overrides, e.g. execution_mode "run_once" for a single live tick)
+      (requires agent_slug; optional config overrides on top of the agent's
+      default_config, e.g. execution_mode "run_once" for a single live tick)
     - "start_experiment": Run ONE simulated tick with every mutation blocked —
       a.k.a. a dry run — saved as a flat experiment snapshot, never a session
-      (requires agent_slug; same strategy/config args as start_session)
+      (requires agent_slug; same config args as start_session)
     - "stop_agent": Stop a running agent, KEEPING its open positions (requires agent_id)
     - "shutdown_agent": Emergency stop that WINDS DOWN this session's positions/executors
       per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
@@ -443,47 +442,57 @@ async def manage_trading_agent(
     Args:
         action: The action to perform.
         agent_id: Agent session ID "{agent_slug}_{N}" (for lifecycle/monitoring/journal actions).
-        strategy_id: Strategy key "agent_slug.strategy_slug" (strategy CRUD only).
-        agent_slug: Owning Agent slug — required for create_strategy,
-            start_session/start_experiment, routine actions, and the agent CRUD
-            actions get/update/delete_agent.
-        strategy: Strategy slug selecting the playbook for start_session /
-            start_experiment (optional when the agent has exactly one strategy).
-        name: Agent name (create_agent), strategy name (create/update_strategy), or routine name (run_routine).
-        description: Agent or strategy description (for create/update).
-        instructions: AGENT.md body (create/update_agent) or strategy instructions text (create/update_strategy).
+        agent_slug: Agent slug — required for start_session/start_experiment,
+            routine actions, and the agent CRUD actions get/update/delete_agent.
+        name: Agent name (create/update_agent) or routine name (run_routine).
+        description: Agent description (create/update_agent).
+        instructions: AGENT.md body (create/update_agent) — identity + domain knowledge + strategy.
         agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Any model can be consulted; a pydantic-ai key (e.g. "ollama:...") additionally enforces the tools allowlist on consult. Default "claude-code".
-        config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
-            For start_session, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
-            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
+        config: Launch config overrides (start_session/start_experiment) or routine config (run_routine).
+            For start_session, supports: agent_key (override agent default), model_base_url (for LM Studio/vLLM),
+            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits (stricter-only), server_name, max_ticks.
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
         when_to_consult: Trigger describing when to consult the agent (create/update_agent). Set it to make the agent consultable — recommended for every agent, on any model.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
-        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
+        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any session it runs use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
         risk_limits: Agent-level risk baseline dict (create/update_agent). Keys:
             max_position_size_quote, max_open_executors, max_drawdown_pct,
             shutdown_drawdown_pct. Governs unattended delegations and is the
-            fallback for tick sessions without their own risk_limits.
+            baseline for tick sessions (launch overrides may only tighten it).
+            REQUIRED for server-backed/trading agents; use
+            {"max_position_size_quote": 0, "max_open_executors": 0} for a
+            read-only agent that must never trade.
+        denomination: Numeraire the risk_limits are expressed in, e.g. "USDC",
+            "SOL", "USD" (create/update_agent). REQUIRED whenever risk_limits
+            are declared.
+        default_config: Launch defaults baked into the AGENT.md (create/update_agent) —
+            AgentConfig keys: frequency_sec, total_amount_quote, execution_mode, max_ticks, ...
+        default_trading_context: Default trading context injected when a launch
+            passes none (create/update_agent).
+        schedule: Optional unattended schedule (create/update_agent), e.g.
+            {"cron": "0 * * * *", "tz": "UTC"}.
 
     Returns:
         Action-specific result dict.
     """
     return await trading_agent.manage_trading_agent(
         action,
-        agent_id,
-        strategy_id,
-        agent_slug,
-        strategy,
-        name,
-        description,
-        instructions,
-        agent_key,
-        config,
+        agent_id=agent_id,
+        agent_slug=agent_slug,
+        name=name,
+        description=description,
+        instructions=instructions,
+        agent_key=agent_key,
+        config=config,
         tools=tools,
         when_to_consult=when_to_consult,
         server_required=server_required,
         server_name=server_name,
         risk_limits=risk_limits,
+        denomination=denomination,
+        default_config=default_config,
+        default_trading_context=default_trading_context,
+        schedule=schedule,
     )
 
 

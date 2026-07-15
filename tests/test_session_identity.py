@@ -13,7 +13,6 @@ import yaml
 
 from condor.agents import agent as agent_module
 from condor.agents import journal as journal_module
-from condor.agents import strategy as strategy_module
 from condor.agents.agent import Agent
 from condor.agents.journal import (
     JournalManager,
@@ -31,7 +30,6 @@ from condor.agents.journal import (
 
 def _patch_roots(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
     monkeypatch.setattr(journal_module, "_DATA_ROOT", tmp_path)
 
 
@@ -94,9 +92,9 @@ def test_allocate_session_dir_sequential_and_concurrent(tmp_path):
 
 def test_session_meta_roundtrip_and_finalize(tmp_path):
     _, session_dir = allocate_session_dir(tmp_path / "acme")
-    write_session_meta(session_dir, {"strategy": "pmm", "status": "running"})
+    write_session_meta(session_dir, {"model": "claude-code", "status": "running"})
     meta = read_session_meta(session_dir)
-    assert meta["strategy"] == "pmm"
+    assert meta["model"] == "claude-code"
 
     finalize_session_meta(session_dir, "stopped")
     meta = read_session_meta(session_dir)
@@ -188,13 +186,11 @@ def test_mcp_resolves_experiment_by_date_filename(tmp_path, monkeypatch):
 
 def _make_engine(tmp_path, monkeypatch, config):
     from condor.agents.engine import TickEngine
-    from condor.agents.strategy import Strategy
 
     _patch_roots(monkeypatch, tmp_path)
-    agent = Agent(slug="acme", name="Acme", agent_key="claude-code")
+    agent = Agent(slug="acme", name="Acme", agent_key="claude-code", server_required=False)
     agent.agent_dir.mkdir(parents=True, exist_ok=True)
-    strategy = Strategy(agent_slug="acme", name="Scalper")
-    return TickEngine(agent=agent, strategy=strategy, config=config, chat_id=1, user_id=1)
+    return TickEngine(agent=agent, config=config, chat_id=1, user_id=1)
 
 
 def test_run_once_becomes_max_ticks_1_session(tmp_path, monkeypatch):
@@ -209,8 +205,9 @@ def test_run_once_becomes_max_ticks_1_session(tmp_path, monkeypatch):
 
     meta = read_session_meta(engine.session_dir)
     assert "kind" not in meta  # every sessions/ entry IS a session (refactor-07)
-    assert meta["strategy"] == "scalper"
     assert meta["status"] == "running"
+    # Both spec hashes recorded with the run (§5.3)
+    assert meta["resolved_spec_hash"]
     # Frozen launch config saved in the session dir
     assert (engine.session_dir / "config.yml").exists()
 
@@ -225,28 +222,27 @@ def test_experiment_mode_is_the_only_experiment(tmp_path, monkeypatch):
 
 def test_engine_falls_back_to_agent_risk_baseline(tmp_path, monkeypatch):
     from condor.agents.engine import TickEngine
-    from condor.agents.strategy import Strategy
 
     _patch_roots(monkeypatch, tmp_path)
     agent = Agent(
-        slug="acme", name="Acme", agent_key="claude-code",
+        slug="acme", name="Acme", agent_key="claude-code", server_required=False,
         risk_limits={"max_position_size_quote": 250.0, "max_open_executors": 2},
+        denomination="USDC",
     )
     agent.agent_dir.mkdir(parents=True, exist_ok=True)
-    strategy = Strategy(agent_slug="acme", name="Scalper")
-    engine = TickEngine(agent=agent, strategy=strategy, config={}, chat_id=1, user_id=1)
+    engine = TickEngine(agent=agent, config={}, chat_id=1, user_id=1)
     assert engine.risk.limits.max_position_size_quote == 250.0
     assert engine.risk.limits.max_open_executors == 2
 
-    # An explicit config risk_limits wins over the baseline.
+    # An explicit config risk_limits wins over the baseline (stricter-only
+    # enforcement happens in lifecycle.start_session, not the engine).
     engine2 = TickEngine(
         agent=agent,
-        strategy=strategy,
-        config={"risk_limits": {"max_position_size_quote": 900.0}},
+        config={"risk_limits": {"max_position_size_quote": 100.0}},
         chat_id=1,
         user_id=1,
     )
-    assert engine2.risk.limits.max_position_size_quote == 900.0
+    assert engine2.risk.limits.max_position_size_quote == 100.0
 
 
 def test_engine_stop_finalizes_meta(tmp_path, monkeypatch):
@@ -290,14 +286,12 @@ def test_consult_persists_nothing(tmp_path, monkeypatch):
     assert not (agent_dir / "sessions").exists()
 
 
-def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
-    """The /agents/{slug}/start route must resolve risk_limits as
-    request config > strategy default_config > AGENT.md baseline > schema
-    defaults — the baseline must not be masked by normalize_config's 500/5
-    schema defaults (regression: a live experiment showed 500/5 for a 0/0 agent)."""
-    from types import SimpleNamespace
-
-    import condor.web.routes.agents as agents_routes
+def test_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
+    """start_session must resolve risk_limits as request config >
+    AGENT.md default_config > AGENT.md baseline > schema defaults — the
+    baseline must not be masked by normalize_config's 500/5 schema defaults
+    (regression: a live experiment showed 500/5 for a 0/0 agent)."""
+    from condor.agents.lifecycle import start_session as lifecycle_start
 
     _patch_roots(monkeypatch, tmp_path)
     agent_dir = tmp_path / "watcher"
@@ -305,18 +299,15 @@ def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
     (agent_dir / "AGENT.md").write_text(
         "---\nname: watcher\nserver_required: true\n"
         "risk_limits:\n  max_position_size_quote: 0\n  max_open_executors: 0\n"
+        "denomination: USD\n"
+        "default_config:\n  frequency_sec: 120\n"
         "---\n\nBody.\n"
-    )
-    sdir = agent_dir / "strategies"
-    sdir.mkdir(parents=True)
-    (sdir / "snap.md").write_text(
-        "---\nname: snap\ndefault_config:\n  frequency_sec: 120\n---\n\nTick.\n"
     )
 
     captured = {}
 
     class _FakeEngine:
-        def __init__(self, *, agent, strategy, config, chat_id, user_id):
+        def __init__(self, *, agent, config, chat_id, user_id):
             captured["config"] = config
             self.agent_id = "watcher_1"
             self.session_num = 1
@@ -328,19 +319,22 @@ def test_web_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
 
     monkeypatch.setattr(engine_module, "TickEngine", _FakeEngine)
 
-    req = agents_routes.StartAgentRequest(config={"execution_mode": "experiment"})
-    user = SimpleNamespace(id=1)
-    result = asyncio.run(agents_routes.start_session("watcher", req, user=user))
+    result = asyncio.run(
+        lifecycle_start("watcher", config={"execution_mode": "experiment"})
+    )
     assert result["started"] is True
     assert captured["config"]["risk_limits"] == {
         "max_position_size_quote": 0,
         "max_open_executors": 0,
     }
 
-    # A strategy-level risk_limits wins over the baseline.
-    (sdir / "snap.md").write_text(
-        "---\nname: snap\ndefault_config:\n  risk_limits:\n"
-        "    max_position_size_quote: 50\n---\n\nTick.\n"
+    # A default_config-level risk_limits wins over the bare baseline seed.
+    (agent_dir / "AGENT.md").write_text(
+        "---\nname: watcher\nserver_required: true\n"
+        "risk_limits:\n  max_position_size_quote: 0\n  max_open_executors: 0\n"
+        "denomination: USD\n"
+        "default_config:\n  risk_limits:\n    max_position_size_quote: 50\n"
+        "---\n\nBody.\n"
     )
-    asyncio.run(agents_routes.start_session("watcher", req, user=user))
+    asyncio.run(lifecycle_start("watcher", config={"execution_mode": "experiment"}))
     assert captured["config"]["risk_limits"] == {"max_position_size_quote": 50}

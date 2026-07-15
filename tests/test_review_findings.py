@@ -355,22 +355,18 @@ def test_engine_stop_defaults_to_detach(monkeypatch):
 def _make_engine(tmp_path, monkeypatch):
     from condor.agents import agent as agent_module
     from condor.agents import journal as journal_module
-    from condor.agents import strategy as strategy_module
     from condor.agents.agent import Agent
     from condor.agents.engine import TickEngine
-    from condor.agents.strategy import Strategy
 
     root = tmp_path / "agents"
     root.mkdir(exist_ok=True)
     monkeypatch.setattr(agent_module, "_DATA_ROOT", root)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", root)
     monkeypatch.setattr(journal_module, "_DATA_ROOT", root)
-    agent = Agent(slug="acme", name="Acme", agent_key="claude-code")
-    agent.agent_dir.mkdir(parents=True, exist_ok=True)
-    strategy = Strategy(agent_slug="acme", name="Scalper")
-    return TickEngine(
-        agent=agent, strategy=strategy, config={}, chat_id=1, user_id=1
+    agent = Agent(
+        slug="acme", name="Acme", agent_key="claude-code", server_required=False
     )
+    agent.agent_dir.mkdir(parents=True, exist_ok=True)
+    return TickEngine(agent=agent, config={}, chat_id=1, user_id=1)
 
 
 def test_directives_survive_failed_tick_and_clear_on_success(tmp_path, monkeypatch):

@@ -1,20 +1,21 @@
-"""Trading Agents API routes.
+"""Trading Agents API routes — a THIN adapter over :class:`AgentService` (§5.2).
 
-An **Agent** is the top-level unit: identity + shared brain (memory/skills) that
-``condor`` can *consult*, plus ALL of its operational history (refactor-01b) —
-sessions (tick loops), delegations, consults, learnings, and experiments all
-live at ``agents/{slug}/``. Strategies are pure playbook templates the
-agent selects at start time; which playbook a session ran is session metadata,
-so per-playbook views are a filter, not a separate tree. Route shape::
+An **Agent** is the top-level unit: identity + strategy body + shared brain
+(memory/skills), with ALL of its operational history at ``agents/{slug}/``.
+Since the Agent + Strategy collapse (§5.3) the AGENT.md is the one spec —
+there is no separate Strategy entity. Route shape::
 
-    /agents                          -> list Agents (rollups + playbooks)
+    /agents                          -> list Agents (rollups)
     /agents/{slug}                   -> Agent detail (sessions/experiments/learnings)
     /agents/{slug}/consult|delegate  -> run the Agent's brain
-    /agents/{slug}/strategies...     -> playbook CRUD ({sslug}.md + default_config)
     /agents/{slug}/start|stop|...    -> session lifecycle
     /agents/{slug}/sessions/...      -> journals, snapshots, executors
     /agents/{slug}/delegation-files  -> flat delegation transcripts
-    /agents/{slug}/performance       -> per-session perf + rollup (?strategy= filter)
+    /agents/{slug}/performance       -> per-session perf + rollup
+
+All CRUD + lifecycle goes through ``AgentService``; the read-only history
+endpoints below are dashboard projections over the on-disk journal layout.
+Every ``LifecycleError`` maps to ``HTTPException(e.status, e.message)``.
 """
 
 from __future__ import annotations
@@ -29,6 +30,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from condor.agents.journal import find_delegation_file, read_session_meta
+from condor.agents.lifecycle import LifecycleError
+from condor.agents.service import AgentService
 from condor.agents.sessions_index import (
     count_experiments,
     count_sessions,
@@ -75,6 +78,22 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
+def _svc() -> AgentService:
+    return AgentService()
+
+
+def _http(e: LifecycleError) -> HTTPException:
+    return HTTPException(status_code=e.status, detail=e.message)
+
+
+def _get_agent(slug: str):
+    """Resolve an Agent or 404 (LifecycleError -> HTTPException)."""
+    try:
+        return _svc().get(slug)
+    except LifecycleError as e:
+        raise _http(e)
+
+
 # ── Request/Response Models ──
 
 
@@ -82,7 +101,6 @@ class RunningInstance(BaseModel):
     agent_id: str
     session_num: int
     status: str
-    strategy: str = ""
     agent_key: str = ""
     tick_count: int = 0
     daily_pnl: float = 0.0
@@ -102,27 +120,18 @@ class RunningInstance(BaseModel):
     risk_limits: dict[str, Any] = {}
 
 
-class PlaybookSummary(BaseModel):
-    """A strategy as what it now is — a playbook template, not a state owner."""
-
-    slug: str
-    name: str
-    description: str
-    agent_key: str | None = None
-    default_config: dict[str, Any] = {}
-    session_count: int = 0  # tick sessions tagged with this strategy
-
-
 class AgentSummary(BaseModel):
     slug: str
     name: str
     description: str
     consultable: bool = False
+    can_trade: bool = False
     when_to_consult: str = ""
     agent_key: str = ""
-    strategy_count: int = 0
-    strategies: list[PlaybookSummary] = []
-    # Agent-level rollups (all history lives at the agent now).
+    denomination: str = ""
+    default_config: dict[str, Any] = {}
+    schedule: dict[str, Any] = {}
+    # Agent-level rollups (all history lives at the agent).
     status: str = "idle"  # "running" if any session is running
     session_count: int = 0
     experiment_count: int = 0
@@ -138,7 +147,7 @@ class AgentPerformanceModel(BaseModel):
     agent_id: str
     session_num: int = 0
     kind: str = "session"  # session | experiment
-    strategy: str = ""
+    strategy: str = ""  # legacy session meta tag — kept tolerantly for old runs
     status: str = ""
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
@@ -160,7 +169,7 @@ class AgentPerformanceResponse(BaseModel):
 
 class SessionInfo(BaseModel):
     number: int
-    strategy: str = ""
+    strategy: str = ""  # legacy meta field — old sessions still carry it
     status: str = ""
     snapshot_count: int = 0
     created_at: str = ""
@@ -198,10 +207,14 @@ class AgentDetail(BaseModel):
     tools: list[str] = []
     when_to_consult: str = ""
     consultable: bool = False
+    can_trade: bool = False
     server_required: bool = True
     server_name: str = ""
     risk_limits: dict[str, Any] = {}
-    strategies: list[PlaybookSummary] = []
+    denomination: str = ""
+    default_config: dict[str, Any] = {}
+    default_trading_context: str = ""
+    schedule: dict[str, Any] = {}
     learnings: str = ""
     status: str = "idle"
     agent_id: str = ""
@@ -209,18 +222,6 @@ class AgentDetail(BaseModel):
     experiments: list[ExperimentInfo] = []
     delegations: list[DelegationInfo] = []
     instances: list[RunningInstance] = []
-
-
-class PlaybookDetail(BaseModel):
-    slug: str
-    agent_slug: str
-    name: str
-    description: str
-    strategy_md: str
-    default_config: dict[str, Any] = {}
-    default_trading_context: str = ""
-    agent_key: str | None = None
-    session_count: int = 0
 
 
 class SnapshotSummary(BaseModel):
@@ -239,27 +240,34 @@ class CreateAgentRequest(BaseModel):
     server_required: bool = True
     server_name: str = ""
     risk_limits: dict[str, Any] = {}
-
-
-class UpdateAgentMdRequest(BaseModel):
-    content: str
-
-
-class CreateStrategyRequest(BaseModel):
-    name: str
-    description: str = ""
-    instructions: str = ""
-    agent_key: str | None = None
+    denomination: str = ""
+    default_config: dict[str, Any] = {}
     default_trading_context: str = ""
-    config: dict[str, Any] = {}
+    schedule: dict[str, Any] = {}
 
 
-class UpdateStrategyMdRequest(BaseModel):
-    content: str
+class UpdateAgentRequest(BaseModel):
+    """Field patch for the agent spec. Only fields explicitly sent are applied.
 
+    ``content`` is the legacy body-update key (the old endpoint wrote raw
+    AGENT.md text) — it is treated as ``instructions`` (the body); frontmatter
+    fields are patched via their own keys.
+    """
 
-class UpdateConfigRequest(BaseModel):
-    config: dict[str, Any]
+    name: str | None = None
+    description: str | None = None
+    instructions: str | None = None
+    agent_key: str | None = None
+    tools: list[str] | None = None
+    when_to_consult: str | None = None
+    server_required: bool | None = None
+    server_name: str | None = None
+    risk_limits: dict[str, Any] | None = None
+    denomination: str | None = None
+    default_config: dict[str, Any] | None = None
+    default_trading_context: str | None = None
+    schedule: dict[str, Any] | None = None
+    content: str | None = None  # legacy alias for instructions
 
 
 class UpdateLearningsRequest(BaseModel):
@@ -278,7 +286,9 @@ class ConsultRequest(BaseModel):
 
 
 class StartAgentRequest(BaseModel):
-    strategy: str = ""  # playbook slug; optional when the agent has exactly one
+    # ``strategy`` is accepted but IGNORED (Agent+Strategy collapse §5.3) —
+    # the dashboard may still send it briefly.
+    strategy: str = ""
     config: dict[str, Any] = {}
     trading_context: str = ""
     chat_id: int = 0  # Telegram chat for notifications (0 = web-launched, no chat)
@@ -296,65 +306,30 @@ class DelegateRequest(BaseModel):
     risk_limits: dict[str, Any] | None = None
 
 
-# ── Stores / lookups ──
+class DirectiveRequest(BaseModel):
+    text: str
+    agent_id: str | None = None
 
 
-def _agent_store():
-    from condor.agents.agent import AgentStore
-
-    return AgentStore()
-
-
-def _strategy_store():
-    from condor.agents.strategy import StrategyStore
-
-    return StrategyStore()
-
-
-def _get_agent(slug: str):
-    agent = _agent_store().get(slug)
-    if not agent:
-        raise HTTPException(status_code=404, detail=f"Agent '{slug}' not found")
-    return agent
-
-
-def _get_strategy(slug: str, sslug: str):
-    strategy = _strategy_store().get(slug, sslug)
-    if not strategy:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Strategy '{sslug}' not found under agent '{slug}'",
-        )
-    return strategy
-
-
-def _get_engines_for(agent_slug: str) -> list:
-    """All engines (running or paused) for a given agent."""
-    from condor.agents.lifecycle import engines_for_slug
-
-    return engines_for_slug(agent_slug)
-
-
-# ── Disk lookups ──
+# ── Performance projection (dashboard rollups) ──
 # Enumeration/counting of sessions & experiments on disk lives in
 # condor.agents.sessions_index (imported at the top), next to the journal
 # code that owns the layout. This module keeps only HTTP concerns.
 
 
-async def _get_client_for_agent(agent, strategies: list):
+async def _get_client_for_agent(agent, strategies: list | None = None):
     """Resolve a Hummingbot API client for an agent's history views.
 
     Server resolution: the agent's pinned server, else the newest tick
-    session's frozen config.yml, else the first strategy default_config that
-    declares one.
+    session's frozen config.yml, else the agent's default_config.
+    (``strategies`` is a legacy positional kept for signature compatibility.)
     """
     from condor.agents.config import load_agent_config
     from config_manager import get_config_manager
 
     server_name = agent.server_name or ""
     if not server_name:
-        agent_dir = agent.agent_dir
-        sessions_dir = agent_dir / "sessions"
+        sessions_dir = agent.agent_dir / "sessions"
         if sessions_dir.exists():
             session_dirs = sorted(
                 (
@@ -373,10 +348,7 @@ async def _get_client_for_agent(agent, strategies: list):
                 if server_name:
                     break
     if not server_name:
-        for s in strategies:
-            server_name = (s.default_config or {}).get("server_name") or ""
-            if server_name:
-                break
+        server_name = (agent.default_config or {}).get("server_name") or ""
     if not server_name:
         return None, ""
     cm = get_config_manager()
@@ -401,14 +373,15 @@ def _session_bot_name(agent_dir: Path, num: int) -> str:
         return ""
 
 
-async def _compute_agent_performance(agent, strategies: list):
+async def _compute_agent_performance(agent, strategies: list | None = None):
     """Return list of AgentPerformanceModel plus rolled-up totals.
 
     Covers every attributed run of the agent (tick sessions + experiments,
     delegations/consults excluded — they never tag ``controller_id``). The
     assembled rollup is cached ~30s (``_PERF_CACHE``); underneath, closed
     sessions/experiments are served from ``_CLOSED_PERF_CACHE`` so only active
-    ids hit the backend after the TTL expires.
+    ids hit the backend after the TTL expires. (``strategies`` is a legacy
+    positional kept for signature compatibility.)
     """
     from condor.agents.performance import fetch_agent_performance_batch
 
@@ -455,7 +428,6 @@ async def _compute_agent_performance(agent, strategies: list):
         for aid in active_ids:
             _CLOSED_PERF_CACHE.pop(aid, None)
 
-        by_controller = {r["controller_id"]: r for r in runs}
         if bot_names:
             # Controller mode attributes the bot's live aggregate to every
             # session, so no per-session result is immutable — fetch all.
@@ -533,14 +505,13 @@ async def _compute_agent_performance(agent, strategies: list):
     return result
 
 
-def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
-    info = engine.get_info()
+def _instance_from_info(info: dict, perf_by_id: dict) -> RunningInstance:
+    """Build a RunningInstance from an engine info dict (svc.list_runs row)."""
     p = perf_by_id.get(info["agent_id"])
     return RunningInstance(
         agent_id=info["agent_id"],
         session_num=info["session_num"],
         status=info["status"],
-        strategy=info.get("strategy_slug", ""),
         tick_count=info["tick_count"],
         daily_pnl=(p.total_pnl if p else info["daily_pnl"]),
         realized_pnl=p.realized_pnl if p else 0.0,
@@ -561,40 +532,29 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
     )
 
 
-def _playbook_summary(strategy, agent_dir: Path) -> PlaybookSummary:
-    return PlaybookSummary(
-        slug=strategy.slug,
-        name=strategy.name,
-        description=strategy.description,
-        agent_key=strategy.agent_key,
-        default_config=strategy.default_config or {},
-        session_count=len(list_sessions(agent_dir, strategy=strategy.slug)),
-    )
-
-
-async def _build_agent_summary(agent, strategies: list) -> AgentSummary:
+async def _build_agent_summary(agent) -> AgentSummary:
     """Roll up disk + engine + performance state for one agent."""
     agent_dir = agent.agent_dir
 
     try:
-        sessions_perf, totals = await _compute_agent_performance(agent, strategies)
+        sessions_perf, totals = await _compute_agent_performance(agent)
     except Exception as e:
         log.warning("compute_agent_performance(%s) failed: %s", agent.slug, e)
         sessions_perf, totals = [], {}
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
-    engines = _get_engines_for(agent.slug)
+    infos = _svc().list_runs(agent.slug)
     status = "idle"
     tick_count = 0
     instances: list[RunningInstance] = []
-    for engine in engines:
-        inst = _instance_from_engine(engine, perf_by_id)
+    for info in infos:
+        inst = _instance_from_info(info, perf_by_id)
         instances.append(inst)
         if status == "idle":
             status = inst.status
             tick_count = inst.tick_count
 
-    if not engines:
+    if not infos:
         disk_info = infer_latest_session_status(agent_dir, agent.slug)
         if disk_info:
             status = disk_info["status"]
@@ -615,10 +575,12 @@ async def _build_agent_summary(agent, strategies: list) -> AgentSummary:
         name=agent.name,
         description=agent.description,
         consultable=agent.consultable,
+        can_trade=agent.can_trade,
         when_to_consult=agent.when_to_consult,
         agent_key=agent.agent_key,
-        strategy_count=len(strategies),
-        strategies=[_playbook_summary(s, agent_dir) for s in strategies],
+        denomination=agent.denomination,
+        default_config=agent.default_config or {},
+        schedule=agent.schedule or {},
         status=status,
         session_count=count_sessions(agent_dir),
         experiment_count=count_experiments(agent_dir),
@@ -636,14 +598,12 @@ async def _build_agent_summary(agent, strategies: list) -> AgentSummary:
 
 @router.get("", response_model=list[AgentSummary])
 async def list_agents(user: WebUser = Depends(get_current_user)):
-    """List all Agents with their playbooks, history rollups, and status."""
+    """List all Agents with history rollups and live status."""
     import asyncio as _asyncio
 
-    agents = _agent_store().list_all()
-    store = _strategy_store()
-
+    agents = _svc().list()
     summaries = await _asyncio.gather(
-        *[_build_agent_summary(a, store.list(a.slug)) for a in agents],
+        *[_build_agent_summary(a) for a in agents],
         return_exceptions=True,
     )
     return [s for s in summaries if isinstance(s, AgentSummary)]
@@ -689,10 +649,7 @@ async def get_delegation_status(
 
     m = _re.match(r"^(?P<slug>.+)-d(?P<num>\d+)$", task_id)
     if m:
-        try:
-            agent = _get_agent(m.group("slug"))
-        except HTTPException:
-            agent = None
+        agent = _svc().store.get(m.group("slug"))
         if agent is not None:
             path = find_delegation_file(agent.agent_dir, int(m.group("num")))
             if path:
@@ -715,30 +672,29 @@ async def stop_delegation_route(
 
 @router.get("/{slug}", response_model=AgentDetail)
 async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
-    """Get Agent detail: identity, playbooks, and the full history envelope."""
+    """Get Agent detail: identity, spec fields, and the full history envelope."""
     agent = _get_agent(slug)
     agent_dir = agent.agent_dir
-    strategies = _strategy_store().list(slug)
 
     try:
-        sessions_perf, _totals = await _compute_agent_performance(agent, strategies)
+        sessions_perf, _totals = await _compute_agent_performance(agent)
     except Exception as e:
         log.warning("compute_agent_performance(%s) failed: %s", slug, e)
         sessions_perf = []
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
-    engines = _get_engines_for(slug)
+    infos = _svc().list_runs(slug)
     status = "idle"
     agent_id = ""
     instances = []
-    for engine in engines:
-        inst = _instance_from_engine(engine, perf_by_id)
+    for info in infos:
+        inst = _instance_from_info(info, perf_by_id)
         instances.append(inst)
         if not agent_id:
             status = inst.status
             agent_id = inst.agent_id
 
-    if not engines:
+    if not infos:
         disk_info = infer_latest_session_status(agent_dir, slug)
         if disk_info:
             status = disk_info["status"]
@@ -751,19 +707,19 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         slug=agent.slug,
         name=agent.name,
         description=agent.description,
-        agent_md=(
-            (agent_dir / "AGENT.md").read_text()
-            if (agent_dir / "AGENT.md").exists()
-            else ""
-        ),
+        agent_md=_svc().store.source_text(slug),
         agent_key=agent.agent_key,
         tools=agent.tools,
         when_to_consult=agent.when_to_consult,
         consultable=agent.consultable,
+        can_trade=agent.can_trade,
         server_required=agent.server_required,
         server_name=agent.server_name,
         risk_limits=agent.risk_limits,
-        strategies=[_playbook_summary(s, agent_dir) for s in strategies],
+        denomination=agent.denomination,
+        default_config=agent.default_config or {},
+        default_trading_context=agent.default_trading_context,
+        schedule=agent.schedule or {},
         learnings=learnings,
         status=status,
         agent_id=agent_id,
@@ -780,51 +736,73 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
 async def create_agent(
     req: CreateAgentRequest, user: WebUser = Depends(get_current_user)
 ):
-    """Create a new Agent (identity + brain; strategies are added separately)."""
-    agent = _agent_store().create(
-        name=req.name,
-        description=req.description,
-        instructions=req.instructions,
-        agent_key=req.agent_key,
-        tools=req.tools,
-        when_to_consult=req.when_to_consult,
-        server_required=req.server_required,
-        server_name=req.server_name,
-        risk_limits=req.risk_limits,
-        created_by=user.id,
-    )
+    """Create a new Agent (identity + spec; AGENT.md is the one spec, §5.3)."""
+    try:
+        agent = _svc().create(
+            name=req.name,
+            description=req.description,
+            instructions=req.instructions,
+            agent_key=req.agent_key,
+            tools=req.tools,
+            when_to_consult=req.when_to_consult,
+            server_required=req.server_required,
+            server_name=req.server_name,
+            risk_limits=req.risk_limits,
+            denomination=req.denomination,
+            default_config=req.default_config,
+            default_trading_context=req.default_trading_context,
+            schedule=req.schedule,
+        )
+    except LifecycleError as e:
+        raise _http(e)
     return AgentSummary(
         slug=agent.slug,
         name=agent.name,
         description=agent.description,
         consultable=agent.consultable,
+        can_trade=agent.can_trade,
         when_to_consult=agent.when_to_consult,
         agent_key=agent.agent_key,
+        denomination=agent.denomination,
+        default_config=agent.default_config or {},
+        schedule=agent.schedule or {},
     )
 
 
 @router.put("/{slug}")
-async def update_agent_md(
-    slug: str, req: UpdateAgentMdRequest, user: WebUser = Depends(get_current_user)
+async def update_agent(
+    slug: str, req: UpdateAgentRequest, user: WebUser = Depends(get_current_user)
 ):
-    """Update AGENT.md content."""
-    agent = _get_agent(slug)
-    (agent.agent_dir / "AGENT.md").write_text(req.content)
+    """Patch the agent spec (AGENT.md body via ``instructions``, and/or fields)."""
+    patch = req.model_dump(exclude_unset=True)
+    content = patch.pop("content", None)
+    if content is not None and "instructions" not in patch:
+        patch["instructions"] = content
+    if not patch:
+        raise HTTPException(status_code=422, detail="no fields to update")
+    try:
+        _svc().update(slug, patch)
+    except LifecycleError as e:
+        raise _http(e)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     return {"updated": True}
+
+
+# Kept for import stability (the PUT handler was historically named this).
+update_agent_md = update_agent
 
 
 @router.delete("/{slug}")
 async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
-    """Delete an Agent. Refuses while it has a running session."""
-    _get_agent(slug)
-    running = [e for e in _get_engines_for(slug) if e.is_running]
-    if running:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete an Agent with running sessions. Stop them first.",
-        )
-    _agent_store().delete(slug)
-    return {"deleted": True}
+    """Tombstone an Agent (§5.2): history preserved, slug reserved.
+
+    Refuses (409) while it has running sessions or nonterminal executors.
+    """
+    try:
+        return _svc().delete(slug)
+    except LifecycleError as e:
+        raise _http(e)
 
 
 @router.post("/{slug}/consult")
@@ -832,7 +810,6 @@ async def consult_agent(
     slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
 ):
     """Run an Agent consult (its brain to completion) and return the answer."""
-    from condor.agents.consult import run_consult
     from config_manager import get_config_manager
 
     if not req.task:
@@ -851,14 +828,17 @@ async def consult_agent(
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
     # another user's memory/skill scope.
-    answer = await run_consult(
-        slug=slug,
-        user_id=user.id,
-        chat_id=req.chat_id,
-        server_name=req.server_name,
-        task=req.task,
-        context=req.context,
-    )
+    try:
+        answer = await _svc().consult(
+            slug,
+            task=req.task,
+            context=req.context,
+            user_id=user.id,
+            chat_id=req.chat_id,
+            server_name=req.server_name,
+        )
+    except LifecycleError as e:
+        raise _http(e)
     return {"agent": slug, "answer": answer}
 
 
@@ -877,7 +857,6 @@ async def delegate_agent(
     serverless agents run with full auto-approve. The async sibling of
     ``/consult``.
     """
-    from condor.agents.delegate import start_delegation
     from config_manager import get_config_manager
 
     _get_agent(slug)
@@ -895,130 +874,22 @@ async def delegate_agent(
     # ``req.user_id`` here would let any authenticated session run a delegation
     # under another user's memory scope and server grants.
     try:
-        dt = await start_delegation(
-            agent_slug=slug,
+        d = await _svc().delegate(
+            slug,
+            task=req.task,
             user_id=user.id,
             chat_id=req.chat_id,
             server_name=req.server_name,
-            task=req.task,
-            timeout_s=req.timeout_s,
             risk_limits=req.risk_limits,
+            timeout_s=req.timeout_s,
         )
+    except LifecycleError as e:
+        raise _http(e)
     except ValueError as e:
         # Loud policy error: trading delegation with neither an AGENT.md
         # baseline nor a per-call override.
         raise HTTPException(status_code=400, detail=str(e))
-    return {"task_id": dt.task_id, "status": dt.status}
-
-
-# ── Strategy (playbook) CRUD ──
-
-
-@router.get("/{slug}/strategies", response_model=list[PlaybookSummary])
-async def list_strategies(slug: str, user: WebUser = Depends(get_current_user)):
-    """List the playbooks owned by an Agent."""
-    agent = _get_agent(slug)
-    return [
-        _playbook_summary(s, agent.agent_dir) for s in _strategy_store().list(slug)
-    ]
-
-
-@router.post("/{slug}/strategies", response_model=PlaybookSummary)
-async def create_strategy(
-    slug: str, req: CreateStrategyRequest, user: WebUser = Depends(get_current_user)
-):
-    """Create a new strategy (playbook) under an Agent."""
-    _get_agent(slug)
-    strategy = _strategy_store().create(
-        agent_slug=slug,
-        name=req.name,
-        description=req.description,
-        instructions=req.instructions,
-        agent_key=req.agent_key,
-        default_config=req.config,
-        default_trading_context=req.default_trading_context,
-        created_by=user.id,
-    )
-    return PlaybookSummary(
-        slug=strategy.slug,
-        name=strategy.name,
-        description=strategy.description,
-        agent_key=strategy.agent_key,
-        default_config=strategy.default_config or {},
-    )
-
-
-@router.get("/{slug}/strategies/{sslug}", response_model=PlaybookDetail)
-async def get_strategy(
-    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
-):
-    """Get playbook detail (the template — history lives on the agent)."""
-    agent = _get_agent(slug)
-    strategy = _get_strategy(slug, sslug)
-
-    strategy_md = strategy.path.read_text() if strategy.path.exists() else ""
-
-    return PlaybookDetail(
-        slug=sslug,
-        agent_slug=slug,
-        name=strategy.name,
-        description=strategy.description,
-        strategy_md=strategy_md,
-        default_config=strategy.default_config or {},
-        default_trading_context=strategy.default_trading_context,
-        agent_key=strategy.agent_key,
-        session_count=len(list_sessions(agent.agent_dir, strategy=sslug)),
-    )
-
-
-@router.put("/{slug}/strategies/{sslug}")
-async def update_strategy_md(
-    slug: str,
-    sslug: str,
-    req: UpdateStrategyMdRequest,
-    user: WebUser = Depends(get_current_user),
-):
-    """Update the playbook's {sslug}.md content."""
-    strategy = _get_strategy(slug, sslug)
-    strategy.path.write_text(req.content)
-    return {"updated": True}
-
-
-@router.put("/{slug}/strategies/{sslug}/config")
-async def update_strategy_config(
-    slug: str,
-    sslug: str,
-    req: UpdateConfigRequest,
-    user: WebUser = Depends(get_current_user),
-):
-    """Update a playbook's default_config (frontmatter — its only state)."""
-    strategy = _get_strategy(slug, sslug)
-    store = _strategy_store()
-    merged = dict(strategy.default_config or {})
-    merged.update(req.config)
-    strategy.default_config = merged
-    store.update(strategy)
-    return {"updated": True, "config": merged}
-
-
-@router.delete("/{slug}/strategies/{sslug}")
-async def delete_strategy(
-    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
-):
-    """Delete a playbook. Refuses while a session is running it."""
-    _get_strategy(slug, sslug)
-    running = [
-        e
-        for e in _get_engines_for(slug)
-        if e.is_running and e.strategy.slug == sslug
-    ]
-    if running:
-        raise HTTPException(
-            status_code=400,
-            detail="Cannot delete a strategy with a running session. Stop it first.",
-        )
-    _strategy_store().delete(slug, sslug)
-    return {"deleted": True}
+    return {"task_id": d["task_id"], "status": d["status"]}
 
 
 # ── Performance ──
@@ -1032,12 +903,10 @@ async def get_agent_performance(
 ):
     """Per-session performance + rollup totals for an agent.
 
-    ``?strategy=`` filters to one playbook's sessions — the per-playbook track
-    record is a metadata filter, not a separate tree.
+    ``?strategy=`` filters on the legacy session-meta tag (old sessions only).
     """
     agent = _get_agent(slug)
-    strategies = _strategy_store().list(slug)
-    sessions, totals = await _compute_agent_performance(agent, strategies)
+    sessions, totals = await _compute_agent_performance(agent)
     if strategy:
         sessions = [
             s for s in sessions if s.strategy == strategy and s.kind == "session"
@@ -1051,7 +920,9 @@ async def get_agent_performance(
             "open_positions": sum(s.open_count for s in sessions),
             "trade_count": float(sum(s.trade_count for s in sessions)),
         }
-    running_ids = {e.agent_id for e in _get_engines_for(slug) if e.is_running}
+    running_ids = {
+        i["agent_id"] for i in _svc().list_runs(slug) if i.get("status") == "running"
+    }
     for s in sessions:
         s.status = "running" if s.agent_id in running_ids else "closed"
     return AgentPerformanceResponse(slug=slug, sessions=sessions, totals=totals)
@@ -1073,8 +944,7 @@ async def get_session_executors(
     controller_id = agent_id
     if session_dir is not None:
         controller_id = read_session_meta(session_dir).get("controller_id") or agent_id
-    strategies = _strategy_store().list(slug)
-    client, _server = await _get_client_for_agent(agent, strategies)
+    client, _server = await _get_client_for_agent(agent)
     if client is None:
         return {
             "executors": [],
@@ -1114,35 +984,29 @@ async def start_session(
     ``execution_mode: "experiment"``, one simulated tick that leaves only a
     flat snapshot.
 
-    ``strategy`` selects the playbook — optional when the agent has exactly
-    one, required (400 listing the options) when it has several.
+    The AGENT.md is the one spec (§5.3): launch config merges over its
+    ``default_config``; a legacy ``strategy`` field in the request is ignored.
     """
-    from condor.agents.lifecycle import LifecycleError
-    from condor.agents.lifecycle import start_session as _start_session
-
     # Web callers always act as themselves (mirror consult): honoring
     # ``req.user_id`` would let any authenticated session start the engine
     # under another user's memory scope and accessible-servers fallback.
     try:
-        return await _start_session(
-            agent_slug=slug,
-            strategy=req.strategy,
+        return await _svc().run(
+            slug,
             config=req.config,
             trading_context=req.trading_context,
             chat_id=req.chat_id,
             user_id=user.id,
         )
     except LifecycleError as e:
-        raise HTTPException(status_code=e.status, detail=e.message)
+        raise _http(e)
 
 
 async def _lifecycle_verb(slug: str, agent_id: str | None, verb: str) -> dict:
-    from condor.agents.lifecycle import LifecycleError, apply_verb
-
     try:
-        return await apply_verb(slug, agent_id, verb)
+        return await _svc().control(slug, verb, agent_id=agent_id)
     except LifecycleError as e:
-        raise HTTPException(status_code=e.status, detail=e.message)
+        raise _http(e)
 
 
 @router.post("/{slug}/stop")
@@ -1190,12 +1054,27 @@ async def resume_agent(
     return await _lifecycle_verb(slug, agent_id, "resume")
 
 
+@router.post("/{slug}/directive")
+async def inject_directive(
+    slug: str,
+    req: DirectiveRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Queue an operator directive for the agent's running session(s)."""
+    if not req.text:
+        raise HTTPException(status_code=400, detail="text is required")
+    try:
+        return _svc().inject_directive(slug, req.text, agent_id=req.agent_id)
+    except LifecycleError as e:
+        raise _http(e)
+
+
 # ── Learnings (agent-level) ──
 
 
 @router.get("/{slug}/learnings")
 async def get_learnings(slug: str, user: WebUser = Depends(get_current_user)):
-    """Read the agent's learnings.md (all strategies, all run kinds)."""
+    """Read the agent's learnings.md (all run kinds)."""
     agent = _get_agent(slug)
     learnings_path = agent.agent_dir / "learnings.md"
     content = learnings_path.read_text() if learnings_path.exists() else ""
@@ -1223,7 +1102,7 @@ async def list_agent_sessions(
     strategy: str | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """List an agent's sessions, optionally filtered to one playbook."""
+    """List an agent's sessions (``?strategy=`` filters the legacy meta tag)."""
     agent = _get_agent(slug)
     sessions = list_sessions(agent.agent_dir, strategy=strategy)
     return {"sessions": [SessionInfo(**s).model_dump() for s in sessions]}

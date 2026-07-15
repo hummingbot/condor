@@ -1,39 +1,39 @@
 """Unified domain *Agent* model + discovery/CRUD store.
 
-An **Agent** is a specialized domain agent with an identity, domain knowledge, a
-tool allowlist, an ``agent_key`` (its default model) and its own memory/skills
-store (FEAT-003, keyed by the directory slug — the "brain"). It replaces the old
-split between ``experts.py`` (consult-only) and the identity half of
-``strategy.py`` (loop-only). An Agent:
+An **Agent** is a specialized domain agent with an identity, domain knowledge,
+a tool allowlist, an ``agent_key`` (its default model) and its own
+memory/skills store (keyed by the directory slug — the "brain"). Since the
+Agent + Strategy collapse (simplification plan §5.3) the ``AGENT.md`` is the
+ONE spec: identity + strategy body + ``default_config`` + ``denomination``
+(the numeraire its risk limits are expressed in) + optional ``schedule``.
+An Agent:
 
 - is **consultable** (CONSULT mode: run its own brain to completion → answer), and
-- **owns strategies** (RUN mode: each strategy is a *playbook* looped by ``TickEngine``).
-
-Capabilities are **derived**, not flagged: an Agent with ``when_to_consult`` is
-consultable (on any model); an Agent with ≥1 strategy is loopeable; it can be both.
+- is **runnable** (RUN mode: ``TickEngine`` loops its spec).
 
 Disk layout::
 
     agents/{slug}/
-        AGENT.md                       # Agent identity + domain knowledge (no `role`)
-        skills/<slug>/SKILL.md         # shared skills (consult + every strategy) [FEAT-002/003]
-        store/user_{id}/               # learned memory (the shared brain) [FEAT-003]
-        strategies/{sslug}.md          # owned playbooks (see strategy.py)
+        AGENT.md                       # the spec (frontmatter + body)
+        skills/<slug>/SKILL.md         # shared skills (consult + runs)
+        store/                         # learned memory (the shared brain)
+        sessions/  experiments/  delegations/   # history (journal.py)
 
-An Agent may be **authored in the repo** (e.g. ``executor_manager``) or **created
-at runtime**; either way ``AgentStore`` can create/update/delete it.
+An Agent may be **authored in the repo** (e.g. ``routine_builder``) or
+**created at runtime**; either way ``AgentStore`` can create/update/delete it.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from condor.memory.store import _parse_frontmatter
+import yaml
 
-from .strategy import _render_frontmatter, _slugify
+from condor.memory.store import _parse_frontmatter
 
 log = logging.getLogger(__name__)
 
@@ -45,12 +45,31 @@ def agents_data_root() -> Path:
     return _DATA_ROOT
 
 
+def _slugify(name: str) -> str:
+    """Convert a name to a filesystem-safe slug.
+
+    Example: "RIVER Scalper v2" -> "river_scalper_v2"
+    """
+    s = name.lower().strip()
+    s = re.sub(r"[^\w\s-]", "", s)
+    s = re.sub(r"[\s-]+", "_", s)
+    return s.strip("_") or "unnamed"
+
+
+def _render_frontmatter(meta: dict, body: str) -> str:
+    """Render YAML frontmatter + markdown body."""
+    frontmatter = yaml.dump(
+        meta, default_flow_style=False, allow_unicode=True, sort_keys=False
+    ).strip()
+    return f"---\n{frontmatter}\n---\n\n{body}\n"
+
+
 @dataclass
 class Agent:
-    slug: str  # directory name == agent_slug for the domain store (FEAT-003)
+    slug: str  # directory name == agent_slug for the domain store
     name: str
     description: str = ""
-    instructions: str = ""  # AGENT.md body: identity + domain knowledge
+    instructions: str = ""  # AGENT.md body: identity + domain knowledge + strategy
     agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code")
     # Tool-name allowlist (pydantic-ai only), enforced on BOTH consult and loop.
     # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
@@ -63,14 +82,23 @@ class Agent:
     # the chat's active server. Empty => fall back to the ambient chat server.
     server_name: str = ""
     # Agent-level risk baseline (RiskLimits keys). Governs unattended delegations
-    # (zero-seeded risk_gate) and is the fallback for tick sessions whose strategy
-    # default_config declares no risk_limits of its own. The AGENT.md defines what
-    # the agent does — a server-backed agent MUST declare a baseline (enforced on
-    # save); {max_position_size_quote: 0, max_open_executors: 0} is the explicit
-    # "read-only, never trades" statement. An empty dict survives only in
-    # hand-written legacy files, where delegate still errors loudly at start.
+    # (zero-seeded risk_gate) and is the baseline for tick sessions (launch
+    # overrides may only TIGHTEN it, §5.3). The AGENT.md defines what the agent
+    # does — a server-backed agent MUST declare a baseline (enforced on save);
+    # {max_position_size_quote: 0, max_open_executors: 0} is the explicit
+    # "read-only, never trades" statement.
     risk_limits: dict = field(default_factory=dict)
-    created_by: int = 0
+    # The numeraire the risk limits are expressed in (e.g. "USDC", "SOL",
+    # "USD") — REQUIRED whenever risk_limits are declared (§5.3/§6.1).
+    denomination: str = ""
+    # Launch defaults (the former strategy default_config): AgentConfig keys —
+    # frequency_sec, total_amount_quote, execution_mode, max_ticks, …
+    default_config: dict = field(default_factory=dict)
+    # Default trading context injected when a launch passes none.
+    default_trading_context: str = ""
+    # Optional unattended schedule: {cron: "0 * * * *", tz: "UTC"} (§5.4).
+    # Schema-validated on save; scheduler EXECUTION lands in Phase 4.
+    schedule: dict = field(default_factory=dict)
     created_at: str = ""
 
     def __post_init__(self):
@@ -83,8 +111,12 @@ class Agent:
 
     @property
     def routines_dir(self) -> Path:
-        """Agent-level routines, shared across all of this agent's strategies."""
+        """Agent-level routines directory."""
         return self.agent_dir / "routines"
+
+    @property
+    def path(self) -> Path:
+        return self.agent_dir / "AGENT.md"
 
     # The one tool that places/stops live executors. An agent that lists it can
     # move real capital and MUST carry a risk baseline (#4).
@@ -131,7 +163,10 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
             server_required=meta.get("server_required", True),
             server_name=meta.get("server_name", "") or "",
             risk_limits=meta.get("risk_limits", {}) or {},
-            created_by=meta.get("created_by", 0),
+            denomination=meta.get("denomination", "") or "",
+            default_config=meta.get("default_config", {}) or {},
+            default_trading_context=meta.get("default_trading_context", "") or "",
+            schedule=meta.get("schedule", {}) or {},
             created_at=meta.get("created_at", ""),
         )
     except Exception:
@@ -142,15 +177,22 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
 class AgentStore:
     """Discovery + CRUD for Agents under ``agents/*/AGENT.md``.
 
-    Replaces ``ExpertStore`` and the identity half of ``StrategyStore``. There is
-    no ``role`` discriminator anymore: every directory with an ``AGENT.md`` is an
-    Agent; whether it is consultable/loopeable is derived from its definition.
+    Every directory with an ``AGENT.md`` is an Agent; whether it is
+    consultable/runnable is derived from its definition.
     """
 
     def get(self, slug: str) -> Agent | None:
         if not slug:
             return None
         return _load_agent_from_dir(_DATA_ROOT / slug)
+
+    def source_text(self, slug: str) -> str:
+        """The authored AGENT.md bytes (the ``source_spec_hash`` input)."""
+        path = _DATA_ROOT / slug / "AGENT.md"
+        try:
+            return path.read_text()
+        except FileNotFoundError:
+            return ""
 
     def list_all(self) -> list[Agent]:
         agents: list[Agent] = []
@@ -183,7 +225,10 @@ class AgentStore:
         server_required: bool = True,
         server_name: str = "",
         risk_limits: dict | None = None,
-        created_by: int = 0,
+        denomination: str = "",
+        default_config: dict | None = None,
+        default_trading_context: str = "",
+        schedule: dict | None = None,
     ) -> Agent:
         agent = Agent(
             slug=_slugify(name),
@@ -196,7 +241,10 @@ class AgentStore:
             server_required=server_required,
             server_name=server_name,
             risk_limits=risk_limits or {},
-            created_by=created_by,
+            denomination=denomination,
+            default_config=default_config or {},
+            default_trading_context=default_trading_context,
+            schedule=schedule or {},
         )
         self._save(agent)
         log.info("Created agent %s (dir: %s)", agent.name, agent.slug)
@@ -211,8 +259,8 @@ class AgentStore:
         if not path.exists():
             return False
         path.unlink()
-        # Remove the whole dir only when nothing else lives there (no strategies,
-        # store or skills) — the brain/strategies must not be silently dropped.
+        # Remove the whole dir only when nothing else lives there (no store or
+        # skills) — the brain/history must not be silently dropped.
         try:
             if not any(agent_dir.iterdir()):
                 agent_dir.rmdir()
@@ -234,6 +282,12 @@ class AgentStore:
                 "{'max_position_size_quote': 0, 'max_open_executors': 0} "
                 "for a read-only agent that must never trade."
             )
+        # Cross-field spec validation (§5.3/§5.4): risk limits need a
+        # denomination; a schedule needs a valid cron/tz and a bounded
+        # duration.
+        from condor.agents.spec import validate_agent_spec
+
+        validate_agent_spec(agent)
         meta = {
             "name": agent.name,
             "description": agent.description,
@@ -243,9 +297,13 @@ class AgentStore:
             "server_required": agent.server_required,
             "server_name": agent.server_name,
             "risk_limits": agent.risk_limits,
-            "created_by": agent.created_by,
+            "denomination": agent.denomination,
+            "default_config": agent.default_config,
+            "default_trading_context": agent.default_trading_context,
             "created_at": agent.created_at,
         }
+        if agent.schedule:
+            meta["schedule"] = agent.schedule
         agent.agent_dir.mkdir(parents=True, exist_ok=True)
         (agent.agent_dir / "AGENT.md").write_text(
             _render_frontmatter(meta, agent.instructions)

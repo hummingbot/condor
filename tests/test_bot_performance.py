@@ -227,17 +227,11 @@ def test_executors_provider_forwards_bot_name(monkeypatch):
 def _minimal_prompt(config):
     from condor.agents.prompts import build_tick_prompt
 
-    agent = SimpleNamespace(instructions="", agent_key="claude-code", slug="river")
-    strategy = SimpleNamespace(
-        instructions="Do the thing.",
-        agent_key="claude-code",
-        slug="scalp",
-        agent_slug="river",
-        dir=None,
+    agent = SimpleNamespace(
+        instructions="Do the thing.", agent_key="claude-code", slug="river"
     )
     return build_tick_prompt(
         agent=agent,
-        strategy=strategy,
         config=config,
         core_data={},
         learnings="",

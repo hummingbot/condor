@@ -1,8 +1,8 @@
-"""Unit tests for the unified Agent model: AgentStore + Strategy sub-resource.
+"""Unit tests for the unified Agent model (AGENT.md is the ONE spec, §5.3).
 
 Covers the FEAT-004 capabilities derived from a definition (consultable vs
-loopeable), the strategy CRUD scoped under an Agent, the shared per-Agent skill
-library, and the pydantic-ai tool allowlist.
+runnable), the shared per-Agent skill library, and the pydantic-ai tool
+allowlist.
 """
 
 import asyncio
@@ -10,9 +10,7 @@ from types import SimpleNamespace
 
 from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.agents import agent as agent_module
-from condor.agents import strategy as strategy_module
 from condor.agents.agent import AgentStore
-from condor.agents.strategy import StrategyStore
 
 
 def _write_agent(root, slug, *, body="Body.", **frontmatter):
@@ -26,7 +24,9 @@ def _write_agent(root, slug, *, body="Body.", **frontmatter):
 
 def _patch_roots(monkeypatch, tmp_path):
     monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setattr(
+        "condor.agents.service.agents_data_root", lambda: tmp_path
+    )
 
 
 # ── Agent discovery + derived capabilities ──
@@ -106,6 +106,7 @@ def test_agent_crud_roundtrip(tmp_path, monkeypatch):
         agent_key="ollama:x",
         when_to_consult="ask me",
         risk_limits={"max_position_size_quote": 500, "max_open_executors": 3},
+        denomination="USDC",
     )
     assert a.slug == "river_maker"
     assert (tmp_path / "river_maker" / "AGENT.md").exists()
@@ -139,6 +140,7 @@ def test_server_backed_agent_requires_risk_baseline(tmp_path, monkeypatch):
         name="Read Only",
         instructions="x",
         risk_limits={"max_position_size_quote": 0, "max_open_executors": 0},
+        denomination="USD",
     )
     assert store.get(ro.slug).risk_limits["max_open_executors"] == 0
 
@@ -152,58 +154,26 @@ def test_server_backed_agent_requires_risk_baseline(tmp_path, monkeypatch):
         store.update(ro)
 
 
-# ── Strategy as an Agent sub-resource ──
-
-
-def test_strategy_crud_under_agent(tmp_path, monkeypatch):
-    _patch_roots(monkeypatch, tmp_path)
-    _write_agent(tmp_path, "brigado", name="Brigado", agent_key="claude-code")
-
-    store = StrategyStore()
-    s = store.create(
-        agent_slug="brigado",
-        name="BRL MM",
-        description="tactic",
-        instructions="do the thing",
-        default_config={"connector_name": "binance"},
-    )
-    assert s.slug == "brl_mm"
-    assert s.key == "brigado.brl_mm"
-    assert s.path == tmp_path / "brigado" / "strategies" / "brl_mm.md"
-    assert s.path.exists()
-
-    # get / get_by_key / list
-    assert store.get("brigado", "brl_mm").instructions.strip() == "do the thing"
-    assert store.get_by_key("brigado.brl_mm").name == "BRL MM"
-    assert [x.slug for x in store.list("brigado")] == ["brl_mm"]
-
-    # A second strategy under the same Agent (shares the brain).
-    store.create(agent_slug="brigado", name="BRL Scalp", instructions="scalp")
-    assert sorted(x.slug for x in store.list("brigado")) == ["brl_mm", "brl_scalp"]
-    assert sorted(x.key for x in store.list_all()) == [
-        "brigado.brl_mm",
-        "brigado.brl_scalp",
-    ]
-
-    assert store.delete("brigado", "brl_scalp") is True
-    assert [x.slug for x in store.list("brigado")] == ["brl_mm"]
-
-
-def test_strategy_agent_key_override_optional(tmp_path, monkeypatch):
-    _patch_roots(monkeypatch, tmp_path)
-    _write_agent(tmp_path, "brigado", name="Brigado", agent_key="claude-code")
-    store = StrategyStore()
-    # No override => inherits the Agent's model (agent_key is None).
-    s = store.create(agent_slug="brigado", name="Inherit", instructions="x")
-    assert store.get_by_key(s.key).agent_key is None
-    # Explicit override persists.
-    s2 = store.create(
-        agent_slug="brigado", name="Override", instructions="x", agent_key="ollama:z"
-    )
-    assert store.get_by_key(s2.key).agent_key == "ollama:z"
-
-
 # ── MCP tool: manage_trading_agent agent CRUD (the AGENT.md identity) ──
+
+
+def _stub_control(monkeypatch):
+    """Route the MCP tool's call_control through the REAL agent handlers
+    (tool → handler → AgentService → store), no socket involved."""
+    import inspect
+
+    from condor.control.handlers import build_agent_handlers
+    from mcp_servers.condor.tools import trading_agent as ta
+
+    handlers = build_agent_handlers()
+
+    async def fake_call_control(method, params=None, timeout=60):
+        result = handlers[method](**(params or {}))
+        if inspect.isawaitable(result):
+            result = await result
+        return result
+
+    monkeypatch.setattr(ta, "call_control", fake_call_control)
 
 
 def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
@@ -212,6 +182,7 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
     from mcp_servers.condor.tools import trading_agent as ta
 
     _patch_roots(monkeypatch, tmp_path)
+    _stub_control(monkeypatch)
     monkeypatch.setattr(settings, "user_id", 7, raising=False)
 
     created = asyncio.run(
@@ -224,6 +195,7 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
             when_to_consult="when sizing a position",
             tools=["get_market_data"],
             risk_limits={"max_position_size_quote": 0, "max_open_executors": 0},
+            denomination="USD",
         )
     )
     assert created["created"] is True
@@ -258,31 +230,19 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
     ]
     assert any(a["slug"] == "risk_sentry" for a in listed)
 
-    assert asyncio.run(
+    deleted = asyncio.run(
         ta.manage_trading_agent(action="delete_agent", agent_slug="risk_sentry")
-    ) == {"deleted": True}
-    assert "error" in asyncio.run(
+    )
+    assert deleted["deleted"] is True and deleted["tombstoned"] is True
+    # Tombstone, not erase: history stays readable, but the agent leaves the
+    # default listing and the slug is reserved.
+    assert "instructions" in asyncio.run(
         ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
     )
-
-
-def test_create_strategy_requires_existing_agent(tmp_path, monkeypatch):
-    """A strategy can't be created under an agent that does not exist."""
-    from mcp_servers.condor.settings import settings
-    from mcp_servers.condor.tools import trading_agent as ta
-
-    _patch_roots(monkeypatch, tmp_path)
-    monkeypatch.setattr(settings, "user_id", 7, raising=False)
-
-    result = asyncio.run(
-        ta.manage_trading_agent(
-            action="create_strategy",
-            agent_slug="ghost",
-            name="S",
-            instructions="x",
-        )
-    )
-    assert "error" in result and "not found" in result["error"].lower()
+    listed_after = asyncio.run(
+        ta.manage_trading_agent(action="list_agent_definitions")
+    )["agents"]
+    assert not any(a["slug"] == "risk_sentry" for a in listed_after)
 
 
 def test_routines_dir_resolves_bare_agent_slug(tmp_path, monkeypatch):

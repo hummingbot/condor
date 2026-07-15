@@ -22,7 +22,7 @@ import logging
 from typing import Any
 
 from .agent import Agent
-from .strategy import _parse_frontmatter
+from condor.memory.store import _parse_frontmatter
 
 log = logging.getLogger(__name__)
 

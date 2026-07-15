@@ -48,12 +48,13 @@ async def manage_executors(
             {
                 "type": executor_type,
                 "config": config,
-                # Attribution trio threaded into this subprocess by the run:
+                # Attribution pair threaded into this subprocess by the run:
                 # slug = WHO, agent_id = WHICH RUN (session "{slug}_{N}" or
-                # delegation "{slug}-dN"), strategy = WHICH PLAYBOOK (ticks only).
+                # delegation "{slug}-dN"). strategy is retired (§5.3 Agent+
+                # Strategy collapse) — kept "" for record-schema compat.
                 "agent_slug": settings.agent_slug or "",
                 "agent_id": agent_id or settings.agent_id or "",
-                "strategy": settings.strategy or "",
+                "strategy": "",
                 # Trade-notification routing back to this run's owner
                 "user_id": settings.user_id or 0,
                 "chat_id": settings.chat_id or 0,

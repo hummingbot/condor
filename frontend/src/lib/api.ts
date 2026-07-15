@@ -335,17 +335,6 @@ export interface RunningInstance {
   risk_limits: Record<string, unknown>;
 }
 
-// Strategy = a pure playbook template (refactor-01b). All operational history
-// (sessions, experiments, learnings) lives at the agent level.
-export interface PlaybookSummary {
-  slug: string;
-  name: string;
-  description: string;
-  agent_key: string | null;
-  default_config: Record<string, unknown>;
-  session_count: number;
-}
-
 export interface AgentSummary {
   slug: string;
   name: string;
@@ -353,8 +342,10 @@ export interface AgentSummary {
   consultable: boolean;
   when_to_consult: string;
   agent_key: string;
-  strategy_count: number;
-  strategies: PlaybookSummary[];
+  denomination: string;
+  default_config: Record<string, unknown>;
+  default_trading_context: string;
+  schedule: Record<string, unknown> | null;
   // Agent-level history rollups for summary cards.
   status: string;
   agent_id?: string;
@@ -444,7 +435,7 @@ export interface ExperimentInfo {
 }
 
 // Agent = identity + brain (AGENT.md, tools, consult capability) that owns
-// playbooks AND all operational history (sessions, experiments, learnings).
+// all operational history (sessions, experiments, learnings).
 export interface AgentDetail {
   slug: string;
   name: string;
@@ -457,7 +448,10 @@ export interface AgentDetail {
   server_required: boolean;
   server_name: string;
   risk_limits: Record<string, unknown>;
-  strategies: PlaybookSummary[];
+  denomination: string;
+  default_config: Record<string, unknown>;
+  default_trading_context: string;
+  schedule: Record<string, unknown> | null;
   learnings: string;
   status: string;
   agent_id: string;
@@ -479,19 +473,6 @@ export interface Delegation {
   status: "running" | "done" | "error" | "stopped";
   result: string;
   error: string;
-}
-
-// Playbook detail — the template only; history lives on AgentDetail.
-export interface PlaybookDetail {
-  slug: string;
-  agent_slug: string;
-  name: string;
-  description: string;
-  strategy_md: string;
-  default_config: Record<string, unknown>;
-  default_trading_context: string;
-  agent_key: string | null;
-  session_count: number;
 }
 
 export interface SnapshotSummary {
@@ -1016,57 +997,11 @@ export const api = {
       { method: "POST" },
     ),
 
-  // ── Strategies (pure playbook templates under an Agent) ──
-
-  getStrategies: (slug: string) =>
-    apiFetch<PlaybookSummary[]>(`/api/v1/agents/${encodeURIComponent(slug)}/strategies`),
-
-  getStrategy: (slug: string, sslug: string) =>
-    apiFetch<PlaybookDetail>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
-    ),
-
-  createStrategy: (
-    slug: string,
-    data: {
-      name: string;
-      description?: string;
-      instructions?: string;
-      agent_key?: string;
-      default_trading_context?: string;
-      config?: Record<string, unknown>;
-    },
-  ) =>
-    apiFetch<PlaybookSummary>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies`,
-      { method: "POST", body: JSON.stringify(data) },
-    ),
-
-  updateStrategyMd: (slug: string, sslug: string, content: string) =>
-    apiFetch<{ updated: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
-      { method: "PUT", body: JSON.stringify({ content }) },
-    ),
-
-  updateStrategyConfig: (slug: string, sslug: string, config: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/config`,
-      { method: "PUT", body: JSON.stringify({ config }) },
-    ),
-
-  deleteStrategy: (slug: string, sslug: string) =>
-    apiFetch<{ deleted: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
-      { method: "DELETE" },
-    ),
-
   // ── Agent history: performance, sessions, lifecycle (all agent-level) ──
 
-  getAgentPerformance: (slug: string, strategy?: string) =>
+  getAgentPerformance: (slug: string) =>
     apiFetch<AgentPerformanceResponse>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/performance${
-        strategy ? `?strategy=${encodeURIComponent(strategy)}` : ""
-      }`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/performance`,
     ),
 
   getSessionExecutors: (slug: string, sessionNum: number) =>
@@ -1076,13 +1011,12 @@ export const api = {
 
   startAgent: (
     slug: string,
-    strategy = "",
     config: Record<string, unknown> = {},
     trading_context = "",
   ) =>
-    apiFetch<{ started: boolean; agent_id: string; strategy: string }>(
+    apiFetch<{ started: boolean; agent_id: string }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/start`,
-      { method: "POST", body: JSON.stringify({ strategy, config, trading_context }) },
+      { method: "POST", body: JSON.stringify({ config, trading_context }) },
     ),
 
   stopAgent: (slug: string, agentId?: string) =>
@@ -1120,14 +1054,10 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
 
-  getAgentSessions: (slug: string, opts: { strategy?: string } = {}) => {
-    const params = new URLSearchParams();
-    if (opts.strategy) params.set("strategy", opts.strategy);
-    const qs = params.toString();
-    return apiFetch<{ sessions: SessionInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions${qs ? `?${qs}` : ""}`,
-    );
-  },
+  getAgentSessions: (slug: string) =>
+    apiFetch<{ sessions: SessionInfo[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/sessions`,
+    ),
 
   getSessionJournal: (slug: string, sessionNum: number) =>
     apiFetch<{ content: string }>(

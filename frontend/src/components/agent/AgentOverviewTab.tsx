@@ -159,17 +159,14 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 
 export function PerformancePanel({
   slug,
-  strategy = "",
   onSessionClick,
 }: {
   slug: string;
-  /** Optional playbook filter — per-playbook track records are a metadata filter. */
-  strategy?: string;
   onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
 }) {
   const { data } = useQuery({
-    queryKey: ["agent-performance", slug, strategy],
-    queryFn: () => api.getAgentPerformance(slug, strategy || undefined),
+    queryKey: ["agent-performance", slug],
+    queryFn: () => api.getAgentPerformance(slug),
     refetchInterval: 10000,
   });
   const totals = data?.totals || {};

@@ -1,171 +1,60 @@
-"""Trading agent strategy CRUD, lifecycle, monitoring, and journal."""
+"""Trading agent CRUD, lifecycle, monitoring, and journal.
 
-from pathlib import Path
+Since the Agent + Strategy collapse (simplification plan §5.3) the AGENT.md is
+the ONE spec — identity + strategy body + ``default_config`` + ``denomination``
++ optional ``schedule``. Agent CRUD and lifecycle go through the main process's
+control socket so ``AgentService`` owns every guard (tombstone semantics,
+running-engine checks, spec validation) exactly once (§5.2). Journal and
+monitoring tools read the shared filesystem directly.
+"""
 
 from mcp_servers.condor.condor_client import call_control, slug_from_agent_id
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
 
 # ---------------------------------------------------------------------------
-# Strategy CRUD (sub-resource of an Agent)
-#
-# ``strategy_id`` is the opaque composite key ``"{agent_slug}.{strategy_slug}"``
-# returned by list_strategies/create_strategy — the LLM just passes it back.
-# ``agent_slug`` (the owning Agent) is required to create a strategy.
+# Agent definitions (the AGENT.md identities — distinct from running instances)
 # ---------------------------------------------------------------------------
 
 
-def _manage_strategy(
-    action: str,
-    strategy_id: str | None,
-    agent_slug: str | None,
-    name: str | None,
-    description: str | None,
-    instructions: str | None,
-    agent_key: str | None,
-    config: dict | None,
-) -> dict:
-    from condor.agents.strategy import StrategyStore, split_key
-
-    store = StrategyStore()
-
-    if action == "list_strategies":
-        strategies = store.list_all()
-        return {
-            "strategies": [
-                {
-                    "id": s.key,
-                    "agent_slug": s.agent_slug,
-                    "name": s.name,
-                    "description": s.description,
-                    "agent_key": s.agent_key,
-                    "default_config": s.default_config,
-                }
-                for s in strategies
-            ]
-        }
-
-    elif action == "get_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        s = store.get_by_key(strategy_id)
-        if not s:
-            return {"error": f"Strategy '{strategy_id}' not found"}
-        return {
-            "id": s.key,
-            "agent_slug": s.agent_slug,
-            "name": s.name,
-            "description": s.description,
-            "agent_key": s.agent_key,
-            "instructions": s.instructions,
-            "default_config": s.default_config,
-            "created_by": s.created_by,
-            "created_at": s.created_at,
-        }
-
-    elif action == "create_strategy":
-        if not name or not instructions:
-            return {"error": "name and instructions are required"}
-        if not agent_slug:
-            return {
-                "error": "agent_slug (the owning Agent) is required to create a strategy"
-            }
-        from condor.agents.agent import AgentStore
-
-        if AgentStore().get(agent_slug) is None:
-            return {"error": f"Agent '{agent_slug}' not found"}
-        strategy = store.create(
-            agent_slug=agent_slug,
-            name=name,
-            description=description or "",
-            agent_key=agent_key,
-            instructions=instructions,
-            default_config=config,
-            created_by=settings.user_id,
-        )
-        return {"created": True, "strategy_id": strategy.key, "name": strategy.name}
-
-    elif action == "update_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        s = store.get_by_key(strategy_id)
-        if not s:
-            return {"error": f"Strategy '{strategy_id}' not found"}
-        if name:
-            s.name = name
-        if description:
-            s.description = description
-        if instructions:
-            s.instructions = instructions
-        if agent_key:
-            s.agent_key = agent_key
-        if config:
-            s.default_config = config
-        store.update(s)
-        return {"updated": True, "strategy_id": s.key, "name": s.name}
-
-    elif action == "delete_strategy":
-        if not strategy_id:
-            return {"error": "strategy_id is required"}
-        parts = split_key(strategy_id)
-        if not parts:
-            return {"error": f"Invalid strategy_id '{strategy_id}'"}
-        deleted = store.delete(parts[0], parts[1])
-        return {"deleted": deleted}
-
-    return {"error": f"Unknown strategy action: {action}"}
-
-
-# ---------------------------------------------------------------------------
-# Agent definitions (the AGENT.md identities — distinct from strategies/instances)
-# ---------------------------------------------------------------------------
-
-
-def _list_agent_definitions() -> dict:
+async def _list_agent_definitions() -> dict:
     """List the Agent identities (agents/*/AGENT.md), with capabilities.
 
     An *agent* (e.g. ``executor_manager``, ``brigado``) is distinct from a
-    *strategy* (a looping playbook it owns) and from a running *instance*. This
-    surfaces consult-only agents and loopable agents that ``list_strategies`` /
-    ``list_agents`` (instances) never show.
+    running *instance*. This surfaces consult-only agents that ``list_agents``
+    (live instances) never shows.
     """
-    from condor.agents.agent import AgentStore
-    from condor.agents.strategy import StrategyStore
-
-    strat_names: dict[str, list[str]] = {}
-    for s in StrategyStore().list_all():
-        strat_names.setdefault(s.agent_slug, []).append(s.name)
-
-    agents = []
-    for a in AgentStore().list_all():
-        owned = strat_names.get(a.slug, [])
-        agents.append(
+    result = await call_control("agent.definitions")
+    agents = result.get("agents", []) if isinstance(result, dict) else []
+    return {
+        "agents": [
             {
-                "slug": a.slug,
-                "name": a.name,
-                "description": a.description,
-                "agent_key": a.agent_key,
-                "consultable": a.consultable,
-                "when_to_consult": a.when_to_consult,
-                "loopable": bool(owned),
-                "strategies": owned,
-                "tools": a.tools,
+                "slug": a.get("slug"),
+                "name": a.get("name"),
+                "description": a.get("description"),
+                "agent_key": a.get("agent_key"),
+                "consultable": a.get("consultable"),
+                "when_to_consult": a.get("when_to_consult"),
+                "can_trade": a.get("can_trade"),
+                "denomination": a.get("denomination"),
+                "schedule": a.get("schedule"),
+                "tools": a.get("tools"),
             }
-        )
-    return {"agents": agents}
+            for a in agents
+        ]
+    }
 
 
 # ---------------------------------------------------------------------------
-# Agent CRUD (the AGENT.md identity itself — the primary artifact)
+# Agent CRUD (the AGENT.md identity itself — the ONE spec, §5.3)
 #
-# An Agent is the brain/identity. It is created FIRST; routines and strategies
-# are sub-resources that hang off an existing agent_slug. Capability is derived:
-# ``when_to_consult`` => consultable (on any model); ≥1 strategy => loopeable.
-# A bare agent (no trigger, no strategy) is a stub.
+# Every mutation goes over the control socket: the main-process AgentService
+# owns the guards (reserved tombstoned slugs, running-engine/nonterminal-
+# executor checks on delete, risk_limits/denomination validation on save).
 # ---------------------------------------------------------------------------
 
 
-def _manage_agent(
+async def _manage_agent(
     action: str,
     agent_slug: str | None,
     name: str | None,
@@ -177,96 +66,83 @@ def _manage_agent(
     server_required: bool | None,
     server_name: str | None,
     risk_limits: dict | None,
+    denomination: str | None,
+    default_config: dict | None,
+    default_trading_context: str | None,
+    schedule: dict | None,
 ) -> dict:
-    from condor.agents.agent import AgentStore
-
-    store = AgentStore()
-
     if action == "create_agent":
         if not name:
             return {"error": "name is required to create an agent"}
-        agent = store.create(
-            name=name,
-            description=description or "",
-            instructions=instructions or "",
-            agent_key=agent_key or "",
-            tools=tools,
-            when_to_consult=when_to_consult or "",
-            server_required=True if server_required is None else server_required,
-            server_name=server_name or "",
-            risk_limits=risk_limits,
-            created_by=settings.user_id,
+        result = await call_control(
+            "agent.create",
+            {
+                "name": name,
+                "description": description or "",
+                "instructions": instructions or "",
+                "agent_key": agent_key or "",
+                "tools": tools or [],
+                "when_to_consult": when_to_consult or "",
+                "server_required": True if server_required is None else server_required,
+                "server_name": server_name or "",
+                "risk_limits": risk_limits or {},
+                "denomination": denomination or "",
+                "default_config": default_config or {},
+                "default_trading_context": default_trading_context or "",
+                "schedule": schedule or {},
+            },
         )
+        agent = result.get("agent", {}) if isinstance(result, dict) else {}
         return {
             "created": True,
-            "agent_slug": agent.slug,
-            "name": agent.name,
-            "consultable": agent.consultable,
+            "agent_slug": agent.get("slug"),
+            "name": agent.get("name"),
+            "consultable": agent.get("consultable"),
         }
+
+    if not agent_slug:
+        return {"error": "agent_slug is required"}
 
     if action == "get_agent":
-        if not agent_slug:
-            return {"error": "agent_slug is required"}
-        a = store.get(agent_slug)
-        if not a:
-            return {"error": f"Agent '{agent_slug}' not found"}
-        return {
-            "slug": a.slug,
-            "name": a.name,
-            "description": a.description,
-            "instructions": a.instructions,
-            "agent_key": a.agent_key,
-            "tools": a.tools,
-            "when_to_consult": a.when_to_consult,
-            "server_required": a.server_required,
-            "server_name": a.server_name,
-            "risk_limits": a.risk_limits,
-            "consultable": a.consultable,
-            "created_by": a.created_by,
-            "created_at": a.created_at,
-        }
+        result = await call_control("agent.get", {"slug": agent_slug})
+        return result.get("agent", result) if isinstance(result, dict) else result
 
     if action == "update_agent":
-        if not agent_slug:
-            return {"error": "agent_slug is required"}
-        a = store.get(agent_slug)
-        if not a:
-            return {"error": f"Agent '{agent_slug}' not found"}
-        if name:
-            a.name = name
-        if description is not None:
-            a.description = description
-        if instructions is not None:
-            a.instructions = instructions
-        if agent_key is not None:
-            a.agent_key = agent_key
-        if tools is not None:
-            a.tools = tools
-        if when_to_consult is not None:
-            a.when_to_consult = when_to_consult
-        if server_required is not None:
-            a.server_required = server_required
-        if server_name is not None:
-            a.server_name = server_name
-        if risk_limits is not None:
-            a.risk_limits = risk_limits
-        store.update(a)
-        return {"updated": True, "agent_slug": a.slug, "consultable": a.consultable}
+        patch = {
+            k: v
+            for k, v in {
+                "name": name,
+                "description": description,
+                "instructions": instructions,
+                "agent_key": agent_key,
+                "tools": tools,
+                "when_to_consult": when_to_consult,
+                "server_required": server_required,
+                "server_name": server_name,
+                "risk_limits": risk_limits,
+                "denomination": denomination,
+                "default_config": default_config,
+                "default_trading_context": default_trading_context,
+                "schedule": schedule,
+            }.items()
+            if v is not None
+        }
+        if not patch:
+            return {"error": "no fields to update"}
+        result = await call_control(
+            "agent.update", {"slug": agent_slug, "patch": patch}
+        )
+        agent = result.get("agent", {}) if isinstance(result, dict) else {}
+        return {
+            "updated": True,
+            "agent_slug": agent.get("slug"),
+            "consultable": agent.get("consultable"),
+        }
 
     if action == "delete_agent":
-        if not agent_slug:
-            return {"error": "agent_slug is required"}
-        from condor.agents.strategy import StrategyStore
-
-        owned = StrategyStore().list(agent_slug)
-        if owned:
-            return {
-                "error": (
-                    f"Agent '{agent_slug}' still owns {len(owned)} strategy(ies). "
-                    "Delete its strategies first."
-                )
-            }
-        return {"deleted": store.delete(agent_slug)}
+        # Tombstone, not erase (§5.2): the service rejects while engines run or
+        # nonterminal executors remain; history stays readable, slug reserved.
+        return await call_control("agent.delete", {"slug": agent_slug})
 
     return {"error": f"Unknown agent action: {action}"}
 
@@ -310,14 +186,13 @@ def _agent_list_routines(agent_slug: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Agent lifecycle (delegates to main process via web API)
+# Agent lifecycle (delegates to main process via the control socket)
 # ---------------------------------------------------------------------------
 
 
 async def _agent_lifecycle(
     action: str,
     agent_slug: str | None,
-    strategy: str | None,
     agent_id: str | None,
     config: dict | None,
 ) -> dict:
@@ -333,51 +208,25 @@ async def _agent_lifecycle(
             if not agent_slug:
                 return {"error": "agent_slug is required"}
 
-            from condor.agents.agent import AgentStore
-            from condor.agents.strategy import StrategyStore
+            # Existence check + the agent's pinned server. Launch defaults and
+            # risk merging are owned by the main-process service (§5.3) — we
+            # only send the caller's overrides.
+            result = await call_control("agent.get", {"slug": agent_slug})
+            owner = result.get("agent", {}) if isinstance(result, dict) else {}
 
-            owner = AgentStore().get(agent_slug)
-            if owner is None:
-                return {"error": f"Agent '{agent_slug}' not found"}
-
-            # The strategy is a start-time selector: optional when the agent has
-            # exactly one, REQUIRED (with the options listed) when it has several.
-            strategies = StrategyStore().list(agent_slug)
-            if strategy:
-                selected = next((s for s in strategies if s.slug == strategy), None)
-                if selected is None:
-                    return {
-                        "error": f"Agent '{agent_slug}' has no strategy '{strategy}'. "
-                        f"Available: {[s.slug for s in strategies] or 'none'}"
-                    }
-            elif len(strategies) == 1:
-                selected = strategies[0]
-            elif not strategies:
-                return {
-                    "error": f"Agent '{agent_slug}' has no strategies — create one "
-                    "with create_strategy before starting it."
-                }
-            else:
-                return {
-                    "error": f"Agent '{agent_slug}' has several strategies — pass "
-                    f"strategy=<slug>. Available: {[s.slug for s in strategies]}"
-                }
-
-            from config_manager import get_config_manager, get_effective_server
-
-            config_dict = dict(selected.default_config or {})
-            if config:
-                if config.get("dry_run") and "execution_mode" not in config:
-                    config["execution_mode"] = "experiment"
-                config_dict.update(config)
+            config_dict = dict(config or {})
+            if config_dict.get("dry_run") and "execution_mode" not in config_dict:
+                config_dict["execution_mode"] = "experiment"
             if action == "start_experiment":
                 # The experiment verb IS the mode — no config knob to get wrong.
                 config_dict["execution_mode"] = "experiment"
-            if not config or "server_name" not in config:
-                # A server pinned on the owning Agent wins over the ambient chat
+            if "server_name" not in config_dict:
+                from config_manager import get_config_manager, get_effective_server
+
+                # A server pinned on the Agent wins over the ambient chat
                 # server, mirroring consult/delegate resolution.
                 effective = (
-                    owner.server_name
+                    owner.get("server_name")
                     or settings.active_server
                     or get_effective_server(settings.chat_id)
                 )
@@ -393,8 +242,7 @@ async def _agent_lifecycle(
             return await call_control(
                 "agent.start",
                 {
-                    "agent_slug": agent_slug,
-                    "strategy": selected.slug,
+                    "slug": agent_slug,
                     "config": config_dict,
                     "trading_context": trading_context,
                     "chat_id": settings.chat_id,
@@ -416,7 +264,7 @@ async def _agent_lifecycle(
             slug = slug_from_agent_id(agent_id)
             return await call_control(
                 "agent.verb",
-                {"slug": slug, "agent_id": agent_id, "verb": verb},
+                {"slug": slug, "verb": verb, "agent_id": agent_id},
             )
 
         return {"error": f"Unknown lifecycle action: {action}"}
@@ -583,16 +431,7 @@ def journal_write(
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     if entry_type == "learning":
-        # Provenance: learnings pool at the agent level, so tick-session entries
-        # carry their strategy slug (live engine, else the session's meta.yml).
-        strategy_slug = ""
-        if engine is not None:
-            strategy_slug = engine.strategy.slug
-        elif session_dir is not None:
-            from condor.agents.journal import read_session_meta
-
-            strategy_slug = read_session_meta(session_dir).get("strategy", "")
-        jm.append_learning(text, category=category or "market", strategy=strategy_slug)
+        jm.append_learning(text, category=category or "market")
     elif entry_type == "state":
         jm.write_state(text)
     else:
@@ -641,9 +480,7 @@ def _agent_monitoring(action: str, agent_id: str | None) -> dict:
 async def manage_trading_agent(
     action: str,
     agent_id: str | None = None,
-    strategy_id: str | None = None,
     agent_slug: str | None = None,
-    strategy: str | None = None,
     name: str | None = None,
     description: str | None = None,
     instructions: str | None = None,
@@ -655,12 +492,19 @@ async def manage_trading_agent(
     server_required: bool | None = None,
     server_name: str | None = None,
     risk_limits: dict | None = None,
+    denomination: str | None = None,
+    default_config: dict | None = None,
+    default_trading_context: str | None = None,
+    schedule: dict | None = None,
 ) -> dict:
-    # Agent definitions (identities) — distinct from strategies and instances
+    # Agent definitions (identities) — distinct from running instances
     if action == "list_agent_definitions":
-        return _list_agent_definitions()
+        try:
+            return await _list_agent_definitions()
+        except APIError as e:
+            return {"error": str(e)}
 
-    # Agent CRUD — the AGENT.md identity itself (created before routines/strategies)
+    # Agent CRUD — the AGENT.md identity, the ONE spec (§5.3)
     agent_def_actions = {
         "create_agent",
         "get_agent",
@@ -668,39 +512,26 @@ async def manage_trading_agent(
         "delete_agent",
     }
     if action in agent_def_actions:
-        return _manage_agent(
-            action,
-            agent_slug,
-            name,
-            description,
-            instructions,
-            agent_key,
-            tools,
-            when_to_consult,
-            server_required,
-            server_name,
-            risk_limits,
-        )
-
-    # Strategy operations
-    local_strategy_actions = {
-        "list_strategies",
-        "get_strategy",
-        "create_strategy",
-        "update_strategy",
-        "delete_strategy",
-    }
-    if action in local_strategy_actions:
-        return _manage_strategy(
-            action,
-            strategy_id,
-            agent_slug,
-            name,
-            description,
-            instructions,
-            agent_key,
-            config,
-        )
+        try:
+            return await _manage_agent(
+                action,
+                agent_slug,
+                name,
+                description,
+                instructions,
+                agent_key,
+                tools,
+                when_to_consult,
+                server_required,
+                server_name,
+                risk_limits,
+                denomination,
+                default_config,
+                default_trading_context,
+                schedule,
+            )
+        except APIError as e:
+            return {"error": str(e)}
 
     # Routine actions scoped to an agent
     if action == "list_routines":
@@ -728,7 +559,7 @@ async def manage_trading_agent(
         "list_agents",
     }
     if action in lifecycle_actions:
-        return await _agent_lifecycle(action, agent_slug, strategy, agent_id, config)
+        return await _agent_lifecycle(action, agent_slug, agent_id, config)
 
     # Journal reads/writes are the standalone trading_agent_journal_read /
     # trading_agent_journal_write tools — the canonical interface used by live

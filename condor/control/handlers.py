@@ -28,17 +28,19 @@ def build_executor_handlers() -> dict[str, Handler]:
 
 
 def build_agent_handlers() -> dict[str, Handler]:
-    """Agent-session lifecycle + consult + delegate — the rest of what the MCP
-    needs so it runs entirely over the socket (no web app)."""
+    """AgentService verbs over the socket — CRUD + lifecycle + consult +
+    delegate — so the MCP subprocess runs entirely over the socket (no web
+    app) and every surface goes through the ONE service (§5.2)."""
     from condor.agents import delegate as dg
-    from condor.agents import lifecycle
-    from condor.agents.consult import run_consult
     from condor.agents.lifecycle import LifecycleError
+    from condor.agents.service import AgentService
+
+    svc = AgentService()
 
     async def _consult(agent, task, context="", chat_id=0, user_id=0, server_name=None):
-        answer = await run_consult(
-            slug=agent, user_id=user_id, chat_id=chat_id,
-            server_name=server_name, task=task, context=context,
+        answer = await svc.consult(
+            agent, task, context=context, user_id=user_id, chat_id=chat_id,
+            server_name=server_name,
         )
         return {"agent": agent, "answer": answer}
 
@@ -77,10 +79,25 @@ def build_agent_handlers() -> dict[str, Handler]:
         return {"stopped": await dg.stop_delegation(task_id)}
 
     return {
-        "agent.list": lambda: {"agents": lifecycle.list_instances()},
-        "agent.start": lambda **kw: lifecycle.start_session(**kw),
-        "agent.verb": lambda **kw: lifecycle.apply_verb(**kw),
+        # lifecycle
+        "agent.list": lambda: {"agents": svc.list_runs()},
+        "agent.start": lambda **kw: svc.run(**kw),
+        "agent.verb": lambda slug, verb, agent_id=None: svc.control(
+            slug, verb, agent_id=agent_id
+        ),
         "agent.consult": lambda **kw: _consult(**kw),
+        # CRUD (the service owns guards — tombstone semantics, spec validation)
+        "agent.get": lambda slug: {"agent": svc.agent_summary(svc.get(slug))},
+        "agent.definitions": lambda: {
+            "agents": [svc.agent_summary(a) for a in svc.list()]
+        },
+        "agent.create": lambda **kw: {"agent": svc.agent_summary(svc.create(**kw))},
+        "agent.update": lambda slug, patch: {
+            "agent": svc.agent_summary(svc.update(slug, patch))
+        },
+        "agent.delete": lambda slug, reason="": svc.delete(slug, reason=reason),
+        "agent.directive": lambda **kw: svc.inject_directive(**kw),
+        # delegations
         "delegate.start": lambda **kw: _delegate_start(**kw),
         "delegate.list": lambda: {"delegations": [d.to_dict() for d in dg.get_all_delegations().values()]},
         "delegate.get": lambda task_id: _delegate_get(task_id),

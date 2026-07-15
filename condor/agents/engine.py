@@ -36,7 +36,6 @@ from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
 from .risk import RiskEngine, RiskLimits, RiskState, risk_gate
 from .run import run_agent
-from .strategy import Strategy
 
 log = logging.getLogger(__name__)
 
@@ -67,8 +66,7 @@ def get_all_engines() -> dict[str, "TickEngine"]:
 
 @dataclass
 class TickEngine:
-    agent: Agent  # owning Agent: identity + shared brain (memory/skills)
-    strategy: Strategy  # the playbook this session loops (tactics + config)
+    agent: Agent  # the spec: identity + strategy body + shared brain (§5.3)
     config: dict[str, Any]
     chat_id: int
     user_id: int
@@ -79,6 +77,7 @@ class TickEngine:
     is_experiment: bool = field(default=False, init=False)
 
     # Components (created in __post_init__)
+    frozen_spec: Any = field(default=None, init=False)
     journal: JournalManager = field(init=False)
     risk: RiskEngine = field(init=False)
     provider_registry: ProviderRegistry = field(init=False)
@@ -100,8 +99,7 @@ class TickEngine:
     _active_client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        # All operational state hangs off the *agent* dir (refactor-01b); the
-        # strategy is a start-time selector recorded as session metadata.
+        # All operational state hangs off the *agent* dir (refactor-01b).
         agent_dir = self.agent.agent_dir
 
         # run_once is not a storage mode: it's an ordinary tick session capped
@@ -118,6 +116,23 @@ class TickEngine:
         # govern this agent's delegations.
         if not self.config.get("risk_limits") and self.agent.risk_limits:
             self.config["risk_limits"] = dict(self.agent.risk_limits)
+
+        # Freeze the effective spec (§5.3) AFTER the config mutations above so
+        # the frozen view is the config the run actually executes: validates
+        # the agent spec (denomination/schedule rules) and computes both spec
+        # hashes. Launch merging + stricter-only risk enforcement already
+        # happened in lifecycle.start_session.
+        from .spec import freeze_spec
+
+        try:
+            from .agent import AgentStore
+
+            source_text = AgentStore().source_text(self.agent.slug)
+        except Exception:
+            source_text = ""
+        self.frozen_spec = freeze_spec(
+            self.agent, self.config, source_text=source_text
+        )
 
         # agent_id == controller_id tag: "{agent_slug}_{N}" (sessions) or
         # "{agent_slug}_e{N}" (experiments).
@@ -136,20 +151,22 @@ class TickEngine:
 
             save_full_config(self.session_dir, self.config)
 
-            write_session_meta(
-                self.session_dir,
-                {
-                    "strategy": self.strategy.slug,
-                    "status": "running",
-                    "model": self._agent_key(),
-                    "started_at": datetime.now(timezone.utc).isoformat(),
-                },
-            )
+            meta = {
+                "status": "running",
+                "model": self._agent_key(),
+                "started_at": datetime.now(timezone.utc).isoformat(),
+            }
+            # Both spec hashes are recorded with the run (§5.3): the authored
+            # AGENT.md bytes and the frozen effective spec.
+            if self.frozen_spec is not None:
+                meta["source_spec_hash"] = self.frozen_spec.source_hash
+                meta["resolved_spec_hash"] = self.frozen_spec.resolved_hash
+            write_session_meta(self.session_dir, meta)
 
             self.journal = JournalManager(
                 self.agent_id,
-                strategy_name=self.strategy.name,
-                strategy_description=self.strategy.description,
+                strategy_name=self.agent.name,
+                strategy_description=self.agent.description,
                 session_dir=self.session_dir,
                 agent_dir=agent_dir,
             )
@@ -476,7 +493,6 @@ class TickEngine:
         next_tick = self.journal.tick_count + 1 if self.journal else 1
         prompt = build_tick_prompt(
             agent=self.agent,
-            strategy=self.strategy,
             config=self.config,
             core_data=core_data_summaries,
             learnings=learnings,
@@ -517,7 +533,6 @@ class TickEngine:
             timeout_s=300,
             on_client=_hold_client,
             agent_id=self.agent_id,
-            strategy=self.strategy.slug,
         )
 
         # The attempt completed — acknowledge the directives it carried.
@@ -691,12 +706,8 @@ class TickEngine:
         return native_active, core_data_summaries
 
     def _agent_key(self) -> str:
-        """Resolve the model for this run: config override > strategy override > Agent."""
-        return (
-            self.config.get("agent_key")
-            or self.strategy.agent_key
-            or self.agent.agent_key
-        )
+        """Resolve the model for this run: config override > Agent default."""
+        return self.config.get("agent_key") or self.agent.agent_key
 
     def _resolve_server(self) -> tuple[str | None, dict | None]:
         """Resolve the server for this agent."""
@@ -768,8 +779,8 @@ class TickEngine:
 
         return {
             "agent_id": self.agent_id,
-            "strategy": self.strategy.name,
-            "strategy_slug": self.strategy.slug,
+            "agent_slug": self.agent.slug,
+            "agent_name": self.agent.name,
             "session_num": self.session_num,
             "status": self.status,
             "tick_count": summary["total_ticks"],

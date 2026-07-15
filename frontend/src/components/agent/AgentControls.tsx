@@ -12,7 +12,7 @@ import {
 import { useState } from "react";
 
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { type PlaybookSummary, api } from "@/lib/api";
+import { api } from "@/lib/api";
 
 // ── Start Session Dialog ──
 
@@ -20,26 +20,24 @@ export function StartSessionDialog({
   open,
   onClose,
   slug,
-  strategies,
-  defaultStrategy = "",
+  defaultConfig = {},
+  defaultTradingContext = "",
 }: {
   open: boolean;
   onClose: () => void;
   slug: string;
-  strategies: PlaybookSummary[];
-  defaultStrategy?: string;
+  defaultConfig?: Record<string, unknown>;
+  defaultTradingContext?: string;
 }) {
   const queryClient = useQueryClient();
   useEscapeKey(open, onClose);
-  const [strategySlug, setStrategySlug] = useState(
-    defaultStrategy || (strategies.length === 1 ? strategies[0].slug : ""),
-  );
-  const selected = strategies.find((s) => s.slug === strategySlug) || strategies[0];
-  const agentConfig = (selected?.default_config || {}) as Record<string, unknown>;
+  const agentConfig = defaultConfig;
   const riskDefaults = (agentConfig.risk_limits || {}) as Record<string, unknown>;
 
   const [executionMode, setExecutionMode] = useState<"experiment" | "run_once" | "loop">("loop");
-  const [context, setContext] = useState((agentConfig.trading_context as string) || "");
+  const [context, setContext] = useState(
+    defaultTradingContext || (agentConfig.trading_context as string) || "",
+  );
   const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
   const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
   const [frequencySec, setFrequencySec] = useState(String(agentConfig.frequency_sec ?? 60));
@@ -66,7 +64,7 @@ export function StartSessionDialog({
           max_drawdown_pct: Number(maxDrawdown),
         },
       };
-      return api.startAgent(slug, strategySlug || (selected?.slug ?? ""), config, context);
+      return api.startAgent(slug, config, context);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agent", slug] });
@@ -94,27 +92,6 @@ export function StartSessionDialog({
         </div>
 
         <div className="space-y-5">
-          {/* Strategy (playbook) selector */}
-          {strategies.length > 1 && (
-            <div>
-              <label className={labelClass}>Strategy (playbook)</label>
-              <select
-                value={strategySlug}
-                onChange={(e) => setStrategySlug(e.target.value)}
-                className={inputClass}
-              >
-                <option value="" disabled>
-                  Select a playbook…
-                </option>
-                {strategies.map((s) => (
-                  <option key={s.slug} value={s.slug}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
           {/* Execution Mode */}
           <div>
             <label className={labelClass}>Execution Mode</label>
@@ -265,7 +242,7 @@ export function StartSessionDialog({
           </button>
           <button
             onClick={() => startMut.mutate()}
-            disabled={startMut.isPending || (strategies.length > 1 && !strategySlug)}
+            disabled={startMut.isPending}
             className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white transition-all disabled:opacity-40 ${
               executionMode === "experiment" ? "bg-blue-600 hover:bg-blue-500" : executionMode === "run_once" ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"
             }`}
@@ -290,7 +267,17 @@ export function StartSessionDialog({
 
 // ── Agent Controls ──
 
-export function AgentControls({ slug, strategies, status }: { slug: string; strategies: PlaybookSummary[]; status: string }) {
+export function AgentControls({
+  slug,
+  status,
+  defaultConfig = {},
+  defaultTradingContext = "",
+}: {
+  slug: string;
+  status: string;
+  defaultConfig?: Record<string, unknown>;
+  defaultTradingContext?: string;
+}) {
   const queryClient = useQueryClient();
   const [showStartDialog, setShowStartDialog] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
@@ -347,8 +334,7 @@ export function AgentControls({ slug, strategies, status }: { slug: string; stra
         {status === "idle" || status === "stopped" ? (
           <button
             onClick={() => setShowStartDialog(true)}
-            disabled={strategies.length === 0}
-            title={strategies.length === 0 ? "Create a strategy (playbook) first" : "Start a session"}
+            title="Start a session"
             className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500"
           >
             <Play className="h-3.5 w-3.5" /> Start
@@ -385,7 +371,8 @@ export function AgentControls({ slug, strategies, status }: { slug: string; stra
         open={showStartDialog}
         onClose={() => setShowStartDialog(false)}
         slug={slug}
-        strategies={strategies}
+        defaultConfig={defaultConfig}
+        defaultTradingContext={defaultTradingContext}
       />
     </>
   );

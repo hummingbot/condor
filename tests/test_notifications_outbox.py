@@ -81,13 +81,12 @@ def test_serverless_session_builds_condor_only():
 
     servers = build_mcp_servers_for_session(
         user_id=1, chat_id=1, agent_slug="memecoin_trender",
-        agent_id="memecoin_trender_1", strategy="trend_position",
+        agent_id="memecoin_trender_1",
         include_hummingbot=False,
     )
     assert [s["name"] for s in servers] == ["condor"]
     args = servers[0]["args"]
     assert "--agent-id" in args and "memecoin_trender_1" in args
-    assert "--strategy" in args and "trend_position" in args
 
 
 def test_serverless_prompt_has_no_hummingbot_refs():
@@ -99,10 +98,9 @@ def test_serverless_prompt_has_no_hummingbot_refs():
 
     def prompt(server_required):
         agent = SimpleNamespace(slug="memecoin_trender", server_required=server_required,
-                                agent_key="claude-acp:sonnet", instructions="hunt memecoins")
-        strat = SimpleNamespace(agent_key=None, instructions="trend playbook",
-                                slug="trend_position", agent_slug="memecoin_trender", dir=None)
-        return build_tick_prompt(agent, strat, {"execution_mode": "loop"}, {}, "", "", "", {},
+                                agent_key="claude-acp:sonnet",
+                                instructions="hunt memecoins\n\ntrend playbook")
+        return build_tick_prompt(agent, {"execution_mode": "loop"}, {}, "", "", "", {},
                                  tick_number=1, agent_id="memecoin_trender_2")
 
     serverless = prompt(False)

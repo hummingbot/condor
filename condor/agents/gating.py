@@ -87,7 +87,6 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
 SYSTEM_MUTATION_ACTIONS: dict[str, set[str]] = {
     "manage_trading_agent": {
         "create_agent", "update_agent", "delete_agent",
-        "create_strategy", "update_strategy", "delete_strategy",
     },
     "manage_routines": {"create_routine", "edit_routine", "delete_routine"},
     "manage_skill": {"create", "write_file", "patch", "edit", "delete"},

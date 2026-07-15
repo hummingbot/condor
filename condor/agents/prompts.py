@@ -10,7 +10,6 @@ from __future__ import annotations
 from typing import Any
 
 from .agent import Agent
-from .strategy import Strategy
 
 BASE_PROMPT_LIVE = """\
 You are an autonomous trading agent running inside Condor.
@@ -179,7 +178,6 @@ def _build_routines_section(agent_slug: str) -> str:
 
 def build_tick_prompt(
     agent: Agent,
-    strategy: Strategy,
     config: dict[str, Any],
     core_data: dict[str, str],
     learnings: str,
@@ -194,15 +192,14 @@ def build_tick_prompt(
 ) -> str:
     """Build the full prompt for one agent tick.
 
-    Composes the Agent's domain identity (``agent.instructions``) with the
-    strategy's tactic (``strategy.instructions``): the Agent says *who you are and
-    what you know*; the strategy says *what to do this tick*.
+    The AGENT.md body IS the spec (§5.3 collapse): domain identity + the
+    strategy tactic in one document (``agent.instructions``).
     """
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     execution_mode = config.get("execution_mode", "loop")
     is_experiment = execution_mode == "experiment"
-    agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
+    agent_key = config.get("agent_key") or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
     # Serverless agents run condor-only (no mcp-hummingbot); the prompt must
     # match the actual wiring (condor/agents/run.py) or the model reaches for
@@ -259,11 +256,10 @@ def build_tick_prompt(
     # Server credentials are injected via env vars into the MCP process,
     # so no need to include them in the prompt or call configure_server.
 
-    # Agent identity + domain knowledge (who you are), then the strategy tactic
-    # (what to do this tick). The Agent body is shared across all its strategies.
+    # The agent spec: identity + domain knowledge + strategy tactic, one
+    # document (AGENT.md body — §5.3 collapse).
     if agent.instructions.strip():
-        sections.append(f"[AGENT — domain identity & knowledge]\n{agent.instructions}")
-    sections.append(f"[STRATEGY INSTRUCTIONS]\n{strategy.instructions}")
+        sections.append(f"[AGENT — identity, knowledge & strategy]\n{agent.instructions}")
 
     # Available skills (playbooks) + routines, unified under one header. Skills
     # are read fresh each tick (the agent may create its own mid-session), so

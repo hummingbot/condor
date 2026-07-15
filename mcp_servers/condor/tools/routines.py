@@ -1,9 +1,43 @@
 """Routine discovery, execution, and CRUD operations."""
 
 import asyncio
+import logging
 from pathlib import Path
 
 from mcp_servers.condor.settings import settings
+
+log = logging.getLogger(__name__)
+
+
+def _authoring_target(agent_slug: str | None) -> tuple[str | None, dict | None]:
+    """Resolve the IMMUTABLE authoring target for routine mutations (§7.2).
+
+    An agent-scoped session (``settings.agent_slug`` set at spawn by the main
+    process — consult, delegation, tick) may author ONLY its own routines: the
+    target is the session's agent, and a caller-supplied ``agent_slug`` naming
+    a DIFFERENT agent is denied and recorded. The chat coordinator (no session
+    agent) acts for the human and may target any existing agent explicitly.
+
+    Returns ``(effective_agent_slug, error_dict_or_None)``.
+    """
+    session_agent = settings.agent_slug or ""
+    if session_agent:
+        if agent_slug and agent_slug != session_agent:
+            log.warning(
+                "routine authoring denied: session agent %r attempted to "
+                "target %r",
+                session_agent,
+                agent_slug,
+            )
+            return None, {
+                "error": (
+                    f"routine authoring is scoped to your own agent "
+                    f"('{session_agent}') — you cannot create or edit "
+                    f"another agent's routines ('{agent_slug}')"
+                )
+            }
+        return session_agent, None
+    return agent_slug, None
 
 
 def _get_agent_routines_dir(agent_slug: str | None) -> Path | None:
@@ -279,6 +313,9 @@ def create_routine(name: str, code: str, agent_slug: str | None) -> dict:
     if not code:
         return {"error": "code is required"}
 
+    agent_slug, denied = _authoring_target(agent_slug)
+    if denied:
+        return denied
     routines_dir = _get_agent_routines_dir(agent_slug)
     if not routines_dir:
         return {
@@ -335,6 +372,9 @@ def read_routine(name: str, agent_slug: str | None) -> dict:
 
 def edit_routine(name: str, code: str, agent_slug: str | None) -> dict:
     """Update the source code of an agent-local routine."""
+    agent_slug, denied = _authoring_target(agent_slug)
+    if denied:
+        return denied
     routines_dir = _get_agent_routines_dir(agent_slug)
     if not routines_dir:
         return {
@@ -373,6 +413,9 @@ def edit_routine(name: str, code: str, agent_slug: str | None) -> dict:
 
 def delete_routine(name: str, agent_slug: str | None) -> dict:
     """Delete an agent-local routine."""
+    agent_slug, denied = _authoring_target(agent_slug)
+    if denied:
+        return denied
     routines_dir = _get_agent_routines_dir(agent_slug)
     if not routines_dir:
         return {

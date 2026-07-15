@@ -79,7 +79,6 @@ async def run_agent(
     fallback_on_unhealthy: bool = False,
     on_client: Callable[[Any], None] | None = None,
     agent_id: str = "",
-    strategy: str = "",
 ) -> RunResult:
     """Run ``agent``'s brain to completion on ``prompt``; return a RunResult.
 
@@ -90,13 +89,11 @@ async def run_agent(
             executors are attributed to the run that created them: session id
             ("{slug}_{N}") for ticks, delegation id ("{slug}-dN") for
             delegations, empty for chat/consults.
-        strategy: Strategy slug for tick runs (executor attribution only;
-            empty for delegations — they run no playbook).
         server_name: The EFFECTIVE hummingbot server for this run (caller
             resolves pin-vs-ambient). None → session wiring (ambient server,
             or none for serverless agents).
         model: Resolved model key; None → the agent's default. Callers own
-            any override triad (tick: config > strategy > agent).
+            any override order (tick: config > agent).
         fallback_on_unhealthy: When True and the (pydantic-ai) backend is
             down, fall back to CONSULT_FALLBACK_MODEL (default claude-code)
             with a visible note — consult/delegate behavior. When False, a
@@ -161,7 +158,6 @@ async def run_agent(
             agent_slug=agent.slug,
             execution_mode=execution_mode,
             agent_id=agent_id,
-            strategy=strategy,
         )
     else:
         mcp_servers = build_mcp_servers_for_session(
@@ -170,7 +166,6 @@ async def run_agent(
             execution_mode=execution_mode,
             agent_slug=agent.slug,
             agent_id=agent_id,
-            strategy=strategy,
             # Serverless agents run condor-only: wiring mcp-hummingbot too
             # exposes a second manage_executors with an incompatible schema.
             include_hummingbot=agent.server_required,

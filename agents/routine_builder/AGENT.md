@@ -7,7 +7,6 @@ tools: []
 when_to_consult: When the user wants to create, modify, fix, or debug a routine (market
   analysis, monitoring, charts, reports) — or delegate routine creation to the background.
 server_required: false
-created_by: 481175164
 created_at: '2026-06-30T08:39:27.451630+00:00'
 ---
 
