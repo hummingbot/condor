@@ -434,6 +434,10 @@
     const valueLabel = encodings.value_label || String(component.y).replaceAll("_", " ");
     const colorLabel = encodings.color_label || String(component.color || "color").replaceAll("_", " ");
     const totalValue = points.reduce((sum, point) => sum + point.value, 0);
+    const transparent = "rgba(0,0,0,0)";
+    const tileLineColor = document.documentElement.classList.contains("light") ? "#d8dce8" : "rgba(15, 23, 42, 0.82)";
+    let rootId = "__condor_treemap_root__:" + (component.id || "chart");
+    while (points.some((point) => String(point.id) === rootId)) rootId += "_";
     const formattedColors = points.map((point) => {
       if (!Number.isFinite(point.color)) return "N/A";
       const formatted = formatValue(point.color, colorConfig);
@@ -441,33 +445,37 @@
     });
     const trace = {
       type: "treemap",
-      ids: points.map((point) => point.id),
-      labels: points.map((point) => point.label),
-      parents: points.map(() => ""),
-      values: points.map((point) => point.value),
-      customdata: points.map((point) => point.id),
-      text: formattedColors,
-      texttemplate: points.map((point) => (
+      ids: [rootId, ...points.map((point) => point.id)],
+      labels: ["", ...points.map((point) => point.label)],
+      parents: ["", ...points.map(() => rootId)],
+      values: [totalValue, ...points.map((point) => point.value)],
+      branchvalues: "total",
+      customdata: [null, ...points.map((point) => point.id)],
+      text: ["", ...formattedColors],
+      texttemplate: ["", ...points.map((point) => (
         component.color && point.value / totalValue >= 0.02
           ? "<b>%{label}</b><br><b>%{text}</b>"
           : "<b>%{label}</b>"
-      )),
+      ))],
       textposition: "middle center",
-      hovertext: points.map((point, index) => {
+      hovertext: ["", ...points.map((point, index) => {
         const details = [String(point.label), valueLabel + ": " + formatValue(point.value, valueConfig)];
         if (component.color) details.push(colorLabel + ": " + formattedColors[index]);
         return details.join("<br>");
-      }),
+      })],
       hovertemplate: "%{hovertext}<extra></extra>",
       pathbar: { visible: false },
       tiling: { pad: 3 },
       textfont: { color: "#ffffff", size: compactChartLayout ? 15 : 20 },
       marker: {
-        line: { color: "rgba(15, 23, 42, 0.82)", width: 2 },
+        line: {
+          color: [transparent, ...points.map(() => tileLineColor)],
+          width: [0, ...points.map(() => 2)],
+        },
       },
     };
     if (component.color) {
-      trace.marker.colors = points.map((point) => Number.isFinite(point.color) ? point.color : 0);
+      trace.marker.colors = [transparent, ...points.map((point) => Number.isFinite(point.color) ? point.color : 0)];
       trace.marker.colorscale = [
         [0, "#ea3943"],
         [0.5, "#475569"],
@@ -485,7 +493,7 @@
         thickness: 10,
       };
     } else {
-      trace.marker.colors = points.map(() => "#d4a845");
+      trace.marker.colors = [transparent, ...points.map(() => "#d4a845")];
     }
     return trace;
   }

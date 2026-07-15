@@ -182,7 +182,7 @@ def test_gallery_run_uses_component_gallery_identity(reports_dir):
     report_id = re.search(r"\(([a-z0-9]+)\)", result).group(1)
     entry = reports.get_report(report_id)
 
-    assert result == f"Hummingbot Component Gallery saved ({report_id})."
-    assert entry["title"] == "Hummingbot Component Gallery"
+    assert result == f"Report Component Gallery saved ({report_id})."
+    assert entry["title"] == "Report Component Gallery"
     assert "components" in entry["tags"]
     assert "static" not in entry["tags"]

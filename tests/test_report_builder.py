@@ -210,6 +210,15 @@ def test_footprint_filters_invalid_rows_and_keeps_zero_visible():
     assert len(figure.data[0].open) == 2
     assert figure.layout.xaxis2.range[0] == 0
     assert figure.layout.yaxis.range[0] > 0
+    total_labels = next(
+        trace for trace in figure.data if trace.name == "Total volume values"
+    )
+    delta_labels = next(
+        trace for trace in figure.data if trace.name == "Net delta values"
+    )
+    assert total_labels.textfont.size == delta_labels.textfont.size == 9
+    assert total_labels.textfont.color is None
+    assert delta_labels.textfont.color is None
     assert all(hasattr(value, "tzinfo") for value in candle_timestamps(candles[:2]))
     assert candle_timestamps(candles) == [0, 1, 2, 3, 4]
 
@@ -221,7 +230,8 @@ def test_report_runtime_core_with_node(tmp_path):
     harness.write_text(
         "const fs = require('fs');\n"
         "global.window = {location: {protocol: 'file:'}, innerWidth: 1200};\n"
-        "global.document = {documentElement: {classList: {contains: () => false}}, getElementById: (id) => id === 'condor-report-spec' ? {textContent: '{\"datasets\":{},\"components\":[]}'} : null};\n"
+        "let lightTheme = false;\n"
+        "global.document = {documentElement: {classList: {contains: () => lightTheme}}, getElementById: (id) => id === 'condor-report-spec' ? {textContent: '{\"datasets\":{},\"components\":[]}'} : null};\n"
         f"eval(fs.readFileSync({json.dumps(str(runtime_path))}, 'utf8'));\n"
         "const core = window.CondorReportRuntime.__test;\n"
         "const state = core.initialRangeState(null, 0.8, 52.1, 'number');\n"
@@ -252,20 +262,29 @@ def test_report_runtime_core_with_node(tmp_path):
         "if (histogram.x.length !== 1 || histogram.x[0] !== 7 || histogram.y[0] !== 2) process.exit(12);\n"
         "if (histogram.customdata[0].join(',') !== 'a,b') process.exit(13);\n"
         "const heatmapRows = [{id: 'btc', row: {symbol: 'BTC', volume: 100, change: 0.25}}, {id: 'btc-2', row: {symbol: 'BTC', volume: 50, change: null}}, {id: 'eth', row: {symbol: 'ETH', volume: 25, change: -0.4}}, {id: 'tiny', row: {symbol: 'TINY', volume: 1, change: 0.1}}, {id: 'bad', row: {symbol: 'BAD', volume: 0, change: 20}}];\n"
-        "const heatmap = core.chartTraces({chart_type: 'treemap', x: 'symbol', y: 'volume', color: 'change', encodings: {value_prefix: '$', color_suffix: '%'}, title: 'Trends'}, heatmapRows)[0];\n"
-        "if (heatmap.type !== 'treemap' || heatmap.labels.join(',') !== 'BTC,BTC,ETH,TINY') process.exit(14);\n"
-        "if (heatmap.ids.join(',') !== 'btc,btc-2,eth,tiny' || heatmap.customdata.join(',') !== 'btc,btc-2,eth,tiny') process.exit(15);\n"
-        "if (heatmap.marker.cmin !== -0.4 || heatmap.marker.cmax !== 0.4 || heatmap.marker.cmid !== 0) process.exit(16);\n"
-        "if (heatmap.text[0] !== '+0.25%' || heatmap.text[1] !== 'N/A') process.exit(17);\n"
-        "if (heatmap.textfont.size !== 20 || heatmap.textposition !== 'middle center') process.exit(18);\n"
-        "if (!heatmap.texttemplate[0].includes('%{text}') || heatmap.texttemplate[3].includes('%{text}')) process.exit(19);\n"
+        "const heatmap = core.chartTraces({id: 'heatmap', chart_type: 'treemap', x: 'symbol', y: 'volume', color: 'change', encodings: {value_prefix: '$', color_suffix: '%'}, title: 'Trends'}, heatmapRows)[0];\n"
+        "const rootId = '__condor_treemap_root__:heatmap';\n"
+        "if (heatmap.type !== 'treemap' || heatmap.labels.slice(1).join(',') !== 'BTC,BTC,ETH,TINY') process.exit(14);\n"
+        "if (heatmap.ids[0] !== rootId || heatmap.ids.slice(1).join(',') !== 'btc,btc-2,eth,tiny') process.exit(15);\n"
+        "if (heatmap.customdata[0] !== null || heatmap.customdata.slice(1).join(',') !== 'btc,btc-2,eth,tiny') process.exit(16);\n"
+        "if (heatmap.parents[0] !== '' || heatmap.parents.slice(1).some((parent) => parent !== rootId)) process.exit(17);\n"
+        "if (heatmap.values[0] !== 176 || heatmap.branchvalues !== 'total') process.exit(18);\n"
+        "if (heatmap.marker.cmin !== -0.4 || heatmap.marker.cmax !== 0.4 || heatmap.marker.cmid !== 0) process.exit(19);\n"
+        "if (heatmap.marker.colors[0] !== 'rgba(0,0,0,0)' || heatmap.marker.line.width[0] !== 0) process.exit(20);\n"
+        "if (heatmap.marker.line.color[1] !== 'rgba(15, 23, 42, 0.82)') process.exit(21);\n"
+        "if (heatmap.text[1] !== '+0.25%' || heatmap.text[2] !== 'N/A') process.exit(22);\n"
+        "if (heatmap.textfont.size !== 20 || heatmap.textposition !== 'middle center') process.exit(23);\n"
+        "if (!heatmap.texttemplate[1].includes('%{text}') || heatmap.texttemplate[4].includes('%{text}')) process.exit(24);\n"
+        "lightTheme = true;\n"
+        "const lightHeatmap = core.chartTraces({id: 'heatmap', chart_type: 'treemap', x: 'symbol', y: 'volume', color: 'change', encodings: {}, title: 'Trends'}, heatmapRows)[0];\n"
+        "if (lightHeatmap.marker.line.color[1] !== '#d8dce8') process.exit(25);\n"
         "const plainHeatmap = core.chartTraces({chart_type: 'treemap', x: 'symbol', y: 'volume', encodings: {}, title: 'Sizes'}, heatmapRows)[0];\n"
-        "if (plainHeatmap.marker.colors.length !== 4 || plainHeatmap.marker.color !== undefined) process.exit(20);\n"
+        "if (plainHeatmap.marker.colors.length !== 5 || plainHeatmap.marker.colors[0] !== 'rgba(0,0,0,0)' || plainHeatmap.marker.color !== undefined) process.exit(26);\n"
         "const line = core.chartTraces({chart_type: 'line', x: 'group', y: 'value', encodings: {text: 'label'}, title: 'Line'}, aggregateRows)[0];\n"
-        "if (line.mode !== 'lines+text' || line.textposition !== 'top center') process.exit(21);\n"
+        "if (line.mode !== 'lines+text' || line.textposition !== 'top center') process.exit(27);\n"
         "const box = core.chartTraces({chart_type: 'box', x: 'group', y: 'value', y_label: 'Value (USD)', selection_field: 'label', encodings: {}, title: 'Box'}, aggregateRows)[0];\n"
-        "if (!box.hovertemplate.includes('Value (USD)') || box.hovertemplate.includes('bps')) process.exit(22);\n"
-        "if (box.jitter !== 0 || box.pointpos !== 0) process.exit(23);\n",
+        "if (!box.hovertemplate.includes('Value (USD)') || box.hovertemplate.includes('bps')) process.exit(28);\n"
+        "if (box.jitter !== 0 || box.pointpos !== 0) process.exit(29);\n",
         encoding="utf-8",
     )
     subprocess.run(["node", str(harness)], check=True)
