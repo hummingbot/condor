@@ -45,7 +45,7 @@ async def run_consult(
     """
     from condor.agents.policies import human_gate
     from condor.agents.run import run_agent
-    from handlers.agents._shared import build_agent_context
+    from condor.agents.context import build_agent_context
 
     store = AgentStore()
     agent = store.get(slug)

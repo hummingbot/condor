@@ -77,7 +77,7 @@ def test_read_notifications_filters(outbox):
 
 
 def test_serverless_session_builds_condor_only():
-    from handlers.agents._shared import build_mcp_servers_for_session
+    from condor.agents.context import build_mcp_servers_for_session
 
     servers = build_mcp_servers_for_session(
         user_id=1, chat_id=1, agent_slug="memecoin_trender",

@@ -532,7 +532,7 @@ class _FakeACPClient:
 
 def _run_create_session(monkeypatch, **kwargs):
     """Invoke get_or_create_session with the ACP client + context stubbed out."""
-    from handlers.agents import session as session_module
+    from condor.agents import chat_session as session_module
 
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr(session_module, "ACPClient", _FakeACPClient)
@@ -679,7 +679,7 @@ def test_consult_forces_caller_user_id(monkeypatch):
 
 def test_condor_brain_loads_from_repo_root():
     """The chat brain is repo-root CONDOR.md (refactor-06): frontmatter + body."""
-    from handlers.agents._shared import _load_condor
+    from condor.agents.context import _load_condor
 
     meta, body = _load_condor()
     assert meta.get("label") == "Condor"
@@ -693,7 +693,7 @@ def test_session_mcp_servers_carry_agent_slug(monkeypatch):
     stores (e.g. 'routine_cookbook not found')."""
     import config_manager
 
-    from handlers.agents._shared import build_mcp_servers_for_session
+    from condor.agents.context import build_mcp_servers_for_session
 
     class _NoServers:
         def get_accessible_servers(self, user_id):

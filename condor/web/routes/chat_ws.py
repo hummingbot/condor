@@ -24,13 +24,10 @@ from condor.acp.client import (
 )
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
-from handlers.agents._shared import (
-    AGENT_OPTIONS,
-    DEFAULT_AGENT,
-    is_dangerous_tool_call,
-)
-from handlers.agents.confirmation import _format_tool_summary
-from handlers.agents.session import destroy_session, get_or_create_session, get_session
+from condor.agents.context import AGENT_OPTIONS, DEFAULT_AGENT
+from condor.agents.gating import is_dangerous_tool_call
+from condor.agents.confirmation import _format_tool_summary
+from condor.agents.chat_session import destroy_session, get_or_create_session, get_session
 
 log = logging.getLogger(__name__)
 

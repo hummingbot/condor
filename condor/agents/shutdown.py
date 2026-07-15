@@ -307,7 +307,7 @@ async def _run_llm_cleanup(
     try:
         from .policies import AUTO
         from .run import run_agent
-        from handlers.agents._shared import build_agent_context
+        from condor.agents.context import build_agent_context
 
         running = await _get_running_executors(engine, client)
         positions = await _fetch_positions(client, engine.agent_id)

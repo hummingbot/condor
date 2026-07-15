@@ -213,7 +213,7 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
     """Background runner: drive the agent to completion, persist, notify."""
     from condor.agents.policies import AUTO, risk_gate
     from condor.agents.run import run_agent
-    from handlers.agents._shared import build_agent_context
+    from condor.agents.context import build_agent_context
 
     if dt.risk_limits is not None:
         policy = risk_gate(dt.risk_limits)  # zero-seeded: caps = per-run budget

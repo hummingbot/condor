@@ -1,6 +1,6 @@
 """Unit tests for the human-readable confirmation-prompt formatter."""
 
-from handlers.agents.confirmation import _format_tool_summary
+from condor.agents.confirmation import _format_tool_summary
 
 
 def _bot_call(action: str, **extra) -> dict:

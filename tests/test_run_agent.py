@@ -57,7 +57,7 @@ def _wire_fakes(monkeypatch):
     monkeypatch.setattr(run_module, "ACPClient", _FakeClient)
     monkeypatch.setattr(run_module, "PydanticAIClient", _FakeClient)
 
-    import handlers.agents._shared as shared
+    import condor.agents.context as shared
 
     monkeypatch.setattr(shared, "build_mcp_servers_for_session", lambda *a, **k: [])
     monkeypatch.setattr(shared, "build_mcp_servers_for_agent", lambda *a, **k: [])

@@ -114,7 +114,7 @@ async def run_agent(
     """
     import asyncio
 
-    from handlers.agents._shared import (
+    from condor.agents.context import (
         build_mcp_servers_for_agent,
         build_mcp_servers_for_session,
         get_project_dir,

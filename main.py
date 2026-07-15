@@ -518,6 +518,16 @@ async def post_init(application: Application) -> None:
 
     await start_health_monitor(application.bot)
 
+    # Register the Telegram confirmation transport so human_gate (consults)
+    # can route dangerous-tool approvals to the user's chat. Without a
+    # registered transport the gate fails closed (mutations denied).
+    import functools
+
+    from condor.agents.confirmation import set_confirmation_transport
+    from handlers.agents.confirmation import permission_callback
+
+    set_confirmation_transport(functools.partial(permission_callback, application.bot))
+
     # Schedule periodic update checks (notifies admin)
     from handlers.admin.update import schedule_update_checks
 
@@ -561,12 +571,6 @@ async def watch_and_reload(application: Application) -> None:
     async for changes in awatch(*watch_paths, watch_filter=_ReloadFilter()):
         logger.info(f"📝 Detected changes: {changes}")
         try:
-            # Reload assistants if any .md file in assistants/ changed
-            if any(str(assistants_path) in str(path) for _, path in changes):
-                from handlers.agents._shared import reload_assistants
-
-                reload_assistants()
-                logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
             register_handlers(application)
             # Refresh the Telegram command menus too, so a newly added/removed

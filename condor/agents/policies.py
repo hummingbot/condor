@@ -38,7 +38,7 @@ def deny_gate(reason: str):
     client AUTO-APPROVES everything (that is exactly how AUTO works), so a
     failed gate must deny, loudly, never downgrade.
     """
-    from handlers.agents._shared import is_dangerous_tool_call
+    from condor.agents.gating import is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
@@ -61,10 +61,11 @@ def deny_gate(reason: str):
 
 
 def human_gate(chat_id: int):
-    """Route dangerous-tool confirmations to the user's Telegram chat.
+    """Route dangerous-tool confirmations to the user's chat.
 
-    Reuses the live bot registered at startup (main.py: routine_store.set_bot).
-    When there is no human to route to — no bot registered, or no usable
+    Uses the confirmation transport the UI layer registered at startup
+    (Telegram registers its inline-keyboard renderer in main.py). When there
+    is no human to route to — no transport registered, or no usable
     ``chat_id`` (web consults default to 0) — the gate FAILS CLOSED via
     :func:`deny_gate`: safe reads proceed, mutations are cancelled with a
     logged reason. It never returns ``None`` (which would silently become
@@ -72,20 +73,19 @@ def human_gate(chat_id: int):
     """
     if not chat_id:
         return deny_gate(
-            "consult has no Telegram chat to confirm in (chat_id=0); "
-            "mutations are denied — run the consult from a Telegram-linked "
+            "consult has no chat to confirm in (chat_id=0); "
+            "mutations are denied — run the consult from a linked "
             "chat to approve actions"
         )
     try:
-        from condor.routine_store import get_routine_store
-        from handlers.agents import confirmation
+        from condor.agents.confirmation import get_confirmation_transport
 
-        bot = get_routine_store().get_bot()
-        if bot is not None:
-            return functools.partial(confirmation.permission_callback, bot, chat_id)
+        transport = get_confirmation_transport()
+        if transport is not None:
+            return functools.partial(transport, chat_id)
     except Exception:
         log.exception("Could not build human_gate callback")
-    return deny_gate("no Telegram bot registered to confirm with; mutations denied")
+    return deny_gate("no confirmation transport registered; mutations denied")
 
 
 def scope_gate(policy, allowed_tools):
@@ -103,7 +103,7 @@ def scope_gate(policy, allowed_tools):
     if not allowed_tools:
         return policy
 
-    from handlers.agents._shared import system_mutation_tool
+    from condor.agents.gating import system_mutation_tool
 
     allowed_short = {t.rsplit("__", 1)[-1] for t in allowed_tools}
 

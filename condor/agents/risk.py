@@ -272,7 +272,7 @@ def risk_gate(
     ``RiskState()`` at zero for delegations (the caps act as a per-run budget).
     ``experiment=True`` additionally cancels every mutating action (tick-only).
     """
-    from handlers.agents._shared import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
+    from condor.agents.gating import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
