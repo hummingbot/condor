@@ -1,8 +1,7 @@
 """Shared executor record shape + attribution helpers.
 
-Extracted from ``store.py`` so both the SQLite store (being retired) and the
-file-based transaction log (``log.py``) speak the same record type without one
-importing the other.
+The record type used by the append-only per-slug JSONL executor log
+(``log.py``) and everything that folds or serves it.
 """
 
 from __future__ import annotations

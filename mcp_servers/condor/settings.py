@@ -63,7 +63,7 @@ def ensure_identity() -> bool:
     one approved user adds convenience without changing the trust model — the
     user id is an identifier here, not a credential. With zero or multiple
     approved users nothing is bound and callers fail fast with instructions
-    (see ``call_main_api``); a multi-user box must say who it is explicitly.
+    a multi-user box must say who it is explicitly.
 
     Returns True when ``settings`` has an identity after the call.
     """

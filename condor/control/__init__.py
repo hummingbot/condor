@@ -2,8 +2,7 @@
 Condor process serves so a harness-spawned MCP subprocess can drive the live
 executor runtime (and, later, agent sessions) without the web REST app.
 
-Replaces ``call_main_api`` (HTTP to the FastAPI app) as the web/telegram UI is
-retired. Local only, no port, no auth surface — the socket file's filesystem
+Local only, no port, no auth surface — the socket file's filesystem
 permissions are the boundary.
 """
 

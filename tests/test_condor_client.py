@@ -1,13 +1,9 @@
-"""Tests for the MCP-server → main-process HTTP client and identity auto-bind."""
+"""Tests for the MCP-server identity auto-bind."""
 
 import asyncio
 
-import pytest
-
 import config_manager
-from mcp_servers.condor import condor_client
 from mcp_servers.condor import settings as settings_module
-from mcp_servers.condor.exceptions import APIError
 
 
 class _StubCM:
@@ -16,22 +12,6 @@ class _StubCM:
 
     def get_approved_users(self):
         return self._approved
-
-
-def test_call_main_api_fails_fast_without_identity(monkeypatch):
-    """With no identity AND an ambiguous config (multiple approved users),
-    call_main_api must raise a clear, actionable error instead of minting a
-    JWT for user 0 and letting the main process 403 with an opaque
-    'Access denied' (the exact failure a stock `claude` session hits with the
-    repo's identity-less .mcp.json)."""
-    monkeypatch.setattr(condor_client.settings, "user_id", 0)
-    monkeypatch.setattr(settings_module, "_config_present", lambda: True)
-    monkeypatch.setattr(
-        config_manager, "get_config_manager", lambda: _StubCM([111, 222])
-    )
-
-    with pytest.raises(APIError, match="CONDOR_USER_ID"):
-        asyncio.run(condor_client.call_main_api("GET", "/agents"))
 
 
 def test_ensure_identity_auto_binds_sole_approved_user(monkeypatch):
