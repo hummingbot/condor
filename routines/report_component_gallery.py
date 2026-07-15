@@ -1918,10 +1918,10 @@ def build_component_gallery(
 
 async def run(config: Config, context: Any) -> str:
     """Build and save the Hummingbot ReportBuilder component gallery."""
-    builder = ReportBuilder("Hummingbot Component Gallery")
+    builder = ReportBuilder("Report Component Gallery")
     builder.source("routine", "report_component_gallery").tags(
         ["components", "developer-tools", "gallery", "hummingbot", "simulated"]
     )
     build_component_gallery(builder, make_gallery_data(config.history_hours))
     report_id = await builder.save()
-    return f"Hummingbot Component Gallery saved ({report_id})."
+    return f"Report Component Gallery saved ({report_id})."
