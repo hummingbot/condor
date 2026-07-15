@@ -31,6 +31,7 @@
   const selectionState = new Map();
   const tableState = new Map();
   let compactChartLayout = window.innerWidth <= 800;
+  let uiRevision = 0;
 
   function reloadReport() {
     const url = new URL(window.location.href);
@@ -95,6 +96,24 @@
     return Number.isFinite(number) ? number : null;
   }
 
+  function finiteNumber(value) {
+    if (value === null || value === undefined || (typeof value === "string" && !value.trim())) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+
+  function rangeMatches(value, state) {
+    if (!state.touched || (state.min == null && state.max == null)) return true;
+    const candidate = comparable(value, state.valueType);
+    if (candidate == null) return false;
+    return (state.min == null || candidate >= state.min) && (state.max == null || candidate <= state.max);
+  }
+
+  function advanceUiRevision() {
+    uiRevision += 1;
+    return uiRevision;
+  }
+
   function inferRangeType(component, entries) {
     if (component.value_type !== "auto") return component.value_type;
     const value = entries.map((entry) => entry.row[component.field]).find((item) => item != null && item !== "");
@@ -120,12 +139,8 @@
       if (component.filter_type === "select" && state.values && state.values.size) {
         entries = entries.filter((entry) => state.values.has(valueKey(entry.row[component.field])));
       }
-      if (component.filter_type === "range" && (state.min != null || state.max != null)) {
-        entries = entries.filter((entry) => {
-          const value = comparable(entry.row[component.field], state.valueType);
-          if (value == null) return false;
-          return (state.min == null || value >= state.min) && (state.max == null || value <= state.max);
-        });
+      if (component.filter_type === "range" && state.touched && (state.min != null || state.max != null)) {
+        entries = entries.filter((entry) => rangeMatches(entry.row[component.field], state));
       }
     }
 
@@ -348,6 +363,7 @@
   }
 
   function aggregatePoints(entries, component) {
+    const encodings = component.encodings || {};
     const points = new Map();
     for (const entry of entries) {
       const x = entry.row[component.x];
@@ -359,20 +375,22 @@
       x: point.x,
       y: aggregate(point.entries, component.y, component.aggregate),
       ids: point.entries.map((entry) => entry.id),
+      text: encodings.text ? point.entries[0].row[encodings.text] : null,
+      size: encodings.size ? aggregate(point.entries, encodings.size, "mean") : null,
     }));
   }
 
   function histogramTrace(component, entries) {
     const values = entries
-      .map((entry) => ({ entry: entry, value: Number(entry.row[component.x]) }))
-      .filter((item) => Number.isFinite(item.value));
+      .map((entry) => ({ entry: entry, value: finiteNumber(entry.row[component.x]) }))
+      .filter((item) => item.value != null);
     if (!values.length) return { type: "bar", x: [], y: [], customdata: [] };
     const minimum = Math.min(...values.map((item) => item.value));
     const maximum = Math.max(...values.map((item) => item.value));
-    const binCount = Math.max(1, component.bins || 30);
+    const binCount = maximum === minimum ? 1 : Math.max(1, component.bins || 30);
     const width = maximum === minimum ? 1 : (maximum - minimum) / binCount;
     const bins = Array.from({ length: binCount }, (_, index) => ({
-      center: minimum + width * (index + 0.5),
+      center: maximum === minimum ? minimum : minimum + width * (index + 0.5),
       entries: [],
     }));
     for (const item of values) {
@@ -383,7 +401,7 @@
       type: "bar",
       x: bins.map((bin) => bin.center),
       y: bins.map((bin) => bin.entries.length),
-      width: maximum === minimum ? undefined : width * 0.92,
+      width: maximum === minimum ? Math.max(1, Math.abs(minimum) * 0.02) : width * 0.92,
       customdata: bins.map((bin) => bin.entries.map((entry) => entry.id)),
       marker: { color: "#d4a845", opacity: 0.82 },
       name: component.title,
@@ -391,7 +409,89 @@
     };
   }
 
+  function treemapTrace(component, entries) {
+    const encodings = component.encodings || {};
+    const points = entries
+      .map((entry) => ({
+        id: entry.id,
+        label: entry.row[component.x],
+        value: finiteNumber(entry.row[component.y]),
+        color: component.color ? finiteNumber(entry.row[component.color]) : null,
+      }))
+      .filter((point) => point.label != null && Number.isFinite(point.value) && point.value > 0);
+    const colorValues = points.map((point) => point.color).filter(Number.isFinite);
+    const colorLimit = Math.max(0, ...colorValues.map((value) => Math.abs(value))) || 1;
+    const valueConfig = {
+      format: encodings.value_format || ",.0f",
+      prefix: encodings.value_prefix || "",
+      suffix: encodings.value_suffix || "",
+    };
+    const colorConfig = {
+      format: encodings.color_format || ".2f",
+      prefix: encodings.color_prefix || "",
+      suffix: encodings.color_suffix || "",
+    };
+    const valueLabel = encodings.value_label || String(component.y).replaceAll("_", " ");
+    const colorLabel = encodings.color_label || String(component.color || "color").replaceAll("_", " ");
+    const totalValue = points.reduce((sum, point) => sum + point.value, 0);
+    const formattedColors = points.map((point) => {
+      if (!Number.isFinite(point.color)) return "N/A";
+      const formatted = formatValue(point.color, colorConfig);
+      return point.color > 0 ? "+" + formatted : formatted;
+    });
+    const trace = {
+      type: "treemap",
+      ids: points.map((point) => point.id),
+      labels: points.map((point) => point.label),
+      parents: points.map(() => ""),
+      values: points.map((point) => point.value),
+      customdata: points.map((point) => point.id),
+      text: formattedColors,
+      texttemplate: points.map((point) => (
+        component.color && point.value / totalValue >= 0.02
+          ? "<b>%{label}</b><br><b>%{text}</b>"
+          : "<b>%{label}</b>"
+      )),
+      textposition: "middle center",
+      hovertext: points.map((point, index) => {
+        const details = [String(point.label), valueLabel + ": " + formatValue(point.value, valueConfig)];
+        if (component.color) details.push(colorLabel + ": " + formattedColors[index]);
+        return details.join("<br>");
+      }),
+      hovertemplate: "%{hovertext}<extra></extra>",
+      pathbar: { visible: false },
+      tiling: { pad: 3 },
+      textfont: { color: "#ffffff", size: compactChartLayout ? 15 : 20 },
+      marker: {
+        line: { color: "rgba(15, 23, 42, 0.82)", width: 2 },
+      },
+    };
+    if (component.color) {
+      trace.marker.colors = points.map((point) => Number.isFinite(point.color) ? point.color : 0);
+      trace.marker.colorscale = [
+        [0, "#ea3943"],
+        [0.5, "#475569"],
+        [1, "#16c784"],
+      ];
+      trace.marker.cmin = -colorLimit;
+      trace.marker.cmax = colorLimit;
+      trace.marker.cmid = 0;
+      trace.marker.colorbar = {
+        title: { text: colorLabel },
+        orientation: "h",
+        x: 0.5,
+        y: -0.1,
+        len: 0.5,
+        thickness: 10,
+      };
+    } else {
+      trace.marker.colors = points.map(() => "#d4a845");
+    }
+    return trace;
+  }
+
   function chartTraces(component, entries) {
+    if (component.chart_type === "treemap") return [treemapTrace(component, entries)];
     if (component.chart_type === "histogram") return [histogramTrace(component, entries)];
     if (component.chart_type === "candlestick") {
       const encodings = component.encodings || {};
@@ -426,6 +526,7 @@
       return groupedRows(entries, component.color).map((group) => {
         const color = groupColor(component, group.name);
         const hoverFields = (component.encodings && component.encodings.hover_fields) || [];
+        const valueLabel = component.y_label || String(component.y).replaceAll("_", " ");
         return {
           type: "box",
           x: group.entries.map((entry) => entry.row[component.x]),
@@ -438,7 +539,7 @@
           }).join("<br>")),
           name: component.color ? String(group.name) : component.title,
           boxpoints: "all",
-          jitter: 0.35,
+          jitter: 0,
           pointpos: 0,
           marker: color ? { color: color, size: 7, opacity: 0.78 } : { size: 7, opacity: 0.78 },
           line: color ? { color: color } : {},
@@ -447,18 +548,20 @@
           hovertemplate: hoverFields.length
             ? "%{hovertext}<extra>%{fullData.name}</extra>"
             : component.selection_field
-              ? "%{text}<br>%{x}<br>%{y:.3f} bps<extra>%{fullData.name}</extra>"
+              ? "%{text}<br>%{x}<br>" + valueLabel + ": %{y}<extra>%{fullData.name}</extra>"
               : undefined,
         };
       });
     }
 
     return groupedRows(entries, component.color).map((group) => {
+      const encodings = component.encodings || {};
       const points = component.aggregate ? aggregatePoints(group.entries, component) : group.entries.map((entry) => ({
         x: entry.row[component.x],
         y: entry.row[component.y],
         ids: entry.id,
-        text: component.encodings && component.encodings.text ? entry.row[component.encodings.text] : null,
+        text: encodings.text ? entry.row[encodings.text] : null,
+        size: encodings.size ? Number(entry.row[encodings.size]) : null,
       }));
       const horizontal = component.chart_type === "horizontal_bar";
       const color = groupColor(component, group.name);
@@ -473,16 +576,32 @@
       if (horizontal) trace.orientation = "h";
       if (component.chart_type === "area") trace.fill = "tozeroy";
       if (color) {
-        trace.marker = { color: color };
+        trace.marker = { ...(trace.marker || {}), color: color };
         trace.line = { ...(trace.line || {}), color: color };
+      }
+      const hasMarkerSizes = component.chart_type === "scatter" && points.some((point) => Number.isFinite(point.size) && point.size > 0);
+      if (hasMarkerSizes) {
+        trace.marker = {
+          ...(trace.marker || {}),
+          size: points.map((point) => Number.isFinite(point.size) && point.size > 0 ? point.size : 8),
+          sizemode: "diameter",
+        };
       }
       if (points.some((point) => point.text != null)) {
         trace.text = points.map((point) => point.text);
-        const negativeHorizontal = horizontal && points.every((point) => Number(point.y) < 0);
-        trace.textposition = negativeHorizontal ? "inside" : "outside";
-        if (negativeHorizontal) {
-          trace.insidetextanchor = "middle";
-          trace.textfont = { color: "#f8fafc" };
+        if (component.chart_type === "scatter") {
+          trace.mode = "markers+text";
+          trace.textposition = encodings.text_position || "top center";
+        } else if (["line", "area"].includes(component.chart_type)) {
+          trace.mode = "lines+text";
+          trace.textposition = encodings.text_position || "top center";
+        } else {
+          const negativeHorizontal = horizontal && points.every((point) => Number(point.y) < 0);
+          trace.textposition = negativeHorizontal ? "inside" : "outside";
+          if (negativeHorizontal) {
+            trace.insidetextanchor = "middle";
+            trace.textfont = { color: "#f8fafc" };
+          }
         }
         trace.cliponaxis = false;
       }
@@ -542,6 +661,15 @@
     categoryAxis.categoryarray = component.category_order;
   }
 
+  function applyAxisEncodings(layout, component) {
+    const encodings = component.encodings || {};
+    const scales = new Set(["linear", "log", "date", "category"]);
+    if (Array.isArray(encodings.x_range)) layout.xaxis.range = encodings.x_range;
+    if (Array.isArray(encodings.y_range)) layout.yaxis.range = encodings.y_range;
+    if (scales.has(encodings.x_scale)) layout.xaxis.type = encodings.x_scale;
+    if (scales.has(encodings.y_scale)) layout.yaxis.type = encodings.y_scale;
+  }
+
   function referenceLineShape(line) {
     const axis = line.axis === "x" ? "x" : "y";
     return {
@@ -572,6 +700,7 @@
     const entries = filteredEntries(component.source, component.id);
     const light = document.documentElement.classList.contains("light");
     const horizontal = component.chart_type === "horizontal_bar";
+    const treemap = component.chart_type === "treemap";
     const referenceLines = (component.encodings && component.encodings.reference_lines) || [];
     const layout = {
       title: { text: component.title, font: { size: 15 } },
@@ -582,23 +711,23 @@
         ? ["#b8860b", "#2563eb", "#7c3aed", "#0891b2", "#64748b"]
         : ["#d4a845", "#56b4e9", "#a78bfa", "#22d3ee", "#94a3b8"],
       margin: {
-        l: horizontal ? (compactChartLayout ? 105 : 170) : (component.y_label ? 70 : 55),
-        r: 25,
+        l: treemap ? 8 : horizontal ? (compactChartLayout ? 105 : 170) : (component.y_label ? 70 : 55),
+        r: treemap ? 8 : 25,
         t: 55,
-        b: component.x_label ? 65 : 50,
+        b: treemap ? 75 : component.x_label ? 65 : 50,
       },
       hovermode: "closest",
-      dragmode: ["scatter", "box"].includes(component.chart_type) ? "lasso" : "zoom",
-      uirevision: component.id,
+      dragmode: treemap ? false : ["scatter", "box"].includes(component.chart_type) ? "lasso" : "zoom",
+      uirevision: component.id + ":" + uiRevision,
       xaxis: { gridcolor: light ? "#e5e7eb" : "#1c2541", title: component.x_label ? { text: component.x_label } : undefined },
       yaxis: { gridcolor: light ? "#e5e7eb" : "#1c2541", title: component.y_label ? { text: component.y_label } : undefined },
-      showlegend: Boolean(component.color || component.chart_type === "candlestick" || referenceLines.some((line) => line.label)),
+      showlegend: !treemap && Boolean(component.color || component.chart_type === "candlestick" || referenceLines.some((line) => line.label)),
       barmode: "group",
       boxmode: "group",
     };
+    if (treemap) layout.uniformtext = { minsize: compactChartLayout ? 13 : 16, mode: "hide" };
     applyCategoryOrder(layout, component, horizontal);
-    if (component.encodings && Array.isArray(component.encodings.x_range)) layout.xaxis.range = component.encodings.x_range;
-    if (component.encodings && Array.isArray(component.encodings.y_range)) layout.yaxis.range = component.encodings.y_range;
+    applyAxisEncodings(layout, component);
     if (component.chart_type === "candlestick") layout.xaxis.rangeslider = { visible: false };
     for (const line of referenceLines) {
       layout.shapes = layout.shapes || [];
@@ -778,6 +907,7 @@
       filterState.clear();
       selectionState.clear();
       tableState.clear();
+      advanceUiRevision();
       initialize();
     });
   }
@@ -808,7 +938,9 @@
       }
     },
     __test: {
+      advanceUiRevision: advanceUiRevision,
       aggregate: aggregate,
+      applyAxisEncodings: applyAxisEncodings,
       applyCategoryOrder: applyCategoryOrder,
       chartTraces: chartTraces,
       comparable: comparable,
@@ -817,6 +949,7 @@
       histogramTrace: histogramTrace,
       inferRangeType: inferRangeType,
       initialRangeState: initialRangeState,
+      rangeMatches: rangeMatches,
       referenceLineShape: referenceLineShape,
     },
   };

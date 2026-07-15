@@ -36,8 +36,14 @@ def _valid_candles(candles: list[dict], volume_field: str) -> list[dict]:
         volume = _finite_number(candle.get(volume_field))
         if any(value is None for value in values) or volume is None:
             continue
-        _, high, low, _ = values
-        if low <= 0 or high < low or volume < 0:
+        open_, high, low, close = values
+        if (
+            low <= 0
+            or high < low
+            or not low <= open_ <= high
+            or not low <= close <= high
+            or volume < 0
+        ):
             continue
         valid.append(candle)
     return valid

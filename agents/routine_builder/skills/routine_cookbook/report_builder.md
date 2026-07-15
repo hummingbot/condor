@@ -103,12 +103,20 @@ Available interactive methods:
 - `drilldown(source, ...)` — rows selected by a chart using the same dataset
 
 Supported chart types are `line`, `area`, `bar`, `horizontal_bar`, `scatter`,
-`box`, `histogram`, and `candlestick`. Use `color_map={"BUY": "#22c55e"}`
+`treemap`, `box`, `histogram`, and `candlestick`. For a treemap, `x` supplies
+tile labels, `y` supplies positive tile area, and `color` supplies an optional
+continuous value rendered on a symmetric red-to-green scale around zero. Use
+`value_label`, `value_prefix`, `value_suffix`, `value_format`, `color_label`,
+`color_prefix`, `color_suffix`, and `color_format` to format treemap labels and
+hover details. Treemaps do not
+support `aggregate`. Use `color_map={"BUY": "#22c55e"}`
 when categories need fixed semantic colors. Pass `text="label_field"` for value
-labels, `category_order=[...]` for stable categorical axes, and
+labels and, for scatter charts, `size="size_field"` and
+`text_position="top center"` for marker sizing and label placement. Use
+`category_order=[...]` for stable categorical axes and
 `reference_lines=[{"axis": "y", "value": 0, "label": "Break-even"}]` for
 labeled thresholds. Pass `x_range=[0, 90]` or `y_range=[...]` when a fixed view
-is clearer. Use `plotly(fig)`
+is clearer, and `x_scale="log"` or `y_scale="log"` for logarithmic axes. Use `plotly(fig)`
 for specialized charts that do not need shared filtering. Supported metric
 aggregates are `count`, `sum`, `mean`, `min`, `max`, `median`, `first`, `last`,
 and `change_pct`.
@@ -131,7 +139,8 @@ For a report that is updated in place, call `auto_refresh(seconds)` before
 chart selection, table search, sorting, or paging pauses refresh so the user's
 interaction is not discarded. Resume loads the newest report immediately. Call
 `auto_refresh(None)` before the final update to leave a stopped, fixed snapshot.
-Downloaded reports remain fixed offline snapshots.
+Downloaded reports remain fixed offline snapshots. In-place updates count as
+recent activity when Condor applies its report-retention limit.
 
 For cross-filtering, charts and target components must reference the same named
 dataset. Keep embedded datasets below roughly 10,000 rows for responsive reports.

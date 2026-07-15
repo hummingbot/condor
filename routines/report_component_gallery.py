@@ -17,7 +17,7 @@ SIMULATION_START = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 
 class Config(BaseModel):
-    """Create a static report gallery from simulated trading data."""
+    """Create a ReportBuilder component gallery from simulated trading data."""
 
     history_hours: int = Field(
         default=168,
@@ -43,6 +43,33 @@ def _rolling_std(values: list[float], period: int) -> float | None:
     window = values[-period:]
     mean = sum(window) / period
     return math.sqrt(sum((value - mean) ** 2 for value in window) / period)
+
+
+def _percentile(sorted_values: list[float], percentile: float) -> float:
+    if not sorted_values:
+        return 0.0
+    index = (len(sorted_values) - 1) * percentile / 100
+    lower = int(index)
+    upper = min(lower + 1, len(sorted_values) - 1)
+    return sorted_values[lower] + (index - lower) * (
+        sorted_values[upper] - sorted_values[lower]
+    )
+
+
+def _return_distribution_stats(candles: list[dict]) -> dict[str, Any]:
+    returns = [float(row["return_pct"]) for row in candles[1:]]
+    sorted_returns = sorted(returns)
+    mean = sum(returns) / len(returns) if returns else 0.0
+    variance = (
+        sum((value - mean) ** 2 for value in returns) / len(returns) if returns else 0.0
+    )
+    return {
+        "returns": returns,
+        "count": len(returns),
+        "p5": _percentile(sorted_returns, 5),
+        "p95": _percentile(sorted_returns, 95),
+        "std": math.sqrt(variance),
+    }
 
 
 def _make_candles(count: int) -> list[dict]:
@@ -219,6 +246,93 @@ def _make_order_book(mid: float) -> list[dict]:
                     "distance_band": _distance_band(distance_bps),
                 }
             )
+    return rows
+
+
+def _make_market_scan() -> list[dict]:
+    markets = (
+        ("BTC-USDT", "Mature", 0.102, 18_400_000_000, 0.22, 3.4),
+        ("ETH-USDT", "Mature", 0.128, 9_700_000_000, 0.25, 4.1),
+        ("SOL-USDT", "Mature", 0.214, 3_150_000_000, 0.31, 6.8),
+        ("XRP-USDT", "Mature", 0.176, 2_480_000_000, 0.29, 5.7),
+        ("DOGE-USDT", "Mature", 0.238, 1_920_000_000, 0.38, 7.9),
+        ("BNB-USDT", "Mature", 0.119, 1_260_000_000, 0.27, 3.8),
+        ("WIF-USDT", "Degen", 0.842, 385_000_000, 1.18, 22.6),
+        ("PEPE-USDT", "Degen", 0.735, 610_000_000, 1.06, 19.8),
+        ("BONK-USDT", "Degen", 0.914, 248_000_000, 1.31, 25.4),
+        ("FLOKI-USDT", "Degen", 0.681, 172_000_000, 0.98, 17.7),
+        ("POPCAT-USDT", "Degen", 1.126, 96_000_000, 1.46, 31.2),
+        ("MEW-USDT", "Degen", 1.284, 74_000_000, 1.57, 35.8),
+        ("AVAX-USDT", "Other", 0.342, 780_000_000, 0.58, 10.5),
+        ("LINK-USDT", "Other", 0.297, 690_000_000, 0.49, 9.2),
+        ("SUI-USDT", "Other", 0.468, 540_000_000, 0.71, 13.8),
+        ("APT-USDT", "Other", 0.415, 315_000_000, 0.66, 12.4),
+        ("ARB-USDT", "Other", 0.386, 286_000_000, 0.61, 11.7),
+        ("OP-USDT", "Other", 0.358, 252_000_000, 0.55, 10.9),
+    )
+    rows = []
+    for index, (
+        pair,
+        classification,
+        natr,
+        volume,
+        bucket_cv,
+        price_range,
+    ) in enumerate(markets):
+        rows.append(
+            {
+                "trading_pair": pair,
+                "symbol_label": pair.removesuffix("-USDT"),
+                "classification": classification,
+                "natr_mean": natr,
+                "volume_24h_usd": volume,
+                "bucket_cv": bucket_cv,
+                "marker_size": round(max(9, 25 - bucket_cv * 8), 1),
+                "price_change_24h": round(math.sin(index * 1.3) * 8.5, 2),
+                "natr_cv": round(0.2 + bucket_cv * 0.45, 3),
+                "natr_spike_ratio": round(1.25 + bucket_cv * 1.7, 2),
+                "price_range_pct": price_range,
+            }
+        )
+    return rows
+
+
+def _make_cross_exchange_books(mid: float) -> list[dict]:
+    venues = (
+        ("Binance", 0.0, 0.75),
+        ("KuCoin", 1.9, 1.05),
+        ("OKX", -1.3, 0.90),
+    )
+    rows = []
+    reference_mid = mid
+    for exchange_rank, (exchange, offset_bps, half_spread_bps) in enumerate(venues):
+        venue_mid = mid * (1 + offset_bps / 10_000)
+        for side_index, side in enumerate(("Bid", "Ask")):
+            direction = -1 if side == "Bid" else 1
+            cumulative_amount = 0.0
+            for level in range(1, 13):
+                distance_bps = half_spread_bps + (level - 1) * 1.8
+                price = venue_mid * (1 + direction * distance_bps / 10_000)
+                amount = (
+                    0.14
+                    + ((level * 5 + exchange_rank * 3 + side_index * 2) % 11) * 0.038
+                )
+                cumulative_amount += amount
+                rows.append(
+                    {
+                        "exchange": exchange,
+                        "exchange_rank": exchange_rank,
+                        "side": side,
+                        "level": level,
+                        "price": round(price, 2),
+                        "amount": round(amount, 4),
+                        "cumulative_amount": round(cumulative_amount, 4),
+                        "mid_price": round(venue_mid, 2),
+                        "spread_bps": round(half_spread_bps * 2, 2),
+                        "reference_exchange": venues[0][0],
+                        "reference_mid": round(reference_mid, 2),
+                    }
+                )
     return rows
 
 
@@ -585,8 +699,10 @@ def make_gallery_data(history_hours: int = 168) -> dict[str, list[dict]]:
     return {
         "candles": candles,
         "raw_candles": [dict(row) for row in candles],
+        "market_scan": _make_market_scan(),
         "bot_fleet": bot_fleet,
         "order_book": order_book,
+        "cross_exchange_books": _make_cross_exchange_books(mid),
         "active_orders": _make_active_orders(order_book, executors),
         "bot_pnl_timeline": pnl_timeline,
         "executors": executors,
@@ -595,6 +711,242 @@ def make_gallery_data(history_hours: int = 168) -> dict[str, list[dict]]:
         "raw_trades": [dict(row) for row in trades],
         "risk_limits": risk_limits,
     }
+
+
+def _build_return_distribution_figure(candles: list[dict]):
+    import plotly.graph_objects as go
+
+    stats = _return_distribution_stats(candles)
+    figure = go.Figure()
+    figure.add_trace(
+        go.Histogram(
+            x=stats["returns"],
+            nbinsx=40,
+            marker_color="#7c3aed",
+            opacity=0.8,
+            name="Hourly returns",
+        )
+    )
+    figure.add_vline(
+        x=stats["p5"],
+        line_dash="dot",
+        line_color="#f59e0b",
+        annotation_text="p5",
+    )
+    figure.add_vline(
+        x=stats["p95"],
+        line_dash="dot",
+        line_color="#f59e0b",
+        annotation_text="p95",
+    )
+    figure.add_vline(x=0, line_color="#94a3b8", line_width=1)
+    figure.update_layout(
+        title="BTC-USDT Hourly Return Distribution",
+        xaxis_title="Return per candle (%)",
+        yaxis_title="Frequency",
+        height=350,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": "#e8e6e3"},
+        legend={"orientation": "h", "y": -0.18, "x": 0.5, "xanchor": "center"},
+        margin={"l": 65, "r": 35, "t": 65, "b": 85},
+    )
+    return figure
+
+
+def _build_cross_exchange_figure(rows: list[dict], pair: str = "BTC-USDT"):
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    exchanges = sorted(
+        {row["exchange"] for row in rows},
+        key=lambda exchange: next(
+            row["exchange_rank"] for row in rows if row["exchange"] == exchange
+        ),
+    )
+    reference_exchange = rows[0]["reference_exchange"]
+    reference_mid = rows[0]["reference_mid"]
+    figure = make_subplots(
+        rows=len(exchanges),
+        cols=2,
+        shared_xaxes="columns",
+        vertical_spacing=0.08,
+        horizontal_spacing=0.10,
+        column_widths=[0.58, 0.42],
+    )
+    bid_color = "rgba(34, 197, 94, 0.85)"
+    ask_color = "rgba(239, 68, 68, 0.85)"
+    bps_values = [0.0]
+
+    for row_index, exchange in enumerate(exchanges, start=1):
+        exchange_rows = [row for row in rows if row["exchange"] == exchange]
+        bids = sorted(
+            (row for row in exchange_rows if row["side"] == "Bid"),
+            key=lambda row: row["level"],
+        )
+        asks = sorted(
+            (row for row in exchange_rows if row["side"] == "Ask"),
+            key=lambda row: row["level"],
+        )
+        for levels, side, color, fill in (
+            (bids, "Bids", bid_color, "rgba(34, 197, 94, 0.12)"),
+            (asks, "Asks", ask_color, "rgba(239, 68, 68, 0.12)"),
+        ):
+            figure.add_trace(
+                go.Scatter(
+                    x=[level["price"] for level in levels],
+                    y=[level["cumulative_amount"] for level in levels],
+                    mode="lines",
+                    fill="tozeroy",
+                    fillcolor=fill,
+                    line={"color": color, "width": 2, "shape": "hv"},
+                    name=side,
+                    legendgroup=side.lower(),
+                    showlegend=row_index == 1,
+                    hovertemplate=(
+                        f"{exchange}<br>Price: %{{x:,.2f}} USDT"
+                        "<br>Cumulative: %{y:.4f} BTC<extra></extra>"
+                    ),
+                ),
+                row=row_index,
+                col=1,
+            )
+
+        bid_bps = (bids[0]["price"] / reference_mid - 1) * 10_000
+        ask_bps = (asks[0]["price"] / reference_mid - 1) * 10_000
+        mid_bps = (exchange_rows[0]["mid_price"] / reference_mid - 1) * 10_000
+        bps_values.extend((bid_bps, ask_bps, mid_bps))
+        figure.add_trace(
+            go.Scatter(
+                x=[bid_bps, ask_bps],
+                y=[0, 0],
+                mode="lines",
+                line={"color": "rgba(148, 163, 184, 0.55)", "width": 4},
+                showlegend=False,
+                hoverinfo="skip",
+            ),
+            row=row_index,
+            col=2,
+        )
+        for value, label, color, position, price in (
+            (bid_bps, "L1 Bid", bid_color, "bottom center", bids[0]["price"]),
+            (ask_bps, "L1 Ask", ask_color, "top center", asks[0]["price"]),
+        ):
+            figure.add_trace(
+                go.Scatter(
+                    x=[value],
+                    y=[0],
+                    mode="markers+text",
+                    marker={"color": color, "size": 13},
+                    text=[f"{value:+.1f}"],
+                    textposition=position,
+                    name=label,
+                    legendgroup=label.lower().replace(" ", "-"),
+                    showlegend=row_index == 1,
+                    hovertemplate=(
+                        f"{exchange} {label}<br>Price: {price:,.2f} USDT"
+                        f"<br>Distance: {value:+.2f} bps<extra></extra>"
+                    ),
+                ),
+                row=row_index,
+                col=2,
+            )
+        if exchange != reference_exchange and abs(mid_bps) > 0.5:
+            figure.add_trace(
+                go.Scatter(
+                    x=[mid_bps],
+                    y=[0],
+                    mode="markers+text",
+                    marker={"color": "#56b4e9", "size": 9, "symbol": "diamond"},
+                    text=[f"mid {mid_bps:+.1f}"],
+                    textposition="bottom center",
+                    showlegend=False,
+                    hovertemplate=(
+                        f"{exchange} mid: {exchange_rows[0]['mid_price']:,.2f} USDT"
+                        f"<br>Distance: {mid_bps:+.2f} bps<extra></extra>"
+                    ),
+                ),
+                row=row_index,
+                col=2,
+            )
+        figure.add_vline(
+            x=exchange_rows[0]["mid_price"],
+            line={"color": "#94a3b8", "width": 1, "dash": "dot"},
+            row=row_index,
+            col=1,
+        )
+        figure.add_vline(
+            x=0,
+            line={"color": "#94a3b8", "width": 1, "dash": "dot"},
+            row=row_index,
+            col=2,
+        )
+
+    prices = [row["price"] for row in rows]
+    price_margin = (max(prices) - min(prices)) * 0.03
+    bps_limit = max(2.0, max(abs(value) for value in bps_values) * 1.35)
+    for row_index, exchange in enumerate(exchanges, start=1):
+        figure.update_xaxes(
+            range=[min(prices) - price_margin, max(prices) + price_margin],
+            row=row_index,
+            col=1,
+        )
+        figure.update_xaxes(
+            range=[-bps_limit, bps_limit],
+            row=row_index,
+            col=2,
+        )
+        figure.update_yaxes(
+            title_text=exchange.upper(),
+            rangemode="tozero",
+            row=row_index,
+            col=1,
+        )
+        figure.update_yaxes(
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+            range=[-1, 1],
+            row=row_index,
+            col=2,
+        )
+    figure.update_xaxes(title_text="Price (USDT)", row=len(exchanges), col=1)
+    figure.update_xaxes(
+        title_text=f"BPS from {reference_exchange} mid",
+        row=len(exchanges),
+        col=2,
+    )
+    figure.add_annotation(
+        text="<b>Cumulative order-book depth (BTC)</b>",
+        xref="paper",
+        yref="paper",
+        x=0.27,
+        y=1.04,
+        showarrow=False,
+    )
+    figure.add_annotation(
+        text=f"<b>L1 quotes vs {reference_exchange} reference</b>",
+        xref="paper",
+        yref="paper",
+        x=0.81,
+        y=1.04,
+        showarrow=False,
+    )
+    figure.update_layout(
+        title=f"Cross-exchange {pair} order books",
+        height=max(560, len(exchanges) * 210),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"color": "#e8e6e3"},
+        legend={
+            "orientation": "h",
+            "y": -0.10,
+            "x": 0.5,
+            "xanchor": "center",
+        },
+        margin={"l": 90, "r": 35, "t": 100, "b": 90},
+    )
+    return figure
 
 
 def _price(value: float) -> str:
@@ -629,17 +981,19 @@ def _table_columns() -> list[str | dict[str, Any]]:
     ]
 
 
-def build_static_gallery(
+def build_component_gallery(
     builder: ReportBuilder, datasets: dict[str, list[dict]]
 ) -> ReportBuilder:
-    """Build the six-section static Hummingbot gallery."""
+    """Build the seven-section ReportBuilder component gallery."""
     builder.manual_order()
     for name, rows in datasets.items():
         builder.dataset(name, rows)
 
     candles = datasets["candles"]
+    market_scan = datasets["market_scan"]
     fleet = datasets["bot_fleet"]
     order_book = datasets["order_book"]
+    cross_exchange_books = datasets["cross_exchange_books"]
     active_orders = datasets["active_orders"]
     executors = datasets["executors"]
     trades = datasets["trades"]
@@ -671,8 +1025,8 @@ def build_static_gallery(
         "A simulated BTC-USDT market-making session and bot fleet overview.",
     )
     builder.markdown(
-        f"This gallery is **deterministic, simulated, and fully offline**. It is fixed at "
-        f"**{as_of}** and must not be interpreted as current exchange or account data. "
+        f"This component gallery uses **deterministic, simulated, and fully offline** data "
+        f"timestamped at **{as_of}**. It must not be interpreted as current exchange or account data. "
         "The primary bot is `btc_mm_alpha`, running a balanced perpetual market-making "
         "controller while BTC, ETH, and SOL peers provide fleet context."
     )
@@ -721,7 +1075,9 @@ def build_static_gallery(
         "| Dataset | Coverage | Rows | Role |\n"
         "| --- | --- | ---: | --- |\n"
         f"| BTC candles | {candles[0]['timestamp'][:10]} to {candles[-1]['timestamp'][:10]} | {len(candles)} | Historical |\n"
+        f"| Market scan | Simulated 24h snapshot | {len(market_scan)} | Cross-market comparison |\n"
         f"| Order book | {as_of} | {len(order_book)} | Current snapshot |\n"
+        f"| CEX books | {as_of} | {len(cross_exchange_books)} | Cross-exchange comparison |\n"
         f"| Bot fleet | Simulated session | {len(fleet)} | Fleet comparison |\n"
         f"| Executors | Simulated session | {len(executors)} | Lifecycle |\n"
         f"| Trades | Last 48 hours | {len(trades)} | Fill ledger |"
@@ -749,8 +1105,124 @@ def build_static_gallery(
         component_id="risk-limits-summary",
     )
     builder.section(
+        "Market Screening",
+        "Compare simulated perpetual markets by normalized volatility, liquidity, and activity consistency.",
+    )
+    builder.markdown(
+        "The scanner classifies markets as **Mature**, **Degen**, or **Other**. "
+        "Heatmap area represents 24h volume and color represents 24h price change. "
+        "In the scatter view, larger points have steadier activity. Select markets in "
+        "either chart to focus the linked metrics and table."
+    )
+    builder.select_filter(
+        "scanner-classification",
+        "market_scan",
+        "classification",
+        label="Market classification",
+        multiple=True,
+        width=12,
+        help_text="Choose one or more scanner classifications.",
+    )
+    for label, field, aggregate, prefix, suffix in (
+        ("Visible Markets", None, "count", "", ""),
+        ("Combined 24h Volume", "volume_24h_usd", "sum", "$", ""),
+        ("Median NATR", "natr_mean", "median", "", "%"),
+        ("Average Price Range", "price_range_pct", "mean", "", "%"),
+    ):
+        builder.metric(
+            label,
+            "market_scan",
+            field,
+            aggregate=aggregate,
+            format=",.2f",
+            prefix=prefix,
+            suffix=suffix,
+            width=3,
+            component_id=f"scanner-{aggregate}-{field or 'rows'}",
+        )
+    builder.chart(
+        "treemap",
+        "Market Heatmap: 24h Trend by Volume",
+        "market_scan",
+        "symbol_label",
+        "volume_24h_usd",
+        color="price_change_24h",
+        value_label="24h Volume",
+        value_prefix="$",
+        value_format=",.0f",
+        color_label="24h Change",
+        color_format=".2f",
+        color_suffix="%",
+        selection_mode="filter",
+        selection_label="market",
+        selection_field="trading_pair",
+        selection_help="Select a tile to update the scanner metrics, scatter chart, and table.",
+        width=12,
+        height=560,
+        component_id="market-trend-heatmap",
+    )
+    builder.chart(
+        "scatter",
+        "Market Scanner: NATR vs 24h Volume",
+        "market_scan",
+        "natr_mean",
+        "volume_24h_usd",
+        color="classification",
+        color_map={"Mature": "#22c55e", "Degen": "#ef4444", "Other": "#94a3b8"},
+        text="symbol_label",
+        text_position="top center",
+        size="marker_size",
+        y_scale="log",
+        selection_mode="filter",
+        selection_label="market",
+        selection_field="trading_pair",
+        selection_help="Select one or more markets to update the scanner metrics and table.",
+        x_label="Mean normalized ATR (%)",
+        y_label="24h volume (USDT, log scale)",
+        width=12,
+        height=520,
+        component_id="market-scanner-scatter",
+    )
+    builder.data_table(
+        "market_scan",
+        [
+            "trading_pair",
+            "classification",
+            {
+                "field": "volume_24h_usd",
+                "label": "24h Volume",
+                "format": ",.0f",
+                "prefix": "$",
+            },
+            {"field": "natr_mean", "label": "NATR", "format": ",.3f", "suffix": "%"},
+            {"field": "bucket_cv", "label": "Volume CV", "format": ",.2f"},
+            {"field": "natr_cv", "label": "NATR CV", "format": ",.2f"},
+            {
+                "field": "natr_spike_ratio",
+                "label": "NATR Spike",
+                "format": ",.2f",
+                "suffix": "x",
+            },
+            {
+                "field": "price_range_pct",
+                "label": "Price Range",
+                "format": ",.2f",
+                "suffix": "%",
+            },
+            {
+                "field": "price_change_24h",
+                "label": "24h Change",
+                "format": ",.2f",
+                "suffix": "%",
+            },
+        ],
+        title="Markets in scanner view",
+        page_size=18,
+        component_id="market-scanner-table",
+    )
+    builder.section(
         "Price & Volume History",
-        "Date controls update the linked metrics and charts; the footprint shows the full report window.",
+        "Date controls update linked metrics and charts; distribution and footprint plots show the full report window.",
     )
     builder.range_filter(
         "candle-date-range",
@@ -834,6 +1306,14 @@ def build_static_gallery(
         height=330,
         component_id="btc-volume",
     )
+    return_stats = _return_distribution_stats(candles)
+    builder.plotly(_build_return_distribution_figure(candles))
+    builder.markdown(
+        f"The hourly return distribution excludes the first candle, which has no prior close. "
+        f"Across **{return_stats['count']} returns**, p5 is **{return_stats['p5']:+.4f}%**, "
+        f"p95 is **{return_stats['p95']:+.4f}%**, and standard deviation is "
+        f"**{return_stats['std']:.4f}%**."
+    )
     footprint = build_estimated_footprint_figure(
         candles,
         volume_field="base_volume",
@@ -846,7 +1326,7 @@ def build_static_gallery(
     if footprint is not None:
         builder.plotly(footprint)
     builder.markdown(
-        "The footprint uses the full fixed report window. Buy and sell volume are estimates "
+        "The footprint uses the full report window. Buy and sell volume are estimates "
         "based on where each candle closed within its range, not actual trade-side records."
     )
     builder.section(
@@ -1002,6 +1482,13 @@ def build_static_gallery(
     builder.kpi("Book Imbalance", f"{imbalance:+.1f}%", "Positive is bid-heavy")
     builder.kpi(
         "Visible Depth", f"${bid_notional + ask_notional:,.0f}", "20 levels per side"
+    )
+    builder.plotly(_build_cross_exchange_figure(cross_exchange_books))
+    builder.markdown(
+        "The cross-exchange chart is a simulated three-venue snapshot. The left column compares "
+        "cumulative BTC depth, while the right column places each best bid, ask, and mid in "
+        "basis points relative to the Binance mid. It does not respond to the single-venue "
+        "filters below."
     )
     builder.select_filter(
         "book-side",
@@ -1303,6 +1790,24 @@ def build_static_gallery(
         component_id="trade-cost-histogram",
     )
     builder.chart(
+        "box",
+        "Execution cost spread by liquidity and side",
+        "trades",
+        "liquidity",
+        "execution_cost_bps",
+        color="side",
+        color_map={"BUY": "#22c55e", "SELL": "#ef4444"},
+        selection_mode="drilldown",
+        selection_label="trade",
+        selection_field="trade_id",
+        selection_help="Select a trade point to inspect its complete fill record.",
+        x_label="Liquidity role",
+        y_label="Execution cost vs mid (bps)",
+        width=7,
+        height=360,
+        component_id="trade-cost-box",
+    )
+    builder.chart(
         "bar",
         "Mean execution cost by trade size and side",
         "trades",
@@ -1328,7 +1833,7 @@ def build_static_gallery(
         ],
         x_label="Trade size",
         y_label="Execution cost vs mid (bps)",
-        width=7,
+        width=12,
         height=360,
         component_id="trade-cost-bars",
     )
@@ -1346,7 +1851,7 @@ def build_static_gallery(
     builder.markdown(
         "These tables contain the records behind the analysis. Search narrows visible rows, "
         "column headers sort, and CSV export downloads the filtered data. All timestamps "
-        "are UTC and all rows remain fixed with this static artifact."
+        "are UTC, and every component uses the same simulated datasets."
     )
     candle_columns: list[str | dict[str, Any]] = [
         "timestamp",
@@ -1412,11 +1917,11 @@ def build_static_gallery(
 
 
 async def run(config: Config, context: Any) -> str:
-    """Build and save the static Hummingbot report gallery."""
-    builder = ReportBuilder("Hummingbot Trading Report Gallery: Static")
+    """Build and save the Hummingbot ReportBuilder component gallery."""
+    builder = ReportBuilder("Hummingbot Component Gallery")
     builder.source("routine", "report_component_gallery").tags(
-        ["developer-tools", "gallery", "hummingbot", "simulated", "static"]
+        ["components", "developer-tools", "gallery", "hummingbot", "simulated"]
     )
-    build_static_gallery(builder, make_gallery_data(config.history_hours))
+    build_component_gallery(builder, make_gallery_data(config.history_hours))
     report_id = await builder.save()
-    return f"Static Hummingbot report gallery saved ({report_id})."
+    return f"Hummingbot Component Gallery saved ({report_id})."

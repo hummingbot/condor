@@ -246,6 +246,7 @@ class ReportBuilder:
             "bar",
             "horizontal_bar",
             "scatter",
+            "treemap",
             "box",
             "histogram",
             "candlestick",
@@ -265,11 +266,14 @@ class ReportBuilder:
                 "bar",
                 "horizontal_bar",
                 "scatter",
+                "treemap",
                 "box",
             }
             and not y
         ):
             raise ValueError(f"y is required for {chart_type} charts")
+        if chart_type == "treemap" and aggregate is not None:
+            raise ValueError("treemap charts do not support aggregate")
         if chart_type == "candlestick":
             missing = {"open", "high", "low", "close"} - encodings.keys()
             if missing:
@@ -516,7 +520,7 @@ class ReportBuilder:
                 index += 1
             elif section["type"] == "plotly":
                 parts.append(
-                    f'<div class="section plotly-chart">{section["content"]}</div>'
+                    f'<div class="section plotly-chart report-panel">{section["content"]}</div>'
                 )
                 index += 1
             elif section["type"] == "table":
