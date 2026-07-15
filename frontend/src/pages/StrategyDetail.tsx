@@ -1,46 +1,102 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertCircle, ArrowLeft, FileText, FlaskConical, ScrollText, Trash2, X, Zap } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { AlertCircle, ArrowLeft, BookOpen, Save, Trash2 } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
 
-import { AgentControls } from "@/components/agent/AgentControls";
-import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
-import {
-  InstanceCard,
-  MarkdownEditor,
-  PerformancePanel,
-} from "@/components/agent/AgentOverviewTab";
-import { SessionReviewer } from "@/components/agent/SessionReviewer";
-import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
-import { ReportBrowser } from "@/components/routines/ReportBrowser";
-import { ExecutorChart } from "@/components/charts/ExecutorChart";
-import { useAgentExecutors } from "@/hooks/useAgentExecutors";
-import { useEscapeKey } from "@/hooks/useEscapeKey";
+import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
+import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { api } from "@/lib/api";
-import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
-// ── Strategy Detail Page ──
+// ── Strategy (Playbook) Detail Page ──
 //
-// A strategy is a playbook that loops under an Agent. This page holds the rich
-// operational view: live executors, sessions/experiments, controls, PnL and the
-// strategy.md / learnings editors. The owning Agent's identity lives one level up
-// at /agents/:slug.
+// A strategy is a pure playbook template (refactor-01b): {sslug}.md (the tick
+// tactic) + default_config. ALL operational history — sessions, experiments,
+// learnings, live instances — lives at the agent level (/agents/:slug), where
+// this playbook's sessions are just a filter.
+
+function DefaultConfigEditor({
+  slug,
+  sslug,
+  config,
+}: {
+  slug: string;
+  sslug: string;
+  config: Record<string, unknown>;
+}) {
+  const queryClient = useQueryClient();
+  const [value, setValue] = useState(() => JSON.stringify(config, null, 2));
+  const [dirty, setDirty] = useState(false);
+  const [parseError, setParseError] = useState("");
+
+  // Re-sync from the server when not mid-edit.
+  useEffect(() => {
+    if (!dirty) setValue(JSON.stringify(config, null, 2));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [JSON.stringify(config)]);
+
+  const saveMut = useMutation({
+    mutationFn: (parsed: Record<string, unknown>) =>
+      api.updateStrategyConfig(slug, sslug, parsed),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      setDirty(false);
+    },
+  });
+
+  const handleSave = () => {
+    try {
+      const parsed = JSON.parse(value) as Record<string, unknown>;
+      setParseError("");
+      saveMut.mutate(parsed);
+    } catch (e) {
+      setParseError(e instanceof Error ? e.message : "Invalid JSON");
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <div>
+          <span className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+            Default Config
+          </span>
+          <span className="ml-2 text-[10px] text-[var(--color-text-muted)]">
+            launch defaults for sessions of this playbook (JSON)
+          </span>
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={!dirty || saveMut.isPending}
+          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-1.5 text-xs font-semibold text-white transition-all disabled:opacity-30"
+        >
+          <Save className="h-3.5 w-3.5" />
+          {saveMut.isPending ? "Saving..." : "Save"}
+        </button>
+      </div>
+      {(parseError || saveMut.isError) && (
+        <div className="rounded-md border border-[var(--color-red)]/40 bg-[var(--color-red)]/10 px-3 py-2 text-xs text-[var(--color-red)]">
+          {parseError ||
+            (saveMut.error instanceof Error ? saveMut.error.message : "Save failed")}
+        </div>
+      )}
+      <textarea
+        value={value}
+        onChange={(e) => {
+          setValue(e.target.value);
+          setDirty(true);
+        }}
+        spellCheck={false}
+        className="min-h-[300px] w-full resize-y rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-sm leading-relaxed text-[var(--color-text)] outline-none transition-colors focus:border-[var(--color-primary)]/50"
+      />
+    </div>
+  );
+}
 
 export function StrategyDetail() {
   const { slug, sslug } = useParams<{ slug: string; sslug: string }>();
   const navigate = useNavigate();
-  const location = useLocation();
-
   const queryClient = useQueryClient();
-  const [reviewerSessionNum, setReviewerSessionNum] = useState<number | null>(null);
-  const [reviewerKind, setReviewerKind] = useState<"session" | "experiment">("session");
-  const [showStrategyModal, setShowStrategyModal] = useState(false);
-  const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
-  // Unsaved-edit guards for the Playbook/Learnings editors (CORR-093)
-  const [playbookDirty, setPlaybookDirty] = useState(false);
-  const [learningsDirty, setLearningsDirty] = useState(false);
-  const [showDiscardConfirm, setShowDiscardConfirm] = useState(false);
 
   const deleteMutation = useMutation({
     mutationFn: () => api.deleteStrategy(slug!, sslug!),
@@ -50,80 +106,13 @@ export function StrategyDetail() {
     },
   });
 
-  // Check location.state for session-deep-linking (SessionReviewer nav)
-  useEffect(() => {
-    const state = location.state as { openReviewer?: boolean; sessionNum?: number } | null;
-    if (state?.openReviewer) {
-      setReviewerSessionNum(state.sessionNum ?? null);
-      navigate(location.pathname, { replace: true, state: null });
-    }
-  }, [location.state, location.pathname, navigate]);
-
-  // Close the strategy modal, dropping any unsaved-edit guards.
-  const closeStrategyModal = useCallback(() => {
-    setShowStrategyModal(false);
-    setShowDiscardConfirm(false);
-    setPlaybookDirty(false);
-    setLearningsDirty(false);
-  }, []);
-
-  // Backdrop click, Escape and the X button all route through here: with
-  // unsaved edits they ask for confirmation instead of silently discarding.
-  const requestCloseStrategyModal = useCallback(() => {
-    if (playbookDirty || learningsDirty) {
-      setShowDiscardConfirm(true);
-    } else {
-      closeStrategyModal();
-    }
-  }, [playbookDirty, learningsDirty, closeStrategyModal]);
-
-  // Close strategy modal on Escape (the discard dialog owns Escape while open)
-  useEscapeKey(showStrategyModal && !showDiscardConfirm, requestCloseStrategyModal);
-
-  const { data: strategy, isLoading, error } = useQuery({
+  const { data: playbook, isLoading, error } = useQuery({
     queryKey: ["strategy", slug, sslug],
     queryFn: () => api.getStrategy(slug!, sslug!),
     enabled: !!slug && !!sslug,
-    refetchInterval: 5000,
   });
 
-  // Routine instances for ReportBrowser
-  const { data: routineInstances = [] } = useQuery({
-    queryKey: ["routine-instances"],
-    queryFn: api.getRoutineInstances,
-    enabled: showRoutinesBrowser,
-    refetchInterval: 5000,
-  });
-
-  // Derive controller IDs from active instances for WS executor streaming
-  const instances = strategy?.instances || [];
-  const hasRunning = instances.length > 0;
-  const serverName = (strategy?.config?.server_name as string) || "";
-
-  const controllerIds = useMemo(
-    () => instances.map((inst) => inst.agent_id).filter(Boolean),
-    [instances],
-  );
-
-  // Real-time executor data via WS
-  const { executors: liveExecutors } = useAgentExecutors(
-    hasRunning ? serverName : null,
-    controllerIds,
-  );
-
-  // Group live executors by connector:pair for charts
-  const chartGroups = useMemo(
-    () => (serverName ? groupExecutorsByMarket(liveExecutors) : []),
-    [liveExecutors, serverName],
-  );
-
-  // Session/experiment click -> open reviewer
-  const handleSessionClick = useCallback((sessionNum: number, kind?: "session" | "experiment") => {
-    setReviewerSessionNum(sessionNum);
-    setReviewerKind(kind || "session");
-  }, []);
-
-  if (error && !strategy) {
+  if (error && !playbook) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
         <div className="max-w-sm rounded-lg border border-red-500/30 bg-[var(--color-surface)] p-8 text-center">
@@ -143,17 +132,13 @@ export function StrategyDetail() {
     );
   }
 
-  if (isLoading || !strategy) {
+  if (isLoading || !playbook) {
     return (
       <div className="flex h-64 items-center justify-center text-[var(--color-text-muted)]">
         <div className="h-6 w-6 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
       </div>
     );
   }
-
-  const reviewerOpen = reviewerSessionNum !== null;
-  const resolvedReviewerSession =
-    reviewerSessionNum ?? (strategy.sessions.length > 0 ? strategy.sessions[0].number : 0);
 
   return (
     <div className="w-full">
@@ -168,252 +153,69 @@ export function StrategyDetail() {
 
         <div className="flex items-start justify-between gap-4">
           <div className="min-w-0">
-            <h1 className="text-xl font-bold text-[var(--color-text)]">
+            <h1 className="flex items-center gap-2 text-xl font-bold text-[var(--color-text)]">
+              <BookOpen className="h-5 w-5 text-[var(--color-text-muted)]" />
               <span className="text-[var(--color-text-muted)]">{slug}</span>
-              <span className="mx-1 text-[var(--color-text-muted)]">/</span>
-              {strategy.name}
+              <span className="text-[var(--color-text-muted)]">/</span>
+              {playbook.name}
             </h1>
-            {strategy.description && (
-              <p className="mt-1 text-sm text-[var(--color-text-muted)]">{strategy.description}</p>
+            {playbook.description && (
+              <p className="mt-1 text-sm text-[var(--color-text-muted)]">{playbook.description}</p>
             )}
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setShowStrategyModal(true)}
-              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-              title="Playbook & Learnings"
-            >
-              <FileText className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Playbook</span>
-            </button>
-            {strategy.experiments.length > 0 && (
-              <button
-                onClick={() =>
-                  handleSessionClick(
-                    Math.max(...strategy.experiments.map((e) => e.number)),
-                    "experiment",
-                  )
-                }
-                className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-                title="Dry-run & run-once snapshots"
-              >
-                <FlaskConical className="h-3.5 w-3.5" />
-                <span className="hidden sm:inline">
-                  Dry runs ({strategy.experiments.length})
+            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
+              <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 font-mono">
+                {playbook.slug}
+              </span>
+              {playbook.agent_key && (
+                <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 font-mono text-[var(--color-primary)]">
+                  {playbook.agent_key}
                 </span>
-              </button>
-            )}
-            <button
-              onClick={() => setShowRoutinesBrowser(true)}
-              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
-              title="Routines & Reports"
-            >
-              <ScrollText className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Routines</span>
-            </button>
-            <button
-              onClick={() => setShowDeleteConfirm(true)}
-              disabled={strategy.status === "running"}
-              className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:cursor-not-allowed disabled:opacity-30"
-              title={strategy.status === "running" ? "Stop strategy before deleting" : "Delete strategy"}
-            >
-              <Trash2 className="h-3.5 w-3.5" />
-              <span className="hidden sm:inline">Delete</span>
-            </button>
-            <AgentControls
-              slug={slug!}
-              sslug={sslug!}
-              status={strategy.status}
-              defaultContext={strategy.default_trading_context || (strategy.config.trading_context as string) || ""}
-              agentConfig={strategy.config}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Meta strip */}
-      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-[var(--color-text-muted)]">
-        <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
-          {strategy.sessions.length} session{strategy.sessions.length !== 1 ? "s" : ""}
-        </span>
-        <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 font-mono">
-          {strategy.slug}
-        </span>
-        {strategy.agent_id && (
-          <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 font-mono">
-            {strategy.agent_id}
-          </span>
-        )}
-      </div>
-
-      {/* Market Context Strip */}
-      {hasRunning && liveExecutors.length > 0 && (
-        <div className="mb-6">
-          <AgentMarketStrip serverName={serverName} executors={liveExecutors} />
-        </div>
-      )}
-
-      {/* Live Executor Charts */}
-      {hasRunning && chartGroups.length > 0 && (
-        <div className="mb-6 space-y-4">
-          <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-            <Zap className="h-3.5 w-3.5" /> Live Executors
-          </h3>
-          {chartGroups.map(([key, group]) => (
-            <ExecutorChart
-              key={key}
-              server={serverName}
-              executors={group}
-              connector={group[0].connector}
-              tradingPair={group[0].trading_pair}
-              height={300}
-            />
-          ))}
-        </div>
-      )}
-
-      {/* Running Instances */}
-      {hasRunning && (
-        <div className="mb-6 rounded-lg border border-emerald-500/20 bg-[var(--color-surface)] p-4">
-          <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-emerald-400">
-            <Zap className="h-3.5 w-3.5" /> Active Sessions ({instances.length})
-          </h3>
-          <div className="space-y-3">
-            {instances.map((inst) => (
-              <InstanceCard key={inst.agent_id} instance={inst} />
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Performance Panel + Sessions table */}
-      <div className="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
-        <PerformancePanel
-          slug={slug!}
-          sslug={sslug!}
-          onSessionClick={handleSessionClick}
-        />
-      </div>
-
-      {/* Playbook & Learnings Modal (near full-screen) */}
-      {showStrategyModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-          {/* Backdrop */}
-          <div
-            className="absolute inset-0 bg-black/60"
-            onClick={requestCloseStrategyModal}
-          />
-          {/* Modal panel */}
-          <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-7xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
-            {/* Modal header */}
-            <div className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-3">
-              <h3 className="text-sm font-semibold text-[var(--color-text)]">
-                Playbook & Learnings — {strategy.name}
-              </h3>
-              <button
-                onClick={requestCloseStrategyModal}
-                className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            {/* Modal content */}
-            <div className="flex-1 overflow-y-auto p-6">
-              <div className="grid h-full grid-cols-1 gap-6 lg:grid-cols-2">
-                <MarkdownEditor
-                  label="Playbook"
-                  sublabel="strategy.md"
-                  content={strategy.strategy_md}
-                  onSave={(value) => api.updateStrategyMd(slug!, sslug!, value)}
-                  invalidateKey={["strategy", slug, sslug]}
-                  onDirtyChange={setPlaybookDirty}
-                />
-                <MarkdownEditor
-                  label="Learnings"
-                  sublabel="persists across sessions"
-                  content={strategy.learnings}
-                  onSave={(value) => api.updateStrategyLearnings(slug!, sslug!, value)}
-                  invalidateKey={["strategy", slug, sslug]}
-                  onDirtyChange={setLearningsDirty}
-                />
-              </div>
+              )}
+              <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
+                {playbook.session_count} session{playbook.session_count !== 1 ? "s" : ""} — view in the agent's history
+              </span>
             </div>
           </div>
-          {/* Unsaved-changes confirmation before discarding edits */}
-          {showDiscardConfirm && (
-            <DiscardChangesDialog
-              fileName={
-                playbookDirty && learningsDirty
-                  ? "strategy.md & learnings"
-                  : playbookDirty
-                    ? "strategy.md"
-                    : "learnings"
-              }
-              onDiscard={closeStrategyModal}
-              onClose={() => setShowDiscardConfirm(false)}
-            />
-          )}
-        </div>
-      )}
-
-      {/* Routines ReportBrowser (full-screen overlay; routines live at the agent
-          level and are shared across strategies, so filter by the agent slug) */}
-      {showRoutinesBrowser && (
-        <ReportBrowser
-          initialSourceTypeFilter={slug}
-          instances={routineInstances}
-          onClose={() => setShowRoutinesBrowser(false)}
-        />
-      )}
-
-      {/* Delete Confirmation Dialog */}
-      {showDeleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowDeleteConfirm(false)}>
-          <div
-            className="w-full max-w-sm rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] p-6 shadow-2xl"
-            onClick={(e) => e.stopPropagation()}
+          <button
+            onClick={() => setShowDeleteConfirm(true)}
+            className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20"
+            title="Delete strategy"
           >
-            <h2 className="mb-2 text-lg font-semibold text-[var(--color-text)]">Delete Strategy</h2>
-            <p className="mb-6 text-sm text-[var(--color-text-muted)]">
-              Delete <strong className="text-[var(--color-text)]">{strategy.name}</strong>? This cannot be undone.
-            </p>
-            <div className="flex justify-end gap-3">
-              <button
-                onClick={() => setShowDeleteConfirm(false)}
-                className="rounded-lg px-4 py-2 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={() => deleteMutation.mutate()}
-                disabled={deleteMutation.isPending}
-                className="rounded-lg bg-red-500 px-4 py-2 text-sm font-medium text-white transition-opacity hover:bg-red-600 disabled:opacity-40"
-              >
-                {deleteMutation.isPending ? "Deleting..." : "Delete"}
-              </button>
-            </div>
-            {deleteMutation.isError && (
-              <p className="mt-3 text-xs text-red-400">Failed to delete strategy. It may be running.</p>
-            )}
-          </div>
+            <Trash2 className="h-3.5 w-3.5" />
+            <span className="hidden sm:inline">Delete</span>
+          </button>
         </div>
-      )}
+      </div>
 
-      {/* Session Reviewer Overlay */}
-      {reviewerOpen && (strategy.sessions.length > 0 || strategy.experiments.length > 0) && (
-        <SessionReviewer
+      {/* Playbook editor + default config */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+        <MarkdownEditor
+          label="Playbook"
+          sublabel="{sslug}.md — the tick tactic (frontmatter + body)"
+          content={playbook.strategy_md}
+          onSave={(value) => api.updateStrategyMd(slug!, sslug!, value)}
+          invalidateKey={["strategy", slug, sslug]}
+        />
+        <DefaultConfigEditor
           slug={slug!}
           sslug={sslug!}
-          agentName={`${slug} / ${strategy.name}`}
-          sessions={strategy.sessions}
-          experiments={strategy.experiments}
-          initialSessionNum={resolvedReviewerSession}
-          initialKind={reviewerKind}
-          serverName={serverName}
-          controllerIds={controllerIds}
-          onClose={() => setReviewerSessionNum(null)}
+          config={playbook.default_config}
         />
-      )}
+      </div>
+
+      {/* Delete Confirmation */}
+      <ConfirmDialog
+        open={showDeleteConfirm}
+        title="Delete Strategy"
+        isPending={deleteMutation.isPending}
+        isError={deleteMutation.isError}
+        errorText="Failed to delete strategy. It may have a running session."
+        onConfirm={() => deleteMutation.mutate()}
+        onClose={() => setShowDeleteConfirm(false)}
+      >
+        Delete <strong className="text-[var(--color-text)]">{playbook.name}</strong>? Its
+        past sessions stay in the agent's history. This cannot be undone.
+      </ConfirmDialog>
     </div>
   );
 }

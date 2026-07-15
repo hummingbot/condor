@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: help setup install run test lint build-frontend setup-chrome register-mcp
+.PHONY: help setup install init login-token run test lint build-frontend setup-chrome register-mcp
 
 # Helper function to find node/npm via nvm or system
 define find_node
@@ -19,6 +19,8 @@ help:
 	@echo ""
 	@echo "  make setup       - Interactive setup wizard"
 	@echo "  make install     - Setup + install all dependencies"
+	@echo "  make init        - Onboarding: identity + harness selection"
+	@echo "  make login-token - Mint a web dashboard login URL"
 	@echo "  make run         - Run locally (dev)"
 	@echo "  make test        - Run tests"
 	@echo "  make lint        - Run black + isort"
@@ -26,6 +28,12 @@ help:
 
 setup:
 	@chmod +x setup-environment.sh && ./setup-environment.sh
+
+init:
+	@uv run python -m condor.cli init
+
+login-token:
+	@uv run python -m condor.cli login-token
 
 install: setup
 	uv sync --dev

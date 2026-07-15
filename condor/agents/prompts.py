@@ -17,10 +17,7 @@ You are an autonomous trading agent running inside Condor.
 
 RULES:
 - Trade ONLY via manage_executors(action="create"). NEVER use place_order.
-- If your strategy deploys a controller-based bot, manage_bots(action="deploy")
-  MUST include max_global_drawdown_quote within your risk limits — deploys
-  without a declared loss cap are blocked by the risk engine.
-- Be conservative. When in doubt, hold and journal why.
+{controller_rule}- Be conservative. When in doubt, hold and journal why.
 
 ERROR RECOVERY:
 - If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
@@ -28,8 +25,8 @@ to fetch the full config schema, compare it against what you sent, fix the missi
 fields, and retry ONCE. Journal the error and fix as a learning.
 """
 
-BASE_PROMPT_DRY_RUN = """\
-You are an autonomous trading agent running inside Condor in 🧪 DRY RUN mode.
+BASE_PROMPT_EXPERIMENT = """\
+You are an autonomous trading agent running inside Condor in 🧪 EXPERIMENT mode.
 
 RULES:
 - This is OBSERVATION ONLY. Do NOT create or stop executors, and do NOT deploy,
@@ -39,15 +36,31 @@ RULES:
   (performance_report; status/logs/get_config).
 - Analyze the market and describe what you WOULD do, but take NO trading action.
 
-DRY RUN MESSAGING:
+EXPERIMENT MESSAGING:
 - Use conditional language: "Would place grid..." not "Grid placed"
-- Prefix actions with 🧪 to signal dry-run
-- End with: "No executors were created (dry run)"
+- Prefix actions with 🧪 to signal the experiment
+- End with: "No executors were created (experiment)"
 """
+
+# The mcp-hummingbot line is added only for server-backed agents (see
+# build_tick_prompt); serverless agents run condor-only and must not be told a
+# hummingbot server exists — they'd otherwise reach for its tools.
+HUMMINGBOT_PRECONFIGURED_LINE = (
+    "- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.\n"
+)
+
+# Controller-based bots (manage_bots) only exist for server-backed agents;
+# serverless agents trade purely through condor-native executors, so this rule
+# is dead weight in their prompt. Injected into BASE_PROMPT_LIVE only when
+# uses_hummingbot (see build_tick_prompt).
+CONTROLLER_DEPLOY_RULE = (
+    "- If your strategy deploys a controller-based bot, manage_bots(action=\"deploy\")\n"
+    "  MUST include max_global_drawdown_quote within your risk limits — deploys\n"
+    "  without a declared loss cap are blocked by the risk engine.\n"
+)
 
 BASE_PROMPT_COMMON = """\
 GENERAL:
-- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.
 - Keep tool chains short (1-5 calls per tick).
 - Your executor state and positions are pre-loaded in [CORE DATA] below — no need to query them.
 
@@ -75,10 +88,11 @@ NOTIFICATIONS:
 - Use send_notification(text="...") to message the user on Telegram.
 """
 
-# Journal guidance. In experiment modes (dry_run / run_once) the engine keeps NO
-# journal — the whole tick is captured in a dry-run snapshot instead — so the agent
-# must not call trading_agent_journal_write (it would fail with "no journal
-# available"). Loop mode gets the full journal protocol.
+# Journal guidance. In experiments the engine keeps NO journal — the whole
+# tick is captured in an experiment snapshot instead — so the agent must not
+# call trading_agent_journal_write (it would fail with "no journal available").
+# Everything else (loop, incl. max_ticks=1 run-once sessions) gets the full
+# journal protocol.
 JOURNAL_SECTION_LIVE = """\
 JOURNAL:
 - Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
@@ -93,27 +107,34 @@ JOURNAL:
 
 JOURNAL_SECTION_EXPERIMENT = """\
 JOURNAL:
-- This is an experiment (dry-run / run-once): there is NO journal this tick.
+- This is an experiment: there is NO journal this tick.
 - Do NOT call trading_agent_journal_write or trading_agent_journal_read — they are
   unavailable here and will error.
 - Put all observations, reasoning, and what you WOULD record straight into your
-  response. The full tick is saved automatically as a dry-run snapshot.
+  response. The full tick is saved automatically as an experiment snapshot.
 """
 
 
-def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
+def _build_tool_preload(*, is_experiment: bool, uses_hummingbot: bool = True) -> str:
     """ToolSearch preload line for ACP sessions.
 
-    Dry-run omits manage_executors (read-only). Experiment modes (dry_run /
-    run_once) omit trading_agent_journal_write since they have no journal.
+    Experiments omit manage_executors (read-only) and trading_agent_journal_write
+    (experiments keep no journal). Serverless agents (``uses_hummingbot=False``)
+    load the CONDOR-native manage_executors and NO mcp-hummingbot tools — wiring
+    both would expose two manage_executors with incompatible schemas, and market
+    data comes from the agent's own routines.
     """
-    tools = ["mcp__mcp-hummingbot__get_market_data"]
-    if not is_dry_run:
-        tools.append("mcp__mcp-hummingbot__manage_executors")
-    tools += [
-        "mcp__mcp-hummingbot__search_history",
-        "mcp__mcp-hummingbot__explore_geckoterminal",
-    ]
+    tools: list[str] = []
+    if uses_hummingbot:
+        tools.append("mcp__mcp-hummingbot__get_market_data")
+        if not is_experiment:
+            tools.append("mcp__mcp-hummingbot__manage_executors")
+        tools += [
+            "mcp__mcp-hummingbot__search_history",
+            "mcp__mcp-hummingbot__explore_geckoterminal",
+        ]
+    elif not is_experiment:
+        tools.append("mcp__condor__manage_executors")
     if not is_experiment:
         tools.append("mcp__condor__trading_agent_journal_write")
     tools += [
@@ -129,7 +150,7 @@ def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
     )
 
 
-def _build_routines_section(strategy: Strategy) -> str:
+def _build_routines_section(agent_slug: str) -> str:
     """Build an [AVAILABLE ROUTINES] section listing this agent's own routines.
 
     Domain experts/trading agents are isolated: they see only their own routines
@@ -139,13 +160,13 @@ def _build_routines_section(strategy: Strategy) -> str:
 
     lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
-        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.key}", config={{...}})'
+        f'Call via: manage_routines(action="run", name="<name>", agent_slug="{agent_slug}", config={{...}})'
     )
     lines.append("")
 
     # Agent-level routines (shared across this agent's strategies, isolated from
     # the chat's general library).
-    routines_dir = assistant_routines_dir(strategy.agent_slug)
+    routines_dir = assistant_routines_dir(agent_slug)
     local = discover_routines_from_path(routines_dir) if routines_dir.exists() else {}
     if local:
         for name, r in sorted(local.items()):
@@ -180,24 +201,36 @@ def build_tick_prompt(
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
 
     execution_mode = config.get("execution_mode", "loop")
-    is_dry_run = execution_mode == "dry_run"
-    # Experiments (dry_run + run_once) keep no journal — the tick is captured as a
-    # dry-run snapshot instead. Mirrors TickEngine.is_experiment in engine.py.
-    is_experiment = execution_mode in ("dry_run", "run_once")
+    is_experiment = execution_mode == "experiment"
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
+    # Serverless agents run condor-only (no mcp-hummingbot); the prompt must
+    # match the actual wiring (condor/agents/run.py) or the model reaches for
+    # tools that aren't there — or, worse, a second manage_executors that is.
+    uses_hummingbot = getattr(agent, "server_required", True)
 
     # Select base prompt and journal protocol based on mode
-    base_prompt = BASE_PROMPT_DRY_RUN if is_dry_run else BASE_PROMPT_LIVE
+    if is_experiment:
+        base_prompt = BASE_PROMPT_EXPERIMENT
+    else:
+        # The controller-deploy rule is only meaningful for server-backed agents.
+        base_prompt = BASE_PROMPT_LIVE.format(
+            controller_rule=CONTROLLER_DEPLOY_RULE if uses_hummingbot else ""
+        )
     journal_section = (
         JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
     )
-    sections: list[str] = [base_prompt, journal_section, BASE_PROMPT_COMMON]
+    common = BASE_PROMPT_COMMON
+    if uses_hummingbot:
+        common = common.replace(
+            "GENERAL:\n", "GENERAL:\n" + HUMMINGBOT_PRECONFIGURED_LINE
+        )
+    sections: list[str] = [base_prompt, journal_section, common]
 
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
         sections.append(
-            _build_tool_preload(is_dry_run=is_dry_run, is_experiment=is_experiment)
+            _build_tool_preload(is_experiment=is_experiment, uses_hummingbot=uses_hummingbot)
         )
     else:
         sections.append(
@@ -209,14 +242,16 @@ def build_tick_prompt(
     tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in journal entries and notifications."
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
-        if not is_dry_run:
+        # controller_id is the hummingbot-executors attribution arg; condor-native
+        # executors are attributed automatically (agent_slug/agent_id/strategy).
+        if not is_experiment and uses_hummingbot:
             tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
     sections.append(tick_info)
 
-    # Run-once mode note
-    if execution_mode == "run_once":
+    # Single-tick session note (run_once maps to max_ticks=1)
+    if not is_experiment and config.get("max_ticks") == 1:
         sections.append(
-            "[EXECUTION MODE — RUN ONCE]\n"
+            "[EXECUTION MODE — SINGLE TICK]\n"
             "Single-tick session with LIVE execution. The engine will stop after this tick. "
             "Make your best move now — there will be no follow-up ticks."
         )
@@ -236,7 +271,7 @@ def build_tick_prompt(
     routines_section = cached_routines_section
     if routines_section is None:
         try:
-            routines_section = _build_routines_section(strategy)
+            routines_section = _build_routines_section(agent.slug)
         except Exception:
             routines_section = ""  # Don't fail the tick if discovery fails
     skills_routines = ["[AVAILABLE SKILLS & ROUTINES]"]
@@ -306,7 +341,10 @@ def build_tick_prompt(
     )
     risk_lines = [
         "[RISK STATE]",
-        f"Position Size: ${rs.get('total_exposure', 0):.2f} / ${rs.get('max_position_size', 500):.2f} limit",
+        # "quote units", not "$": exposure is denominated in each session's
+        # quote asset (SOL for a Solana-quoted agent, USD(C) for perp/pred).
+        f"Position Size: {rs.get('total_exposure', 0):.2f} / "
+        f"{rs.get('max_position_size', 500):.2f} quote units limit",
         f"Open Executors: {rs.get('executor_count', 0)} / {rs.get('max_open_executors', 5)} limit",
         f"Drawdown: {dd_display}",
         f"Status: {'BLOCKED - ' + rs.get('block_reason', '') if rs.get('is_blocked') else 'ACTIVE'}",

@@ -12,16 +12,12 @@ from handlers import clear_all_input_states
 from utils.auth import restricted
 
 from ._shared import (
-    AGENT_MODES,
     AGENT_OPTIONS,
     COMPACT_CONTEXT_TEMPLATE,
     COMPACT_PROMPT_AUTO,
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
-    DEFAULT_MODE,
     get_project_dir,
-    load_assistant,
-    normalize_mode,
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
@@ -95,10 +91,6 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     clear_all_input_states(context)
 
-    # Ensure defaults are set (coercing any legacy/removed persisted mode)
-    context.user_data["agent_mode"] = normalize_mode(
-        context.user_data.get("agent_mode")
-    )
     agent_key = _reclaim_default_agent(context)
 
     # Warn if no agent CLI is available
@@ -140,8 +132,8 @@ async def agent_callback_handler(
 
     # Start a session (single condor agent)
     if action.startswith("mode:"):
-        mode = action.split(":", 1)[1]
-        await _handle_mode_start(update, context, mode)
+        # Legacy callback name; there is a single brain (CONDOR.md, refactor-06).
+        await _handle_session_start(update, context)
 
     # Settings
     elif action == "settings":
@@ -197,25 +189,21 @@ async def agent_callback_handler(
         await query.message.edit_text(text)
 
 
-async def _handle_mode_start(
+async def _handle_session_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    mode: str,
 ) -> None:
-    """Start a session in the given mode."""
+    """Start a fresh Condor chat session (the brain comes from CONDOR.md,
+    already folded into the session's initial context)."""
     query = update.callback_query
     message = query.message if query else update.message
     chat_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    # Never start a session in a removed/unknown mode (stale state, old button).
-    mode = normalize_mode(mode)
-
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
-    mode_label = AGENT_MODES.get(mode, {}).get("label", mode)
     llm_label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
 
-    status_text = f"Starting {mode_label} session ({llm_label})..."
+    status_text = f"Starting Condor session ({llm_label})..."
     if query:
         await message.edit_text(status_text)
     else:
@@ -223,8 +211,6 @@ async def _handle_mode_start(
 
     # Destroy existing session
     await destroy_session(chat_id)
-
-    context.user_data["agent_mode"] = mode
 
     try:
         bot = context.bot
@@ -234,26 +220,16 @@ async def _handle_mode_start(
 
             return await permission_callback(bot, chat_id, tool_call, options)
 
-        session = await get_or_create_session(
+        await get_or_create_session(
             chat_id=chat_id,
             agent_key=agent_key,
             permission_callback=_perm_cb,
             user_id=user_id,
             user_data=context.user_data,
-            mode=mode,
         )
 
-        # Inject mode-specific context (auto-loaded from assistants/*.md)
-        extra_context = load_assistant(mode)
-
-        if extra_context:
-            try:
-                await session.client.prompt(extra_context)
-            except Exception:
-                log.warning("Failed to inject %s context for chat %d", mode, chat_id)
-
         await message.edit_text(
-            f"{mode_label} is ready. Send a message to start chatting.\n\n"
+            "Condor is ready. Send a message to start chatting.\n\n"
             "Use /agent to see options or any other command to exit."
         )
     except Exception as e:
@@ -568,7 +544,6 @@ async def _handle_compact(
         return
 
     agent_key = session.agent_key
-    mode = session.mode
     await destroy_session(chat_id)
 
     try:
@@ -586,7 +561,6 @@ async def _handle_compact(
             permission_callback=_perm_cb,
             user_id=user_id,
             user_data=context.user_data,
-            mode=mode,
         )
 
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
@@ -626,7 +600,7 @@ async def _handle_compact_custom_prompt(
 async def _handle_new_session(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
-    """Destroy current session and start a fresh one in the same mode."""
+    """Destroy current session and start a fresh one."""
     query = update.callback_query
     chat_id = update.effective_chat.id
     session = get_session(chat_id)
@@ -635,8 +609,7 @@ async def _handle_new_session(
         await query.message.edit_text("No active session.")
         return
 
-    mode = session.mode
-    await _handle_mode_start(update, context, mode)
+    await _handle_session_start(update, context)
 
 
 async def _do_compact_from_message(
@@ -670,7 +643,6 @@ async def _do_compact_from_message(
         return
 
     agent_key = session.agent_key
-    mode = session.mode
     await destroy_session(chat_id)
 
     try:
@@ -688,7 +660,6 @@ async def _do_compact_from_message(
             permission_callback=_perm_cb,
             user_id=user_id,
             user_data=context.user_data,
-            mode=mode,
         )
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
         await new_session.client.prompt(compact_context)
@@ -821,8 +792,6 @@ async def agent_message_handler(
         await _resolve_openrouter_typed_slug(update, context, text)
         return
 
-    mode = normalize_mode(context.user_data.get("agent_mode"))
-
     session = get_session(chat_id)
 
     # Auto-create session if none exists (always-on agent)
@@ -830,11 +799,6 @@ async def agent_message_handler(
         # Reclaim the configured default after an auto-switch — same healing the
         # /agent command does, so users who only ever type messages benefit too.
         agent_key = _reclaim_default_agent(context)
-
-        # Condor is the single interactive agent; its builder capabilities ship
-        # as built-in skills, so there is only ever one mode.
-        mode = DEFAULT_MODE
-        context.user_data["agent_mode"] = mode
 
         # Check if the CLI binary is installed before attempting to spawn
         if not _is_agent_available(agent_key):
@@ -855,19 +819,7 @@ async def agent_message_handler(
                 permission_callback=_perm_cb,
                 user_id=user_id,
                 user_data=context.user_data,
-                mode=mode,
             )
-
-            # Inject mode-specific context (auto-loaded from assistants/*.md)
-            extra_context = load_assistant(mode)
-
-            if extra_context:
-                try:
-                    await session.client.prompt(extra_context)
-                except Exception:
-                    log.warning(
-                        "Failed to inject %s context for chat %d", mode, chat_id
-                    )
 
         except Exception as e:
             log.exception("Failed to create agent session")
@@ -886,9 +838,6 @@ async def agent_message_handler(
 
     # Create streamer prefix
     prefix = ""
-    mode_label = AGENT_MODES.get(mode, {}).get("label", "")
-    if mode != DEFAULT_MODE and mode_label:
-        prefix = f"{mode_label}\n\n"
 
     # Fetch voice data if this was a transcription
     voice_placeholder = context.chat_data.pop("_voice_placeholder", None)

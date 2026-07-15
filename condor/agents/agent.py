@@ -18,7 +18,7 @@ Disk layout::
         AGENT.md                       # Agent identity + domain knowledge (no `role`)
         skills/<slug>/SKILL.md         # shared skills (consult + every strategy) [FEAT-002/003]
         store/user_{id}/               # learned memory (the shared brain) [FEAT-003]
-        strategies/{sslug}/            # owned playbooks (see strategy.py)
+        strategies/{sslug}.md          # owned playbooks (see strategy.py)
 
 An Agent may be **authored in the repo** (e.g. ``executor_manager``) or **created
 at runtime**; either way ``AgentStore`` can create/update/delete it.
@@ -40,6 +40,11 @@ log = logging.getLogger(__name__)
 _DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
 
 
+def agents_data_root() -> Path:
+    """Root of the on-disk agent tree (``agents/`` at repo root)."""
+    return _DATA_ROOT
+
+
 @dataclass
 class Agent:
     slug: str  # directory name == agent_slug for the domain store (FEAT-003)
@@ -57,6 +62,14 @@ class Agent:
     # mcp-hummingbot subprocess is initialized against THIS server regardless of
     # the chat's active server. Empty => fall back to the ambient chat server.
     server_name: str = ""
+    # Agent-level risk baseline (RiskLimits keys). Governs unattended delegations
+    # (zero-seeded risk_gate) and is the fallback for tick sessions whose strategy
+    # default_config declares no risk_limits of its own. The AGENT.md defines what
+    # the agent does — a server-backed agent MUST declare a baseline (enforced on
+    # save); {max_position_size_quote: 0, max_open_executors: 0} is the explicit
+    # "read-only, never trades" statement. An empty dict survives only in
+    # hand-written legacy files, where delegate still errors loudly at start.
+    risk_limits: dict = field(default_factory=dict)
     created_by: int = 0
     created_at: str = ""
 
@@ -72,6 +85,21 @@ class Agent:
     def routines_dir(self) -> Path:
         """Agent-level routines, shared across all of this agent's strategies."""
         return self.agent_dir / "routines"
+
+    # The one tool that places/stops live executors. An agent that lists it can
+    # move real capital and MUST carry a risk baseline (#4).
+    _TRADING_TOOL = "manage_executors"
+
+    @property
+    def can_trade(self) -> bool:
+        """True if this agent explicitly owns the executor tool. Such an agent
+        MUST declare a risk baseline — enforced on save and at delegation —
+        whether or not it needs a hummingbot server, because condor-native
+        executors trade on serverless agents too (#4)."""
+        return any(
+            t == self._TRADING_TOOL or t.endswith(f"__{self._TRADING_TOOL}")
+            for t in (self.tools or [])
+        )
 
     @property
     def consultable(self) -> bool:
@@ -102,6 +130,7 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
             when_to_consult=meta.get("when_to_consult", ""),
             server_required=meta.get("server_required", True),
             server_name=meta.get("server_name", "") or "",
+            risk_limits=meta.get("risk_limits", {}) or {},
             created_by=meta.get("created_by", 0),
             created_at=meta.get("created_at", ""),
         )
@@ -153,6 +182,7 @@ class AgentStore:
         when_to_consult: str = "",
         server_required: bool = True,
         server_name: str = "",
+        risk_limits: dict | None = None,
         created_by: int = 0,
     ) -> Agent:
         agent = Agent(
@@ -165,6 +195,7 @@ class AgentStore:
             when_to_consult=when_to_consult,
             server_required=server_required,
             server_name=server_name,
+            risk_limits=risk_limits or {},
             created_by=created_by,
         )
         self._save(agent)
@@ -191,6 +222,18 @@ class AgentStore:
         return True
 
     def _save(self, agent: Agent) -> None:
+        # The AGENT.md defines what the agent does — for a server-backed agent
+        # that includes how much it may do unattended. Refusing to save an
+        # incomplete definition moves the loud error from delegate time to
+        # authoring time.
+        if (agent.server_required or agent.can_trade) and not agent.risk_limits:
+            why = "is server-backed" if agent.server_required else "owns manage_executors"
+            raise ValueError(
+                f"Agent '{agent.slug}' {why} but declares no risk_limits "
+                "baseline. Say the numbers in AGENT.md — use "
+                "{'max_position_size_quote': 0, 'max_open_executors': 0} "
+                "for a read-only agent that must never trade."
+            )
         meta = {
             "name": agent.name,
             "description": agent.description,
@@ -199,6 +242,7 @@ class AgentStore:
             "when_to_consult": agent.when_to_consult,
             "server_required": agent.server_required,
             "server_name": agent.server_name,
+            "risk_limits": agent.risk_limits,
             "created_by": agent.created_by,
             "created_at": agent.created_at,
         }

@@ -65,30 +65,28 @@ def test_attribution_resets_after_block(reports_dir):
     assert rep.list_reports()[0][0]["agent"] == "condor"
 
 
-def test_mcp_runner_stamps_bare_agent_slug_for_strategy(
-    reports_dir, tmp_path, monkeypatch
-):
-    """The MCP routine runner must attribute a strategy's report to the bare
-    owning-agent slug, not the composite ``"{agent}.{strategy}"`` key — so it
-    lands in the same ``list_reports(agent=...)`` bucket as the web/Telegram
-    runner (which uses the bare slug). Regression test for CORR-027."""
-    import condor.agents.strategy as strategy_mod
+def test_mcp_runner_stamps_agent_slug(reports_dir, tmp_path, monkeypatch):
+    """The MCP routine runner must attribute an agent-targeted run's report to
+    the agent slug — the same ``list_reports(agent=...)`` bucket the
+    web/Telegram runner uses. Regression test for CORR-027 (originally about
+    composite strategy keys leaking into attribution)."""
+    import condor.agents.agent as agent_mod
     import routines.base as routines_base
     from mcp_servers.condor.tools import routines as mcp_routines
 
-    # Point both data roots (strategies live under agents/, routines are
-    # resolved relative to the project root) at an isolated tmp tree.
-    monkeypatch.setattr(strategy_mod, "_DATA_ROOT", tmp_path / "agents")
+    # Point both data roots (agents/, routines resolved relative to the
+    # project root) at an isolated tmp tree.
+    monkeypatch.setattr(agent_mod, "_DATA_ROOT", tmp_path / "agents")
     monkeypatch.setattr(routines_base, "_PROJECT_ROOT", tmp_path)
 
-    # A real strategy on disk so StrategyStore().get_by_key(...) resolves.
-    strategy = strategy_mod.StrategyStore().create(
-        agent_slug="market_making_expert",
-        name="Scalp v2",
+    # A real agent on disk so AgentStore().get(...) resolves.
+    agent_dir = tmp_path / "agents" / "market_making_expert"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "AGENT.md").write_text(
+        "---\nname: market_making_expert\n---\n\nBody.\n"
     )
-    assert strategy.key == "market_making_expert.scalp_v2"  # composite key
 
-    # A one-shot routine in the owning agent's routines dir, producing a report.
+    # A one-shot routine in the agent's routines dir, producing a report.
     routines_dir = routines_base.assistant_routines_dir("market_making_expert")
     routines_dir.mkdir(parents=True, exist_ok=True)
     (routines_dir / "probe.py").write_text(
@@ -104,9 +102,9 @@ def test_mcp_runner_stamps_bare_agent_slug_for_strategy(
         "    return 'done'\n"
     )
 
-    asyncio.run(mcp_routines.run_routine("probe", {}, strategy_id=strategy.key))
+    asyncio.run(
+        mcp_routines.run_routine("probe", {}, agent_slug="market_making_expert")
+    )
 
-    # Report is bucketed under the bare slug, not the composite key.
     bare, _ = rep.list_reports(agent="market_making_expert")
     assert [e["title"] for e in bare] == ["Probe report"]
-    assert rep.list_reports(agent=strategy.key)[0] == []

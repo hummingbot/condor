@@ -22,12 +22,26 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def client():
+    import os
+    import uuid
+
     from starlette.testclient import TestClient
 
     from condor.web.app import create_app
 
-    with TestClient(create_app()) as test_client:
-        yield test_client
+    # The app lifespan starts a ControlServer; give it its own socket so the
+    # test never contends with (or previously: silently stole) the socket of
+    # a live Condor process on this machine.
+    prev = os.environ.get("CONDOR_CONTROL_SOCKET")
+    os.environ["CONDOR_CONTROL_SOCKET"] = f"/tmp/condor-spa-{uuid.uuid4().hex[:8]}.sock"
+    try:
+        with TestClient(create_app()) as test_client:
+            yield test_client
+    finally:
+        if prev is None:
+            os.environ.pop("CONDOR_CONTROL_SOCKET", None)
+        else:
+            os.environ["CONDOR_CONTROL_SOCKET"] = prev
 
 
 @pytest.mark.parametrize(

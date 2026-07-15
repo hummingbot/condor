@@ -105,6 +105,7 @@ def test_agent_crud_roundtrip(tmp_path, monkeypatch):
         instructions="identity body",
         agent_key="ollama:x",
         when_to_consult="ask me",
+        risk_limits={"max_position_size_quote": 500, "max_open_executors": 3},
     )
     assert a.slug == "river_maker"
     assert (tmp_path / "river_maker" / "AGENT.md").exists()
@@ -119,6 +120,36 @@ def test_agent_crud_roundtrip(tmp_path, monkeypatch):
 
     assert store.delete("river_maker") is True
     assert store.get("river_maker") is None
+
+
+def test_server_backed_agent_requires_risk_baseline(tmp_path, monkeypatch):
+    """The AGENT.md defines what the agent does — a server-backed agent
+    without a risk baseline is an incomplete definition and must not save.
+    {0, 0} is the explicit read-only statement and is accepted."""
+    import pytest
+
+    _patch_roots(monkeypatch, tmp_path)
+    store = AgentStore()
+
+    with pytest.raises(ValueError, match="risk_limits"):
+        store.create(name="No Budget", instructions="x")
+
+    # Explicit read-only baseline is a complete definition.
+    ro = store.create(
+        name="Read Only",
+        instructions="x",
+        risk_limits={"max_position_size_quote": 0, "max_open_executors": 0},
+    )
+    assert store.get(ro.slug).risk_limits["max_open_executors"] == 0
+
+    # Serverless specialists need no baseline (nothing they touch trades).
+    s = store.create(name="Specialist", instructions="x", server_required=False)
+    assert store.get(s.slug).risk_limits == {}
+
+    # update() goes through the same check: stripping the baseline must fail.
+    ro.risk_limits = {}
+    with pytest.raises(ValueError, match="risk_limits"):
+        store.update(ro)
 
 
 # ── Strategy as an Agent sub-resource ──
@@ -138,8 +169,8 @@ def test_strategy_crud_under_agent(tmp_path, monkeypatch):
     )
     assert s.slug == "brl_mm"
     assert s.key == "brigado.brl_mm"
-    assert s.dir == tmp_path / "brigado" / "strategies" / "brl_mm"
-    assert (s.dir / "strategy.md").exists()
+    assert s.path == tmp_path / "brigado" / "strategies" / "brl_mm.md"
+    assert s.path.exists()
 
     # get / get_by_key / list
     assert store.get("brigado", "brl_mm").instructions.strip() == "do the thing"
@@ -192,6 +223,7 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
             agent_key="ollama:qwen3:32b",
             when_to_consult="when sizing a position",
             tools=["get_market_data"],
+            risk_limits={"max_position_size_quote": 0, "max_open_executors": 0},
         )
     )
     assert created["created"] is True
@@ -273,28 +305,28 @@ def test_routines_dir_resolves_bare_agent_slug(tmp_path, monkeypatch):
 
 
 def test_agent_skill_library_read_and_edit(tmp_path, monkeypatch):
-    """An Agent's skills/<slug>/SKILL.md library is readable and editable."""
+    """An Agent's skills/<name>/SKILL.md library is readable and editable."""
     from condor.memory import paths as paths_module
     from condor.memory.skills import SkillStore
 
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    skill_dir = tmp_path / "agents" / "executor_manager" / "skills" / "size_grid"
+    skill_dir = tmp_path / "agents" / "executor_manager" / "skills" / "size-grid"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: size_grid\ndescription: d\nwhen_to_use: before a grid\n"
-        "source: builtin\n---\n\nSteps.\n"
+        '---\nname: size-grid\ndescription: "Size a grid. Use when before a grid."\n'
+        'metadata: {"condor-source": "builtin"}\n---\n\nSteps.\n'
     )
 
     store = SkillStore(agent_slug="executor_manager")
-    assert "[size_grid] before a grid" in store.list_index()
-    read = store.read("size_grid")
-    assert read is not None and read["when_to_use"] == "before a grid"
+    assert "[size-grid] Size a grid. Use when before a grid." in store.list_index()
+    read = store.read("size grid")
+    assert read is not None and "Use when before a grid" in read["description"]
 
-    assert store.create("stop or widen", "d2", "when underwater", "steps")["saved"]
-    assert "[stop_or_widen] when underwater" in store.list_index()
-    assert store.edit("size_grid", description="updated")["description"] == "updated"
-    assert store.delete("stop_or_widen") is True
-    assert "stop_or_widen" not in store.list_index()
+    assert store.create("stop or widen", "d2. Use when underwater.", "steps")["saved"]
+    assert "[stop-or-widen] d2. Use when underwater." in store.list_index()
+    assert store.edit("size-grid", description="updated")["description"] == "updated"
+    assert store.delete("stop-or-widen")["deleted"] is True
+    assert "stop-or-widen" not in store.list_index()
 
 
 # ── pydantic-ai tool allowlist (enforced on consult) ──
@@ -645,19 +677,13 @@ def test_consult_forces_caller_user_id(monkeypatch):
     assert seen["server_name"] == "X"
 
 
-def test_normalize_mode_coerces_legacy_and_unknown():
-    """Legacy/removed (FEAT-004) or unknown persisted agent_mode -> DEFAULT_MODE."""
-    from handlers.agents._shared import AGENT_MODES, DEFAULT_MODE, normalize_mode
+def test_condor_brain_loads_from_repo_root():
+    """The chat brain is repo-root CONDOR.md (refactor-06): frontmatter + body."""
+    from handlers.agents._shared import _load_condor
 
-    # Removed legacy modes and any unknown/None value fall back to default.
-    assert normalize_mode("trading") == DEFAULT_MODE
-    assert normalize_mode("agent_builder") == DEFAULT_MODE
-    assert normalize_mode("does-not-exist") == DEFAULT_MODE
-    assert normalize_mode(None) == DEFAULT_MODE
-
-    # The default mode itself is always valid and preserved.
-    assert DEFAULT_MODE in AGENT_MODES
-    assert normalize_mode(DEFAULT_MODE) == DEFAULT_MODE
+    meta, body = _load_condor()
+    assert meta.get("label") == "Condor"
+    assert "coordinator" in body or "Condor" in body
 
 
 def test_session_mcp_servers_carry_agent_slug(monkeypatch):

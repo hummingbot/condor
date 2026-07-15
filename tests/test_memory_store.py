@@ -14,7 +14,8 @@ def memory_root(tmp_path, monkeypatch):
     """Point the project root at a tmp dir so stores resolve under it."""
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     # The chat store (agent_slug=None) is what these per-user tests exercise.
-    return tmp_path / "assistants" / "condor" / "store"
+    # It lives at the repo root (refactor-06): root store/ is the chat's.
+    return tmp_path / "store"
 
 
 def test_write_list_read_roundtrip(memory_root):
@@ -248,25 +249,25 @@ def test_concurrent_writers_never_leave_a_torn_file(memory_root):
 # -- per-assistant resolver + isolation (FEAT-003) ----------------------------
 
 
-def test_resolver_distinct_roots_per_assistant(tmp_path, monkeypatch):
+def test_resolver_distinct_roots_per_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     chat = store_root(42, None)
     grid = store_root(42, "grid_scalper")
     ema = store_root(42, "ema_trend_follower")
     assert chat != grid != ema
-    assert chat == tmp_path / "assistants" / "condor" / "store" / "user_42"
+    assert chat == tmp_path / "store" / "user_42"
     assert grid == tmp_path / "agents" / "grid_scalper" / "store" / "user_42"
     # Same (slug, user) is stable across calls.
     assert store_root(42, "grid_scalper") == grid
 
 
-def test_resolver_user_isolation_within_assistant(tmp_path, monkeypatch):
+def test_resolver_user_isolation_within_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     assert store_root(1, "grid_scalper") != store_root(2, "grid_scalper")
 
 
-def test_memory_isolated_between_assistants(tmp_path, monkeypatch):
-    """A memory written by one assistant is invisible to another."""
+def test_memory_isolated_between_agents(tmp_path, monkeypatch):
+    """A memory written by one agent is invisible to another."""
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     grid = MemoryStore(user_id=42, agent_slug="grid_scalper")
     chat = MemoryStore(user_id=42, agent_slug=None)

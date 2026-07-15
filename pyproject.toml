@@ -23,6 +23,11 @@ dependencies = [
     "scipy>=1.17.1",
     "pydantic-ai[mcp]",
     "beautifulsoup4>=4.14.3",
+    "solders>=0.27.1",
+    "solana>=0.40.0",
+    "hyperliquid-python-sdk>=0.24.0",
+    "base58>=2.1.1",
+    "py-clob-client-v2>=1.0.2",
 ]
 
 [project.optional-dependencies]

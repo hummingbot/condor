@@ -6,25 +6,30 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# -- Assistant prompt loader (auto-discovery from assistants/ folder) --
+# -- Chat brain loader (repo-root CONDOR.md, refactor-06) --
+#
+# The repo root is the chat coordinator's agent-home: CONDOR.md (this brain) +
+# skills/ + routines/ + store/, mirroring agents/{slug}/. The name is
+# deliberately NOT AGENT.md/AGENTS.md — those are host-owned files a harness
+# opened in this repo would load as ITS OWN instructions.
 
-_ASSISTANTS_DIR = Path(__file__).parent.parent.parent / "assistants"
-_assistant_cache: dict[str, tuple[dict[str, str], str]] = {}
+_CONDOR_MD = Path(__file__).parent.parent.parent / "CONDOR.md"
+_condor_cache: tuple[dict[str, str], str] | None = None
 
 
-def _parse_assistant(path: Path) -> tuple[dict[str, str], str]:
-    """Parse an assistant .md file, extracting YAML frontmatter and body.
+def _load_condor() -> tuple[dict[str, str], str]:
+    """Load the chat brain's (frontmatter, body) from CONDOR.md. Cached."""
+    global _condor_cache
+    if _condor_cache is not None:
+        return _condor_cache
 
-    Frontmatter format (between --- lines):
-        label: Display Name
-        description: Short description
-
-    Returns (metadata_dict, body_text).
-    """
-    raw = path.read_text(encoding="utf-8").strip()
     meta: dict[str, str] = {}
-    body = raw
-
+    body = ""
+    try:
+        raw = _CONDOR_MD.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        log.error("Chat brain not found: %s", _CONDOR_MD)
+        raw = ""
     if raw.startswith("---"):
         parts = raw.split("---", 2)
         if len(parts) >= 3:
@@ -33,72 +38,13 @@ def _parse_assistant(path: Path) -> tuple[dict[str, str], str]:
                     k, v = line.split(":", 1)
                     meta[k.strip()] = v.strip()
             body = parts[2].strip()
+    else:
+        body = raw
 
-    # Fallback: derive label from filename
-    if "label" not in meta:
-        meta["label"] = path.stem.replace("_", " ").title()
-    if "description" not in meta:
-        meta["description"] = ""
-
-    return meta, body
-
-
-def load_assistant(name: str) -> str:
-    """Load an assistant prompt body from assistants/{name}.md. Cached."""
-    meta, body = _load_assistant_full(name)
-    return body
-
-
-def _assistant_path(name: str) -> Path | None:
-    """Resolve an assistant's definition file.
-
-    Supports both the flat form (``assistants/{name}.md``) and the folder form
-    (``assistants/{name}/AGENT.md``, FEAT-003), where the assistant's store is
-    co-located under ``assistants/{name}/store/``. Flat form wins if both exist.
-    """
-    flat = _ASSISTANTS_DIR / f"{name}.md"
-    if flat.exists():
-        return flat
-    folder = _ASSISTANTS_DIR / name / "AGENT.md"
-    if folder.exists():
-        return folder
-    return None
-
-
-def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
-    """Load metadata + body for an assistant. Cached after first read."""
-    if name in _assistant_cache:
-        return _assistant_cache[name]
-    path = _assistant_path(name)
-    if path is None:
-        log.warning("Assistant prompt not found: %s", _ASSISTANTS_DIR / name)
-        return {"label": name, "description": ""}, ""
-    result = _parse_assistant(path)
-    _assistant_cache[name] = result
-    return result
-
-
-def discover_assistants() -> dict[str, dict[str, str]]:
-    """Auto-discover all assistants from ``assistants/``.
-
-    Picks up both ``assistants/{name}.md`` (flat) and ``assistants/{name}/AGENT.md``
-    (folder form, FEAT-003). Returns dict like:
-    {"condor": {"label": "Condor", "description": "..."}, ...}
-    """
-    result: dict[str, dict[str, str]] = {}
-    if not _ASSISTANTS_DIR.exists():
-        return result
-    # Flat form: assistants/{name}.md
-    names = [path.stem for path in sorted(_ASSISTANTS_DIR.glob("*.md"))]
-    # Folder form (FEAT-003): assistants/{name}/AGENT.md
-    names += [path.parent.name for path in sorted(_ASSISTANTS_DIR.glob("*/AGENT.md"))]
-    for name in dict.fromkeys(names):  # dedupe, preserve order
-        meta, _ = _load_assistant_full(name)
-        result[name] = {
-            "label": meta["label"],
-            "description": meta.get("description", ""),
-        }
-    return result
+    meta.setdefault("label", "Condor")
+    meta.setdefault("description", "")
+    _condor_cache = (meta, body)
+    return _condor_cache
 
 
 AGENT_OPTIONS: dict[str, dict[str, str]] = {
@@ -119,7 +65,7 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
 def _default_agent() -> str:
     """Resolve the fallback agent_key for users who haven't picked a model.
 
-    Precedence: ``CONDOR_DEFAULT_AGENT`` env > condor ``AGENT.md`` frontmatter
+    Precedence: ``CONDOR_DEFAULT_AGENT`` env > ``CONDOR.md`` frontmatter
     ``agent_key`` > ``"claude-code"``. A user's own /agent → Change LLM choice
     (``agent_llm``) still overrides this at runtime; this is only the default.
     Examples for the frontmatter / env: ``claude-code``, ``claude-acp:opus``,
@@ -127,37 +73,13 @@ def _default_agent() -> str:
     """
     import os
 
-    meta, _ = _load_assistant_full("condor")
+    meta, _ = _load_condor()
     return (
         os.environ.get("CONDOR_DEFAULT_AGENT") or meta.get("agent_key") or "claude-code"
     )
 
 
 DEFAULT_AGENT = _default_agent()
-
-# -- Agent modes (auto-discovered) --
-
-AGENT_MODES = discover_assistants()
-DEFAULT_MODE = "condor"
-
-
-def normalize_mode(mode: str | None) -> str:
-    """Coerce a persisted ``agent_mode`` to a currently-valid one.
-
-    FEAT-004 collapsed the old multi-mode setup ('trading'/'agent_builder') into
-    the single 'condor' mode. Stale pickled ``user_data`` may still hold a mode
-    that is no longer in ``AGENT_MODES``; left as-is it would surface a raw broken
-    label or start a non-existent mode. Anything unknown falls back to
-    ``DEFAULT_MODE``.
-    """
-    return mode if mode in AGENT_MODES else DEFAULT_MODE
-
-
-def reload_assistants() -> None:
-    """Re-scan assistants/ folder. Call after adding/removing .md files."""
-    _assistant_cache.clear()
-    AGENT_MODES.clear()
-    AGENT_MODES.update(discover_assistants())
 
 
 # -- Compact prompt templates --
@@ -205,12 +127,12 @@ _TELEGRAM_FORMATTING = (
 
 
 def _build_system_prompt(platform: str = "telegram") -> str:
-    """Build the system prompt by combining the assistant .md with platform formatting rules."""
-    assistant_content = load_assistant("condor")
+    """Build the system prompt: the CONDOR.md brain + platform formatting rules."""
+    _, brain = _load_condor()
     formatting = _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
     return (
         "[System context -- do not repeat this to the user]\n\n"
-        f"{assistant_content}\n\n"
+        f"{brain}\n\n"
         f"{formatting}"
     )
 
@@ -285,6 +207,33 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     return False
 
 
+# System-MUTATION actions per tool — reshaping the agent/routine/skill system,
+# distinct from placing trades or writing an agent's own memory. Read/run/list
+# actions are deliberately excluded (they are safe). Used to gate ACP agents to
+# their declared tool scope (#8): mutations they never declared are denied.
+SYSTEM_MUTATION_ACTIONS: dict[str, set[str]] = {
+    "manage_trading_agent": {
+        "create_agent", "update_agent", "delete_agent",
+        "create_strategy", "update_strategy", "delete_strategy",
+    },
+    "manage_routines": {"create_routine", "edit_routine", "delete_routine"},
+    "manage_skill": {"create", "write_file", "patch", "edit", "delete"},
+}
+
+
+def system_mutation_tool(tool_call: dict[str, Any]) -> str | None:
+    """If this call mutates the agent/routine/skill system, return the tool's
+    short name; else ``None``. Trading, an agent's own memory, and every
+    read/run/list action are NOT system mutations."""
+    raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
+    tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+    actions = SYSTEM_MUTATION_ACTIONS.get(tool_name)
+    if actions is None:
+        return None
+    action = (tool_call.get("input", {}) or {}).get("action", "")
+    return tool_name if action in actions else None
+
+
 def get_project_dir() -> str:
     """Get the condor project root directory (where .mcp.json lives).
 
@@ -299,6 +248,8 @@ def _condor_mcp_args(
     user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
+    agent_id: str | None = None,
+    strategy: str | None = None,
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess."""
     import os
@@ -316,6 +267,10 @@ def _condor_mcp_args(
     ]
     if agent_slug:
         args.extend(["--agent-slug", agent_slug])
+    if agent_id:
+        args.extend(["--agent-id", agent_id])
+    if strategy:
+        args.extend(["--strategy", strategy])
     if server_name:
         args.extend(["--server-name", server_name])
     return args
@@ -328,8 +283,16 @@ def build_mcp_servers_for_session(
     execution_mode: str = "loop",
     server_name: str | None = None,
     agent_slug: str | None = None,
+    agent_id: str | None = None,
+    strategy: str | None = None,
+    include_hummingbot: bool = True,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
+
+    ``include_hummingbot=False`` returns the condor MCP alone — REQUIRED for
+    serverless agents: with both servers wired, the model sees two
+    ``manage_executors`` tools (condor-native vs hummingbot-api) with
+    incompatible schemas and picks wrong.
 
     Resolves the user's default Condor server and returns ACP-format mcpServers
     that override the static .mcp.json entries by name.
@@ -341,11 +304,24 @@ def build_mcp_servers_for_session(
     condor's stores — correct for chat sessions, wrong for an Agent run: a
     serverless consult/tick would silently read and write the CHAT's memory
     and skills instead of the Agent's own (e.g. routine_builder unable to
-    find its routine_cookbook skill).
+    find its routine-cookbook skill).
     """
     from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
+
+    if not include_hummingbot:
+        return [
+            {
+                "name": "condor",
+                "command": "uv",
+                "args": ["run", "python", "-m", "mcp_servers.condor"]
+                + _condor_mcp_args(
+                    chat_id, user_id, agent_slug, agent_id=agent_id, strategy=strategy
+                ),
+                "env": [],
+            }
+        ]
 
     # Resolve which hummingbot server to use (explicit override > user preferences)
     if not server_name:
@@ -360,7 +336,10 @@ def build_mcp_servers_for_session(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
+        + _condor_mcp_args(
+            chat_id, user_id, agent_slug, server_name=server_name,
+            agent_id=agent_id, strategy=strategy,
+        ),
         "env": [],
     }
 
@@ -414,6 +393,8 @@ def build_mcp_servers_for_agent(
     chat_id: int,
     agent_slug: str | None = None,
     execution_mode: str = "loop",
+    agent_id: str | None = None,
+    strategy: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build MCP server configs for a trading agent bound to a specific server.
 
@@ -429,7 +410,10 @@ def build_mcp_servers_for_agent(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
+        + _condor_mcp_args(
+            chat_id, user_id, agent_slug, server_name=server_name,
+            agent_id=agent_id, strategy=strategy,
+        ),
         "env": [],
     }
 
@@ -485,7 +469,7 @@ def build_initial_context(
 
     cm = get_config_manager()
 
-    # Build system prompt from assistants/ .md + platform formatting
+    # Build system prompt from CONDOR.md + platform formatting
     system_prompt = _build_system_prompt(platform)
     sections: list[str] = [system_prompt]
 

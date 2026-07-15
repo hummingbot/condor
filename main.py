@@ -726,18 +726,6 @@ async def _run_dual(application: Application) -> None:
     # Start WebSocket manager
     get_ws_manager().start()
 
-    # Notify admin that Condor has started
-    from utils.config import ADMIN_USER_ID
-
-    if ADMIN_USER_ID:
-        try:
-            await application.bot.send_message(
-                chat_id=int(ADMIN_USER_ID),
-                text="Condor is online and ready.",
-            )
-        except Exception as e:
-            logger.warning(f"Failed to send startup notification to admin: {e}")
-
     logger.info("Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT)
 
     # Handle shutdown signals
@@ -754,6 +742,26 @@ async def _run_dual(application: Application) -> None:
     web_task = asyncio.create_task(server.serve())
     stop_task = asyncio.create_task(shutdown_event.wait())
 
+    # Notify admin only once the server is actually accepting connections
+    # (lifespan startup done: control socket up, reconcile running/complete) —
+    # "ready" before serve() was a lie during slow reconciles.
+    async def _announce_ready():
+        from utils.config import ADMIN_USER_ID
+
+        while not server.started and not web_task.done():
+            await asyncio.sleep(0.2)
+        if not server.started or not ADMIN_USER_ID:
+            return
+        try:
+            await application.bot.send_message(
+                chat_id=int(ADMIN_USER_ID),
+                text="Condor is online and ready.",
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send startup notification to admin: {e}")
+
+    announce_task = asyncio.create_task(_announce_ready())
+
     try:
         # Exit on a shutdown signal OR if the web server stops/crashes on its own.
         await asyncio.wait({web_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
@@ -762,6 +770,7 @@ async def _run_dual(application: Application) -> None:
         # (destroy_all_sessions + engine.stop) reaps every ACP subprocess tree.
         logger.info("Shutting down...")
         stop_task.cancel()
+        announce_task.cancel()
         server.should_exit = True
         try:
             await web_task

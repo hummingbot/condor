@@ -12,7 +12,7 @@ import {
 import { useState } from "react";
 
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { api } from "@/lib/api";
+import { type PlaybookSummary, api } from "@/lib/api";
 
 // ── Start Session Dialog ──
 
@@ -20,23 +20,26 @@ export function StartSessionDialog({
   open,
   onClose,
   slug,
-  sslug,
-  agentConfig,
-  defaultContext,
+  strategies,
+  defaultStrategy = "",
 }: {
   open: boolean;
   onClose: () => void;
   slug: string;
-  sslug: string;
-  agentConfig: Record<string, unknown>;
-  defaultContext: string;
+  strategies: PlaybookSummary[];
+  defaultStrategy?: string;
 }) {
   const queryClient = useQueryClient();
   useEscapeKey(open, onClose);
+  const [strategySlug, setStrategySlug] = useState(
+    defaultStrategy || (strategies.length === 1 ? strategies[0].slug : ""),
+  );
+  const selected = strategies.find((s) => s.slug === strategySlug) || strategies[0];
+  const agentConfig = (selected?.default_config || {}) as Record<string, unknown>;
   const riskDefaults = (agentConfig.risk_limits || {}) as Record<string, unknown>;
 
-  const [executionMode, setExecutionMode] = useState<"dry_run" | "run_once" | "loop">("loop");
-  const [context, setContext] = useState(defaultContext);
+  const [executionMode, setExecutionMode] = useState<"experiment" | "run_once" | "loop">("loop");
+  const [context, setContext] = useState((agentConfig.trading_context as string) || "");
   const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
   const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
   const [frequencySec, setFrequencySec] = useState(String(agentConfig.frequency_sec ?? 60));
@@ -63,10 +66,10 @@ export function StartSessionDialog({
           max_drawdown_pct: Number(maxDrawdown),
         },
       };
-      return api.startStrategy(slug, sslug, config, context);
+      return api.startAgent(slug, strategySlug || (selected?.slug ?? ""), config, context);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
       onClose();
     },
   });
@@ -91,12 +94,33 @@ export function StartSessionDialog({
         </div>
 
         <div className="space-y-5">
+          {/* Strategy (playbook) selector */}
+          {strategies.length > 1 && (
+            <div>
+              <label className={labelClass}>Strategy (playbook)</label>
+              <select
+                value={strategySlug}
+                onChange={(e) => setStrategySlug(e.target.value)}
+                className={inputClass}
+              >
+                <option value="" disabled>
+                  Select a playbook…
+                </option>
+                {strategies.map((s) => (
+                  <option key={s.slug} value={s.slug}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Execution Mode */}
           <div>
             <label className={labelClass}>Execution Mode</label>
             <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
               {([
-                { value: "dry_run", label: "Dry Run", desc: "Simulate" },
+                { value: "experiment", label: "Experiment", desc: "Simulate" },
                 { value: "run_once", label: "Run Once", desc: "Single tick" },
                 { value: "loop", label: "Loop", desc: "Continuous" },
               ] as const).map((opt) => (
@@ -106,7 +130,7 @@ export function StartSessionDialog({
                   onClick={() => setExecutionMode(opt.value)}
                   className={`flex-1 rounded-md px-3 py-2 text-center text-xs font-medium transition-all ${
                     executionMode === opt.value
-                      ? opt.value === "dry_run"
+                      ? opt.value === "experiment"
                         ? "bg-blue-500/15 text-blue-400"
                         : opt.value === "run_once"
                           ? "bg-amber-500/15 text-amber-400"
@@ -241,16 +265,16 @@ export function StartSessionDialog({
           </button>
           <button
             onClick={() => startMut.mutate()}
-            disabled={startMut.isPending}
+            disabled={startMut.isPending || (strategies.length > 1 && !strategySlug)}
             className={`flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white transition-all disabled:opacity-40 ${
-              executionMode === "dry_run" ? "bg-blue-600 hover:bg-blue-500" : executionMode === "run_once" ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"
+              executionMode === "experiment" ? "bg-blue-600 hover:bg-blue-500" : executionMode === "run_once" ? "bg-amber-600 hover:bg-amber-500" : "bg-emerald-600 hover:bg-emerald-500"
             }`}
           >
             <Play className="h-3.5 w-3.5" />
             {startMut.isPending
               ? "Starting..."
-              : executionMode === "dry_run"
-                ? "Run Dry Test"
+              : executionMode === "experiment"
+                ? "Run Experiment"
                 : executionMode === "run_once"
                   ? "Execute Once"
                   : "Start Session"}
@@ -266,25 +290,25 @@ export function StartSessionDialog({
 
 // ── Agent Controls ──
 
-export function AgentControls({ slug, sslug, status, defaultContext, agentConfig }: { slug: string; sslug: string; status: string; defaultContext: string; agentConfig: Record<string, unknown> }) {
+export function AgentControls({ slug, strategies, status }: { slug: string; strategies: PlaybookSummary[]; status: string }) {
   const queryClient = useQueryClient();
   const [showStartDialog, setShowStartDialog] = useState(false);
   const [confirmStop, setConfirmStop] = useState(false);
 
   const stopMut = useMutation({
-    mutationFn: () => api.stopStrategy(slug, sslug),
+    mutationFn: () => api.stopAgent(slug),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
       setConfirmStop(false);
     },
   });
   const pauseMut = useMutation({
-    mutationFn: () => api.pauseStrategy(slug, sslug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
+    mutationFn: () => api.pauseAgent(slug),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
   });
   const resumeMut = useMutation({
-    mutationFn: () => api.resumeStrategy(slug, sslug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
+    mutationFn: () => api.resumeAgent(slug),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
   });
 
   const loading = stopMut.isPending || pauseMut.isPending || resumeMut.isPending;
@@ -323,6 +347,8 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
         {status === "idle" || status === "stopped" ? (
           <button
             onClick={() => setShowStartDialog(true)}
+            disabled={strategies.length === 0}
+            title={strategies.length === 0 ? "Create a strategy (playbook) first" : "Start a session"}
             className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-emerald-500"
           >
             <Play className="h-3.5 w-3.5" /> Start
@@ -359,9 +385,7 @@ export function AgentControls({ slug, sslug, status, defaultContext, agentConfig
         open={showStartDialog}
         onClose={() => setShowStartDialog(false)}
         slug={slug}
-        sslug={sslug}
-        agentConfig={agentConfig}
-        defaultContext={defaultContext}
+        strategies={strategies}
       />
     </>
   );

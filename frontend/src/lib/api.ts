@@ -315,6 +315,7 @@ export interface RunningInstance {
   agent_id: string;
   session_num: number;
   status: string;
+  strategy: string;
   agent_key: string;
   tick_count: number;
   daily_pnl: number;
@@ -330,24 +331,19 @@ export interface RunningInstance {
   total_amount_quote: number;
   trading_context: string;
   frequency_sec: number;
-  execution_mode: "dry_run" | "run_once" | "loop";
+  execution_mode: "experiment" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
 }
 
-export interface StrategySummary {
+// Strategy = a pure playbook template (refactor-01b). All operational history
+// (sessions, experiments, learnings) lives at the agent level.
+export interface PlaybookSummary {
   slug: string;
   name: string;
   description: string;
-  status: string;
-  agent_id: string;
+  agent_key: string | null;
+  default_config: Record<string, unknown>;
   session_count: number;
-  experiment_count: number;
-  tick_count: number;
-  daily_pnl: number;
-  total_pnl: number;
-  total_volume: number;
-  open_positions: number;
-  instances: RunningInstance[];
 }
 
 export interface AgentSummary {
@@ -358,8 +354,8 @@ export interface AgentSummary {
   when_to_consult: string;
   agent_key: string;
   strategy_count: number;
-  strategies: StrategySummary[];
-  // Rolled-up aggregates across the agent's strategies (FEAT-004) for summary cards.
+  strategies: PlaybookSummary[];
+  // Agent-level history rollups for summary cards.
   status: string;
   agent_id?: string;
   session_count: number;
@@ -397,6 +393,7 @@ export interface AgentPerformance {
   agent_id: string;
   session_num: number;
   kind: "session" | "experiment";
+  strategy: string;
   status: string;
   realized_pnl: number;
   unrealized_pnl: number;
@@ -418,8 +415,23 @@ export interface AgentPerformanceResponse {
 
 export interface SessionInfo {
   number: number;
+  strategy: string;
+  status: string;
   snapshot_count: number;
   created_at: string;
+  ended_at: string;
+  has_journal: boolean;
+}
+
+// One flat delegation transcript (agents/{slug}/delegations/{date}-dN.md).
+export interface DelegationFileInfo {
+  number: number;
+  task_id: string;
+  status: string;
+  task: string;
+  created_at: string;
+  ended_at: string;
+  file: string;
 }
 
 export interface ExperimentInfo {
@@ -431,7 +443,8 @@ export interface ExperimentInfo {
   error?: boolean;
 }
 
-// Agent = identity + brain (AGENT.md, tools, consult capability) that owns strategies.
+// Agent = identity + brain (AGENT.md, tools, consult capability) that owns
+// playbooks AND all operational history (sessions, experiments, learnings).
 export interface AgentDetail {
   slug: string;
   name: string;
@@ -443,7 +456,15 @@ export interface AgentDetail {
   consultable: boolean;
   server_required: boolean;
   server_name: string;
-  strategies: StrategySummary[];
+  risk_limits: Record<string, unknown>;
+  strategies: PlaybookSummary[];
+  learnings: string;
+  status: string;
+  agent_id: string;
+  sessions: SessionInfo[];
+  experiments: ExperimentInfo[];
+  delegations: DelegationFileInfo[];
+  instances: RunningInstance[];
 }
 
 // Delegation = a fire-and-forget background task handed to a detached Agent
@@ -460,22 +481,17 @@ export interface Delegation {
   error: string;
 }
 
-// Strategy = a playbook that loops under an Agent. Holds the operational
-// history: sessions, experiments, live instances, config and learnings.
-export interface StrategyDetail {
+// Playbook detail — the template only; history lives on AgentDetail.
+export interface PlaybookDetail {
   slug: string;
   agent_slug: string;
   name: string;
   description: string;
   strategy_md: string;
-  config: Record<string, unknown>;
+  default_config: Record<string, unknown>;
   default_trading_context: string;
-  learnings: string;
-  status: string;
-  agent_id: string;
-  sessions: SessionInfo[];
-  experiments: ExperimentInfo[];
-  instances: RunningInstance[];
+  agent_key: string | null;
+  session_count: number;
 }
 
 export interface SnapshotSummary {
@@ -651,17 +667,9 @@ export interface ChatAgentOption {
   label: string;
 }
 
-export interface ChatModeOption {
-  key: string;
-  label: string;
-  description: string;
-}
-
 export interface ChatOptionsResponse {
   agents: ChatAgentOption[];
-  modes: ChatModeOption[];
   default_agent: string;
-  default_mode: string;
 }
 
 // ── Backtesting ──
@@ -1008,13 +1016,13 @@ export const api = {
       { method: "POST" },
     ),
 
-  // ── Strategies (playbooks that loop under an Agent) ──
+  // ── Strategies (pure playbook templates under an Agent) ──
 
   getStrategies: (slug: string) =>
-    apiFetch<StrategySummary[]>(`/api/v1/agents/${encodeURIComponent(slug)}/strategies`),
+    apiFetch<PlaybookSummary[]>(`/api/v1/agents/${encodeURIComponent(slug)}/strategies`),
 
   getStrategy: (slug: string, sslug: string) =>
-    apiFetch<StrategyDetail>(
+    apiFetch<PlaybookDetail>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
     ),
 
@@ -1029,7 +1037,7 @@ export const api = {
       config?: Record<string, unknown>;
     },
   ) =>
-    apiFetch<StrategySummary>(
+    apiFetch<PlaybookSummary>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies`,
       { method: "POST", body: JSON.stringify(data) },
     ),
@@ -1052,74 +1060,93 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  getStrategyPerformance: (slug: string, sslug: string) =>
+  // ── Agent history: performance, sessions, lifecycle (all agent-level) ──
+
+  getAgentPerformance: (slug: string, strategy?: string) =>
     apiFetch<AgentPerformanceResponse>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/performance`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/performance${
+        strategy ? `?strategy=${encodeURIComponent(strategy)}` : ""
+      }`,
     ),
 
-  getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
+  getSessionExecutors: (slug: string, sessionNum: number) =>
     apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/executors`,
     ),
 
-  startStrategy: (
+  startAgent: (
     slug: string,
-    sslug: string,
+    strategy = "",
     config: Record<string, unknown> = {},
     trading_context = "",
   ) =>
-    apiFetch<{ started: boolean; agent_id: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/start`,
-      { method: "POST", body: JSON.stringify({ config, trading_context }) },
+    apiFetch<{ started: boolean; agent_id: string; strategy: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/start`,
+      { method: "POST", body: JSON.stringify({ strategy, config, trading_context }) },
     ),
 
-  stopStrategy: (slug: string, sslug: string) =>
+  stopAgent: (slug: string, agentId?: string) =>
     apiFetch<{ stopped: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/stop`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/stop${
+        agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""
+      }`,
       { method: "POST" },
     ),
 
-  pauseStrategy: (slug: string, sslug: string) =>
+  pauseAgent: (slug: string, agentId?: string) =>
     apiFetch<{ paused: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/pause`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/pause${
+        agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""
+      }`,
       { method: "POST" },
     ),
 
-  resumeStrategy: (slug: string, sslug: string) =>
+  resumeAgent: (slug: string, agentId?: string) =>
     apiFetch<{ resumed: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/resume`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/resume${
+        agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""
+      }`,
       { method: "POST" },
     ),
 
-  getStrategyLearnings: (slug: string, sslug: string) =>
+  getAgentLearnings: (slug: string) =>
     apiFetch<{ content: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/learnings`,
     ),
 
-  updateStrategyLearnings: (slug: string, sslug: string, content: string) =>
+  updateAgentLearnings: (slug: string, content: string) =>
     apiFetch<{ updated: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/learnings`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/learnings`,
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
 
-  getStrategySessions: (slug: string, sslug: string) =>
-    apiFetch<{ sessions: SessionInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions`,
-    ),
+  getAgentSessions: (slug: string, opts: { strategy?: string } = {}) => {
+    const params = new URLSearchParams();
+    if (opts.strategy) params.set("strategy", opts.strategy);
+    const qs = params.toString();
+    return apiFetch<{ sessions: SessionInfo[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/sessions${qs ? `?${qs}` : ""}`,
+    );
+  },
 
-  getSessionJournal: (slug: string, sslug: string, sessionNum: number) =>
+  getSessionJournal: (slug: string, sessionNum: number) =>
     apiFetch<{ content: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/journal`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/journal`,
     ),
 
-  getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
+  getDelegationTranscript: (slug: string, num: number) =>
+    apiFetch<{ content: string; file: string }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/delegation-files/${num}`,
+    ),
+
+  getSessionSnapshots: (slug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/snapshots`,
     ),
 
-  getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>
+  getSnapshot: (slug: string, sessionNum: number, tick: number) =>
     apiFetch<{ content: string; tick: number }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots/${tick}`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/snapshots/${tick}`,
     ),
 
   // ── Backtesting ──
@@ -1162,16 +1189,16 @@ export const api = {
       { method: "DELETE" },
     ),
 
-  // ── Experiments ──
+  // ── Experiments (agent-level experiment snapshots) ──
 
-  getAgentExperiments: (slug: string, sslug: string) =>
+  getAgentExperiments: (slug: string) =>
     apiFetch<{ experiments: ExperimentInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/experiments`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/experiments`,
     ),
 
-  getExperiment: (slug: string, sslug: string, expNum: number) =>
+  getExperiment: (slug: string, expNum: number) =>
     apiFetch<{ content: string; number: number }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/experiments/${expNum}`,
+      `/api/v1/agents/${encodeURIComponent(slug)}/experiments/${expNum}`,
     ),
 
   // ── Archived Bots ──

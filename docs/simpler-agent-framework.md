@@ -1,0 +1,456 @@
+# Condor agent framework — the simplified architecture
+
+Architectural reference for the Condor agent system as of 2026-07-12 —
+the single description of how the system works today. How it got here
+from `main` (the harness-validation spike and the refactor series that
+followed) is recorded in [changes-from-main.md](changes-from-main.md);
+user-facing install docs are in [installing.md](installing.md).
+
+The one-sentence version: **an Agent is one identity with one history; every
+way of invoking its brain is the same primitive under a different permission
+policy; it captures what it learns as learnings; and its skills are portable
+artifacts any host harness can install.**
+
+## 1. Ontology — three things, not five
+
+| Entity | Is | Is NOT |
+|---|---|---|
+| **Agent** (`agents/{slug}/AGENT.md`) | The unit of identity, attribution, and accumulation: tools allowlist, consult trigger, server pin, **risk baseline**, plus ALL operational history | A per-task construct; there is exactly one history per agent |
+| **Strategy** (`strategies/{sslug}.md`) | A pure **playbook template**: tick tactic + `default_config`. A start-time selector recorded as session metadata | A state owner. No sessions/learnings/config.yml/shutdown.md live under it |
+| **Session** (`sessions/session_N/`) | The **stateful** unit of capital engagement: frozen config, journal, risk carry-over, `controller_id` attribution, a track-record entry. Ticks are how the scheduler advances it | An envelope for every brain invocation. Consults return an inline answer (no disk); delegations leave a flat transcript; experiments leave a flat snapshot |
+
+Supporting artifacts (owned by the agent, shared across all its playbooks):
+**skills** (markdown procedures, three tiers — §6), **routines** (executable
+Python), **learnings** (`learnings.md`, the capped semantic capture pool),
+**store/** (per-user memory). The memory triple is deliberate and matches
+what the field converged on independently: journal = episodic, learnings =
+semantic, skills = procedural.
+
+The chat coordinator's agent-home is the **repo root**: `CONDOR.md` (its
+brain — deliberately not a host-owned name like AGENT.md or AGENTS.md,
+which a harness opened in this repo would load as *its own* instructions) +
+`skills/` + `routines/` + `store/`, mirroring `agents/{slug}/` one-for-one.
+It routes to agents and is not itself consultable. There is no separate
+"assistants" layer: the root IS the chat agent, `agents/` are the domain
+agents it routes to.
+
+## 2. Identity & storage — one dir, one numbering, metadata not addresses
+
+Session identity is `{agent_slug}_{N}` (`{agent_slug}_e{N}` for
+experiments — a.k.a. dry runs). The strategy slug is **not part of the address** — which
+playbook a session ran is metadata, so per-playbook track records are a
+filter over one comparable list, not separate trees.
+
+```
+agents/{slug}/
+    AGENT.md                    # identity + domain knowledge
+                                #   frontmatter: tools, when_to_consult,
+                                #   server_required/name, risk_limits (baseline)
+    learnings.md                # agent-level; entries [strategy]-prefixed;
+                                #   Promoted section = folded into a skill
+    shutdown.md                 # optional winddown override (walk: agent → _defaults)
+    skills/  routines/  store/  # the shared brain
+    strategies/
+        {sslug}.md              # playbook + default_config — NOTHING else
+    sessions/                   # ONLY real sessions — every entry is track record
+        session_N/
+            meta.yml            #   strategy, status, model, timestamps
+            config.yml          #   frozen launch config
+            journal.md          #   summary / decisions / ticks / executors
+            snapshots/          #   full per-tick dumps
+    delegations/
+        2026-07-11-d3.md        # flat transcript per delegation ({date}-dN.md;
+                                #   parseable header: status/task/risk/started/ended)
+    experiments/
+        2026-07-11-e2.md        # flat snapshot per experiment ({date}-eN.md)
+```
+
+Allocation is mkdir-atomic (`allocate_session_dir`), so concurrent starts
+never collide. `run_once` is not a storage mode: it maps to an ordinary
+`tick_loop` session with `max_ticks: 1` — journal, frozen config, risk
+pre-flight, and a place in the track record. `_eN` is reserved for true
+experiments (mutations cancelled by the gate; a flat snapshot, never a session).
+
+Boundary worth memorizing: **experiments = scratch that never touches capital;
+sessions = anything that does (or could).**
+
+## 3. One execution primitive: `run_agent` + the policy lattice
+
+Every way an agent's brain gets invoked is one function
+(`condor/agents/run.py`) parameterized by a permission policy
+(`condor/agents/policies.py`). There are no parallel execution stacks.
+
+```
+run_agent(agent, prompt, *, permission_policy, ...) -> RunResult
+  .--------------------------------------------------------------.
+  |  resolve model (caller passes the triad winner:               |
+  |    config > strategy > agent) --- healthcheck / fallback      |
+  |            |                                                  |
+  |  build MCP servers (server pin > ambient; agent_slug scope)   |
+  |            |                                                  |
+  |  make client: pydantic-ai (tools allowlist enforced)          |
+  |               OR ACP subprocess (claude-acp / gemini / ...)   |
+  |            |                                                  |
+  |  permission_policy --> client's permission_callback           |
+  |            |                                                  |
+  |  stream events --> fold ONCE into BOTH views                  |
+  |    (events = chronological transcript; tool_calls = tick view)|
+  |    under asyncio.timeout(timeout_s)                           |
+  |            |                                                  |
+  |  finally: client.stop()  (reap subprocess, always)            |
+  '--------------------------------------------------------------'
+        RunResult(text, tool_calls, events, duration, error, model)
+```
+
+The policy lattice — the ONE axis that genuinely differs between run kinds:
+
+```
+                strictest
+                    |
+     human_gate(chat_id)          consult: dangerous calls -> Approve/Reject
+                    |             in the user's Telegram chat.
+                    |             FAILS CLOSED: no bot or no chat_id ->
+                    |             deny_gate (safe tools pass, mutations
+                    |             cancelled + logged). Never None.
+                    |
+     risk_gate(limits, state)     ONE shared policy for anything that can
+                    |             trade. Caller picks the state seed:
+                    |               tick:       journal-derived (real exposure/
+                    |                           count carried across ticks)
+                    |               delegation: RiskState() at zero (caps act
+                    |                           as a per-run budget)
+                    |             Blocks: place_order (always), uncapped bot
+                    |             deploys, executor creates past caps.
+                    |             experiment=True additionally cancels ALL
+                    |             mutations.
+                    |
+     AUTO (None)                  serverless specialists (routine_builder)
+                loosest           — enforcement lives elsewhere (tier guards).
+```
+
+A `None` permission callback means the client auto-approves everything — so
+a gate that cannot be built must return `deny_gate`, never `None`. This was
+a real, live bug class; it is now tested against.
+
+## 4. The three run kinds — one primitive, three call sites
+
+### 4.1 Consult — synchronous, human-gated ("watch me do this")
+
+```
+chat / web POST /agents/{slug}/consult
+     |
+     v
+run_consult(slug, task)                       condor/agents/consult.py
+     |  build_agent_context: identity + [DOMAIN MEMORY] + [DOMAIN SKILLS] + task
+     v
+run_agent(policy=human_gate(chat_id), timeout=900s)
+     |                    |-- dangerous call? -> Telegram Approve/Reject,
+     |                    |   blocks until tapped (registry is process-global)
+     |                    `-- no chat/bot? -> deny_gate: mutation cancelled
+     v
+return answer text inline (caller was blocking the whole time)
+     — nothing persists: the ANSWER is the artifact
+```
+
+### 4.2 Delegation — background, unattended, **risk-gated**
+
+```
+delegate(action="start", agent=..., task=..., [risk_limits={...}])
+     |
+     v
+start_delegation()                            condor/agents/delegate.py
+     |  resolve policy FIRST (loud error before anything runs):
+     |    trading agent (server_required)?
+     |       limits = per-call risk_limits override   <- REPLACES baseline
+     |             or AGENT.md risk_limits baseline   <- REQUIRED at agent
+     |                                                   save time (see §8)
+     |       neither? -> ValueError — only reachable via hand-written
+     |                   legacy AGENT.md files (defense in depth)
+     |       policy = risk_gate(limits, RiskState())   # zero seed = per-run budget
+     |    serverless specialist? policy = AUTO
+     |
+     |  allocate delegations/{date}-dN.md NOW (husk with Status: running
+     |  -> a crash leaves an inspectable record); task_id = "{slug}-dN" —
+     |  its own namespace, session numbering untouched
+     |
+     |  detached asyncio.Task ------------------> caller gets task_id immediately
+     v
+run_agent(policy, event_sink -> live dt.events, timeout=900s)
+     |            |-- place_order            -> blocked
+     |            |-- deploy w/o loss cap    -> blocked
+     |            `-- executor creates       -> counted against the budget
+     v
+finally: rewrite the flat file — full transcript + terminal status
+     |
+     v
+notify user on Telegram (the notification IS the return path)
+```
+
+A zero baseline (`{max_position_size_quote: 0, max_open_executors: 0}`) is
+the **read-only pattern**: the agent gets live market data but every
+order-shaped action is blocked by construction (`funding_rate_watcher`,
+`backtest_lab`).
+
+### 4.3 Tick loop — `TickEngine` is a scheduler, not an engine
+
+```
+TickEngine (owns loop/pause/max_ticks, the _engines registry entry,
+            directive injection — and NO client/stream code)
+============================================================================
+  every frequency_sec, while running and not paused:
+       |
+       |  PRE-FLIGHT (tick-only)
+       |    providers: fetch executors/positions (controller_id == agent_id)
+       |    journal readback: learnings / summary / recent decisions
+       |    risk_state = RiskEngine.get_state(journal)
+       |       |-- should_shutdown? --> run_shutdown() ----.
+       |       `-- is_blocked?      --> journal + skip      |  SHUTDOWN
+       v                                                    |  ESCALATION
+  prompt = build_tick_prompt(agent, strategy, config,       |  (scheduler-level
+           core data, journal context, risk state)          |   hook, not in the
+       |                                                    |   primitive):
+       v                                                    |  deterministic
+  run_agent(policy=risk_gate(limits, risk_state),           |  close (no LLM) ->
+            timeout=300s, on_client=hold-for-cancel)        |  bounded LLM
+       |                                                    |  cleanup ->
+       v                                                    |  verify + alert
+  POST-RUN (tick-only)                                      |  -> stop
+    journal.record_tick / record_snapshot /                 |
+    save_full_snapshot / write_summary                      |
+       |                                                    |
+  session end (stop / max_ticks reached):                   |
+    finalize meta.yml                                       |
+```
+
+Launch resolution: `start_session(agent_slug, strategy=...)` — the strategy is
+optional with exactly one playbook, a loud error listing options with
+several. Risk limits resolve **request config > strategy default_config >
+AGENT.md baseline > schema defaults**.
+
+## 5. Self-improvement: capture, then human curation
+
+The pen is never held by the in-run agent. Ticks are told skills are
+read-only; their write channel is learnings (one-line facts, deduped,
+`[strategy]`-provenance-prefixed, capped at 20).
+
+Folding learnings into skills is **human-directed, in chat**: review an
+agent's learnings, then use `manage_skill(action="patch")` — a delta edit
+(old→new string, must match exactly once) that stamps provenance
+(`condor-updated-by` + an appending `condor-changelog`) — and optionally
+mark the consumed learning via the journal's `promote_learning` (moves it
+to the `## Promoted` section: it stops occupying the capped active pool
+but stays on record). Shared-tier writes remain chat-only
+(`scope="shared"`); agents get a loud read-only error.
+
+Why delta patches: full-rewrite self-editing measurably collapses playbooks
+(ACE's brevity bias / context collapse), so `patch` is the preferred edit
+even for humans. An automatic session-end curation pass (evidence-gated
+delta patches by the agent itself) was implemented, live-validated, and
+then **removed** — the machinery outweighed the benefit at this scale. The
+capture side and the patch/promote primitives it used remain.
+
+## 6. Skills — one portable format, three tiers, two estates
+
+All skills are agentskills.io-conformant `SKILL.md` (hyphenated `name`
+matching the dir, single-line frontmatter, `description` carries the routing
+trigger, Condor extras as flat `condor-*` metadata strings). Progressive
+disclosure: index line → body → companion files.
+
+```
+HOST (Claude Code / OpenClaw / Hermes — opened in the condor repo)
+│    host's native skill index; /slash invocation
+│
+├── HOST-FACING            skills/<name>/SKILL.md        (repo root)
+│     "how to drive Condor via MCP": agent-builder, log-analyzer, ...
+│     ONE dir serves every consumer: Condor chat (builtin root),
+│     Claude Code (.claude/skills symlinks), OpenClaw (<ws>/skills scan),
+│     Hermes (tap layout). compatibility: gates on the Condor MCP;
+│     each carries the rule: operate Condor ONLY via mcp__condor__* tools.
+│
+╌╌╌  MCP boundary (mcp_servers/condor)  ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+│
+└── AGENT-INTERNAL         consumed only by Condor's own runs
+      agents/{slug}/skills/      local tier   (the agent's own playbooks)
+      agents/_shared/skills/     shared tier  (chat-writable only, via
+                                  manage_skill(scope="shared"); agents get
+                                  a loud read-only error; local shadows
+                                  shared on a name clash)
+      resolution: local > shared — index marks "[shared — read-only]"
+```
+
+Index isolation is structural (no host scans `agents/*/skills/`); file-level
+isolation does not exist under repo-as-workspace and is not claimed — git
+visibility and the MCP-only operating rule are the actual mitigations.
+
+## 7. Routines — unchanged shape, agent-keyed
+
+Executable Python, two tiers: global `routines/` (chat-owned) +
+`agents/{slug}/routines/` (agent-local, invisible to other agents). All MCP
+params are `agent_slug` now (the composite `strategy_id` key survives only
+in strategy CRUD). Authoring remains a hard routing rule: routine
+create/edit/fix goes through the `routine_builder` agent — typically as a
+delegation, which is also how the framework builds its own examples
+(`grid_backtest`, `funding_logger` were authored and tested by it).
+
+**The routine/skill/agent decision framework** (validated end-to-end by
+building real examples through the system itself):
+
+```
+routine  = deterministic HOW   (same inputs, same steps: a report, a fetch)
+skill    = judgment HOW        (a procedure that needs a model to apply it)
+agent    = ownership + accumulation (someone must hold history/learnings)
+loop     = ONLY for scheduled work — not a synonym for "agent exists"
+```
+
+Worked examples that set the pattern: backtesting became a `backtest_lab`
+agent (zero-trade `{0, 0}` baseline) + a methodology skill + candle-sim
+routines — the platform's own `run_backtest` was unusable here (binance
+geo-blocked with 451, hyperliquid has no backtest connector, and
+hyperliquid 3m candles cap at ~3 days: use 15m for month windows). Data
+collection became routines owned by the *consuming* agent, writing to its
+own `store/` (`funding_logger` under `funding_rate_watcher`).
+
+## 8. Risk model — one gate, many seats
+
+```
+                      where the numbers come from
+                      ----------------------------
+AGENT.md baseline     REQUIRED for every server-backed agent — the save
+                      itself fails without one (AgentStore._save): the
+                      AGENT.md defines what the agent does, including how
+                      much it may do unattended. {0, 0} is the explicit
+                      "read-only, never trades" statement.
+tick session          request config > strategy default_config
+                      > AGENT.md risk_limits baseline > schema defaults
+delegation            per-call risk_limits override (REPLACES, never merges)
+                      > AGENT.md baseline (present by construction; a loud
+                      delegate-time error survives for hand-written files)
+read-only agent       baseline {0, 0} -> every order-shaped action blocked
+                      by construction (funding_rate_watcher, backtest_lab)
+
+                      what the gate checks (risk.py risk_gate)
+                      ----------------------------------------
+place_order           blocked outright, always
+manage_bots deploy    must declare bounded max_global_drawdown_quote
+                      <= position limit (platform-enforced kill switch)
+executor create       count + exposure vs caps; approvals accumulate into
+                      the running state within the run
+experiment            ALL mutations cancelled (a.k.a. dry run)
+
+                      escalation (tick-only, scheduler-level)
+                      ---------------------------------------
+soft:  drawdown > max_drawdown_pct        -> tick blocked, journaled
+hard:  drawdown > shutdown_drawdown_pct   -> run_shutdown():
+       deterministic close (policy from agents/{slug}/shutdown.md ->
+       agents/_defaults/shutdown.md) -> bounded LLM cleanup -> verify+alert
+```
+
+Known, accepted gap: no aggregate exposure cap *across* concurrent sessions
+of one agent — each session's budget is its own (the platform-side deploy
+loss cap is the cross-cutting bound).
+
+## 9. Routing (chat) — the decision tree
+
+The chat coordinator (and any external harness following the MCP server
+instructions) routes requests in this priority order:
+
+```
+User request
+|
++-- routine create/edit/fix?  --> routine_builder (hard rule)
++-- [SKILLS] playbook match?  --> read it, follow it, answer inline
++-- [AGENTS] domain match?    --> consult (quick, user watching, human-gated)
+|                                 or delegate (long/fire-and-forget,
+|                                 RISK-GATED for trading agents; per-call
+|                                 risk_limits override available; flat
+|                                 transcript + notification)
+`-- nothing matches           --> raw tools
+```
+
+## 10. Harnesses, identity, onboarding — the outer tier
+
+The framework runs behind an MCP boundary, which makes the *conversation*
+layer swappable (validated live: sessions survived harness swaps
+mid-flight — start from Claude Code, stop from Telegram). Two tiers:
+
+```
+Tier 1  interactive harnesses — NONE privileged (a proposal to drop ours
+        for Hermes was evaluated and rejected)
+        Condor's own chat (Telegram + web)  <- batteries-included default;
+                                               owns the approval surface
+                                               (DANGEROUS_TOOLS confirms)
+        Claude Code / OpenClaw / Hermes     <- drive the same Tier 2 via
+                                               mcp_servers/condor + the
+                                               host-facing skills (§6)
+Tier 2  the persistent Condor process — TickEngine, gates, journals,
+        MCP servers, web API. Every gate that matters lives HERE, so it
+        is indifferent to which harness invoked it.
+```
+
+**Chat sessions are Tier-1 conversation state, not §2 sessions.** Condor's
+own harness keeps a per-user `AgentSession` (`handlers/agents/session.py`):
+conversation history with compaction, streaming to Telegram/web, and the
+DANGEROUS_TOOLS confirmation flow (`confirmation.py` — asyncio futures
+answered by inline Approve/Reject buttons, 120s timeout). The brain it
+loads is repo-root `CONDOR.md`. This is the same *kind* of thing as a
+Claude Code session — a conversation that steers Tier 2 — and shares
+nothing with `sessions/session_N/` (the capital-engagement record).
+
+**Identity.** `user_id` is an integer at every call site (historically a
+Telegram id — Telegram remains the IdP for multi-user installs). Tier-A
+auto-bind: an MCP server spawned *without* identity args binds to the sole
+approved user in config.yml — on a single-user box the OS user already
+holds every secret, so the id is an identifier, not a credential. Multiple
+approved users deliberately disable auto-bind; each harness registration
+must then pass explicit identity args.
+
+**Onboarding.** `install.sh` is bash bootstrap only (git/uv,
+clone-or-update, `uv sync`, `.env` template, API probe; `--stage-json` for
+agent-driven installs); every product question lives in `condor init`
+(`python -m condor.cli`, `make init`), which is idempotent and handed the
+terminal via `/dev/tty`. Init anchors identity ("Do you use Telegram?" →
+TG id, else a minted integer), registers + probes hummingbot-api loudly,
+then offers a harness **multi-select**: the Condor harness (Telegram + web
+bundled — web works with zero config, Telegram lights up when a token is
+added) is selected by default; external harnesses are detected on the box
+and get their config **emitted, never installed**. `condor login-token`
+mints a stateless, purpose-tagged, 5-minute JWT the token-login route
+redeems, so Telegram-free installs reach the dashboard; `decode_jwt`
+rejects purpose-tagged tokens as session bearers on both the HTTP and WS
+paths. Full walkthrough: [installing.md](installing.md).
+
+**Notifications.** Telegram-first, by decision: TG is the notification
+spine (all six emitters — MCP `send_notification`, `engine._notify`,
+`delegate._notify_done`, shutdown alerts, routines, login tokens), no
+bus/inbox/mailbox layer. Known accepted gap, fix decided but pending: runs
+launched with `chat_id=0` (web starts) notify no one — resolve the TG chat
+from `user_id` (in DMs `chat_id == user_id`).
+
+## 11. Summary diagram
+
+```
+ HOSTS (Claude Code / OpenClaw / Hermes / Condor chat+web)
+   |            install natively: skills/<name>/SKILL.md  (host-facing)
+   |  mcp__condor__* tools
+   v
+╌ MCP boundary ╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌╌
+   |
+   |   consult(human_gate)   delegate(risk_gate|AUTO)   start_session
+   |          \                    |                    /
+   |           v                   v                   v
+   |          .-------------------------------------------.
+   |          |            run_agent + policies            |
+   |          '-------------------------------------------'
+   |                               |
+   v                               v
+ agents/{slug}/          sessions/session_N   <- stateful: journal + snapshots
+   AGENT.md (risk baseline)                        + frozen config (track record)
+   strategies/{sslug}.md     delegations/{date}-dN.md  <- flat transcript
+     (playbook template)     experiments/{date}-eN.md  <- flat snapshot
+   skills/ (local>_shared)                          (consults persist nothing)
+   learnings.md   <── capture (in-run); folded into skills by the
+   routines/  store/          user in chat (manage_skill patch, provenance)
+
+ tick sessions --controller_id == {slug}_N--> Hummingbot executors/bots
+                                              (the isolated virtual portfolio)
+```

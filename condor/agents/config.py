@@ -10,14 +10,22 @@ from pathlib import Path
 from typing import Any, Literal
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class RiskLimitsConfig(BaseModel):
+    # Strict: a typo'd or unknown risk key must fail loudly, not silently
+    # widen the effective limits to schema defaults.
+    model_config = ConfigDict(extra="forbid")
+
+    # ge=0: zero is a legitimate deny-all baseline (watcher agents); negatives
+    # are nonsense.
     max_position_size_quote: float = Field(
-        default=500.0, description="Max total position size in quote currency"
+        default=500.0, ge=0, description="Max total position size in quote currency"
     )
-    max_open_executors: int = Field(default=5, description="Max simultaneous executors")
+    max_open_executors: int = Field(
+        default=5, ge=0, description="Max simultaneous executors"
+    )
     max_drawdown_pct: float = Field(
         default=-1.0,
         description="Max drawdown %% that pauses (soft-blocks) ticks; -1 = disabled",
@@ -27,6 +35,15 @@ class RiskLimitsConfig(BaseModel):
         description="Max drawdown %% that triggers an emergency winddown "
         "(closes positions per shutdown.md); -1 = disabled",
     )
+
+    @field_validator("max_drawdown_pct", "shutdown_drawdown_pct")
+    @classmethod
+    def _drawdown_range(cls, v: float) -> float:
+        if v == -1.0:  # disabled sentinel
+            return v
+        if not (0 < v <= 100):
+            raise ValueError("drawdown pct must be -1 (disabled) or in (0, 100]")
+        return v
 
 
 class AgentConfig(BaseModel):
@@ -48,12 +65,19 @@ class AgentConfig(BaseModel):
         default="",
         description="Natural language session context that guides the agent's trading decisions",
     )
-    execution_mode: Literal["dry_run", "run_once", "loop"] = Field(
+    execution_mode: Literal["experiment", "run_once", "loop"] = Field(
         default="loop",
-        description="Execution mode: dry_run (simulate), run_once (single live tick), loop (continuous)",
+        description="Execution mode: experiment (simulate — a.k.a. dry run), "
+        "run_once (single live tick), loop (continuous)",
     )
     max_ticks: int = Field(
         default=0, description="Max ticks before auto-stop; 0 = unlimited"
+    )
+    keep_position_on_stop: bool = Field(
+        default=True,
+        description="On plain stop: True (default) detaches — positions stay "
+        "open, unmanaged; False closes them out. Liquidation is otherwise "
+        "reserved for the explicit shutdown escalation.",
     )
     bot_name: str = Field(
         default="",
@@ -72,9 +96,9 @@ class AgentConfig(BaseModel):
     def from_dict(cls, d: dict[str, Any]) -> AgentConfig:
         """Create from a raw dict (e.g. strategy.default_config)."""
         cleaned = {k: v for k, v in d.items() if k in cls.model_fields}
-        # Translate dry_run shorthand → execution_mode
+        # Translate the dry_run shorthand (users still say "dry run") → experiment
         if d.get("dry_run") and "execution_mode" not in d:
-            cleaned["execution_mode"] = "dry_run"
+            cleaned["execution_mode"] = "experiment"
         return cls(**cleaned)
 
 
@@ -103,23 +127,15 @@ def save_agent_config(agent_dir: Path, config: AgentConfig) -> None:
     )
 
 
-def load_full_config(
-    agent_dir: Path, defaults: dict[str, Any] | None = None
-) -> dict[str, Any]:
-    """Load config preserving both AgentConfig fields and strategy-specific keys.
+def normalize_config(config: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Normalize a launch config: validate core fields, fill schema defaults.
 
-    Starts from strategy defaults, overlays saved config.yml, then validates
-    core fields via AgentConfig and merges defaults for any missing core fields.
+    Preserves strategy-specific extra keys alongside the validated AgentConfig
+    fields. Strategies are pure templates with no config.yml of their own
+    (refactor-01b), so there is nothing to load from disk — the caller passes
+    the merged defaults (strategy default_config + risk baseline seeding).
     """
-    result = dict(defaults or {})
-
-    config_path = agent_dir / "config.yml"
-    if config_path.exists():
-        try:
-            saved = yaml.safe_load(config_path.read_text()) or {}
-            result.update(saved)
-        except Exception:
-            pass
+    result = dict(config or {})
 
     # Validate core fields and fill in any missing AgentConfig defaults
     core = AgentConfig.from_dict(result)
@@ -127,6 +143,31 @@ def load_full_config(
     for k, v in core_defaults.items():
         result.setdefault(k, v)
 
+    return result
+
+
+def merge_launch_config(
+    base: dict[str, Any], override: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Deep-merge a launch override into normalized defaults, then re-validate.
+
+    A shallow ``update`` let a partial nested override (e.g. ``risk_limits``
+    with only ``max_drawdown_pct``) replace the seeded baseline object wholesale
+    — the missing keys then silently reverted to schema defaults (500/5),
+    broadening risk limits. Nested dicts merge key-by-key instead, and the FINAL
+    object is validated (strict risk_limits: unknown keys and out-of-range
+    values raise)."""
+    result = dict(base)
+    for k, v in (override or {}).items():
+        if isinstance(v, dict) and isinstance(result.get(k), dict):
+            merged = dict(result[k])
+            merged.update(v)
+            result[k] = merged
+        else:
+            result[k] = v
+    # Validates all core fields, including risk_limits via RiskLimitsConfig
+    # (extra="forbid" + range constraints). Raises pydantic.ValidationError.
+    AgentConfig.from_dict(result)
     return result
 
 

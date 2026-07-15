@@ -7,7 +7,7 @@ consult may block on a user confirmation (the agent is allowed to execute mutati
 actions), so we use a generous timeout.
 """
 
-from mcp_servers.condor.condor_client import call_main_api
+from mcp_servers.condor.condor_client import call_control
 from mcp_servers.condor.settings import settings
 
 # Long enough to cover a pending user confirmation (CONFIRMATION_TIMEOUT=120) plus
@@ -20,10 +20,10 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
     if not agent or not task:
         return {"error": "agent and task are required"}
 
-    data = await call_main_api(
-        "POST",
-        f"/agents/{agent}/consult",
+    data = await call_control(
+        "agent.consult",
         {
+            "agent": agent,
             "task": task,
             "context": context,
             "chat_id": settings.chat_id,

@@ -41,6 +41,7 @@ interface SidebarItem {
   kind: "session" | "experiment";
   snapshot_count: number;
   created_at: string;
+  strategy?: string;
   execution_mode?: string;
   agent_key?: string;
   error?: boolean;
@@ -51,7 +52,7 @@ interface SidebarItem {
 // specific to this sidebar.
 function expDisplay(mode?: string): { Icon: typeof FlaskConical; label: string; color: string } {
   if (mode === "run_once") return { Icon: Zap, label: "Run", color: MODE_STYLES.run_once.text };
-  if (mode === "dry_run") return { Icon: FlaskConical, label: "Dry", color: MODE_STYLES.dry_run.text };
+  if (mode === "experiment") return { Icon: FlaskConical, label: "Exp", color: MODE_STYLES.experiment.text };
   return { Icon: FlaskConical, label: "Exp", color: "text-amber-400" };
 }
 
@@ -64,7 +65,7 @@ function formatCreatedAt(value: string): string {
   return value;
 }
 
-// A dry-run / run-once tick whose model call failed writes the raw error string
+// An experiment / run-once tick whose model call failed writes the raw error string
 // as its "Agent Response" (e.g. "(error: status_code: 404, model_name: ...)").
 // Detect that so we render it as an error banner instead of a normal analysis.
 function isErrorResponse(text: string): boolean {
@@ -85,7 +86,6 @@ function parseRiskState(text: string): { label: string; value: string }[] {
 
 interface SessionReviewerProps {
   slug: string;
-  sslug: string;
   agentName: string;
   sessions: SessionInfo[];
   experiments?: ExperimentInfo[];
@@ -98,7 +98,6 @@ interface SessionReviewerProps {
 
 export function SessionReviewer({
   slug,
-  sslug,
   agentName,
   sessions,
   experiments = [],
@@ -122,6 +121,7 @@ export function SessionReviewer({
         kind: "session" as const,
         snapshot_count: s.snapshot_count,
         created_at: s.created_at,
+        strategy: s.strategy,
       })),
       ...experiments.map((e) => ({
         number: e.number,
@@ -145,8 +145,8 @@ export function SessionReviewer({
 
   // Journal data (for sessions)
   const { data: journalData } = useQuery({
-    queryKey: ["strategy", slug, sslug, "session", selectedNum, "journal"],
-    queryFn: () => api.getSessionJournal(slug, sslug, selectedNum),
+    queryKey: ["agent", slug, "session", selectedNum, "journal"],
+    queryFn: () => api.getSessionJournal(slug, selectedNum),
     enabled: !isExperiment && selectedNum > 0,
   });
 
@@ -157,8 +157,8 @@ export function SessionReviewer({
 
   // Experiment snapshot data
   const { data: experimentData } = useQuery({
-    queryKey: ["strategy", slug, sslug, "experiment", selectedNum],
-    queryFn: () => api.getExperiment(slug, sslug, selectedNum),
+    queryKey: ["agent", slug, "experiment", selectedNum],
+    queryFn: () => api.getExperiment(slug, selectedNum),
     enabled: isExperiment && selectedNum > 0,
   });
 
@@ -169,8 +169,8 @@ export function SessionReviewer({
 
   // Session performance data
   const { data: sessionPerfData } = useQuery({
-    queryKey: ["strategy-session-executors", slug, sslug, selectedNum],
-    queryFn: () => api.getStrategySessionExecutors(slug, sslug, selectedNum),
+    queryKey: ["agent-session-executors", slug, selectedNum],
+    queryFn: () => api.getSessionExecutors(slug, selectedNum),
     enabled: !isExperiment && selectedNum > 0,
     refetchInterval: 10000,
   });
@@ -296,9 +296,14 @@ export function SessionReviewer({
                   </span>
                 </div>
                 <div className="mt-0.5 flex items-center gap-1.5">
+                  {!isExp && item.strategy && (
+                    <span className="rounded bg-[var(--color-primary)]/10 px-1 py-0.5 text-[8px] font-bold uppercase text-[var(--color-primary)]">
+                      {item.strategy}
+                    </span>
+                  )}
                   {isExp && item.execution_mode && (
                     <span className="rounded bg-amber-500/10 px-1 py-0.5 text-[8px] font-bold uppercase text-amber-400">
-                      {item.execution_mode === "dry_run" ? "dry" : item.execution_mode === "run_once" ? "once" : item.execution_mode}
+                      {item.execution_mode === "experiment" ? "exp" : item.execution_mode === "run_once" ? "once" : item.execution_mode}
                     </span>
                   )}
                   {isExp && item.error && (
@@ -533,7 +538,6 @@ export function SessionReviewer({
                   <div className="space-y-4">
                     <SessionExecutors
                       slug={slug}
-                      sslug={sslug}
                       sessionNum={selectedNum}
                       serverName={serverName}
                       controllerIds={controllerIds}
@@ -545,7 +549,7 @@ export function SessionReviewer({
                 )}
                 {activeSubTab === "activity" && <SessionActivity journal={parsedJournal} />}
                 {activeSubTab === "snapshots" && (
-                  <SessionSnapshots slug={slug} sslug={sslug} sessionNum={selectedNum} initialTick={pendingSnapshotTick} />
+                  <SessionSnapshots slug={slug} sessionNum={selectedNum} initialTick={pendingSnapshotTick} />
                 )}
               </>
             )

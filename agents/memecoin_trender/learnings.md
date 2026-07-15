@@ -1,0 +1,31 @@
+# Learnings
+
+## Market Observations
+- [2026-07-15 05:21] [trend_position] FLEA (9NzyoJ...z7r4) tick #7 re-entry closed — h1=+74%/m5 strong at close; likely TP again, confirming FLEA with h1>70% reliably hits 3% TP within 600s across multiple entries.
+- [2026-07-15 05:26] [trend_position] FLEA (9NzyoJ...z7r4) hitting TP a 3rd consecutive time (tick #10 entry, uPnL +0.0009 at CLOSING) — every entry with h1>70% has resulted in TP within 600s across this session.
+- [2026-07-15 05:42] [trend_position] FLEA (9NzyoJ...z7r4) closed between tick #18 and #19 — 4th consecutive TP on h1>70% momentum, uPnL was +$0.0008 at tick #18 close to TP trigger.
+- [2026-07-15 06:11] [trend_position] ANSEM (9cRCn...pump) closed between tick #31 and #32 — uPnL was +$0.0003 at last check; likely TP or time-limit exit with slight positive outcome.
+- [2026-07-15 07:06] [trend_position] THREE closed between tick #8 and #9 — was at -$0.0007 uPnL at tick #8, likely SL or time-limit; third consecutive negative/flat close for non-CARDS/CASHCAT entries this session.
+- [2026-07-15 07:34] [trend_position] W26 (AYYfBt...moon) closed positive (was +$0.0004 uPnL) — h1 was +24% at close but m5 had gone negative; time-limit or TP exit with slight gain.
+- [2026-07-15 07:36] [trend_position] CASHCAT (Cashcat...JqSS) closed between tick #21 and #22 at ~-$0.0003 (time-limit or SL); was h1=+6% at close of prior tick — 600s not enough for CASHCAT to hit 3% TP despite moderate positive h1.
+- [2026-07-15 07:49] [trend_position] HBULL (7V6Sk6...pump) closed between tick #26 and #27 — was at -$0.0009 uPnL (-3%), below SL threshold; likely time-limit exit, not SL; scan now shows m5=-2.4%/h1=+2.7% mixed signal confirming momentum stalled post-entry.
+- [2026-07-15 08:15] [trend_position] WORLDCUP (33eum82...pump) closed at ~-$0.0004 (≈-1.3% of position, time-limit not SL) after holding through ticks #33–37; h1=+6–7% throughout but m5 stayed weak (+0.4–1.6%), consistent with gradual drift not catching 3% TP in 600s.
+- [2026-07-15 08:26] [trend_position] HAAL9K (wobYcxY...pump) closed between tick #41 and #42 at ~-$0.0013 (-4.3% uPnL), likely SL or time-limit; h1 was +9.6% at entry but momentum did not hold through 600s.
+- [2026-07-15 09:22] [trend_position] HBULL (7V6Sk6...pump) closed within 600s on tick #64 entry (uPnL -$0.0001 at tick #65 then closed by #66) — likely TP hit as m5 surged to +8.73% between ticks; consistent with fast TP on m5 breakout entries but leaves no room for re-entry before m5 exhausts.
+- [2026-07-15 09:32] [trend_position] HBULL (7V6Sk6...pump) tick #68 entry closed by tick #70 (~5 min, well before 600s limit) — was at +$0.0003 uPnL at tick #69, likely TP; confirms h1>24% on HBULL reliably yields fast TP within 600s across repeated entries this session.
+- [2026-07-15 09:40] [trend_position] HBULL tick #70 entry closed between #72 and #73 — last uPnL +$0.0001 at tick #72 (6 min), closed at time-limit (~10 min); recovered from -4.3% trough to flat/positive, consistent with high volatility intra-position swings before time-limit.
+- [2026-07-15 09:45] [trend_position] W26 (AYYfBt...moon) tick #72 entry closed by tick #75 (~7 min) at ~-$0.0002 — h1=+15.5%/m5=+6.5% at entry; small loss suggests time-limit or near-SL exit; W26 has now closed negative twice (ticks #73 and #72 entries), suggesting 3% TP in 600s is unreliable even on dual-positive h1>15% signals for this token.
+- [2026-07-15 09:49] [trend_position] WORLDCUP (33eum82...pump) tick #75 entry closed at ~-$0.0022 (~-7.3%, likely SL+slippage) — m5=+10.4% breakout entry reversed hard; excluded for 24h.
+- [2026-07-15 09:49] [trend_position] HBULL (7V6Sk6...pump) tick #73 entry closed at time-limit, ~+$0.0004 — h1=+33.8% strong but 3% TP not reached in 600s again; HBULL h1>24% yields fast TP only sometimes (ticks #64/#68), not reliably.
+- [2026-07-15 10:02] [trend_position] HBULL tick #78 entry (09:54) closed between #80 and #81 at ~-$0.0009 (likely time-limit ~10 min); m5 was -2.5% at tick #80, stalled momentum consistent with time-limit rather than TP.
+- [2026-07-15 11:29] [trend_position] FEBU (4ko5tSr5...pump) tick #119 entry closed within ~4 min (by tick #121) — was -$0.0002 at tick #120, likely TP given h1 surged from +5.835% to +8.461% by tick #121; confirms fast TP on FEBU with h1>5% and rising momentum.
+- [2026-07-15 11:40] [trend_position] FEBU closed between tick #126 and #127 at ~-$0.0013 (time-limit) — m5 was persistently negative (-1.1% → -0.06% → -0.24%) across 3 ticks despite h1=+11.4%; confirms that negative m5 at entry/hold predicts time-limit loss even with strong h1.
+- [2026-07-15 11:59] [trend_position] BULLCAT (G9j8WW...pump) tick #133 entry closed SL (~-$0.0016) — h1=+61.6%/m5=+2.44% at entry, briefly +$0.0005 at tick #134, then reversed hard; high h1 alone does not guarantee TP when m5 is weak at entry (only +2.44%), unlike FLEA which had strong m5 throughout.
+
+## Execution Notes
+- [2026-07-13 23:35] [trend_position] Gateway NOW ROUTES pump.fun / Token-2022 mints via jupiter/router. The earlier "Token not found" (HTTP 400) was a Gateway bug: solana.getToken() called getMint() with the legacy TOKEN_PROGRAM_ID, which throws on Token-2022 mints (most modern pump.fun launches), so the mint resolved to null before Jupiter was ever called. Fixed by making getToken program-aware (reads the mint owner, passes TOKEN_2022_PROGRAM_ID when needed). Verified: SOL→ANSEM (9cRCn...pump) quotes fine. Enter pump.fun candidates normally — base_token = the mint address, connector omitted (default is jupiter/router).
+- [2026-07-15 12:30] [trend_position] Current executor schema (kind×instrument): type="position_spot", config={chain_network, base_token (mint), quote_token, amount_quote, take_profit_pct, stop_loss_pct, time_limit_s, slippage_pct}. The wallet comes from the runtime's own creds — do not hardcode addresses in memory.
+
+## Retired Insights
+- (schema, superseded 2026-07-15) executor_type="position" with wallet_address in config — replaced by the kind×instrument schema above.
+- (transient incident, expired) 2026-07-14 Gateway offline caused one OPENING failure; 2026-07-15 control-socket outage blocked creates. Both were process/infra outages, not durable trading knowledge.

@@ -73,6 +73,27 @@ class RiskEngine:
     def __init__(self, limits: RiskLimits | None = None):
         self.limits = limits or RiskLimits()
 
+    def _drawdown_pct(self, tracker: Any) -> float:
+        """Peak-to-current PnL drawdown as a percent of ALLOCATED CAPITAL.
+
+        The tracker's own get_drawdown_pct measures the drop against peak *PnL*,
+        which is meaningless for a strategy whose PnL oscillates near zero — a
+        $0.04 dip from a $0.01 peak reads as 400% and permanently pauses a market
+        maker. Bounding by max_position_size_quote makes it an actual fraction of
+        capital at risk. Falls back to the tracker's metric when no capital base
+        is declared or the series is unavailable (e.g. experiment NullTracker)."""
+        capital = float(self.limits.max_position_size_quote or 0)
+        if capital <= 0:
+            return tracker.get_drawdown_pct()
+        try:
+            series = [float(s.get("pnl", 0)) for s in tracker.get_pnl_series()]
+        except Exception:
+            return tracker.get_drawdown_pct()
+        if not series:
+            return 0.0
+        peak = max(series + [0.0])  # high-water mark, from break-even up
+        return max(0.0, (peak - series[-1]) / capital * 100)
+
     def get_state(self, tracker: Any) -> RiskState:
         """Compute current risk metrics from tracker data."""
         state = RiskState()
@@ -81,7 +102,7 @@ class RiskEngine:
         try:
             state.total_exposure = tracker.get_total_exposure()
             state.executor_count = tracker.get_open_executor_count()
-            state.drawdown_pct = tracker.get_drawdown_pct()
+            state.drawdown_pct = self._drawdown_pct(tracker)
         except Exception as exc:
             log.exception("Failed to compute risk state from tracker")
             # Fail closed: without real metrics we must not approve creates
@@ -147,11 +168,22 @@ class RiskEngine:
                 f"Max open executors ({self.limits.max_open_executors}) reached",
             )
 
-        # Check position size
-        config = input_data.get("executor_config", {})
-        amount = float(
-            config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
-        )
+        # Check position size. Two call shapes:
+        # - hummingbot-api (mcp-hummingbot manage_executors): amount is in
+        #   executor_config.total_amount_quote
+        # - condor-native (condor manage_executors): the executor type's own
+        #   RiskDeclaration computes the notional from the declared config;
+        #   if it can't be computed, fail CLOSED.
+        if "executor_config" in input_data:
+            config = input_data.get("executor_config", {})
+            amount = float(
+                config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
+            )
+        else:
+            try:
+                amount = self._native_notional(input_data)
+            except Exception as exc:
+                return False, f"Cannot compute risk for native executor: {exc}"
 
         if current_state.total_exposure + amount > self.limits.max_position_size_quote:
             return False, (
@@ -165,6 +197,26 @@ class RiskEngine:
         current_state.total_exposure += amount
 
         return True, ""
+
+    @staticmethod
+    def _native_notional(input_data: dict) -> float:
+        """Notional of a condor-native create, from the type's RiskDeclaration.
+
+        Note: the declaration is in the pool's QUOTE units; the position
+        limit is nominally USD. Exact for USD-quoted pools, approximate
+        otherwise.
+        """
+        from condor.executors.runtime import _EXECUTOR_TYPES
+
+        executor_type = input_data.get("executor_type", "")
+        if executor_type not in _EXECUTOR_TYPES:
+            raise ValueError(f"unknown native executor type: {executor_type!r}")
+        config_cls, _ = _EXECUTOR_TYPES[executor_type]
+        config = config_cls(**(input_data.get("config") or {}))
+        from condor.executors.base import validate_risk_declaration
+
+        declaration = validate_risk_declaration(config.risk_declaration())
+        return float(declaration.max_notional_quote)
 
     def check_bot_action(self, tool_call: dict) -> tuple[bool, str]:
         """Check a manage_bots call against risk limits.
@@ -208,12 +260,18 @@ class RiskEngine:
         return True, ""
 
 
-def auto_approve_with_risk_check(
+def risk_gate(
     risk_engine: RiskEngine,
     risk_state: RiskState,
-    execution_mode: str = "loop",
+    experiment: bool = False,
 ):
-    """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones."""
+    """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
+
+    The ONE shared risk policy (refactor-02 §4.1) — the caller chooses the state
+    seed: journal-derived for tick sessions (real exposure/count carried over),
+    ``RiskState()`` at zero for delegations (the caps act as a per-run budget).
+    ``experiment=True`` additionally cancels every mutating action (tick-only).
+    """
     from handlers.agents._shared import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
@@ -221,26 +279,26 @@ def auto_approve_with_risk_check(
             raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
             tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
 
-            # Dry-run mode: block ALL mutating actions
-            if execution_mode == "dry_run":
+            # Experiment mode: block ALL mutating actions
+            if experiment:
                 if tool_name == "manage_executors":
                     input_data = tool_call.get("input", {})
                     action = input_data.get("action", "")
                     if action in ("create", "stop"):
-                        log.info("Dry-run mode: blocked manage_executors(%s)", action)
+                        log.info("Experiment mode: blocked manage_executors(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
                 elif tool_name == "manage_bots":
                     input_data = tool_call.get("input", {})
                     action = input_data.get("action", "")
                     if action in DANGEROUS_BOT_ACTIONS:
-                        log.info("Dry-run mode: blocked manage_bots(%s)", action)
+                        log.info("Experiment mode: blocked manage_bots(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
                 elif tool_name in (
                     "place_order",
                     "manage_gateway_swaps",
                     "manage_gateway_clmm",
                 ):
-                    log.info("Dry-run mode: blocked %s", tool_name)
+                    log.info("Experiment mode: blocked %s", tool_name)
                     return {"outcome": {"outcome": "cancelled"}}
 
             # For executor actions, run risk check
@@ -248,8 +306,10 @@ def auto_approve_with_risk_check(
                 input_data = tool_call.get("input", {})
                 action = input_data.get("action", "")
 
-                # Validate controller_id on create
-                if action == "create":
+                # Validate controller_id on create (hummingbot-api shape only;
+                # condor-native creates carry "config" and are bounded by
+                # their RiskDeclaration in check_executor_action)
+                if action == "create" and "executor_config" in input_data:
                     executor_config = input_data.get("executor_config", {})
                     if not executor_config.get("controller_id"):
                         log.warning("Blocked executor create: missing controller_id")

@@ -86,22 +86,27 @@ def create_jwt(
 
 def decode_jwt(token: str) -> Optional[dict]:
     try:
-        return jwt.decode(token, _jwt_secret(), algorithms=[_ALGORITHM])
+        payload = jwt.decode(token, _jwt_secret(), algorithms=[_ALGORITHM])
     except JWTError:
-        pass
-    # The token may be signed with a secret a sibling process persisted to
-    # config.yml after our snapshot was loaded (main bot vs MCP subprocess).
-    # Refresh from disk once and retry before rejecting. Skipped when the
-    # env var pins the secret — there is nothing fresher to read.
-    if os.getenv("WEB_JWT_SECRET"):
+        # The token may be signed with a secret a sibling process persisted to
+        # config.yml after our snapshot was loaded (main bot vs MCP subprocess).
+        # Refresh from disk once and retry before rejecting. Skipped when the
+        # env var pins the secret — there is nothing fresher to read.
+        if os.getenv("WEB_JWT_SECRET"):
+            return None
+        fresh = get_config_manager().reload_web_jwt_secret()
+        if not fresh:
+            return None
+        try:
+            payload = jwt.decode(token, fresh, algorithms=[_ALGORITHM])
+        except JWTError:
+            return None
+    # Purpose-tagged tokens (e.g. cli-login) are only good for their own
+    # exchange, never as a session bearer — reject them here so the HTTP
+    # and WebSocket session paths share the check.
+    if payload.get("purpose"):
         return None
-    fresh = get_config_manager().reload_web_jwt_secret()
-    if not fresh:
-        return None
-    try:
-        return jwt.decode(token, fresh, algorithms=[_ALGORITHM])
-    except JWTError:
-        return None
+    return payload
 
 
 # ── WebSocket auth (subprotocol header, query-param fallback) ──
@@ -165,6 +170,45 @@ async def get_current_user(
         first_name=payload.get("first_name", ""),
         role=role.value,
     )
+
+
+# ── CLI login tokens (minted by `condor login-token` on the box) ──
+
+_CLI_LOGIN_TOKEN_TTL = 300  # 5 minutes
+
+
+def create_cli_login_token(user_id: int, username: str = "") -> str:
+    """Mint a stateless login token from the terminal.
+
+    Same trust model as Tier-A identity auto-bind: whoever can run commands
+    on this box already reads config.yml and the JWT signing secret, so a
+    terminal-minted token adds convenience, not privilege. It is short-lived
+    and purpose-tagged, so it is only accepted by the token-login exchange
+    (``decode_jwt`` rejects purpose-tagged tokens as session bearers). Being
+    stateless, it works without the web process sharing memory with the CLI.
+    """
+    payload = {
+        "sub": str(user_id),
+        "username": username,
+        "purpose": "cli-login",
+        "exp": int(time.time()) + _CLI_LOGIN_TOKEN_TTL,
+    }
+    return jwt.encode(payload, _jwt_secret(), algorithm=_ALGORITHM)
+
+
+def redeem_cli_login_token(token: str) -> Optional[dict]:
+    """Validate a CLI-minted login token. Returns user info or None."""
+    try:
+        payload = jwt.decode(token, _jwt_secret(), algorithms=[_ALGORITHM])
+    except JWTError:
+        return None
+    if payload.get("purpose") != "cli-login":
+        return None
+    return {
+        "user_id": int(payload["sub"]),
+        "username": payload.get("username", ""),
+        "first_name": "",
+    }
 
 
 # ── One-time login tokens (generated from Telegram /web command) ──

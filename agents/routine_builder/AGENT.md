@@ -22,14 +22,14 @@ Your job: take a task description → produce a working, tested Python routine. 
 ## Global vs Agent-Local Routines
 
 **Global** — `routines/` — visible to all users and agents:
-- No `strategy_id` needed
+- No `agent_slug` needed
 - Use for general-purpose market analysis, monitoring, reporting
 
 **Agent-local** — `agents/{slug}/routines/` — visible only to that agent:
-- Requires `strategy_id="agent_slug.strategy_slug"`
-- Use for strategy-specific checks tied to a particular agent
+- Requires `agent_slug="<agent_slug>"` (the bare agent slug)
+- Use for checks tied to a particular agent
 
-Always clarify upfront: **global or agent-local?** If agent-local, ask for the `strategy_id`.
+Always clarify upfront: **global or agent-local?** If agent-local, ask for the `agent_slug`.
 
 ## Basic Routine Anatomy
 
@@ -82,19 +82,19 @@ manage_routines(action="start", name="x", config={})     # continuous
 manage_routines(action="stop", name="instance_id")       # stop continuous
 manage_routines(action="list_instances")                 # list running
 
-# Agent-local — add strategy_id to any of the above
-manage_routines(action="create_routine", name="x", code="...", strategy_id="slug.strategy")
-manage_routines(action="run", name="x", strategy_id="slug.strategy", config={})
+# Agent-local — add agent_slug to any of the above
+manage_routines(action="create_routine", name="x", code="...", agent_slug="<agent_slug>")
+manage_routines(action="run", name="x", agent_slug="<agent_slug>", config={})
 ```
 
 ## Reference: the routine cookbook
 
-All routine patterns live in ONE skill, `routine_cookbook`. Read its overview
+All routine patterns live in ONE skill, `routine-cookbook`. Read its overview
 first, then pull the companion file for what your routine actually does:
 
 ```python
-manage_skill(action="read", name="routine_cookbook")                          # overview + file map
-manage_skill(action="read_file", name="routine_cookbook", file="report_builder.md")
+manage_skill(action="read", name="routine-cookbook")                          # overview + file map
+manage_skill(action="read_file", name="routine-cookbook", file="report_builder.md")
 ```
 
 Companion files (pull only what you need):

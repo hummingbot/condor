@@ -11,6 +11,7 @@ from mcp_servers.condor.tools import consult as consult_tool
 from mcp_servers.condor.tools import context
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
+    executors as executors_tool,
     memory,
     notes,
     notification,
@@ -119,6 +120,7 @@ async def delegate(
     agent: str = "",
     task: str = "",
     task_id: str = "",
+    risk_limits: dict | None = None,
 ) -> dict:
     """Delegate a one-off task to a background agent instance.
 
@@ -127,8 +129,17 @@ async def delegate(
     goal-oriented task to a DETACHED agent that works autonomously until done, then
     notifies the user with the result — while you stay free to do other things. Use
     it for "go build/scan/produce X and ping me when finished" (e.g. "create a
-    routine that scans SOL pools"). The agent runs unrestricted with full
-    auto-approve, so delegate only to trusted agents/tasks.
+    routine that scans SOL pools").
+
+    Authorization: a delegation to a TRADING agent (one that needs a hummingbot
+    server, has an AGENT.md risk_limits baseline, or is given caps here) runs under a
+    zero-seeded risk gate — tool calls auto-approve within caps, uncapped bot
+    deploys and place_order are blocked. The caps come from the optional
+    risk_limits arg when given (it REPLACES the agent's AGENT.md baseline for
+    this one run — what you pass is exactly what governs), else the baseline. A
+    trading delegation with neither errors at start; "unbounded" is expressed by
+    passing explicitly large caps. Serverless agents (e.g. routine_builder) run
+    with full auto-approve.
 
     The user tracks a delegation in Telegram with the /delegations command (NOT
     "/task" — that does not exist) and is pinged automatically when it finishes.
@@ -147,11 +158,14 @@ async def delegate(
         agent: Agent slug to delegate to (for start).
         task: The one-off task, in plain language (for start).
         task_id: Delegation id returned by start (for get/stop).
+        risk_limits: Per-delegation risk caps override (for start; trading agents
+            only). Keys: max_position_size_quote, max_open_executors,
+            max_drawdown_pct, shutdown_drawdown_pct. Replaces the agent baseline.
 
     Returns:
         Action-specific result dict.
     """
-    return await delegate_tool.delegate(action, agent, task, task_id)
+    return await delegate_tool.delegate(action, agent, task, task_id, risk_limits)
 
 
 @mcp.tool()
@@ -173,12 +187,38 @@ async def send_notification(
 
 
 @mcp.tool()
+@handle_errors("get notifications")
+async def get_notifications(
+    limit: int = 30,
+    since_ts: float | None = None,
+    agent_id: str | None = None,
+) -> dict:
+    """Read recent Condor notifications from the outbox (oldest first).
+
+    Every user-facing notification (session ticks, delegation results,
+    agent pings) is recorded in the outbox regardless of Telegram
+    delivery. Use this to catch up on what agents reported — e.g. after
+    starting a session or delegation from this harness — or to poll for
+    new entries by passing the last seen ``ts`` as ``since_ts``.
+
+    Args:
+        limit: Max entries returned.
+        since_ts: Only entries with ts strictly greater than this.
+        agent_id: Filter to one run (session or delegation id).
+
+    Returns:
+        {"notifications": [{ts, user_id, agent_id, kind, text, ...}]}
+    """
+    return await notification.get_notifications(limit, since_ts, agent_id)
+
+
+@mcp.tool()
 @handle_errors("manage routines")
 async def manage_routines(
     action: str,
     name: str | None = None,
     config: dict | None = None,
-    strategy_id: str | None = None,
+    agent_slug: str | None = None,
     code: str | None = None,
 ) -> dict:
     """Manage and run Condor routines (auto-discoverable Python scripts).
@@ -191,27 +231,27 @@ async def manage_routines(
     - "stop": Stop a running routine instance (requires name=instance_id)
     - "list_instances": List all running/scheduled routine instances
 
-    Actions -- Agent-Local Routine CRUD (requires strategy_id or CONDOR_AGENT_SLUG):
+    Actions -- Agent-Local Routine CRUD (requires agent_slug or CONDOR_AGENT_SLUG):
     - "create_routine": Create a new agent-local routine (requires name, code)
     - "read_routine": Read source code of a routine (requires name)
     - "edit_routine": Update an agent-local routine (requires name, code)
     - "delete_routine": Delete an agent-local routine (requires name)
 
-    Agent-local routines live in agents/{slug}/routines/ and are only
-    visible to that strategy's agent. They follow the same pattern as global
-    routines: a Config(BaseModel) class and an async run(config, context) function.
+    Agent-local routines live in agents/{slug}/routines/ and are only visible
+    to that agent. They follow the same pattern as global routines: a
+    Config(BaseModel) class and an async run(config, context) function.
 
     Args:
         action: The action to perform.
         name: Routine name (required for all except list/list_instances). For "stop", pass the instance_id as name.
         config: Config overrides for run/start (optional, merged with defaults).
-        strategy_id: Strategy ID for agent-local routine CRUD operations.
+        agent_slug: Target agent for agent-local routine CRUD operations.
         code: Python source code for create_routine / edit_routine.
 
     Returns:
         Action-specific result dict.
     """
-    return await routines.manage_routines(action, name, config, strategy_id, code)
+    return await routines.manage_routines(action, name, config, agent_slug, code)
 
 
 @mcp.tool()
@@ -237,6 +277,74 @@ async def manage_servers(
 
 
 @mcp.tool()
+@handle_errors("manage executors")
+async def manage_executors(
+    action: str,
+    executor_type: str | None = None,
+    config: dict | None = None,
+    executor_id: str | None = None,
+    agent_id: str | None = None,
+    keep_position: bool = True,
+    group_by: str | None = None,
+) -> dict | list:
+    """Manage Condor-native executors (gateway-backed DEX execution).
+
+    These run in the persistent Condor process against Hummingbot Gateway
+    (keys never leave Gateway). Creates and stops are risk- and
+    human-gated; experiments cancel them automatically.
+
+    executor_type is a composite {kind}_{instrument}: kind ∈ {order (single
+    leg, place-and-track), position (round-trip with a SL/trailing/TP/time
+    barrier ladder)}, instrument ∈ {spot, perp, pred}. Six types: order_spot,
+    order_perp, order_pred, position_spot, position_perp, position_pred. venue
+    selects the exchange (spot→solana default; perp→hyperliquid; pred→
+    polymarket|hyperliquid).
+
+    Actions:
+    - "create": start an executor. Requires executor_type + config.
+      - "order_spot": config {chain_network, wallet_address, base_token,
+        quote_token, amount, side (BUY|SELL), slippage_pct?, order_type?,
+        notional_quote? (quote-unit value; auto-priced when omitted)}
+      - "position_spot": config {chain_network, wallet_address, base_token,
+        quote_token, amount_quote, slippage_pct?, take_profit_pct?,
+        stop_loss_pct?, time_limit_s?, trailing_activation_pct?, trailing_delta_pct?}
+      - "position_perp" (venue hyperliquid): config {coin, side (LONG|SHORT),
+        notional_quote, leverage?, cross_margin?, entry?, limit_px?,
+        liquidation_guard_pct?, native_triggers?, + barrier fields}
+      - "position_pred" (venue polymarket|hyperliquid): config {market,
+        position (LONG|SHORT), amount_quote, resolve_win_price?,
+        resolve_loss_price?, + barrier fields}
+      - "order_perp" / "order_pred": single-leg variants of the above.
+    - "stop": stop an executor. keep_position=True (default) DETACHES —
+      the on-chain position stays open and unmanaged; keep_position=False
+      closes the position on-chain. Requires executor_id.
+    - "get": fetch one executor's full state. Requires executor_id.
+    - "list": list executors (optionally filtered by agent_id).
+    - "performance": rolled-up scorecard — open/closed/failed counts,
+      realized PnL, costs, win rate, close-type breakdown — grouped by
+      group_by: "agent" (per agent, all its runs), "run" (per
+      session/delegation), "strategy" (compare playbooks), "venue", or
+      "type". Use this to answer "how is agent X doing" or "compare
+      strategy A vs B" in one call.
+
+    Args:
+        action: create | stop | get | list | performance
+        executor_type: {order,position}_{spot,perp,pred} (create only)
+        config: executor config dict (create only)
+        executor_id: target executor (stop/get)
+        agent_id: attribution/filter; defaults to this session's agent
+        keep_position: on stop, keep net position (True) or swap back (False)
+        group_by: performance grouping (default "agent")
+
+    Returns:
+        Action-specific result dict.
+    """
+    return await executors_tool.manage_executors(
+        action, executor_type, config, executor_id, agent_id, keep_position, group_by
+    )
+
+
+@mcp.tool()
 @handle_errors("get user context")
 async def get_user_context() -> dict:
     """Get the current user's context within Condor.
@@ -257,16 +365,17 @@ async def manage_trading_agent(
     agent_id: str | None = None,
     strategy_id: str | None = None,
     agent_slug: str | None = None,
+    strategy: str | None = None,
     name: str | None = None,
     description: str | None = None,
     instructions: str | None = None,
     agent_key: str | None = None,
-    skills: list[str] | None = None,
     config: dict | None = None,
     tools: list[str] | None = None,
     when_to_consult: str | None = None,
     server_required: bool | None = None,
     server_name: str | None = None,
+    risk_limits: dict | None = None,
 ) -> dict:
     """Manage trading agents and strategies.
 
@@ -277,7 +386,10 @@ async def manage_trading_agent(
     is consultable (on any model); an agent that owns ≥1 strategy is loopeable; it can
     be both. Create the agent FIRST, then add its routines and (optionally) a strategy.
     ``strategy_id`` is the opaque key returned by list_strategies/create_strategy
-    (form "agent_slug.strategy_slug").
+    (form "agent_slug.strategy_slug") — used ONLY by strategy CRUD. Running
+    sessions are identified as "{agent_slug}_{N}" ("{agent_slug}_e{N}" for
+    experiments); which strategy a session ran is session metadata, and
+    all history (sessions, learnings, experiments) lives at the agent level.
 
     Actions -- Agents (identities):
     - "list_agent_definitions": List all agents (AGENT.md identities) with their
@@ -303,16 +415,23 @@ async def manage_trading_agent(
 
     Actions -- Lifecycle:
     - "list_agents": List all running agent instances with status
-    - "start_agent": Start a new agent session (requires strategy_id, optional config overrides)
+    - "start_session": Start a new agent SESSION — the stateful unit of capital
+      engagement: frozen config, journal, risk state, its own track-record entry
+      (requires agent_slug; strategy=<slug> selects the playbook — optional when
+      the agent has exactly one, required when it has several; optional config
+      overrides, e.g. execution_mode "run_once" for a single live tick)
+    - "start_experiment": Run ONE simulated tick with every mutation blocked —
+      a.k.a. a dry run — saved as a flat experiment snapshot, never a session
+      (requires agent_slug; same strategy/config args as start_session)
     - "stop_agent": Stop a running agent, KEEPING its open positions (requires agent_id)
     - "shutdown_agent": Emergency stop that WINDS DOWN this session's positions/executors
       per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
     - "pause_agent": Pause a running agent (requires agent_id)
     - "resume_agent": Resume a paused agent (requires agent_id)
 
-    Actions -- Routines (scoped to a strategy):
-    - "list_routines": List global + agent-local routines for a strategy (requires strategy_id)
-    - "run_routine": Execute a one-shot routine (requires strategy_id, name, optional config)
+    Actions -- Routines (scoped to an agent):
+    - "list_routines": List global + agent-local routines for an agent (requires agent_slug)
+    - "run_routine": Execute a one-shot routine (requires agent_slug, name, optional config)
 
     Journal reads/writes are the dedicated trading_agent_journal_read /
     trading_agent_journal_write tools, not actions of this tool.
@@ -323,22 +442,28 @@ async def manage_trading_agent(
 
     Args:
         action: The action to perform.
-        agent_id: Agent instance ID (for lifecycle/monitoring/journal actions).
-        strategy_id: Strategy key "agent_slug.strategy_slug" (for strategy/routine/start actions).
-        agent_slug: Owning Agent slug — required for create_strategy and for the
-            agent CRUD actions get_agent/update_agent/delete_agent.
+        agent_id: Agent session ID "{agent_slug}_{N}" (for lifecycle/monitoring/journal actions).
+        strategy_id: Strategy key "agent_slug.strategy_slug" (strategy CRUD only).
+        agent_slug: Owning Agent slug — required for create_strategy,
+            start_session/start_experiment, routine actions, and the agent CRUD
+            actions get/update/delete_agent.
+        strategy: Strategy slug selecting the playbook for start_session /
+            start_experiment (optional when the agent has exactly one strategy).
         name: Agent name (create_agent), strategy name (create/update_strategy), or routine name (run_routine).
         description: Agent or strategy description (for create/update).
         instructions: AGENT.md body (create/update_agent) or strategy instructions text (create/update_strategy).
         agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Any model can be consulted; a pydantic-ai key (e.g. "ollama:...") additionally enforces the tools allowlist on consult. Default "claude-code".
-        skills: List of optional skill names to enable (for create/update_strategy).
         config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
-            For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
+            For start_session, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
             execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
         when_to_consult: Trigger describing when to consult the agent (create/update_agent). Set it to make the agent consultable — recommended for every agent, on any model.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
         server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
+        risk_limits: Agent-level risk baseline dict (create/update_agent). Keys:
+            max_position_size_quote, max_open_executors, max_drawdown_pct,
+            shutdown_drawdown_pct. Governs unattended delegations and is the
+            fallback for tick sessions without their own risk_limits.
 
     Returns:
         Action-specific result dict.
@@ -348,16 +473,17 @@ async def manage_trading_agent(
         agent_id,
         strategy_id,
         agent_slug,
+        strategy,
         name,
         description,
         instructions,
         agent_key,
-        skills,
         config,
         tools=tools,
         when_to_consult=when_to_consult,
         server_required=server_required,
         server_name=server_name,
+        risk_limits=risk_limits,
     )
 
 
@@ -417,14 +543,17 @@ async def manage_skill(
     action: str,
     name: str | None = None,
     description: str | None = None,
-    when_to_use: str | None = None,
     body: str | None = None,
     references_routine: str | None = None,
     query: str | None = None,
     max_entries: int = 30,
-    strategy_id: str | None = None,
+    agent_slug: str | None = None,
+    scope: str | None = None,
     file: str | None = None,
     content: str | None = None,
+    old_string: str | None = None,
+    new_string: str | None = None,
+    changelog: str | None = None,
 ) -> dict:
     """Manage your SKILLS — playbooks (know-how) you can follow and refine.
 
@@ -452,9 +581,20 @@ async def manage_skill(
 
     Skills are scoped per-assistant: a launched agent reads/writes ONLY its own
     library. From the chat you can target a specific agent's local skill library
-    with strategy_id (an "agent_slug.strategy_slug" key, or a bare agent slug) —
-    use this to author or inspect an agent's skills while building it. Without
-    strategy_id the current assistant's library is used.
+    with agent_slug — use this to author or inspect an agent's skills while
+    building it. Without agent_slug the current assistant's library is used.
+
+    PLACEMENT RULE (three tiers): the chat's own library is the repo-root
+    skills/ dir, which is HOST-VISIBLE — any harness opened in the Condor repo
+    (Claude Code, OpenClaw, Hermes) indexes it natively. Put only genuinely
+    host-relevant playbooks there. Knowledge meant for ONE agent belongs in
+    that agent's local tier (pass agent_slug). Knowledge EVERY domain agent
+    should get (executor mechanics, venue quirks) belongs in the SHARED tier
+    (pass scope="shared" — agents/_shared/skills): domain agents read it
+    automatically (local overrides shared on a name clash) but can never
+    write it — shared edits happen only here in the chat, with the user.
+    Skills follow the agentskills.io format: hyphenated names, and the
+    description states WHAT the skill does and WHEN to use it.
 
     Actions:
     - "read": Get a full playbook + routine validation + companion `files` (requires name).
@@ -462,23 +602,32 @@ async def manage_skill(
     - "write_file": Create/overwrite one bundled companion file (requires name + file + content).
     - "search": Keyword search over the skills (requires query).
     - "list": Return the skills index (one line per skill).
-    - "create": Add/overwrite a skill (requires name, description, when_to_use, body).
-    - "edit": Patch fields of a skill (requires name + any of description/when_to_use/body/references_routine).
+    - "create": Add/overwrite a skill (requires name, description, body).
+    - "patch": Delta-edit a skill BODY (requires name, old_string, new_string,
+      changelog). old_string must match exactly once; provenance is stamped.
+    - "edit": Replace fields wholesale (requires name + any of description/body/
+      references_routine). Human-directed use; prefer "patch" for incremental
+      improvements — full-body rewrites lose detail.
     - "delete": Remove a skill (requires name).
 
     Args:
         action: read | read_file | write_file | search | list | create | edit | delete
-        name: Short kebab/snake name (e.g. "grid-en-band-walk").
-        description: One-line summary (create/edit).
-        when_to_use: The trigger/condition for the playbook (create/edit).
+        name: Short kebab-case name (e.g. "grid-en-band-walk").
+        description: Single line stating what the skill does AND when to use
+            it (create/edit) — the routing trigger, ≤1024 chars.
         body: The steps / playbook text (create/edit).
         references_routine: Optional routine name to link; "" clears it (create/edit).
         query: Search string (for search).
         max_entries: Cap for search results (default 30).
-        strategy_id: Target a specific agent's local skill library (chat-side
-            authoring). Composite "agent_slug.strategy_slug" key or bare agent slug.
+        agent_slug: Target a specific agent's local skill library (chat-side
+            authoring).
+        scope: "shared" targets the shared tier read by every domain agent
+            (chat-only; mutually exclusive with agent_slug).
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
+        old_string: Exact existing body text to replace (for patch; must be unique).
+        new_string: Replacement text (for patch).
+        changelog: One line — what changed and why (required for patch).
 
     Returns:
         Action-specific result dict.
@@ -487,14 +636,17 @@ async def manage_skill(
         action,
         name=name,
         description=description,
-        when_to_use=when_to_use,
         body=body,
         references_routine=references_routine,
         query=query,
         max_entries=max_entries,
-        strategy_id=strategy_id,
+        agent_slug=agent_slug,
+        scope=scope,
         file=file,
         content=content,
+        old_string=old_string,
+        new_string=new_string,
+        changelog=changelog,
     )
 
 
@@ -576,12 +728,16 @@ async def trading_agent_journal_write(
     """Write to the trading agent's journal. Keep entries SHORT (one line).
 
     Args:
-        agent_id: The trading agent instance ID.
-        entry_type: "action", "learning", or "state".
+        agent_id: The trading agent instance ID ("{slug}_{N}"). For
+            entry_type="promote_learning" the bare agent slug also works —
+            learnings live at the agent level, no session handle needed.
+        entry_type: "action", "learning", "state", or "promote_learning".
             - "action": What you did this tick (auto-trimmed to last 10).
             - "learning": A new insight. Duplicates are auto-filtered. Only write
               if this is genuinely new and not already in learnings (max 20).
             - "state": Overwrite the current state snapshot (e.g. price, position, grids).
+            - "promote_learning": Move an existing learning to the Promoted
+              section after folding it into a skill (text must match the line).
         text: The entry content. Keep it to ONE short line.
         reasoning: One-sentence reasoning (for actions only).
         risk_note: Optional risk note (for actions only).

@@ -1,11 +1,18 @@
-"""TickEngine -- main orchestrator for autonomous trading agents.
+"""TickEngine -- scheduler for autonomous trading agents.
 
-One TickEngine instance per running agent.  Each tick:
+One TickEngine instance per running agent session. It no longer owns an
+execution stack (refactor-02): each tick is pre-flight → ``run_agent`` →
+journal write-back. What lives here is the loop/pause/max_ticks logic, the
+``_engines`` registry entry, directive injection, the risk pre-flight, the
+post-run journal block, and the shutdown escalation hook.
+
+Each tick:
 1. Pre-compute core data providers (active executors)
 2. Read journal (learnings + summary + recent decisions)
-3. Build prompt with strategy + data + risk state
-4. Spawn a fresh ACP session, stream events, capture tool calls
-5. Save full snapshot and update journal
+3. Risk pre-flight (soft block / hard kill-switch)
+4. Build prompt with strategy + data + risk state
+5. run_agent under a risk_gate policy (fresh client, clean context window)
+6. Save full snapshot and update journal
 """
 
 from __future__ import annotations
@@ -14,25 +21,21 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
-from condor.acp.client import (
-    ACPClient,
-    Heartbeat,
-    PromptDone,
-    TextChunk,
-    ToolCallEvent,
-    ToolCallUpdate,
-    fold_tool_call_event,
-    resolve_acp,
-)
-from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
-
 from .agent import Agent
-from .journal import JournalManager, next_experiment_number, next_session_number
+from .journal import (
+    JournalManager,
+    allocate_session_dir,
+    finalize_session_meta,
+    next_experiment_number,
+    write_session_meta,
+)
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
-from .risk import RiskEngine, RiskLimits, RiskState, auto_approve_with_risk_check
+from .risk import RiskEngine, RiskLimits, RiskState, risk_gate
+from .run import run_agent
 from .strategy import Strategy
 
 log = logging.getLogger(__name__)
@@ -65,7 +68,7 @@ def get_all_engines() -> dict[str, "TickEngine"]:
 @dataclass
 class TickEngine:
     agent: Agent  # owning Agent: identity + shared brain (memory/skills)
-    strategy: Strategy  # the playbook this run loops (tactics + config)
+    strategy: Strategy  # the playbook this session loops (tactics + config)
     config: dict[str, Any]
     chat_id: int
     user_id: int
@@ -91,47 +94,64 @@ class TickEngine:
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
-    # The live per-tick ACP client, held so stop() can reap it if the tick's own
-    # finally is skipped (e.g. cancelled mid-await). None between ticks.
-    _active_client: "ACPClient | PydanticAIClient | None" = field(
-        default=None, init=False, repr=False
-    )
+    # The live per-tick client (set via run_agent's on_client hook), held so
+    # stop() can reap it if the tick's own finally is skipped (e.g. cancelled
+    # mid-await). None between ticks.
+    _active_client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        # The journal/sessions/learnings hang off the *strategy* dir (one level
-        # below the Agent), so each playbook keeps its own operational history
-        # while the Agent's brain (memory/skills) stays shared at the parent.
-        strategy_dir = self.strategy.dir
-        mode = self.config.get("execution_mode", "loop")
-        self.is_experiment = mode in ("dry_run", "run_once")
+        # All operational state hangs off the *agent* dir (refactor-01b); the
+        # strategy is a start-time selector recorded as session metadata.
+        agent_dir = self.agent.agent_dir
 
-        # agent_id == controller_id tag: "{agent_slug}.{strategy_slug}_{N}" (and
-        # "..._e{N}" for experiments). The dot separates the two slugs cleanly —
-        # slugs never contain a dot.
-        run_key = f"{self.agent.slug}.{self.strategy.slug}"
+        # run_once is not a storage mode: it's an ordinary tick session capped
+        # at one tick — journal, frozen config, risk pre-flight, attribution.
+        if self.config.get("execution_mode") == "run_once":
+            self.config["execution_mode"] = "loop"
+            self.config["max_ticks"] = 1
+
+        mode = self.config.get("execution_mode", "loop")
+        self.is_experiment = mode == "experiment"
+
+        # Tick sessions whose config declares no risk_limits fall back to the
+        # agent-level baseline (AGENT.md `risk_limits:`), the same numbers that
+        # govern this agent's delegations.
+        if not self.config.get("risk_limits") and self.agent.risk_limits:
+            self.config["risk_limits"] = dict(self.agent.risk_limits)
+
+        # agent_id == controller_id tag: "{agent_slug}_{N}" (sessions) or
+        # "{agent_slug}_e{N}" (experiments).
         if self.is_experiment:
-            self.session_num = next_experiment_number(strategy_dir)
-            self.agent_id = f"{run_key}_e{self.session_num}"
-            # Experiments: flat folder, no session dir or journal
+            self.session_num = next_experiment_number(agent_dir)
+            self.agent_id = f"{self.agent.slug}_e{self.session_num}"
+            # Experiments: flat snapshot file, no session dir or journal
             self.session_dir = None
             self.journal = None
         else:
-            self.session_num = next_session_number(strategy_dir)
-            self.agent_id = f"{run_key}_{self.session_num}"
-            self.session_dir = strategy_dir / "sessions" / f"session_{self.session_num}"
-            self.session_dir.mkdir(parents=True, exist_ok=True)
+            self.session_num, self.session_dir = allocate_session_dir(agent_dir)
+            self.agent_id = f"{self.agent.slug}_{self.session_num}"
 
             # Save config per session
             from .config import save_full_config
 
             save_full_config(self.session_dir, self.config)
 
+            write_session_meta(
+                self.session_dir,
+                {
+                    "strategy": self.strategy.slug,
+                    "status": "running",
+                    "model": self._agent_key(),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                },
+            )
+
             self.journal = JournalManager(
                 self.agent_id,
                 strategy_name=self.strategy.name,
                 strategy_description=self.strategy.description,
                 session_dir=self.session_dir,
-                agent_dir=strategy_dir,
+                agent_dir=agent_dir,
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
@@ -156,6 +176,15 @@ class TickEngine:
             self.config.get("frequency_sec", 60),
         )
 
+    def _finalize_meta(self, status: str) -> None:
+        """Record the terminal status in the session's meta.yml."""
+        if self.session_dir is None:
+            return
+        try:
+            finalize_session_meta(self.session_dir, status)
+        except Exception:
+            log.exception("TickEngine %s: failed to finalize meta.yml", self.agent_id)
+
     async def stop(self) -> None:
         """Stop gracefully."""
         self._running = False
@@ -165,9 +194,9 @@ class TickEngine:
                 await self._task
             except asyncio.CancelledError:
                 pass
-        # Backstop: if the tick was cancelled mid-await, its own finally may not
-        # have reaped the ACP subprocess. stop() is idempotent, so a double call
-        # after a clean tick is a harmless no-op.
+        # Backstop: if the tick was cancelled mid-await, run_agent's own finally
+        # may not have reaped the client subprocess. stop() is idempotent, so a
+        # double call after a clean tick is a harmless no-op.
         client = self._active_client
         if client is not None:
             try:
@@ -177,9 +206,31 @@ class TickEngine:
                     "TickEngine %s: error reaping active client", self.agent_id
                 )
             self._active_client = None
+        # Stop this session's native executors too — a stopped agent must not
+        # leave executors polling Gateway. The agent config's
+        # `keep_position_on_stop` decides fate: default True detaches (positions
+        # stay in the wallet, unmanaged — stop is position-preserving; /shutdown
+        # is the liquidating escalation); an explicit False swaps positions back
+        # to the quote token. Either way the executor loops stop.
+        from condor.executors.service import peek_executor_runtime
+
+        runtime = peek_executor_runtime()
+        if runtime is not None:
+            keep_position = bool(self.config.get("keep_position_on_stop", True))
+            stopped = runtime.stop_agent_executors(
+                self.agent_id, keep_position=keep_position
+            )
+            if stopped:
+                log.info(
+                    "TickEngine %s: stopped %d native executor(s): %s",
+                    self.agent_id,
+                    len(stopped),
+                    stopped,
+                )
         if self.journal:
             self.journal.close()
-        _engines.pop(self.agent_id, None)
+        if _engines.pop(self.agent_id, None) is not None:
+            self._finalize_meta("stopped")
         log.info("TickEngine %s stopped", self.agent_id)
 
     async def _run_shutdown(self, reason: str) -> None:
@@ -239,6 +290,7 @@ class TickEngine:
             if self.journal:
                 self.journal.close()
             _engines.pop(self.agent_id, None)
+            self._finalize_meta("stopped")
             log.info("TickEngine %s shut down (%s)", self.agent_id, reason)
 
     def pause(self) -> None:
@@ -273,9 +325,19 @@ class TickEngine:
     # ------------------------------------------------------------------
 
     async def _loop(self) -> None:
+        import random
+
         freq = self.config.get("frequency_sec", 60)
         mode = self.config.get("execution_mode", "loop")
+        # Startup jitter: concurrently-started agents would otherwise tick in
+        # lockstep, stacking model + venue load at the same instant.
+        if mode == "loop":
+            try:
+                await asyncio.sleep(random.uniform(0, min(freq, 10)))
+            except asyncio.CancelledError:
+                return
         while self._running:
+            tick_started = time.monotonic()
             if not self._paused:
                 try:
                     await self._tick()
@@ -289,20 +351,18 @@ class TickEngine:
                         self.journal.append_error(str(e))
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
 
-                # Single-tick modes: stop after first tick
-                if mode in ("dry_run", "run_once"):
-                    label = "Dry run" if mode == "dry_run" else "Run-once"
+                # Experiments: single tick, then self-stop
+                if mode == "experiment":
                     log.info(
-                        "TickEngine %s: %s complete, self-stopping",
+                        "TickEngine %s: experiment complete, self-stopping",
                         self.agent_id,
-                        label,
                     )
-                    await self._notify(f"Agent {self.agent_id}: {label} complete.")
+                    await self._notify(f"Agent {self.agent_id}: Experiment complete.")
                     self._running = False
                     _engines.pop(self.agent_id, None)
                     return
 
-                # max_ticks limit (loop mode only)
+                # max_ticks limit (covers run_once via max_ticks=1)
                 max_ticks = self.config.get("max_ticks", 0)
                 if max_ticks > 0 and self.journal.tick_count >= max_ticks:
                     log.info(
@@ -316,10 +376,24 @@ class TickEngine:
                     self._running = False
                     self.journal.close()
                     _engines.pop(self.agent_id, None)
+                    self._finalize_meta("stopped")
                     return
 
+            # Fixed-rate scheduling: frequency_sec is the interval between tick
+            # STARTS, not a sleep appended after each tick — a 45s model run on
+            # a 60s agent still ticks every 60s. An overrunning tick starts the
+            # next one immediately and the lag is logged.
+            elapsed = time.monotonic() - tick_started
+            if not self._paused and elapsed > freq:
+                log.warning(
+                    "TickEngine %s: tick took %.1fs > frequency %ss (lag %.1fs)",
+                    self.agent_id,
+                    elapsed,
+                    freq,
+                    elapsed - freq,
+                )
             try:
-                await asyncio.sleep(freq)
+                await asyncio.sleep(max(0.0, freq - elapsed))
             except asyncio.CancelledError:
                 break
 
@@ -327,30 +401,18 @@ class TickEngine:
         self._last_tick_at = time.time()
         mode = self.config.get("execution_mode", "loop")
 
-        # 1. Get API client
+        # 1. Get the hummingbot-api client IF one is configured — but treat it as
+        #    OPTIONAL. Gateway-native agents (condor-native position/swap/lp
+        #    executors) run in-process against Hummingbot Gateway and are read via
+        #    the native_executors provider, which needs no hummingbot-api client.
+        #    Only the hummingbot-api providers (executors/positions) use it, and
+        #    run_core_providers isolates their failure. So a missing client must
+        #    NOT abort the tick — that would strand a fully-working Gateway-only
+        #    agent (no hummingbot-api required).
         client = await self._get_client()
-        if not client:
-            if self.journal:
-                self.journal.append_error("No API client available")
-            return
 
         # 2. Run core data providers (executors only -- agent uses MCP for market data)
-        skill_results = await self.provider_registry.run_core_providers(
-            client, self.config, agent_id=self.agent_id
-        )
-
-        # Extract structured data from providers for tracking
-        executors_result = skill_results.get("executors")
-        if executors_result:
-            self._last_skill_data = executors_result.data
-        positions_result = skill_results.get("positions")
-        if positions_result:
-            self._last_skill_data["positions"] = positions_result.data
-
-        # Convert provider results to summary strings
-        core_data_summaries: dict[str, str] = {
-            name: result.summary for name, result in skill_results.items()
-        }
+        native_active, core_data_summaries = await self._collect_provider_state(client)
 
         # 3. Read journal context (sessions only)
         learnings = self.journal.read_learnings() if self.journal else ""
@@ -386,7 +448,9 @@ class TickEngine:
             from .prompts import _build_routines_section
 
             try:
-                self._cached_routines_section = _build_routines_section(self.strategy)
+                self._cached_routines_section = _build_routines_section(
+                    self.agent.slug
+                )
             except Exception:
                 self._cached_routines_section = ""
 
@@ -426,51 +490,73 @@ class TickEngine:
             skills_index=skills_index,
         )
 
-        # Inject pending user directives
-        if self._pending_directives:
-            directives = "\n".join(f"- {d}" for d in self._pending_directives)
-            prompt += f"\n\nUSER DIRECTIVES (apply these on this tick):\n{directives}"
-            self._pending_directives.clear()
+        # Inject pending user directives. Acknowledged (dequeued) only AFTER the
+        # tick's run completes — a timeout/crash mid-run must not lose them.
+        directives = list(self._pending_directives)
+        if directives:
+            listing = "\n".join(f"- {d}" for d in directives)
+            prompt += f"\n\nUSER DIRECTIVES (apply these on this tick):\n{listing}"
 
-        # 6. Create a fresh agent client per tick (clean context window)
-        acp_client = await self._create_client(risk_state)
-        self._active_client = acp_client
+        # 6. One run_agent call per tick (fresh client, clean context window).
+        # risk_state was computed once above and threads into the gate so the
+        # per-call checks accumulate against this tick's running totals.
+        def _hold_client(c):
+            self._active_client = c
 
-        response_chunks: list[str] = []
-        tool_calls: list[dict[str, Any]] = []
-        tool_call_map: dict[str, dict[str, Any]] = {}
+        result = await run_agent(
+            self.agent,
+            prompt,
+            permission_policy=risk_gate(self.risk, risk_state, experiment=self.is_experiment),
+            user_id=self.user_id,
+            chat_id=self.chat_id,
+            server_name=self.config.get("server_name") or None,
+            execution_mode=mode,
+            model=self._agent_key(),
+            model_base_url=self.config.get("model_base_url") or None,
+            tool_filter_mode=self.config.get("tool_filter_mode") or None,
+            timeout_s=300,
+            on_client=_hold_client,
+            agent_id=self.agent_id,
+            strategy=self.strategy.slug,
+        )
 
-        await acp_client.start()
-        try:
-            async with asyncio.timeout(300):
-                async for event in self._collect_stream(acp_client, prompt):
-                    if isinstance(event, TextChunk):
-                        response_chunks.append(event.text)
-                    elif isinstance(event, (ToolCallEvent, ToolCallUpdate)):
-                        new_tc = fold_tool_call_event(tool_call_map, event)
-                        if new_tc is not None:
-                            tool_calls.append(new_tc)
-        except asyncio.TimeoutError:
-            log.warning("TickEngine %s: ACP prompt timed out", self.agent_id)
-            response_chunks.append("(timed out)")
-        finally:
-            await acp_client.stop()
-            self._active_client = None
+        # The attempt completed — acknowledge the directives it carried.
+        # (Directives queued DURING the run stay pending for the next tick.)
+        for d in directives:
+            try:
+                self._pending_directives.remove(d)
+            except ValueError:
+                pass
 
-        response_text = "".join(response_chunks)
+        response_text = result.text
+        tool_calls = result.tool_calls
         tick_duration = time.time() - self._last_tick_at
 
-        from datetime import datetime, timezone
+        # Post-tick refresh: tool calls mutate executor state, so the snapshot
+        # must record the COMPLETED tick (an order created this tick shows
+        # open=1, not the pre-action open=0). Failure keeps the pre-run view.
+        if tool_calls:
+            try:
+                native_active, core_data_summaries = (
+                    await self._collect_provider_state(client)
+                )
+            except Exception:
+                log.exception(
+                    "TickEngine %s: post-tick provider refresh failed", self.agent_id
+                )
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        executors_summary = core_data_summaries.get("executors", "No executor data.")
+        executors_summary = core_data_summaries.get(
+            "native_executors" if native_active else "executors",
+            "No executor data.",
+        )
 
         if self.is_experiment:
             # Experiments: save a single snapshot file, no journal
             from .journal import save_experiment_snapshot
 
             save_experiment_snapshot(
-                agent_dir=self.strategy.dir,
+                agent_dir=self.agent.agent_dir,
                 experiment_num=self.session_num,
                 execution_mode=mode,
                 timestamp=timestamp,
@@ -493,6 +579,7 @@ class TickEngine:
             # Sessions: full journal tracking
             tick_num = self.journal.record_tick(
                 response_summary=response_text[:500],
+                actions=len(tool_calls),
             )
 
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
@@ -538,91 +625,70 @@ class TickEngine:
                 len(response_text),
             )
 
-    async def _collect_stream(self, acp_client: ACPClient, prompt: str):
-        """Wrapper to make prompt_stream compatible with wait_for."""
-        async for event in acp_client.prompt_stream(prompt):
-            yield event
-            if isinstance(event, PromptDone):
-                break
-
-    # ------------------------------------------------------------------
-    # Client factory
-    # ------------------------------------------------------------------
-
-    async def _create_client(
-        self, risk_state: RiskState
-    ) -> "ACPClient | PydanticAIClient":
-        """Build an ACP or PydanticAI client (does NOT start it).
-
-        ``risk_state`` is computed once in ``_tick`` and threaded through here
-        (it only feeds the auto-approve callback and cannot change between the
-        two points), avoiding a redundant per-tick journal re-parse.
-        """
-        from handlers.agents._shared import (
-            build_mcp_servers_for_agent,
-            build_mcp_servers_for_session,
-            get_project_dir,
-        )
-
-        mode = self.config.get("execution_mode", "loop")
-
-        server_name = self.config.get("server_name")
-        if server_name:
-            mcp_servers = build_mcp_servers_for_agent(
-                server_name,
-                self.user_id,
-                self.chat_id,
-                agent_slug=self.agent.slug,
-                execution_mode=mode,
-            )
-        else:
-            mcp_servers = build_mcp_servers_for_session(
-                self.user_id,
-                self.chat_id,
-                execution_mode=mode,
-                agent_slug=self.agent.slug,
-            )
-        permission_cb = auto_approve_with_risk_check(
-            self.risk, risk_state, execution_mode=mode
-        )
-
-        agent_key = self._agent_key()
-        use_pydantic_ai = is_pydantic_ai_model(agent_key)
-
-        if use_pydantic_ai:
-            import os
-
-            base_url = self.config.get("model_base_url") or None
-            tool_filter_mode = (
-                self.config.get("tool_filter_mode")
-                or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
-                or None
-            )
-            return PydanticAIClient(
-                model=agent_key,
-                mcp_servers=mcp_servers,
-                permission_callback=permission_cb,
-                base_url=base_url,
-                tool_filter_mode=tool_filter_mode,
-                # Same allowlist the agent gets on consult; empty => unrestricted.
-                allowed_tools=self.agent.tools or None,
-            )
-        else:
-            # Supports a Claude model suffix, e.g. "claude-acp:opus" — selected via
-            # session/set_model after handshake (the bridge ignores ANTHROPIC_MODEL).
-            agent_cmd, model_env, model_pref = resolve_acp(agent_key)
-            return ACPClient(
-                command=agent_cmd,
-                working_dir=get_project_dir(),
-                mcp_servers=mcp_servers,
-                permission_callback=permission_cb,
-                extra_env=model_env or None,
-                model=model_pref or None,
-            )
-
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _collect_provider_state(self, client) -> tuple[bool, dict[str, str]]:
+        """Run core data providers and refresh ``_last_skill_data`` + journal
+        executor sync. Returns (native_active, per-provider summary strings).
+
+        Called once before the model runs (prompt data) and again after a tick
+        that made tool calls — the persisted snapshot must record the COMPLETED
+        tick's state, not the pre-action view.
+        """
+        skill_results = await self.provider_registry.run_core_providers(
+            client, self.config, agent_id=self.agent_id
+        )
+
+        # Extract structured data from providers for tracking. Prefer the
+        # native_executors provider whenever it carries data: a Gateway-native
+        # agent's real positions/PnL live there, while the hummingbot-api
+        # `executors` provider is empty (no API client) — so reading it would
+        # record pnl=0/volume=0/open=0 snapshots for an agent that is actually
+        # trading. Fall back to the hummingbot-api provider for API-backed agents.
+        native_result = skill_results.get("native_executors")
+        executors_result = skill_results.get("executors")
+        nd = native_result.data if native_result else {}
+        native_active = bool(nd) and "error" not in nd and (
+            nd.get("executors")
+            or nd.get("open_count")
+            or nd.get("closed_count")
+            or nd.get("failed_count")
+        )
+        if native_active:
+            self._last_skill_data = {
+                "executors": nd.get("executors", []),
+                "total_exposure": nd.get("total_exposure", 0.0),
+                # Native store tracks realized (closed) + unrealized (open) PnL
+                # separately; the snapshot wants a single total.
+                "total_pnl": (nd.get("realized_pnl") or 0.0)
+                + (nd.get("unrealized_pnl") or 0.0),
+                "total_volume": nd.get("total_volume", 0.0),
+                "realized_pnl": nd.get("realized_pnl", 0.0),
+                "unrealized_pnl": nd.get("unrealized_pnl", 0.0),
+                "open_count": nd.get("open_count", 0),
+                "closed_count": nd.get("closed_count", 0),
+                "failed_count": nd.get("failed_count", 0),
+            }
+        elif executors_result:
+            self._last_skill_data = executors_result.data
+        # Keep the journal's Executors section (and thus risk exposure/count) in
+        # sync with live native positions — nothing else populates it on the
+        # Gateway-native path.
+        if native_active and self.journal:
+            try:
+                self.journal.sync_open_executors(nd.get("executors", []))
+            except Exception:
+                log.exception("sync_open_executors failed for %s", self.agent_id)
+        positions_result = skill_results.get("positions")
+        if positions_result:
+            self._last_skill_data["positions"] = positions_result.data
+
+        core_data_summaries: dict[str, str] = {
+            name: result.summary for name, result in skill_results.items()
+        }
+        return native_active, core_data_summaries
 
     def _agent_key(self) -> str:
         """Resolve the model for this run: config override > strategy override > Agent."""
@@ -669,12 +735,20 @@ class TickEngine:
             return None
 
     async def _notify(self, message: str) -> None:
-        """Send a notification to the user via Telegram."""
-        if hasattr(self, "_bot") and self._bot:
-            try:
-                await self._bot.send_message(chat_id=self.chat_id, text=message)
-            except Exception:
-                log.exception("Failed to send notification to chat %s", self.chat_id)
+        """Notify the user: outbox + Telegram mirror (condor.notifications)."""
+        from condor.notifications import notify
+
+        try:
+            await notify(
+                message,
+                user_id=self.user_id,
+                chat_id=self.chat_id if isinstance(self.chat_id, int) else 0,
+                agent_id=self.agent_id,
+                kind="session",
+                bot=getattr(self, "_bot", None),
+            )
+        except Exception:
+            log.exception("Failed to send notification for %s", self.agent_id)
 
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""

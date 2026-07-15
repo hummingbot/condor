@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -19,6 +20,9 @@ from condor.web.routes import (
     controller_performance,
     executors,
     market,
+    native_executors,
+    venues,
+    notifications,
     portfolio,
     positions,
     reports,
@@ -47,8 +51,40 @@ def _build_cors_origins() -> list[str]:
     return origins
 
 
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    # Native executor runtime (docs/condor-simple.md): reconcile persisted
+    # executors + start the watchdog in this (main) process.
+    import asyncio
+
+    from condor.control.handlers import build_all_handlers
+    from condor.control.server import ControlServer
+    from condor.executors.service import start_executor_service, stop_executor_service
+
+    # Control socket FIRST: the surface a harness-spawned MCP subprocess drives
+    # (the headless/serverless path). Same process as the runtime + engines, so
+    # the web host and the standalone `condor.daemon` expose the identical
+    # surface. Reconciliation then runs in the background — reads and stops work
+    # immediately; executor CREATE is 503-gated until runtime_ready() (a slow
+    # venue once held the socket down ~20 min when this was sequential).
+    control = ControlServer(build_all_handlers())
+    await control.start()
+    service_task = asyncio.create_task(start_executor_service())
+    try:
+        yield
+    finally:
+        if not service_task.done():
+            service_task.cancel()
+            try:
+                await service_task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await control.stop()
+        await stop_executor_service()
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Condor Dashboard API", version="0.1.0")
+    app = FastAPI(title="Condor Dashboard API", version="0.1.0", lifespan=_lifespan)
 
     # CORS – allow Vite dev server, local origins, and WEB_URL origin (e.g. Tailscale hostname)
     app.add_middleware(
@@ -77,6 +113,9 @@ def create_app() -> FastAPI:
     app.include_router(settings.router, prefix="/api/v1")
     app.include_router(chat_ws.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
+    app.include_router(native_executors.router, prefix="/api/v1")
+    app.include_router(venues.router, prefix="/api/v1")
+    app.include_router(notifications.router, prefix="/api/v1")
 
     # ── Serve report HTML files ──
     reports_dir = Path(__file__).resolve().parent.parent.parent / "reports"

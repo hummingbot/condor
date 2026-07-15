@@ -329,7 +329,7 @@ export function parseSnapshot(content: string): ParsedSnapshot {
   result.agentResponse = getSection(content, "Agent Response");
 
   // Tool calls - sessions wrap them in a <details> block; experiment snapshots
-  // (dry_run / run_once) write them flat under a "## Tool Calls (N)" section.
+  // (experiment / run_once) write them flat under a "## Tool Calls (N)" section.
   const toolDetailsMatch = content.match(/<details><summary>Tool Calls[^<]*<\/summary>\s*(.*?)\s*<\/details>/s);
   if (toolDetailsMatch) {
     result.toolCalls = parseToolCalls(toolDetailsMatch[1]);

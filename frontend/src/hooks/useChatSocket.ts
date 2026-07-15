@@ -20,7 +20,6 @@ export interface ChatMessage {
 export interface SlotInfo {
   slot_id: string;
   agent_key: string;
-  mode: string;
   is_busy?: boolean;
   server_name?: string;
 }
@@ -183,7 +182,6 @@ export function useChatSocket() {
           const newSlot: SlotInfo = {
             slot_id: data.slot_id as string,
             agent_key: data.agent_key as string,
-            mode: data.mode as string,
             server_name: (data.server_name as string) || undefined,
           };
           setSlots((prev) => [...prev, { info: newSlot, messages: [] }]);
@@ -418,8 +416,8 @@ export function useChatSocket() {
   );
 
   const startSession = useCallback(
-    (agentKey: string, mode: string, serverName?: string) => {
-      send({ action: "start_session", agent_key: agentKey, mode, server_name: serverName });
+    (agentKey: string, serverName?: string) => {
+      send({ action: "start_session", agent_key: agentKey, server_name: serverName });
     },
     [send],
   );

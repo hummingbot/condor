@@ -1,15 +1,18 @@
 """Unit tests for the emergency-shutdown feature (FEAT-007).
 
-Covers the declarative ``shutdown.md`` policy loader and its strategy → agent →
-default resolution, the deterministic winddown (policy → keep_position mapping,
-verify/alert on residual), and the engine wrapper's idempotency guard.
+Covers the declarative ``shutdown.md`` policy loader and its agent → default
+resolution (the strategy tier was dropped in refactor-01b — winddown is
+session-scoped and positions don't care which playbook opened them), the
+deterministic winddown (policy → keep_position mapping, verify/alert on
+residual), and the engine wrapper's idempotency guard.
 """
 
 import asyncio
 from types import SimpleNamespace
 
+from condor.agents import agent as agent_module
 from condor.agents import shutdown as shutdown_module
-from condor.agents import strategy as strategy_module
+from condor.agents.agent import Agent
 from condor.agents.engine import TickEngine
 from condor.agents.shutdown import (
     DEFAULT_POLICY,
@@ -23,14 +26,13 @@ from condor.agents.shutdown import (
     load_shutdown_policy,
     run_shutdown,
 )
-from condor.agents.strategy import Strategy
 
 
-def _make_strategy(tmp_path, monkeypatch) -> Strategy:
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
-    s = Strategy(agent_slug="acme", name="Scalper")
-    s.dir.mkdir(parents=True, exist_ok=True)
-    return s
+def _make_agent(tmp_path, monkeypatch) -> Agent:
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    a = Agent(slug="acme", name="Acme")
+    a.agent_dir.mkdir(parents=True, exist_ok=True)
+    return a
 
 
 def _write_shutdown_md(
@@ -67,46 +69,33 @@ def test_policy_from_dict_empty_is_default():
 # ── load_shutdown_policy resolution ──
 
 
-def test_resolution_prefers_strategy_over_agent_over_default(tmp_path, monkeypatch):
-    s = _make_strategy(tmp_path, monkeypatch)
-    agent_dir = s.dir.parent.parent  # {root}/acme
+def test_resolution_prefers_agent_over_default(tmp_path, monkeypatch):
+    a = _make_agent(tmp_path, monkeypatch)
     defaults_dir = tmp_path / "_defaults"
 
     _write_shutdown_md(
         defaults_dir / "shutdown.md", DEFAULT_POLICY, body="default body"
     )
-    _write_shutdown_md(agent_dir / "shutdown.md", POLICY_KEEP_ALL, body="agent body")
-    _write_shutdown_md(s.dir / "shutdown.md", POLICY_FLATTEN_ALL, body="strategy body")
+    _write_shutdown_md(a.agent_dir / "shutdown.md", POLICY_KEEP_ALL, body="agent body")
 
-    policy, body = load_shutdown_policy(s)
-    assert policy.on_kill_switch == POLICY_FLATTEN_ALL
-    assert body == "strategy body"
-
-
-def test_resolution_falls_back_to_agent(tmp_path, monkeypatch):
-    s = _make_strategy(tmp_path, monkeypatch)
-    agent_dir = s.dir.parent.parent
-    _write_shutdown_md(tmp_path / "_defaults" / "shutdown.md", DEFAULT_POLICY)
-    _write_shutdown_md(agent_dir / "shutdown.md", POLICY_KEEP_ALL, body="agent body")
-
-    policy, body = load_shutdown_policy(s)
+    policy, body = load_shutdown_policy(a)
     assert policy.on_kill_switch == POLICY_KEEP_ALL
     assert body == "agent body"
 
 
 def test_resolution_falls_back_to_default_file(tmp_path, monkeypatch):
-    s = _make_strategy(tmp_path, monkeypatch)
+    a = _make_agent(tmp_path, monkeypatch)
     _write_shutdown_md(
         tmp_path / "_defaults" / "shutdown.md", POLICY_FLATTEN_ALL, body="default body"
     )
-    policy, body = load_shutdown_policy(s)
+    policy, body = load_shutdown_policy(a)
     assert policy.on_kill_switch == POLICY_FLATTEN_ALL
     assert body == "default body"
 
 
 def test_resolution_no_files_returns_builtin_default(tmp_path, monkeypatch):
-    s = _make_strategy(tmp_path, monkeypatch)
-    policy, body = load_shutdown_policy(s)
+    a = _make_agent(tmp_path, monkeypatch)
+    policy, body = load_shutdown_policy(a)
     assert policy.on_kill_switch == DEFAULT_POLICY
     assert body == ""
 
@@ -193,8 +182,7 @@ class _FakeJournal:
 def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
     """Build a duck-typed engine sufficient for run_shutdown, with no shutdown.md
     on disk so the built-in default (keep_spot_close_perp) applies."""
-    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
-    strat = Strategy(agent_slug="acme", name="Scalper")
+    agent = _make_agent(tmp_path, monkeypatch)
 
     class _Registry:
         async def run_core_providers(self, client, config, agent_id=""):
@@ -210,8 +198,8 @@ def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
         return client
 
     engine = SimpleNamespace(
-        strategy=strat,
-        agent_id="acme.scalper_1",
+        agent=agent,
+        agent_id="acme_1",
         config={},
         journal=_FakeJournal(),
         provider_registry=_Registry(),
@@ -247,9 +235,8 @@ def test_winddown_flatten_all_closes_everything(tmp_path, monkeypatch):
         {"id": "e_spot", "connector": "binance"},
     ]
     engine, client, notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
-    # Force flatten_all via a strategy-level shutdown.md.
-    (engine.strategy.dir).mkdir(parents=True, exist_ok=True)
-    (engine.strategy.dir / "shutdown.md").write_text(
+    # Force flatten_all via the agent-level shutdown.md.
+    (engine.agent.agent_dir / "shutdown.md").write_text(
         "---\non_kill_switch: flatten_all\n---\nBody\n"
     )
     asyncio.run(run_shutdown(engine, "flat"))
@@ -301,8 +288,10 @@ def test_run_shutdown_idempotent(monkeypatch):
         _task=None,
         _active_client=None,
         journal=None,
-        agent_id="acme.scalper_1",
+        session_dir=None,
+        agent_id="acme_1",
         _notify=_notify,
+        _finalize_meta=lambda status: None,
     )
 
     async def _drive():
@@ -369,18 +358,16 @@ def test_shutdown_threshold_disabled_by_default():
 
 def _engine_with_llm(running, positions_seq, tmp_path, monkeypatch, body):
     engine, client, notes = _fake_engine(running, positions_seq, monkeypatch, tmp_path)
-    engine.agent = SimpleNamespace(slug="acme")
     engine.user_id = 7
     engine.chat_id = 99
-    engine.strategy.dir.mkdir(parents=True, exist_ok=True)
-    (engine.strategy.dir / "shutdown.md").write_text(
+    (engine.agent.agent_dir / "shutdown.md").write_text(
         f"---\non_kill_switch: flatten_all\n---\n{body}\n"
     )
     return engine, client, notes
 
 
 def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
-    from condor.agents import consult as consult_module
+    from condor.agents import run as run_module
 
     running = [{"id": "e1", "connector": "binance_perpetual"}]
     engine, client, notes = _engine_with_llm(
@@ -388,29 +375,33 @@ def test_llm_cleanup_invoked_with_body(tmp_path, monkeypatch):
     )
     seen = {}
 
-    async def fake_complete(**kwargs):
+    async def fake_run_agent(agent, prompt, **kwargs):
+        seen["agent"] = agent
+        seen["prompt"] = prompt
         seen.update(kwargs)
-        return "done"
+        return run_module.RunResult(text="done")
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_complete)
+    monkeypatch.setattr(run_module, "run_agent", fake_run_agent)
     asyncio.run(run_shutdown(engine, "breach"))
-    assert seen["task"] == "Do cleanup."
-    assert seen["slug"] == "acme"
-    assert seen["permission_callback"] is None
+    # The cleanup body is the task inside the built prompt; the pass runs
+    # unattended (AUTO policy → permission_policy is None).
+    assert "Do cleanup." in seen["prompt"]
+    assert seen["agent"].slug == "acme"
+    assert seen["permission_policy"] is None
 
 
 def test_llm_cleanup_failure_does_not_block_winddown(tmp_path, monkeypatch):
-    from condor.agents import consult as consult_module
+    from condor.agents import run as run_module
 
     running = [{"id": "e1", "connector": "binance_perpetual"}]
     engine, client, notes = _engine_with_llm(
         running, [[]], tmp_path, monkeypatch, body="Cleanup."
     )
 
-    async def boom(**kwargs):
+    async def boom(agent, prompt, **kwargs):
         raise RuntimeError("model exploded")
 
-    monkeypatch.setattr(consult_module, "_run_agent_to_completion", boom)
+    monkeypatch.setattr(run_module, "run_agent", boom)
     asyncio.run(run_shutdown(engine, "breach"))
     # The deterministic floor still ran and the winddown completed cleanly.
     assert dict(client.executors.stop_calls) == {"e1": False}

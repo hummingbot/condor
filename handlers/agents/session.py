@@ -37,7 +37,6 @@ class AgentSession:
     chat_id: int | str
     agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
     client: ACPClient | PydanticAIClient
-    mode: str = "condor"  # "condor", "agent_builder"
     server_name: str | None = None  # Which Condor server this session uses
     is_busy: bool = False
     pending_context: str | None = None  # Lazy context: injected on first prompt
@@ -117,7 +116,6 @@ async def get_or_create_session(
     permission_callback: PermissionCallback | None = None,
     user_id: int | None = None,
     user_data: dict | None = None,
-    mode: str = "condor",
     platform: str = "telegram",
     lazy_context: bool = False,
     server_name: str | None = None,
@@ -231,7 +229,6 @@ async def get_or_create_session(
             chat_id=chat_id,
             agent_key=agent_key,
             client=client,
-            mode=mode,
             server_name=resolved_server,
             pending_context=initial_context or None,
         )

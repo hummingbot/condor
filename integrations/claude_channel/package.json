@@ -1,0 +1,9 @@
+{
+  "name": "condor-claude-channel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Claude Code channel: pushes Condor notification-outbox entries into a running session",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}

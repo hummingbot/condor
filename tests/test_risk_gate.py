@@ -12,7 +12,7 @@ from condor.agents.risk import (
     RiskEngine,
     RiskLimits,
     RiskState,
-    auto_approve_with_risk_check,
+    risk_gate,
 )
 
 
@@ -87,7 +87,7 @@ def test_non_create_actions_do_not_accumulate():
 
 
 # ---------------------------------------------------------------------------
-# auto_approve_with_risk_check driven twice with the same RiskState instance
+# risk_gate driven twice with the same RiskState instance
 # ---------------------------------------------------------------------------
 
 
@@ -95,7 +95,7 @@ def test_callback_second_create_cancelled_same_tick():
     """Driving the permission callback twice with one RiskState: second create is cancelled."""
     engine = RiskEngine(RiskLimits(max_open_executors=5))
     state = RiskState(executor_count=4)
-    callback = auto_approve_with_risk_check(engine, state)
+    callback = risk_gate(engine, state)
 
     async def _drive():
         first = await callback(_create_call(), _OPTIONS)
@@ -149,7 +149,7 @@ def test_get_state_null_tracker_stays_unblocked():
 def test_callback_cumulative_exposure_cancelled_same_tick():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState(total_exposure=250.0)
-    callback = auto_approve_with_risk_check(engine, state)
+    callback = risk_gate(engine, state)
 
     async def _drive():
         first = await callback(_create_call(150.0), _OPTIONS)
@@ -162,7 +162,7 @@ def test_callback_cumulative_exposure_cancelled_same_tick():
 
 
 # ---------------------------------------------------------------------------
-# dry_run must block manage_bots deploy/mutate actions too, not just
+# experiment mode must block manage_bots deploy/mutate actions too, not just
 # manage_executors/place_order/gateway swaps — manage_bots(deploy) places real
 # capital via a controller-based bot, a separate path from manage_executors.
 # ---------------------------------------------------------------------------
@@ -172,10 +172,10 @@ def _bot_call(action: str, **extra) -> dict:
     return {"tool": "mcp__mcp-hummingbot__manage_bots", "input": {"action": action, **extra}}
 
 
-def test_dry_run_blocks_manage_bots_deploy():
+def test_experiment_blocks_manage_bots_deploy():
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+    callback = risk_gate(engine, state, experiment=True)
 
     result = asyncio.run(
         callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
@@ -183,20 +183,20 @@ def test_dry_run_blocks_manage_bots_deploy():
     assert result["outcome"]["outcome"] == "cancelled"
 
 
-def test_dry_run_blocks_manage_bots_update_config():
+def test_experiment_blocks_manage_bots_update_config():
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+    callback = risk_gate(engine, state, experiment=True)
 
     result = asyncio.run(callback(_bot_call("update_config", bot_name="x"), _OPTIONS))
     assert result["outcome"]["outcome"] == "cancelled"
 
 
-def test_dry_run_allows_manage_bots_status():
-    """Read-only manage_bots actions must not be blocked in dry_run."""
+def test_experiment_allows_manage_bots_status():
+    """Read-only manage_bots actions must not be blocked in an experiment."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
+    callback = risk_gate(engine, state, experiment=True)
 
     result = asyncio.run(callback(_bot_call("status"), _OPTIONS))
     assert result["outcome"]["outcome"] == "selected"
@@ -213,7 +213,7 @@ def test_loop_mode_blocks_bot_deploy_without_loss_cap():
     """A deploy with no declared max_global_drawdown_quote is blocked."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
@@ -224,7 +224,7 @@ def test_loop_mode_blocks_bot_deploy_without_loss_cap():
 def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(
@@ -243,7 +243,7 @@ def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():
 def test_loop_mode_blocks_bot_deploy_with_excessive_loss_cap():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(
@@ -262,7 +262,7 @@ def test_loop_mode_blocks_bot_deploy_with_excessive_loss_cap():
 def test_loop_mode_blocks_update_config_raising_amount_beyond_limit():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(
@@ -281,7 +281,7 @@ def test_loop_mode_blocks_update_config_raising_amount_beyond_limit():
 def test_loop_mode_approves_update_config_within_limit():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(
         callback(
@@ -301,7 +301,37 @@ def test_loop_mode_still_approves_bot_stop():
     """Stops are risk-reducing — never blocked by the loss-cap gate."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
-    callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
+    callback = risk_gate(engine, state)
 
     result = asyncio.run(callback(_bot_call("stop_bot", bot_name="x"), _OPTIONS))
     assert result["outcome"]["outcome"] == "selected"
+
+
+def test_drawdown_measured_against_capital_not_peak_pnl():
+    """A maker whose PnL oscillates near zero (peak +0.01, current -0.03) must
+    read a tiny drawdown vs its capital, not 400% vs peak PnL (which permanently
+    paused the perp MM)."""
+    from condor.agents.risk import RiskEngine, RiskLimits
+
+    class _T:
+        def get_total_exposure(self): return 0.0
+        def get_open_executor_count(self): return 0
+        def get_pnl_series(self): return [{"pnl": 0.0}, {"pnl": 0.01}, {"pnl": -0.03}]
+        def get_drawdown_pct(self): return 400.0  # the old (wrong) metric — must be ignored
+
+    eng = RiskEngine(RiskLimits(max_position_size_quote=200, max_drawdown_pct=15))
+    st = eng.get_state(_T())
+    assert st.drawdown_pct < 1.0          # (0.01 - -0.03)/200*100 = 0.02%
+    assert not st.is_blocked
+
+
+def test_drawdown_falls_back_without_capital_base():
+    from condor.agents.risk import RiskEngine, RiskLimits
+
+    class _T:
+        def get_total_exposure(self): return 0.0
+        def get_open_executor_count(self): return 0
+        def get_drawdown_pct(self): return 12.5
+
+    eng = RiskEngine(RiskLimits(max_drawdown_pct=15))  # no position-size base
+    assert eng.get_state(_T()).drawdown_pct == 12.5

@@ -322,6 +322,28 @@ def fold_tool_call_event(
     return None
 
 
+def _extract_tool_output(update: dict) -> str | None:
+    """Tool result across ACP payload variants: ``rawOutput`` (spec), legacy
+    ``output``, else the text of any ``content`` blocks. Coerced to str so the
+    transcript/snapshot writer can persist it uniformly."""
+    raw = update.get("rawOutput")
+    if raw is None:
+        raw = update.get("output")
+    if raw is None:
+        texts = []
+        for block in update.get("content") or []:
+            inner = block.get("content") if isinstance(block, dict) else None
+            if isinstance(inner, dict) and inner.get("type") == "text":
+                texts.append(inner.get("text", ""))
+        return "\n".join(texts) if texts else None
+    if isinstance(raw, str):
+        return raw
+    try:
+        return json.dumps(raw)
+    except (TypeError, ValueError):
+        return str(raw)
+
+
 # Type alias for the permission callback
 PermissionCallback = Callable[[dict, list[dict]], Awaitable[dict]]
 
@@ -390,9 +412,58 @@ class ACPClient:
                 },
                 self._process.stdin,
             )
+            # Re-express our MCP servers in the SDK-native shape with
+            # ``alwaysLoad: True`` so their tools are EAGERLY included in the
+            # prompt instead of being deferred behind ToolSearch. Deferred
+            # loading is what made every tick spend 15-25 tool calls just
+            # *finding* the agent's tools (and intermittently failing to, then
+            # reconstructing schemas from source) — vs ~4 calls a tick when tools
+            # are eager. alwaysLoad blocks turn-1 until the server connects (5s
+            # cap; ours connect in <1s), which also closes the registration race.
+            # It must be passed via _meta because the bridge's top-level
+            # mcpServers mapping drops alwaysLoad.
+            sdk_mcp_servers: dict[str, dict[str, Any]] = {}
+            for s in self.mcp_servers:
+                raw_env = s.get("env") or []
+                env_dict = (
+                    {e["name"]: e["value"] for e in raw_env}
+                    if isinstance(raw_env, list)
+                    else dict(raw_env)
+                )
+                cfg: dict[str, Any] = {
+                    "type": "stdio",
+                    "command": s["command"],
+                    "args": s.get("args", []),
+                    "alwaysLoad": True,
+                }
+                if env_dict:
+                    cfg["env"] = env_dict
+                sdk_mcp_servers[s["name"]] = cfg
             result = await self._peer.send_request(
                 "session/new",
-                {"cwd": self.working_dir, "mcpServers": self.mcp_servers},
+                {
+                    "cwd": self.working_dir,
+                    # Empty here on purpose: the bridge maps this top-level list
+                    # into the SDK config WITHOUT alwaysLoad, and (acp-agent.js
+                    # ~L1388) it overrides the _meta servers on key collision. So
+                    # _meta is the single source of our servers below.
+                    "mcpServers": [],
+                    "_meta": {
+                        "claudeCode": {
+                            "options": {
+                                # strictMcpConfig: ignore the user's global
+                                # file-based MCP servers (resend/vercel/gmail/…).
+                                # Without it the bridge merges all of them on top
+                                # of ours, ballooning the tool surface and forcing
+                                # deferred loading. permissions/skills/hooks from
+                                # settingSources are unaffected.
+                                "strictMcpConfig": True,
+                                # Our server(s), eager-loaded (alwaysLoad above).
+                                "mcpServers": sdk_mcp_servers,
+                            }
+                        }
+                    },
+                },
                 self._process.stdin,
             )
         except Exception:
@@ -685,7 +756,10 @@ class ACPClient:
                     title=update.get("title", ""),
                     status=update.get("status", "pending"),
                     kind=update.get("kind", "other"),
-                    input=update.get("input"),
+                    # ACP sends the arguments as rawInput; "input" is a legacy
+                    # variant. Without this fallback the audit trail records
+                    # tool names with no arguments.
+                    input=update.get("rawInput") or update.get("input"),
                 )
             )
         elif kind == "tool_call_update":
@@ -694,7 +768,7 @@ class ACPClient:
                     tool_call_id=update.get("toolCallId", ""),
                     status=update.get("status"),
                     title=update.get("title"),
-                    output=update.get("output"),
+                    output=_extract_tool_output(update),
                 )
             )
 

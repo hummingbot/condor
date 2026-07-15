@@ -66,31 +66,29 @@ async def call_main_api(
         raise APIError(f"Failed to reach main process API: {e}")
 
 
-def runkey_from_agent_id(agent_id: str) -> str:
-    """Extract the ``"{agent_slug}.{strategy_slug}"`` run key from an agent_id.
+async def call_control(
+    method: str, params: dict | None = None, timeout: float = 60
+) -> dict | list:
+    """Call the persistent Condor process over its unix control socket.
 
-    agent_id formats: ``'{agent_slug}.{strategy_slug}_{session_num}'`` or
-    ``'..._e{num}'``. Slugs may contain underscores, so strip the trailing
-    ``_N`` / ``_eN`` from the right.
+    Replaces call_main_api for live-runtime operations as the web REST app is
+    retired. Raises APIError (mapping ControlError) so callers keep one error type.
+    """
+    from condor.control.client import ControlError
+    from condor.control.client import call_control as _call
+
+    try:
+        return await _call(method, params, timeout=timeout)
+    except ControlError as e:
+        raise APIError(f"control error ({e.status}): {e.message}")
+
+
+def slug_from_agent_id(agent_id: str) -> str:
+    """Extract the agent slug from a session id.
+
+    agent_id formats: ``'{agent_slug}_{session_num}'`` or
+    ``'{agent_slug}_e{num}'``. Slugs may contain underscores, so strip the
+    trailing ``_N`` / ``_eN`` from the right.
     """
     m = re.match(r"^(.+?)_(?:e?\d+)$", agent_id)
     return m.group(1) if m else agent_id
-
-
-def agent_strategy_from_agent_id(agent_id: str) -> tuple[str, str]:
-    """Split an agent_id into ``(agent_slug, strategy_slug)``.
-
-    The run key is ``"{agent_slug}.{strategy_slug}"``; slugs never contain a dot,
-    so the first dot is the boundary. A legacy dotless key maps both parts to the
-    same slug.
-    """
-    run_key = runkey_from_agent_id(agent_id)
-    if "." in run_key:
-        agent_slug, sslug = run_key.split(".", 1)
-        return agent_slug, sslug
-    return run_key, run_key
-
-
-# Backwards-compatible alias (callers may still import the old name).
-def slug_from_agent_id(agent_id: str) -> str:
-    return runkey_from_agent_id(agent_id)
