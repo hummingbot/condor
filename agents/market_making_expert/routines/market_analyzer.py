@@ -1,10 +1,10 @@
 """Multi-timeframe market regime analyzer for MM decision-making."""
 import logging
 import math
-from datetime import datetime, timezone
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 from config_manager import get_client
+from condor.reports.footprint import build_estimated_footprint_figure, candle_timestamps
 
 logger = logging.getLogger(__name__)
 
@@ -336,71 +336,6 @@ def _analyze_returns(closes: list, periods_per_day: int = 24) -> dict:
     }
 
 
-# ── Footprint helpers ────────────────────────────────────────────────────────
-
-def _estimate_buy_sell_volume(candle: dict):
-    """Estimate buy/sell taker volume from OHLCV: buy=(C-L)/(H-L)*V, sell=(H-C)/(H-L)*V."""
-    h = float(candle.get("high", 0))
-    l = float(candle.get("low", 0))
-    c = float(candle.get("close", 0))
-    v = float(candle.get("volume", 0))
-    hl = h - l
-    if hl == 0:
-        return v / 2, v / 2
-    return v * (c - l) / hl, v * (h - c) / hl
-
-
-def _build_footprint(candles: list, n_buckets: int = 25):
-    """Aggregate buy/sell volume by price bucket. Returns (prices, buy_vols, sell_vols)."""
-    if not candles:
-        return [], [], []
-    price_min = min(float(c.get("low", 0)) for c in candles)
-    price_max = max(float(c.get("high", 0)) for c in candles)
-    price_range = price_max - price_min
-    if price_range == 0:
-        return [], [], []
-    bucket_size = price_range / n_buckets
-    buy_by = {}
-    sell_by = {}
-    for candle in candles:
-        mid = (float(candle.get("high", 0)) + float(candle.get("low", 0))) / 2
-        idx = min(int((mid - price_min) / bucket_size), n_buckets - 1)
-        bv, sv = _estimate_buy_sell_volume(candle)
-        buy_by[idx] = buy_by.get(idx, 0) + bv
-        sell_by[idx] = sell_by.get(idx, 0) + sv
-    prices, buys, sells = [], [], []
-    for i in range(n_buckets):
-        prices.append(round(price_min + (i + 0.5) * bucket_size, 6))
-        buys.append(buy_by.get(i, 0))
-        sells.append(sell_by.get(i, 0))
-    return prices, buys, sells
-
-
-def _ts_to_dt(ts) -> datetime | None:
-    """Convert raw timestamp (int ms or s) to UTC datetime. Returns None on failure."""
-    if ts is None:
-        return None
-    try:
-        ts_f = float(ts)
-        if ts_f > 1_000_000_000_000:   # milliseconds
-            return datetime.fromtimestamp(ts_f / 1000, tz=timezone.utc)
-        elif ts_f > 1_000_000_000:     # seconds
-            return datetime.fromtimestamp(ts_f, tz=timezone.utc)
-    except (ValueError, TypeError, OSError):
-        pass
-    return None
-
-
-def _make_ts_list(candles: list) -> list:
-    """Return list of datetime objects for candle timestamps (falls back to index)."""
-    result = []
-    for i, c in enumerate(candles):
-        ts = c.get("timestamp", c.get("time", c.get("open_time")))
-        dt = _ts_to_dt(ts)
-        result.append(dt if dt is not None else i)
-    return result
-
-
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     client = await get_client(context._chat_id, context=context)
     if not client:
@@ -499,7 +434,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # Generate report
     try:
         import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
         from condor.reports import ReportBuilder
         builder = ReportBuilder(f"Market Analysis: {pair}")
         builder.source("routine", "market_analyzer").tags(["market-making", "regime", pair.lower()])
@@ -565,7 +499,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
         # 15m trend chart: candlestick + EMA9 + SMA20
         if candles_15m and len(candles_15m) >= 5:
-            ts_15m = _make_ts_list(candles_15m)
+            ts_15m = candle_timestamps(candles_15m)
             closes_15m = [float(c.get("close", 0)) for c in candles_15m]
             ema9_series = _calc_ema_series(closes_15m, 9)
             sma20_series = _calc_sma_series(closes_15m, 20)
@@ -597,108 +531,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             )
             builder.plotly(fig_15m)
 
-        # Footprint chart: 1m candlestick (left) + volume profile (right).
-        # Right panel uses Scatter polygons (not go.Bar) to keep the shared Y axis numeric
-        # and avoid Plotly silently switching it to categorical (which breaks price alignment).
-        #
-        # Two overlaid layers per price bucket:
-        #   1. Total volume  (buy + sell) — gray translucent, wide — shows Points of Interest
-        #   2. Net delta     (buy - sell) — green (buyers dominated) / red (sellers dominated)
-        #      positive → extends right; negative → extends left
         if minute_candles and len(minute_candles) >= 5:
-            ts_1m = _make_ts_list(minute_candles)
-            fp_prices, fp_buys, fp_sells = _build_footprint(minute_candles, n_buckets=25)
-            if fp_prices:
-                price_lo = min(float(c.get("low", 0)) for c in minute_candles)
-                price_hi = max(float(c.get("high", 0)) for c in minute_candles)
-                bucket_h = (price_hi - price_lo) / 25
-                half = bucket_h / 2
-
-                fp_net = [b - s for b, s in zip(fp_buys, fp_sells)]
-                fp_total = [b + s for b, s in zip(fp_buys, fp_sells)]
-
-                # Build Scatter polygon lists.
-                # Each bucket is a rectangle: (0, p-half)→(val, p-half)→(val, p+half)→(0, p+half)
-                # A None separator closes each polygon via fill="toself".
-                total_x: list = []
-                total_y: list = []
-                net_pos_x: list = []   # net delta > 0 → buyers dominated (green, right)
-                net_pos_y: list = []
-                net_neg_x: list = []   # net delta < 0 → sellers dominated (red, left/negative)
-                net_neg_y: list = []
-
-                for p, t, n in zip(fp_prices, fp_total, fp_net):
-                    # Total vol: always extends right from 0
-                    total_x.extend([0, t, t, 0, None])
-                    total_y.extend([p - half, p - half, p + half, p + half, None])
-                    # Net delta: route to pos or neg trace
-                    if n >= 0:
-                        net_pos_x.extend([0, n, n, 0, None])
-                        net_pos_y.extend([p - half, p - half, p + half, p + half, None])
-                    else:
-                        net_neg_x.extend([0, n, n, 0, None])   # n is negative → extends left
-                        net_neg_y.extend([p - half, p - half, p + half, p + half, None])
-
-                fig_fp = make_subplots(
-                    rows=1, cols=2,
-                    column_widths=[0.65, 0.35],
-                    shared_yaxes=True,
-                    subplot_titles=["1m Candlestick (24h)", "Volume Profile (24h)"],
-                    horizontal_spacing=0.01,
-                )
-                fig_fp.add_trace(go.Candlestick(
-                    x=ts_1m,
-                    open=[float(c.get("open", 0)) for c in minute_candles],
-                    high=[float(c.get("high", 0)) for c in minute_candles],
-                    low=[float(c.get("low", 0)) for c in minute_candles],
-                    close=[float(c.get("close", 0)) for c in minute_candles],
-                    name="1m",
-                    increasing_line_color="#22c55e",
-                    decreasing_line_color="#ef4444",
-                ), row=1, col=1)
-
-                # Layer 1: Total volume (gray translucent background — shows POIs)
-                fig_fp.add_trace(go.Scatter(
-                    x=total_x, y=total_y,
-                    fill="toself", fillcolor="rgba(156, 163, 175, 0.25)",
-                    line=dict(width=0), mode="lines",
-                    name="Total Vol",
-                ), row=1, col=2)
-
-                # Layer 2a: Net delta positive — buyers dominated (green)
-                if any(v is not None for v in net_pos_x):
-                    fig_fp.add_trace(go.Scatter(
-                        x=net_pos_x, y=net_pos_y,
-                        fill="toself", fillcolor="rgba(34, 197, 94, 0.75)",
-                        line=dict(width=0), mode="lines",
-                        name="Net Δ (Buy)",
-                    ), row=1, col=2)
-
-                # Layer 2b: Net delta negative — sellers dominated (red, x values are negative)
-                if any(v is not None for v in net_neg_x):
-                    fig_fp.add_trace(go.Scatter(
-                        x=net_neg_x, y=net_neg_y,
-                        fill="toself", fillcolor="rgba(239, 68, 68, 0.75)",
-                        line=dict(width=0), mode="lines",
-                        name="Net Δ (Sell)",
-                    ), row=1, col=2)
-
-                fig_fp.update_layout(
-                    title=f"Footprint Chart (1m, 24h) — {pair}",
-                    template="plotly_dark", height=600,
-                    xaxis_rangeslider_visible=False,
-                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-                )
-                fig_fp.update_xaxes(title_text="Time", type="date", row=1, col=1)
-                fig_fp.update_xaxes(title_text="Volume (net delta | total)", row=1, col=2)
-                # Force shared Y axis to linear and pin range to the actual candle price range
-                fig_fp.update_yaxes(
-                    type="linear",
-                    range=[price_lo * 0.999, price_hi * 1.001],
-                    title_text="Price",
-                )
-                # Hide Y-axis tick labels on the right panel (volume profile)
-                fig_fp.update_yaxes(showticklabels=False, row=1, col=2)
+            fig_fp = build_estimated_footprint_figure(
+                minute_candles,
+                title=f"Footprint Chart (1m, 24h) — {pair}",
+                candle_title="1m Candlestick (24h)",
+                profile_title="Volume Profile (24h)",
+                candle_name="1m",
+            )
+            if fig_fp is not None:
                 builder.plotly(fig_fp)
 
         builder.markdown(summary)

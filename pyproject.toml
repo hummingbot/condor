@@ -23,6 +23,8 @@ dependencies = [
     "scipy>=1.17.1",
     "pydantic-ai[mcp]",
     "beautifulsoup4>=4.14.3",
+    "markdown>=3.10.2",
+    "bleach>=6.4.0",
 ]
 
 [project.optional-dependencies]
@@ -30,3 +32,6 @@ dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 
 [tool.isort]
 profile = "black"
+
+[tool.setuptools.package-data]
+"condor.reports" = ["report_runtime.js"]
