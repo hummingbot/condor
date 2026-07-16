@@ -5,6 +5,7 @@ import {
   Brain,
   ChevronRight,
   FileText,
+  History,
   MessageSquareText,
   ScrollText,
   Send,
@@ -14,7 +15,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useNavigate, useParams } from "react-router-dom";
@@ -28,13 +29,14 @@ import {
 } from "@/components/agent/AgentOverviewTab";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { SessionReviewer } from "@/components/agent/SessionReviewer";
+import { RunReviewer } from "@/components/agent/RunReviewer";
+import { KindBadge, RUN_STATUS_COLORS } from "@/components/agent/runStyles";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
-import { type DelegationFileInfo, api } from "@/lib/api";
+import { type RunMeta, api } from "@/lib/api";
 import { formatDateTime } from "@/lib/formatters";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
@@ -85,102 +87,94 @@ function ConsultPanel({ slug, whenToConsult }: { slug: string; whenToConsult: st
   );
 }
 
-// ── Transcript viewer (flat delegation files) ──
+// ── Runs history (RunStore: one JSONL event stream per run, §7.1) ──
 
-function TranscriptModal({
-  slug,
-  delegation,
-  onClose,
+const RUN_FILTERS = [
+  { id: "", label: "All" },
+  { id: "session", label: "Sessions" },
+  { id: "experiment", label: "Experiments" },
+  { id: "scheduled", label: "Scheduled" },
+  { id: "delegation", label: "Delegations" },
+  { id: "consult", label: "Consults" },
+] as const;
+
+function RunsPanel({
+  runs,
+  onOpen,
 }: {
-  slug: string;
-  delegation: DelegationFileInfo;
-  onClose: () => void;
+  runs: RunMeta[];
+  onOpen: (runId: string) => void;
 }) {
-  useEscapeKey(true, onClose);
-  const { data } = useQuery({
-    queryKey: ["agent", slug, "delegation", delegation.number, "transcript"],
-    queryFn: () => api.getDelegationTranscript(slug, delegation.number),
-  });
+  const [kindFilter, setKindFilter] = useState<string>("");
+  if (runs.length === 0) return null;
+
+  const counts = new Map<string, number>();
+  for (const r of runs) counts.set(r.kind, (counts.get(r.kind) ?? 0) + 1);
+  const visible = kindFilter ? runs.filter((r) => r.kind === kindFilter) : runs;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-4xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] px-6 py-3">
-          <h3 className="flex items-center gap-2 text-sm font-semibold text-[var(--color-text)]">
-            <span className="rounded bg-purple-500/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-purple-400">
-              delegation
-            </span>
-            {delegation.task_id}
-            {delegation.status && (
-              <span className={`text-xs ${delegation.status === "done" ? "text-emerald-400" : delegation.status === "error" ? "text-red-400" : "text-[var(--color-text-muted)]"}`}>
-                {delegation.status}
-              </span>
-            )}
-          </h3>
-          <button
-            onClick={onClose}
-            className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-        <div className="chat-markdown flex-1 overflow-y-auto p-6 text-sm text-[var(--color-text)]">
-          {data ? (
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
-              {data.content || "(no transcript captured)"}
-            </ReactMarkdown>
-          ) : (
-            <div className="flex h-32 items-center justify-center">
-              <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--color-border)] border-t-[var(--color-primary)]" />
-            </div>
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+          <History className="h-3.5 w-3.5" /> Runs ({runs.length})
+        </h3>
+        <div className="ml-auto flex flex-wrap items-center gap-1">
+          {RUN_FILTERS.map(
+            (f) =>
+              (f.id === "" || (counts.get(f.id) ?? 0) > 0) && (
+                <button
+                  key={f.id}
+                  onClick={() => setKindFilter(f.id)}
+                  className={`rounded-md px-2 py-1 text-[10px] font-medium transition-colors ${
+                    kindFilter === f.id
+                      ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                  }`}
+                >
+                  {f.label}
+                  {f.id && ` (${counts.get(f.id)})`}
+                </button>
+              ),
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-// ── Delegation transcripts list (flat files — refactor-07) ──
-
-function BackgroundRunsPanel({
-  delegations,
-  onOpen,
-}: {
-  delegations: DelegationFileInfo[];
-  onOpen: (d: DelegationFileInfo) => void;
-}) {
-  if (delegations.length === 0) return null;
-  return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-      <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-        <MessageSquareText className="h-3.5 w-3.5" /> Delegations ({delegations.length})
-      </h3>
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
             <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
               <th className="px-2 py-1">#</th>
+              <th className="px-2 py-1">Kind</th>
               <th className="px-2 py-1">Task</th>
               <th className="px-2 py-1">Status</th>
+              <th className="px-2 py-1">Model</th>
+              <th className="px-2 py-1">Started</th>
               <th className="px-2 py-1">Ended</th>
               <th className="px-2 py-1 w-6" />
             </tr>
           </thead>
           <tbody>
-            {delegations.map((d) => (
+            {visible.map((r) => (
               <tr
-                key={d.number}
-                onClick={() => onOpen(d)}
+                key={r.run_id}
+                onClick={() => onOpen(r.run_id)}
                 className="cursor-pointer border-t border-[var(--color-border)]/40 transition-colors hover:bg-[var(--color-surface-hover)]"
               >
-                <td className="px-2 py-1.5 font-mono text-[var(--color-text)]">{d.task_id}</td>
-                <td className="max-w-md truncate px-2 py-1.5 text-[var(--color-text-muted)]">{d.task || "—"}</td>
-                <td className={`px-2 py-1.5 ${d.status === "done" ? "text-emerald-400" : d.status === "error" ? "text-red-400" : d.status === "running" ? "text-amber-400" : "text-[var(--color-text-muted)]"}`}>
-                  {d.status || "—"}
+                <td className="px-2 py-1.5 font-mono text-[var(--color-text)]">{r.display_seq}</td>
+                <td className="px-2 py-1.5">
+                  <KindBadge kind={r.kind} />
+                </td>
+                <td className="max-w-md truncate px-2 py-1.5 text-[var(--color-text-muted)]">
+                  {r.task ? r.task.split("\n")[0] : "—"}
+                </td>
+                <td className={`px-2 py-1.5 font-medium ${RUN_STATUS_COLORS[r.status] ?? "text-[var(--color-text-muted)]"}`}>
+                  {r.status || "—"}
+                </td>
+                <td className="px-2 py-1.5 font-mono text-[var(--color-text-muted)]">{r.model || "—"}</td>
+                <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
+                  {r.started_at ? formatDateTime(r.started_at * 1000) : "—"}
                 </td>
                 <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
-                  {d.ended_at ? formatDateTime(Date.parse(d.ended_at)) : "—"}
+                  {r.ended_at ? formatDateTime(r.ended_at * 1000) : "—"}
                 </td>
                 <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
                   <ChevronRight className="h-3.5 w-3.5" />
@@ -195,9 +189,9 @@ function BackgroundRunsPanel({
 }
 
 // ── Agent Detail Page ──
-// The operational hub: identity + ALL history — live instances, per-session
-// performance, tick sessions/experiments (SessionReviewer), delegation/consult
-// transcripts, and the agent-level learnings.
+// The operational hub: identity + ALL history — live instances, per-run
+// performance, the run history list (RunReviewer opens any run's event
+// stream), and the agent-level learnings.
 
 export function AgentDetail() {
   const { slug } = useParams<{ slug: string }>();
@@ -211,9 +205,7 @@ export function AgentDetail() {
   const [showBrainDiscardConfirm, setShowBrainDiscardConfirm] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
-  const [reviewerSessionNum, setReviewerSessionNum] = useState<number | null>(null);
-  const [reviewerKind, setReviewerKind] = useState<"session" | "experiment">("session");
-  const [transcriptDelegation, setTranscriptDelegation] = useState<DelegationFileInfo | null>(null);
+  const [reviewerRunId, setReviewerRunId] = useState<string | null>(null);
 
   // Routine instances for ReportBrowser (routines live at the agent level)
   const { data: routineInstances = [] } = useQuery({
@@ -275,14 +267,6 @@ export function AgentDetail() {
     [liveExecutors, serverName],
   );
 
-  const handleSessionClick = useCallback(
-    (sessionNum: number, kind?: "session" | "experiment") => {
-      setReviewerSessionNum(sessionNum);
-      setReviewerKind(kind || "session");
-    },
-    [],
-  );
-
   if (error && !agent) {
     return (
       <div className="flex min-h-[60vh] items-center justify-center">
@@ -313,10 +297,7 @@ export function AgentDetail() {
 
   const status = deriveAgentStatus(agent);
   const isRunning = agent.status === "running";
-  const tickSessions = agent.sessions || [];
-  const reviewerOpen = reviewerSessionNum !== null;
-  const resolvedReviewerSession =
-    reviewerSessionNum ?? (tickSessions.length > 0 ? tickSessions[0].number : 0);
+  const runs = agent.runs || [];
 
   return (
     <div className="w-full">
@@ -460,24 +441,21 @@ export function AgentDetail() {
         </div>
       )}
 
-      {/* Performance & sessions */}
-      {(tickSessions.length > 0 || agent.experiments.length > 0 || hasRunning) && (
+      {/* Performance & runs */}
+      {(runs.length > 0 || hasRunning) && (
         <div className="mb-6">
           <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
             <PerformancePanel
               slug={agent.slug}
-              onSessionClick={handleSessionClick}
+              onRunClick={setReviewerRunId}
             />
           </div>
         </div>
       )}
 
-      {/* Delegation transcripts */}
+      {/* Run history (all kinds, filterable) */}
       <div className="mb-6">
-        <BackgroundRunsPanel
-          delegations={agent.delegations || []}
-          onOpen={setTranscriptDelegation}
-        />
+        <RunsPanel runs={runs} onOpen={setReviewerRunId} />
       </div>
 
       {/* Routines ReportBrowser (full-screen overlay, filtered to this agent) */}
@@ -555,27 +533,13 @@ export function AgentDetail() {
         Delete <strong className="text-[var(--color-text)]">{agent.name}</strong>? Its history stays on disk; the identity is removed. This cannot be undone.
       </ConfirmDialog>
 
-      {/* Session Reviewer Overlay (tick sessions + experiments) */}
-      {reviewerOpen && (tickSessions.length > 0 || agent.experiments.length > 0) && (
-        <SessionReviewer
+      {/* Run Reviewer Overlay (any run's event stream) */}
+      {reviewerRunId && (
+        <RunReviewer
           slug={agent.slug}
           agentName={agent.name}
-          sessions={tickSessions}
-          experiments={agent.experiments}
-          initialSessionNum={resolvedReviewerSession}
-          initialKind={reviewerKind}
-          serverName={serverName}
-          controllerIds={controllerIds}
-          onClose={() => setReviewerSessionNum(null)}
-        />
-      )}
-
-      {/* Delegation transcript viewer */}
-      {transcriptDelegation && (
-        <TranscriptModal
-          slug={agent.slug}
-          delegation={transcriptDelegation}
-          onClose={() => setTranscriptDelegation(null)}
+          initialRunId={reviewerRunId}
+          onClose={() => setReviewerRunId(null)}
         />
       )}
     </div>

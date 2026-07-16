@@ -1,8 +1,9 @@
 """Autonomous Trading Agent Framework.
 
-Spawns ACP sessions on a configurable tick loop. Each tick reads a persistent
-journal, analyzes market state via skills, makes trading decisions through
-executors, and writes observations back to the journal.
+Spawns ACP sessions on a configurable tick loop. Each tick folds run context
+from the RunStore event stream (§7.1), analyzes market state via providers,
+makes trading decisions through executors, and emits events back to the run's
+append-only stream. Markdown views are generated exports.
 """
 
 from .agent import Agent, AgentStore
@@ -12,11 +13,10 @@ from .config import (
     load_agent_config,
     normalize_config,
     save_agent_config,
-    save_full_config,
 )
 from .engine import TickEngine
-from .journal import JournalManager, get_session_dir, next_session_number
 from .risk import RiskEngine, RiskLimits
+from .runstore import RunStore, get_run_store, new_ulid
 
 __all__ = [
     "Agent",
@@ -26,11 +26,10 @@ __all__ = [
     "load_agent_config",
     "normalize_config",
     "save_agent_config",
-    "save_full_config",
     "TickEngine",
-    "JournalManager",
-    "get_session_dir",
-    "next_session_number",
+    "RunStore",
+    "get_run_store",
+    "new_ulid",
     "RiskEngine",
     "RiskLimits",
 ]

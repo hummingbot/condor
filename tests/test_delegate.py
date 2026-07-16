@@ -66,10 +66,22 @@ async def _drain(dt):
 
 
 def _patch_roots(monkeypatch, tmp_path):
-    import condor.agents.journal as journal_module
+    from condor.agents.runstore import RunStore, set_run_store
 
     monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
-    monkeypatch.setattr(journal_module, "_DATA_ROOT", tmp_path)
+    set_run_store(RunStore(root=tmp_path))
+
+
+def _run_events(slug, run_id):
+    from condor.agents.runstore import get_run_store
+
+    return get_run_store().read_events(slug, run_id)
+
+
+def _run_status(slug, run_id):
+    from condor.agents.runstore import get_run_store
+
+    return get_run_store().run_meta(slug, run_id)["status"]
 
 
 def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
@@ -100,27 +112,31 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
         # Returns immediately, still running before we await it.
         assert dt.status == "running"
         assert get_delegation(dt.task_id) is dt
-        # The flat-file husk exists from the start (crash-inspectable).
-        husk = dt.file_path.read_text()
-        assert "**Status:** running" in husk
+        # run_started persisted from the start (crash-inspectable stream).
+        events = _run_events("scout", dt.task_id)
+        assert events[0]["type"] == "run_started"
+        assert events[0]["payload"]["kind"] == "delegation"
         await _drain(dt)
         return dt
 
     dt = asyncio.run(scenario())
 
-    # Delegations have their own id namespace: "{slug}-d{N}", not a session id.
-    assert dt.task_id == "scout-d1"
+    # The task id IS the run id — an opaque ULID, no "-dN" grammar.
+    from condor.agents.runstore import is_run_id
+
+    assert is_run_id(dt.task_id)
     # Lifecycle + result capture.
     assert dt.status == "done"
     assert dt.result == "scan complete: 3 pools"
     # Serverless agent → AUTO policy (no permission callback).
     assert seen["permission_policy"] is None
     assert "scan SOL pools" in seen["prompt"]
-    # One flat transcript; NO session dir was consumed.
-    text = dt.file_path.read_text()
-    assert "scan complete: 3 pools" in text
-    assert "**Status:** done" in text
-    assert "**Ended:**" in text and "**Ended:** -" not in text
+    # The stream records the result and terminal status; no session dir.
+    events = _run_events("scout", dt.task_id)
+    assert events[-1]["type"] == "run_ended"
+    assert events[-1]["payload"]["status"] == "completed"
+    snapshots = [e for e in events if e["type"] == "state_snapshot"]
+    assert snapshots and snapshots[-1]["payload"]["result"] == "scan complete: 3 pools"
     assert not (tmp_path / "scout" / "sessions").exists()
     # Notification delivered.
     assert any("done" in m for m in bot.messages)
@@ -153,9 +169,9 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
     assert dt.status == "error"
     assert "model exploded" in dt.error
     assert any("failed" in m for m in bot.messages)
-    text = dt.file_path.read_text()
-    assert "**Status:** error" in text
-    assert "model exploded" in text
+    assert _run_status("scout", dt.task_id) == "error"
+    events = _run_events("scout", dt.task_id)
+    assert "model exploded" in events[-1]["payload"]["reason"]
 
 
 def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
@@ -190,8 +206,8 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
     assert dt.status == "stopped"
     # A stopped task does not spam a completion notification.
     assert bot.messages == []
-    # But its transcript records the terminal state.
-    assert "**Status:** stopped" in dt.file_path.read_text()
+    # But its stream records the terminal state.
+    assert _run_status("scout", dt.task_id) == "stopped"
 
 
 def test_stop_unknown_returns_false():
@@ -419,9 +435,10 @@ def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
 
     dt = asyncio.run(scenario())
     # REPLACE, not merge: exactly what was passed governs the run — and the
-    # transcript header records exactly those numbers.
+    # run_started payload records exactly those numbers.
     assert dt.risk_limits == {"max_position_size_quote": 2000}
-    assert '"max_position_size_quote": 2000' in dt.file_path.read_text()
+    started = _run_events("scout", dt.task_id)[0]
+    assert started["payload"]["risk_limits"]["max_position_size_quote"] == 2000
 
 
 def test_zero_seeded_gate_blocks_uncapped_deploy_and_place_order(tmp_path, monkeypatch):
@@ -528,11 +545,12 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
     assert tool_ev["status"] == "completed"  # patched by the ToolCallUpdate
     assert tool_ev["output"] == "3 pools found"
 
-    # Transcript renders the full session, not just the result.
-    text = dt.file_path.read_text()
-    assert "## Session" in text
-    assert "I should scan the pools first." in text
-    assert "get_market_data" in text
-    assert "3 pools found" in text
-    assert "**Tool calls:** 1" in text
+    # The generated markdown export renders the run, not just the result.
+    from condor.agents.exports import render_run_markdown
+    from condor.agents.runstore import get_run_store
+
+    store = get_run_store()
+    events = store.read_events("scout", dt.task_id)
+    text = render_run_markdown(store.run_meta("scout", dt.task_id), events)
     assert "Done: 3 pools." in text
+    assert "Run ended — completed" in text

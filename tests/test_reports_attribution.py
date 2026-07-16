@@ -102,6 +102,17 @@ def test_mcp_runner_stamps_agent_slug(reports_dir, tmp_path, monkeypatch):
         "    return 'done'\n"
     )
 
+    # The routine normally runs in a disposable worker subprocess (§7.2),
+    # which cannot see this test's monkeypatched tmp roots — dispatch the
+    # worker's own logic in-process instead (same code path minus the fork),
+    # so the attribution the worker applies is what gets asserted.
+    import condor.routines_worker as worker
+
+    async def _inline_spawn(payload, timeout_s):
+        return await worker._do_run(payload)
+
+    monkeypatch.setattr(worker, "_spawn", _inline_spawn)
+
     asyncio.run(
         mcp_routines.run_routine("probe", {}, agent_slug="market_making_expert")
     )

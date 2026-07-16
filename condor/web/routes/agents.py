@@ -1,48 +1,40 @@
 """Trading Agents API routes — a THIN adapter over :class:`AgentService` (§5.2).
 
 An **Agent** is the top-level unit: identity + strategy body + shared brain
-(memory/skills), with ALL of its operational history at ``agents/{slug}/``.
-Since the Agent + Strategy collapse (§5.3) the AGENT.md is the one spec —
-there is no separate Strategy entity. Route shape::
+(memory/skills). ALL of its operational history is the RunStore (§7.1): one
+append-only JSONL event stream per run at ``agents/{slug}/runs/{run_id}.jsonl``
+with opaque ULID run ids. Route shape::
 
     /agents                          -> list Agents (rollups)
-    /agents/{slug}                   -> Agent detail (sessions/experiments/learnings)
+    /agents/delegations              -> live delegation registry
+    /agents/runs/{run_id}            -> one run (meta; ?events=true)
+    /agents/runs/{run_id}/export     -> generated markdown transcript
+    /agents/runs/{run_id}/executors  -> executors + performance for one run
+    /agents/{slug}                   -> Agent detail (spec + recent runs)
+    /agents/{slug}/runs              -> run history (?kind=&limit=)
     /agents/{slug}/consult|delegate  -> run the Agent's brain
     /agents/{slug}/start|stop|...    -> session lifecycle
-    /agents/{slug}/sessions/...      -> journals, snapshots, executors
-    /agents/{slug}/delegation-files  -> flat delegation transcripts
-    /agents/{slug}/performance       -> per-session perf + rollup
+    /agents/{slug}/performance       -> per-run perf + rollup
 
 All CRUD + lifecycle goes through ``AgentService``; the read-only history
-endpoints below are dashboard projections over the on-disk journal layout.
-Every ``LifecycleError`` maps to ``HTTPException(e.status, e.message)``.
+endpoints below are dashboard projections over the RunStore. Every
+``LifecycleError`` maps to ``HTTPException(e.status, e.message)``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import re
 import time
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from condor.agents.journal import find_delegation_file, read_session_meta
+from condor.agents.learnings import learnings_path, read_learnings
 from condor.agents.lifecycle import LifecycleError
+from condor.agents.runstore import get_run_store
 from condor.agents.service import AgentService
-from condor.agents.sessions_index import (
-    count_experiments,
-    count_sessions,
-    enumerate_run_ids,
-    find_experiment_file,
-    find_session_dir,
-    infer_latest_session_status,
-    list_delegations_on_disk,
-    list_experiments,
-    list_sessions,
-)
 from condor.web.auth import get_current_user
 from condor.web.models import ReportSummary, WebUser
 
@@ -50,12 +42,12 @@ from condor.web.models import ReportSummary, WebUser
 _PERF_CACHE: dict[str, tuple[float, Any]] = {}
 _PERF_TTL = 30.0  # seconds
 
-# Long-lived cache for CLOSED sessions/experiments, keyed by agent_id.
-# A closed session's executors are immutable (no engine running, no open
-# executors), so its performance never changes — fetch it once and freeze it.
-# Only ids that are inactive (no registered engine, not the newest session),
-# fetched successfully, with open_count == 0, and not in controller mode land
-# here; everything else keeps flowing through the 30s TTL path above.
+# Long-lived cache for CLOSED runs, keyed by run_id. A closed run's executors
+# are immutable (no engine running, no open executors), so its performance
+# never changes — fetch it once and freeze it. Only ids that are inactive
+# (no registered engine, not the newest run), fetched successfully, with
+# open_count == 0, and not in controller mode land here; everything else
+# keeps flowing through the 30s TTL path above.
 _CLOSED_PERF_CACHE: dict[str, Any] = {}
 
 
@@ -144,10 +136,11 @@ class AgentSummary(BaseModel):
 
 
 class AgentPerformanceModel(BaseModel):
+    # ``agent_id`` is the run id (executors tag controller_id == run_id).
     agent_id: str
-    session_num: int = 0
-    kind: str = "session"  # session | experiment
-    strategy: str = ""  # legacy session meta tag — kept tolerantly for old runs
+    run_id: str = ""
+    session_num: int = 0  # display_seq from the run stream
+    kind: str = "session"  # session | experiment | scheduled
     status: str = ""
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
@@ -165,37 +158,6 @@ class AgentPerformanceResponse(BaseModel):
     slug: str
     sessions: list[AgentPerformanceModel] = []
     totals: dict[str, float] = {}
-
-
-class SessionInfo(BaseModel):
-    number: int
-    strategy: str = ""  # legacy meta field — old sessions still carry it
-    status: str = ""
-    snapshot_count: int = 0
-    created_at: str = ""
-    ended_at: str = ""
-    has_journal: bool = False
-
-
-class DelegationInfo(BaseModel):
-    """One flat delegation transcript (delegations/{date}-dN.md)."""
-
-    number: int
-    task_id: str = ""
-    status: str = ""
-    task: str = ""
-    created_at: str = ""
-    ended_at: str = ""
-    file: str = ""
-
-
-class ExperimentInfo(BaseModel):
-    number: int
-    execution_mode: str = ""  # experiment | run_once | loop
-    agent_key: str = ""
-    snapshot_count: int = 0
-    created_at: str = ""
-    error: bool = False  # the tick's model call failed (Agent Response is an error)
 
 
 class AgentDetail(BaseModel):
@@ -218,16 +180,9 @@ class AgentDetail(BaseModel):
     learnings: str = ""
     status: str = "idle"
     agent_id: str = ""
-    sessions: list[SessionInfo] = []
-    experiments: list[ExperimentInfo] = []
-    delegations: list[DelegationInfo] = []
+    # RunStore metas, newest first (all kinds) — the one history list.
+    runs: list[dict[str, Any]] = []
     instances: list[RunningInstance] = []
-
-
-class SnapshotSummary(BaseModel):
-    tick: int
-    timestamp: str = ""
-    file: str = ""
 
 
 class CreateAgentRequest(BaseModel):
@@ -312,41 +267,60 @@ class DirectiveRequest(BaseModel):
 
 
 # ── Performance projection (dashboard rollups) ──
-# Enumeration/counting of sessions & experiments on disk lives in
-# condor.agents.sessions_index (imported at the top), next to the journal
-# code that owns the layout. This module keeps only HTTP concerns.
+# Executors tag ``controller_id == run_id`` (§7.1), so the RunStore metas ARE
+# the enumeration the rollup fetches against.
+
+# Run kinds whose executors are attributed to the agent (delegations/consults
+# never launch the tick engine, so they never tag a controller_id).
+_PERF_KINDS = ("session", "experiment", "scheduled")
+_HISTORY_LIMIT = 200  # max runs enumerated per agent for rollups
 
 
-async def _get_client_for_agent(agent, strategies: list | None = None):
+def _perf_runs(slug: str) -> list[dict]:
+    """RunStore metas for the agent's trading-attributed runs, newest first."""
+    return [
+        m
+        for m in get_run_store().list_runs(slug, limit=_HISTORY_LIMIT)
+        if m.get("kind") in _PERF_KINDS
+    ]
+
+
+def _run_started_payload(slug: str, run_id: str) -> dict:
+    """The ``run_started`` payload (first stream line); {} if unreadable."""
+    path = get_run_store().run_path(slug, run_id)
+    try:
+        with open(path, "rb") as f:
+            line = f.readline()
+        if not line.endswith(b"\n"):
+            return {}
+        return (json.loads(line) or {}).get("payload") or {}
+    except Exception:
+        return {}
+
+
+def _run_config(slug: str, run_id: str) -> dict:
+    """The frozen launch config recorded on ``run_started`` (§5.3)."""
+    spec = _run_started_payload(slug, run_id).get("frozen_spec") or {}
+    cfg = spec.get("config") or {}
+    return cfg if isinstance(cfg, dict) else {}
+
+
+async def _get_client_for_agent(agent):
     """Resolve a Hummingbot API client for an agent's history views.
 
-    Server resolution: the agent's pinned server, else the newest tick
-    session's frozen config.yml, else the agent's default_config.
-    (``strategies`` is a legacy positional kept for signature compatibility.)
+    Server resolution: the agent's pinned server, else the frozen config of
+    a recent run, else the agent's default_config.
     """
-    from condor.agents.config import load_agent_config
     from config_manager import get_config_manager
 
     server_name = agent.server_name or ""
     if not server_name:
-        sessions_dir = agent.agent_dir / "sessions"
-        if sessions_dir.exists():
-            session_dirs = sorted(
-                (
-                    d
-                    for d in sessions_dir.iterdir()
-                    if d.is_dir() and (d / "config.yml").exists()
-                ),
-                key=lambda d: d.stat().st_mtime,
-                reverse=True,
+        for m in _perf_runs(agent.slug)[:10]:
+            server_name = str(
+                _run_config(agent.slug, m["run_id"]).get("server_name") or ""
             )
-            for d in session_dirs:
-                try:
-                    server_name = load_agent_config(d).server_name or ""
-                except Exception:
-                    server_name = ""
-                if server_name:
-                    break
+            if server_name:
+                break
     if not server_name:
         server_name = (agent.default_config or {}).get("server_name") or ""
     if not server_name:
@@ -360,84 +334,92 @@ async def _get_client_for_agent(agent, strategies: list | None = None):
     return client, server_name
 
 
-def _session_bot_name(agent_dir: Path, num: int) -> str:
-    """Controller-mode attribution: a session's frozen config.yml bot_name."""
-    import yaml
-
-    cfg_path = agent_dir / "sessions" / f"session_{num}" / "config.yml"
-    if not cfg_path.exists():
-        return ""
-    try:
-        return (yaml.safe_load(cfg_path.read_text()) or {}).get("bot_name", "") or ""
-    except Exception:
-        return ""
+def _run_bot_name(slug: str, run_id: str) -> str:
+    """Controller-mode attribution: the run's frozen config bot_name."""
+    return str(_run_config(slug, run_id).get("bot_name") or "")
 
 
-async def _compute_agent_performance(agent, strategies: list | None = None):
+def _perf_model(meta: dict, perf) -> AgentPerformanceModel:
+    run_id = meta["run_id"]
+    return AgentPerformanceModel(
+        agent_id=run_id,
+        run_id=run_id,
+        session_num=meta.get("display_seq", 0),
+        kind=meta.get("kind") or "session",
+        status=meta.get("status", ""),
+        realized_pnl=perf.realized_pnl,
+        unrealized_pnl=perf.unrealized_pnl,
+        total_pnl=perf.total_pnl,
+        volume=perf.volume,
+        fees=perf.fees,
+        trade_count=perf.trade_count,
+        win_rate=perf.win_rate,
+        open_count=perf.open_count,
+        closed_count=perf.closed_count,
+        executors=perf.executors,
+    )
+
+
+async def _compute_agent_performance(agent):
     """Return list of AgentPerformanceModel plus rolled-up totals.
 
-    Covers every attributed run of the agent (tick sessions + experiments,
-    delegations/consults excluded — they never tag ``controller_id``). The
-    assembled rollup is cached ~30s (``_PERF_CACHE``); underneath, closed
-    sessions/experiments are served from ``_CLOSED_PERF_CACHE`` so only active
-    ids hit the backend after the TTL expires. (``strategies`` is a legacy
-    positional kept for signature compatibility.)
+    Covers every attributed run of the agent (RunStore kinds session /
+    experiment / scheduled). The assembled rollup is cached ~30s
+    (``_PERF_CACHE``); underneath, closed runs are served from
+    ``_CLOSED_PERF_CACHE`` so only active ids hit the backend after the TTL
+    expires.
     """
     from condor.agents.performance import fetch_agent_performance_batch
 
     slug = agent.slug
-    agent_dir = agent.agent_dir
 
     cached = _cache_get(f"perf:{slug}")
     if cached is not None:
         return cached
 
-    runs = enumerate_run_ids(slug, agent_dir)
-    client, _server = await _get_client_for_agent(agent, strategies)
+    runs = _perf_runs(slug)
+    client, _server = await _get_client_for_agent(agent)
 
-    # Controller mode: a session with a bot_name in its frozen config attributes
-    # that bot's PnL to it. Executor search uses the run's controller_id (the
-    # legacy composite tag for migrated sessions, the agent_id otherwise).
+    # Controller mode: a run whose frozen config carries a bot_name attributes
+    # that bot's PnL to it (executor search still keys on the run id).
     bot_names: dict[str, str] = {}
-    for r in runs:
-        if r["kind"] == "session":
-            bn = _session_bot_name(agent_dir, r["num"])
+    for m in runs:
+        if m["kind"] != "experiment":
+            bn = _run_bot_name(slug, m["run_id"])
             if bn:
-                bot_names[r["controller_id"]] = bn
+                bot_names[m["run_id"]] = bn
 
     sessions: list[AgentPerformanceModel] = []
     if client and runs:
         from condor.agents.engine import get_all_engines
 
-        # Split ids by state: closed sessions/experiments are immutable, so only
-        # ids with a live engine (running/paused, incl. experiments) plus the
-        # newest session — whose executors may still be closing out — are
+        # Split ids by state: closed runs are immutable, so only ids with a
+        # live engine (running/paused, incl. experiments) plus the newest
+        # non-experiment run — whose executors may still be closing out — are
         # re-fetched; everything else is served from the long-lived frozen cache.
         engine_ids = {e.agent_id for e in get_all_engines().values()}
-        latest_session = max(
-            (r["num"] for r in runs if r["kind"] == "session"), default=None
-        )
+        latest_run_id = next(
+            (m["run_id"] for m in runs if m["kind"] != "experiment"), None
+        )  # metas are newest-first
         active_ids = {
-            r["agent_id"]
-            for r in runs
-            if r["agent_id"] in engine_ids
-            or (r["kind"] == "session" and r["num"] == latest_session)
+            m["run_id"]
+            for m in runs
+            if m["run_id"] in engine_ids or m["run_id"] == latest_run_id
         }
         # An id active again (e.g. restored engine) must not serve a stale
         # frozen value once it goes idle — evict so it gets one final fetch.
-        for aid in active_ids:
-            _CLOSED_PERF_CACHE.pop(aid, None)
+        for rid in active_ids:
+            _CLOSED_PERF_CACHE.pop(rid, None)
 
         if bot_names:
             # Controller mode attributes the bot's live aggregate to every
-            # session, so no per-session result is immutable — fetch all.
-            fetch_ids = [r["controller_id"] for r in runs]
+            # run, so no per-run result is immutable — fetch all.
+            fetch_ids = [m["run_id"] for m in runs]
         else:
             fetch_ids = [
-                r["controller_id"]
-                for r in runs
-                if r["agent_id"] in active_ids
-                or r["agent_id"] not in _CLOSED_PERF_CACHE
+                m["run_id"]
+                for m in runs
+                if m["run_id"] in active_ids or m["run_id"] not in _CLOSED_PERF_CACHE
             ]
 
         perf_map: dict[str, Any] = {}
@@ -452,45 +434,28 @@ async def _compute_agent_performance(agent, strategies: list | None = None):
                 perf_map = {}
                 failed_ids = set(fetch_ids)
 
-        for r in runs:
-            agent_id, controller_id = r["agent_id"], r["controller_id"]
-            perf = perf_map.get(controller_id)
+        for m in runs:
+            rid = m["run_id"]
+            perf = perf_map.get(rid)
             if perf is None:
-                perf = _CLOSED_PERF_CACHE.get(agent_id)
+                perf = _CLOSED_PERF_CACHE.get(rid)
             if perf is None:
                 continue
             # Freeze immutable results: fetched fine, no engine, not the newest
-            # session, and nothing still open whose unrealized PnL could move.
+            # run, and nothing still open whose unrealized PnL could move.
             if (
                 not bot_names
-                and controller_id in perf_map
-                and agent_id not in active_ids
-                and agent_id not in failed_ids
+                and rid in perf_map
+                and rid not in active_ids
+                and rid not in failed_ids
                 and perf.open_count == 0
             ):
-                _CLOSED_PERF_CACHE[agent_id] = perf
-            if r["kind"] == "experiment" and perf.trade_count == 0:
+                _CLOSED_PERF_CACHE[rid] = perf
+            if m["kind"] == "experiment" and perf.trade_count == 0:
                 continue
-            sessions.append(
-                AgentPerformanceModel(
-                    agent_id=agent_id,
-                    session_num=r["num"],
-                    kind=r["kind"],
-                    strategy=r.get("strategy", ""),
-                    realized_pnl=perf.realized_pnl,
-                    unrealized_pnl=perf.unrealized_pnl,
-                    total_pnl=perf.total_pnl,
-                    volume=perf.volume,
-                    fees=perf.fees,
-                    trade_count=perf.trade_count,
-                    win_rate=perf.win_rate,
-                    open_count=perf.open_count,
-                    closed_count=perf.closed_count,
-                    executors=perf.executors,
-                )
-            )
+            sessions.append(_perf_model(m, perf))
 
-    real_sessions = [s for s in sessions if s.kind == "session"]
+    real_sessions = [s for s in sessions if s.kind != "experiment"]
     totals = {
         "total_pnl": sum(s.total_pnl for s in real_sessions),
         "realized_pnl": sum(s.realized_pnl for s in real_sessions),
@@ -506,7 +471,7 @@ async def _compute_agent_performance(agent, strategies: list | None = None):
 
 
 def _instance_from_info(info: dict, perf_by_id: dict) -> RunningInstance:
-    """Build a RunningInstance from an engine info dict (svc.list_runs row)."""
+    """Build a RunningInstance from an engine info dict (live_only row)."""
     p = perf_by_id.get(info["agent_id"])
     return RunningInstance(
         agent_id=info["agent_id"],
@@ -533,9 +498,7 @@ def _instance_from_info(info: dict, perf_by_id: dict) -> RunningInstance:
 
 
 async def _build_agent_summary(agent) -> AgentSummary:
-    """Roll up disk + engine + performance state for one agent."""
-    agent_dir = agent.agent_dir
-
+    """Roll up RunStore + engine + performance state for one agent."""
     try:
         sessions_perf, totals = await _compute_agent_performance(agent)
     except Exception as e:
@@ -543,7 +506,9 @@ async def _build_agent_summary(agent) -> AgentSummary:
         sessions_perf, totals = [], {}
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
-    infos = _svc().list_runs(agent.slug)
+    metas = get_run_store().list_runs(agent.slug, limit=_HISTORY_LIMIT)
+
+    infos = _svc().list_runs(agent.slug, live_only=True)
     status = "idle"
     tick_count = 0
     instances: list[RunningInstance] = []
@@ -555,20 +520,22 @@ async def _build_agent_summary(agent) -> AgentSummary:
             tick_count = inst.tick_count
 
     if not infos:
-        disk_info = infer_latest_session_status(agent_dir, agent.slug)
-        if disk_info:
-            status = disk_info["status"]
-            tick_count = disk_info["tick_count"]
-
-    latest_session_pnl = 0.0
-    if sessions_perf:
-        latest = max(
-            (p for p in sessions_perf if p.kind == "session"),
-            key=lambda p: p.session_num,
-            default=None,
-        )
+        latest = next((m for m in metas if m.get("kind") in _PERF_KINDS), None)
         if latest:
-            latest_session_pnl = latest.total_pnl
+            status = latest.get("status") or "idle"
+
+    latest_run_pnl = 0.0
+    if sessions_perf:
+        latest_perf = next(
+            (
+                perf_by_id[m["run_id"]]
+                for m in metas
+                if m.get("kind") != "experiment" and m["run_id"] in perf_by_id
+            ),
+            None,
+        )
+        if latest_perf:
+            latest_run_pnl = latest_perf.total_pnl
 
     return AgentSummary(
         slug=agent.slug,
@@ -582,10 +549,10 @@ async def _build_agent_summary(agent) -> AgentSummary:
         default_config=agent.default_config or {},
         schedule=agent.schedule or {},
         status=status,
-        session_count=count_sessions(agent_dir),
-        experiment_count=count_experiments(agent_dir),
+        session_count=sum(1 for m in metas if m.get("kind") == "session"),
+        experiment_count=sum(1 for m in metas if m.get("kind") == "experiment"),
         tick_count=tick_count,
-        daily_pnl=latest_session_pnl,
+        daily_pnl=latest_run_pnl,
         total_pnl=float(totals.get("total_pnl", 0.0)),
         total_volume=float(totals.get("volume", 0.0)),
         open_positions=int(totals.get("open_positions", 0)),
@@ -611,9 +578,9 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
 
 # ── Delegation status/list routes ──
 # NOTE: Starlette matches routes in registration order, so these literal
-# /delegations paths MUST be registered before the /{slug} catch-all below;
-# otherwise GET /agents/delegations would match get_agent with
-# slug="delegations" and 404.
+# /delegations and /runs paths MUST be registered before the /{slug}
+# catch-all below; otherwise GET /agents/delegations would match get_agent
+# with slug="delegations" and 404.
 
 
 @router.get("/delegations")
@@ -623,6 +590,7 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
     Returns the full record per task (status + result/error) so the dashboard can
     render an at-a-glance list without a follow-up fetch per row. The registry is
     in-memory and small (ephemeral, per-process), so the payload stays cheap.
+    Historical delegations live in the RunStore (``/agents/{slug}/runs?kind=delegation``).
     """
     from condor.agents.delegate import get_all_delegations
 
@@ -635,25 +603,32 @@ async def get_delegation_status(
 ):
     """Get a delegation's status + result/error.
 
-    Live tasks come from the in-process registry; after a restart the flat
-    transcript file (``agents/{slug}/delegations/{date}-dN.md``) still
-    resolves, so a task_id never goes dark just because the process died.
+    Live tasks come from the in-process registry; after a restart the
+    RunStore stream (kind=delegation, ``run_id == task_id``) still resolves,
+    so a task_id never goes dark just because the process died.
     """
-    import re as _re
-
     from condor.agents.delegate import get_delegation
 
     dt = get_delegation(task_id)
     if dt is not None:
         return dt.to_dict()
 
-    m = _re.match(r"^(?P<slug>.+)-d(?P<num>\d+)$", task_id)
-    if m:
-        agent = _svc().store.get(m.group("slug"))
-        if agent is not None:
-            path = find_delegation_file(agent.agent_dir, int(m.group("num")))
-            if path:
-                return {"task_id": task_id, "transcript": path.read_text()}
+    store = get_run_store()
+    path = store.find_run_path(task_id)
+    if path is not None:
+        slug = path.parent.parent.name
+        meta = store.run_meta(slug, task_id)
+        if meta.get("kind") == "delegation":
+            return {
+                "task_id": task_id,
+                "run_id": task_id,
+                "agent": slug,
+                "status": meta.get("status", ""),
+                "task": meta.get("task", ""),
+                "started_at": meta.get("started_at"),
+                "ended_at": meta.get("ended_at"),
+                "transcript": _svc().export_run(task_id),
+            }
     raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
 
 
@@ -670,11 +645,65 @@ async def stop_delegation_route(
     return {"stopped": stopped}
 
 
+# ── Runs (the one history API) ──
+
+
+@router.get("/runs/{run_id}")
+async def get_run_route(
+    run_id: str,
+    events: bool = False,
+    user: WebUser = Depends(get_current_user),
+):
+    """One run: RunStore meta (+ live engine overlay), ``?events=true`` inlines
+    the full event envelope list."""
+    try:
+        return _svc().get_run(run_id, include_events=events)
+    except LifecycleError as e:
+        raise _http(e)
+
+
+@router.get("/runs/{run_id}/export")
+async def export_run_route(run_id: str, user: WebUser = Depends(get_current_user)):
+    """Markdown transcript of one run (generated view, §7.1)."""
+    try:
+        return {"run_id": run_id, "markdown": _svc().export_run(run_id)}
+    except LifecycleError as e:
+        raise _http(e)
+
+
+@router.get("/runs/{run_id}/executors")
+async def get_run_executors(run_id: str, user: WebUser = Depends(get_current_user)):
+    """Executors + performance for a single run (controller_id == run_id)."""
+    from condor.agents.performance import fetch_agent_performance
+
+    store = get_run_store()
+    path = store.find_run_path(run_id)
+    if path is None:
+        raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
+    slug = path.parent.parent.name
+    meta = store.run_meta(slug, run_id)
+    agent = _get_agent(slug)
+    client, _server = await _get_client_for_agent(agent)
+    if client is None:
+        empty = AgentPerformanceModel(
+            agent_id=run_id,
+            run_id=run_id,
+            session_num=meta.get("display_seq", 0),
+            kind=meta.get("kind") or "session",
+            status=meta.get("status", ""),
+        )
+        return {"executors": [], "performance": empty.model_dump()}
+    perf = await fetch_agent_performance(
+        client, run_id, bot_name=_run_bot_name(slug, run_id)
+    )
+    model = _perf_model(meta, perf)
+    return {"executors": perf.executors, "performance": model.model_dump()}
+
+
 @router.get("/{slug}", response_model=AgentDetail)
 async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
-    """Get Agent detail: identity, spec fields, and the full history envelope."""
+    """Get Agent detail: identity, spec fields, and the recent run history."""
     agent = _get_agent(slug)
-    agent_dir = agent.agent_dir
 
     try:
         sessions_perf, _totals = await _compute_agent_performance(agent)
@@ -683,7 +712,9 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         sessions_perf = []
     perf_by_id = {p.agent_id: p for p in sessions_perf}
 
-    infos = _svc().list_runs(slug)
+    runs = _svc().list_runs(slug, limit=50)
+
+    infos = _svc().list_runs(slug, live_only=True)
     status = "idle"
     agent_id = ""
     instances = []
@@ -695,13 +726,10 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
             agent_id = inst.agent_id
 
     if not infos:
-        disk_info = infer_latest_session_status(agent_dir, slug)
-        if disk_info:
-            status = disk_info["status"]
-            agent_id = disk_info["agent_id"]
-
-    learnings_path = agent_dir / "learnings.md"
-    learnings = learnings_path.read_text() if learnings_path.exists() else ""
+        latest = next((m for m in runs if m.get("kind") in _PERF_KINDS), None)
+        if latest:
+            status = latest.get("status") or "idle"
+            agent_id = latest.get("run_id", "")
 
     return AgentDetail(
         slug=agent.slug,
@@ -720,16 +748,27 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         default_config=agent.default_config or {},
         default_trading_context=agent.default_trading_context,
         schedule=agent.schedule or {},
-        learnings=learnings,
+        learnings=read_learnings(agent.agent_dir),
         status=status,
         agent_id=agent_id,
-        sessions=[SessionInfo(**s) for s in list_sessions(agent_dir)],
-        experiments=[ExperimentInfo(**e) for e in list_experiments(agent_dir)],
-        delegations=[
-            DelegationInfo(**d) for d in list_delegations_on_disk(agent_dir)
-        ],
+        runs=runs,
         instances=instances,
     )
+
+
+@router.get("/{slug}/runs")
+async def list_agent_runs(
+    slug: str,
+    kind: str | None = None,
+    limit: int = 50,
+    user: WebUser = Depends(get_current_user),
+):
+    """Run history for one agent (RunStore metas, newest first, live overlay).
+
+    ``?kind=`` filters (session | experiment | delegation | consult | scheduled).
+    """
+    _get_agent(slug)
+    return {"runs": _svc().list_runs(slug, kind=kind, limit=limit)}
 
 
 @router.post("", response_model=AgentSummary)
@@ -787,10 +826,6 @@ async def update_agent(
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
     return {"updated": True}
-
-
-# Kept for import stability (the PUT handler was historically named this).
-update_agent_md = update_agent
 
 
 @router.delete("/{slug}")
@@ -851,11 +886,11 @@ async def delegate_agent(
 ):
     """Delegate a one-off task to a detached background Agent instance.
 
-    Returns immediately with a ``task_id``; the agent runs unattended until
-    done, then notifies the user. Trading agents run under a zero-seeded risk
-    gate (per-call ``risk_limits`` override replaces the AGENT.md baseline);
-    serverless agents run with full auto-approve. The async sibling of
-    ``/consult``.
+    Returns immediately with a ``task_id`` (also the run id); the agent runs
+    unattended until done, then notifies the user. Trading agents run under a
+    zero-seeded risk gate (per-call ``risk_limits`` override replaces the
+    AGENT.md baseline); serverless agents run with full auto-approve. The
+    async sibling of ``/consult``.
     """
     from config_manager import get_config_manager
 
@@ -898,77 +933,22 @@ async def delegate_agent(
 @router.get("/{slug}/performance", response_model=AgentPerformanceResponse)
 async def get_agent_performance(
     slug: str,
-    strategy: str | None = None,
     user: WebUser = Depends(get_current_user),
 ):
-    """Per-session performance + rollup totals for an agent.
-
-    ``?strategy=`` filters on the legacy session-meta tag (old sessions only).
-    """
+    """Per-run performance + rollup totals for an agent."""
     agent = _get_agent(slug)
     sessions, totals = await _compute_agent_performance(agent)
-    if strategy:
-        sessions = [
-            s for s in sessions if s.strategy == strategy and s.kind == "session"
-        ]
-        totals = {
-            "total_pnl": sum(s.total_pnl for s in sessions),
-            "realized_pnl": sum(s.realized_pnl for s in sessions),
-            "unrealized_pnl": sum(s.unrealized_pnl for s in sessions),
-            "volume": sum(s.volume for s in sessions),
-            "fees": sum(s.fees for s in sessions),
-            "open_positions": sum(s.open_count for s in sessions),
-            "trade_count": float(sum(s.trade_count for s in sessions)),
-        }
     running_ids = {
-        i["agent_id"] for i in _svc().list_runs(slug) if i.get("status") == "running"
+        i["agent_id"]
+        for i in _svc().list_runs(slug, live_only=True)
+        if i.get("status") == "running"
     }
     for s in sessions:
-        s.status = "running" if s.agent_id in running_ids else "closed"
+        if s.agent_id in running_ids:
+            s.status = "running"
+        elif not s.status or s.status == "running":
+            s.status = "closed"
     return AgentPerformanceResponse(slug=slug, sessions=sessions, totals=totals)
-
-
-@router.get("/{slug}/sessions/{session_num}/executors")
-async def get_session_executors(
-    slug: str,
-    session_num: int,
-    user: WebUser = Depends(get_current_user),
-):
-    """Return executors + performance for a single session."""
-    from condor.agents.performance import fetch_agent_performance
-
-    agent = _get_agent(slug)
-    agent_id = f"{slug}_{session_num}"
-    session_dir = find_session_dir(agent.agent_dir, session_num)
-    # Migrated sessions keep their legacy composite controller_id in meta.yml.
-    controller_id = agent_id
-    if session_dir is not None:
-        controller_id = read_session_meta(session_dir).get("controller_id") or agent_id
-    client, _server = await _get_client_for_agent(agent)
-    if client is None:
-        return {
-            "executors": [],
-            "performance": AgentPerformanceModel(
-                agent_id=agent_id, session_num=session_num
-            ).model_dump(),
-        }
-    bot_name = _session_bot_name(agent.agent_dir, session_num)
-    perf = await fetch_agent_performance(client, controller_id, bot_name=bot_name)
-    model = AgentPerformanceModel(
-        agent_id=agent_id,
-        session_num=session_num,
-        realized_pnl=perf.realized_pnl,
-        unrealized_pnl=perf.unrealized_pnl,
-        total_pnl=perf.total_pnl,
-        volume=perf.volume,
-        fees=perf.fees,
-        trade_count=perf.trade_count,
-        win_rate=perf.win_rate,
-        open_count=perf.open_count,
-        closed_count=perf.closed_count,
-        executors=perf.executors,
-    )
-    return {"executors": perf.executors, "performance": model.model_dump()}
 
 
 # ── Lifecycle ──
@@ -981,8 +961,7 @@ async def start_session(
     user: WebUser = Depends(get_current_user),
 ):
     """Start a session — the stateful unit of capital engagement — or, with
-    ``execution_mode: "experiment"``, one simulated tick that leaves only a
-    flat snapshot.
+    ``execution_mode: "experiment"``, one simulated tick.
 
     The AGENT.md is the one spec (§5.3): launch config merges over its
     ``default_config``; a legacy ``strategy`` field in the request is ignored.
@@ -1074,11 +1053,9 @@ async def inject_directive(
 
 @router.get("/{slug}/learnings")
 async def get_learnings(slug: str, user: WebUser = Depends(get_current_user)):
-    """Read the agent's learnings.md (all run kinds)."""
+    """Read the agent's learnings (curated agent memory, §7.1)."""
     agent = _get_agent(slug)
-    learnings_path = agent.agent_dir / "learnings.md"
-    content = learnings_path.read_text() if learnings_path.exists() else ""
-    return {"content": content}
+    return {"content": read_learnings(agent.agent_dir)}
 
 
 @router.put("/{slug}/learnings")
@@ -1087,142 +1064,10 @@ async def update_learnings(
     req: UpdateLearningsRequest,
     user: WebUser = Depends(get_current_user),
 ):
-    """Update the agent's learnings.md."""
+    """Replace the agent's learnings.md (operator curation)."""
     agent = _get_agent(slug)
-    (agent.agent_dir / "learnings.md").write_text(req.content)
+    learnings_path(agent.agent_dir).write_text(req.content)
     return {"updated": True}
-
-
-# ── Sessions ──
-
-
-@router.get("/{slug}/sessions")
-async def list_agent_sessions(
-    slug: str,
-    strategy: str | None = None,
-    user: WebUser = Depends(get_current_user),
-):
-    """List an agent's sessions (``?strategy=`` filters the legacy meta tag)."""
-    agent = _get_agent(slug)
-    sessions = list_sessions(agent.agent_dir, strategy=strategy)
-    return {"sessions": [SessionInfo(**s).model_dump() for s in sessions]}
-
-
-def _get_session_dir_or_404(slug: str, session_num: int) -> Path:
-    agent = _get_agent(slug)
-    session_dir = find_session_dir(agent.agent_dir, session_num)
-    if not session_dir:
-        raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
-    return session_dir
-
-
-@router.get("/{slug}/sessions/{session_num}/journal")
-async def get_journal(
-    slug: str,
-    session_num: int,
-    user: WebUser = Depends(get_current_user),
-):
-    """Read journal.md for a (tick) session."""
-    session_dir = _get_session_dir_or_404(slug, session_num)
-    journal_path = session_dir / "journal.md"
-    content = journal_path.read_text() if journal_path.exists() else ""
-    return {"content": content}
-
-
-@router.get("/{slug}/delegation-files")
-async def list_agent_delegations(
-    slug: str, user: WebUser = Depends(get_current_user)
-):
-    """List an agent's delegation transcripts (flat files, newest first)."""
-    agent = _get_agent(slug)
-    return {
-        "delegations": [
-            DelegationInfo(**d).model_dump()
-            for d in list_delegations_on_disk(agent.agent_dir)
-        ]
-    }
-
-
-@router.get("/{slug}/delegation-files/{num}")
-async def get_agent_delegation(
-    slug: str,
-    num: int,
-    user: WebUser = Depends(get_current_user),
-):
-    """Read one delegation transcript."""
-    agent = _get_agent(slug)
-    path = find_delegation_file(agent.agent_dir, num)
-    if not path:
-        raise HTTPException(status_code=404, detail=f"Delegation {num} not found")
-    return {"content": path.read_text(), "file": path.name}
-
-
-@router.get("/{slug}/sessions/{session_num}/snapshots")
-async def list_snapshots(
-    slug: str,
-    session_num: int,
-    user: WebUser = Depends(get_current_user),
-):
-    """List snapshots for a session."""
-    session_dir = _get_session_dir_or_404(slug, session_num)
-
-    snapshots = []
-    snap_dir = session_dir / "snapshots"
-    if snap_dir.exists():
-        for f in sorted(
-            snap_dir.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True
-        ):
-            m = re.match(r"snapshot_(\d+)\.md", f.name)
-            if m:
-                tick = int(m.group(1))
-                content = f.read_text()
-                ts_match = re.search(r"^# Snapshot #\d+ — (.+)$", content, re.MULTILINE)
-                timestamp = ts_match.group(1) if ts_match else ""
-                snapshots.append(
-                    SnapshotSummary(tick=tick, timestamp=timestamp, file=f.name)
-                )
-
-    return {"snapshots": [s.model_dump() for s in snapshots]}
-
-
-@router.get("/{slug}/sessions/{session_num}/snapshots/{tick}")
-async def get_snapshot(
-    slug: str,
-    session_num: int,
-    tick: int,
-    user: WebUser = Depends(get_current_user),
-):
-    """Read a specific snapshot."""
-    session_dir = _get_session_dir_or_404(slug, session_num)
-    path = session_dir / "snapshots" / f"snapshot_{tick}.md"
-    if path.exists():
-        return {"content": path.read_text(), "tick": tick}
-    raise HTTPException(status_code=404, detail=f"Snapshot {tick} not found")
-
-
-# ── Experiments ──
-
-
-@router.get("/{slug}/experiments")
-async def list_agent_experiments(
-    slug: str, user: WebUser = Depends(get_current_user)
-):
-    """List an agent's experiments."""
-    agent = _get_agent(slug)
-    experiments = list_experiments(agent.agent_dir)
-    return {"experiments": [ExperimentInfo(**e).model_dump() for e in experiments]}
-
-
-@router.get("/{slug}/experiments/{exp_num}")
-async def get_experiment(
-    slug: str, exp_num: int, user: WebUser = Depends(get_current_user)
-):
-    """Read an experiment snapshot."""
-    agent = _get_agent(slug)
-    path = find_experiment_file(agent.agent_dir, exp_num)
-    if not path:
-        raise HTTPException(status_code=404, detail=f"Experiment {exp_num} not found")
-    return {"content": path.read_text(), "number": exp_num}
 
 
 # ── Routines / reports ──

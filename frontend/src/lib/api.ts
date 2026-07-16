@@ -315,7 +315,6 @@ export interface RunningInstance {
   agent_id: string;
   session_num: number;
   status: string;
-  strategy: string;
   agent_key: string;
   tick_count: number;
   daily_pnl: number;
@@ -381,10 +380,11 @@ export interface AgentExecutorRow {
 }
 
 export interface AgentPerformance {
+  // agent_id === run_id (executors tag controller_id == run_id)
   agent_id: string;
-  session_num: number;
-  kind: "session" | "experiment";
-  strategy: string;
+  run_id: string;
+  session_num: number; // display_seq from the run stream
+  kind: "session" | "experiment" | "scheduled";
   status: string;
   realized_pnl: number;
   unrealized_pnl: number;
@@ -404,38 +404,46 @@ export interface AgentPerformanceResponse {
   totals: Record<string, number>;
 }
 
-export interface SessionInfo {
-  number: number;
-  strategy: string;
-  status: string;
-  snapshot_count: number;
-  created_at: string;
-  ended_at: string;
-  has_journal: boolean;
+// One run from the RunStore: an append-only JSONL event stream per run at
+// agents/{slug}/runs/{run_id}.jsonl. run_id is an opaque ULID.
+export type RunKind = "session" | "experiment" | "delegation" | "consult" | "scheduled";
+
+export interface RunMeta {
+  run_id: string;
+  agent_slug: string;
+  kind: RunKind | "";
+  display_seq: number;
+  started_at: number | null; // epoch seconds
+  ended_at: number | null;
+  status: string; // running | completed | stopped | error | interrupted | unknown
+  reason: string;
+  model?: string;
+  source_spec_hash?: string;
+  resolved_spec_hash?: string;
+  event_count?: number;
+  task?: string;
+  scheduled_for?: string;
+  // Live engine info overlaid while the run is in flight.
+  live?: Record<string, unknown>;
 }
 
-// One flat delegation transcript (agents/{slug}/delegations/{date}-dN.md).
-export interface DelegationFileInfo {
-  number: number;
-  task_id: string;
-  status: string;
-  task: string;
-  created_at: string;
-  ended_at: string;
-  file: string;
+// One event envelope from a run stream.
+export interface RunEvent {
+  v: number;
+  seq: number;
+  ts: number; // epoch seconds
+  type: string;
+  run_id: string;
+  tick?: number;
+  tool_call_id?: string;
+  executor_id?: string;
+  payload: Record<string, unknown>;
 }
 
-export interface ExperimentInfo {
-  number: number;
-  execution_mode: string;
-  agent_key: string;
-  snapshot_count: number;
-  created_at: string;
-  error?: boolean;
-}
+export type RunDetail = RunMeta & { events?: RunEvent[] };
 
 // Agent = identity + brain (AGENT.md, tools, consult capability) that owns
-// all operational history (sessions, experiments, learnings).
+// all operational history (the RunStore + learnings).
 export interface AgentDetail {
   slug: string;
   name: string;
@@ -455,16 +463,16 @@ export interface AgentDetail {
   learnings: string;
   status: string;
   agent_id: string;
-  sessions: SessionInfo[];
-  experiments: ExperimentInfo[];
-  delegations: DelegationFileInfo[];
+  // RunStore metas, newest first (all kinds) — the one history list.
+  runs: RunMeta[];
   instances: RunningInstance[];
 }
 
 // Delegation = a fire-and-forget background task handed to a detached Agent
 // instance (DELEGATE mode). Ephemeral + in-process; status drives the UI.
 export interface Delegation {
-  task_id: string;
+  task_id: string; // === run_id (RunStore stream id)
+  run_id?: string;
   agent: string;
   user_id: number;
   chat_id: number;
@@ -473,12 +481,8 @@ export interface Delegation {
   status: "running" | "done" | "error" | "stopped";
   result: string;
   error: string;
-}
-
-export interface SnapshotSummary {
-  tick: number;
-  timestamp: string;
-  file: string;
+  started_at?: string;
+  ended_at?: string;
 }
 
 // ── Routines ──
@@ -1004,9 +1008,28 @@ export const api = {
       `/api/v1/agents/${encodeURIComponent(slug)}/performance`,
     ),
 
-  getSessionExecutors: (slug: string, sessionNum: number) =>
+  // ── Runs (the one history API — RunStore streams) ──
+
+  getAgentRuns: (slug: string, kind?: RunKind, limit = 50) =>
+    apiFetch<{ runs: RunMeta[] }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/runs?limit=${limit}${
+        kind ? `&kind=${encodeURIComponent(kind)}` : ""
+      }`,
+    ),
+
+  getRun: (runId: string, includeEvents = false) =>
+    apiFetch<RunDetail>(
+      `/api/v1/agents/runs/${encodeURIComponent(runId)}?events=${includeEvents}`,
+    ),
+
+  getRunExport: (runId: string) =>
+    apiFetch<{ run_id: string; markdown: string }>(
+      `/api/v1/agents/runs/${encodeURIComponent(runId)}/export`,
+    ),
+
+  getRunExecutors: (runId: string) =>
     apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/executors`,
+      `/api/v1/agents/runs/${encodeURIComponent(runId)}/executors`,
     ),
 
   startAgent: (
@@ -1054,31 +1077,6 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
 
-  getAgentSessions: (slug: string) =>
-    apiFetch<{ sessions: SessionInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions`,
-    ),
-
-  getSessionJournal: (slug: string, sessionNum: number) =>
-    apiFetch<{ content: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/journal`,
-    ),
-
-  getDelegationTranscript: (slug: string, num: number) =>
-    apiFetch<{ content: string; file: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/delegation-files/${num}`,
-    ),
-
-  getSessionSnapshots: (slug: string, sessionNum: number) =>
-    apiFetch<{ snapshots: SnapshotSummary[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/snapshots`,
-    ),
-
-  getSnapshot: (slug: string, sessionNum: number, tick: number) =>
-    apiFetch<{ content: string; tick: number }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/sessions/${sessionNum}/snapshots/${tick}`,
-    ),
-
   // ── Backtesting ──
 
   submitBacktest: (
@@ -1117,18 +1115,6 @@ export const api = {
     apiFetch<Record<string, unknown>>(
       `/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved/${encodeURIComponent(taskId)}`,
       { method: "DELETE" },
-    ),
-
-  // ── Experiments (agent-level experiment snapshots) ──
-
-  getAgentExperiments: (slug: string) =>
-    apiFetch<{ experiments: ExperimentInfo[] }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/experiments`,
-    ),
-
-  getExperiment: (slug: string, expNum: number) =>
-    apiFetch<{ content: string; number: number }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/experiments/${expNum}`,
     ),
 
   // ── Archived Bots ──

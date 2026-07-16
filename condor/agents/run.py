@@ -80,16 +80,16 @@ async def run_agent(
     fallback_on_unhealthy: bool = False,
     on_client: Callable[[Any], None] | None = None,
     agent_id: str = "",
+    on_tool_call: Callable[[dict], None] | None = None,
 ) -> RunResult:
     """Run ``agent``'s brain to completion on ``prompt``; return a RunResult.
 
     Args:
         permission_policy: ``None`` (AUTO) or a permission callback — see
             :mod:`condor.agents.policies`.
-        agent_id: Run id threaded into the condor MCP subprocess so native
-            executors are attributed to the run that created them: session id
-            ("{slug}_{N}") for ticks, delegation id ("{slug}-dN") for
-            delegations, empty for chat/consults.
+        agent_id: The run's opaque RunStore id (ULID, §7.1) threaded into the
+            condor MCP subprocess so native executors are attributed to the
+            run that created them; empty for plain chat sessions.
         server_name: The EFFECTIVE hummingbot server for this run (caller
             resolves pin-vs-ambient). None → session wiring (ambient server,
             or none for serverless agents).
@@ -106,6 +106,9 @@ async def run_agent(
         on_client: Optional hook called with the live client after creation
             and with ``None`` after reaping — lets TickEngine.stop() keep its
             cancellation backstop on the in-flight subprocess.
+        on_tool_call: Optional hook fired with each FOLDED tool call the
+            moment it completes (RunStore streaming persistence) — the same
+            dicts that land on ``result.tool_calls``, delivered live.
 
     Raises:
         RuntimeError: model backend unavailable and fallback disabled/unset.
@@ -246,6 +249,11 @@ async def run_agent(
                 tc["type"] = "tool"
                 result.tool_calls.append(tc)
                 result.events.append(tc)
+                if on_tool_call is not None:
+                    try:
+                        on_tool_call(tc)
+                    except Exception:
+                        log.exception("on_tool_call hook failed")
 
     await client.start()
     try:

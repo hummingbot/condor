@@ -1,18 +1,14 @@
 """Run an Agent consult to completion in the main process.
 
-``condor`` (the coordinator) calls the ``consult`` MCP tool, which calls back into
-the main process (where ``ConfigManager`` and the agent runtime live) and lands
-here. We load the Agent, build its prompt, and drive :func:`condor.agents.run.
-run_agent` under the ``human_gate`` policy — every mutating tool call is
-confirmed via the user's Telegram chat (the confirmation registry is
-process-global, so the Approve/Reject tap resolves even while condor's own chat
-session is busy awaiting the consult result). No strategy is involved — CONSULT
-runs the Agent's identity + shared memory/skills.
+``condor`` (the coordinator) calls the ``consult`` MCP tool, which calls back
+into the main process (where the agent runtime lives) and lands here. We load
+the Agent, build its prompt, and drive :func:`condor.agents.run.run_agent`
+under the ``human_gate`` policy — every mutating tool call needs a human
+approval.
 
-A consult persists nothing (refactor-07): the answer returns inline and that
-is the whole artifact. Anything long or durable enough to deserve a record is
-delegation-shaped — route it through :mod:`condor.agents.delegate`, which
-leaves a flat transcript.
+The answer returns inline; the run itself is recorded like every other run —
+a ``kind: consult`` RunStore stream (§7.1) carrying the task, tool calls, and
+the result, so consult-created executors attribute to a real run id.
 """
 
 from __future__ import annotations
@@ -24,7 +20,7 @@ from condor.agents.agent import AgentStore
 log = logging.getLogger(__name__)
 
 # Wall-clock budget for one consult; without it a hung backend blocks the
-# user's Telegram chat forever. Matches the delegation default.
+# caller forever. Matches the delegation default.
 CONSULT_TIMEOUT_S = 900
 
 
@@ -38,14 +34,15 @@ async def run_consult(
 ) -> str:
     """Consult the Agent ``slug`` with ``task`` and return its answer.
 
-    CONSULT is synchronous and human-gated: mutating tools are confirmed via the
-    user's Telegram chat. Its async, unattended sibling is DELEGATE
+    CONSULT is synchronous and human-gated: mutating tools need a human
+    approval. Its async, unattended sibling is DELEGATE
     (:mod:`condor.agents.delegate`), which runs the same primitive under a
     ``risk_gate``/AUTO policy.
     """
     from condor.agents.policies import human_gate
     from condor.agents.run import run_agent
     from condor.agents.context import build_agent_context
+    from condor.agents.runstore import get_run_store
 
     store = AgentStore()
     agent = store.get(slug)
@@ -60,32 +57,64 @@ async def run_consult(
 
     prompt = build_agent_context(agent, user_id, task, context)
 
-    # Consults persist no transcript, but any capital mutation they make must
-    # still land attributed in the immutable executor store — "{slug}-cTS" is
-    # the run id recorded on rows this consult creates (kind marker "c",
-    # timestamp instead of a counter since consults allocate no dir).
-    from datetime import datetime, timezone
+    run_store = get_run_store()
+    run_id = run_store.start_run(
+        slug,
+        "consult",
+        payload={"task": task, "model": agent.agent_key},
+    )
 
-    consult_id = f"{slug}-c{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    def _persist_tool_call(tc: dict) -> None:
+        from condor.agents.gating import is_dangerous_tool_call
+
+        try:
+            run_store.emit(
+                run_id,
+                "tool_call",
+                {
+                    "name": tc.get("name") or tc.get("title", ""),
+                    "status": tc.get("status", ""),
+                    "input": tc.get("input"),
+                    "output": tc.get("output"),
+                    "mutating": is_dangerous_tool_call(tc),
+                },
+                tool_call_id=str(tc.get("id") or "") or None,
+            )
+        except Exception:
+            log.exception("consult %s: tool_call emit failed", run_id)
 
     try:
         result = await run_agent(
             agent,
             prompt,
-            permission_policy=human_gate(chat_id),
+            permission_policy=human_gate(chat_id, run_id=run_id, agent_slug=slug),
             user_id=user_id,
             chat_id=chat_id,
             server_name=effective_server,
             timeout_s=CONSULT_TIMEOUT_S,
             fallback_on_unhealthy=True,
-            agent_id=consult_id,
+            agent_id=run_id,
+            on_tool_call=_persist_tool_call,
         )
     except RuntimeError as e:
+        run_store.end_run(run_id, "error", str(e))
         # Model backend down and no fallback configured — fail with the fix.
         return (
             f"{e}\n\n"
             "Start the model backend, or set CONSULT_FALLBACK_MODEL to a "
             "reachable model to auto-fall-back."
         )
+    except BaseException:
+        run_store.end_run(run_id, "error", "consult crashed/cancelled")
+        raise
 
-    return result.fallback_note + (result.text or "(the agent returned no answer)")
+    answer = result.fallback_note + (result.text or "(the agent returned no answer)")
+    try:
+        run_store.emit(run_id, "state_snapshot", {"result": answer})
+    finally:
+        run_store.end_run(
+            run_id,
+            "error" if result.timed_out else "completed",
+            result.error if result.timed_out else "",
+        )
+    return answer

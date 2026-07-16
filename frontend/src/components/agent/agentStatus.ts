@@ -5,6 +5,10 @@ export const STATUS_STYLES: Record<string, { dot: string; bg: string; label: str
   experiment: { dot: "bg-blue-400", bg: "border-blue-500/30 bg-blue-500/5", label: "EXPERIMENT" },
   paused: { dot: "bg-amber-400", bg: "border-amber-500/30 bg-amber-500/5", label: "PAUSED" },
   stopped: { dot: "bg-red-400/60", bg: "border-red-500/20 bg-red-500/5", label: "STOPPED" },
+  // RunStore terminal statuses (the latest run's status when nothing is live).
+  completed: { dot: "bg-sky-400/70", bg: "border-sky-500/20 bg-sky-500/5", label: "COMPLETED" },
+  interrupted: { dot: "bg-amber-400/70", bg: "border-amber-500/20 bg-amber-500/5", label: "INTERRUPTED" },
+  error: { dot: "bg-red-400", bg: "border-red-500/30 bg-red-500/5", label: "ERROR" },
   idle: { dot: "bg-[var(--color-text-muted)]/40", bg: "border-[var(--color-border)] bg-[var(--color-surface)]", label: "IDLE" },
 };
 

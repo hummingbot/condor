@@ -17,14 +17,6 @@ from .base import BaseProvider, ProviderResult
 
 _OPEN_STATUSES = {"PENDING", "ACTIVE", "CLOSING"}
 
-def _slug_of(agent_id: str) -> str:
-    """agent_id → agent slug, via the store's own canonical rule (sessions
-    ``{slug}_{N}``, experiments ``_eN``, delegations ``-dN``, consults ``-cTS``
-    all attribute to one slug)."""
-    from condor.executors.records import slug_from_run_id
-
-    return slug_from_run_id(agent_id)
-
 
 def _pair(record) -> str:
     """Human-readable instrument label per executor type (no more '?-?')."""
@@ -257,7 +249,7 @@ class NativeExecutorsProvider(BaseProvider):
     is_core = True
 
     async def execute(
-        self, client: Any, config: dict, agent_id: str = ""
+        self, client: Any, config: dict, agent_id: str = "", agent_slug: str = ""
     ) -> ProviderResult:
         from condor.executors.service import get_executor_runtime
 
@@ -267,13 +259,21 @@ class NativeExecutorsProvider(BaseProvider):
                 data={"executors": [], "total_exposure": 0, "open_count": 0},
                 summary="Native Executors: no agent_id provided",
             )
+        if not agent_slug:
+            # Run ids are opaque ULIDs (§7.1) — the slug-wide inherited-state
+            # read needs the explicit slug the engine already knows.
+            return ProviderResult(
+                name=self.name,
+                data={"error": "no agent_slug provided"},
+                summary="Native Executors: no agent_slug provided",
+            )
 
         try:
             runtime = get_executor_runtime()
-            # Slug-wide read: open executors surviving from a PRIOR session (or
+            # Slug-wide read: open executors surviving from a PRIOR run (or
             # a delegation) of this agent must stay visible to the current one,
             # or a restart resets apparent exposure and enables duplication.
-            slug = _slug_of(agent_id)
+            slug = agent_slug
             slug_records = [
                 _overlay_live_record(r, runtime)
                 for r in runtime.store.load_by_slug(slug)

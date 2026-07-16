@@ -194,8 +194,11 @@ class AgentService:
         trading_context: str = "",
         chat_id: int = 0,
         user_id: int = 0,
+        kind: str = "",
+        scheduled_for: str = "",
     ) -> dict:
-        """Start a session/experiment run (execution_mode comes from config)."""
+        """Start a session/experiment run (execution_mode comes from config).
+        The scheduler passes ``kind="scheduled"`` + the fire time (§5.4)."""
         self._reject_tombstoned(slug, "launching")
         return await start_session(
             slug,
@@ -203,26 +206,72 @@ class AgentService:
             trading_context=trading_context,
             chat_id=chat_id,
             user_id=user_id,
+            kind=kind,
+            scheduled_for=scheduled_for,
         )
 
     async def control(self, slug: str, verb: str, agent_id: Optional[str] = None) -> dict:
         """pause | resume | stop | shutdown (§5.2 verbs)."""
         return await apply_verb(slug, agent_id, verb)
 
-    def list_runs(self, slug: Optional[str] = None) -> list[dict]:
-        """Live engine instances (all agents, or one slug)."""
-        instances = list_instances()
-        if slug:
-            instances = [i for i in instances if i.get("agent_slug") == slug]
-        return instances
+    def list_runs(
+        self,
+        slug: Optional[str] = None,
+        kind: Optional[str] = None,
+        limit: int = 50,
+        live_only: bool = False,
+    ) -> list[dict]:
+        """Run history from the RunStore (one slug or all), newest first,
+        with live engine info overlaid on running runs. ``live_only`` returns
+        just the live engine instances (the old behavior)."""
+        instances = {i["agent_id"]: i for i in list_instances()}
+        if live_only:
+            out = list(instances.values())
+            if slug:
+                out = [i for i in out if i.get("agent_slug") == slug]
+            return out
 
-    def get_run(self, agent_id: str) -> dict:
+        from condor.agents.runstore import get_run_store
+
+        store = get_run_store()
+        slugs = [slug] if slug else store.agent_slugs_with_runs()
+        runs: list[dict] = []
+        for s in slugs:
+            runs.extend(store.list_runs(s, kind=kind, limit=limit))
+        for meta in runs:
+            live = instances.get(meta["run_id"])
+            if live is not None:
+                meta["live"] = live
+                meta["status"] = live.get("status", meta.get("status"))
+        runs.sort(key=lambda m: m.get("started_at") or 0, reverse=True)
+        return runs[:limit]
+
+    def get_run(self, run_id: str, include_events: bool = False) -> dict:
+        """One run: live engine info while running, RunStore meta after."""
         from condor.agents.engine import get_engine
+        from condor.agents.runstore import get_run_store
 
-        engine = get_engine(agent_id)
-        if engine is None:
-            raise LifecycleError(404, f"run '{agent_id}' not found")
-        return engine.get_info()
+        store = get_run_store()
+        path = store.find_run_path(run_id)
+        if path is None:
+            raise LifecycleError(404, f"run '{run_id}' not found")
+        slug = path.parent.parent.name
+        meta = store.run_meta(slug, run_id)
+        engine = get_engine(run_id)
+        if engine is not None:
+            meta["live"] = engine.get_info()
+            meta["status"] = engine.status
+        if include_events:
+            meta["events"] = store.read_events(slug, run_id)
+        return meta
+
+    def export_run(self, run_id: str) -> str:
+        """Markdown export of one run (generated view, §7.1)."""
+        from condor.agents.exports import render_run_markdown
+
+        meta = self.get_run(run_id, include_events=True)
+        events = meta.pop("events")
+        return render_run_markdown(meta, events)
 
     def inject_directive(self, slug: str, text: str, agent_id: Optional[str] = None) -> dict:
         engines = select_engines(slug, agent_id, running_only=True)

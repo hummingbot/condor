@@ -92,11 +92,6 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
       <div className="mb-3 flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="font-mono text-sm font-bold text-[var(--color-text)]">{instance.agent_id}</span>
-          {instance.strategy && (
-            <span className="rounded bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-[var(--color-primary)]">
-              {instance.strategy}
-            </span>
-          )}
           <span className={`text-xs font-semibold uppercase ${statusColor}`}>{instance.status}</span>
           <ModeBadge mode={instance.execution_mode} />
         </div>
@@ -159,10 +154,10 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
 
 export function PerformancePanel({
   slug,
-  onSessionClick,
+  onRunClick,
 }: {
   slug: string;
-  onSessionClick?: (sessionNum: number, kind?: "session" | "experiment") => void;
+  onRunClick?: (runId: string) => void;
 }) {
   const { data } = useQuery({
     queryKey: ["agent-performance", slug],
@@ -260,7 +255,6 @@ export function PerformancePanel({
                 <tr className="text-left text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
                   <th className="px-2 py-1">#</th>
                   <th className="px-2 py-1">Kind</th>
-                  <th className="px-2 py-1">Strategy</th>
                   <th className="px-2 py-1">Status</th>
                   <th className="px-2 py-1 text-right">Total PnL</th>
                   <th className="px-2 py-1 text-right">Realized</th>
@@ -268,7 +262,7 @@ export function PerformancePanel({
                   <th className="px-2 py-1 text-right">Volume</th>
                   <th className="px-2 py-1 text-right">Trades</th>
                   <th className="px-2 py-1 text-right">Open</th>
-                  {onSessionClick && <th className="px-2 py-1 w-6" />}
+                  {onRunClick && <th className="px-2 py-1 w-6" />}
                 </tr>
               </thead>
               <tbody>
@@ -281,8 +275,8 @@ export function PerformancePanel({
                     return (
                       <tr
                         key={s.agent_id}
-                        onClick={() => onSessionClick?.(s.session_num, s.kind)}
-                        className={`border-t border-[var(--color-border)]/40 font-mono ${onSessionClick ? "cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]" : ""}`}
+                        onClick={() => onRunClick?.(s.run_id || s.agent_id)}
+                        className={`border-t border-[var(--color-border)]/40 font-mono ${onRunClick ? "cursor-pointer transition-colors hover:bg-[var(--color-surface-hover)]" : ""}`}
                       >
                         <td className="px-2 py-1.5 text-[var(--color-text)]">{s.session_num}</td>
                         <td className="px-2 py-1.5">
@@ -295,7 +289,6 @@ export function PerformancePanel({
                             <span className="text-[var(--color-text-muted)]">{s.kind}</span>
                           )}
                         </td>
-                        <td className="px-2 py-1.5 text-[var(--color-text-muted)]">{s.strategy || "—"}</td>
                         <td className={`px-2 py-1.5 ${s.status === "running" ? "text-emerald-400" : "text-[var(--color-text-muted)]"}`}>
                           {s.status || "—"}
                         </td>
@@ -309,7 +302,7 @@ export function PerformancePanel({
                         </td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.trade_count}</td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.open_count}</td>
-                        {onSessionClick && (
+                        {onRunClick && (
                           <td className="px-2 py-1.5 text-[var(--color-text-muted)]">
                             <ChevronRight className="h-3.5 w-3.5" />
                           </td>

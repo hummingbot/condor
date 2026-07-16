@@ -19,5 +19,7 @@ class BaseProvider:
     name: str = ""
     is_core: bool = False
 
-    async def execute(self, client: Any, config: dict, agent_id: str = "") -> ProviderResult:
+    async def execute(
+        self, client: Any, config: dict, agent_id: str = "", agent_slug: str = ""
+    ) -> ProviderResult:
         raise NotImplementedError

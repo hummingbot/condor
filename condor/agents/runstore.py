@@ -500,7 +500,7 @@ class RunStore:
             # stream awaiting the startup sweep.
             meta["status"] = "interrupted"
         if tail is not None:
-            meta["events"] = tail.get("seq", 0)
+            meta["event_count"] = tail.get("seq", 0)
         return meta
 
     def list_runs(

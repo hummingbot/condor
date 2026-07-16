@@ -43,7 +43,15 @@ async def main() -> None:
     )
     await control.start()
     registry.write_direct_token()  # §6.2 direct bootstrap, rotated per restart
-    service_task = asyncio.create_task(start_executor_service())
+
+    async def _start_services():
+        # §12 ordering: scheduled fires enable LAST (no backfill on startup).
+        await start_executor_service()
+        from condor.agents.scheduler import get_scheduler
+
+        get_scheduler().start()
+
+    service_task = asyncio.create_task(_start_services())
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -53,6 +61,9 @@ async def main() -> None:
 
     await stop.wait()
     logger.info("condor daemon shutting down")
+    from condor.agents.scheduler import get_scheduler
+
+    await get_scheduler().stop()
     if not service_task.done():
         service_task.cancel()
         try:

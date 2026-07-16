@@ -169,7 +169,10 @@ async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
     """
     try:
         results = await engine.provider_registry.run_core_providers(
-            client, engine.config, agent_id=engine.agent_id
+            client,
+            engine.config,
+            agent_id=engine.agent_id,
+            agent_slug=engine.agent.slug,
         )
         ex_result = results.get("executors")
         if ex_result is not None and "executors" in getattr(ex_result, "data", {}):
@@ -343,12 +346,12 @@ async def run_shutdown(engine: Any, reason: str) -> None:
 
     Sequence (the LLM judgment pass is inserted between baseline and verify):
 
-    1. Load the resolved policy + body; journal ``shutdown_start``.
+    1. Load the resolved policy + body; record ``shutdown_start``.
     2. Deterministic baseline: stop this session's executors with ``keep_position``
        per policy (the guaranteed floor).
     3. Verify: re-query positions, retry the close once, and loudly alert the user
        if anything the policy said to close is still open.
-    4. Journal ``shutdown_done``.
+    4. Record ``shutdown_done``.
 
     The caller (:meth:`TickEngine._run_shutdown`) owns the idempotency guard and
     the self-stop; this function performs the winddown itself and never raises for
@@ -362,12 +365,9 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         reason,
         policy.on_kill_switch,
     )
-    if engine.journal:
-        engine.journal.append_action(
-            engine.journal.tick_count + 1,
-            "shutdown_start",
-            f"{reason} (policy={policy.on_kill_switch})",
-        )
+    engine.record_decision(
+        "shutdown_start", f"{reason} (policy={policy.on_kill_switch})"
+    )
 
     client = await engine._get_client()
     if client is None:
@@ -377,11 +377,7 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         )
         log.error(msg)
         await engine._notify(msg)
-        if engine.journal:
-            engine.journal.append_action(
-                engine.journal.tick_count + 1, "shutdown_failed", "no API client"
-            )
-            engine.journal.record_tick("shutdown failed (no client): " + reason)
+        engine.record_decision("shutdown_failed", "no API client")
         return
 
     stopped, failures = await _deterministic_baseline(engine, client, policy)
@@ -408,11 +404,8 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         msg += f"\n⚠️ {len(failures)} winddown error(s): " + "; ".join(failures[:5])
     await engine._notify(msg)
 
-    if engine.journal:
-        verified = "flat" if not stranded else f"{len(stranded)} stranded"
-        engine.journal.append_action(
-            engine.journal.tick_count + 1,
-            "shutdown_done",
-            f"stopped={stopped}, failures={len(failures)}, verify={verified}",
-        )
-        engine.journal.record_tick("shutdown: " + reason)
+    verified = "flat" if not stranded else f"{len(stranded)} stranded"
+    engine.record_decision(
+        "shutdown_done",
+        f"stopped={stopped}, failures={len(failures)}, verify={verified}",
+    )

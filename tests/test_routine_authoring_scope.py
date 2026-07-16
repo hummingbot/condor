@@ -1,3 +1,4 @@
+import asyncio
 """Phase 2 acceptance: routine authoring is target-scoped by the session's
 immutable agent capability (§7.2) — a consult/delegation session can never
 write another agent's routine directory."""
@@ -37,16 +38,16 @@ def test_cross_agent_routine_authoring_denied(tmp_path, monkeypatch):
     # Session spawned FOR owner_agent (immutable capability set at spawn).
     monkeypatch.setattr(settings, "agent_slug", "owner_agent", raising=False)
 
-    result = routines_tool.create_routine(
+    result = asyncio.run(routines_tool.create_routine(
         name="sneaky", code=ROUTINE_CODE, agent_slug="victim_agent"
-    )
+    ))
     assert "error" in result and "scoped to your own agent" in result["error"]
     assert not (tmp_path / "victim_agent" / "routines" / "sneaky.py").exists()
 
     # edit/delete are equally denied
-    assert "scoped to your own agent" in routines_tool.edit_routine(
+    assert "scoped to your own agent" in asyncio.run(routines_tool.edit_routine(
         "x", ROUTINE_CODE, agent_slug="victim_agent"
-    )["error"]
+    ))["error"]
     assert "scoped to your own agent" in routines_tool.delete_routine(
         "x", agent_slug="victim_agent"
     )["error"]
@@ -57,9 +58,9 @@ def test_own_agent_authoring_allowed(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "agent_slug", "owner_agent", raising=False)
 
     # Explicitly naming YOURSELF is fine; so is naming nothing.
-    result = routines_tool.create_routine(
+    result = asyncio.run(routines_tool.create_routine(
         name="mine", code=ROUTINE_CODE, agent_slug="owner_agent"
-    )
+    ))
     assert result.get("created") is True
     assert (tmp_path / "owner_agent" / "routines" / "mine.py").exists()
 
@@ -69,8 +70,8 @@ def test_chat_coordinator_can_target_explicitly(tmp_path, monkeypatch):
     # Chat session: no session agent — acts for the human.
     monkeypatch.setattr(settings, "agent_slug", "", raising=False)
 
-    result = routines_tool.create_routine(
+    result = asyncio.run(routines_tool.create_routine(
         name="foragent", code=ROUTINE_CODE, agent_slug="victim_agent"
-    )
+    ))
     assert result.get("created") is True
     assert (tmp_path / "victim_agent" / "routines" / "foragent.py").exists()

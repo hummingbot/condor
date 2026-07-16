@@ -188,40 +188,14 @@ class MCPContext:
 async def run_routine(
     name: str, config: dict | None, agent_slug: str | None = None
 ) -> dict:
-    """Execute a one-shot routine and return its result."""
-    routine = None
+    """Execute a one-shot routine in a disposable worker subprocess (§7.2).
 
-    if agent_slug:
-        routines_dir = _get_agent_routines_dir(agent_slug)
-        if routines_dir and routines_dir.exists():
-            from routines.base import discover_routines_from_path
-
-            agent_routines = discover_routines_from_path(routines_dir)
-            routine = agent_routines.get(name)
-
-    if not routine:
-        routine = _resolve_routine(name)
-
-    if not routine:
-        return {"error": f"Routine '{name}' not found"}
-
-    if routine.is_continuous:
-        return {
-            "error": f"Routine '{name}' is continuous and cannot be run via MCP. "
-            "Use the Telegram /routines command to start/stop continuous routines."
-        }
-
-    try:
-        config_obj = routine.config_class(**(config or {}))
-    except Exception as e:
-        return {"error": f"Invalid config: {e}"}
-
-    context = MCPContext()
-
-    # Attribute the report to its producer: the explicitly-targeted agent (the
-    # canonical attribution unit shared with the web/Telegram runner's
-    # _agent_of and the agent index), else the run context (Agent consult ->
-    # its slug; chat condor -> "condor").
+    The worker resolves the routine (agent-local dir first, then the global
+    library), enforces the hard 120s timeout via SIGKILL, and returns the
+    normalized result. A crash or hang takes down only the worker.
+    """
+    # Attribute the report to its producer: the explicitly-targeted agent,
+    # else the run context (Agent consult → its slug; chat condor → "condor").
     agent = settings.agent_slug or "condor"
     if agent_slug:
         from condor.agents.agent import AgentStore
@@ -229,80 +203,73 @@ async def run_routine(
         if AgentStore().get(agent_slug):
             agent = agent_slug
 
-    try:
-        from condor.reports import attribute_to
+    from condor.routines_worker import run_routine_in_worker
 
-        with attribute_to(agent):
-            result = await asyncio.wait_for(
-                routine.run_fn(config_obj, context), timeout=120
-            )
-        from routines.base import normalize_result
-
-        nr = normalize_result(result)
-        return {
-            "name": name,
-            "result": {
-                "text": nr.text,
-                "table_data": nr.table_data,
-                "table_columns": nr.table_columns,
-                "chart_image": (
-                    "(PNG bytes, view via dashboard)" if nr.chart_image else None
-                ),
-                "sections": nr.sections,
-            },
-        }
-    except asyncio.TimeoutError:
-        return {"error": f"Routine '{name}' timed out after 120s"}
-    except Exception as e:
-        return {"error": f"Routine '{name}' failed: {e}"}
+    out = await run_routine_in_worker(
+        name,
+        config or {},
+        agent_slug=agent_slug or settings.agent_slug or "",
+        attribute=agent,
+    )
+    if "result" in out:
+        result = out["result"]
+        if result.pop("chart_image_b64", None):
+            result["chart_image"] = "(PNG bytes, view via dashboard)"
+    return out
 
 
 async def start_routine(name: str, config: dict | None) -> dict:
-    """Start a continuous routine as a background task."""
-    routine = _resolve_routine(name)
-    if not routine:
-        return {"error": f"Routine '{name}' not found"}
-    if not routine.is_continuous:
-        return {
-            "error": f"Routine '{name}' is not continuous — use action='run' instead"
-        }
+    """Removed: routines are strictly one-shot (§7.2)."""
+    return {
+        "error": "Continuous routines were removed — routines are one-shot "
+        "with a hard timeout. Schedule the routine instead "
+        "(action='schedule_routine' with a cron expression); the scheduler "
+        "provides the repetition."
+    }
 
-    from condor.routine_store import get_routine_store
 
-    store = get_routine_store()
+def schedule_routine(
+    name: str, config: dict | None, cron: str, tz: str = "UTC",
+    agent_slug: str | None = None,
+) -> dict:
+    """Create a durable schedule (store/schedules.json) for a read-only
+    routine — survives restarts; missed fires are skipped, never backfilled."""
+    if not cron:
+        return {"error": "cron is required (5-field cron expression)"}
+    from condor.agents.scheduler import create_routine_schedule
+
     try:
-        instance_id = await store.start_continuous(
-            routine_name=name,
+        return create_routine_schedule(
+            routine=name,
+            agent_slug=agent_slug or settings.agent_slug or "",
             config=config or {},
-            server_name=settings.active_server,
-            user_id=settings.chat_id,
+            cron=cron,
+            tz=tz,
         )
-        return {"started": True, "instance_id": instance_id, "routine": name}
     except Exception as e:
-        return {"error": f"Failed to start: {e}"}
+        return {"error": f"could not schedule: {e}"}
 
 
-def stop_routine(instance_id: str) -> dict:
-    """Stop a running routine instance."""
-    from condor.routine_store import get_routine_store
+def unschedule_routine(schedule_id: str) -> dict:
+    from condor.agents.scheduler import RoutineScheduleStore
 
-    store = get_routine_store()
-    stopped = store.stop(instance_id)
-    if stopped:
-        return {"stopped": True, "instance_id": instance_id}
-    return {"error": f"Instance '{instance_id}' not found or already stopped"}
+    if RoutineScheduleStore().remove(schedule_id):
+        return {"removed": True, "schedule_id": schedule_id}
+    return {"error": f"schedule '{schedule_id}' not found"}
 
 
-def list_instances() -> dict:
-    """List all running/scheduled routine instances."""
-    from condor.routine_store import get_routine_store
+def list_schedules() -> dict:
+    from condor.agents.scheduler import RoutineScheduleStore
 
-    store = get_routine_store()
-    instances = store.list_instances()
-    return {"instances": instances}
+    data = RoutineScheduleStore().load()
+    return {
+        "schedules": [
+            {"schedule_id": sid, **entry} for sid, entry in sorted(data.items())
+        ]
+    }
 
 
-def create_routine(name: str, code: str, agent_slug: str | None) -> dict:
+async def create_routine(name: str, code: str, agent_slug: str | None) -> dict:
     """Create a new agent-local routine file."""
     import re
 
@@ -337,22 +304,22 @@ def create_routine(name: str, code: str, agent_slug: str | None) -> dict:
     routines_dir.mkdir(parents=True, exist_ok=True)
     file_path.write_text(code)
 
-    from routines.base import discover_routines_from_path
+    # Validate in a disposable worker (§7.2): a blocking top-level import in
+    # the new module can no longer hang this process, and a syntax error is
+    # caught before the routine is discoverable.
+    from condor.routines_worker import validate_routine_in_worker
 
-    loaded = discover_routines_from_path(routines_dir)
-    if name not in loaded:
+    check = await validate_routine_in_worker(str(file_path))
+    if check.get("error"):
+        file_path.unlink()
+        return {"error": f"Routine failed validation: {check['error']}"}
+    if check.get("continuous"):
         file_path.unlink()
         return {
-            "error": "Routine file was created but failed to load. Check for syntax errors."
+            "error": "Continuous routines were removed (§7.2) — write a "
+            "one-shot run() and schedule it (action='schedule_routine')."
         }
-
-    routine = loaded[name]
-    return {
-        "created": True,
-        "name": name,
-        "description": routine.description,
-        "path": str(file_path),
-    }
+    return {"created": True, "name": name, "path": str(file_path)}
 
 
 def read_routine(name: str, agent_slug: str | None) -> dict:
@@ -370,7 +337,7 @@ def read_routine(name: str, agent_slug: str | None) -> dict:
     return {"error": f"Routine '{name}' not found"}
 
 
-def edit_routine(name: str, code: str, agent_slug: str | None) -> dict:
+async def edit_routine(name: str, code: str, agent_slug: str | None) -> dict:
     """Update the source code of an agent-local routine."""
     agent_slug, denied = _authoring_target(agent_slug)
     if denied:
@@ -394,21 +361,16 @@ def edit_routine(name: str, code: str, agent_slug: str | None) -> dict:
     old_code = file_path.read_text()
     file_path.write_text(code)
 
-    from routines.base import discover_routines_from_path
+    from condor.routines_worker import validate_routine_in_worker
 
-    loaded = discover_routines_from_path(routines_dir)
-    if name not in loaded:
+    check = await validate_routine_in_worker(str(file_path))
+    if check.get("error"):
         file_path.write_text(old_code)
         return {
-            "error": "Updated code failed to load (syntax error?). Reverted to previous version."
+            "error": f"Updated code failed validation ({check['error']}). "
+            "Reverted to previous version."
         }
-
-    routine = loaded[name]
-    return {
-        "updated": True,
-        "name": name,
-        "description": routine.description,
-    }
+    return {"updated": True, "name": name}
 
 
 def delete_routine(name: str, agent_slug: str | None) -> dict:
@@ -451,7 +413,7 @@ async def manage_routines(
     if action == "create_routine":
         if not name:
             return {"error": "name is required"}
-        return create_routine(name, code or "", agent_slug)
+        return await create_routine(name, code or "", agent_slug)
     if action == "read_routine":
         if not name:
             return {"error": "name is required"}
@@ -459,7 +421,7 @@ async def manage_routines(
     if action == "edit_routine":
         if not name:
             return {"error": "name is required"}
-        return edit_routine(name, code or "", agent_slug)
+        return await edit_routine(name, code or "", agent_slug)
     if action == "delete_routine":
         if not name:
             return {"error": "name is required"}
@@ -468,10 +430,23 @@ async def manage_routines(
         if not name:
             return {"error": "name is required"}
         return await start_routine(name, config)
-    if action == "stop":
+    if action == "schedule_routine":
         if not name:
-            return {"error": "instance_id is required (pass as name)"}
-        return stop_routine(name)
-    if action == "list_instances":
-        return list_instances()
+            return {"error": "name is required"}
+        cfg = dict(config or {})
+        cron = cfg.pop("cron", "")
+        tz = cfg.pop("tz", "UTC")
+        return schedule_routine(name, cfg, cron=cron, tz=tz, agent_slug=agent_slug)
+    if action == "unschedule_routine":
+        if not name:
+            return {"error": "schedule_id is required (pass as name)"}
+        return unschedule_routine(name)
+    if action in ("list_schedules", "list_instances"):
+        return list_schedules()
+    if action == "stop":
+        return {
+            "error": "Continuous routines were removed — use "
+            "action='unschedule_routine' with the schedule_id to stop a "
+            "scheduled routine."
+        }
     return {"error": f"Unknown action: {action}"}

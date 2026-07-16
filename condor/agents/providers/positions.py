@@ -12,7 +12,9 @@ class PositionsProvider(BaseProvider):
     name = "positions"
     is_core = True
 
-    async def execute(self, client: Any, config: dict, agent_id: str = "") -> ProviderResult:
+    async def execute(
+        self, client: Any, config: dict, agent_id: str = "", agent_slug: str = ""
+    ) -> ProviderResult:
         try:
             result = await client.executors.get_positions_summary(
                 controller_id=agent_id or None,

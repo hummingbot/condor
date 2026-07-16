@@ -170,9 +170,3 @@ def merge_launch_config(
     AgentConfig.from_dict(result)
     return result
 
-
-def save_full_config(agent_dir: Path, config: dict[str, Any]) -> None:
-    """Save a raw config dict as YAML (no filtering through AgentConfig)."""
-    config_path = agent_dir / "config.yml"
-    agent_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))

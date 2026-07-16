@@ -79,7 +79,17 @@ async def _lifespan(app: FastAPI):
     # MCP wrapper exchanges it over a persistent connection for a
     # condor-direct capability that dies with that connection.
     registry.write_direct_token()
-    service_task = asyncio.create_task(start_executor_service())
+
+    async def _start_services():
+        # §12 ordering: scheduled fires enable LAST — a fire that came due
+        # during a slow startup is skipped (no backfill), never launched
+        # against half-reconciled state.
+        await start_executor_service()
+        from condor.agents.scheduler import get_scheduler
+
+        get_scheduler().start()
+
+    service_task = asyncio.create_task(_start_services())
     try:
         yield
     finally:
@@ -89,6 +99,9 @@ async def _lifespan(app: FastAPI):
                 await service_task
             except (asyncio.CancelledError, Exception):
                 pass
+        from condor.agents.scheduler import get_scheduler
+
+        await get_scheduler().stop()
         await control.stop()
         await stop_executor_service()
 

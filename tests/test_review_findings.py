@@ -86,7 +86,9 @@ def _seed_open(store, agent_id, n, amount_quote=Decimal("1")):
     gw = SimpleNamespace()
     for i in range(n):
         ex = PositionExecutor(
-            f"pos_{agent_id}_{i}", pos_config(agent_id=agent_id, amount_quote=amount_quote), gw, store
+            f"pos_{agent_id}_{i}",
+            pos_config(agent_slug="mm", agent_id=agent_id, amount_quote=amount_quote),
+            gw, store,
         )
         ex.status = ExecutorStatus.ACTIVE
         ex.state.state = PositionStates.ACTIVE
@@ -166,26 +168,23 @@ def test_runtime_cap_no_baseline_is_permissive(tmp_path, monkeypatch):
 # -- #5: interrupted-session sweep ------------------------------------------------
 
 
-def test_mark_interrupted_sessions(tmp_path):
-    from condor.agents.journal import (
-        mark_interrupted_sessions,
-        read_session_meta,
-        write_session_meta,
-    )
+def test_interrupted_run_sweep(tmp_path):
+    """§4.2: runs are memory-only — a run_started stream lacking run_ended is
+    closed as interrupted at startup; ended runs are untouched."""
+    from condor.agents.runstore import RunStore
 
-    s1 = tmp_path / "mm" / "sessions" / "session_1"
-    s2 = tmp_path / "mm" / "sessions" / "session_2"
-    s1.mkdir(parents=True)
-    s2.mkdir(parents=True)
-    write_session_meta(s1, {"status": "running", "strategy": "x"})
-    write_session_meta(s2, {"status": "stopped", "strategy": "x"})
+    store = RunStore(root=tmp_path)
+    r1 = store.start_run("mm", "session")
+    r2 = store.start_run("mm", "session")
+    store.end_run(r2, "stopped")
+    # Simulate process death: forget r1's writer without run_ended.
+    store._writers[r1].close()
+    store._writers.clear()
 
-    marked = mark_interrupted_sessions(tmp_path)
-    assert marked == ["mm/session_1"]
-    m1 = read_session_meta(s1)
-    assert m1["status"] == "interrupted"
-    assert m1["ended_at"]
-    assert read_session_meta(s2)["status"] == "stopped"
+    fresh = RunStore(root=tmp_path)
+    fresh.sweep_interrupted()
+    assert fresh.run_meta("mm", r1)["status"] == "interrupted"
+    assert fresh.run_meta("mm", r2)["status"] == "stopped"
 
 
 # -- #6 + #4: cross-session visibility + filled-order holdings --------------------
@@ -211,14 +210,14 @@ def test_provider_sees_prior_session_executors_and_holdings(tmp_path, monkeypatc
     gw = SimpleNamespace()
 
     # Open position left by session 1 (the interrupted one).
-    survivor = PositionExecutor("pos_old", pos_config(agent_id="wc_1"), gw, store)
+    survivor = PositionExecutor("pos_old", pos_config(agent_slug="wc", agent_id="wc_1"), gw, store)
     survivor.status = ExecutorStatus.ACTIVE
     survivor.state.state = PositionStates.ACTIVE
     survivor.state.amount_spent = Decimal("1")
     store.save(survivor)
 
     # Filled order_pred from session 1: 20 shares @ 0.5 = $10 cost basis.
-    filled = OrderExecutor("ord_filled", _pred_config(agent_id="wc_1"), gw, store)
+    filled = OrderExecutor("ord_filled", _pred_config(agent_slug="wc", agent_id="wc_1"), gw, store)
     filled.status = ExecutorStatus.CLOSED
     filled.state.state = OrderStates.DONE
     filled.state.size = Decimal("20")
@@ -227,7 +226,7 @@ def test_provider_sees_prior_session_executors_and_holdings(tmp_path, monkeypatc
     store.save(filled)
 
     # Cancelled (early_stop) order must NOT become a holding.
-    pulled = OrderExecutor("ord_pulled", _pred_config(agent_id="wc_1"), gw, store)
+    pulled = OrderExecutor("ord_pulled", _pred_config(agent_slug="wc", agent_id="wc_1"), gw, store)
     pulled.status = ExecutorStatus.CLOSED
     pulled.state.state = OrderStates.DONE
     pulled.state.close_type = "early_stop"
@@ -236,7 +235,7 @@ def test_provider_sees_prior_session_executors_and_holdings(tmp_path, monkeypatc
     monkeypatch.setattr(service, "_runtime", SimpleNamespace(store=store))
 
     # Session 2 (fresh id) must still see both the survivor and the holding.
-    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="wc_2"))
+    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="wc_2", agent_slug="wc"))
     rows = {e["id"]: e for e in result.data["executors"]}
     assert "pos_old" in rows, "prior-session open executor must stay visible"
     assert rows["pos_old"]["owner"] == "wc_1"
@@ -254,14 +253,14 @@ def test_provider_typed_rows_for_pred_orders(tmp_path, monkeypatch):
 
     store = ExecutorLog(tmp_path)
     resting = OrderExecutor(
-        "ord_resting", _pred_config(agent_id="wc_1", position="SHORT"), SimpleNamespace(), store
+        "ord_resting", _pred_config(agent_slug="wc", agent_id="wc_1", position="SHORT"), SimpleNamespace(), store
     )
     resting.status = ExecutorStatus.ACTIVE
     resting.state.state = OrderStates.RESTING
     store.save(resting)
 
     monkeypatch.setattr(service, "_runtime", SimpleNamespace(store=store))
-    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="wc_1"))
+    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="wc_1", agent_slug="wc"))
     (row,) = result.data["executors"]
     assert row["pair"] == "world-cup-winner:No"  # not "?-?"
     assert row["side"] == "SHORT"
@@ -339,11 +338,10 @@ def test_engine_stop_defaults_to_detach(monkeypatch):
     eng = SimpleNamespace(
         config={},
         agent_id="mm_1",
-        journal=None,
         _task=None,
         _active_client=None,
         _running=False,
-        _finalize_meta=lambda status: None,
+        _end_run=lambda status, reason="": None,
     )
     asyncio.run(engine_mod.TickEngine.stop(eng))
     assert calls["keep_position"] is True
@@ -354,14 +352,14 @@ def test_engine_stop_defaults_to_detach(monkeypatch):
 
 def _make_engine(tmp_path, monkeypatch):
     from condor.agents import agent as agent_module
-    from condor.agents import journal as journal_module
     from condor.agents.agent import Agent
     from condor.agents.engine import TickEngine
+    from condor.agents.runstore import RunStore, set_run_store
 
     root = tmp_path / "agents"
     root.mkdir(exist_ok=True)
     monkeypatch.setattr(agent_module, "_DATA_ROOT", root)
-    monkeypatch.setattr(journal_module, "_DATA_ROOT", root)
+    set_run_store(RunStore(root=root))
     agent = Agent(
         slug="acme", name="Acme", agent_key="claude-code", server_required=False
     )
@@ -397,7 +395,7 @@ def test_directives_survive_failed_tick_and_clear_on_success(tmp_path, monkeypat
 
     async def ok(agent, prompt, **kw):
         seen["prompt"] = prompt
-        return SimpleNamespace(text="done", tool_calls=[])
+        return SimpleNamespace(text="done", tool_calls=[], timed_out=False)
 
     monkeypatch.setattr(engine_mod, "run_agent", ok)
     asyncio.run(engine._tick())

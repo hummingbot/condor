@@ -52,6 +52,8 @@ async def start_session(
     trading_context: str = "",
     chat_id: int = 0,
     user_id: int = 0,
+    kind: str = "",
+    scheduled_for: str = "",
 ) -> dict:
     from condor.agents.agent import AgentStore
     from condor.agents.config import merge_launch_config, normalize_config
@@ -97,7 +99,12 @@ async def start_session(
 
     try:
         engine = TickEngine(
-            agent=agent, config=config_dict, chat_id=chat_id, user_id=user_id
+            agent=agent,
+            config=config_dict,
+            chat_id=chat_id,
+            user_id=user_id,
+            kind_override=kind,
+            scheduled_for=scheduled_for,
         )
     except SpecValidationError as e:
         raise LifecycleError(422, str(e))

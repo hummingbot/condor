@@ -13,7 +13,6 @@ from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
     executors as executors_tool,
     memory,
-    notes,
     notification,
     routines,
     servers,
@@ -213,6 +212,56 @@ async def get_notifications(
 
 
 @mcp.tool()
+@handle_errors("resolve approval")
+async def resolve_approval(
+    approval_id: str,
+    decision: str,
+    note: str = "",
+) -> dict:
+    """Resolve a pending trade/tool approval (approve or deny).
+
+    Agent runs surface dangerous tool calls as ``kind=approval``
+    notifications carrying an approval_id; the run blocks (default DENY
+    after the timeout) until a human answers. Relay the question to the
+    user, then call this with their decision. Resolution is idempotent —
+    double-resolves and resolves after the run consumed the grant are
+    no-ops reporting the recorded state.
+
+    Args:
+        approval_id: The id from the approval notification.
+        decision: "approve" or "deny".
+        note: Optional human note recorded with the decision.
+
+    Returns:
+        The approval record including the recorded decision and channel.
+    """
+    from mcp_servers.condor.condor_client import call_control
+
+    return await call_control(
+        "approval.resolve",
+        {
+            "approval_id": approval_id,
+            "decision": decision,
+            "note": note,
+            "channel": "mcp",
+        },
+    )
+
+
+@mcp.tool()
+@handle_errors("list approvals")
+async def list_approvals() -> dict:
+    """List approvals still awaiting a human decision.
+
+    Returns:
+        {"approvals": [{approval_id, run_id, agent_slug, summary, ...}]}
+    """
+    from mcp_servers.condor.condor_client import call_control
+
+    return await call_control("approval.list")
+
+
+@mcp.tool()
 @handle_errors("manage routines")
 async def manage_routines(
     action: str,
@@ -226,10 +275,13 @@ async def manage_routines(
     Actions -- Discovery & Execution:
     - "list": List all available routines with name, description, type, and scope
     - "describe": Show config schema for a routine (requires name)
-    - "run": Execute a one-shot routine and return its result (requires name, optional config)
-    - "start": Start a continuous routine as a background task (requires name, optional config)
-    - "stop": Stop a running routine instance (requires name=instance_id)
-    - "list_instances": List all running/scheduled routine instances
+    - "run": Execute a one-shot routine in a disposable worker and return its
+      result (requires name, optional config; hard 120s timeout)
+    - "schedule_routine": Create a durable cron schedule for a routine
+      (requires name; config carries "cron" (5-field) and optional "tz",
+      remaining keys are the routine config). Missed fires are skipped.
+    - "unschedule_routine": Remove a schedule (pass the schedule_id as name)
+    - "list_schedules": List durable routine schedules
 
     Actions -- Agent-Local Routine CRUD (requires agent_slug or CONDOR_AGENT_SLUG):
     - "create_routine": Create a new agent-local routine (requires name, code)
@@ -243,8 +295,10 @@ async def manage_routines(
 
     Args:
         action: The action to perform.
-        name: Routine name (required for all except list/list_instances). For "stop", pass the instance_id as name.
-        config: Config overrides for run/start (optional, merged with defaults).
+        name: Routine name (required for all except list/list_schedules).
+            For "unschedule_routine", pass the schedule_id as name.
+        config: Config overrides for run/schedule (optional, merged with
+            defaults; for schedule_routine also carries "cron"/"tz").
         agent_slug: Target agent for agent-local routine CRUD operations.
         code: Python source code for create_routine / edit_routine.
 
@@ -659,35 +713,6 @@ async def manage_skill(
     )
 
 
-@mcp.tool()
-@handle_errors("manage notes")
-async def manage_notes(
-    action: str,
-    key: str | None = None,
-    value: str | None = None,
-) -> dict:
-    """DEPRECATED — use manage_memory instead.
-
-    Thin alias kept for one release: "set"->write (type="reference"), "get"->read,
-    "list"->list, "delete"->delete. New code should call manage_memory directly.
-
-    Actions:
-    - "list": List all saved notes
-    - "get": Get a specific note (requires key)
-    - "set": Save a note (requires key and value)
-    - "delete": Delete a note (requires key)
-
-    Args:
-        action: The action to perform (list, get, set, delete)
-        key: The note key (required for get, set, delete)
-        value: The note value (required for set)
-
-    Returns:
-        Action-specific result dict.
-    """
-    return await notes.manage_notes(action, key, value)
-
-
 # ---------------------------------------------------------------------------
 # Trading-agent journal tools — the canonical interface live tick prompts call
 # directly (see condor/agents/prompts.py). Kept as dedicated top-level tools
@@ -758,7 +783,7 @@ async def trading_agent_journal_write(
     Returns:
         {"written": true}
     """
-    return trading_agent.journal_write(
+    return await trading_agent.journal_write(
         agent_id,
         entry_type,
         text,

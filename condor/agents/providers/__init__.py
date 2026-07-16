@@ -45,7 +45,7 @@ class ProviderRegistry:
     """Convenience wrapper used by TickEngine."""
 
     async def run_core_providers(
-        self, client: Any, config: dict, agent_id: str = ""
+        self, client: Any, config: dict, agent_id: str = "", agent_slug: str = ""
     ) -> dict[str, ProviderResult]:
         """Run all core providers and return {name: ProviderResult} dict."""
         if not _REGISTRY:
@@ -54,7 +54,9 @@ class ProviderRegistry:
         results: dict[str, ProviderResult] = {}
         for provider in list_core_providers():
             try:
-                result = await provider.execute(client, config, agent_id=agent_id)
+                result = await provider.execute(
+                    client, config, agent_id=agent_id, agent_slug=agent_slug
+                )
                 results[result.name] = result
             except Exception:
                 log.exception("Core provider %s failed", provider.name)

@@ -164,19 +164,6 @@ class _FakeClient:
         self.executors = _FakeExecutorsAPI(positions_sequence)
 
 
-class _FakeJournal:
-    def __init__(self):
-        self.tick_count = 0
-        self.actions = []
-        self.ticks = []
-
-    def append_action(self, tick, action, reasoning, risk_note=""):
-        self.actions.append((action, reasoning))
-
-    def record_tick(self, summary="", actions=0):
-        self.ticks.append(summary)
-        self.tick_count += 1
-        return self.tick_count
 
 
 def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
@@ -185,7 +172,7 @@ def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
     agent = _make_agent(tmp_path, monkeypatch)
 
     class _Registry:
-        async def run_core_providers(self, client, config, agent_id=""):
+        async def run_core_providers(self, client, config, agent_id="", agent_slug=""):
             return {"executors": SimpleNamespace(data={"executors": running_executors})}
 
     client = _FakeClient(positions_sequence)
@@ -197,15 +184,18 @@ def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
     async def _get_client():
         return client
 
+    decisions = []
+
     engine = SimpleNamespace(
         agent=agent,
-        agent_id="acme_1",
+        agent_id="01JZX5B7Q2K4N8P1T3V5W7Y9ZB",
         config={},
-        journal=_FakeJournal(),
         provider_registry=_Registry(),
         _last_skill_data={"executors": running_executors},
         _get_client=_get_client,
         _notify=_notify,
+        record_decision=lambda action, note="": decisions.append((action, note)),
+        decisions=decisions,
     )
     return engine, client, notifications
 
@@ -224,9 +214,7 @@ def test_winddown_keep_spot_close_perp(tmp_path, monkeypatch):
     assert calls["e_spot"] is True  # spot kept
     assert any("complete" in n for n in notes)
     assert not any("🚨" in n for n in notes)
-    assert ("shutdown_done", "stopped=2, failures=0, verify=flat") in [
-        (a, r) for a, r in engine.journal.actions
-    ]
+    assert ("shutdown_done", "stopped=2, failures=0, verify=flat") in engine.decisions
 
 
 def test_winddown_flatten_all_closes_everything(tmp_path, monkeypatch):
@@ -287,11 +275,9 @@ def test_run_shutdown_idempotent(monkeypatch):
         _paused=False,
         _task=None,
         _active_client=None,
-        journal=None,
-        session_dir=None,
-        agent_id="acme_1",
+        agent_id="01JZX5B7Q2K4N8P1T3V5W7Y9ZB",
         _notify=_notify,
-        _finalize_meta=lambda status: None,
+        _end_run=lambda status, reason="": None,
     )
 
     async def _drive():

@@ -30,7 +30,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable, Optional
 
-from condor.executors.records import ExecutorRecord, slug_from_run_id
+from condor.executors.records import ExecutorRecord
 
 if TYPE_CHECKING:
     from condor.executors.base import ExecutorBase
@@ -132,10 +132,16 @@ class ExecutorLog:
         model this is called on transitions, not every tick.
         """
         status = executor.status.value
-        # Derive the slug (config value, else from the run id) — this is both the
-        # file it's routed to and the agent_slug recorded, so a record always
-        # reflects where it lives (parity with the old store's backfill).
-        slug = executor.config.agent_slug or slug_from_run_id(executor.config.agent_id)
+        # The slug routes the record to its agent's log file. Run ids are
+        # opaque ULIDs (§7.1) — nothing derives a slug from one, so an
+        # attributed executor must carry its agent_slug explicitly.
+        slug = executor.config.agent_slug
+        if executor.config.agent_id and not slug:
+            raise ValueError(
+                f"executor {executor.id} carries agent_id "
+                f"{executor.config.agent_id!r} without agent_slug — run ids "
+                "are opaque; attribution requires the explicit slug"
+            )
         obj = {
             "ts": time.time(),
             "event": self._event_for_status(status),
@@ -198,10 +204,13 @@ class ExecutorLog:
         return out
 
     def load_by_agent(self, agent_id: str, limit: int = 100) -> list[ExecutorRecord]:
-        slug = slug_from_run_id(agent_id)
+        """Records attributed to one run id. Run ids are opaque (no slug is
+        derivable), so this scans every agent's log — the per-slug fan-out is
+        small and the fold is already file-local."""
         recs = [
             r
-            for r in self._fold(self._read(self._path_for_slug(slug))).values()
+            for path in self._all_paths()
+            for r in self._fold(self._read(path)).values()
             if r.agent_id == agent_id
         ]
         recs.sort(key=lambda r: r.created_at, reverse=True)

@@ -9,7 +9,6 @@ from condor.executors.base import ExecutorStatus
 from condor.executors.performance import GROUP_KEYS, aggregate_performance
 from condor.executors.position import PositionSpotConfig, PositionExecutor, PositionStates
 from condor.executors.log import ExecutorLog
-from condor.executors.records import slug_from_run_id
 
 WALLET = "82SggYRE2Vo4jN4a2pk3aQ4SET4ctafZJGbowmCqyHx5"
 GW = SimpleNamespace()
@@ -87,11 +86,6 @@ def test_perp_and_pred_realized_pnl_in_rollup(tmp_path):
     assert rows["world_cup"]["win_rate"] == pytest.approx(1.0)
 
 
-def test_slug_derivation():
-    assert slug_from_run_id("range_trader_2") == "range_trader"
-    assert slug_from_run_id("memecoin_trender-d2") == "memecoin_trender"
-    assert slug_from_run_id("mm_expert_e3") == "mm_expert"
-    assert slug_from_run_id("bare_slug") == "bare_slug"
 
 
 def test_store_persists_attribution_trio(tmp_path):
@@ -103,11 +97,12 @@ def test_store_persists_attribution_trio(tmp_path):
         "range_trader", "range_trader_2", "range_rebalance")
 
 
-def test_store_derives_slug_when_missing(tmp_path):
+def test_store_rejects_run_id_without_slug(tmp_path):
+    # Run ids are opaque ULIDs (§7.1): nothing derives a slug, so an
+    # attributed executor must carry agent_slug explicitly.
     store = ExecutorLog(tmp_path)
-    position(store, "pos_1", agent_id="range_trader-d1")  # no slug given
-    assert store.load("pos_1").agent_slug == "range_trader"
-    assert store.load_by_slug("range_trader")[0].id == "pos_1"
+    with pytest.raises(ValueError, match="without agent_slug"):
+        position(store, "pos_1", agent_id="01JZX5B7Q2K4N8P1T3V5W7Y9ZB")
 
 
 def _seeded(tmp_path) -> ExecutorLog:

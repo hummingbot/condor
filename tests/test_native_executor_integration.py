@@ -143,8 +143,8 @@ def test_risk_gate_experiment_blocks_native_create():
 def test_store_agent_id_filter(tmp_path):
     store = ExecutorLog(tmp_path)
     gw = SimpleNamespace()
-    a = PositionExecutor("pos_a", pos_config(agent_id="agent_x_1"), gw, store)
-    b = PositionExecutor("pos_b", pos_config(agent_id="agent_y_1"), gw, store)
+    a = PositionExecutor("pos_a", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store)
+    b = PositionExecutor("pos_b", pos_config(agent_slug="agent_y", agent_id="agent_y_1"), gw, store)
     store.save(a)
     store.save(b)
     mine = store.load_by_agent("agent_x_1")
@@ -156,7 +156,7 @@ def _seed_store(tmp_path) -> ExecutorLog:
     store = ExecutorLog(tmp_path)
     gw = SimpleNamespace()
 
-    open_ex = PositionExecutor("pos_open", pos_config(agent_id="agent_x_1"), gw, store)
+    open_ex = PositionExecutor("pos_open", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store)
     open_ex.status = ExecutorStatus.ACTIVE
     open_ex.state.state = PositionStates.ACTIVE
     open_ex.state.size = Decimal("0.01")
@@ -165,7 +165,7 @@ def _seed_store(tmp_path) -> ExecutorLog:
     open_ex.state.mark_price = Decimal("110")
     store.save(open_ex)
 
-    closed = PositionExecutor("pos_closed", pos_config(agent_id="agent_x_1"), gw, store)
+    closed = PositionExecutor("pos_closed", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store)
     closed.status = ExecutorStatus.CLOSED
     closed.state.state = PositionStates.COMPLETE
     closed.state.amount_spent = Decimal("1")
@@ -182,7 +182,7 @@ def test_native_provider_reports_exposure_and_unrealized(tmp_path, monkeypatch):
         service, "_runtime", SimpleNamespace(store=store, gateway=SimpleNamespace())
     )
 
-    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="agent_x_1"))
+    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="agent_x_1", agent_slug="agent_x"))
     assert result.data["open_count"] == 1
     # open notional at cost basis: quote_spent = 1
     assert result.data["total_exposure"] == pytest.approx(1.0)
@@ -201,7 +201,7 @@ def test_native_provider_reads_live_pnl_after_deduped_poll(tmp_path, monkeypatch
     store = ExecutorLog(tmp_path)
     ex = PositionExecutor(
         "pos_live_mark",
-        pos_config(agent_id="agent_x_1"),
+        pos_config(agent_slug="agent_x", agent_id="agent_x_1"),
         SimpleNamespace(),
         store,
     )
@@ -223,7 +223,7 @@ def test_native_provider_reads_live_pnl_after_deduped_poll(tmp_path, monkeypatch
     )
 
     result = asyncio.run(
-        NativeExecutorsProvider().execute(None, {}, agent_id="agent_x_1")
+        NativeExecutorsProvider().execute(None, {}, agent_id="agent_x_1", agent_slug="agent_x")
     )
     assert result.data["unrealized_pnl"] == pytest.approx(0.1)
 
@@ -274,7 +274,7 @@ def test_filled_order_perp_inventory_remains_risk_exposure(tmp_path, monkeypatch
 
     result = asyncio.run(
         NativeExecutorsProvider().execute(
-            None, {}, agent_id="perp_market_maker_1"
+            None, {}, agent_id="perp_market_maker_1", agent_slug="perp_market_maker"
         )
     )
     assert result.data["total_exposure"] == pytest.approx(20.0)

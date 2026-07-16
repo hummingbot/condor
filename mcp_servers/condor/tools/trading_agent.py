@@ -8,7 +8,7 @@ running-engine checks, spec validation) exactly once (§5.2). Journal and
 monitoring tools read the shared filesystem directly.
 """
 
-from mcp_servers.condor.condor_client import call_control, slug_from_agent_id
+from mcp_servers.condor.condor_client import call_control
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
 
@@ -261,10 +261,11 @@ async def _agent_lifecycle(
                 "resume_agent": "resume",
                 "shutdown_agent": "shutdown",
             }[action]
-            slug = slug_from_agent_id(agent_id)
+            # Run ids are opaque (§7.1): the handler selects the engine by
+            # agent_id; the slug only matters for slug-wide verbs without one.
             return await call_control(
                 "agent.verb",
-                {"slug": slug, "verb": verb, "agent_id": agent_id},
+                {"slug": settings.agent_slug or "", "verb": verb, "agent_id": agent_id},
             )
 
         return {"error": f"Unknown lifecycle action: {action}"}
@@ -273,101 +274,79 @@ async def _agent_lifecycle(
 
 
 # ---------------------------------------------------------------------------
-# Journal read/write
+# Journal read/write — projections over the RunStore stream (§7.1)
+#
+# Reads fold the run's event stream directly (read-only file access); writes
+# go over the control socket ("run.emit") — the main process owns the one
+# serialized writer per run. Learnings are agent-level curated memory
+# (agents/{slug}/learnings.md), written via the flock'd learnings module.
 # ---------------------------------------------------------------------------
 
 
-def _resolve_journal_manager(agent_id: str):
-    """Get JournalManager for an agent, returns (jm, error_dict)."""
-    from condor.agents.engine import get_engine
-    from condor.agents.journal import JournalManager
+def _run_events(agent_id: str):
+    """(slug, events) for a run id, or (None, None) when unknown."""
+    from condor.agents.runstore import get_run_store
 
-    engine = get_engine(agent_id)
-    if engine:
-        if engine.is_experiment:
-            return None, {
-                "content": "(experiment mode — no journal, results saved to experiments/)"
-            }
-        session_dir = engine.session_dir
-        agent_dir = engine.agent.agent_dir
-    else:
-        from condor.agents.journal import resolve_agent_dirs
-
-        session_dir, agent_dir = resolve_agent_dirs(agent_id)
-    if not session_dir:
-        return None, {"content": "(no journal available for this agent)"}
-    return JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir), None
-
-
-def _resolve_experiment_file(agent_id: str):
-    """For an experiment agent_id ("{slug}_eN"), locate its saved snapshot.
-
-    Experiments keep no journal — the tick is saved as a flat
-    ``experiments/{date}-eN.md``. Returns (path | None, num | None); num is
-    set even when the file isn't on disk yet so callers can distinguish
-    "experiment in progress" from "not an experiment".
-    """
-    from condor.agents.journal import resolve_agent_dirs, split_agent_id
-    from condor.agents.sessions_index import find_experiment_file
-
-    parsed = split_agent_id(agent_id)
-    if parsed is None or not parsed[2]:
+    store = get_run_store()
+    path = store.find_run_path(agent_id)
+    if path is None:
         return None, None
-    num = parsed[1]
+    slug = path.parent.parent.name
+    return slug, store.read_events(slug, agent_id)
 
-    _, agent_dir = resolve_agent_dirs(agent_id)
-    if agent_dir is None:
-        return None, num
-    return find_experiment_file(agent_dir, num), num
+
+def _agent_dir_for(agent_ref: str):
+    """Agent dir for a slug (or a run id, resolved to its slug)."""
+    from condor.agents.agent import AgentStore
+
+    agent = AgentStore().get(agent_ref)
+    if agent is not None:
+        return agent.agent_dir
+    slug, _ = _run_events(agent_ref)
+    if slug is None:
+        return None
+    agent = AgentStore().get(slug)
+    return agent.agent_dir if agent is not None else None
 
 
 def journal_read(agent_id: str, section: str = "recent", max_entries: int = 30) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
 
-    # Experiments have no journal — surface the saved experiment
-    # snapshot instead of the misleading "no journal available" error.
-    exp_path, exp_num = _resolve_experiment_file(agent_id)
-    if exp_num is not None:
-        if exp_path is None:
-            return {
-                "content": f"(experiment #{exp_num} — no saved snapshot yet; "
-                "the run may still be in progress)"
-            }
-        content = exp_path.read_text()
-        if section == "runs":
-            return {"runs": [{"experiment": exp_num, "file": exp_path.name}]}
-        return {"content": content}
+    slug, events = _run_events(agent_id)
+    if events is None:
+        return {"error": f"unknown run '{agent_id}'"}
 
-    jm, err = _resolve_journal_manager(agent_id)
-    if err:
-        return err
+    from condor.agents.learnings import read_learnings
+    from condor.agents.projections import run_projection
 
+    if section == "learnings":
+        agent_dir = _agent_dir_for(slug)
+        return {"content": read_learnings(agent_dir) if agent_dir else ""}
+
+    proj = run_projection(events)
+    if section in ("state", "summary"):
+        return {"content": proj["state"] or "(no state recorded yet)"}
     if section == "full":
-        return {"content": jm.read_full()}
-    elif section == "learnings":
-        return {"content": jm.read_learnings()}
-    elif section in ("state", "summary"):
-        return {"content": jm.read_state()}
-    elif section == "runs":
-        runs = jm.list_snapshots(limit=max_entries)
-        return {"runs": runs}
-    elif section.startswith("run:"):
-        try:
-            tick_num = int(section.split(":", 1)[1])
-        except (ValueError, IndexError):
-            return {
-                "error": "Invalid run format. Use 'run:N' where N is the tick number."
-            }
-        content = jm.read_snapshot(tick_num)
-        if not content:
-            return {"error": f"No run snapshot found for tick #{tick_num}"}
-        return {"content": content}
-    else:
-        return {"content": jm.read_recent(max_entries=max_entries)}
+        from condor.agents.exports import render_run_markdown
+        from condor.agents.runstore import get_run_store
+
+        meta = get_run_store().run_meta(slug, agent_id)
+        return {"content": render_run_markdown(meta, events)}
+    if section == "runs":
+        from condor.agents.runstore import get_run_store
+
+        return {"runs": get_run_store().list_runs(slug, limit=max_entries)}
+    # default: recent decisions + last state
+    parts = []
+    if proj["recent_decisions"]:
+        parts.append(proj["recent_decisions"])
+    if proj["state"]:
+        parts.append(f"State: {proj['state']}")
+    return {"content": "\n".join(parts) or "(no entries yet)"}
 
 
-def journal_write(
+async def journal_write(
     agent_id: str,
     entry_type: str,
     text: str,
@@ -381,66 +360,48 @@ def journal_write(
     if not text:
         return {"error": "text is required"}
 
-    if entry_type == "promote_learning":
-        # Learnings live at the AGENT level, so promotion takes the bare agent
-        # slug — no session handle required (a session id also resolves, for
-        # convenience). Moves the matched line to the Promoted section after
-        # it was folded into a skill (frees the active-pool cap, keeps the
-        # record).
-        from condor.agents.agent import AgentStore
-        from condor.agents.journal import promote_agent_learning, split_agent_id
+    if entry_type == "learning":
+        # Agent-level curated memory — direct flock'd file append (the
+        # single-writer rule covers RUN streams; learnings are agent memory,
+        # same trust boundary as the memory tools).
+        from condor.agents.learnings import append_learning
 
-        parsed = split_agent_id(agent_id)
-        slug = parsed[0] if parsed else agent_id
-        target = AgentStore().get(slug)
-        if target is None:
-            return {"error": f"unknown agent '{slug}'"}
-        ok = promote_agent_learning(target.agent_dir, text)
-        return {"promoted": ok} if ok else {
-            "error": "no active learning matched that text — copy it exactly "
-            "from the [LEARNINGS] block"
+        agent_dir = _agent_dir_for(settings.agent_slug or agent_id)
+        if agent_dir is None:
+            return {"error": f"unknown agent for '{agent_id}'"}
+        append_learning(agent_dir, text)
+        return {"written": True}
+
+    if entry_type == "promote_learning":
+        return {
+            "error": "promote_learning was removed (§7.1) — learnings are a "
+            "flat curated list now; just append the distilled form"
         }
 
-    from condor.agents.engine import get_engine
-    from condor.agents.journal import JournalManager
-
-    engine = get_engine(agent_id)
-    if engine:
-        if engine.is_experiment:
-            # Experiments keep no journal — the whole tick is captured in
-            # the experiment snapshot. Treat a stray write as a benign
-            # skip so it never derails the (possibly live) run_once tick.
-            return {
-                "skipped": "experiment mode — no journal; the tick is saved as an experiment snapshot"
-            }
-        session_dir = engine.session_dir
-        agent_dir = engine.agent.agent_dir
-    else:
-        from condor.agents.journal import resolve_agent_dirs
-
-        session_dir, agent_dir = resolve_agent_dirs(agent_id)
-        # resolve_agent_dirs returns (None, agent_dir) for an experiment id
-        # ("{slug}_eN") but (None, None) for a genuinely unknown agent. Skip
-        # benignly for the former, error for the latter.
-        if session_dir is None and agent_dir is not None:
-            return {
-                "skipped": "experiment mode — no journal; the tick is saved as an experiment snapshot"
-            }
-    if not session_dir:
-        return {"error": "no journal available for this agent"}
-    jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
-
-    if entry_type == "learning":
-        jm.append_learning(text, category=category or "market")
-    elif entry_type == "state":
-        jm.write_state(text)
-    else:
-        jm.append_action(tick, text, reasoning, risk_note)
+    # state / decision entries → run events over the control socket (the
+    # main process owns the one serialized writer per run).
+    payload = {"state": text} if entry_type == "state" else {
+        "decision": text if not reasoning else f"{text} — {reasoning}"
+    }
+    if risk_note:
+        payload["risk_note"] = risk_note
+    try:
+        await call_control(
+            "run.emit",
+            {
+                "run_id": agent_id,
+                "type": "state_snapshot",
+                "payload": payload,
+                "tick": tick or None,
+            },
+        )
+    except APIError as e:
+        return {"error": str(e)}
     return {"written": True}
 
 
 # ---------------------------------------------------------------------------
-# Agent monitoring (file-based)
+# Agent monitoring (projections over the same stream)
 # ---------------------------------------------------------------------------
 
 
@@ -448,25 +409,36 @@ def _agent_monitoring(action: str, agent_id: str | None) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
 
-    jm, err = _resolve_journal_manager(agent_id)
-    if err:
-        # For monitoring, convert experiment/missing journal to error
-        if "experiment" in str(err.get("content", "")):
-            return {
-                "error": "experiments don't have a journal — use experiments/ for results"
-            }
-        return {"error": "no journal available for this agent"}
+    slug, events = _run_events(agent_id)
+    if events is None:
+        return {"error": f"unknown run '{agent_id}'"}
+
+    from condor.agents.learnings import read_learnings
+    from condor.agents.projections import run_projection
+
+    proj = run_projection(events)
 
     if action == "agent_tracker":
-        content = jm.read_full()
-        summary = jm.get_summary_dict()
-        return {"tracker_md": content, "summary": summary}
+        from condor.agents.exports import render_run_markdown
+        from condor.agents.runstore import get_run_store
 
-    elif action == "agent_journal":
+        meta = get_run_store().run_meta(slug, agent_id)
+        summary = {
+            "total_ticks": proj["tick_count"],
+            "tool_calls": proj["tool_calls"],
+            "status": meta.get("status"),
+            "kind": meta.get("kind"),
+        }
+        if proj["metrics_series"]:
+            summary.update(proj["metrics_series"][-1])
+        return {"tracker_md": render_run_markdown(meta, events), "summary": summary}
+
+    if action == "agent_journal":
+        agent_dir = _agent_dir_for(slug)
         return {
-            "recent_actions": jm.read_recent(max_entries=30),
-            "learnings": jm.read_learnings(),
-            "entry_count": jm.entry_count(),
+            "recent_actions": proj["recent_decisions"],
+            "learnings": read_learnings(agent_dir) if agent_dir else "",
+            "entry_count": proj["tick_count"],
         }
 
     return {"error": f"Unknown monitoring action: {action}"}

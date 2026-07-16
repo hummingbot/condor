@@ -17,7 +17,7 @@ class ExecutorsProvider(BaseProvider):
     is_core = True
 
     async def execute(
-        self, client: Any, config: dict, agent_id: str = ""
+        self, client: Any, config: dict, agent_id: str = "", agent_slug: str = ""
     ) -> ProviderResult:
         from condor.agents.performance import fetch_agent_performance
 

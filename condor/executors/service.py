@@ -45,22 +45,30 @@ async def start_executor_service() -> None:
     per-record and logged CRITICAL inside reconcile(); a gateway that is
     down leaves rows untouched for the next start.
     """
-    # Sessions do not survive a restart (engines are memory-only): mark any
-    # meta.yml still claiming "running" as interrupted before anything reads
-    # session statuses. Their executors are handled by reconcile() below.
+    # Runs do not survive a restart (engines are memory-only, §4.2): any
+    # run_started stream lacking run_ended gets a synthesized
+    # run_ended{interrupted}, and its pending approvals are voided
+    # (interrupted_void) — the dead run can never consume a grant. Their
+    # executors are handled by reconcile() below (§4.2 survival rule).
     try:
-        from condor.agents.agent import agents_data_root
-        from condor.agents.journal import mark_interrupted_sessions
+        from condor.agents.runstore import get_run_store
 
-        marked = mark_interrupted_sessions(agents_data_root())
-        if marked:
-            logger.warning(
-                "executor service: %d session(s) interrupted by restart: %s",
-                len(marked),
-                marked,
-            )
+        voided = get_run_store().sweep_interrupted()
+        for perm in voided:
+            try:
+                from condor.notifications import notify
+
+                await notify(
+                    f"Pending approval {perm.get('approval_id', '')} voided — "
+                    f"its run {perm.get('run_id', '')} was interrupted by "
+                    "restart; a relaunched run must re-request approval.",
+                    agent_id=perm.get("run_id", ""),
+                    kind="approval",
+                )
+            except Exception:
+                logger.exception("executor service: approval-void notify failed")
     except Exception:
-        logger.exception("executor service: interrupted-session sweep failed")
+        logger.exception("executor service: interrupted-run sweep failed")
 
     global _reconciling
     _reconciling = True

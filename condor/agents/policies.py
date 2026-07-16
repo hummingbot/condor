@@ -60,17 +60,56 @@ def deny_gate(reason: str):
     return callback
 
 
-def human_gate(chat_id: int):
-    """Route dangerous-tool confirmations to the user's chat.
+def approval_gate(run_id: str, agent_slug: str):
+    """Durable human gate (§4.2): dangerous tool calls become pending
+    ``permission`` events + a ``kind=approval`` outbox entry, resolved via
+    ``resolve_approval`` (any channel) or a dashboard button. Default deny
+    on timeout; a one-use grant keyed by executor_id survives for a same-run
+    retry of the same create."""
+    from condor.agents.confirmation import _format_tool_summary
+    from condor.agents.gating import is_dangerous_tool_call
 
-    Uses the confirmation transport the UI layer registered at startup
-    (Telegram registers its inline-keyboard renderer in main.py). When there
-    is no human to route to — no transport registered, or no usable
-    ``chat_id`` (web consults default to 0) — the gate FAILS CLOSED via
-    :func:`deny_gate`: safe reads proceed, mutations are cancelled with a
-    logged reason. It never returns ``None`` (which would silently become
-    full auto-approve).
+    async def callback(tool_call: dict, options: list[dict]) -> dict:
+        if is_dangerous_tool_call(tool_call):
+            from condor.agents.approvals import get_approval_manager
+
+            input_data = tool_call.get("input", {}) or {}
+            approved = await get_approval_manager().request(
+                run_id=run_id,
+                agent_slug=agent_slug,
+                summary=_format_tool_summary(tool_call),
+                tool_call_id=str(tool_call.get("id") or tool_call.get("tool_call_id") or ""),
+                executor_id=str(input_data.get("executor_id") or ""),
+            )
+            if not approved:
+                return {"outcome": {"outcome": "cancelled"}}
+        for opt in options:
+            if opt.get("kind") in ("allow_once", "allow_always"):
+                return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
+        if options:
+            return {
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+            }
+        return {"outcome": {"outcome": "cancelled"}}
+
+    return callback
+
+
+def human_gate(chat_id: int, *, run_id: str = "", agent_slug: str = ""):
+    """Route dangerous-tool confirmations to a human.
+
+    With a ``run_id`` (consults are runs, §7.1) the gate is the DURABLE
+    approval queue (§4.2): pending permission events + outbox surfacing +
+    ``resolve_approval``/dashboard resolution, default deny on timeout.
+
+    Without one (plain chat sessions), it falls back to the interactive
+    confirmation transport the UI layer registered at startup; with no
+    transport and no usable ``chat_id`` it FAILS CLOSED via
+    :func:`deny_gate` — never ``None`` (which would silently become full
+    auto-approve).
     """
+    if run_id:
+        return approval_gate(run_id, agent_slug)
     if not chat_id:
         return deny_gate(
             "consult has no chat to confirm in (chat_id=0); "

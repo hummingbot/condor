@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
 import { formatCurrencyPnl } from "@/lib/formatters";
-import type { MetricEntry } from "@/lib/parse-agent";
 import { getThemeColors } from "@/lib/theme-colors";
 
 interface PnlDataPoint {
@@ -206,17 +205,6 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
       </div>
     </div>
   );
-}
-
-// Helper to convert MetricEntry[] to PnlDataPoint[]
-export function metricsToDataPoints(metrics: MetricEntry[]): PnlDataPoint[] {
-  return metrics
-    .filter((m) => m.timestamp)
-    .map((m) => ({
-      time: Math.floor(new Date(m.timestamp).getTime() / 1000),
-      value: m.pnl,
-    }))
-    .sort((a, b) => a.time - b.time);
 }
 
 // Helper to convert session-level performance to PnlDataPoints (aggregate)

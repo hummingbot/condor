@@ -13,21 +13,19 @@ primitive under an unattended policy (refactor-02 §4.1):
   auto-approve *within caps* (the caps act as a per-run budget), uncapped bot
   deploys and ``place_order`` are blocked. "Trading" means: needs a hummingbot
   server, OR carries an AGENT.md ``risk_limits:`` baseline, OR the caller
-  passed caps — serverless agents can trade via condor-native executors, so
-  ``server_required`` alone is not the test. The limits come from the per-call
-  ``risk_limits`` override when given (it REPLACES the baseline — what you
-  pass is exactly what governs), else the baseline. A server-backed
-  delegation with NEITHER errors loudly at start.
+  passed caps. The limits come from the per-call ``risk_limits`` override when
+  given (it REPLACES the baseline — what you pass is exactly what governs),
+  else the baseline. A server-backed delegation with NEITHER errors loudly at
+  start.
 - **Serverless specialists with no baseline** (e.g. ``routine_builder``) keep
   full auto-approve.
 
 The in-memory registry dies with the process, like a running ``TickEngine`` in
-``_engines``. Each delegation is persisted as ONE flat transcript file,
-``agents/{slug}/delegations/{date}-dN.md`` (refactor-07): written at start
-with ``Status: running`` — a crash leaves an inspectable husk — and rewritten
-in ``finally`` with the full transcript and terminal status. Delegations are
-NOT sessions: they own no journal, carry no state, and never consume a
-session number.
+``_engines``. Each delegation is persisted as a ``kind: delegation`` RunStore
+stream (§7.1): ``run_started`` lands before the run (a crash leaves an
+inspectable stream that the startup sweep closes as interrupted), tool calls
+stream in as they land, and ``run_ended`` carries the terminal status. The
+markdown transcript is a generated export, never parsed back.
 """
 
 from __future__ import annotations
@@ -36,7 +34,6 @@ import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
@@ -49,13 +46,12 @@ DEFAULT_TIMEOUT_S = 900
 
 @dataclass
 class DelegateTask:
-    task_id: str  # "{agent_slug}-d{N}" — its own namespace, not a session id
+    task_id: str  # the RunStore run_id (opaque ULID)
     agent_slug: str
     user_id: int
     chat_id: int
     server_name: str | None
     task: str
-    file_path: Path | None = None  # delegations/{date}-dN.md transcript
     started_at: str = ""
     ended_at: str = ""
     risk_limits: dict | None = None  # per-call override; None → agent baseline
@@ -70,6 +66,7 @@ class DelegateTask:
     def to_dict(self) -> dict:
         return {
             "task_id": self.task_id,
+            "run_id": self.task_id,
             "agent": self.agent_slug,
             "user_id": self.user_id,
             "chat_id": self.chat_id,
@@ -133,15 +130,15 @@ async def start_delegation(
 ) -> DelegateTask:
     """Create a DelegateTask, spawn the detached runner, register it, return now.
 
-    Returns immediately -- the caller gets a ``task_id`` to poll/stop while the
-    agent works in the background.
+    Returns immediately -- the caller gets a ``task_id`` (the run id) to
+    poll/stop while the agent works in the background.
 
     Raises:
         ValueError: unknown agent, or a trading delegation with neither an
             AGENT.md ``risk_limits`` baseline nor a per-call override.
     """
     from condor.agents.agent import AgentStore
-    from condor.agents.journal import allocate_delegation_file
+    from condor.agents.runstore import get_run_store
 
     agent = AgentStore().get(agent_slug)
     if agent is None:
@@ -152,20 +149,28 @@ async def start_delegation(
     effective_limits = _resolve_delegation_limits(agent, risk_limits)
 
     started_at = datetime.now(timezone.utc).isoformat()
-    num, file_path = allocate_delegation_file(agent.agent_dir, started_at)
+    # run_started persists BEFORE the run: a crash mid-delegation leaves a
+    # stream the startup sweep closes as interrupted — the inspectable husk.
+    run_id = get_run_store().start_run(
+        agent_slug,
+        "delegation",
+        payload={
+            "task": task,
+            "model": agent.agent_key,
+            "risk_limits": effective_limits or {},
+            "server": server_name or "",
+        },
+    )
     dt = DelegateTask(
-        task_id=f"{agent_slug}-d{num}",
+        task_id=run_id,
         agent_slug=agent_slug,
         user_id=user_id,
         chat_id=chat_id,
         server_name=server_name,
         task=task,
-        file_path=file_path,
         started_at=started_at,
         risk_limits=effective_limits,
     )
-    # Start-husk: written before the run so a crash leaves an inspectable record.
-    _write_transcript(dt)
     _delegations[dt.task_id] = dt
     dt._task = asyncio.create_task(_run(dt, agent, bot, timeout_s))
     return dt
@@ -175,7 +180,7 @@ def _make_event_sink(dt: DelegateTask):
     """Build a callback that folds streamed events into ``dt.events`` live.
 
     ``run_agent`` folds the same stream into ``RunResult.events`` for the
-    persisted transcript; this sink keeps the in-memory task record streaming
+    persisted record; this sink keeps the in-memory task record streaming
     for pollers (``delegate(action="get")``) while the run is in flight.
     """
     from condor.acp.client import (
@@ -211,9 +216,13 @@ def _make_event_sink(dt: DelegateTask):
 
 async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
     """Background runner: drive the agent to completion, persist, notify."""
+    from condor.agents.gating import is_dangerous_tool_call
     from condor.agents.policies import AUTO, risk_gate
     from condor.agents.run import run_agent
     from condor.agents.context import build_agent_context
+    from condor.agents.runstore import get_run_store
+
+    run_store = get_run_store()
 
     if dt.risk_limits is not None:
         policy = risk_gate(dt.risk_limits)  # zero-seeded: caps = per-run budget
@@ -225,6 +234,24 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
     )
     prompt = build_agent_context(agent, dt.user_id, dt.task)
 
+    def _persist_tool_call(tc: dict) -> None:
+        try:
+            run_store.emit(
+                dt.task_id,
+                "tool_call",
+                {
+                    "name": tc.get("name") or tc.get("title", ""),
+                    "status": tc.get("status", ""),
+                    "input": tc.get("input"),
+                    "output": tc.get("output"),
+                    "mutating": is_dangerous_tool_call(tc),
+                },
+                tool_call_id=str(tc.get("id") or "") or None,
+            )
+        except Exception:
+            log.exception("delegation %s: tool_call emit failed", dt.task_id)
+
+    end_status, end_reason = "completed", ""
     try:
         result = await run_agent(
             agent,
@@ -237,13 +264,14 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
             timeout_s=timeout_s,
             event_sink=_make_event_sink(dt),
             fallback_on_unhealthy=True,
-            # Executor attribution: this delegation's id is the run key
-            # ("{slug}-dN"), consistent with sessions' "{slug}_{N}".
+            # Executor attribution: the run id is the one execution key.
             agent_id=dt.task_id,
+            on_tool_call=_persist_tool_call,
         )
         if result.timed_out:
             dt.status = "error"
             dt.error = result.error
+            end_status, end_reason = "error", result.error
             log.warning("Delegation %s timed out after %ss", dt.task_id, timeout_s)
         else:
             dt.result = result.fallback_note + (
@@ -252,17 +280,21 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
             dt.status = "done"
     except asyncio.CancelledError:
         dt.status = "stopped"
+        end_status, end_reason = "stopped", "cancelled by operator"
         raise
     except Exception as e:  # noqa: BLE001 -- surface any runtime failure as task error
         dt.status = "error"
         dt.error = str(e)
+        end_status, end_reason = "error", str(e)
         log.exception("Delegation %s failed", dt.task_id)
     finally:
         dt.ended_at = datetime.now(timezone.utc).isoformat()
         try:
-            _write_transcript(dt)
+            if dt.result:
+                run_store.emit(dt.task_id, "state_snapshot", {"result": dt.result})
+            run_store.end_run(dt.task_id, end_status, end_reason)
         except Exception:
-            log.exception("Failed to persist delegation transcript for %s", dt.task_id)
+            log.exception("Failed to close delegation run %s", dt.task_id)
         if dt.status != "stopped":
             try:
                 await _notify_done(dt, bot)
@@ -280,46 +312,8 @@ async def stop_delegation(task_id: str) -> bool:
     return True
 
 
-def _write_transcript(dt: DelegateTask) -> None:
-    """Write the delegation's flat transcript file (husk at start, full at end).
-
-    The parseable header (Status/Agent/Started/…) is the delegation's only
-    metadata — there is no meta.yml. The body captures the full run: the
-    agent's reasoning, every tool call (with input/output), and the final
-    result, so nothing about *how* the task was solved is lost.
-    """
-    import json
-
-    from condor.agents.journal import render_transcript
-
-    if dt.file_path is None:
-        return
-
-    body = dt.error if dt.status == "error" else dt.result
-    tool_count = sum(1 for e in dt.events if e.get("type") == "tool")
-    session = render_transcript(dt.events)
-
-    content = (
-        f"# Delegation {dt.task_id}\n\n"
-        f"- **Status:** {dt.status}\n"
-        f"- **Agent:** {dt.agent_slug}\n"
-        f"- **Server:** {dt.server_name or '-'}\n"
-        f"- **Risk limits:** "
-        f"{json.dumps(dt.risk_limits) if dt.risk_limits else '-'}\n"
-        f"- **Started:** {dt.started_at or '-'}\n"
-        f"- **Ended:** {dt.ended_at or '-'}\n"
-        f"- **Tool calls:** {tool_count}\n\n"
-        f"## Task\n\n{dt.task}\n\n"
-        f"## Session\n\n{session or '(no events captured)'}\n\n"
-        f"## {'Error' if dt.status == 'error' else 'Result'}\n\n"
-        f"{body or '(none)'}\n"
-    )
-    dt.file_path.write_text(content)
-
-
 async def _notify_done(dt: DelegateTask, bot) -> None:
-    """Notify the user the delegation finished: outbox + Telegram mirror
-    (bot fallbacks live in condor.notifications)."""
+    """Notify the user the delegation finished (outbox chokepoint)."""
     if dt.status == "error":
         text = f"❌ Delegated task {dt.task_id} failed: {dt.error}"
     else:

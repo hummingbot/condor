@@ -134,11 +134,11 @@ def test_get_state_fails_closed_when_tracker_raises():
     assert "garbage" in state.block_reason
 
 
-def test_get_state_null_tracker_stays_unblocked():
-    """Experiments use _NullTracker, which never raises: state stays clean."""
-    from condor.agents.engine import _NullTracker
+def test_get_state_fresh_tracker_stays_unblocked():
+    """A fresh RunMetricsTracker never raises: state stays clean."""
+    from condor.agents.projections import RunMetricsTracker
 
-    state = RiskEngine(RiskLimits()).get_state(_NullTracker())
+    state = RiskEngine(RiskLimits()).get_state(RunMetricsTracker())
 
     assert not state.is_blocked
     assert state.block_reason == ""

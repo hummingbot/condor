@@ -1,18 +1,23 @@
 """TickEngine -- scheduler for autonomous trading agents.
 
-One TickEngine instance per running agent session. It no longer owns an
+One TickEngine instance per running agent run. It no longer owns an
 execution stack (refactor-02): each tick is pre-flight → ``run_agent`` →
-journal write-back. What lives here is the loop/pause/max_ticks logic, the
+RunStore write-back. What lives here is the loop/pause/max_ticks logic, the
 ``_engines`` registry entry, directive injection, the risk pre-flight, the
-post-run journal block, and the shutdown escalation hook.
+per-tick event emission, and the shutdown escalation hook.
+
+All operational history is RunStore events (§7.1) — the engine emits
+``run_started``/``tick_started``/``tool_call``/``tick_completed``/
+``state_snapshot``/``directive``/``error``/``run_ended`` on the run's
+append-only stream; markdown views are generated exports.
 
 Each tick:
 1. Pre-compute core data providers (active executors)
-2. Read journal (learnings + summary + recent decisions)
+2. Fold run context from the event stream (state + recent decisions)
 3. Risk pre-flight (soft block / hard kill-switch)
-4. Build prompt with strategy + data + risk state
+4. Build prompt with agent spec + data + risk state
 5. run_agent under a risk_gate policy (fresh client, clean context window)
-6. Save full snapshot and update journal
+6. Emit tick_completed + state_snapshot
 """
 
 from __future__ import annotations
@@ -21,39 +26,21 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any
 
 from .agent import Agent
-from .journal import (
-    JournalManager,
-    allocate_session_dir,
-    finalize_session_meta,
-    next_experiment_number,
-    write_session_meta,
-)
+from .learnings import read_learnings
+from .projections import RunMetricsTracker, run_projection
 from .prompts import build_tick_prompt
 from .providers import ProviderRegistry
-from .risk import RiskEngine, RiskLimits, RiskState, risk_gate
+from .risk import RiskEngine, RiskLimits, risk_gate
 from .run import run_agent
+from .runstore import get_run_store
 
 log = logging.getLogger(__name__)
 
-# Module-level registry of running engines
+# Module-level registry of running engines, keyed by run_id.
 _engines: dict[str, "TickEngine"] = {}
-
-
-class _NullTracker:
-    """Stub tracker for experiments (no journal)."""
-
-    def get_total_exposure(self) -> float:
-        return 0.0
-
-    def get_open_executor_count(self) -> int:
-        return 0
-
-    def get_drawdown_pct(self) -> float:
-        return 0.0
 
 
 def get_engine(agent_id: str) -> TickEngine | None:
@@ -70,24 +57,29 @@ class TickEngine:
     config: dict[str, Any]
     chat_id: int
     user_id: int
+    # "scheduled" marks a schedule-triggered launch (§5.4); the fire time is
+    # persisted on run_started for fire-key dedup.
+    kind_override: str = ""
+    scheduled_for: str = ""
 
     # Derived identity (set in __post_init__)
-    agent_id: str = field(init=False)
-    session_num: int = field(init=False)
+    agent_id: str = field(init=False)  # the RunStore run_id (opaque ULID)
+    session_num: int = field(init=False)  # display seq from run_started
     is_experiment: bool = field(default=False, init=False)
 
     # Components (created in __post_init__)
     frozen_spec: Any = field(default=None, init=False)
-    journal: JournalManager = field(init=False)
     risk: RiskEngine = field(init=False)
+    metrics: RunMetricsTracker = field(init=False)
     provider_registry: ProviderRegistry = field(init=False)
-    session_dir: "Path | None" = field(default=None, init=False)
 
     # Runtime state
     _task: asyncio.Task | None = field(default=None, init=False, repr=False)
     _running: bool = field(default=False, init=False)
     _paused: bool = field(default=False, init=False)
     _shutting_down: bool = field(default=False, init=False)
+    _ended: bool = field(default=False, init=False)
+    _tick_count: int = field(default=0, init=False)
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
@@ -99,11 +91,8 @@ class TickEngine:
     _active_client: Any = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        # All operational state hangs off the *agent* dir (refactor-01b).
-        agent_dir = self.agent.agent_dir
-
-        # run_once is not a storage mode: it's an ordinary tick session capped
-        # at one tick — journal, frozen config, risk pre-flight, attribution.
+        # run_once is not a storage mode: it's an ordinary tick run capped
+        # at one tick — frozen config, risk pre-flight, attribution.
         if self.config.get("execution_mode") == "run_once":
             self.config["execution_mode"] = "loop"
             self.config["max_ticks"] = 1
@@ -111,9 +100,9 @@ class TickEngine:
         mode = self.config.get("execution_mode", "loop")
         self.is_experiment = mode == "experiment"
 
-        # Tick sessions whose config declares no risk_limits fall back to the
-        # agent-level baseline (AGENT.md `risk_limits:`), the same numbers that
-        # govern this agent's delegations.
+        # Tick runs whose config declares no risk_limits fall back to the
+        # agent-level baseline (AGENT.md `risk_limits:`), the same numbers
+        # that govern this agent's delegations.
         if not self.config.get("risk_limits") and self.agent.risk_limits:
             self.config["risk_limits"] = dict(self.agent.risk_limits)
 
@@ -134,46 +123,65 @@ class TickEngine:
             self.agent, self.config, source_text=source_text
         )
 
-        # agent_id == controller_id tag: "{agent_slug}_{N}" (sessions) or
-        # "{agent_slug}_e{N}" (experiments).
-        if self.is_experiment:
-            self.session_num = next_experiment_number(agent_dir)
-            self.agent_id = f"{self.agent.slug}_e{self.session_num}"
-            # Experiments: flat snapshot file, no session dir or journal
-            self.session_dir = None
-            self.journal = None
-        else:
-            self.session_num, self.session_dir = allocate_session_dir(agent_dir)
-            self.agent_id = f"{self.agent.slug}_{self.session_num}"
-
-            # Save config per session
-            from .config import save_full_config
-
-            save_full_config(self.session_dir, self.config)
-
-            meta = {
-                "status": "running",
-                "model": self._agent_key(),
-                "started_at": datetime.now(timezone.utc).isoformat(),
-            }
-            # Both spec hashes are recorded with the run (§5.3): the authored
-            # AGENT.md bytes and the frozen effective spec.
-            if self.frozen_spec is not None:
-                meta["source_spec_hash"] = self.frozen_spec.source_hash
-                meta["resolved_spec_hash"] = self.frozen_spec.resolved_hash
-            write_session_meta(self.session_dir, meta)
-
-            self.journal = JournalManager(
-                self.agent_id,
-                strategy_name=self.agent.name,
-                strategy_description=self.agent.description,
-                session_dir=self.session_dir,
-                agent_dir=agent_dir,
-            )
+        # Open the run stream: run_started carries the frozen spec, both
+        # content hashes (§5.3), and the venue in play. The run id is an
+        # opaque ULID — the legacy "{slug}_{N}" grammar is gone.
+        store = get_run_store()
+        kind = self.kind_override or ("experiment" if self.is_experiment else "session")
+        payload: dict[str, Any] = {
+            "model": self._agent_key(),
+            "frozen_spec": self.frozen_spec.to_public_dict(),
+            "source_spec_hash": self.frozen_spec.source_hash,
+            "resolved_spec_hash": self.frozen_spec.resolved_hash,
+            "venue": self.config.get("venue", ""),
+            "execution_mode": mode,
+            "risk_limits": dict(self.config.get("risk_limits") or {}),
+        }
+        if self.scheduled_for:
+            payload["scheduled_for"] = self.scheduled_for
+        self.agent_id = store.start_run(self.agent.slug, kind, payload=payload)
+        self.session_num = store.run_meta(self.agent.slug, self.agent_id).get(
+            "display_seq", 0
+        )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
         self.risk = RiskEngine(risk_limits)
+        self.metrics = RunMetricsTracker()
         self.provider_registry = ProviderRegistry()
+
+    # ------------------------------------------------------------------
+    # RunStore emission
+    # ------------------------------------------------------------------
+
+    def _emit(self, type_: str, payload: dict | None = None, **corr) -> None:
+        """Best-effort event append — persistence failures never take down
+        the trading loop (the executor store stays the financial authority)."""
+        try:
+            get_run_store().emit(self.agent_id, type_, payload, **corr)
+        except Exception:
+            log.exception("TickEngine %s: run event emit failed (%s)", self.agent_id, type_)
+
+    def _end_run(self, status: str, reason: str = "") -> None:
+        if self._ended:
+            return
+        self._ended = True
+        try:
+            # A run's pending approvals die with it (§4.2) — the grant could
+            # never be consumed by a run that no longer exists.
+            from condor.agents.approvals import get_approval_manager
+
+            get_approval_manager().void_run(self.agent_id)
+        except Exception:
+            log.exception("TickEngine %s: approval voiding failed", self.agent_id)
+        try:
+            get_run_store().end_run(self.agent_id, status, reason)
+        except Exception:
+            log.exception("TickEngine %s: run_ended emit failed", self.agent_id)
+
+    def record_decision(self, action: str, note: str = "") -> None:
+        """Durable one-line decision entry (shutdown journal replacement)."""
+        text = action if not note else f"{action} — {note}"
+        self._emit("state_snapshot", {"decision": text}, tick=self._tick_count or None)
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -188,19 +196,12 @@ class TickEngine:
         self._task = asyncio.create_task(self._loop())
         _engines[self.agent_id] = self
         log.info(
-            "TickEngine %s started (freq=%ss)",
+            "TickEngine %s (%s #%d) started (freq=%ss)",
             self.agent_id,
+            self.agent.slug,
+            self.session_num,
             self.config.get("frequency_sec", 60),
         )
-
-    def _finalize_meta(self, status: str) -> None:
-        """Record the terminal status in the session's meta.yml."""
-        if self.session_dir is None:
-            return
-        try:
-            finalize_session_meta(self.session_dir, status)
-        except Exception:
-            log.exception("TickEngine %s: failed to finalize meta.yml", self.agent_id)
 
     async def stop(self) -> None:
         """Stop gracefully."""
@@ -223,7 +224,7 @@ class TickEngine:
                     "TickEngine %s: error reaping active client", self.agent_id
                 )
             self._active_client = None
-        # Stop this session's native executors too — a stopped agent must not
+        # Stop this run's native executors too — a stopped agent must not
         # leave executors polling Gateway. The agent config's
         # `keep_position_on_stop` decides fate: default True detaches (positions
         # stay in the wallet, unmanaged — stop is position-preserving; /shutdown
@@ -244,14 +245,12 @@ class TickEngine:
                     len(stopped),
                     stopped,
                 )
-        if self.journal:
-            self.journal.close()
         if _engines.pop(self.agent_id, None) is not None:
-            self._finalize_meta("stopped")
+            self._end_run("stopped", "manual stop")
         log.info("TickEngine %s stopped", self.agent_id)
 
     async def _run_shutdown(self, reason: str) -> None:
-        """Emergency winddown of this session's positions/executors, then self-stop.
+        """Emergency winddown of this run's positions/executors, then self-stop.
 
         This is the escalation above the plain graceful :meth:`stop` (which keeps
         positions): it runs the deterministic + LLM winddown in
@@ -304,10 +303,8 @@ class TickEngine:
                 f"verify positions manually! ({reason})"
             )
         finally:
-            if self.journal:
-                self.journal.close()
             _engines.pop(self.agent_id, None)
-            self._finalize_meta("stopped")
+            self._end_run("stopped", f"shutdown: {reason}")
             log.info("TickEngine %s shut down (%s)", self.agent_id, reason)
 
     def pause(self) -> None:
@@ -319,6 +316,7 @@ class TickEngine:
     def inject_directive(self, text: str) -> None:
         """Queue a user directive to be included in the next tick's prompt."""
         self._pending_directives.append(text)
+        self._emit("directive", {"text": text, "acked": False})
         log.info("TickEngine %s: directive queued: %s", self.agent_id, text[:80])
 
     @property
@@ -364,8 +362,7 @@ class TickEngine:
                 except Exception as e:
                     self._last_error = str(e)
                     log.exception("TickEngine %s tick error", self.agent_id)
-                    if self.journal:
-                        self.journal.append_error(str(e))
+                    self._emit("error", {"message": str(e)}, tick=self._tick_count)
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
 
                 # Experiments: single tick, then self-stop
@@ -377,11 +374,12 @@ class TickEngine:
                     await self._notify(f"Agent {self.agent_id}: Experiment complete.")
                     self._running = False
                     _engines.pop(self.agent_id, None)
+                    self._end_run("completed", "experiment complete")
                     return
 
                 # max_ticks limit (covers run_once via max_ticks=1)
                 max_ticks = self.config.get("max_ticks", 0)
-                if max_ticks > 0 and self.journal.tick_count >= max_ticks:
+                if max_ticks > 0 and self._tick_count >= max_ticks:
                     log.info(
                         "TickEngine %s: reached max_ticks=%d, self-stopping",
                         self.agent_id,
@@ -391,9 +389,8 @@ class TickEngine:
                         f"Agent {self.agent_id}: completed {max_ticks} ticks (max_ticks limit)."
                     )
                     self._running = False
-                    self.journal.close()
                     _engines.pop(self.agent_id, None)
-                    self._finalize_meta("stopped")
+                    self._end_run("completed", f"max_ticks={max_ticks}")
                     return
 
             # Fixed-rate scheduling: frequency_sec is the interval between tick
@@ -420,26 +417,29 @@ class TickEngine:
 
         # 1. Get the hummingbot-api client IF one is configured — but treat it as
         #    OPTIONAL. Gateway-native agents (condor-native position/swap/lp
-        #    executors) run in-process against Hummingbot Gateway and are read via
-        #    the native_executors provider, which needs no hummingbot-api client.
-        #    Only the hummingbot-api providers (executors/positions) use it, and
-        #    run_core_providers isolates their failure. So a missing client must
-        #    NOT abort the tick — that would strand a fully-working Gateway-only
-        #    agent (no hummingbot-api required).
+        #    executors) run in-process and are read via the native_executors
+        #    provider, which needs no hummingbot-api client.
         client = await self._get_client()
 
         # 2. Run core data providers (executors only -- agent uses MCP for market data)
         native_active, core_data_summaries = await self._collect_provider_state(client)
 
-        # 3. Read journal context (sessions only)
-        learnings = self.journal.read_learnings() if self.journal else ""
-        recent_decisions = (
-            self.journal.get_recent_decisions(count=3) if self.journal else ""
-        )
-        summary = self.journal.read_summary() if self.journal else ""
+        # 3. Fold run context from the event stream (state + recent decisions)
+        learnings = read_learnings(self.agent.agent_dir)
+        try:
+            store = get_run_store()
+            proj = run_projection(
+                store.read_events(self.agent.slug, self.agent_id)
+            )
+        except Exception:
+            log.exception("TickEngine %s: run projection failed", self.agent_id)
+            proj = {"state": "", "recent_decisions": ""}
+        summary = proj.get("state", "")
+        recent_decisions = proj.get("recent_decisions", "")
 
-        # 4. Get risk state (experiments pass None — returns clean state)
-        risk_state = self.risk.get_state(self.journal or _NullTracker())
+        # 4. Get risk state — exposure/count are venue-record truth via the
+        #    provider fold; the pnl series is this run's in-memory history.
+        risk_state = self.risk.get_state(self.metrics)
 
         # Hard kill-switch: escalate to an emergency winddown before the soft
         # pause below. Experiments never trade for real, so they never shut down.
@@ -448,19 +448,23 @@ class TickEngine:
             return
 
         if risk_state.is_blocked and not self.is_experiment:
-            self.journal.append_action(
-                self.journal.tick_count + 1,
-                "tick_blocked",
-                risk_state.block_reason,
+            self._tick_count += 1
+            self._emit(
+                "tick_completed",
+                {
+                    "actions": 0,
+                    "blocked": True,
+                    "block_reason": risk_state.block_reason,
+                },
+                tick=self._tick_count,
             )
-            self.journal.record_tick("blocked: " + risk_state.block_reason)
             await self._notify(
                 f"Agent {self.agent_id} blocked: {risk_state.block_reason}"
             )
             return
 
-        # 5. Build prompt (server credentials are injected via env into MCP process)
-        # Cache routine discovery on first tick — routines rarely change mid-session
+        # 5. Build prompt.
+        # Cache routine discovery on first tick — routines rarely change mid-run.
         if self._cached_routines_section is None:
             from .prompts import _build_routines_section
 
@@ -471,26 +475,21 @@ class TickEngine:
             except Exception:
                 self._cached_routines_section = ""
 
-        # User memory index (advisory) — read fresh each tick so memory written
+        # Agent memory index (advisory) — read fresh each tick so memory written
         # by the chat or by the agent itself shows up promptly. It's a small file
-        # read, like learnings/summary above; failure never blocks a tick.
+        # read; failure never blocks a tick.
         user_memory = ""
         skills_index = ""
         try:
             from condor.memory import MemoryStore, SkillStore
 
-            # Per-Agent memory (FEAT-003): the Agent's shared brain, keyed by the
-            # *Agent* slug — shared across all its strategies and consults, not by
-            # the per-strategy run.
             slug = self.agent.slug
             user_memory = MemoryStore(self.user_id, slug).list_index()
-            # Skills are read-only playbooks shipped with this Agent (keyed by the
-            # Agent slug only — not per-user, not learned).
             skills_index = SkillStore(slug).list_index()
         except Exception:
             pass
 
-        next_tick = self.journal.tick_count + 1 if self.journal else 1
+        next_tick = self._tick_count + 1
         prompt = build_tick_prompt(
             agent=self.agent,
             config=self.config,
@@ -513,11 +512,29 @@ class TickEngine:
             listing = "\n".join(f"- {d}" for d in directives)
             prompt += f"\n\nUSER DIRECTIVES (apply these on this tick):\n{listing}"
 
+        self._emit("tick_started", {}, tick=next_tick)
+
         # 6. One run_agent call per tick (fresh client, clean context window).
         # risk_state was computed once above and threads into the gate so the
         # per-call checks accumulate against this tick's running totals.
         def _hold_client(c):
             self._active_client = c
+
+        from condor.agents.gating import is_dangerous_tool_call
+
+        def _persist_tool_call(tc: dict) -> None:
+            self._emit(
+                "tool_call",
+                {
+                    "name": tc.get("name") or tc.get("title", ""),
+                    "status": tc.get("status", ""),
+                    "input": tc.get("input"),
+                    "output": tc.get("output"),
+                    "mutating": is_dangerous_tool_call(tc),
+                },
+                tick=next_tick,
+                tool_call_id=str(tc.get("id") or "") or None,
+            )
 
         result = await run_agent(
             self.agent,
@@ -534,6 +551,7 @@ class TickEngine:
             timeout_s=300,
             on_client=_hold_client,
             agent_id=self.agent_id,
+            on_tool_call=_persist_tool_call,
         )
 
         # The attempt completed — acknowledge the directives it carried.
@@ -543,6 +561,7 @@ class TickEngine:
                 self._pending_directives.remove(d)
             except ValueError:
                 pass
+            self._emit("directive", {"text": d, "acked": True}, tick=next_tick)
 
         response_text = result.text
         tool_calls = result.tool_calls
@@ -561,100 +580,59 @@ class TickEngine:
                     "TickEngine %s: post-tick provider refresh failed", self.agent_id
                 )
 
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        executors_summary = core_data_summaries.get(
-            "native_executors" if native_active else "executors",
-            "No executor data.",
+        self._tick_count = next_tick
+        metrics = {
+            "total_pnl": self._last_skill_data.get("total_pnl", 0.0),
+            "total_volume": self._last_skill_data.get("total_volume", 0.0),
+            "total_exposure": self._last_skill_data.get("total_exposure", 0.0),
+            "open_count": len(self._last_skill_data.get("executors", [])),
+        }
+        self.metrics.update(
+            total_exposure=metrics["total_exposure"],
+            open_count=metrics["open_count"],
+            total_pnl=metrics["total_pnl"],
         )
-
-        if self.is_experiment:
-            # Experiments: save a single snapshot file, no journal
-            from .journal import save_experiment_snapshot
-
-            save_experiment_snapshot(
-                agent_dir=self.agent.agent_dir,
-                experiment_num=self.session_num,
-                execution_mode=mode,
-                timestamp=timestamp,
-                system_prompt=prompt,
-                response_text=response_text,
-                tool_calls=tool_calls,
-                executors_data=executors_summary,
-                risk_state=risk_state.to_dict(),
-                duration=tick_duration,
-                agent_key=self._agent_key(),
-            )
-            log.info(
-                "TickEngine %s experiment #%d complete (tools=%d, response=%d chars)",
-                self.agent_id,
-                self.session_num,
-                len(tool_calls),
-                len(response_text),
-            )
-        else:
-            # Sessions: full journal tracking
-            tick_num = self.journal.record_tick(
-                response_summary=response_text[:500],
-                actions=len(tool_calls),
-            )
-
-            skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
-            skill_volume = self._last_skill_data.get("total_volume", 0.0)
-            skill_executors = len(self._last_skill_data.get("executors", []))
-            skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
-            self.journal.record_snapshot(
-                total_pnl=skill_pnl,
-                total_volume=skill_volume,
-                open_count=skill_executors,
-                position_size=skill_exposure,
-            )
-
-            self.journal.save_full_snapshot(
-                tick=tick_num,
-                timestamp=timestamp,
-                system_prompt=prompt,
-                response_text=response_text,
-                tool_calls=tool_calls,
-                executors_data=executors_summary,
-                risk_state=risk_state.to_dict(),
-                duration=tick_duration,
-            )
-
-            action_brief = (
-                response_text[:100].replace("\n", " ")
-                if response_text
-                else "No response"
-            )
-            self.journal.write_summary(
-                tick=tick_num,
-                status="Running",
-                pnl=skill_pnl,
-                open_count=skill_executors,
-                last_action=action_brief,
-            )
-
-            log.info(
-                "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
-                self.agent_id,
-                tick_num,
-                len(tool_calls),
-                len(response_text),
-            )
+        self._emit(
+            "state_snapshot",
+            {
+                "response": response_text[:2000],
+                "metrics": metrics,
+                "duration": tick_duration,
+            },
+            tick=next_tick,
+        )
+        self._emit(
+            "tick_completed",
+            {
+                "actions": len(tool_calls),
+                "metrics": metrics,
+                "duration": tick_duration,
+                "timed_out": result.timed_out,
+            },
+            tick=next_tick,
+        )
+        log.info(
+            "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
+            self.agent_id,
+            next_tick,
+            len(tool_calls),
+            len(response_text),
+        )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
     async def _collect_provider_state(self, client) -> tuple[bool, dict[str, str]]:
-        """Run core data providers and refresh ``_last_skill_data`` + journal
-        executor sync. Returns (native_active, per-provider summary strings).
+        """Run core data providers and refresh ``_last_skill_data`` + the risk
+        tracker inputs. Returns (native_active, per-provider summary strings).
 
         Called once before the model runs (prompt data) and again after a tick
         that made tool calls — the persisted snapshot must record the COMPLETED
         tick's state, not the pre-action view.
         """
         skill_results = await self.provider_registry.run_core_providers(
-            client, self.config, agent_id=self.agent_id
+            client, self.config, agent_id=self.agent_id, agent_slug=self.agent.slug
         )
 
         # Extract structured data from providers for tracking. Prefer the
@@ -689,14 +667,6 @@ class TickEngine:
             }
         elif executors_result:
             self._last_skill_data = executors_result.data
-        # Keep the journal's Executors section (and thus risk exposure/count) in
-        # sync with live native positions — nothing else populates it on the
-        # Gateway-native path.
-        if native_active and self.journal:
-            try:
-                self.journal.sync_open_executors(nd.get("executors", []))
-            except Exception:
-                log.exception("sync_open_executors failed for %s", self.agent_id)
         positions_result = skill_results.get("positions")
         if positions_result:
             self._last_skill_data["positions"] = positions_result.data
@@ -747,9 +717,10 @@ class TickEngine:
             return None
 
     async def _notify(self, message: str) -> None:
-        """Notify the user: outbox + Telegram mirror (condor.notifications)."""
+        """Notify the user: outbox (+ run stream mirror)."""
         from condor.notifications import notify
 
+        self._emit("notification", {"text": message})
         try:
             await notify(
                 message,
@@ -767,28 +738,18 @@ class TickEngine:
         sd = self._last_skill_data
         risk_limits = self.config.get("risk_limits", {})
 
-        if self.journal:
-            summary = self.journal.get_summary_dict()
-        else:
-            summary = {
-                "total_ticks": 0,
-                "daily_pnl": 0,
-                "total_volume": 0,
-                "total_exposure": 0,
-                "open_executors": 0,
-            }
-
         return {
             "agent_id": self.agent_id,
+            "run_id": self.agent_id,
             "agent_slug": self.agent.slug,
             "agent_name": self.agent.name,
             "session_num": self.session_num,
             "status": self.status,
-            "tick_count": summary["total_ticks"],
-            "daily_pnl": sd.get("total_pnl", summary["daily_pnl"]),
-            "total_volume": sd.get("total_volume", summary.get("total_volume", 0)),
-            "total_exposure": sd.get("total_exposure", summary["total_exposure"]),
-            "open_executors": len(sd.get("executors", [])) or summary["open_executors"],
+            "tick_count": self._tick_count,
+            "daily_pnl": sd.get("total_pnl", 0.0),
+            "total_volume": sd.get("total_volume", 0.0),
+            "total_exposure": sd.get("total_exposure", 0.0),
+            "open_executors": len(sd.get("executors", [])),
             "frequency_sec": self.config.get("frequency_sec", 60),
             "server_name": self.config.get("server_name", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),
@@ -807,6 +768,5 @@ class TickEngine:
             "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
-            "session_dir": str(self.session_dir) if self.session_dir else "",
             "is_experiment": self.is_experiment,
         }
