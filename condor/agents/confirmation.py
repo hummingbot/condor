@@ -3,10 +3,8 @@
 Relocated from ``handlers/agents/confirmation.py`` (simplification plan §5.1):
 the transport-agnostic half of the human-approval flow — an in-process
 registry of pending confirmation futures plus the human-readable summary a
-confirmation prompt renders. The Telegram renderer (inline keyboard +
-``permission_callback``) stays in ``handlers/agents/confirmation.py`` and
-consumes this registry; the web chat has its own transport and imports the
-formatter directly.
+confirmation prompt renders. A transport (the web chat's WS renderer)
+registers itself against this registry and imports the formatter directly.
 """
 
 from __future__ import annotations
@@ -23,7 +21,7 @@ _pending: dict[str, asyncio.Future] = {}
 CONFIRMATION_TIMEOUT = 120  # seconds
 
 # Injected human-confirmation transport: async (chat_id, tool_call, options) ->
-# permission outcome dict. The Telegram side registers its inline-keyboard
+# permission outcome dict. A transport (e.g. the web chat) registers its
 # renderer at startup; without a registered transport, human_gate FAILS CLOSED
 # (deny_gate) — never auto-approve.
 _transport = None

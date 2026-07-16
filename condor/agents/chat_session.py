@@ -1,11 +1,8 @@
-"""Chat session lifecycle manager (dashboard + Telegram transports).
+"""Chat session lifecycle manager (web dashboard transport).
 
-Relocated from ``handlers/agents/session.py`` (simplification plan §5.1).
-Transport-agnostic: sessions are keyed by an opaque session key (an int
-Telegram chat id today, or an opaque string minted by the web chat at WS
-connect). The health monitor takes an injected async notifier instead of a
-Telegram bot handle — the Telegram wrapper lives in
-``handlers/agents/session.py``.
+Transport-agnostic: sessions are keyed by an opaque session key (an int, or
+an opaque string minted by the web chat at WS connect). The health monitor
+takes an injected async notifier instead of a transport handle.
 """
 
 from __future__ import annotations
@@ -38,7 +35,7 @@ _sessions: dict[int | str, "AgentSession"] = {}
 # Health monitor state
 _health_task: asyncio.Task | None = None
 # Injected notifier: async (session_key) -> None, called when a dead session
-# is reaped. Transport decides how (Telegram message, WS event, nothing).
+# is reaped. Transport decides how (WS event, nothing).
 _health_notifier: Callable[[int | str], Awaitable[None]] | None = None
 
 
@@ -127,7 +124,7 @@ async def get_or_create_session(
     permission_callback: PermissionCallback | None = None,
     user_id: int | None = None,
     user_data: dict | None = None,
-    platform: str = "telegram",
+    platform: str = "web",  # kept for caller compat; "web" is the only surface
     lazy_context: bool = False,
     server_name: str | None = None,
 ) -> AgentSession:
@@ -182,7 +179,6 @@ async def get_or_create_session(
                 user_id,
                 chat_id,
                 agent_key=agent_key,
-                platform=platform,
             )
 
         if initial_context and not lazy_context:
@@ -249,8 +245,7 @@ async def start_health_monitor(
     """Start periodic background check for dead sessions.
 
     ``notifier`` is called with the session key after a dead session is
-    reaped; the transport decides how to surface it (Telegram message, WS
-    event, nothing).
+    reaped; the transport decides how to surface it (WS event, nothing).
     """
     global _health_task, _health_notifier
     _health_notifier = notifier

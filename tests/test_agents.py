@@ -412,24 +412,11 @@ def test_condor_brain_loads_from_repo_root():
     assert "coordinator" in body or "Condor" in body
 
 
-def test_session_mcp_servers_carry_agent_slug(monkeypatch):
-    """Serverless agent runs (consult/tick without server_name) must scope the
-    condor MCP tools to the agent's own memory/skills via --agent-slug —
-    without it, routine_builder-style agents silently read/write the CHAT's
-    stores (e.g. 'routine_cookbook not found')."""
-    import config_manager
-
+def test_session_mcp_servers_carry_agent_slug():
+    """Agent runs must scope the condor MCP tools to the agent's own
+    memory/skills via --agent-slug — without it, routine_builder-style agents
+    silently read/write the CHAT's stores (e.g. 'routine_cookbook not found')."""
     from condor.agents.context import build_mcp_servers_for_session
-
-    class _NoServers:
-        def get_accessible_servers(self, user_id):
-            return []
-
-        def get_server(self, name):
-            return None
-
-    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _NoServers())
-    monkeypatch.setattr(config_manager, "get_effective_server", lambda *a, **k: None)
 
     servers = build_mcp_servers_for_session(42, 42, agent_slug="routine_builder")
     condor = next(s for s in servers if s["name"] == "condor")

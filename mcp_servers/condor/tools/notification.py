@@ -3,14 +3,14 @@
 The outbox has ONE serialized writer in the main process (§4.1): this
 subprocess never appends the file itself — ``send_notification`` enqueues
 over the control socket ("notify.emit"), and the main-process ``notify()``
-handles the append (fsynced, stable id) plus the delivery mirror. Reads are
-direct (read-only file access is fine).
+handles the append (fsynced, stable id). Reads are direct (read-only file
+access is fine).
 """
 
 from mcp_servers.condor.settings import settings
 
 
-async def send_notification(text: str, parse_mode: str = "Markdown") -> dict:
+async def send_notification(text: str) -> dict:
     """Notify the user; always recorded in the outbox.
 
     Returns:
@@ -34,11 +34,7 @@ async def send_notification(text: str, parse_mode: str = "Markdown") -> dict:
     except APIError as e:
         return {"error": f"notification enqueue failed: {e}"}
     entry = out.get("entry", {}) if isinstance(out, dict) else {}
-    return {
-        "sent": True,
-        "id": entry.get("id", ""),
-        "delivered_telegram": entry.get("delivered_telegram", False),
-    }
+    return {"sent": True, "id": entry.get("id", "")}
 
 
 async def get_notifications(

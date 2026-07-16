@@ -1,8 +1,8 @@
 """
 Centralized User Preferences Management
 
-This module provides a unified interface for managing all user preferences
-across the bot. All user-specific settings should be accessed through this module.
+This module provides a unified interface for managing all user preferences.
+All user-specific settings should be accessed through this module.
 
 Structure:
 - Portfolio settings (graph days, interval)
@@ -10,12 +10,9 @@ Structure:
 - DEX trading defaults (network, connector, slippage, last swap params)
 - General settings (active server)
 
-Storage:
-- Primary: config.yml via ConfigManager (shared across TG + Web)
-- Fallback: context.user_data pickle (for session-level state)
-
-When a user_data dict contains '_user_id', changes are synced to ConfigManager
-so the web dashboard can also read them.
+Storage: config.yml via ConfigManager. Callers pass a per-user ``user_data``
+dict; when it contains '_user_id', changes are synced to ConfigManager so the
+web dashboard reads the same values.
 """
 
 import logging
@@ -238,47 +235,6 @@ class AgentPrefs(TypedDict, total=False):
     tool_filter_mode: str  # "essential", "moderate", or "full" for PydanticAI models
 
 
-class VoicePrefs(TypedDict, total=False):
-    whisper_model: str  # "tiny", "base", "small", "medium", "large-v3"
-    language: Optional[str]  # ISO code ("en", "es", ...) or None for auto-detect
-    auto_send: bool  # Send message immediately after transcription
-
-
-# Available whisper models with descriptions
-WHISPER_MODELS = {
-    "tiny": "Tiny — Fastest, lower accuracy",
-    "base": "Base — Good balance (default)",
-    "small": "Small — Better accuracy",
-    "medium": "Medium — High accuracy, slower",
-    "large-v3": "Large v3 — Best accuracy, slowest",
-}
-
-# Supported languages for manual selection (subset of Whisper supported languages)
-VOICE_LANGUAGES = {
-    "": "Auto-detect",
-    "en": "English",
-    "es": "Spanish",
-    "pt": "Portuguese",
-    "fr": "French",
-    "de": "German",
-    "it": "Italian",
-    "ja": "Japanese",
-    "ko": "Korean",
-    "zh": "Chinese",
-    "ru": "Russian",
-    "ar": "Arabic",
-    "hi": "Hindi",
-    "nl": "Dutch",
-    "pl": "Polish",
-    "tr": "Turkish",
-    "uk": "Ukrainian",
-    "sv": "Swedish",
-    "da": "Danish",
-    "fi": "Finnish",
-    "no": "Norwegian",
-}
-
-
 class UserPreferences(TypedDict, total=False):
     portfolio: PortfolioPrefs
     clob: CLOBPrefs
@@ -288,7 +244,6 @@ class UserPreferences(TypedDict, total=False):
     unified_trade: UnifiedTradePrefs
     executors: ExecutorPrefs
     agent: AgentPrefs
-    voice: VoicePrefs
     trading_agent: TradingAgentPrefs
     notes: Dict[str, str]
 
@@ -336,11 +291,6 @@ def _get_default_preferences() -> UserPreferences:
         "agent": {
             "default_agent": "claude-code",
             "show_tool_calls": True,
-        },
-        "voice": {
-            "whisper_model": "small",
-            "language": None,  # Auto-detect
-            "auto_send": True,
         },
         "trading_agent": {
             "last_strategy_id": None,
@@ -462,7 +412,7 @@ def get_preferences(user_data: Dict) -> UserPreferences:
     """Get all user preferences (read-only copy)
 
     Args:
-        user_data: context.user_data from telegram update
+        user_data: the caller's per-user preference dict
 
     Returns:
         Complete user preferences dictionary
@@ -1009,38 +959,6 @@ def set_default_agent(user_data: Dict, agent_key: str) -> None:
     prefs["agent"]["default_agent"] = agent_key
     _sync_section_to_cm(user_data, "agent")
     logger.info(f"Set default agent to {agent_key}")
-
-
-# ============================================
-# PUBLIC API - VOICE
-# ============================================
-
-
-def get_voice_prefs(user_data: Dict) -> "VoicePrefs":
-    """Get voice preferences"""
-    _migrate_legacy_data(user_data)
-    return deepcopy(
-        user_data[USER_PREFERENCES_KEY].get(
-            "voice",
-            {
-                "whisper_model": "small",
-                "language": None,
-                "auto_send": True,
-            },
-        )
-    )
-
-
-def set_voice_prefs(user_data: Dict, **kwargs) -> None:
-    """Update voice preferences. Pass only the keys you want to change."""
-    prefs = _ensure_preferences(user_data)
-    if "voice" not in prefs:
-        prefs["voice"] = {"whisper_model": "small", "language": None, "auto_send": True}
-    for key in ("whisper_model", "language", "auto_send"):
-        if key in kwargs:
-            prefs["voice"][key] = kwargs[key]
-    _sync_section_to_cm(user_data, "voice")
-    logger.info("Updated voice preferences: %s", kwargs)
 
 
 # ============================================

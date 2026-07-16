@@ -101,7 +101,7 @@ class ExecutorConfig(BaseModel):
     # result, a different hash is rejected.
     request_hash: str = ""
     # Notification routing for trade events (open/close). 0 = outbox-only
-    # (no Telegram mirror), e.g. CLI-created executors.
+    # e.g. CLI-created executors.
     user_id: int = 0
     chat_id: int = 0
     # Emit a notification on position open/close. Default on; set false to
@@ -265,7 +265,7 @@ class ExecutorBase:
 
     async def notify_trade(self, text: str) -> None:
         """Emit a trade event (position open/close) to the notifications
-        outbox + Telegram mirror. No-op when notify_trades is off. Fail-soft:
+        outbox. No-op when notify_trades is off. Fail-soft:
         a notify error never touches the executor's lifecycle."""
         if not self.config.notify_trades:
             return

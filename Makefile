@@ -63,7 +63,7 @@ build-frontend:
 	'
 
 run: build-frontend
-	uv run python main.py
+	uv run python -m condor.cli serve
 
 test:
 	uv run pytest

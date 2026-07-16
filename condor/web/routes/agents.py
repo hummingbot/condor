@@ -23,7 +23,6 @@ endpoints below are dashboard projections over the RunStore. Every
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 from typing import Any
@@ -41,14 +40,6 @@ from condor.web.models import ReportSummary, WebUser
 # ── Simple in-memory TTL cache for performance data ──
 _PERF_CACHE: dict[str, tuple[float, Any]] = {}
 _PERF_TTL = 30.0  # seconds
-
-# Long-lived cache for CLOSED runs, keyed by run_id. A closed run's executors
-# are immutable (no engine running, no open executors), so its performance
-# never changes — fetch it once and freeze it. Only ids that are inactive
-# (no registered engine, not the newest run), fetched successfully, with
-# open_count == 0, and not in controller mode land here; everything else
-# keeps flowing through the 30s TTL path above.
-_CLOSED_PERF_CACHE: dict[str, Any] = {}
 
 
 def _cache_get(key: str) -> Any | None:
@@ -104,7 +95,6 @@ class RunningInstance(BaseModel):
     open_count: int = 0
     closed_count: int = 0
     win_rate: float = 0.0
-    server_name: str = ""
     total_amount_quote: float = 100.0
     trading_context: str = ""
     frequency_sec: int = 60
@@ -170,8 +160,6 @@ class AgentDetail(BaseModel):
     when_to_consult: str = ""
     consultable: bool = False
     can_trade: bool = False
-    server_required: bool = True
-    server_name: str = ""
     risk_limits: dict[str, Any] = {}
     denomination: str = ""
     default_config: dict[str, Any] = {}
@@ -192,8 +180,6 @@ class CreateAgentRequest(BaseModel):
     agent_key: str = ""
     tools: list[str] = []
     when_to_consult: str = ""
-    server_required: bool = True
-    server_name: str = ""
     risk_limits: dict[str, Any] = {}
     denomination: str = ""
     default_config: dict[str, Any] = {}
@@ -215,8 +201,6 @@ class UpdateAgentRequest(BaseModel):
     agent_key: str | None = None
     tools: list[str] | None = None
     when_to_consult: str | None = None
-    server_required: bool | None = None
-    server_name: str | None = None
     risk_limits: dict[str, Any] | None = None
     denomination: str | None = None
     default_config: dict[str, Any] | None = None
@@ -232,12 +216,11 @@ class UpdateLearningsRequest(BaseModel):
 class ConsultRequest(BaseModel):
     task: str
     context: str = ""
-    # Telegram chat that approves mutating tool calls. 0 (web default) means
+    # Chat that approves mutating tool calls. 0 (web default) means
     # NO human gate is reachable: the consult still runs, but mutations are
     # denied fail-closed (policies.deny_gate) rather than silently allowed.
     chat_id: int = 0
     user_id: int | None = None
-    server_name: str | None = None
 
 
 class StartAgentRequest(BaseModel):
@@ -252,9 +235,8 @@ class StartAgentRequest(BaseModel):
 
 class DelegateRequest(BaseModel):
     task: str
-    chat_id: int = 0  # Telegram chat for the completion notification
+    chat_id: int = 0  # Chat for the completion notification
     user_id: int | None = None  # Accepted for compat but ignored (see handler)
-    server_name: str | None = None
     timeout_s: int = 900
     # Per-delegation risk caps override — REPLACES the agent's AGENT.md baseline
     # for this one run (trading agents only).
@@ -285,78 +267,51 @@ def _perf_runs(slug: str) -> list[dict]:
     ]
 
 
-def _run_started_payload(slug: str, run_id: str) -> dict:
-    """The ``run_started`` payload (first stream line); {} if unreadable."""
-    path = get_run_store().run_path(slug, run_id)
-    try:
-        with open(path, "rb") as f:
-            line = f.readline()
-        if not line.endswith(b"\n"):
-            return {}
-        return (json.loads(line) or {}).get("payload") or {}
-    except Exception:
-        return {}
+def _native_perf_rows(
+    agent_slug: str | None = None, agent_id: str | None = None
+) -> dict[str, dict]:
+    """Native per-run performance rows keyed by run id.
 
-
-def _run_config(slug: str, run_id: str) -> dict:
-    """The frozen launch config recorded on ``run_started`` (§5.3)."""
-    spec = _run_started_payload(slug, run_id).get("frozen_spec") or {}
-    cfg = spec.get("config") or {}
-    return cfg if isinstance(cfg, dict) else {}
-
-
-async def _get_client_for_agent(agent):
-    """Resolve a Hummingbot API client for an agent's history views.
-
-    Server resolution: the agent's pinned server, else the frozen config of
-    a recent run, else the agent's default_config.
+    Rolls up the Condor executor store (executors tag ``agent_id == run_id``,
+    §7.1) via :mod:`condor.executors.performance` — no external services.
     """
-    from config_manager import get_config_manager
+    from condor.executors import ops
+    from condor.executors.service import get_executor_runtime
 
-    server_name = agent.server_name or ""
-    if not server_name:
-        for m in _perf_runs(agent.slug)[:10]:
-            server_name = str(
-                _run_config(agent.slug, m["run_id"]).get("server_name") or ""
-            )
-            if server_name:
-                break
-    if not server_name:
-        server_name = (agent.default_config or {}).get("server_name") or ""
-    if not server_name:
-        return None, ""
-    cm = get_config_manager()
-    try:
-        client = await cm.get_client(server_name)
-    except Exception as e:
-        log.warning("get_client(%s) failed: %s", server_name, e)
-        return None, server_name
-    return client, server_name
+    result = ops.performance(
+        get_executor_runtime(),
+        group_by="run",
+        agent_id=agent_id,
+        agent_slug=agent_slug,
+    )
+    return {row["key"]: row for row in result.get("groups", [])}
 
 
-def _run_bot_name(slug: str, run_id: str) -> str:
-    """Controller-mode attribution: the run's frozen config bot_name."""
-    return str(_run_config(slug, run_id).get("bot_name") or "")
+def _perf_model(meta: dict, row: dict) -> AgentPerformanceModel:
+    """Map a native GroupPerformance row onto the dashboard model.
 
-
-def _perf_model(meta: dict, perf) -> AgentPerformanceModel:
+    Realized PnL is net of costs already; unrealized/volume are not tracked
+    by the native rollup and stay 0 (open exposure is ``open_count``).
+    """
     run_id = meta["run_id"]
+    realized = float(row.get("realized_pnl_quote") or 0.0)
+    closed = int(row.get("closed_count") or 0)
     return AgentPerformanceModel(
         agent_id=run_id,
         run_id=run_id,
         session_num=meta.get("display_seq", 0),
         kind=meta.get("kind") or "session",
         status=meta.get("status", ""),
-        realized_pnl=perf.realized_pnl,
-        unrealized_pnl=perf.unrealized_pnl,
-        total_pnl=perf.total_pnl,
-        volume=perf.volume,
-        fees=perf.fees,
-        trade_count=perf.trade_count,
-        win_rate=perf.win_rate,
-        open_count=perf.open_count,
-        closed_count=perf.closed_count,
-        executors=perf.executors,
+        realized_pnl=realized,
+        unrealized_pnl=0.0,
+        total_pnl=realized,
+        volume=0.0,
+        fees=float(row.get("costs_quote") or 0.0),
+        trade_count=closed,
+        win_rate=float(row.get("win_rate") or 0.0),
+        open_count=int(row.get("open_count") or 0),
+        closed_count=closed,
+        executors=[],
     )
 
 
@@ -364,13 +319,9 @@ async def _compute_agent_performance(agent):
     """Return list of AgentPerformanceModel plus rolled-up totals.
 
     Covers every attributed run of the agent (RunStore kinds session /
-    experiment / scheduled). The assembled rollup is cached ~30s
-    (``_PERF_CACHE``); underneath, closed runs are served from
-    ``_CLOSED_PERF_CACHE`` so only active ids hit the backend after the TTL
-    expires.
+    experiment / scheduled), computed from the native executor store.
+    The assembled rollup is cached ~30s (``_PERF_CACHE``).
     """
-    from condor.agents.performance import fetch_agent_performance_batch
-
     slug = agent.slug
 
     cached = _cache_get(f"perf:{slug}")
@@ -378,82 +329,21 @@ async def _compute_agent_performance(agent):
         return cached
 
     runs = _perf_runs(slug)
-    client, _server = await _get_client_for_agent(agent)
-
-    # Controller mode: a run whose frozen config carries a bot_name attributes
-    # that bot's PnL to it (executor search still keys on the run id).
-    bot_names: dict[str, str] = {}
-    for m in runs:
-        if m["kind"] != "experiment":
-            bn = _run_bot_name(slug, m["run_id"])
-            if bn:
-                bot_names[m["run_id"]] = bn
 
     sessions: list[AgentPerformanceModel] = []
-    if client and runs:
-        from condor.agents.engine import get_all_engines
-
-        # Split ids by state: closed runs are immutable, so only ids with a
-        # live engine (running/paused, incl. experiments) plus the newest
-        # non-experiment run — whose executors may still be closing out — are
-        # re-fetched; everything else is served from the long-lived frozen cache.
-        engine_ids = {e.agent_id for e in get_all_engines().values()}
-        latest_run_id = next(
-            (m["run_id"] for m in runs if m["kind"] != "experiment"), None
-        )  # metas are newest-first
-        active_ids = {
-            m["run_id"]
-            for m in runs
-            if m["run_id"] in engine_ids or m["run_id"] == latest_run_id
-        }
-        # An id active again (e.g. restored engine) must not serve a stale
-        # frozen value once it goes idle — evict so it gets one final fetch.
-        for rid in active_ids:
-            _CLOSED_PERF_CACHE.pop(rid, None)
-
-        if bot_names:
-            # Controller mode attributes the bot's live aggregate to every
-            # run, so no per-run result is immutable — fetch all.
-            fetch_ids = [m["run_id"] for m in runs]
-        else:
-            fetch_ids = [
-                m["run_id"]
-                for m in runs
-                if m["run_id"] in active_ids or m["run_id"] not in _CLOSED_PERF_CACHE
-            ]
-
-        perf_map: dict[str, Any] = {}
-        failed_ids: set[str] = set()
-        if fetch_ids:
-            try:
-                perf_map = await fetch_agent_performance_batch(
-                    client, fetch_ids, bot_names or None, failed_ids=failed_ids
-                )
-            except Exception as e:
-                log.warning("fetch_agent_performance_batch(%s) failed: %s", slug, e)
-                perf_map = {}
-                failed_ids = set(fetch_ids)
-
+    if runs:
+        try:
+            rows = _native_perf_rows(agent_slug=slug)
+        except Exception as e:
+            log.warning("native performance rollup (%s) failed: %s", slug, e)
+            rows = {}
         for m in runs:
-            rid = m["run_id"]
-            perf = perf_map.get(rid)
-            if perf is None:
-                perf = _CLOSED_PERF_CACHE.get(rid)
-            if perf is None:
+            row = rows.get(m["run_id"])
+            if row is None:
                 continue
-            # Freeze immutable results: fetched fine, no engine, not the newest
-            # run, and nothing still open whose unrealized PnL could move.
-            if (
-                not bot_names
-                and rid in perf_map
-                and rid not in active_ids
-                and rid not in failed_ids
-                and perf.open_count == 0
-            ):
-                _CLOSED_PERF_CACHE[rid] = perf
-            if m["kind"] == "experiment" and perf.trade_count == 0:
+            if m["kind"] == "experiment" and not row.get("closed_count"):
                 continue
-            sessions.append(_perf_model(m, perf))
+            sessions.append(_perf_model(m, row))
 
     real_sessions = [s for s in sessions if s.kind != "experiment"]
     totals = {
@@ -487,7 +377,6 @@ def _instance_from_info(info: dict, perf_by_id: dict) -> RunningInstance:
         open_count=p.open_count if p else 0,
         closed_count=p.closed_count if p else 0,
         win_rate=p.win_rate if p else 0.0,
-        server_name=info.get("server_name", ""),
         total_amount_quote=info.get("total_amount_quote", 100),
         trading_context=info.get("trading_context", ""),
         frequency_sec=info.get("frequency_sec", 60),
@@ -673,8 +562,9 @@ async def export_run_route(run_id: str, user: WebUser = Depends(get_current_user
 
 @router.get("/runs/{run_id}/executors")
 async def get_run_executors(run_id: str, user: WebUser = Depends(get_current_user)):
-    """Executors + performance for a single run (controller_id == run_id)."""
-    from condor.agents.performance import fetch_agent_performance
+    """Executors + performance for a single run (executors tag agent_id == run_id)."""
+    from condor.executors import ops
+    from condor.executors.service import get_executor_runtime
 
     store = get_run_store()
     path = store.find_run_path(run_id)
@@ -682,22 +572,24 @@ async def get_run_executors(run_id: str, user: WebUser = Depends(get_current_use
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
     slug = path.parent.parent.name
     meta = store.run_meta(slug, run_id)
-    agent = _get_agent(slug)
-    client, _server = await _get_client_for_agent(agent)
-    if client is None:
-        empty = AgentPerformanceModel(
+    _get_agent(slug)
+
+    executors = ops.list_(get_executor_runtime(), agent_id=run_id, limit=200).get(
+        "executors", []
+    )
+    row = _native_perf_rows(agent_id=run_id).get(run_id)
+    if row is None:
+        model = AgentPerformanceModel(
             agent_id=run_id,
             run_id=run_id,
             session_num=meta.get("display_seq", 0),
             kind=meta.get("kind") or "session",
             status=meta.get("status", ""),
         )
-        return {"executors": [], "performance": empty.model_dump()}
-    perf = await fetch_agent_performance(
-        client, run_id, bot_name=_run_bot_name(slug, run_id)
-    )
-    model = _perf_model(meta, perf)
-    return {"executors": perf.executors, "performance": model.model_dump()}
+    else:
+        model = _perf_model(meta, row)
+    model.executors = executors
+    return {"executors": executors, "performance": model.model_dump()}
 
 
 @router.get("/{slug}", response_model=AgentDetail)
@@ -741,8 +633,6 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         when_to_consult=agent.when_to_consult,
         consultable=agent.consultable,
         can_trade=agent.can_trade,
-        server_required=agent.server_required,
-        server_name=agent.server_name,
         risk_limits=agent.risk_limits,
         denomination=agent.denomination,
         default_config=agent.default_config or {},
@@ -784,8 +674,6 @@ async def create_agent(
             agent_key=req.agent_key,
             tools=req.tools,
             when_to_consult=req.when_to_consult,
-            server_required=req.server_required,
-            server_name=req.server_name,
             risk_limits=req.risk_limits,
             denomination=req.denomination,
             default_config=req.default_config,
@@ -845,20 +733,8 @@ async def consult_agent(
     slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
 ):
     """Run an Agent consult (its brain to completion) and return the answer."""
-    from config_manager import get_config_manager
-
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
-
-    # The consult binds the agent's MCP toolset to ``server_name``'s live
-    # credentials, so gate it on server access exactly like the portfolio/bots
-    # routes do — otherwise any session could consult against a server it was
-    # never granted (IDOR). Only enforce when a server is actually requested;
-    # serverless consults need no server scope.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
 
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
@@ -870,7 +746,6 @@ async def consult_agent(
             context=req.context,
             user_id=user.id,
             chat_id=req.chat_id,
-            server_name=req.server_name,
         )
     except LifecycleError as e:
         raise _http(e)
@@ -889,32 +764,22 @@ async def delegate_agent(
     Returns immediately with a ``task_id`` (also the run id); the agent runs
     unattended until done, then notifies the user. Trading agents run under a
     zero-seeded risk gate (per-call ``risk_limits`` override replaces the
-    AGENT.md baseline); serverless agents run with full auto-approve. The
+    AGENT.md baseline); non-trading agents run with full auto-approve. The
     async sibling of ``/consult``.
     """
-    from config_manager import get_config_manager
-
     _get_agent(slug)
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
 
-    # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
-    # to ``server_name``'s live credentials, so refuse a server the caller can't access.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
-
     # Web callers always act as themselves (mirror consult): honoring
     # ``req.user_id`` here would let any authenticated session run a delegation
-    # under another user's memory scope and server grants.
+    # under another user's memory scope.
     try:
         d = await _svc().delegate(
             slug,
             task=req.task,
             user_id=user.id,
             chat_id=req.chat_id,
-            server_name=req.server_name,
             risk_limits=req.risk_limits,
             timeout_s=req.timeout_s,
         )

@@ -3,7 +3,7 @@
 Relocated from ``handlers/agents/_shared.py`` (simplification plan §5.1) —
 the agent core: chat-brain loading, system prompts, initial chat context,
 consult context, and the MCP subprocess wiring every run kind shares.
-Transport-agnostic (the Telegram handlers import from here, not vice versa).
+Transport-agnostic (transports import from here, not vice versa).
 """
 
 from __future__ import annotations
@@ -125,23 +125,13 @@ _WEB_FORMATTING = (
     "- Respond in the user's language."
 )
 
-_TELEGRAM_FORMATTING = (
-    "FORMATTING (Telegram mobile):\n"
-    "- NEVER use Markdown tables. Use bullet lists or key: value lines.\n"
-    "- Keep paragraphs short (2-3 sentences max).\n"
-    "- Cap lists at 5-7 items.\n"
-    "- Respond in the user's language."
-)
-
-
-def _build_system_prompt(platform: str = "telegram") -> str:
-    """Build the system prompt: the CONDOR.md brain + platform formatting rules."""
+def _build_system_prompt() -> str:
+    """Build the system prompt: the CONDOR.md brain + formatting rules."""
     _, brain = _load_condor()
-    formatting = _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
     return (
         "[System context -- do not repeat this to the user]\n\n"
         f"{brain}\n\n"
-        f"{formatting}"
+        f"{_WEB_FORMATTING}"
     )
 
 
@@ -162,18 +152,14 @@ def _condor_mcp_args(
     capability: str | None = None,
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess."""
-    import os
-
-    # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
-    # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
+    # MCP server expects int chat_id. For web sessions (string keys like
+    # "web_42"), use user_id instead.
     effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
     args = [
         "--chat-id",
         str(effective_chat_id),
         "--user-id",
         str(user_id),
-        "--bot-token",
-        os.environ.get("TELEGRAM_TOKEN", ""),
     ]
     if agent_slug:
         args.extend(["--agent-slug", agent_slug])
@@ -223,12 +209,10 @@ def build_initial_context(
     user_id: int,
     chat_id: int | str,
     agent_key: str | None = None,
-    platform: str = "telegram",
 ) -> str:
     """Build an initial context prompt: the chat brain, tool preload, memory/
-    skills/agents indexes, and platform formatting rules."""
-    # Build system prompt from CONDOR.md + platform formatting
-    system_prompt = _build_system_prompt(platform)
+    skills/agents indexes, and formatting rules."""
+    system_prompt = _build_system_prompt()
     sections: list[str] = [system_prompt]
 
     # ACP sessions load MCP tools via ToolSearch — preload them all in one call.

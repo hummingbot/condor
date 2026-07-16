@@ -211,7 +211,7 @@ def test_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
             self.agent_id = "01JZX5B7Q2K4N8P1T3V5W7Y9ZB"
             self.session_num = 1
 
-        async def start(self, bot=None):
+        async def start(self):
             pass
 
     import condor.agents.engine as engine_module

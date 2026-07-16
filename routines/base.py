@@ -41,7 +41,6 @@ class RoutineResult:
 
     Routines can return this instead of a plain string to provide
     structured data for the web dashboard (tables, charts, sections).
-    Telegram still uses the `text` field.
     """
 
     text: str

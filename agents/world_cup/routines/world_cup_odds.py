@@ -12,7 +12,6 @@ import logging
 import urllib.request
 
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ def _f(v):
         return None
 
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+async def run(config: Config, context=None) -> str:
     import asyncio
 
     try:

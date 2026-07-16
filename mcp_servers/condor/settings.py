@@ -9,7 +9,6 @@ from dataclasses import dataclass
 class Settings:
     chat_id: int
     user_id: int
-    bot_token: str
     agent_slug: str
     # Session id of the owning run ("{agent_slug}_{N}") — the attribution
     # key for journal/executor accounting. Empty for chat sessions.
@@ -27,13 +26,11 @@ def _parse_settings() -> Settings:
     parser.add_argument("--agent-slug", default=None)
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--capability", default=None)
-    parser.add_argument("--bot-token", default=None)
     args, _ = parser.parse_known_args()
 
     return Settings(
         chat_id=args.chat_id if args.chat_id is not None else int(os.environ.get("CONDOR_CHAT_ID", "0")),
         user_id=args.user_id if args.user_id is not None else int(os.environ.get("CONDOR_USER_ID", "0")),
-        bot_token=args.bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         agent_slug=args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", ""),
         agent_id=args.agent_id or os.environ.get("CONDOR_AGENT_ID", ""),
         capability=args.capability or os.environ.get("CONDOR_RUN_CAPABILITY", ""),

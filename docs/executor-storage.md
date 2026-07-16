@@ -195,14 +195,11 @@ Barriers live in the process, so a restart must re-adopt open positions:
 ## Who owns the runtime
 
 The `ExecutorRuntime` — the sole writer of the logs — lives in **one persistent
-process**, either:
+process**: `uv run python -m condor.cli serve` (§9.3), which starts the runtime
++ control socket in the web app's lifespan and serves the dashboard
+(`--headless` skips the frontend assets).
 
-- `python -m condor.daemon` — headless: runtime + control socket, no web app; or
-- `main.py` — the web app, which starts the identical runtime + control socket in
-  its lifespan and also serves the dashboard.
-
-Run **one**, never both (they share the runtime, the logs, and the single
-control socket). A harness-spawned MCP subprocess (or the dashboard) reaches the
+A harness-spawned MCP subprocess (or the dashboard) reaches the
 runtime over the unix control socket (`condor/control/`), which dispatches to the
 transport-agnostic operations in `condor/executors/ops.py`. Everyone else only
 **reads** the logs; single-writer discipline is what keeps append-only safe.
@@ -224,7 +221,7 @@ transport-agnostic operations in `condor/executors/ops.py`. Everyone else only
 | Performance / scorecard (folds closed events) | `condor/executors/performance.py` |
 | Runtime singleton + startup | `condor/executors/service.py` |
 | Control socket (server/client/handlers) | `condor/control/` |
-| Headless host | `condor/daemon.py` |
+| Host (`condor serve`) | `condor/cli.py` + `condor/web/app.py` lifespan |
 
 ## What there is *not*
 

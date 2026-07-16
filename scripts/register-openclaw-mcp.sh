@@ -24,16 +24,16 @@ if [ -f "$REPO_ROOT/.env" ]; then
     set +a
 fi
 
-if [ -z "${ADMIN_USER_ID:-}" ] || [ -z "${TELEGRAM_TOKEN:-}" ]; then
-    echo "ADMIN_USER_ID or TELEGRAM_TOKEN unset — run setup-environment.sh first."
+if [ -z "${ADMIN_USER_ID:-}" ]; then
+    echo "ADMIN_USER_ID unset — run 'uv run python -m condor.cli init' first."
     echo "Skipping MCP registration."
     exit 0
 fi
 
 echo "Registering Condor MCP servers with OpenClaw..."
 
-# Build the JSON with json.dumps rather than interpolating into a heredoc: a bot
-# token containing a quote or backslash would otherwise corrupt the config.
+# Build the JSON with json.dumps rather than interpolating into a heredoc: a
+# value containing a quote or backslash would otherwise corrupt the config.
 #
 # `uv run` must locate the condor project. The `cwd` field alone is not enough:
 # `openclaw mcp probe` honors it, but the claude CLI ignores it when spawning
@@ -42,11 +42,10 @@ echo "Registering Condor MCP servers with OpenClaw..."
 # the project regardless of the spawning process's cwd.
 #
 # The condor server derives chat_id/user_id per-conversation when Condor spawns
-# it. OpenClaw has no conversation to derive from, so pin it to the admin, whose
-# Telegram DM chat_id equals their user_id.
+# it. OpenClaw has no conversation to derive from, so pin it to the admin.
 condor_json=$(python3 -c '
 import json, sys
-root, admin, token = sys.argv[1:4]
+root, admin = sys.argv[1:3]
 print(json.dumps({
     "command": "uv",
     "args": ["run", "--directory", root, "python", "-m", "mcp_servers.condor"],
@@ -54,9 +53,8 @@ print(json.dumps({
     "env": {
         "CONDOR_CHAT_ID": admin,
         "CONDOR_USER_ID": admin,
-        "TELEGRAM_BOT_TOKEN": token,
     },
-}))' "$REPO_ROOT" "$ADMIN_USER_ID" "$TELEGRAM_TOKEN")
+}))' "$REPO_ROOT" "$ADMIN_USER_ID")
 
 hb_json=$(python3 -c '
 import json, sys

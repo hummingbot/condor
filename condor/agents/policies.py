@@ -3,8 +3,8 @@
 The one axis that genuinely differs between run kinds is *who approves
 mutations* (refactor-02 §4.1). Instead of three hardwired callbacks::
 
-    human_gate(chat_id)      strictest — every dangerous call goes to the user's
-                             Telegram chat for Approve/Reject (consult)
+    human_gate(chat_id)      strictest — every dangerous call goes to the user
+                             for Approve/Reject (consult)
     risk_gate(limits, state) ONE shared policy — auto-approve within caps, block
                              breaches. The caller picks the state seed:
                              journal-derived for ticks, zero for delegations

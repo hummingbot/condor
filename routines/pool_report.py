@@ -1,4 +1,4 @@
-"""Generate a comprehensive DEX pool report with candlestick chart, GeckoTerminal data, and CLMM connector info."""
+"""Generate a comprehensive DEX pool report with candlestick chart and GeckoTerminal data."""
 
 import asyncio
 import io
@@ -8,25 +8,13 @@ from typing import Any
 
 import aiohttp
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
 
-from config_manager import get_client
 from routines.base import RoutineResult
 
 logger = logging.getLogger(__name__)
 
 GT_BASE = "https://api.geckoterminal.com/api/v2"
 GT_HEADERS = {"Accept": "application/json;version=20230302"}
-
-# Map GeckoTerminal network IDs to CLMM gateway network IDs
-NETWORK_MAP = {
-    "solana": "solana-mainnet-beta",
-    "eth": "ethereum-mainnet",
-    "bsc": "bsc-mainnet",
-    "polygon_pos": "polygon-mainnet",
-    "arbitrum": "arbitrum-mainnet",
-    "base": "base-mainnet",
-}
 
 # Map shorthand intervals to GeckoTerminal (timeframe, aggregate) pairs
 TIMEFRAME_MAP = {
@@ -41,13 +29,12 @@ TIMEFRAME_MAP = {
 
 
 class Config(BaseModel):
-    """Generate a pool report: candlestick chart, GeckoTerminal pool stats, and optional CLMM connector info."""
+    """Generate a pool report: candlestick chart and GeckoTerminal pool stats."""
 
     pool_address: str = Field(default="", description="Pool contract address (required)")
     network: str = Field(default="solana", description="GeckoTerminal network ID (solana, eth, bsc, base, ...)")
     timeframe: str = Field(default="1h", description="Candle timeframe (1m, 5m, 15m, 1h, 4h, 1d)")
     candles_limit: int = Field(default=100, description="Number of candles to fetch (max 1000)")
-    connector: str = Field(default="", description="Optional CLMM connector for on-chain pool info (meteora, raydium, uniswap)")
 
 
 async def _fetch_json(session: aiohttp.ClientSession, url: str) -> dict[str, Any]:
@@ -86,15 +73,9 @@ def _safe_get(d: dict, *keys, default=None):
     return cur
 
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResult | str:
+async def run(config: Config, context=None) -> RoutineResult | str:
     if not config.pool_address:
         return "pool_address is required"
-
-    client = await get_client(context._chat_id, context=context)
-    if not client:
-        return "No server available"
-
-    chat_id = context._chat_id if hasattr(context, "_chat_id") else None
 
     tf_key = config.timeframe.lower()
     if tf_key not in TIMEFRAME_MAP:
@@ -149,46 +130,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     buys_24h = _safe_get(attrs, "transactions", "h24", "buys") or 0
     sells_24h = _safe_get(attrs, "transactions", "h24", "sells") or 0
 
-    # Optional: CLMM connector pool info (merge get_pool_info + get_pools row)
-    clmm_info: dict | None = None
-    clmm_error: str | None = None
-    if config.connector:
-        gw_network = NETWORK_MAP.get(config.network, config.network)
-        try:
-            info_task = client.gateway_clmm.get_pool_info(
-                connector=config.connector,
-                network=gw_network,
-                pool_address=config.pool_address,
-            )
-            pools_task = client.gateway_clmm.get_pools(
-                connector=config.connector,
-                search_term=config.pool_address,
-                limit=5,
-            )
-            info_res, pools_res = await asyncio.gather(
-                info_task, pools_task, return_exceptions=True
-            )
-
-            merged: dict = {}
-            if not isinstance(pools_res, Exception):
-                for row in (pools_res or {}).get("pools", []):
-                    if row.get("address") == config.pool_address:
-                        merged.update(row)
-                        break
-            if not isinstance(info_res, Exception) and isinstance(info_res, dict):
-                for k, v in info_res.items():
-                    if v is not None:
-                        merged[k] = v
-
-            if merged:
-                clmm_info = merged
-            elif isinstance(info_res, Exception):
-                clmm_error = str(info_res)
-            elif isinstance(pools_res, Exception):
-                clmm_error = str(pools_res)
-        except Exception as e:
-            clmm_error = str(e)
-
     # Build summary text
     lines = [
         f"*{name}* ({dex_name or 'DEX'})",
@@ -206,27 +147,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
         lines.append(f"🏛️ MCap: ${_fmt(mcap)}")
     if created_at:
         lines.append(f"📅 Created: {created_at[:10]}")
-
-    if clmm_info:
-        lines.append("")
-        lines.append("*On-chain pool info:*")
-        # Show common CLMM fields if present (covers Meteora, Raydium, Uniswap shapes)
-        display_keys = (
-            "trading_pair", "bin_step", "tickSpacing", "base_fee_percentage", "feePct",
-            "current_price", "price", "activeId", "liquidity",
-            "volume_24h", "fees_24h", "apr", "apy",
-            "mint_x", "mint_y", "baseTokenAddress", "quoteTokenAddress",
-        )
-        for key in display_keys:
-            val = clmm_info.get(key)
-            if val is not None and val != "":
-                if key in ("apr", "apy", "base_fee_percentage", "feePct"):
-                    val = f"{_fmt(val, 2)}%"
-                elif key in ("liquidity", "volume_24h", "fees_24h"):
-                    val = f"${_fmt(val)}"
-                lines.append(f"  {key}: `{val}`")
-    elif clmm_error:
-        lines.append(f"\n_Connector info unavailable: {clmm_error[:120]}_")
 
     summary = "\n".join(lines)
 
@@ -287,14 +207,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
                 fig.write_image(buf, format="png", width=1100, height=720, scale=2)
                 buf.seek(0)
                 chart_bytes = buf.getvalue()
-
-                if chat_id and context.bot:
-                    buf.seek(0)
-                    await context.bot.send_photo(
-                        chat_id=chat_id,
-                        photo=buf,
-                        caption=f"{name} — {config.timeframe}",
-                    )
             except Exception as e:
                 logger.warning(f"Chart PNG render failed: {e}")
         except Exception as e:
@@ -311,12 +223,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
         builder.markdown(summary.replace("`", ""))
         if plotly_fig is not None:
             builder.plotly(plotly_fig)
-        if clmm_info:
-            builder.markdown("### On-chain pool data")
-            builder.table(
-                [{"Field": k, "Value": str(v)} for k, v in clmm_info.items()],
-                columns=["Field", "Value"],
-            )
         if ohlcv_list:
             recent = sorted(ohlcv_list, key=lambda c: c[0], reverse=True)[:30]
             builder.markdown("### Recent candles")

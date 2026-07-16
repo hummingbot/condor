@@ -40,7 +40,7 @@ async def delegate(
             result["next_steps"] = (
                 "Running in the background — the user is notified automatically "
                 "when it finishes. Tell them they can check progress anytime with "
-                "the /delegations command in Telegram. You can poll it yourself "
+                "the dashboard. You can poll it yourself "
                 'with delegate(action="get", task_id="<id>"). Do NOT invent any '
                 "other status command (e.g. there is no /task command)."
             )

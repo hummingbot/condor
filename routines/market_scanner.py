@@ -4,28 +4,22 @@ CATEGORY = "Market Data"
 
 import asyncio
 import logging
-import time
 from typing import Any
 
 import aiohttp
 import numpy as np
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
-
-from config_manager import get_client
 
 logger = logging.getLogger(__name__)
 
 BINANCE_FUTURES_TICKER = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+BINANCE_FUTURES_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 MAX_CONCURRENT = 30  # concurrent candle fetches
 
 
 class Config(BaseModel):
-    """Scan top perpetual markets for volume/volatility profiles and classify as mature or degen."""
+    """Scan top Binance perpetual markets for volume/volatility profiles and classify as mature or degen."""
 
-    connector: str = Field(
-        default="binance_perpetual", description="Exchange connector"
-    )
     top_n: int = Field(default=100, description="Number of top pairs by 24h volume")
     lookback_hours: int = Field(default=4, description="Hours of 1m candle data")
     min_volume_usd: float = Field(
@@ -70,43 +64,56 @@ async def fetch_top_pairs(top_n: int, min_volume: float) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# Step 2: Fetch 1m candles via hummingbot API client
+# Step 2: Fetch 1m candles from the Binance Futures public REST API
 # ---------------------------------------------------------------------------
 
 async def fetch_candles_for_pair(
-    client, connector: str, trading_pair: str, max_records: int, semaphore: asyncio.Semaphore
+    session: aiohttp.ClientSession,
+    symbol: str,
+    max_records: int,
+    semaphore: asyncio.Semaphore,
 ) -> list[dict] | None:
-    """Fetch 1m candles for a single pair with concurrency control."""
+    """Fetch 1m klines for a single symbol with concurrency control."""
     async with semaphore:
         try:
-            result = await client.market_data.get_candles(
-                connector_name=connector,
-                trading_pair=trading_pair,
-                interval="1m",
-                max_records=max_records,
-            )
-            if isinstance(result, list):
-                return result
-            if isinstance(result, dict):
-                return result.get("data", [])
-            return None
+            params = {
+                "symbol": symbol,
+                "interval": "1m",
+                "limit": min(max_records, 1500),  # fapi klines hard limit
+            }
+            async with session.get(BINANCE_FUTURES_KLINES, params=params) as resp:
+                resp.raise_for_status()
+                raw = await resp.json()
+            # kline row: [open_time, open, high, low, close, volume, ...]
+            return [
+                {
+                    "timestamp": r[0],
+                    "open": r[1],
+                    "high": r[2],
+                    "low": r[3],
+                    "close": r[4],
+                    "volume": r[5],
+                }
+                for r in raw
+            ]
         except Exception as e:
-            logger.debug(f"Candles failed for {trading_pair}: {e}")
+            logger.debug(f"Candles failed for {symbol}: {e}")
             return None
 
 
 async def fetch_all_candles(
-    client, connector: str, pairs: list[dict], max_records: int
+    pairs: list[dict], max_records: int
 ) -> dict[str, list[dict]]:
     """Fetch candles for all pairs with bounded concurrency."""
     semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-    tasks = {
-        p["trading_pair"]: fetch_candles_for_pair(
-            client, connector, p["trading_pair"], max_records, semaphore
-        )
-        for p in pairs
-    }
-    results = await asyncio.gather(*tasks.values(), return_exceptions=True)
+    async with aiohttp.ClientSession() as session:
+        tasks = {
+            p["trading_pair"]: fetch_candles_for_pair(
+                session, p["symbol"], max_records, semaphore
+            )
+            for p in pairs
+        }
+        results = await asyncio.gather(*tasks.values(), return_exceptions=True)
     candles_map = {}
     for pair_name, result in zip(tasks.keys(), results):
         if isinstance(result, list) and len(result) > 0:
@@ -332,13 +339,8 @@ def format_results(result: dict, lookback_hours: int) -> str:
 # Main entry point
 # ---------------------------------------------------------------------------
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+async def run(config: Config, context=None) -> str:
     """Scan top markets and classify by volume/volatility profile."""
-    chat_id = context._chat_id if hasattr(context, "_chat_id") else None
-    client = await get_client(chat_id, context=context)
-    if not client:
-        return "No server available. Configure servers in /config."
-
     max_records = config.lookback_hours * 60  # 1m candles
 
     # Step 1: Get top pairs by 24h volume
@@ -351,7 +353,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         return "No pairs found matching volume criteria."
 
     # Step 2: Fetch 1m candles for all pairs
-    candles_map = await fetch_all_candles(client, config.connector, top_pairs, max_records)
+    candles_map = await fetch_all_candles(top_pairs, max_records)
 
     if not candles_map:
         return "Failed to fetch candles for any pair."

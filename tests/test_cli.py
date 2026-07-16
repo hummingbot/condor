@@ -13,7 +13,7 @@ import condor.cli as cli
 def env_file(tmp_path, monkeypatch):
     env = tmp_path / ".env"
     example = tmp_path / ".env.example"
-    example.write_text("TELEGRAM_TOKEN=\nADMIN_USER_ID=\n")
+    example.write_text("SOME_TEMPLATE_KEY=\nADMIN_USER_ID=\n")
     monkeypatch.setattr(cli, "ENV_FILE", env)
     monkeypatch.setattr(cli, "ENV_EXAMPLE", example)
     return env
@@ -23,7 +23,7 @@ def test_write_env_var_creates_from_example(env_file):
     cli._write_env_var("ADMIN_USER_ID", "42")
     content = env_file.read_text()
     assert "ADMIN_USER_ID=42" in content
-    assert "TELEGRAM_TOKEN=" in content  # template lines preserved
+    assert "SOME_TEMPLATE_KEY=" in content  # template lines preserved
 
 
 def test_write_env_var_is_idempotent(env_file):

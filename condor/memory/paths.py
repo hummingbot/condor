@@ -17,7 +17,7 @@ The key of a store is ``(agent, user_id)`` — "per-agent" *composes with*
 ``user_id``, it does not replace it (group chats share a chat but each user
 keeps their own memory).
 
-Pure filesystem logic with **no** MCP/Telegram deps, so it runs from the main
+Pure filesystem logic with **no** MCP/transport deps, so it runs from the main
 process (prompt injection) and from the MCP subprocess (the tools) alike.
 """
 

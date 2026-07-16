@@ -17,7 +17,6 @@ from typing import Any, Optional
 
 import aiohttp
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 
@@ -77,7 +76,7 @@ def _f(value: Any) -> float:
         return 0.0
 
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+async def run(config: Config, context=None) -> str:
     candidates: list = []
     seen_mints: set = set()
     rejected = {"excluded_symbol": 0, "liquidity": 0, "volume": 0, "txns": 0, "no_token": 0,

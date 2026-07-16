@@ -1,4 +1,4 @@
-"""Condor - Telegram bot for Hummingbot trading."""
+"""Condor — autonomous trading agent platform."""
 
 
 def _patch_plotly_templates() -> None:

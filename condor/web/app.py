@@ -12,24 +12,14 @@ from fastapi.staticfiles import StaticFiles
 
 from condor.web.routes import (
     agents,
-    archived,
     auth,
-    backtesting,
-    bots,
     chat_ws,
-    controller_performance,
-    executors,
-    market,
     native_executors,
     venues,
     notifications,
-    portfolio,
-    positions,
     reports,
     routines,
-    servers,
     settings,
-    transcribe,
     ws,
 )
 
@@ -135,22 +125,12 @@ def create_app() -> FastAPI:
 
     # ── API routes ──
     app.include_router(auth.router, prefix="/api/v1")
-    app.include_router(servers.router, prefix="/api/v1")
-    app.include_router(portfolio.router, prefix="/api/v1")
-    app.include_router(bots.router, prefix="/api/v1")
-    app.include_router(controller_performance.router, prefix="/api/v1")
-    app.include_router(archived.router, prefix="/api/v1")
-    app.include_router(executors.router, prefix="/api/v1")
-    app.include_router(positions.router, prefix="/api/v1")
-    app.include_router(backtesting.router, prefix="/api/v1")
-    app.include_router(market.router, prefix="/api/v1")
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(settings.router, prefix="/api/v1")
     app.include_router(chat_ws.router, prefix="/api/v1")
-    app.include_router(transcribe.router, prefix="/api/v1")
     app.include_router(native_executors.router, prefix="/api/v1")
     app.include_router(venues.router, prefix="/api/v1")
     app.include_router(notifications.router, prefix="/api/v1")

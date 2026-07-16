@@ -10,7 +10,6 @@ import math
 import time
 from datetime import datetime, timezone
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 
@@ -524,7 +523,7 @@ def _make_ts_list(candles: list) -> list:
     return result
 
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+async def run(config: Config, context=None) -> str:
     import asyncio
 
     coin = config.coin.upper()

@@ -1,6 +1,6 @@
 """User memory — persistent facts the agent keeps about a user.
 
-Pure-filesystem store (no MCP/Telegram deps) keyed by ``(assistant, user_id)``
+Pure-filesystem store (no MCP/transport deps) keyed by ``(assistant, user_id)``
 (FEAT-003): each assistant — the ``/agent`` chat and every trading agent — has
 its own isolated store, co-located with its definition. See ``paths.store_root``
 and ``store.MemoryStore``.

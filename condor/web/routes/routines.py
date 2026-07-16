@@ -15,7 +15,6 @@ from condor.reports import list_reports
 from condor.routine_store import get_routine_store
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
-from config_manager import get_config_manager
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/routines", tags=["routines"])
@@ -103,9 +102,6 @@ async def run_routine(
     user: WebUser = Depends(get_current_user),
 ):
     """Execute a one-shot routine. Returns instance_id for polling."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, server_name):
-        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.execute(
@@ -127,9 +123,6 @@ async def schedule_routine(
     user: WebUser = Depends(get_current_user),
 ):
     """Schedule a routine at an interval. Returns instance_id."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, server_name):
-        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.schedule(
@@ -150,9 +143,6 @@ async def run_routine_v2(
     user: WebUser = Depends(get_current_user),
 ):
     """Execute a routine (supports names with slashes like agent/routine)."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, body.server_name):
-        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.execute(
@@ -172,9 +162,6 @@ async def schedule_routine_v2(
     user: WebUser = Depends(get_current_user),
 ):
     """Schedule a routine (supports names with slashes like agent/routine)."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, body.server_name):
-        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.schedule(
@@ -218,22 +205,14 @@ async def put_hooks(
 @router.get("/options/{source}")
 async def get_field_options(
     source: str,
-    server: str = Query("local", alias="server"),
     user: WebUser = Depends(get_current_user),
 ):
-    """Return dynamic options for routine config fields (e.g. controller_configs)."""
-    if source == "controller_configs":
-        try:
-            cm = get_config_manager()
-            client = await cm.get_client(server)
-            if not client:
-                return {"options": []}
-            configs = await client.controllers.list_controller_configs()
-            names = [c.get("id") or c.get("name", "") for c in (configs or [])]
-            return {"options": sorted(n for n in names if n)}
-        except Exception as e:
-            log.warning(f"Failed to fetch controller configs: {e}")
-            return {"options": []}
+    """Return dynamic options for routine config fields.
+
+    No dynamic sources remain after the Hummingbot removal (the only source
+    was hb ``controller_configs``); kept so option-typed fields degrade
+    gracefully in the dashboard.
+    """
     return {"options": []}
 
 

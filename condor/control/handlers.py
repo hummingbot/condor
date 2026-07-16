@@ -190,5 +190,5 @@ def build_agent_handlers() -> dict[str, Handler]:
 
 def build_all_handlers() -> dict[str, Handler]:
     """Every control method — executors + agent lifecycle/consult/delegate.
-    Used by both the web-app host and the standalone `condor.daemon`."""
+    Used by the web-app host (`condor serve`)."""
     return {**build_executor_handlers(), **build_agent_handlers()}

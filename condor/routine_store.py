@@ -1,7 +1,7 @@
 """Shared in-memory store for routine instances and results.
 
-Bridges Telegram handler and web API so both can see
-the same instances, schedule runs, and read results.
+The single registry the web API and the MCP routines tool both read:
+instances, scheduled runs, and results.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 import condor.reports as reports
-from condor import routine_hooks
 from routines.base import (
     RoutineResult,
     discover_routines,
@@ -26,75 +25,6 @@ from routines.base import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class _HttpBot:
-    """Fallback bot that sends Telegram messages via HTTP when no real bot is available."""
-
-    def __init__(self):
-        import os
-
-        self._token = os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get(
-            "TELEGRAM_TOKEN", ""
-        )
-
-    async def _post(self, method: str, data: dict, files: dict | None = None):
-        if not self._token:
-            return None
-        import httpx
-
-        url = f"https://api.telegram.org/bot{self._token}/{method}"
-        async with httpx.AsyncClient(timeout=30) as client:
-            if files:
-                resp = await client.post(url, data=data, files=files)
-            else:
-                resp = await client.post(url, json=data)
-            result = resp.json()
-            if not result.get("ok"):
-                logger.warning(f"Telegram {method} failed: {resp.text}")
-            return result
-
-    async def send_message(self, *a, **kw):
-        chat_id = kw.get("chat_id") or (a[0] if a else None)
-        text = kw.get("text") or (a[1] if len(a) > 1 else "")
-        data = {"chat_id": chat_id, "text": text}
-        if kw.get("parse_mode"):
-            data["parse_mode"] = kw["parse_mode"]
-        return await self._post("sendMessage", data)
-
-    async def send_photo(self, *a, **kw):
-        chat_id = kw.get("chat_id") or (a[0] if a else None)
-        photo = kw.get("photo") or (a[1] if len(a) > 1 else None)
-        data = {"chat_id": chat_id}
-        if kw.get("caption"):
-            data["caption"] = kw["caption"]
-        files = {"photo": ("chart.png", photo, "image/png")} if photo else None
-        return await self._post("sendPhoto", data, files=files)
-
-    async def send_document(self, *a, **kw):
-        import mimetypes
-
-        chat_id = kw.get("chat_id") or (a[0] if a else None)
-        document = kw.get("document") or (a[1] if len(a) > 1 else None)
-        data = {"chat_id": chat_id}
-        if kw.get("caption"):
-            data["caption"] = kw["caption"]
-        files = None
-        if document is not None:
-            # Honor the buffer's name (e.g. "Daily_PnL.html") and the explicit
-            # `filename` kwarg so the file arrives with a real name + extension
-            # instead of a generic, extension-less "file".
-            filename = kw.get("filename") or getattr(document, "name", None) or "file"
-            mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
-            files = {"document": (filename, document, mime)}
-        return await self._post("sendDocument", data, files=files)
-
-    async def edit_message_text(self, *a, **kw):
-        data = {k: v for k, v in kw.items() if v is not None}
-        return await self._post("editMessageText", data)
-
-
-_http_bot = _HttpBot()
 
 
 def _agent_of(routine) -> str:
@@ -109,11 +39,14 @@ def _agent_of(routine) -> str:
 
 
 class WebRoutineContext:
-    """Lightweight context so routines can run without Telegram."""
+    """Lightweight run context handed to routines: user prefs + chat id.
 
-    def __init__(self, server_name: str, bot=None, chat_id: int = 0):
+    Chat delivery died with the retired bot surface (§9.1) — routines report
+    via condor.reports / notify(), never a transport handle.
+    """
+
+    def __init__(self, server_name: str, chat_id: int = 0):
         self._chat_id = chat_id
-        self.bot = bot if bot is not None else _http_bot
         self._user_data: dict[str, Any] = {
             "preferences": {"general": {"active_server": server_name}},
         }
@@ -130,15 +63,6 @@ class RoutineStore:
         self._instances: dict[str, dict] = {}
         self._results: dict[str, RoutineResult] = {}
         self._tasks: dict[str, asyncio.Task] = {}
-        self._bot = None  # Telegram bot instance, set via set_bot()
-
-    def set_bot(self, bot) -> None:
-        """Inject the Telegram bot so web-triggered routines can send messages."""
-        self._bot = bot
-
-    def get_bot(self):
-        """Return the registered Telegram bot, or None if not set yet."""
-        return self._bot
 
     # ── Discovery ──
 
@@ -257,27 +181,6 @@ class RoutineStore:
     def _gen_id(self) -> str:
         return hashlib.md5(f"{time.time()}{id(object())}".encode()).hexdigest()[:8]
 
-    async def _fire_hooks(
-        self, instance_id: str, result, report_id: str | None, failed: bool
-    ) -> None:
-        """Dispatch post-execution hooks for a stored instance. Never raises."""
-        meta = self._instances.get(instance_id)
-        routine_name = meta.get("routine_name") if meta else None
-        if not routine_name:
-            return
-        try:
-            await routine_hooks.dispatch(
-                routine_name,
-                result,
-                report_id,
-                failed=failed,
-                bot=(self._bot or _http_bot),
-            )
-        except Exception as e:
-            logger.error(
-                f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
-            )
-
     def _new_instance_meta(
         self,
         routine_name: str,
@@ -313,9 +216,8 @@ class RoutineStore:
         *,
         status_after: str,
         failed_status: str | None = None,
-        fire_hooks: bool = True,
     ) -> None:
-        """Run a routine once, store the result, update instance metadata, fire hooks.
+        """Run a routine once, store the result, update instance metadata.
 
         Shared by one-shot, continuous and scheduled runs — the entry points
         only differ in loop/cancellation semantics. ``status_after`` is the
@@ -324,7 +226,7 @@ class RoutineStore:
         recorded as a clean "Stopped by user" run so a stopped continuous
         routine still stores its final result.
         """
-        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
+        ctx = WebRoutineContext(server_name, chat_id=user_id)
         start = time.time()
         reports.reset_last_report_id()
         error_msg = None
@@ -346,7 +248,6 @@ class RoutineStore:
             failed = True
 
         duration = time.time() - start
-        report_id = reports.get_last_report_id()
         self._results[instance_id] = result
 
         if instance_id in self._instances:
@@ -362,9 +263,6 @@ class RoutineStore:
                     "error": error_msg,
                 }
             )
-
-        if fire_hooks:
-            await self._fire_hooks(instance_id, result, report_id, failed)
 
     def _resolve_routine(self, routine_name: str):
         """Resolve a routine by name, supporting 'agent_slug/routine_name' format."""
@@ -458,9 +356,6 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
     ) -> None:
-        # Continuous routines message the user from inside their own loop and
-        # only end on stop/error, so per-run completion hooks are intentionally
-        # not fired for them (they would only trigger once, at shutdown).
         await self._execute_and_record(
             instance_id,
             routine,
@@ -468,7 +363,6 @@ class RoutineStore:
             server_name,
             user_id,
             status_after="stopped",
-            fire_hooks=False,
         )
 
     async def schedule(

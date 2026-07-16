@@ -6,12 +6,13 @@ import asyncio
 import logging
 from itertools import combinations
 
+import aiohttp
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
-
-from config_manager import get_client
 
 logger = logging.getLogger(__name__)
+
+# Public order-book endpoints per exchange — no credentials needed.
+SUPPORTED_EXCHANGES = ("binance", "kucoin", "okx", "gate_io")
 
 
 class Config(BaseModel):
@@ -22,7 +23,7 @@ class Config(BaseModel):
     )
     exchanges: str = Field(
         default="binance,kucoin",
-        description="Comma-separated exchanges (e.g. binance,kucoin,htx,gate_io)",
+        description=f"Comma-separated exchanges (supported: {','.join(SUPPORTED_EXCHANGES)})",
     )
     amount: float = Field(default=1.0, description="Amount to quote (in base asset)")
     ob_depth: int = Field(default=20, description="Order book depth (levels)")
@@ -32,29 +33,80 @@ def _parse_exchanges(raw: str) -> list[str]:
     return [e.strip().lower() for e in raw.split(",") if e.strip()]
 
 
-async def _get_order_book(client, connector: str, trading_pair: str, depth: int) -> dict | None:
+async def _fetch_json(session: aiohttp.ClientSession, url: str, params: dict) -> dict:
+    async with session.get(url, params=params) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
+async def _get_order_book(
+    session: aiohttp.ClientSession, connector: str, trading_pair: str, depth: int
+) -> dict | None:
+    """Fetch a public order book. Returns {"bids": [[p, s], ...], "asks": ...}.
+
+    Bids are returned best-first (descending), asks best-first (ascending),
+    matching what every adapter below already provides.
+    """
+    base, quote = trading_pair.split("-", 1)
     try:
-        result = await client.market_data.get_order_book(
-            connector_name=connector, trading_pair=trading_pair, depth=depth,
-        )
-        return result if isinstance(result, dict) else None
+        if connector == "binance":
+            data = await _fetch_json(
+                session,
+                "https://api.binance.com/api/v3/depth",
+                {"symbol": f"{base}{quote}".upper(), "limit": max(depth, 5)},
+            )
+            return {"bids": data["bids"][:depth], "asks": data["asks"][:depth]}
+        if connector == "kucoin":
+            data = await _fetch_json(
+                session,
+                "https://api.kucoin.com/api/v1/market/orderbook/level2_100",
+                {"symbol": f"{base}-{quote}".upper()},
+            )
+            book = data.get("data") or {}
+            return {"bids": book.get("bids", [])[:depth], "asks": book.get("asks", [])[:depth]}
+        if connector == "okx":
+            data = await _fetch_json(
+                session,
+                "https://www.okx.com/api/v5/market/books",
+                {"instId": f"{base}-{quote}".upper(), "sz": min(depth, 400)},
+            )
+            rows = data.get("data") or []
+            if not rows:
+                return None
+            # OKX levels are [price, size, liquidated, orders] — keep [price, size].
+            return {
+                "bids": [lvl[:2] for lvl in rows[0].get("bids", [])],
+                "asks": [lvl[:2] for lvl in rows[0].get("asks", [])],
+            }
+        if connector == "gate_io":
+            data = await _fetch_json(
+                session,
+                "https://api.gateio.ws/api/v4/spot/order_book",
+                {"currency_pair": f"{base}_{quote}".upper(), "limit": min(depth, 100)},
+            )
+            return {"bids": data.get("bids", []), "asks": data.get("asks", [])}
+        logger.warning(f"Unsupported exchange for order book: {connector}")
+        return None
     except Exception as e:
         logger.warning(f"Order book failed for {connector}/{trading_pair}: {e}")
         return None
 
 
-async def _get_fill_price(client, connector: str, trading_pair: str, amount: float, is_buy: bool) -> float | None:
-    try:
-        result = await client.market_data.get_price_for_volume(
-            connector_name=connector, trading_pair=trading_pair, volume=amount, is_buy=is_buy,
-        )
-        if isinstance(result, dict):
-            price = result.get("result_price") or result.get("price") or result.get("average_price")
-            return float(price) if price else None
+def _fill_price(levels: list, amount: float) -> float | None:
+    """Volume-weighted average price to fill ``amount`` (base units) by
+    walking the book. None when the fetched depth can't cover the amount."""
+    if amount <= 0:
         return None
-    except Exception as e:
-        logger.warning(f"Fill price failed for {connector}/{trading_pair}: {e}")
-        return None
+    remaining = amount
+    cost = 0.0
+    for level in levels:
+        price, size = _parse_level(level)
+        take = min(size, remaining)
+        cost += take * price
+        remaining -= take
+        if remaining <= 0:
+            return cost / amount
+    return None
 
 
 def _parse_level(level) -> tuple[float, float]:
@@ -331,32 +383,31 @@ def _build_ob_chart(exchange_data: list[tuple[str, list, list]], pair: str):
     return fig
 
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+async def run(config: Config, context=None) -> str:
     """Compare order books across multiple CEX exchanges."""
-    chat_id = context._chat_id if hasattr(context, "_chat_id") else None
-    client = await get_client(chat_id, context=context)
-
-    if not client:
-        return "No server available. Configure servers in /config."
-
     exchanges = _parse_exchanges(config.exchanges)
     if len(exchanges) < 2:
-        return "Need at least 2 exchanges (comma-separated). Example: binance,kucoin,htx"
+        return (
+            "Need at least 2 exchanges (comma-separated). "
+            f"Supported: {', '.join(SUPPORTED_EXCHANGES)}"
+        )
+
+    unsupported = [ex for ex in exchanges if ex not in SUPPORTED_EXCHANGES]
+    exchanges = [ex for ex in exchanges if ex in SUPPORTED_EXCHANGES]
+    if len(exchanges) < 2:
+        return (
+            f"Unsupported exchange(s): {', '.join(unsupported)}. "
+            f"Supported: {', '.join(SUPPORTED_EXCHANGES)}"
+        )
 
     pair = config.trading_pair
 
-    # Fetch all order books and fill prices in parallel with asyncio.gather
-    ob_tasks = [_get_order_book(client, ex, pair, config.ob_depth) for ex in exchanges]
-    buy_tasks = [_get_fill_price(client, ex, pair, config.amount, True) for ex in exchanges]
-    sell_tasks = [_get_fill_price(client, ex, pair, config.amount, False) for ex in exchanges]
-
-    all_results = await asyncio.gather(*ob_tasks, *buy_tasks, *sell_tasks)
-
-    # Unpack results
-    n_ex = len(exchanges)
-    ob_results = all_results[:n_ex]
-    buy_results = all_results[n_ex:2 * n_ex]
-    sell_results = all_results[2 * n_ex:]
+    # Fetch all order books in parallel; fill prices are computed locally by
+    # walking each book (public data — no execution backend involved).
+    async with aiohttp.ClientSession() as session:
+        ob_results = await asyncio.gather(
+            *(_get_order_book(session, ex, pair, config.ob_depth) for ex in exchanges)
+        )
 
     ex_data = {}
     for i, ex in enumerate(exchanges):
@@ -365,11 +416,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         stats = _ob_stats(bids, asks) if ob else {}
         ex_data[ex] = {
             "ob": ob, "bids": bids, "asks": asks, "stats": stats,
-            "fill_buy": buy_results[i], "fill_sell": sell_results[i],
+            "fill_buy": _fill_price(ob.get("asks", []), config.amount) if ob else None,
+            "fill_sell": _fill_price(ob.get("bids", []), config.amount) if ob else None,
         }
 
     # Filter invalid exchanges and sort by spread
     valid_exchanges, invalid_exchanges = _filter_and_sort_exchanges(exchanges, ex_data)
+    invalid_exchanges.extend(
+        (ex, f"Unsupported exchange (supported: {', '.join(SUPPORTED_EXCHANGES)})")
+        for ex in unsupported
+    )
 
     if not valid_exchanges:
         msg = f"Could not fetch valid order books from any exchange: {', '.join(exchanges)}"

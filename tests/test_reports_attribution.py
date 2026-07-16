@@ -68,7 +68,7 @@ def test_attribution_resets_after_block(reports_dir):
 def test_mcp_runner_stamps_agent_slug(reports_dir, tmp_path, monkeypatch):
     """The MCP routine runner must attribute an agent-targeted run's report to
     the agent slug — the same ``list_reports(agent=...)`` bucket the
-    web/Telegram runner uses. Regression test for CORR-027 (originally about
+    web runner uses. Regression test for CORR-027 (originally about
     composite strategy keys leaking into attribution)."""
     import condor.agents.agent as agent_mod
     import routines.base as routines_base

@@ -2,9 +2,11 @@
 
 Subcommands:
 
-    init         identity anchor + hummingbot-api probe + harness
-                 multi-select; emits per-harness config. Idempotent —
-                 re-run any time to add a harness or the Telegram token.
+    init         identity anchor + harness multi-select; emits
+                 per-harness config. Idempotent — re-run any time to
+                 add a harness.
+    update       pull the latest Condor from the current branch and
+                 sync dependencies (restart `condor serve` after).
     login-token  mint a short-lived web login URL from the terminal
                  (same trust model as Tier-A auto-bind: whoever runs
                  commands on this box already owns config.yml and the
@@ -26,13 +28,10 @@ installer (install.sh) only bootstraps and then hands off to `init`.
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import secrets
 import shutil
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -40,10 +39,6 @@ ENV_FILE = REPO_ROOT / ".env"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 
 HARNESSES = ("claude-code", "openclaw", "hermes", "condor")
-API_INSTALL_CMD = (
-    "curl -fsSL https://raw.githubusercontent.com/hummingbot/deploy/main/setup.sh"
-    " | bash -s -- --hummingbot-api"
-)
 
 
 def _die(msg: str) -> None:
@@ -119,33 +114,6 @@ def detect_harnesses(home: Path | None = None) -> dict[str, bool]:
 # ── probes ──
 
 
-def _probe_http(url: str, timeout: float = 5.0) -> bool:
-    """True when *anything* HTTP answers at url (401/404 counts: the
-    service is up; credentials are a /servers concern, not init's)."""
-    try:
-        with urllib.request.urlopen(url, timeout=timeout):
-            return True
-    except urllib.error.HTTPError:
-        return True
-    except Exception:
-        return False
-
-
-def _validate_telegram_token(token: str) -> str:
-    """Return the bot username for a valid token; die loudly otherwise."""
-    url = f"https://api.telegram.org/bot{token}/getMe"
-    try:
-        with urllib.request.urlopen(url, timeout=10) as resp:
-            data = json.load(resp)
-    except urllib.error.HTTPError as exc:
-        _die(f"Telegram rejected the bot token (HTTP {exc.code}). Check it in @BotFather.")
-    except Exception as exc:
-        _die(f"Could not reach api.telegram.org to validate the token: {exc}")
-    if not data.get("ok"):
-        _die(f"Telegram rejected the bot token: {data}")
-    return data["result"].get("username", "")
-
-
 # ── init steps ──
 
 
@@ -163,20 +131,9 @@ def _step_identity(args) -> int:
             "no ADMIN_USER_ID in .env and no --user-id given; "
             "non-interactive init needs --user-id"
         )
-    elif _ask_yes_no("Do you use Telegram?", default=True):
-        print("  Get your numeric id from https://t.me/userinfobot (send /start).")
-        raw = _ask("Your Telegram user id")
-        if not raw.isdigit():
-            _die(f"a Telegram user id is numeric, got {raw!r}")
-        user_id = int(raw)
     else:
         user_id = 1_000_000 + secrets.randbelow(2_000_000_000)
-        print(
-            f"• Minted user id {user_id} (an identifier, not a credential).\n"
-            "  NOTE: enabling the Telegram surface later requires the id to BE\n"
-            "  your Telegram id — that is an .env + config.yml edit, so decide\n"
-            "  early if you can."
-        )
+        print(f"• Minted user id {user_id} (an identifier, not a credential).")
 
     _write_env_var("ADMIN_USER_ID", str(user_id))
     os.environ["ADMIN_USER_ID"] = str(user_id)
@@ -190,7 +147,7 @@ def _step_identity(args) -> int:
     extra = args.extra_users or ""
     if not extra and _interactive() and not args.harness:
         if not _ask_yes_no("Single-user install?", default=True):
-            extra = _ask("Additional approved Telegram user ids (comma-separated)")
+            extra = _ask("Additional approved user ids (comma-separated)")
     if extra:
         cm = get_config_manager()
         ids = [int(x) for x in extra.replace(" ", "").split(",") if x]
@@ -204,31 +161,6 @@ def _step_identity(args) -> int:
             "    env CONDOR_USER_ID=<id> uv run python -m mcp_servers.condor"
         )
     return user_id
-
-
-def _step_api(args, user_id: int) -> None:
-    """Register the same-box hummingbot-api and probe it, loudly."""
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-    if cm.get_server("local") is None:
-        # admin/admin are hummingbot-api's own install defaults; change
-        # via /servers (Telegram) or the dashboard if you hardened them.
-        cm.add_server("local", "localhost", 8000, "admin", "admin", owner_id=user_id)
-        if not cm.get_default_server():
-            cm.set_default_server("local")
-        print("• Registered hummingbot-api server 'local' (localhost:8000)")
-
-    api_url = args.api_url or "http://localhost:8000"
-    if _probe_http(api_url):
-        print(f"• hummingbot-api reachable at {api_url}")
-    else:
-        print(
-            f"\n!! hummingbot-api is NOT reachable at {api_url}.\n"
-            "!! Nothing can trade until it is running. Install/start it with:\n"
-            f"!!   {API_INSTALL_CMD}\n",
-            file=sys.stderr,
-        )
 
 
 def _select_harnesses(args) -> list[str]:
@@ -308,29 +240,10 @@ def _emit_hermes() -> None:
     )
 
 
-def _emit_condor(args) -> None:
+def _emit_condor() -> None:
     from utils.config import WEB_URL
 
-    print("\n── Condor harness (Telegram + web) ──")
-    env = _read_env_file()
-    token = args.telegram_token or env.get("TELEGRAM_TOKEN", "")
-    if args.telegram_token:
-        username = _validate_telegram_token(token)
-        _write_env_var("TELEGRAM_TOKEN", token)
-        print(f"  Telegram bot @{username} configured.")
-    elif token:
-        print("  Telegram: token already in .env.")
-    elif _interactive() and _ask_yes_no(
-        "Set up the Telegram surface now (needs a bot token from @BotFather)?",
-        default=False,
-    ):
-        print("  Create a bot with https://t.me/BotFather (/newbot), paste the token.")
-        token = _ask("Bot token")
-        username = _validate_telegram_token(token)
-        _write_env_var("TELEGRAM_TOKEN", token)
-        print(f"  Telegram bot @{username} configured.")
-    else:
-        print("  Telegram: skipped — the web surface works without it; re-run init to add.")
+    print("\n── Condor harness (web) ──")
     print(
         f"  Start Condor:  make run   (tmux session 'condor')\n"
         f"  Web chat:      {WEB_URL}/login — mint a login URL with:\n"
@@ -340,15 +253,14 @@ def _emit_condor(args) -> None:
 
 def cmd_init(args) -> None:
     print(f"Condor init — {REPO_ROOT}\n")
-    user_id = _step_identity(args)
-    _step_api(args, user_id)
+    _step_identity(args)
     selected = _select_harnesses(args)
 
     emitters = {
         "claude-code": _emit_claude_code,
         "openclaw": _emit_openclaw,
         "hermes": _emit_hermes,
-        "condor": lambda: _emit_condor(args),
+        "condor": _emit_condor,
     }
     for harness in selected:
         emitters[harness]()
@@ -476,6 +388,41 @@ def cmd_account_list(args) -> None:
         print(f"{venue_id}  {addr}{label}{marker}")
 
 
+def cmd_update(args) -> None:
+    """Update Condor from the remote branch: fetch/compare, pull, uv sync.
+
+    The CLI replacement for the retired bot-admin /update flow (wraps
+    utils.updater). Restart `condor serve` afterwards to pick up the code.
+    """
+    import asyncio
+
+    from utils.updater import check_for_updates, install_dependencies, pull_updates
+
+    async def run() -> None:
+        info = await check_for_updates()
+        if info["error"]:
+            _die(info["error"])
+        print(f"branch {info['branch']}: local {info['local_commit']}, "
+              f"remote {info['remote_commit']}")
+        if info["up_to_date"]:
+            print("Already up to date.")
+            return
+        print(f"{info['commits_behind']} commit(s) behind:\n{info['commit_log']}")
+        if args.check_only:
+            return
+        ok, msg = await pull_updates()
+        if not ok:
+            _die(msg)
+        print(msg)
+        ok, msg = await install_dependencies()
+        if not ok:
+            _die(msg)
+        print("Dependencies synced. Restart Condor to apply: "
+              "uv run python -m condor.cli serve")
+
+    asyncio.run(run())
+
+
 def cmd_serve(args) -> None:
     """The ONE process (§9.3): control socket + scheduler + execution runtime
     + web app, in the web app's lifespan. ``--headless`` skips the frontend
@@ -508,13 +455,18 @@ def main(argv: list[str] | None = None) -> None:
     p_init.add_argument("--user-id", type=int, help="approved user id (skips the identity question)")
     p_init.add_argument("--extra-users", help="comma-separated additional approved user ids")
     p_init.add_argument("--harness", help=f"comma-separated selection from {list(HARNESSES)}, or 'none'")
-    p_init.add_argument("--telegram-token", help="bot token for the Condor Telegram surface")
-    p_init.add_argument("--api-url", help="hummingbot-api URL to probe (default http://localhost:8000)")
     p_init.set_defaults(func=cmd_init)
 
     p_token = sub.add_parser("login-token", help="mint a web dashboard login URL")
     p_token.add_argument("--user-id", type=int, help="user to log in as (default: sole approved user)")
     p_token.set_defaults(func=cmd_login_token)
+
+    p_update = sub.add_parser("update", help="git pull the current branch + uv sync")
+    p_update.add_argument(
+        "--check-only", action="store_true",
+        help="only report whether updates are available; don't pull",
+    )
+    p_update.set_defaults(func=cmd_update)
 
     p_serve = sub.add_parser(
         "serve",

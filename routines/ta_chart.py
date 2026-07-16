@@ -1,25 +1,34 @@
 import io
 import logging
+import time
 
+import aiohttp
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
 
-from config_manager import get_client
 from routines.base import RoutineResult
 
 logger = logging.getLogger(__name__)
 
 CATEGORY = "Analysis"
 
+# Public Binance REST — no credentials needed.
+_KLINES_URLS = {
+    "binance": "https://api.binance.com/api/v3/klines",
+    "binance_perpetual": "https://fapi.binance.com/fapi/v1/klines",
+}
+
 
 class Config(BaseModel):
     """Candlestick chart with BB + EMAs and a band-breakout signal evaluated over a fixed horizon."""
 
-    connector_name: str = Field(default="binance_perpetual", description="Exchange connector")
+    connector_name: str = Field(
+        default="binance_perpetual",
+        description="Data source: binance (spot) or binance_perpetual (futures)",
+    )
     trading_pair: str = Field(default="JUP-USDT", description="Trading pair")
     interval: str = Field(default="15m", description="Candle interval")
     days: int = Field(default=7, description="Days of history to plot")
@@ -44,6 +53,55 @@ class Config(BaseModel):
 def _interval_minutes(interval: str) -> int:
     units = {"m": 1, "h": 60, "d": 1440}
     return int(interval[:-1]) * units.get(interval[-1], 1)
+
+
+async def _fetch_klines(
+    connector_name: str, trading_pair: str, interval: str, days: float
+) -> list[dict]:
+    """Fetch klines from Binance public REST, paginating past the per-request cap."""
+    if connector_name not in _KLINES_URLS:
+        raise ValueError(
+            f"Unsupported connector {connector_name!r} — "
+            f"supported: {', '.join(sorted(_KLINES_URLS))}"
+        )
+    url = _KLINES_URLS[connector_name]
+    symbol = trading_pair.replace("-", "").upper()
+    interval_ms = _interval_minutes(interval) * 60_000
+    end_ms = int(time.time() * 1000)
+    start_ms = end_ms - int(days * 86_400_000)
+    per_request = 1000
+
+    records: list[dict] = []
+    async with aiohttp.ClientSession() as session:
+        cursor = start_ms
+        while cursor < end_ms:
+            params = {
+                "symbol": symbol,
+                "interval": interval,
+                "startTime": cursor,
+                "endTime": end_ms,
+                "limit": per_request,
+            }
+            async with session.get(url, params=params) as resp:
+                resp.raise_for_status()
+                raw = await resp.json()
+            if not raw:
+                break
+            records.extend(
+                {
+                    "timestamp": r[0],
+                    "open": r[1],
+                    "high": r[2],
+                    "low": r[3],
+                    "close": r[4],
+                    "volume": r[5],
+                }
+                for r in raw
+            )
+            cursor = raw[-1][0] + interval_ms
+            if len(raw) < per_request:
+                break
+    return records
 
 
 def _compute_signals(plot_df: pd.DataFrame, config: Config):
@@ -133,21 +191,16 @@ def _compute_signals(plot_df: pd.DataFrame, config: Config):
     return signal, signals, raw_crossings
 
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE):
-    client = await get_client(context._chat_id, context=context)
-    if not client:
-        return "No server available"
-
+async def run(config: Config, context=None):
     # Fetch extra days so BB/EMA warm up before the displayed window
     warmup_minutes = config.ema_slow * _interval_minutes(config.interval)
     warmup_days = max(2, warmup_minutes // (60 * 24) + 1)
-    result = await client.market_data.get_candles_last_days(
+    records = await _fetch_klines(
         config.connector_name,
         config.trading_pair,
+        config.interval,
         config.days + warmup_days,
-        interval=config.interval,
     )
-    records = result if isinstance(result, list) else result.get("data", result.get("candles", []))
     if not records:
         return f"No candles returned for {config.trading_pair} on {config.connector_name}"
 
@@ -327,17 +380,6 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE):
         f"Closed: {len(closed)} | Win rate: {win_rate:.0f}% | "
         f"Avg PnL: {avg_pnl:+.2f}% | Total PnL: {total_pnl:+.2f}%"
     )
-
-    try:
-        await context.bot.send_photo(
-            chat_id=context._chat_id, photo=io.BytesIO(png_bytes),
-            caption=(
-                f"{config.trading_pair} {config.interval} — breakout signal: "
-                f"{len(signals)} signals, win rate {win_rate:.0f}%, total {total_pnl:+.2f}%"
-            ),
-        )
-    except Exception as e:
-        logger.warning(f"Telegram photo send failed: {e}")
 
     try:
         from condor.reports import ReportBuilder

@@ -11,7 +11,7 @@ and also ``create``/``edit``/``delete`` them via the ``manage_skill`` tool. Repo
 shipped playbooks are simply files already present in the dir; they live in the
 same library and can be refined like any other (so edits are version-controlled).
 
-Like the memory store this is pure filesystem logic with **no** MCP/Telegram
+Like the memory store this is pure filesystem logic with **no** MCP/transport
 dependencies, so it runs from the main process (prompt injection) and from the
 MCP subprocess (the ``manage_skill`` tool) alike.
 

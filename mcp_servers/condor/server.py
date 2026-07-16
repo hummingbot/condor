@@ -32,8 +32,7 @@ def _build_instructions() -> str:
     base = (
         "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
         "routine) and consultable **domain agents** on top of these tools.\n\n"
-        "ROUTING RULE — before handling a request with raw tools (including tools "
-        "from other connected MCP servers such as mcp-hummingbot), apply this "
+        "ROUTING RULE — before handling a request with raw tools, apply this "
         "priority: (1) a matching SKILL, (2) a matching AGENT, (3) raw tools only "
         "if neither matches:\n"
         '- If a SKILL matches, call `manage_skill(action="read", name="<name>")` '
@@ -55,7 +54,7 @@ def _build_instructions() -> str:
         '— for that just call `manage_routines(action="run", name="...")`.)\n'
         "- Only fall back to raw tools when nothing matches.\n"
         "Anti-pattern: answering a domain request (deploy/tune an executor, analyze "
-        "logs, author a routine) with a chain of raw `mcp-hummingbot`/`manage_*` "
+        "logs, author a routine) with a chain of raw `manage_*` "
         "calls when a skill or agent covers it.\n"
         'Discover more anytime with `manage_skill(action="list")`.'
     )
@@ -138,10 +137,9 @@ async def delegate(
     "unbounded" is expressed by passing explicitly large caps. Non-trading
     specialists (e.g. routine_builder) run with full auto-approve.
 
-    The user tracks a delegation in Telegram with the /delegations command (NOT
-    "/task" — that does not exist) and is pinged automatically when it finishes.
-    Never invent a status command; "start" returns a next_steps hint with the
-    correct wording.
+    The user tracks a delegation from the dashboard and is pinged automatically
+    (a notification outbox entry) when it finishes. Never invent a status
+    command; "start" returns a next_steps hint with the correct wording.
 
     Actions:
     - "start": Begin a delegation (requires agent, task). Returns immediately with
@@ -169,18 +167,16 @@ async def delegate(
 @handle_errors("send notification")
 async def send_notification(
     text: str,
-    parse_mode: str = "Markdown",
 ) -> dict:
-    """Send a Telegram message to the user.
+    """Notify the user (recorded in the notification outbox).
 
     Args:
         text: Message text to send.
-        parse_mode: Telegram parse mode ("Markdown" or "HTML"). Default: "Markdown".
 
     Returns:
         {"sent": true} on success, {"error": "..."} on failure.
     """
-    return await notification.send_notification(text, parse_mode)
+    return await notification.send_notification(text)
 
 
 @mcp.tool()
@@ -193,8 +189,8 @@ async def get_notifications(
     """Read recent Condor notifications from the outbox (oldest first).
 
     Every user-facing notification (session ticks, delegation results,
-    agent pings) is recorded in the outbox regardless of Telegram
-    delivery. Use this to catch up on what agents reported — e.g. after
+    agent pings) is recorded in the outbox. Use this to catch up on what
+    agents reported — e.g. after
     starting a session or delegation from this harness — or to poll for
     new entries by passing the last seen ``ts`` as ``since_ts``.
 

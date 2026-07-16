@@ -1,59 +1,65 @@
-"""Logs Summary — error/warning diagnostics across all active bots on every
-connected server.
+"""Logs Summary — error/warning diagnostics over the Condor process log.
 
-Fans out across all the Hummingbot API servers Condor is connected to (via
-`asyncio.gather`), queries the bot-orchestration status for every active bot on
-each, and mines their `error_logs` / `general_logs`: counts errors & warnings,
-finds the last failure time, clusters failures into normalized patterns
-(NLP-style message templating), and surfaces the most common failures per bot
-and the noisiest loggers. Powers the `log_analyzer` skill's retrospective
-diagnostics.
+Reads the condor-native log file (``store/condor.log``), mines ERROR/WARNING
+lines, counts failures per logger, finds the last failure time, and clusters
+failures into normalized patterns (NLP-style message templating). Powers the
+`log_analyzer` skill's retrospective diagnostics.
+
+(The Hummingbot bot-log fan-out was removed with the Hummingbot deletion —
+simplification plan §9.2; this now analyzes Condor's own log.)
 """
 
-import asyncio
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
+from pathlib import Path
 
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
 
-from config_manager import get_config_manager
+CATEGORY = "Diagnostics"
 
-CATEGORY = "Bot Analysis"
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DEFAULT_LOG = _PROJECT_ROOT / "store" / "condor.log"
 
-# Levels we treat as failures (level_no >= 40 is ERROR/CRITICAL in Hummingbot).
 _ERROR_LEVELS = {"ERROR", "CRITICAL", "FATAL"}
 _WARN_LEVELS = {"WARNING", "WARN"}
 
+# "2026-07-15 08:55:28,161 - condor.control.server - INFO - message"
+_LINE_RE = re.compile(
+    r"^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)?\s+-\s+"
+    r"(?P<logger>\S+)\s+-\s+(?P<level>[A-Z]+)\s+-\s+(?P<msg>.*)$"
+)
+
 
 class Config(BaseModel):
-    """Summarize errors/warnings across active bots: counts, last failure, top patterns."""
+    """Summarize errors/warnings in the Condor log: counts, last failure, top patterns."""
 
-    bot_name: str = Field(
+    log_file: str = Field(
         default="",
-        description="Limit to one bot (substring match). Empty = all active bots.",
+        description=f"Log file to analyze (default: {_DEFAULT_LOG})",
     )
-    servers: str = Field(
+    logger_filter: str = Field(
         default="",
-        description="Limit to these servers (comma-separated names, substring match). Empty = all connected servers.",
+        description="Limit to loggers containing this substring (e.g. 'executors'). Empty = all.",
+    )
+    max_lines: int = Field(
+        default=20000, description="Analyze at most this many lines from the end of the file"
     )
     include_warnings: bool = Field(
-        default=True, description="Include WARNING-level logs in the analysis"
+        default=True, description="Include WARNING-level lines in the analysis"
     )
     top_patterns: int = Field(
         default=8, description="How many failure patterns to show in the summary"
     )
     recent_incident_min: int = Field(
         default=15,
-        description="Flag a bot as an active incident if its last error is newer than this many minutes",
+        description="Flag a logger as an active incident if its last error is newer than this many minutes",
     )
 
 
 # --- message normalization (turn a raw log line into a reusable template) -----
 
 _NORMALIZERS = [
-    (re.compile(r"x-[A-Za-z0-9]{6,}"), "<ORDER_ID>"),  # hummingbot client order ids
     (re.compile(r"\b0x[0-9a-fA-F]{6,}\b"), "<HEX>"),  # tx hashes / addresses
     (re.compile(r"\b[0-9a-fA-F]{16,}\b"), "<HEX>"),  # long hex blobs
     (
@@ -62,6 +68,7 @@ _NORMALIZERS = [
         ),
         "<UUID>",
     ),
+    (re.compile(r"\b[0-9A-HJKMNP-TV-Z]{26}\b"), "<ULID>"),  # run/executor ids
     (re.compile(r"\b\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}\S*"), "<TS>"),
     (re.compile(r"\b\d+\.\d+\b"), "<NUM>"),  # floats (prices, pnl)
     (re.compile(r"\b\d+\b"), "<NUM>"),  # ints (counts, retries)
@@ -83,21 +90,6 @@ def _short_logger(name: str) -> str:
     return ".".join(parts[-2:]) if len(parts) > 1 else name
 
 
-def _ts_to_dt(ts):
-    """Coerce a unix epoch (float/int) or ISO string into an aware datetime, or None."""
-    if ts in (None, ""):
-        return None
-    try:
-        return datetime.fromtimestamp(float(ts), tz=timezone.utc)
-    except (ValueError, TypeError, OverflowError):
-        s = str(ts).replace("Z", "+00:00")
-        try:
-            dt = datetime.fromisoformat(s)
-            return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-        except ValueError:
-            return None
-
-
 def _ago(dt, now):
     """Human 'time ago' label for a datetime relative to now."""
     if dt is None:
@@ -114,256 +106,157 @@ def _ago(dt, now):
     return f"{int(secs // 86400)}d ago"
 
 
-def _resolve_servers(cm, context, filter_str: str) -> list:
-    """Resolve which connected servers to analyze.
+def _tail_lines(path: Path, max_lines: int) -> list[str]:
+    with open(path, "r", errors="replace") as f:
+        lines = f.readlines()
+    return lines[-max_lines:] if len(lines) > max_lines else lines
 
-    Scopes to the user's accessible servers when a user id is available
-    (Telegram), otherwise falls back to every configured server (web/MCP).
-    An optional comma-separated substring filter narrows the set further.
+
+def _entries(lines: list[str]):
+    """Yield (level, msg, datetime, logger) tuples from raw log lines.
+
+    Non-matching lines (tracebacks, uvicorn access lines) are skipped —
+    the leading ERROR line of a traceback still carries the message.
     """
-    user_id = None
-    if context is not None:
-        user_data = context.user_data
-        if user_data is None:
-            user_data = getattr(context, "_user_data", None)
-        if user_data:
-            user_id = user_data.get("_user_id")
-
-    all_servers = list(cm.list_servers().keys())
-    if user_id:
-        names = [s for s in cm.get_accessible_servers(user_id) if s in all_servers]
-        names = names or all_servers
-    else:
-        names = all_servers
-
-    wanted = [s.strip().lower() for s in filter_str.split(",") if s.strip()]
-    if wanted:
-        names = [n for n in names if any(w in n.lower() for w in wanted)]
-    return names
+    for line in lines:
+        m = _LINE_RE.match(line.rstrip("\n"))
+        if not m:
+            continue
+        try:
+            dt = datetime.strptime(m["ts"], "%Y-%m-%d %H:%M:%S").astimezone()
+            dt = dt.astimezone(timezone.utc)
+        except ValueError:
+            dt = None
+        yield m["level"].upper(), m["msg"], dt, m["logger"]
 
 
-async def _fetch_server_status(cm, server_name: str):
-    """Fetch active-bot status for one server. Returns (name, data, error).
+async def run(config: Config, context=None) -> str:
+    log_path = Path(config.log_file) if config.log_file else _DEFAULT_LOG
+    if not log_path.exists():
+        return f"Log file not found: {log_path}"
 
-    Never raises — connection/API failures are returned as the error string so a
-    single unreachable server can't sink the whole gather.
-    """
-    try:
-        client = await cm.get_client(server_name)
-        resp = await client.bot_orchestration.get_active_bots_status()
-    except Exception as e:  # noqa: BLE001
-        return server_name, {}, str(e)
-    data = resp.get("data", resp) if isinstance(resp, dict) else {}
-    return server_name, (data if isinstance(data, dict) else {}), None
-
-
-def _entries(raw):
-    """Yield (level_name, msg, datetime, logger) tuples from a logs list."""
-    for log in raw or []:
-        if isinstance(log, dict):
-            level = str(log.get("level_name", log.get("level", ""))).upper()
-            msg = log.get("msg", log.get("message", ""))
-            dt = _ts_to_dt(log.get("timestamp", log.get("time", log.get("ts"))))
-            logger = log.get("logger_name", log.get("logger", ""))
-        else:
-            level, msg, dt, logger = "", str(log), None, ""
-        yield level, msg, dt, logger
-
-
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
-    cm = get_config_manager()
-    server_names = _resolve_servers(cm, context, config.servers)
-    if not server_names:
-        return "No servers connected to Condor — nothing to analyze."
-
-    # Fan out: collect every server's active-bot status concurrently.
-    results = await asyncio.gather(
-        *(_fetch_server_status(cm, name) for name in server_names)
-    )
-
-    server_errors = {}  # server -> error string (unreachable / API failure)
-    server_data = {}  # server -> {bot_name: info}
-    for name, data, err in results:
-        if err:
-            server_errors[name] = err
-        else:
-            server_data[name] = data
-
-    if not server_data and server_errors:
-        detail = "; ".join(f"{n}: {e}" for n, e in server_errors.items())
-        return f"Failed to fetch bot status from all servers — {detail}"
-
-    multi_server = len(server_names) > 1
-
+    lines = _tail_lines(log_path, config.max_lines)
     now = datetime.now(timezone.utc)
-    bot_rows = []  # per-bot summary rows
-    global_patterns = Counter()  # normalized error pattern -> count
-    pattern_bots = defaultdict(set)  # pattern -> set((server, bot))
-    pattern_last = {}  # pattern -> latest datetime
-    pattern_logger = defaultdict(Counter)
-    total_errors = total_warns = bots_with_errors = 0
-    servers_with_errors = set()
 
-    # Flatten (server, bot, info) across every server, then analyze each bot.
-    for server_name, data in server_data.items():
-        for bot_name, info in data.items():
-            if config.bot_name and config.bot_name.lower() not in bot_name.lower():
-                continue
-            if not isinstance(info, dict):
-                continue
+    per_logger: dict[str, dict] = defaultdict(
+        lambda: {"errors": 0, "warns": 0, "last_err": None, "patterns": Counter()}
+    )
+    global_patterns = Counter()
+    pattern_loggers = defaultdict(set)
+    pattern_last = {}
+    total_errors = total_warns = 0
 
-            err_count = warn_count = 0
-            last_err_dt = None
-            bot_patterns = Counter()
-            bot_loggers = Counter()
+    for level, msg, dt, logger_name in _entries(lines):
+        if config.logger_filter and config.logger_filter.lower() not in logger_name.lower():
+            continue
+        is_err = level in _ERROR_LEVELS
+        is_warn = level in _WARN_LEVELS
+        if not (is_err or is_warn):
+            continue
+        if is_warn and not config.include_warnings:
+            continue
 
-            # error_logs is the curated failure list; general_logs may also carry WARNINGs.
-            streams = [info.get("error_logs", [])]
-            if config.include_warnings:
-                streams.append(info.get("general_logs", []))
+        entry = per_logger[logger_name]
+        if is_err:
+            total_errors += 1
+            entry["errors"] += 1
+            pattern = _normalize(msg)
+            entry["patterns"][pattern] += 1
+            global_patterns[pattern] += 1
+            pattern_loggers[pattern].add(_short_logger(logger_name))
+            if dt and (entry["last_err"] is None or dt > entry["last_err"]):
+                entry["last_err"] = dt
+            if dt and (pattern not in pattern_last or dt > pattern_last[pattern]):
+                pattern_last[pattern] = dt
+        else:
+            total_warns += 1
+            entry["warns"] += 1
 
-            for stream in streams:
-                for level, msg, dt, logger in _entries(stream):
-                    is_err = level in _ERROR_LEVELS
-                    is_warn = level in _WARN_LEVELS
-                    if not (is_err or is_warn):
-                        continue
-                    if is_warn and not config.include_warnings:
-                        continue
-                    if is_err:
-                        err_count += 1
-                        pattern = _normalize(msg)
-                        bot_patterns[pattern] += 1
-                        bot_loggers[_short_logger(logger)] += 1
-                        global_patterns[pattern] += 1
-                        pattern_bots[pattern].add((server_name, bot_name))
-                        pattern_logger[pattern][_short_logger(logger)] += 1
-                        if dt and (last_err_dt is None or dt > last_err_dt):
-                            last_err_dt = dt
-                        if dt and (
-                            pattern not in pattern_last or dt > pattern_last[pattern]
-                        ):
-                            pattern_last[pattern] = dt
-                    else:
-                        warn_count += 1
-
-            total_errors += err_count
-            total_warns += warn_count
-            if err_count:
-                bots_with_errors += 1
-                servers_with_errors.add(server_name)
-
-            top_failure = bot_patterns.most_common(1)[0][0] if bot_patterns else "—"
-            top_logger = bot_loggers.most_common(1)[0][0] if bot_loggers else "—"
-            incident = bool(
-                last_err_dt
-                and (now - last_err_dt).total_seconds()
-                <= config.recent_incident_min * 60
-            )
-            row = {
-                "Server": server_name[:18],
-                "Bot": bot_name[:34],
+    # --- per-logger summary rows ----------------------------------------------
+    logger_rows = []
+    for logger_name, entry in per_logger.items():
+        if not entry["errors"] and not entry["warns"]:
+            continue
+        incident = bool(
+            entry["last_err"]
+            and (now - entry["last_err"]).total_seconds()
+            <= config.recent_incident_min * 60
+        )
+        top_failure = (
+            entry["patterns"].most_common(1)[0][0] if entry["patterns"] else "—"
+        )
+        logger_rows.append(
+            {
+                "Logger": _short_logger(logger_name)[:34],
                 "Status": (
                     ("🔴 incident" if incident else "🟢 ok")
-                    if err_count
+                    if entry["errors"]
                     else "🟢 clean"
                 ),
-                "Errors": err_count,
-                "Warns": warn_count,
-                "Last Error": _ago(last_err_dt, now),
+                "Errors": entry["errors"],
+                "Warns": entry["warns"],
+                "Last Error": _ago(entry["last_err"], now),
                 "Top Failure": top_failure[:48],
-                "Source": top_logger,
             }
-            if not multi_server:
-                row.pop("Server")
-            bot_rows.append(row)
+        )
+    logger_rows.sort(key=lambda r: r["Errors"], reverse=True)
+    logger_cols = ["Logger", "Status", "Errors", "Warns", "Last Error", "Top Failure"]
 
-    bot_rows.sort(key=lambda r: r["Errors"], reverse=True)
-
-    # Column layouts — the Server column only appears when >1 server was scanned.
-    bot_cols = (["Server"] if multi_server else []) + [
-        "Bot",
-        "Status",
-        "Errors",
-        "Warns",
-        "Last Error",
-        "Top Failure",
-        "Source",
-    ]
-    pattern_cols = ["Pattern", "Count", "Bots"]
-    if multi_server:
-        pattern_cols.append("Servers")
-    pattern_cols += ["Last Seen", "Source"]
-
-    # --- failure pattern table (cross-bot, cross-server clustering) -----------
+    # --- failure pattern table (cross-logger clustering) -----------------------
     pattern_rows = []
     for pattern, count in global_patterns.most_common(config.top_patterns):
-        top_src = pattern_logger[pattern].most_common(1)
-        affected = pattern_bots[pattern]
-        row = {
-            "Pattern": pattern[:70],
-            "Count": count,
-            "Bots": len(affected),
-            "Last Seen": _ago(pattern_last.get(pattern), now),
-            "Source": top_src[0][0] if top_src else "—",
-        }
-        if multi_server:
-            row["Servers"] = len({s for s, _ in affected})
-        pattern_rows.append(row)
+        pattern_rows.append(
+            {
+                "Pattern": pattern[:70],
+                "Count": count,
+                "Loggers": len(pattern_loggers[pattern]),
+                "Last Seen": _ago(pattern_last.get(pattern), now),
+            }
+        )
+    pattern_cols = ["Pattern", "Count", "Loggers", "Last Seen"]
 
     # --- text summary ---------------------------------------------------------
-    incidents = [r for r in bot_rows if "incident" in r["Status"]]
-    analyzed = f"{len(bot_rows)} bot(s) across {len(server_data)} server(s)"
-    lines = [
-        f"📊 Logs Summary — {analyzed} analyzed @ {now.strftime('%Y-%m-%d %H:%M UTC')}",
-        f"Errors: {total_errors} | Warnings: {total_warns} | Bots with errors: {bots_with_errors}"
-        + (
-            f" | Servers with errors: {len(servers_with_errors)}"
-            if multi_server
-            else ""
-        ),
+    incidents = [r for r in logger_rows if "incident" in r["Status"]]
+    lines_out = [
+        f"📊 Logs Summary — {log_path.name}, last {len(lines)} lines "
+        f"@ {now.strftime('%Y-%m-%d %H:%M UTC')}",
+        f"Errors: {total_errors} | Warnings: {total_warns} | "
+        f"Loggers with errors: {sum(1 for r in logger_rows if r['Errors'])}",
     ]
-    if server_errors:
-        lines.append(
-            "⚠️ Unreachable: "
-            + ", ".join(f"{n} ({e})"[:60] for n, e in server_errors.items())
-        )
     if incidents:
-        lines.append("")
-        lines.append(
+        lines_out.append("")
+        lines_out.append(
             f"🔴 Active incidents ({len(incidents)}): last error within {config.recent_incident_min}m"
         )
         for r in incidents:
-            loc = f"[{r['Server']}] " if multi_server else ""
-            lines.append(
-                f"  • {loc}{r['Bot']} — {r['Errors']} err, last {r['Last Error']}: {r['Top Failure']}"
+            lines_out.append(
+                f"  • {r['Logger']} — {r['Errors']} err, last {r['Last Error']}: {r['Top Failure']}"
             )
     if pattern_rows:
-        lines.append("")
-        lines.append("Top failure patterns:")
+        lines_out.append("")
+        lines_out.append("Top failure patterns:")
         for r in pattern_rows[:5]:
-            lines.append(
-                f"  • [{r['Count']}× / {r['Bots']} bot(s)] {r['Pattern']}  ({r['Source']})"
+            lines_out.append(
+                f"  • [{r['Count']}× / {r['Loggers']} logger(s)] {r['Pattern']}"
             )
     if total_errors == 0:
-        lines.append("")
-        lines.append("✅ No errors found across active bots.")
-    summary = "\n".join(lines)
+        lines_out.append("")
+        lines_out.append("✅ No errors found in the analyzed window.")
+    summary = "\n".join(lines_out)
 
     # --- persistent report ----------------------------------------------------
     try:
         from condor.reports import ReportBuilder
 
-        builder = ReportBuilder("Bot Logs Summary")
-        builder.source("routine", "logs_summary").tags(["logs", "diagnostics", "bots"])
+        builder = ReportBuilder("Condor Logs Summary")
+        builder.source("routine", "logs_summary").tags(["logs", "diagnostics"])
         builder.kpi("Total Errors", total_errors)
         builder.kpi("Total Warnings", total_warns)
-        builder.kpi("Bots w/ Errors", f"{bots_with_errors}/{len(bot_rows)}")
-        builder.kpi("Servers", f"{len(server_data)}/{len(server_names)}")
+        builder.kpi("Loggers w/ Errors", sum(1 for r in logger_rows if r["Errors"]))
         builder.kpi("Active Incidents", len(incidents))
         builder.markdown(summary)
-        if bot_rows:
-            builder.table(bot_rows, bot_cols)
+        if logger_rows:
+            builder.table(logger_rows, logger_cols)
         if pattern_rows:
             builder.table(pattern_rows, pattern_cols)
         builder.manual_order()
@@ -374,13 +267,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         logging.getLogger(__name__).warning(f"Report generation failed: {e}")
 
     # --- rich inline result ---------------------------------------------------
-    try:
-        from routines.base import RoutineResult
+    from routines.base import RoutineResult
 
-        return RoutineResult(
-            text=summary,
-            table_data=bot_rows,
-            table_columns=bot_cols,
-        )
-    except Exception:  # noqa: BLE001
-        return summary
+    return RoutineResult(
+        text=summary,
+        table_data=logger_rows,
+        table_columns=logger_cols,
+    )

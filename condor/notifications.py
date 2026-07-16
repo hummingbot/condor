@@ -1,18 +1,10 @@
-"""Notification outbox + delivery — the single chokepoint for user pings.
+"""Notification outbox — the single chokepoint for user pings (§4.1).
 
-Every emitter calls notify() instead of a Telegram bot directly:
-
-1. The entry is ALWAYS appended to the outbox (``store/notifications.jsonl``)
-   — the channel-agnostic source any harness consumes: Claude Code tails it
-   (Monitor today, a channels plugin later), the dashboard can poll it, a
-   Hermes webhook adapter can forward it.
-2. It is then mirrored to Telegram — the push spine. Delivery is fail-soft:
-   a missing bot or dead network never loses the notification (it is already
-   in the outbox) and never raises into the caller.
-
-This also closes the long-standing ``chat_id=0`` gap: web-started runs used
-to notify no one; now they land in the outbox and the Telegram mirror falls
-back to the user's DM (in DMs ``chat_id == user_id``).
+Every emitter calls notify(): the entry is ALWAYS appended to the outbox
+(``store/notifications.jsonl``) — the channel-agnostic source any harness
+consumes. Claude Code tails it (Monitor today, a channels plugin later),
+the dashboard can poll it, relays (integrations/notify_relay) forward it
+into any harness's conversation.
 """
 
 from __future__ import annotations
@@ -23,7 +15,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -45,32 +37,6 @@ def _append_outbox(entry: dict) -> None:
             os.fsync(f.fileno())
 
 
-async def _deliver_telegram(chat_id: int, text: str, bot: Any = None) -> bool:
-    """Best-effort Telegram delivery: live bot > registered routine bot >
-    raw HTTP (TELEGRAM_TOKEN). Returns delivered?"""
-    target = bot
-    if target is None:
-        try:
-            from condor.routine_store import get_routine_store
-
-            target = get_routine_store().get_bot()
-        except Exception:
-            target = None
-    if target is None:
-        try:
-            from condor.routine_store import _HttpBot
-
-            target = _HttpBot()
-        except Exception:
-            return False
-    try:
-        await target.send_message(chat_id=chat_id, text=text)
-        return True
-    except Exception:
-        log.warning("telegram delivery failed for chat %s", chat_id, exc_info=True)
-        return False
-
-
 async def notify(
     text: str,
     *,
@@ -79,12 +45,8 @@ async def notify(
     agent_id: str = "",
     kind: str = "info",
     origin: str = "",
-    bot: Any = None,
 ) -> dict:
-    """Record a notification in the outbox, then mirror to Telegram.
-
-    Returns the outbox entry (including ``delivered_telegram``).
-    """
+    """Record a notification in the outbox. Returns the outbox entry."""
     from condor.agents.runstore import new_ulid
 
     entry = {
@@ -99,13 +61,7 @@ async def notify(
         "kind": kind,
         "origin": origin,
         "text": text,
-        "delivered_telegram": False,
     }
-
-    # Telegram mirror; chat_id=0 falls back to the user's DM
-    effective_chat = chat_id or user_id
-    if effective_chat:
-        entry["delivered_telegram"] = await _deliver_telegram(effective_chat, text, bot=bot)
 
     try:
         _append_outbox(entry)

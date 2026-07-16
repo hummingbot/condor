@@ -24,12 +24,11 @@ from condor.agents.delegate import (
 from condor.agents.run import RunResult
 
 
-class _FakeBot:
-    def __init__(self):
-        self.messages = []
+def _outbox_texts() -> list[str]:
+    """Texts of the notifications recorded in the (test-isolated) outbox."""
+    from condor.notifications import read_notifications
 
-    async def send_message(self, *a, **kw):
-        self.messages.append(kw.get("text") or (a[1] if len(a) > 1 else ""))
+    return [e["text"] for e in read_notifications()]
 
 
 def _write_agent(root, slug, *, risk_limits=None, tools=("manage_routines",)):
@@ -99,7 +98,6 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
         return RunResult(text="scan complete: 3 pools")
 
     monkeypatch.setattr(run_module, "run_agent", fake_run)
-    bot = _FakeBot()
 
     async def scenario():
         dt = await start_delegation(
@@ -107,7 +105,6 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
             user_id=1,
             chat_id=42,
             task="scan SOL pools",
-            bot=bot,
         )
         # Returns immediately, still running before we await it.
         assert dt.status == "running"
@@ -139,7 +136,7 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
     assert snapshots and snapshots[-1]["payload"]["result"] == "scan complete: 3 pools"
     assert not (tmp_path / "scout" / "sessions").exists()
     # Notification delivered.
-    assert any("done" in m for m in bot.messages)
+    assert any("done" in m for m in _outbox_texts())
 
 
 def test_delegation_captures_error(tmp_path, monkeypatch):
@@ -150,7 +147,6 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
         raise RuntimeError("model exploded")
 
     monkeypatch.setattr(run_module, "run_agent", boom)
-    bot = _FakeBot()
 
     async def scenario():
         dt = await start_delegation(
@@ -158,7 +154,6 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
             user_id=1,
             chat_id=42,
             task="do thing",
-            bot=bot,
         )
         await _drain(dt)
         return dt
@@ -167,7 +162,7 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
 
     assert dt.status == "error"
     assert "model exploded" in dt.error
-    assert any("failed" in m for m in bot.messages)
+    assert any("failed" in m for m in _outbox_texts())
     assert _run_status("scout", dt.task_id) == "error"
     events = _run_events("scout", dt.task_id)
     assert "model exploded" in events[-1]["payload"]["reason"]
@@ -182,7 +177,6 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
         return RunResult(text="never")
 
     monkeypatch.setattr(run_module, "run_agent", slow)
-    bot = _FakeBot()
 
     async def scenario():
         dt = await start_delegation(
@@ -190,7 +184,6 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
             user_id=1,
             chat_id=42,
             task="long task",
-            bot=bot,
         )
         await asyncio.sleep(0)  # let the runner start
         assert dt.task_id in get_all_delegations()
@@ -203,7 +196,7 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
     assert stopped is True
     assert dt.status == "stopped"
     # A stopped task does not spam a completion notification.
-    assert bot.messages == []
+    assert _outbox_texts() == []
     # But its stream records the terminal state.
     assert _run_status("scout", dt.task_id) == "stopped"
 
@@ -290,7 +283,6 @@ def test_trading_delegation_uses_agent_baseline(tmp_path, monkeypatch):
             user_id=1,
             chat_id=42,
             task="deploy",
-            bot=_FakeBot(),
         )
         await _drain(dt)
         return dt
@@ -328,7 +320,6 @@ def test_agent_with_baseline_is_risk_gated_even_without_executor_tool(
             user_id=1,
             chat_id=42,
             task="open an LP position",
-            bot=_FakeBot(),
         )
         await _drain(dt)
         return dt
@@ -358,7 +349,6 @@ def test_explicit_caps_not_discarded(tmp_path, monkeypatch):
             user_id=1,
             chat_id=42,
             task="open an LP position",
-            bot=_FakeBot(),
             risk_limits={"max_position_size_quote": 5},
         )
         await _drain(dt)
@@ -389,7 +379,6 @@ def test_non_trading_specialist_without_baseline_stays_auto(tmp_path, monkeypatc
             user_id=1,
             chat_id=42,
             task="build a routine",
-            bot=_FakeBot(),
         )
         await _drain(dt)
         return dt
@@ -419,7 +408,6 @@ def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
             user_id=1,
             chat_id=42,
             task="deploy with more room",
-            bot=_FakeBot(),
             risk_limits={"max_position_size_quote": 2000},
         )
         await _drain(dt)
@@ -471,7 +459,6 @@ def test_zero_seeded_gate_bounds_native_creates(tmp_path, monkeypatch):
             user_id=1,
             chat_id=42,
             task="deploy",
-            bot=_FakeBot(),
         )
         await _drain(dt)
         policy = captured["policy"]
@@ -533,7 +520,6 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
             user_id=1,
             chat_id=42,
             task="scan SOL pools",
-            bot=_FakeBot(),
         )
         await _drain(dt)
         return dt

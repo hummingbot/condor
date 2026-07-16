@@ -2,19 +2,19 @@
 conversation via that harness's own send primitive.
 
 The output-path counterpart to the MCP input path: "no harness is
-privileged" applied to notifications. Condor's own Telegram bot is just
-one sink; this relay lets Hermes, OpenClaw, or anything with a
-send-a-message command receive the same notifications IN the conversation
-the user drives Condor from — no Condor core changes, it only tails the
-outbox (store/notifications.jsonl, written by condor/notifications.py).
+privileged" applied to notifications. This relay lets Hermes, OpenClaw, or
+anything with a send-a-message command receive the same notifications IN
+the conversation the user drives Condor from — no Condor core changes, it
+only tails the outbox (store/notifications.jsonl, written by
+condor/notifications.py).
 
 Configure with an argv TEMPLATE (JSON list); placeholders are substituted
 as whole argv elements — never shell-interpolated, so a notification's
 text can't inject arguments. Placeholders: {text} {agent_id} {kind} {ts}.
 
-    # OpenClaw (delivers into the user's OpenClaw Telegram conversation)
+    # OpenClaw (delivers into the conversation channel you use with it)
     export CONDOR_NOTIFY_CMD='["openclaw","message","send",
-        "--channel","telegram","--target","<CHAT>","--text","{text}"]'
+        "--channel","<CHANNEL>","--target","<CHAT>","--text","{text}"]'
 
     # Hermes (POST to its API-server ingress, same chat)
     export CONDOR_NOTIFY_CMD='["curl","-sS","-X","POST",

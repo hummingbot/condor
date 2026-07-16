@@ -1,18 +1,22 @@
 """
-Unified Configuration Manager for Condor Bot.
-Manages servers, users, permissions, and settings in a single config.yml file.
+Unified Configuration Manager for Condor.
+Manages users, permissions, and settings in a single config.yml file.
+
+The Hummingbot server registry (server CRUD, per-server API clients,
+server access control, per-chat default servers) was removed with the
+Hummingbot deletion (simplification plan §9.2). What remains is user-role
+management — auth still depends on it until the auth pass — plus user
+preferences, the web JWT secret, and the audit log.
 """
 
-import asyncio
 import logging
 import secrets
 import time
 from enum import Enum
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Optional
 
 import yaml
-from aiohttp import ClientTimeout
 
 logger = logging.getLogger(__name__)
 
@@ -26,23 +30,10 @@ class UserRole(str, Enum):
     BLOCKED = "blocked"
 
 
-class ServerPermission(str, Enum):
-    """Permission levels for server access"""
-
-    OWNER = "owner"
-    TRADER = "trader"
-
-
-PERMISSION_HIERARCHY = {
-    ServerPermission.TRADER: 0,
-    ServerPermission.OWNER: 1,
-}
-
-
 class ConfigManager:
     """
-    Unified configuration manager for Condor Bot.
-    Handles servers, users, permissions, and chat defaults in a single YAML file.
+    Unified configuration manager for Condor.
+    Handles users, roles, and preferences in a single YAML file.
     Uses singleton pattern - access via ConfigManager.instance()
     """
 
@@ -56,14 +47,6 @@ class ConfigManager:
         self.audit_log_path = Path("audit_log.yml")
         self._data: dict = {}
         self._audit_log: list = []
-        self._clients: Dict[str, Tuple[Any, float]] = (
-            {}
-        )  # server_name -> (client, connect_time)
-        self._client_ttl = 300  # 5 minutes
-        self._client_verify_interval = 60  # seconds between liveness checks
-        self._client_locks: Dict[str, asyncio.Lock] = (
-            {}
-        )  # per-server lock for get_client
         self._load_config()
         self._load_audit_log()
 
@@ -96,11 +79,7 @@ class ConfigManager:
                 self._data = yaml.safe_load(f) or {}
 
             # Ensure all sections exist
-            self._data.setdefault("servers", {})
-            self._data.setdefault("default_server", None)
             self._data.setdefault("users", {})
-            self._data.setdefault("server_access", {})
-            self._data.setdefault("chat_defaults", {})
             self._data.setdefault("user_preferences", {})
             # Migrate audit_log from config.yml to separate file (one-time)
             if "audit_log" in self._data:
@@ -123,12 +102,8 @@ class ConfigManager:
         """Initialize with default configuration."""
         admin_id = self._get_admin_from_env()
         self._data = {
-            "servers": {},
-            "default_server": None,
             "admin_id": admin_id,
             "users": {},
-            "server_access": {},
-            "chat_defaults": {},
             "user_preferences": {},
             "version": self.VERSION,
         }
@@ -153,12 +128,8 @@ class ConfigManager:
         """Save configuration to YAML file."""
         try:
             data = {
-                "servers": self._data.get("servers", {}),
-                "default_server": self._data.get("default_server"),
                 "admin_id": self._data.get("admin_id"),
                 "users": self._data.get("users", {}),
-                "server_access": self._data.get("server_access", {}),
-                "chat_defaults": self._data.get("chat_defaults", {}),
                 "web_jwt_secret": self._data.get("web_jwt_secret"),
                 "version": self._data.get("version", self.VERSION),
             }
@@ -220,113 +191,8 @@ class ConfigManager:
         return self._data.get("admin_id")
 
     # =========================================================================
-    # SERVER MANAGEMENT
+    # WEB JWT SECRET
     # =========================================================================
-
-    def list_servers(self) -> Dict[str, dict]:
-        """List all configured servers."""
-        return self._data.get("servers", {}).copy()
-
-    def get_server(self, name: str) -> Optional[dict]:
-        """Get a specific server configuration."""
-        return self._data.get("servers", {}).get(name)
-
-    def add_server(
-        self,
-        name: str,
-        host: str,
-        port: int,
-        username: str,
-        password: str,
-        owner_id: int = None,
-    ) -> bool:
-        """Add a new server."""
-        servers = self._data["servers"]
-        if name in servers:
-            logger.error(f"Server '{name}' already exists")
-            return False
-
-        servers[name] = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-        }
-
-        # Register ownership
-        if owner_id:
-            self.register_server_owner(name, owner_id)
-
-        self._save_config()
-        logger.info(f"Added server '{name}'")
-        return True
-
-    def modify_server(
-        self,
-        name: str,
-        host: str = None,
-        port: int = None,
-        username: str = None,
-        password: str = None,
-    ) -> bool:
-        """Modify an existing server."""
-        servers = self._data["servers"]
-        if name not in servers:
-            logger.error(f"Server '{name}' not found")
-            return False
-
-        # Clear cached client
-        if name in self._clients:
-            del self._clients[name]
-
-        if host is not None:
-            servers[name]["host"] = host
-        if port is not None:
-            servers[name]["port"] = port
-        if username is not None:
-            servers[name]["username"] = username
-        if password is not None:
-            servers[name]["password"] = password
-
-        self._save_config()
-        logger.info(f"Modified server '{name}'")
-        return True
-
-    def delete_server(self, name: str, actor_id: int = None) -> bool:
-        """Delete a server."""
-        servers = self._data["servers"]
-        if name not in servers:
-            logger.error(f"Server '{name}' not found")
-            return False
-
-        # Clear cached client
-        if name in self._clients:
-            del self._clients[name]
-
-        del servers[name]
-
-        # Unregister from access control
-        if name in self._data["server_access"]:
-            del self._data["server_access"][name]
-
-        self._save_config()
-        logger.info(f"Deleted server '{name}'")
-        return True
-
-    def get_default_server(self) -> Optional[str]:
-        """Get the default server name."""
-        return self._data.get("default_server")
-
-    def set_default_server(self, name: str) -> bool:
-        """Set the default server."""
-        if name not in self._data["servers"]:
-            logger.error(f"Server '{name}' not found")
-            return False
-
-        self._data["default_server"] = name
-        self._save_config()
-        logger.info(f"Set default server to '{name}'")
-        return True
 
     def get_or_create_web_jwt_secret(self) -> str:
         """Return the web dashboard JWT signing secret, generating one on demand.
@@ -339,11 +205,11 @@ class ConfigManager:
         secret = self._data.get("web_jwt_secret")
         if secret:
             return secret
-        # Several processes share config.yml (main bot + each MCP subprocess),
-        # each with its own snapshot loaded at startup. A snapshot without the
-        # secret does NOT mean the file has none: another process may have
-        # generated one since. Adopt the on-disk value before minting — a
-        # second generation here clobbers the file via _save_config() and
+        # Several processes share config.yml (main process + each MCP
+        # subprocess), each with its own snapshot loaded at startup. A snapshot
+        # without the secret does NOT mean the file has none: another process
+        # may have generated one since. Adopt the on-disk value before minting —
+        # a second generation here clobbers the file via _save_config() and
         # invalidates every JWT the other processes signed (opaque 401s).
         on_disk = self.reload_web_jwt_secret()
         if on_disk:
@@ -373,169 +239,6 @@ class ConfigManager:
         if on_disk:
             self._data["web_jwt_secret"] = on_disk
         return on_disk
-
-    async def get_client(self, name: str = None):
-        """Get or create API client for a server."""
-        from hummingbot_api_client import HummingbotAPIClient
-
-        if name is None:
-            name = self.get_default_server()
-            if not name:
-                if self._data["servers"]:
-                    name = list(self._data["servers"].keys())[0]
-                else:
-                    raise ValueError("No servers configured")
-
-        if name not in self._data["servers"]:
-            raise ValueError(f"Server '{name}' not found")
-
-        # Fast path (no lock): return cached client if recently verified
-        if name in self._clients:
-            client, last_verified = self._clients[name]
-            if time.time() - last_verified < self._client_verify_interval:
-                return client
-
-        # Serialize client creation/verification per server to prevent
-        # concurrent coroutines from creating duplicate sessions
-        if name not in self._client_locks:
-            self._client_locks[name] = asyncio.Lock()
-
-        async with self._client_locks[name]:
-            return await self._get_or_create_client(name, HummingbotAPIClient)
-
-    async def _get_or_create_client(self, name: str, HummingbotAPIClient):
-        """Inner client acquisition — must be called under _client_locks[name]."""
-        # Re-check under lock (another coroutine may have just created it)
-        if name in self._clients:
-            client, last_verified = self._clients[name]
-            if time.time() - last_verified < self._client_verify_interval:
-                # Fast path: recently verified
-                return client
-            elif time.time() - last_verified < self._client_ttl:
-                # Needs liveness check
-                try:
-                    await asyncio.wait_for(client.accounts.list_accounts(), timeout=5)
-                    self._clients[name] = (client, time.time())
-                    return client
-                except Exception:
-                    logger.warning(
-                        f"Stale connection to '{name}' detected, reconnecting"
-                    )
-                    try:
-                        await client.close()
-                    except Exception:
-                        pass
-                    del self._clients[name]
-            else:
-                try:
-                    await client.close()
-                except Exception:
-                    pass
-                del self._clients[name]
-
-        # Create new client
-        server = self._data["servers"][name]
-        base_url = f"http://{server['host']}:{server['port']}"
-        client = HummingbotAPIClient(
-            base_url=base_url,
-            username=server["username"],
-            password=server["password"],
-            timeout=ClientTimeout(total=60, connect=10),
-        )
-
-        try:
-            await client.init()
-            await client.accounts.list_accounts()
-            self._clients[name] = (client, time.time())
-            logger.info(f"Connected to server '{name}' at {base_url}")
-            return client
-        except Exception as e:
-            await client.close()
-            logger.error(f"Failed to connect to '{name}': {e}")
-            raise
-
-    async def get_client_for_chat(
-        self, chat_id: int, user_id: int = None, preferred_server: str = None
-    ):
-        """Get the API client for a user's preferred or first accessible server.
-
-        Priority:
-        1. preferred_server (from user preferences/context) if accessible
-        2. chat_defaults[chat_id] if accessible
-        3. First accessible server for the user
-        4. If no user_id, use chat default or any available server
-        """
-        if user_id:
-            accessible = self.get_accessible_servers(user_id)
-            if not accessible:
-                raise ValueError(
-                    "No servers available. Ask the admin to share a server with you."
-                )
-
-            # 1. User's preferred server if accessible
-            if preferred_server and preferred_server in accessible:
-                return await self.get_client(preferred_server)
-
-            # 2. Chat's default server if accessible
-            chat_default = self._data.get("chat_defaults", {}).get(chat_id)
-            if chat_default and chat_default in accessible:
-                return await self.get_client(chat_default)
-
-            # 3. First accessible server
-            return await self.get_client(accessible[0])
-
-        # No user_id - use chat default with proper fallbacks
-        server_name = self.get_chat_default_server(chat_id)
-        if not server_name:
-            raise ValueError("No servers configured")
-        return await self.get_client(server_name)
-
-    async def check_server_status(self, name: str) -> dict:
-        """Check if a server is online."""
-        from hummingbot_api_client import HummingbotAPIClient
-
-        if name not in self._data["servers"]:
-            return {"status": "error", "message": "Server not found"}
-
-        server = self._data["servers"][name]
-        base_url = f"http://{server['host']}:{server['port']}"
-
-        client = HummingbotAPIClient(
-            base_url=base_url,
-            username=server["username"],
-            password=server["password"],
-            timeout=ClientTimeout(total=3, connect=2),
-        )
-
-        try:
-            await client.init()
-            await client.accounts.list_accounts()
-            return {"status": "online", "message": "Connected and authenticated"}
-        except Exception as e:
-            error_msg = str(e)
-            if "401" in error_msg:
-                return {"status": "auth_error", "message": "Invalid credentials"}
-            elif "timeout" in error_msg.lower():
-                return {"status": "offline", "message": "Connection timeout"}
-            elif "connect" in error_msg.lower():
-                return {"status": "offline", "message": "Cannot reach server"}
-            else:
-                return {"status": "error", "message": f"Error: {error_msg[:80]}"}
-        finally:
-            try:
-                await client.close()
-            except Exception:
-                pass
-
-    async def close_all_clients(self):
-        """Close all cached client connections."""
-        for name, (client, _) in list(self._clients.items()):
-            try:
-                await client.close()
-                logger.info(f"Closed connection to '{name}'")
-            except Exception as e:
-                logger.error(f"Error closing client '{name}': {e}")
-        self._clients.clear()
 
     # =========================================================================
     # USER MANAGEMENT
@@ -648,7 +351,7 @@ class ConfigManager:
         return list(self._data.get("users", {}).values())
 
     # =========================================================================
-    # USER PREFERENCES (persisted in config.yml, shared across TG + Web)
+    # USER PREFERENCES (persisted in config.yml)
     # =========================================================================
 
     def get_user_preferences(self, user_id: int) -> dict:
@@ -688,248 +391,6 @@ class ConfigManager:
         return False
 
     # =========================================================================
-    # SERVER ACCESS CONTROL
-    # =========================================================================
-
-    def register_server_owner(self, server_name: str, owner_id: int) -> bool:
-        """Register server ownership."""
-        access = self._data["server_access"]
-        if server_name in access:
-            return False
-
-        access[server_name] = {
-            "owner_id": owner_id,
-            "created_at": time.time(),
-            "shared_with": {},
-        }
-        self._audit("server_registered", "server", server_name, owner_id)
-        self._save_config()
-        return True
-
-    def ensure_server_registered(
-        self, server_name: str, default_owner_id: int = None
-    ) -> bool:
-        """Ensure server is registered in access control."""
-        if server_name in self._data["server_access"]:
-            return True
-
-        owner_id = default_owner_id or self.admin_id
-        if owner_id:
-            self._data["server_access"][server_name] = {
-                "owner_id": owner_id,
-                "created_at": time.time(),
-                "shared_with": {},
-            }
-            self._save_config()
-            return True
-        return False
-
-    def get_server_owner(self, server_name: str) -> Optional[int]:
-        access = self._data.get("server_access", {}).get(server_name)
-        return access.get("owner_id") if access else None
-
-    def get_server_permission(
-        self, user_id: int, server_name: str
-    ) -> Optional[ServerPermission]:
-        """Get user's permission level for a server."""
-        if self.is_admin(user_id):
-            return ServerPermission.OWNER
-
-        access = self._data.get("server_access", {}).get(server_name)
-        if not access:
-            return None
-
-        if access.get("owner_id") == user_id:
-            return ServerPermission.OWNER
-
-        perm_str = access.get("shared_with", {}).get(user_id)
-        if perm_str:
-            try:
-                return ServerPermission(perm_str)
-            except ValueError:
-                return None
-        return None
-
-    def has_server_access(
-        self,
-        user_id: int,
-        server_name: str,
-        min_permission: ServerPermission = ServerPermission.TRADER,
-    ) -> bool:
-        perm = self.get_server_permission(user_id, server_name)
-        if perm is None:
-            return False
-        return PERMISSION_HIERARCHY.get(perm, 0) >= PERMISSION_HIERARCHY.get(
-            min_permission, 0
-        )
-
-    def share_server(
-        self,
-        server_name: str,
-        owner_id: int,
-        target_user_id: int,
-        permission: ServerPermission,
-    ) -> bool:
-        """Share a server with another user."""
-        access = self._data.get("server_access", {}).get(server_name)
-        if not access:
-            return False
-        if access.get("owner_id") != owner_id and not self.is_admin(owner_id):
-            return False
-        if target_user_id == access.get("owner_id"):
-            return False
-        if not self.is_approved(target_user_id):
-            return False
-
-        access.setdefault("shared_with", {})[target_user_id] = permission.value
-        self._audit(
-            "server_shared",
-            "server",
-            server_name,
-            owner_id,
-            {"target_user": target_user_id, "permission": permission.value},
-        )
-        self._save_config()
-        return True
-
-    def revoke_server_access(
-        self, server_name: str, owner_id: int, target_user_id: int
-    ) -> bool:
-        """Revoke a user's access to a server."""
-        access = self._data.get("server_access", {}).get(server_name)
-        if not access:
-            return False
-        if access.get("owner_id") != owner_id and not self.is_admin(owner_id):
-            return False
-
-        shared = access.get("shared_with", {})
-        if target_user_id not in shared:
-            return False
-
-        del shared[target_user_id]
-        self._audit(
-            "server_access_revoked",
-            "server",
-            server_name,
-            owner_id,
-            {"target_user": target_user_id},
-        )
-        self._save_config()
-        return True
-
-    def get_server_shared_users(self, server_name: str) -> list:
-        """Get list of users a server is shared with."""
-        access = self._data.get("server_access", {}).get(server_name)
-        if not access:
-            return []
-
-        result = []
-        for user_id, perm_str in access.get("shared_with", {}).items():
-            try:
-                result.append((user_id, ServerPermission(perm_str)))
-            except ValueError:
-                pass
-        return result
-
-    def get_accessible_servers(self, user_id: int) -> list:
-        """Get all servers a user can access."""
-        if self.is_admin(user_id):
-            return list(self._data.get("server_access", {}).keys())
-
-        accessible = []
-        for server_name, access in self._data.get("server_access", {}).items():
-            if access.get("owner_id") == user_id:
-                accessible.append(server_name)
-            elif user_id in access.get("shared_with", {}):
-                accessible.append(server_name)
-        return accessible
-
-    def get_owned_servers(self, user_id: int) -> list:
-        return [
-            s
-            for s, a in self._data.get("server_access", {}).items()
-            if a.get("owner_id") == user_id
-        ]
-
-    def get_shared_servers(self, user_id: int) -> list:
-        """Get servers shared with user (not owned)."""
-        result = []
-        for server_name, access in self._data.get("server_access", {}).items():
-            if access.get("owner_id") == user_id:
-                continue
-            perm_str = access.get("shared_with", {}).get(user_id)
-            if perm_str:
-                try:
-                    result.append((server_name, ServerPermission(perm_str)))
-                except ValueError:
-                    pass
-        return result
-
-    def list_accessible_servers(self, user_id: int) -> Dict[str, dict]:
-        """List servers accessible by a user with their configs."""
-        if self.is_admin(user_id):
-            # Auto-register unregistered servers for admin
-            for name in self._data["servers"]:
-                self.ensure_server_registered(name, self.admin_id)
-            return self._data["servers"].copy()
-
-        accessible = {}
-        for name in self.get_accessible_servers(user_id):
-            if name in self._data["servers"]:
-                accessible[name] = self._data["servers"][name]
-        return accessible
-
-    # =========================================================================
-    # CHAT DEFAULTS
-    # =========================================================================
-
-    def get_chat_default_server(self, chat_id: int) -> Optional[str]:
-        """Get the default server for a chat."""
-        server = self._data.get("chat_defaults", {}).get(chat_id)
-        if server and server in self._data["servers"]:
-            return server
-        # Fallback to global default
-        default = self.get_default_server()
-        if default and default in self._data["servers"]:
-            return default
-        # Last resort: first server
-        if self._data["servers"]:
-            return list(self._data["servers"].keys())[0]
-        return None
-
-    def set_chat_default_server(self, chat_id: int, server_name: str) -> bool:
-        """Set the default server for a chat."""
-        if server_name not in self._data["servers"]:
-            return False
-        self._data.setdefault("chat_defaults", {})[chat_id] = server_name
-        self._save_config()
-        return True
-
-    def clear_chat_default_server(self, chat_id: int) -> bool:
-        """Clear the default server for a chat."""
-        defaults = self._data.get("chat_defaults", {})
-        if chat_id in defaults:
-            del defaults[chat_id]
-            self._save_config()
-            return True
-        return False
-
-    def get_chat_server_info(self, chat_id: int) -> dict:
-        """Get server info for a chat."""
-        per_chat = self._data.get("chat_defaults", {}).get(chat_id)
-        if per_chat and per_chat in self._data["servers"]:
-            return {
-                "server": per_chat,
-                "is_per_chat": True,
-                "global_default": self.get_default_server(),
-            }
-        return {
-            "server": self.get_default_server(),
-            "is_per_chat": False,
-            "global_default": self.get_default_server(),
-        }
-
-    # =========================================================================
     # AUDIT LOG
     # =========================================================================
 
@@ -961,58 +422,3 @@ class ConfigManager:
 def get_config_manager() -> ConfigManager:
     """Get the ConfigManager singleton instance."""
     return ConfigManager.instance()
-
-
-def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
-    """Get the effective default server for a chat, checking both user_data and config.yml.
-
-    Priority:
-    1. user_data active_server (from pickle, fast in-memory)
-    2. chat_defaults from config.yml (persistent across hard kills)
-    3. None if nothing configured
-
-    Args:
-        chat_id: The chat ID
-        user_data: Optional user_data dict from context
-
-    Returns:
-        Server name or None
-    """
-    from handlers.config.user_preferences import get_active_server
-
-    # First check user_data (pickle - might be lost on hard kill)
-    if user_data:
-        active = get_active_server(user_data)
-        if active:
-            return active
-
-    # Fall back to chat_defaults in config.yml (always persisted)
-    cm = get_config_manager()
-    chat_default = cm._data.get("chat_defaults", {}).get(chat_id)
-    if chat_default and chat_default in cm._data.get("servers", {}):
-        # Also sync back to user_data for fast future access
-        if user_data is not None:
-            from handlers.config.user_preferences import set_active_server
-
-            set_active_server(user_data, chat_default)
-        return chat_default
-
-    return None
-
-
-async def get_client(chat_id: int, user_id: int = None, context=None):
-    """Get the API client for the user's preferred server."""
-    preferred_server = None
-    if context is not None:
-        # Handle both normal context and job context (where user_data may be None)
-        user_data = context.user_data
-        if user_data is None:
-            user_data = getattr(context, "_user_data", None)
-
-        if user_id is None and user_data is not None:
-            user_id = user_data.get("_user_id")
-        preferred_server = get_effective_server(chat_id, user_data)
-
-    return await get_config_manager().get_client_for_chat(
-        chat_id, user_id, preferred_server
-    )

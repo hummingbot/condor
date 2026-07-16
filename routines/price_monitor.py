@@ -1,196 +1,119 @@
-"""Monitor price and alert on threshold."""
+"""One-shot price threshold check — designed to be scheduled (the scheduler
+provides repetition)."""
 
 CATEGORY = "Monitoring"
 
-import asyncio
 import logging
-import time
 
+import aiohttp
 from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
-
-from config_manager import get_client
-from utils.telegram_formatters import escape_markdown_v2
 
 logger = logging.getLogger(__name__)
 
-# Mark as continuous routine - has internal loop
-CONTINUOUS = True
+# Public Binance REST — no credentials, works from the scrubbed routine worker.
+_TICKER_URLS = {
+    "binance": "https://api.binance.com/api/v3/ticker/price",
+    "binance_perpetual": "https://fapi.binance.com/fapi/v1/ticker/price",
+}
+_KLINES_URLS = {
+    "binance": "https://api.binance.com/api/v3/klines",
+    "binance_perpetual": "https://fapi.binance.com/fapi/v1/klines",
+}
 
 
 class Config(BaseModel):
-    """Live price monitor with configurable alerts."""
+    """Check a price against alert thresholds once; schedule it for monitoring."""
 
-    connector: str = Field(default="binance", description="CEX connector name")
-    trading_pair: str = Field(default="BTC-USDT", description="Trading pair to monitor")
-    threshold_pct: float = Field(default=1.0, description="Alert threshold in %")
-    interval_sec: int = Field(default=10, description="Check interval in seconds")
+    connector: str = Field(
+        default="binance",
+        description="Data source: binance (spot) or binance_perpetual (futures)",
+    )
+    trading_pair: str = Field(
+        default="BTC-USDT", description="Trading pair to check (e.g. BTC-USDT)"
+    )
+    upper_price: float = Field(
+        default=0.0, description="Alert if price is at/above this (0 = disabled)"
+    )
+    lower_price: float = Field(
+        default=0.0, description="Alert if price is at/below this (0 = disabled)"
+    )
+    move_threshold_pct: float = Field(
+        default=1.0,
+        description="Alert if |price change| over the lookback exceeds this % (0 = disabled)",
+    )
+    lookback_min: int = Field(
+        default=15, description="Lookback window in minutes for the move check"
+    )
 
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
+def _symbol(trading_pair: str) -> str:
+    return trading_pair.replace("-", "").upper()
+
+
+async def _fetch_json(session: aiohttp.ClientSession, url: str, params: dict) -> object:
+    async with session.get(url, params=params) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
+async def run(config: Config, context=None) -> str:
+    """One-shot check: fetch the current price, compare against thresholds.
+
+    Returns an ``ALERT:``-prefixed summary when any threshold is crossed,
+    otherwise an ``OK:`` status line.
     """
-    Monitor price continuously.
-
-    This is a continuous routine - runs forever until cancelled.
-    Sends alert messages when threshold is crossed.
-    """
-    chat_id = context._chat_id if hasattr(context, "_chat_id") else None
-    instance_id = getattr(context, "_instance_id", "default")
-
-    client = await get_client(chat_id, context=context)
-    if not client:
-        return "No server available"
-
-    # State for tracking
-    state = {
-        "initial_price": None,
-        "last_price": None,
-        "high_price": None,
-        "low_price": None,
-        "alerts_sent": 0,
-        "updates": 0,
-        "start_time": time.time(),
-    }
-
-    # Send start notification
-    try:
-        pair_esc = escape_markdown_v2(config.trading_pair)
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=f"🟢 *Price Monitor Started*\n{pair_esc} @ {escape_markdown_v2(config.connector)}",
-            parse_mode="MarkdownV2",
+    if config.connector not in _TICKER_URLS:
+        raise ValueError(
+            f"Unsupported connector {config.connector!r} — "
+            f"supported: {', '.join(sorted(_TICKER_URLS))}"
         )
-    except Exception as e:
-        logger.error(f"Failed to send start message: {e}")
 
-    # Live report setup
-    try:
-        from condor.reports import LiveReport
-
-        report = LiveReport(
-            f"Price Monitor: {config.trading_pair}",
-            source_name="price_monitor",
-            tags=["monitoring", "live"],
+    symbol = _symbol(config.trading_pair)
+    async with aiohttp.ClientSession() as session:
+        ticker = await _fetch_json(
+            session, _TICKER_URLS[config.connector], {"symbol": symbol}
         )
-    except Exception:
-        report = None
+        price = float(ticker["price"])
 
-    history = []
-
-    try:
-        # Main monitoring loop
-        while True:
-            try:
-                # Re-acquire client each iteration to avoid stale sessions
-                client = await get_client(chat_id, context=context)
-                if not client:
-                    await asyncio.sleep(config.interval_sec)
-                    continue
-
-                # Get current price
-                prices = await client.market_data.get_prices(
-                    connector_name=config.connector, trading_pairs=config.trading_pair
-                )
-                current_price = prices["prices"].get(config.trading_pair)
-
-                if not current_price:
-                    await asyncio.sleep(config.interval_sec)
-                    continue
-
-                # Initialize on first price
-                if state["initial_price"] is None:
-                    state["initial_price"] = current_price
-                    state["last_price"] = current_price
-                    state["high_price"] = current_price
-                    state["low_price"] = current_price
-
-                # Update tracking
-                state["high_price"] = max(state["high_price"], current_price)
-                state["low_price"] = min(state["low_price"], current_price)
-                state["updates"] += 1
-
-                # Calculate changes
-                change_from_last = (
-                    (current_price - state["last_price"]) / state["last_price"]
-                ) * 100
-
-                # Check threshold for alert
-                if abs(change_from_last) >= config.threshold_pct:
-                    direction = "📈" if change_from_last > 0 else "📉"
-                    pair_esc = escape_markdown_v2(config.trading_pair)
-                    price_esc = escape_markdown_v2(f"${current_price:,.2f}")
-                    change_esc = escape_markdown_v2(f"{change_from_last:+.2f}%")
-
-                    try:
-                        await context.bot.send_message(
-                            chat_id=chat_id,
-                            text=(
-                                f"{direction} *{pair_esc} Alert*\n"
-                                f"Price: `{price_esc}`\n"
-                                f"Change: `{change_esc}`"
-                            ),
-                            parse_mode="MarkdownV2",
-                        )
-                        state["alerts_sent"] += 1
-                    except Exception:
-                        pass
-
-                # Update last price
-                state["last_price"] = current_price
-
-                # Update live report
-                if report:
-                    try:
-                        from datetime import datetime, timezone
-
-                        history.append({
-                            "Time": datetime.now(timezone.utc).strftime("%H:%M:%S"),
-                            "Price": f"${current_price:,.2f}",
-                            "Change": f"{change_from_last:+.2f}%",
-                        })
-
-                        elapsed = int(time.time() - state["start_time"])
-                        mins, secs = divmod(elapsed, 60)
-                        change_total = ((current_price - state["initial_price"]) / state["initial_price"]) * 100
-
-                        report.clear()
-                        report.builder.manual_order()
-                        report.builder.kpi("Current Price", f"${current_price:,.2f}")
-                        report.builder.kpi("High", f"${state['high_price']:,.2f}", trend="up")
-                        report.builder.kpi("Low", f"${state['low_price']:,.2f}", trend="down")
-                        report.builder.kpi("Change", f"{change_total:+.2f}%",
-                                           trend="up" if change_total > 0 else "down")
-                        report.builder.kpi("Runtime", f"{mins}m {secs}s")
-                        report.builder.kpi("Alerts", str(state["alerts_sent"]))
-                        report.builder.table(history[-50:])
-                        await report.update()
-                    except Exception as e:
-                        logger.debug(f"Report update failed: {e}")
-
-            except asyncio.CancelledError:
-                raise  # Re-raise to exit the loop
-            except Exception as e:
-                logger.error(f"Price monitor error: {e}")
-
-            # Wait for next check
-            await asyncio.sleep(config.interval_sec)
-
-    except asyncio.CancelledError:
-        # Send stop notification
-        elapsed = int(time.time() - state["start_time"])
-        mins, secs = divmod(elapsed, 60)
-
-        try:
-            await context.bot.send_message(
-                chat_id=chat_id,
-                text=(
-                    f"🔴 *Price Monitor Stopped*\n"
-                    f"{escape_markdown_v2(config.trading_pair)}\n"
-                    f"Duration: {mins}m {secs}s \\| Updates: {state['updates']} \\| Alerts: {state['alerts_sent']}"
-                ),
-                parse_mode="MarkdownV2",
+        ref_price = None
+        change_pct = None
+        if config.move_threshold_pct > 0 and config.lookback_min > 0:
+            # First 1m candle of the lookback window: its open is the reference.
+            klines = await _fetch_json(
+                session,
+                _KLINES_URLS[config.connector],
+                {
+                    "symbol": symbol,
+                    "interval": "1m",
+                    "limit": min(max(config.lookback_min, 1), 1000),
+                },
             )
-        except Exception:
-            pass
+            if klines:
+                ref_price = float(klines[0][1])  # open of the oldest candle
+                if ref_price > 0:
+                    change_pct = (price - ref_price) / ref_price * 100
 
-        return f"Stopped after {mins}m {secs}s, {state['updates']} updates, {state['alerts_sent']} alerts"
+    alerts: list[str] = []
+    if config.upper_price > 0 and price >= config.upper_price:
+        alerts.append(f"price {price:,.6g} >= upper threshold {config.upper_price:,.6g}")
+    if config.lower_price > 0 and price <= config.lower_price:
+        alerts.append(f"price {price:,.6g} <= lower threshold {config.lower_price:,.6g}")
+    if (
+        change_pct is not None
+        and config.move_threshold_pct > 0
+        and abs(change_pct) >= config.move_threshold_pct
+    ):
+        alerts.append(
+            f"moved {change_pct:+.2f}% in {config.lookback_min}m "
+            f"(threshold {config.move_threshold_pct}%)"
+        )
+
+    move_note = (
+        f" | {config.lookback_min}m change: {change_pct:+.2f}%"
+        if change_pct is not None
+        else ""
+    )
+    status = f"{config.trading_pair} @ {price:,.6g} ({config.connector}){move_note}"
+    if alerts:
+        return f"ALERT: {status}\n" + "\n".join(f"- {a}" for a in alerts)
+    return f"OK: {status} — no thresholds crossed"

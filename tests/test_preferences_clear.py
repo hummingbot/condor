@@ -24,7 +24,6 @@ from condor.preferences import (
     get_portfolio_prefs,
     get_preferences,
     get_unified_trade_prefs,
-    get_voice_prefs,
     set_note,
     set_portfolio_days,
 )
@@ -39,7 +38,6 @@ PUBLIC_GETTERS = [
     get_unified_trade_prefs,
     get_executor_prefs,
     get_agent_prefs,
-    get_voice_prefs,
     get_notes,
 ]
 

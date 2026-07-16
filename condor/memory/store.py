@@ -5,7 +5,7 @@ this repo: a file per fact (YAML frontmatter + markdown body) plus a small
 ``MEMORY.md`` index that is cheap to inject into a prompt. The body is read
 on-demand via :meth:`MemoryStore.read`.
 
-This module is pure filesystem logic with **no** MCP/Telegram dependencies so
+This module is pure filesystem logic with **no** MCP/transport dependencies so
 it can run from the main process (prompt injection) and from the MCP
 subprocess (the ``manage_memory`` tool) alike.
 

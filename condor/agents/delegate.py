@@ -119,7 +119,6 @@ async def start_delegation(
     user_id: int,
     chat_id: int,
     task: str,
-    bot=None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     risk_limits: dict | None = None,
 ) -> DelegateTask:
@@ -165,7 +164,7 @@ async def start_delegation(
         risk_limits=effective_limits,
     )
     _delegations[dt.task_id] = dt
-    dt._task = asyncio.create_task(_run(dt, agent, bot, timeout_s))
+    dt._task = asyncio.create_task(_run(dt, agent, timeout_s))
     return dt
 
 
@@ -207,7 +206,7 @@ def _make_event_sink(dt: DelegateTask):
     return sink
 
 
-async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
+async def _run(dt: DelegateTask, agent, timeout_s: int) -> None:
     """Background runner: drive the agent to completion, persist, notify."""
     from condor.agents.gating import is_dangerous_tool_call
     from condor.agents.policies import AUTO, risk_gate
@@ -283,7 +282,7 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
             log.exception("Failed to close delegation run %s", dt.task_id)
         if dt.status != "stopped":
             try:
-                await _notify_done(dt, bot)
+                await _notify_done(dt)
             except Exception:
                 log.exception("Failed to notify delegation %s done", dt.task_id)
 
@@ -298,7 +297,7 @@ async def stop_delegation(task_id: str) -> bool:
     return True
 
 
-async def _notify_done(dt: DelegateTask, bot) -> None:
+async def _notify_done(dt: DelegateTask) -> None:
     """Notify the user the delegation finished (outbox chokepoint)."""
     if dt.status == "error":
         text = f"❌ Delegated task {dt.task_id} failed: {dt.error}"
@@ -316,5 +315,4 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
         chat_id=dt.chat_id,
         agent_id=dt.task_id,
         kind="delegation",
-        bot=bot,
     )

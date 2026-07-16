@@ -187,12 +187,11 @@ class TickEngine:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self, bot=None) -> None:
+    async def start(self) -> None:
         """Start the tick loop as an asyncio task."""
         if self._running:
             return
         self._running = True
-        self._bot = bot
         self._task = asyncio.create_task(self._loop())
         _engines[self.agent_id] = self
         log.info(
@@ -666,7 +665,6 @@ class TickEngine:
                 chat_id=self.chat_id if isinstance(self.chat_id, int) else 0,
                 agent_id=self.agent_id,
                 kind="session",
-                bot=getattr(self, "_bot", None),
             )
         except Exception:
             log.exception("Failed to send notification for %s", self.agent_id)
