@@ -1,81 +1,35 @@
-"""Tests for the MCP-server identity auto-bind."""
+"""Tests for the MCP-server settings (§4.3: no user identity dimension)."""
 
 import asyncio
+from dataclasses import fields
 
-import config_manager
 from mcp_servers.condor import settings as settings_module
 
 
-class _StubCM:
-    def __init__(self, approved):
-        self._approved = approved
-
-    def get_approved_users(self):
-        return self._approved
-
-
-def test_ensure_identity_auto_binds_sole_approved_user(monkeypatch):
-    """Tier A: exactly one approved user in config.yml → bind identity to it
-    (user_id and, when unset, chat_id)."""
-    monkeypatch.setattr(settings_module.settings, "user_id", 0)
-    monkeypatch.setattr(settings_module.settings, "chat_id", 0)
-    monkeypatch.setattr(settings_module, "_config_present", lambda: True)
-    monkeypatch.setattr(
-        config_manager, "get_config_manager", lambda: _StubCM([456181693])
-    )
-
-    assert settings_module.ensure_identity() is True
-    assert settings_module.settings.user_id == 456181693
-    assert settings_module.settings.chat_id == 456181693
+def test_settings_carry_no_user_identity():
+    """§4.3: the MCP settings expose no user_id/chat_id — identity is gone;
+    the only keys are agent attribution + the run capability."""
+    names = {f.name for f in fields(settings_module.Settings)}
+    assert names == {"agent_slug", "agent_id", "capability"}
+    assert not hasattr(settings_module, "ensure_identity")
 
 
-def test_ensure_identity_refuses_ambiguous_or_empty(monkeypatch):
-    """Zero or multiple approved users: no bind — a multi-user box must say
-    who it is explicitly."""
-    monkeypatch.setattr(settings_module, "_config_present", lambda: True)
-    for approved in ([], [111, 222]):
-        monkeypatch.setattr(settings_module.settings, "user_id", 0)
-        monkeypatch.setattr(
-            config_manager, "get_config_manager", lambda a=approved: _StubCM(a)
-        )
-        assert settings_module.ensure_identity() is False
-        assert settings_module.settings.user_id == 0
-
-
-def test_ensure_identity_never_creates_a_config_file(monkeypatch):
-    """With no config.yml in cwd, the identity probe must not touch
-    ConfigManager at all — instantiating it would CREATE a default config.yml
-    as a side effect."""
-
-    def _boom():
-        raise AssertionError("ConfigManager must not be instantiated")
-
-    monkeypatch.setattr(settings_module.settings, "user_id", 0)
-    monkeypatch.setattr(settings_module, "_config_present", lambda: False)
-    monkeypatch.setattr(config_manager, "get_config_manager", _boom)
-
-    assert settings_module.ensure_identity() is False
-
-
-def test_manage_memory_fails_fast_without_identity(monkeypatch):
-    """Memory tools resolve the store from user_id directly (no main-API call
-    to 403), so an unresolved identity must return an actionable error instead
-    of silently reading/writing user 0's store."""
+def test_manage_memory_needs_no_identity(monkeypatch, tmp_path):
+    """Memory resolves by agent_slug alone — no identity bootstrap required."""
+    from condor.memory import paths as paths_module
     from mcp_servers.condor.tools.memory import manage_memory
 
-    monkeypatch.setattr(settings_module.settings, "user_id", 0)
-    monkeypatch.setattr(settings_module, "_config_present", lambda: True)
-    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _StubCM([]))
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(settings_module.settings, "agent_slug", "")
 
     result = asyncio.run(manage_memory(action="list"))
-    assert "CONDOR_USER_ID" in result["error"]
+    assert result == {"index": ""}
 
-
-def test_ensure_identity_keeps_explicit_identity(monkeypatch):
-    """An explicitly configured identity is never overridden by auto-bind."""
-    monkeypatch.setattr(settings_module.settings, "user_id", 999)
-    monkeypatch.setattr(
-        config_manager, "get_config_manager", lambda: _StubCM([456181693])
+    result = asyncio.run(
+        manage_memory(
+            action="write", name="Fact", content="body", description="desc"
+        )
     )
-    assert settings_module.ensure_identity() is True
-    assert settings_module.settings.user_id == 999
+    assert result["saved"] is True
+    # The write landed in the global tier: repo-root store/memory.
+    assert (tmp_path / "store" / "memory" / "memories" / "fact.md").exists()

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useAuth } from "@/lib/auth";
 import { getViewContext } from "@/lib/viewContext";
-import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
+import { WS_AUTH_SUBPROTOCOL, getLegacyWsToken } from "@/lib/ws-auth";
 
 export interface ToolCall {
   tool_call_id: string;
@@ -72,7 +71,6 @@ function clearStoredSlot(slotId: string) {
 }
 
 export function useChatSocket() {
-  const { token } = useAuth();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   // Trailing debounce for localStorage persistence: streaming chunks update
@@ -115,16 +113,19 @@ export function useChatSocket() {
   );
 
   const connect = useCallback(() => {
-    if (!token) return;
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = import.meta.env.DEV ? "localhost:8088" : window.location.host;
     const url = `${protocol}//${host}/api/v1/ws/chat`;
 
-    // Pass the JWT via the Sec-WebSocket-Protocol subprotocol header instead of
-    // the URL query string, so it never leaks via proxy logs or history.
-    const ws = new WebSocket(url, [WS_AUTH_SUBPROTOCOL, token]);
+    // auth pass: remove — chat_ws.py still decodes a JWT from the
+    // Sec-WebSocket-Protocol handshake, so keep sending any legacy token
+    // until the auth pass deletes that requirement server-side.
+    const token = getLegacyWsToken();
+    const ws = token
+      ? new WebSocket(url, [WS_AUTH_SUBPROTOCOL, token])
+      : new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => setIsConnected(true);
@@ -139,7 +140,7 @@ export function useChatSocket() {
         /* ignore */
       }
     };
-  }, [token]);
+  }, []);
 
   const disconnect = useCallback(() => {
     clearTimeout(reconnectTimer.current);
@@ -416,8 +417,8 @@ export function useChatSocket() {
   );
 
   const startSession = useCallback(
-    (agentKey: string, serverName?: string) => {
-      send({ action: "start_session", agent_key: agentKey, server_name: serverName });
+    (agentKey: string) => {
+      send({ action: "start_session", agent_key: agentKey });
     },
     [send],
   );

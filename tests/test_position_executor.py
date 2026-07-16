@@ -206,7 +206,7 @@ def _outbox_texts():
 def test_trade_notifications_on_entry_and_exit(tmp_path):
     # take profit at +10%: expect an entry AND an exit notification
     run_executor(tmp_path, FakeGateway([100.0, 100.0, 111.0]),
-                 config(user_id=7, chat_id=7))
+                 config())
     texts = _outbox_texts()
     assert any(t.startswith("🟢 Entered") for t in texts), texts
     assert any("Exited" in t and "take_profit" in t for t in texts), texts
@@ -214,6 +214,6 @@ def test_trade_notifications_on_entry_and_exit(tmp_path):
 
 def test_trade_notifications_off_by_flag(tmp_path):
     run_executor(tmp_path, FakeGateway([100.0, 100.0, 111.0]),
-                 config(user_id=7, chat_id=7, notify_trades=False))
+                 config(notify_trades=False))
     texts = _outbox_texts()
     assert not any("Entered" in t or "Exited" in t for t in texts), texts

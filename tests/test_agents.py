@@ -204,7 +204,6 @@ def test_explicit_agent_crud_tools(tmp_path, monkeypatch):
 
     _patch_roots(monkeypatch, tmp_path)
     _stub_control(monkeypatch)
-    monkeypatch.setattr(settings, "user_id", 7, raising=False)
 
     created = asyncio.run(
         ta.create_agent(
@@ -351,18 +350,12 @@ def _run_create_session(monkeypatch, **kwargs):
     return _FakeACPClient.last_extra_env
 
 
-def test_extra_env_uses_user_id(monkeypatch):
-    """CONDOR_USER_ID is injected from the explicit user_id."""
-    env = _run_create_session(monkeypatch, chat_id=555, user_id=42)
-    assert env["CONDOR_USER_ID"] == "42"
-    assert env["CONDOR_CHAT_ID"] == "555"
-
-
-def test_extra_env_falls_back_to_chat_id(monkeypatch):
-    """With no user_id, CONDOR_USER_ID falls back to the chat_id, not '0'."""
-    env = _run_create_session(monkeypatch, chat_id=777, user_id=None)
-    assert env["CONDOR_USER_ID"] == "777"
-    assert env["CONDOR_USER_ID"] != "0"
+def test_extra_env_carries_no_identity(monkeypatch):
+    """§4.3: no CONDOR_USER_ID/CONDOR_CHAT_ID env is injected — identity is
+    gone from the MCP subprocess wiring."""
+    env = _run_create_session(monkeypatch, chat_id=555)
+    assert "CONDOR_USER_ID" not in (env or {})
+    assert "CONDOR_CHAT_ID" not in (env or {})
 
 
 def test_resolve_acp_model_suffix():
@@ -418,13 +411,13 @@ def test_session_mcp_servers_carry_agent_slug():
     silently read/write the CHAT's stores (e.g. 'routine_cookbook not found')."""
     from condor.agents.context import build_mcp_servers_for_session
 
-    servers = build_mcp_servers_for_session(42, 42, agent_slug="routine_builder")
+    servers = build_mcp_servers_for_session(agent_slug="routine_builder")
     condor = next(s for s in servers if s["name"] == "condor")
     args = condor["args"]
     assert "--agent-slug" in args
     assert args[args.index("--agent-slug") + 1] == "routine_builder"
 
     # Chat sessions (no agent_slug) keep the chat scope: no --agent-slug arg.
-    servers = build_mcp_servers_for_session(42, 42)
+    servers = build_mcp_servers_for_session()
     condor = next(s for s in servers if s["name"] == "condor")
     assert "--agent-slug" not in condor["args"]

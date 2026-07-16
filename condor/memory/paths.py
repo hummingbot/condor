@@ -13,9 +13,10 @@ stores never resolve to the same root: the chat's lives at the root and
 trading agents' under ``agents/{slug}/``, so even an agent literally named
 ``condor`` cannot collide with the chat.
 
-The key of a store is ``(agent, user_id)`` — "per-agent" *composes with*
-``user_id``, it does not replace it (group chats share a chat but each user
-keeps their own memory).
+Memory is two tiers only (§4.3): the **global/local tier** (repo-root
+``store/memory/``) and the **agent tier** (``agents/{slug}/store/memory/``).
+The Telegram-era per-user dimension (``store/user_{id}/``) is gone; the sole
+key of a store is the agent slug (``None`` = the chat/global tier).
 
 Pure filesystem logic with **no** MCP/transport deps, so it runs from the main
 process (prompt injection) and from the MCP subprocess (the tools) alike.
@@ -23,23 +24,71 @@ process (prompt injection) and from the MCP subprocess (the tools) alike.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # Anchor to the project root (…/condor) so paths are stable regardless of cwd.
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
 
 
-def store_root(user_id: int, agent_slug: str | None = None) -> Path:
-    """Root of an agent's per-user store.
+def store_root(agent_slug: str | None = None) -> Path:
+    """Root of an agent's memory store.
 
-    ``agent_slug`` set  -> trading agent: ``agents/{slug}/store/user_{id}``
-    ``agent_slug`` None  -> chat condor:   ``store/user_{id}`` (repo root)
+    ``agent_slug`` set  -> trading agent: ``agents/{slug}/store/memory``
+    ``agent_slug`` None  -> global tier:   ``store/memory`` (repo root)
     """
     if agent_slug:
         base = _PROJECT_ROOT / "agents" / agent_slug
     else:
         base = _PROJECT_ROOT
-    return base / "store" / f"user_{user_id}"
+    return base / "store" / "memory"
+
+
+def migrate_memory_tiers() -> list[str]:
+    """One-time rename of Telegram-era ``store/user_*`` dirs to the new tiers.
+
+    A plain ``mv``, not a compat layer (§4.3): for the repo root and each
+    ``agents/{slug}`` home, if ``store/user_*`` dirs exist and ``store/memory``
+    does not, the NEWEST ``user_*`` dir (by mtime) is renamed to ``memory``.
+    Older ``user_*`` dirs are left in place (and logged) for the operator to
+    delete. Idempotent: re-running with ``store/memory`` present is a no-op.
+
+    Returns a list of human-readable descriptions of the moves performed.
+    """
+    moves: list[str] = []
+    homes = [_PROJECT_ROOT]
+    agents_dir = _PROJECT_ROOT / "agents"
+    if agents_dir.exists():
+        homes.extend(
+            d for d in sorted(agents_dir.iterdir())
+            if d.is_dir() and not d.name.startswith("_")
+        )
+    for home in homes:
+        store = home / "store"
+        user_dirs = sorted(
+            (d for d in store.glob("user_*") if d.is_dir()),
+            key=lambda d: d.stat().st_mtime,
+        )
+        if not user_dirs:
+            continue
+        target = store / "memory"
+        if target.exists():
+            log.warning(
+                "memory migration: %s exists; leaving %s untouched",
+                target, [d.name for d in user_dirs],
+            )
+            continue
+        newest = user_dirs[-1]
+        newest.rename(target)
+        desc = f"{newest} -> {target}"
+        if len(user_dirs) > 1:
+            leftovers = [d.name for d in user_dirs[:-1]]
+            desc += f" (older per-user dirs left in place: {leftovers})"
+        log.info("memory migration: %s", desc)
+        moves.append(desc)
+    return moves
 
 
 def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
@@ -77,19 +126,20 @@ def shared_skills_root() -> Path:
     return _PROJECT_ROOT / "agents" / "_shared" / "skills"
 
 
-def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:
-    """``(label, agent_slug, root)`` for each existing store of ``user_id``.
+def iter_stores() -> list[tuple[str, str | None, Path]]:
+    """``(label, agent_slug, root)`` for each existing memory store.
 
-    Used by ``/memory`` to show one section per agent. Scans the root
-    ``store/user_{id}`` (the chat's) and ``agents/*/store/user_{id}`` and
-    returns only the stores that exist on disk (so empty agents don't clutter
-    the view). ``agent_slug`` is ``None`` for the chat and the slug for a trading
-    agent, so a caller can rebuild the store via ``MemoryStore(user_id, agent_slug)``.
-    The chat is labelled ``condor (chat)`` and listed first, then agents alphabetically.
+    Used by ``/memory`` to show one section per agent. Scans the global tier
+    (repo-root ``store/memory``) and ``agents/*/store/memory`` and returns
+    only the stores that exist on disk (so empty agents don't clutter the
+    view). ``agent_slug`` is ``None`` for the global tier and the slug for a
+    trading agent, so a caller can rebuild the store via
+    ``MemoryStore(agent_slug)``. The global tier is labelled ``condor (chat)``
+    and listed first, then agents alphabetically.
     """
     found: list[tuple[str, str | None, Path]] = []
 
-    chat_root = _PROJECT_ROOT / "store" / f"user_{user_id}"
+    chat_root = store_root(None)
     if chat_root.exists():
         found.append(("condor (chat)", None, chat_root))
 
@@ -98,7 +148,7 @@ def iter_user_stores(user_id: int) -> list[tuple[str, str | None, Path]]:
         for d in sorted(agents_dir.iterdir()):
             if not d.is_dir() or d.name.startswith("_") or d.name == "strategies":
                 continue
-            root = d / "store" / f"user_{user_id}"
+            root = d / "store" / "memory"
             if root.exists():
                 found.append((d.name, d.name, root))
 

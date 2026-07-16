@@ -40,13 +40,15 @@ def _append_outbox(entry: dict) -> None:
 async def notify(
     text: str,
     *,
-    user_id: int = 0,
-    chat_id: int = 0,
     agent_id: str = "",
     kind: str = "info",
     origin: str = "",
 ) -> dict:
-    """Record a notification in the outbox. Returns the outbox entry."""
+    """Record a notification in the outbox. Returns the outbox entry.
+
+    Entries are keyed by agent/run/channel metadata only (§4.3) — no user
+    identity dimension.
+    """
     from condor.agents.runstore import new_ulid
 
     entry = {
@@ -55,8 +57,6 @@ async def notify(
         # with id-based dedup across crashes.
         "id": new_ulid(),
         "ts": time.time(),
-        "user_id": user_id,
-        "chat_id": chat_id,
         "agent_id": agent_id,
         "kind": kind,
         "origin": origin,

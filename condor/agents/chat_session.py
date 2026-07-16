@@ -122,7 +122,6 @@ async def get_or_create_session(
     chat_id: int | str,
     agent_key: str,
     permission_callback: PermissionCallback | None = None,
-    user_id: int | None = None,
     user_data: dict | None = None,
     platform: str = "web",  # kept for caller compat; "web" is the only surface
     lazy_context: bool = False,
@@ -130,8 +129,8 @@ async def get_or_create_session(
 ) -> AgentSession:
     """Get existing session or create a new one.
 
-    When user_id is provided, dynamically configures MCP servers using
-    the user's Condor server permissions instead of static .mcp.json.
+    ``chat_id`` is an opaque session key (auth pass will rename it) — it
+    carries no user identity (§4.3).
     """
     session = _sessions.get(chat_id)
 
@@ -143,17 +142,8 @@ async def get_or_create_session(
     if session:
         await _destroy_session_internal(chat_id)
 
-    # MCP subprocess env expects numeric chat_id; for web sessions use user_id
-    effective_chat_id = chat_id if isinstance(chat_id, int) else (user_id or 0)
-    extra_env = {
-        "CONDOR_CHAT_ID": str(effective_chat_id),
-        "CONDOR_USER_ID": str(user_id or effective_chat_id),
-    }
-
     # Build dynamic MCP servers (condor MCP only — §9.2)
-    mcp_servers: list[dict] = []
-    if user_id:
-        mcp_servers = build_mcp_servers_for_session(user_id, chat_id)
+    mcp_servers: list[dict] = build_mcp_servers_for_session()
 
     # ACP subprocess models: claude-code, gemini, codex. A Claude model can be
     # pinned via a suffix, e.g. "claude-acp:opus" / "claude-acp:sonnet";
@@ -165,7 +155,7 @@ async def get_or_create_session(
         working_dir=get_project_dir(),
         mcp_servers=mcp_servers,
         permission_callback=permission_callback,
-        extra_env={**extra_env, **model_env},
+        extra_env=model_env,
         model=model_pref,
     )
 
@@ -173,13 +163,7 @@ async def get_or_create_session(
 
     try:
         # Build initial context (chat brain + tool preload + indexes)
-        initial_context = ""
-        if user_id:
-            initial_context = build_initial_context(
-                user_id,
-                chat_id,
-                agent_key=agent_key,
-            )
+        initial_context = build_initial_context(agent_key=agent_key)
 
         if initial_context and not lazy_context:
             # Eager: send context now (blocks until agent processes it)

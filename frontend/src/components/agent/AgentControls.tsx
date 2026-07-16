@@ -1,10 +1,9 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Clock,
   MessageSquareText,
   Pause,
   Play,
-  Server,
   Square,
   X,
   Zap,
@@ -38,23 +37,15 @@ export function StartSessionDialog({
   const [context, setContext] = useState(
     defaultTradingContext || (agentConfig.trading_context as string) || "",
   );
-  const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
   const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
   const [frequencySec, setFrequencySec] = useState(String(agentConfig.frequency_sec ?? 60));
   const [maxPositionSize, setMaxPositionSize] = useState(String(riskDefaults.max_position_size_quote ?? 500));
   const [maxOpenExecutors, setMaxOpenExecutors] = useState(String(riskDefaults.max_open_executors ?? 5));
   const [maxDrawdown, setMaxDrawdown] = useState(String(riskDefaults.max_drawdown_pct ?? -1));
 
-  const { data: servers } = useQuery({
-    queryKey: ["servers"],
-    queryFn: () => api.getServers(),
-    enabled: open,
-  });
-
   const startMut = useMutation({
     mutationFn: () => {
       const config: Record<string, unknown> = {
-        server_name: serverName,
         total_amount_quote: Number(totalAmountQuote) || 100,
         frequency_sec: Number(frequencySec) || 60,
         execution_mode: executionMode,
@@ -139,26 +130,6 @@ export function StartSessionDialog({
               className={`${inputClass} resize-none`}
               autoFocus
             />
-          </div>
-
-          {/* Server row */}
-          <div>
-            <label className={labelClass}>
-              <Server className="h-3.5 w-3.5" />
-              Server
-            </label>
-            <select
-              value={serverName}
-              onChange={(e) => setServerName(e.target.value)}
-              className={inputClass}
-            >
-              <option value="">Auto (current default)</option>
-              {servers?.map((s) => (
-                <option key={s.name} value={s.name} disabled={!s.online}>
-                  {s.name} {s.online ? "" : "(offline)"}
-                </option>
-              ))}
-            </select>
           </div>
 
           {/* Budget + Frequency row */}

@@ -146,8 +146,6 @@ async def run_agent(
             "slug": agent_slug,
             "config": config_dict,
             "trading_context": trading_context,
-            "chat_id": settings.chat_id,
-            "user_id": settings.user_id,
         },
     )
 

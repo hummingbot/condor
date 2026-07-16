@@ -13,13 +13,13 @@ from condor.memory.store import MemoryStore, _atomic_write
 def memory_root(tmp_path, monkeypatch):
     """Point the project root at a tmp dir so stores resolve under it."""
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    # The chat store (agent_slug=None) is what these per-user tests exercise.
+    # The global/chat store (agent_slug=None) is what these tests exercise.
     # It lives at the repo root (refactor-06): root store/ is the chat's.
     return tmp_path / "store"
 
 
 def test_write_list_read_roundtrip(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     res = s.write(
         name="Report in USD",
         content="Always report volumes and PnL in USD with thousands separators.",
@@ -42,17 +42,17 @@ def test_write_list_read_roundtrip(memory_root):
 
 
 def test_read_missing_returns_none(memory_root):
-    s = MemoryStore(user_id=1)
+    s = MemoryStore()
     assert s.read("does_not_exist") is None
 
 
 def test_empty_index_is_empty_string(memory_root):
-    s = MemoryStore(user_id=7)
+    s = MemoryStore()
     assert s.list_index() == ""
 
 
 def test_search_matches_body_and_description(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write(
         "Default exchange",
         "Binance is the default.",
@@ -79,15 +79,15 @@ def test_search_matches_body_and_description(memory_root):
 
 
 def test_invalid_type_falls_back_to_fact(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     res = s.write("X", "body", "desc", type="not_a_type")
     assert res["type"] == "fact"
 
 
 def test_overwrite_preserves_created_date(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write("Pair", "v1", "desc v1", type="fact")
-    path = memory_root / "user_42" / "memories" / "pair.md"
+    path = memory_root / "memory" / "memories" / "pair.md"
     first = path.read_text()
     created_line = [l for l in first.splitlines() if l.startswith("created:")][0]
 
@@ -99,15 +99,15 @@ def test_overwrite_preserves_created_date(memory_root):
 
 
 def test_slug_dedup_no_duplicate_files(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write("Report In USD", "a", "desc", type="fact")
     s.write("report-in-usd", "b", "desc2", type="fact")  # same slug
-    files = list((memory_root / "user_42" / "memories").glob("*.md"))
+    files = list((memory_root / "memory" / "memories").glob("*.md"))
     assert len(files) == 1
 
 
 def test_delete_removes_and_audits(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write("Temp", "body", "desc", type="fact", source="chat")
     assert s.delete("Temp", source="user") is True
     assert s.read("Temp") is None
@@ -127,7 +127,7 @@ def test_audit_log_is_bounded_and_keeps_newest(memory_root, monkeypatch):
     from condor.memory import store as store_module
 
     monkeypatch.setattr(store_module, "_AUDIT_CAP", 10)
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     total = 55  # >> 2 * cap, forces several trims
     for i in range(total):
         s.write("Pair", f"body {i}", f"desc {i}", type="fact")
@@ -142,7 +142,7 @@ def test_audit_log_is_bounded_and_keeps_newest(memory_root, monkeypatch):
 
 
 def test_audit_records_source(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write("From agent", "body", "desc", source="agent:grid_scalper")
     entry = s.audit()[-1]
     assert entry["source"] == "agent:grid_scalper"
@@ -150,7 +150,7 @@ def test_audit_records_source(memory_root):
 
 
 def test_audit_distinguishes_create_and_update(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write("Pair", "v1", "desc v1", type="fact")
     s.write("Pair", "v2", "desc v2", type="fact")  # same slug -> overwrite
     actions = [e["action"] for e in s.audit() if e["target"] == "memory:pair"]
@@ -158,7 +158,7 @@ def test_audit_distinguishes_create_and_update(memory_root):
 
 
 def test_reindex_never_stale(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write("One", "a", "first", type="fact")
     s.write("Two", "b", "second", type="fact")
     index = s.list_index()
@@ -172,7 +172,7 @@ def test_reindex_never_stale(memory_root):
 
 
 def test_index_self_heals_when_missing(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write("One", "a", "first", type="fact")
     # Simulate a lost index file.
     s.index_file.unlink()
@@ -181,9 +181,9 @@ def test_index_self_heals_when_missing(memory_root):
 
 
 def test_atomic_write_leaves_no_tmp(memory_root):
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     s.write("One", "a", "first", type="fact")
-    tmp_files = list((memory_root / "user_42" / "memories").glob("*.tmp"))
+    tmp_files = list((memory_root / "memory" / "memories").glob("*.tmp"))
     assert tmp_files == []
 
 
@@ -191,7 +191,7 @@ def test_atomic_write_uses_unique_tmp_per_writer(memory_root, monkeypatch):
     # Two writes to the same slug must target distinct temp files so concurrent
     # writers (CORR-032) never share — and thus never tear — the temp file.
     seen: list[str] = []
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     target = s.memories_dir / "one.md"
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -218,7 +218,7 @@ def test_concurrent_writers_never_leave_a_torn_file(memory_root):
 
     from condor.memory.store import _parse_frontmatter
 
-    s = MemoryStore(user_id=42)
+    s = MemoryStore()
     target = s.memories_dir / "shared.md"
     target.parent.mkdir(parents=True, exist_ok=True)
 
@@ -251,26 +251,48 @@ def test_concurrent_writers_never_leave_a_torn_file(memory_root):
 
 def test_resolver_distinct_roots_per_agent(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    chat = store_root(42, None)
-    grid = store_root(42, "grid_scalper")
-    ema = store_root(42, "ema_trend_follower")
+    chat = store_root(None)
+    grid = store_root("grid_scalper")
+    ema = store_root("ema_trend_follower")
     assert chat != grid != ema
-    assert chat == tmp_path / "store" / "user_42"
-    assert grid == tmp_path / "agents" / "grid_scalper" / "store" / "user_42"
-    # Same (slug, user) is stable across calls.
-    assert store_root(42, "grid_scalper") == grid
+    assert chat == tmp_path / "store" / "memory"
+    assert grid == tmp_path / "agents" / "grid_scalper" / "store" / "memory"
+    # Same slug is stable across calls.
+    assert store_root("grid_scalper") == grid
 
 
-def test_resolver_user_isolation_within_agent(tmp_path, monkeypatch):
+def test_migrate_memory_tiers_renames_newest_user_dir(tmp_path, monkeypatch):
+    """One-time mv (§4.3): newest store/user_* becomes store/memory; idempotent."""
+    import os
+    import time
+
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    assert store_root(1, "grid_scalper") != store_root(2, "grid_scalper")
+    old = tmp_path / "store" / "user_1"
+    older = tmp_path / "store" / "user_2"
+    for d in (older, old):
+        (d / "memories").mkdir(parents=True)
+    (old / "MEMORY.md").write_text("# index\n")
+    now = time.time()
+    os.utime(older, (now - 100, now - 100))
+    os.utime(old, (now, now))
+    agent_old = tmp_path / "agents" / "grid" / "store" / "user_1"
+    agent_old.mkdir(parents=True)
+
+    moves = paths_module.migrate_memory_tiers()
+    assert len(moves) == 2
+    assert (tmp_path / "store" / "memory" / "MEMORY.md").exists()
+    assert older.exists()  # older per-user dirs are left in place
+    assert not old.exists()
+    assert (tmp_path / "agents" / "grid" / "store" / "memory").exists()
+    # Idempotent: a second run is a no-op.
+    assert paths_module.migrate_memory_tiers() == []
 
 
 def test_memory_isolated_between_agents(tmp_path, monkeypatch):
     """A memory written by one agent is invisible to another."""
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    grid = MemoryStore(user_id=42, agent_slug="grid_scalper")
-    chat = MemoryStore(user_id=42, agent_slug=None)
+    grid = MemoryStore(agent_slug="grid_scalper")
+    chat = MemoryStore(agent_slug=None)
 
     grid.write("Grid fact", "only grid knows this", "grid-only", type="fact")
 
@@ -283,8 +305,8 @@ def test_memory_isolated_between_agents(tmp_path, monkeypatch):
 
 def test_audit_logs_are_per_assistant(tmp_path, monkeypatch):
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    grid = MemoryStore(user_id=42, agent_slug="grid_scalper")
-    ema = MemoryStore(user_id=42, agent_slug="ema_trend_follower")
+    grid = MemoryStore(agent_slug="grid_scalper")
+    ema = MemoryStore(agent_slug="ema_trend_follower")
 
     grid.write("G", "b", "d", source="agent:grid_scalper")
     ema.write("E", "b", "d", source="agent:ema_trend_follower")

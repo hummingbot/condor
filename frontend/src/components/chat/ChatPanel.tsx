@@ -14,7 +14,6 @@ import { useChatSocket, type ChatSlot } from "@/hooks/useChatSocket";
 import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { api, type ChatAgentOption } from "@/lib/api";
-import { useServer } from "@/hooks/useServer";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 
 const MIN_WIDTH = 360;
@@ -28,7 +27,6 @@ interface ChatPanelProps {
 
 export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const chat = useChatSocket();
-  const { server } = useServer();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -98,7 +96,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const handleNewSession = (agentKey: string) => {
     setPendingSession(true);
     onToggle(true);
-    chat.startSession(agentKey, server || undefined);
+    chat.startSession(agentKey);
     setShowNewMenu(false);
     setSelectedAgent(null);
   };

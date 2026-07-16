@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Bell,
   Brain,
   ChevronDown,
   ChevronLeft,
@@ -26,9 +25,7 @@ import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
 import { type RoutineInstance, api } from "@/lib/api";
 import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
-import { useServer } from "@/hooks/useServer";
 import { RoutineConfigForm } from "./RoutineConfigForm";
-import { RoutineHooksPanel } from "./RoutineHooksPanel";
 import { ScheduleDropdown } from "./ScheduleDropdown";
 
 interface ReportBrowserProps {
@@ -44,12 +41,10 @@ export function ReportBrowser({
   initialSourceTypeFilter,
   onClose,
 }: ReportBrowserProps) {
-  const { server } = useServer();
   const qc = useQueryClient();
   const [sourceTypeFilter, setSourceTypeFilter] = useState<string>(initialSourceTypeFilter || "all");
   const [isCompact, setIsCompact] = useState(false);
   const [showConfigPanel, setShowConfigPanel] = useState(false);
-  const [showNotifyPanel, setShowNotifyPanel] = useState(false);
   const [showSourceModal, setShowSourceModal] = useState(false);
   const [reportTheme, setReportTheme] = useState<"dark" | "light">("dark");
   const sidebarRef = useRef<HTMLDivElement>(null);
@@ -167,7 +162,7 @@ export function ReportBrowser({
   }, [polledInstance, activeSource, qc]);
 
   const runMutation = useMutation({
-    mutationFn: () => api.runRoutine(server!, activeSource, configValues),
+    mutationFn: () => api.runRoutine(activeSource, configValues),
     onSuccess: (data) => {
       setPollingInstanceId(data.instance_id);
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
@@ -177,7 +172,7 @@ export function ReportBrowser({
 
   const scheduleMutation = useMutation({
     mutationFn: (intervalSec: number) =>
-      api.scheduleRoutine(server!, activeSource, configValues, intervalSec),
+      api.scheduleRoutine(activeSource, configValues, intervalSec),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["routine-instances"] });
       setShowConfigPanel(false);
@@ -207,7 +202,7 @@ export function ReportBrowser({
   const [runAllProgress, setRunAllProgress] = useState<{ current: number; total: number } | null>(null);
 
   const runAll = useCallback(async () => {
-    if (!server || filteredRoutines.length === 0) return;
+    if (filteredRoutines.length === 0) return;
     const toRun = filteredRoutines;
     setRunAllProgress({ current: 0, total: toRun.length });
     for (let i = 0; i < toRun.length; i++) {
@@ -215,7 +210,7 @@ export function ReportBrowser({
       const routine = toRun[i];
       const cfg = buildConfigValues(routine);
       try {
-        await api.runRoutine(server, routine.name, cfg);
+        await api.runRoutine(routine.name, cfg);
       } catch {
         // continue with remaining routines
       }
@@ -223,7 +218,7 @@ export function ReportBrowser({
     setRunAllProgress(null);
     invalidateRoutineQueries(qc);
     qc.invalidateQueries({ queryKey: ["routine-reports"] });
-  }, [server, filteredRoutines, qc]);
+  }, [filteredRoutines, qc]);
 
   // Sync theme to iframe when it changes or report changes
   useEffect(() => {
@@ -272,14 +267,13 @@ export function ReportBrowser({
       else if (e.key === "Escape") {
         if (showSourceModal) setShowSourceModal(false);
         else if (showConfigPanel) setShowConfigPanel(false);
-        else if (showNotifyPanel) setShowNotifyPanel(false);
         else onClose();
         e.preventDefault();
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel, showNotifyPanel, showSourceModal]);
+  }, [goSourceUp, goSourceDown, goPrevReport, goNextReport, onClose, showConfigPanel, showSourceModal]);
 
   // Scroll active source into view
   useEffect(() => {
@@ -522,7 +516,7 @@ export function ReportBrowser({
           </div>
           <div className="flex items-center gap-1">
             {/* Run / Config actions — always show when routine exists */}
-            {activeRoutine && server && (
+            {activeRoutine && (
               <div className="flex items-center gap-1 mr-2">
                 <button
                   onClick={() => setShowSourceModal(true)}
@@ -533,10 +527,7 @@ export function ReportBrowser({
                   Source
                 </button>
                 <button
-                  onClick={() => {
-                    setShowConfigPanel((v) => !v);
-                    setShowNotifyPanel(false);
-                  }}
+                  onClick={() => setShowConfigPanel((v) => !v)}
                   className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
                     showConfigPanel
                       ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
@@ -548,23 +539,8 @@ export function ReportBrowser({
                   Config
                 </button>
                 <button
-                  onClick={() => {
-                    setShowNotifyPanel((v) => !v);
-                    setShowConfigPanel(false);
-                  }}
-                  className={`flex items-center gap-1 rounded px-2 py-1 text-[10px] font-semibold transition-colors ${
-                    showNotifyPanel
-                      ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
-                      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                  }`}
-                  title="Post-run notifications"
-                >
-                  <Bell className="h-3.5 w-3.5" />
-                  Notify
-                </button>
-                <button
                   onClick={() => runMutation.mutate()}
-                  disabled={runMutation.isPending || !server}
+                  disabled={runMutation.isPending}
                   className="flex items-center gap-1 rounded bg-[var(--color-primary)] px-2.5 py-1 text-[10px] font-semibold text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
                   title="Run with current config"
                 >
@@ -578,13 +554,13 @@ export function ReportBrowser({
                 {!activeRoutine.is_continuous && (
                   <ScheduleDropdown
                     onSchedule={(sec) => scheduleMutation.mutate(sec)}
-                    disabled={scheduleMutation.isPending || !server}
+                    disabled={scheduleMutation.isPending}
                   />
                 )}
                 {filteredRoutines.length > 1 && (
                   <button
                     onClick={runAll}
-                    disabled={!!runAllProgress || !server}
+                    disabled={!!runAllProgress}
                     className="flex items-center gap-1 rounded bg-[var(--color-surface-hover)] px-2.5 py-1 text-[10px] font-semibold text-[var(--color-text)] transition-colors hover:bg-[var(--color-border)] disabled:opacity-50"
                     title="Run all filtered routines with default configs"
                   >
@@ -724,24 +700,6 @@ export function ReportBrowser({
           </div>
         )}
 
-        {/* Notifications panel (collapsible) */}
-        {showNotifyPanel && activeRoutine && (
-          <div className="border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-                Notifications
-              </h3>
-              <button
-                onClick={() => setShowNotifyPanel(false)}
-                className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            </div>
-            <RoutineHooksPanel routineName={activeSource} collapsible={false} />
-          </div>
-        )}
-
         {/* Report timeline strip at top */}
         {reports.length > 1 && (
           <div className="flex items-center gap-1 border-b border-[var(--color-border)]/50 px-4 py-1.5">
@@ -813,7 +771,7 @@ export function ReportBrowser({
                     <pre className="whitespace-pre-wrap break-words text-left font-mono text-xs text-[var(--color-text-muted)] bg-[var(--color-surface)] rounded p-3 max-h-60 overflow-y-auto">
                       {(polledInstance?.status === "failed" ? polledInstance.error : latestFailedInstance?.error) || "Unknown error"}
                     </pre>
-                    {activeRoutine && server && (
+                    {activeRoutine && (
                       <button
                         onClick={() => runMutation.mutate()}
                         disabled={runMutation.isPending}
@@ -856,7 +814,7 @@ export function ReportBrowser({
                       />
                     </div>
                   )}
-                  {activeRoutine && server && (
+                  {activeRoutine && (
                     <button
                       onClick={() => runMutation.mutate()}
                       disabled={runMutation.isPending}

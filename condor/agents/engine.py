@@ -55,8 +55,6 @@ def get_all_engines() -> dict[str, "TickEngine"]:
 class TickEngine:
     agent: Agent  # the spec: identity + strategy body + shared brain (§5.3)
     config: dict[str, Any]
-    chat_id: int
-    user_id: int
     # "scheduled" marks a schedule-triggered launch (§5.4); the fire time is
     # persisted on run_started for fire-key dedup.
     kind_override: str = ""
@@ -483,7 +481,7 @@ class TickEngine:
             from condor.memory import MemoryStore, SkillStore
 
             slug = self.agent.slug
-            user_memory = MemoryStore(self.user_id, slug).list_index()
+            user_memory = MemoryStore(slug).list_index()
             skills_index = SkillStore(slug).list_index()
         except Exception:
             pass
@@ -539,8 +537,6 @@ class TickEngine:
             self.agent,
             prompt,
             permission_policy=risk_gate(self.risk, risk_state, experiment=self.is_experiment),
-            user_id=self.user_id,
-            chat_id=self.chat_id,
             execution_mode=mode,
             model=self._agent_key(),
             risk_limits=self.config.get("risk_limits") or None,
@@ -661,8 +657,6 @@ class TickEngine:
         try:
             await notify(
                 message,
-                user_id=self.user_id,
-                chat_id=self.chat_id if isinstance(self.chat_id, int) else 0,
                 agent_id=self.agent_id,
                 kind="session",
             )

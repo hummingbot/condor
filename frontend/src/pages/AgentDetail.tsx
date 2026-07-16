@@ -15,13 +15,12 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { AgentControls } from "@/components/agent/AgentControls";
-import { AgentMarketStrip } from "@/components/agent/AgentMarketStrip";
 import {
   InstanceCard,
   MarkdownEditor,
@@ -31,14 +30,11 @@ import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { RunReviewer } from "@/components/agent/RunReviewer";
 import { KindBadge, RUN_STATUS_COLORS } from "@/components/agent/runStyles";
-import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
-import { ExecutorChart } from "@/components/charts/ExecutorChart";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
-import { useAgentExecutors } from "@/hooks/useAgentExecutors";
+import { DiscardChangesDialog } from "@/components/ui/DiscardChangesDialog";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { type RunMeta, api } from "@/lib/api";
 import { formatDateTime } from "@/lib/formatters";
-import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 
 // ── Consult Panel ──
 
@@ -250,22 +246,8 @@ export function AgentDetail() {
     refetchInterval: 5000,
   });
 
-  // Live executor streaming for running instances
   const instances = agent?.instances || [];
   const hasRunning = instances.length > 0;
-  const serverName = instances[0]?.server_name || agent?.server_name || "";
-  const controllerIds = useMemo(
-    () => instances.map((inst) => inst.agent_id).filter(Boolean),
-    [instances],
-  );
-  const { executors: liveExecutors } = useAgentExecutors(
-    hasRunning && serverName ? serverName : null,
-    controllerIds,
-  );
-  const chartGroups = useMemo(
-    () => (serverName ? groupExecutorsByMarket(liveExecutors) : []),
-    [liveExecutors, serverName],
-  );
 
   if (error && !agent) {
     return (
@@ -343,7 +325,7 @@ export function AgentDetail() {
               {agent.server_name && (
                 <span
                   className="flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 font-mono text-emerald-400"
-                  title="Pinned Hummingbot API server"
+                  title="Pinned server"
                 >
                   <Server className="h-3 w-3" /> {agent.server_name}
                 </span>
@@ -398,32 +380,6 @@ export function AgentDetail() {
       {agent.consultable && (
         <div className="mb-6">
           <ConsultPanel slug={agent.slug} whenToConsult={agent.when_to_consult} />
-        </div>
-      )}
-
-      {/* Market Context Strip */}
-      {hasRunning && liveExecutors.length > 0 && (
-        <div className="mb-6">
-          <AgentMarketStrip serverName={serverName} executors={liveExecutors} />
-        </div>
-      )}
-
-      {/* Live Executor Charts */}
-      {hasRunning && chartGroups.length > 0 && (
-        <div className="mb-6 space-y-4">
-          <h3 className="flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-            <Zap className="h-3.5 w-3.5" /> Live Executors
-          </h3>
-          {chartGroups.map(([key, group]) => (
-            <ExecutorChart
-              key={key}
-              server={serverName}
-              executors={group}
-              connector={group[0].connector}
-              tradingPair={group[0].trading_pair}
-              height={300}
-            />
-          ))}
         </div>
       )}
 

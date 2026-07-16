@@ -1,12 +1,12 @@
-"""User memory tool — thin MCP wrapper over condor.memory.MemoryStore.
+"""Memory tool — thin MCP wrapper over condor.memory.MemoryStore.
 
-Resolves the store by ``settings.user_id`` (already injected into the MCP
-process) and derives the audit ``source`` from ``settings.agent_slug`` so the
-LLM never has to report who is writing.
+Resolves the store by ``settings.agent_slug`` alone (§4.3 — global tier when
+empty) and derives the audit ``source`` from it so the LLM never has to
+report who is writing.
 """
 
 from condor.memory import MemoryStore
-from mcp_servers.condor.settings import ensure_identity, settings
+from mcp_servers.condor.settings import settings
 
 
 def _source() -> str:
@@ -14,8 +14,8 @@ def _source() -> str:
 
 
 def _store() -> MemoryStore:
-    # agent_slug selects this assistant's store (FEAT-003); empty -> chat condor.
-    return MemoryStore(settings.user_id, settings.agent_slug or None)
+    # agent_slug selects this assistant's store (FEAT-003); empty -> global tier.
+    return MemoryStore(settings.agent_slug or None)
 
 
 async def manage_memory(
@@ -27,17 +27,6 @@ async def manage_memory(
     query: str | None = None,
     max_entries: int = 30,
 ) -> dict:
-    # Memory is resolved by user_id directly (no main-API call to fail on),
-    # so an unresolved identity would silently read/write user 0's store.
-    if not settings.user_id and not ensure_identity():
-        return {
-            "error": "Condor MCP server has no identity, and auto-bind could "
-            "not resolve one (zero or multiple approved users in config.yml) — "
-            "memory would silently target user 0's store. Set the "
-            "CONDOR_USER_ID and CONDOR_CHAT_ID env vars (or pass "
-            "--user-id/--chat-id args) to your registered Condor user id, "
-            "then restart the MCP session."
-        }
     store = _store()
 
     if action == "write":

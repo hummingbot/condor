@@ -70,17 +70,13 @@ def build_agent_handlers() -> dict[str, Handler]:
 
     svc = AgentService()
 
-    async def _consult(agent, task, context="", chat_id=0, user_id=0):
-        answer = await svc.consult(
-            agent, task, context=context, user_id=user_id, chat_id=chat_id,
-        )
+    async def _consult(agent, task, context=""):
+        answer = await svc.consult(agent, task, context=context)
         return {"agent": agent, "answer": answer}
 
-    async def _delegate_start(agent, task, chat_id=0, user_id=0,
-                              risk_limits=None, timeout_s=None):
+    async def _delegate_start(agent, task, risk_limits=None, timeout_s=None):
         dt = await dg.start_delegation(
-            agent_slug=agent, user_id=user_id, chat_id=chat_id,
-            task=task, timeout_s=timeout_s,
+            agent_slug=agent, task=task, timeout_s=timeout_s,
             risk_limits=risk_limits,
         )
         return {"task_id": dt.task_id, "status": dt.status}
@@ -103,14 +99,10 @@ def build_agent_handlers() -> dict[str, Handler]:
             raise LifecycleError(404, f"Delegation '{task_id}' not found")
         return {"stopped": await dg.stop_delegation(task_id)}
 
-    async def _notify_emit(text, user_id=0, chat_id=0, agent_id="", kind="agent",
-                           origin="mcp"):
+    async def _notify_emit(text, agent_id="", kind="agent", origin="mcp"):
         from condor.notifications import notify
 
-        entry = await notify(
-            text, user_id=user_id, chat_id=chat_id, agent_id=agent_id,
-            kind=kind, origin=origin,
-        )
+        entry = await notify(text, agent_id=agent_id, kind=kind, origin=origin)
         return {"entry": entry}
 
     def _approval_list():

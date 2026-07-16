@@ -39,14 +39,13 @@ def _agent_of(routine) -> str:
 
 
 class WebRoutineContext:
-    """Lightweight run context handed to routines: user prefs + chat id.
+    """Lightweight run context handed to routines: preferences only.
 
     Chat delivery died with the retired bot surface (§9.1) — routines report
     via condor.reports / notify(), never a transport handle.
     """
 
-    def __init__(self, server_name: str, chat_id: int = 0):
-        self._chat_id = chat_id
+    def __init__(self, server_name: str):
         self._user_data: dict[str, Any] = {
             "preferences": {"general": {"active_server": server_name}},
         }
@@ -186,7 +185,6 @@ class RoutineStore:
         routine_name: str,
         config: dict,
         server_name: str,
-        user_id: int,
         source: str,
         **extra,
     ) -> dict:
@@ -197,7 +195,6 @@ class RoutineStore:
             "status": "running",
             "source": source,
             "server_name": server_name,
-            "user_id": user_id,
             "created_at": time.time(),
             "last_run_at": None,
             "last_result": None,
@@ -212,7 +209,6 @@ class RoutineStore:
         routine,
         config: dict,
         server_name: str,
-        user_id: int = 0,
         *,
         status_after: str,
         failed_status: str | None = None,
@@ -226,7 +222,7 @@ class RoutineStore:
         recorded as a clean "Stopped by user" run so a stopped continuous
         routine still stores its final result.
         """
-        ctx = WebRoutineContext(server_name, chat_id=user_id)
+        ctx = WebRoutineContext(server_name)
         start = time.time()
         reports.reset_last_report_id()
         error_msg = None
@@ -285,7 +281,6 @@ class RoutineStore:
         routine_name: str,
         config: dict,
         server_name: str,
-        user_id: int = 0,
     ) -> str:
         """Run a one-shot routine from the web. Returns instance_id."""
         routine = self._resolve_routine(routine_name)
@@ -294,11 +289,11 @@ class RoutineStore:
 
         instance_id = self._gen_id()
         self._instances[instance_id] = self._new_instance_meta(
-            routine_name, config, server_name, user_id, source="web"
+            routine_name, config, server_name, source="web"
         )
 
         task = asyncio.create_task(
-            self._run_oneshot(instance_id, routine, config, server_name, user_id)
+            self._run_oneshot(instance_id, routine, config, server_name)
         )
         self._tasks[instance_id] = task
         return instance_id
@@ -309,14 +304,12 @@ class RoutineStore:
         routine,
         config: dict,
         server_name: str,
-        user_id: int = 0,
     ) -> None:
         await self._execute_and_record(
             instance_id,
             routine,
             config,
             server_name,
-            user_id,
             status_after="completed",
             failed_status="failed",
         )
@@ -326,7 +319,6 @@ class RoutineStore:
         routine_name: str,
         config: dict,
         server_name: str,
-        user_id: int = 0,
     ) -> str:
         """Start a continuous routine as a background task. Returns instance_id."""
         routine = self._resolve_routine(routine_name)
@@ -339,11 +331,11 @@ class RoutineStore:
 
         instance_id = self._gen_id()
         self._instances[instance_id] = self._new_instance_meta(
-            routine_name, config, server_name, user_id, source="mcp"
+            routine_name, config, server_name, source="mcp"
         )
 
         task = asyncio.create_task(
-            self._run_continuous(instance_id, routine, config, server_name, user_id)
+            self._run_continuous(instance_id, routine, config, server_name)
         )
         self._tasks[instance_id] = task
         return instance_id
@@ -354,14 +346,12 @@ class RoutineStore:
         routine,
         config: dict,
         server_name: str,
-        user_id: int = 0,
     ) -> None:
         await self._execute_and_record(
             instance_id,
             routine,
             config,
             server_name,
-            user_id,
             status_after="stopped",
         )
 
@@ -371,7 +361,6 @@ class RoutineStore:
         config: dict,
         server_name: str,
         interval_sec: int,
-        user_id: int = 0,
     ) -> str:
         """Schedule a routine to repeat at interval_sec. Returns instance_id."""
         routine = self._resolve_routine(routine_name)
@@ -383,7 +372,6 @@ class RoutineStore:
             routine_name,
             config,
             server_name,
-            user_id,
             source="web",
             status="scheduled",
             schedule={"type": "interval", "interval_sec": interval_sec},
@@ -391,7 +379,7 @@ class RoutineStore:
 
         task = asyncio.create_task(
             self._run_scheduled(
-                instance_id, routine, config, server_name, interval_sec, user_id
+                instance_id, routine, config, server_name, interval_sec
             )
         )
         self._tasks[instance_id] = task
@@ -404,7 +392,6 @@ class RoutineStore:
         config: dict,
         server_name: str,
         interval_sec: int,
-        user_id: int = 0,
     ) -> None:
         try:
             while instance_id in self._instances:
@@ -413,7 +400,6 @@ class RoutineStore:
                     routine,
                     config,
                     server_name,
-                    user_id,
                     status_after="scheduled",
                 )
                 # A cancel that lands mid-run is swallowed (and recorded) by

@@ -216,8 +216,6 @@ def _fake_engine(records, monkeypatch, tmp_path, strand_ids=()):
     engine = SimpleNamespace(
         agent=agent,
         agent_id="01JZX5B7Q2K4N8P1T3V5W7Y9ZB",
-        user_id=7,
-        chat_id=99,
         config={},
         _notify=_notify,
         record_decision=lambda action, note="": decisions.append((action, note)),

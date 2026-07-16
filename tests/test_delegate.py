@@ -102,8 +102,6 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
     async def scenario():
         dt = await start_delegation(
             agent_slug="scout",
-            user_id=1,
-            chat_id=42,
             task="scan SOL pools",
         )
         # Returns immediately, still running before we await it.
@@ -151,8 +149,6 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
     async def scenario():
         dt = await start_delegation(
             agent_slug="scout",
-            user_id=1,
-            chat_id=42,
             task="do thing",
         )
         await _drain(dt)
@@ -181,8 +177,6 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
     async def scenario():
         dt = await start_delegation(
             agent_slug="scout",
-            user_id=1,
-            chat_id=42,
             task="long task",
         )
         await asyncio.sleep(0)  # let the runner start
@@ -211,8 +205,6 @@ def test_unknown_agent_errors_at_start(tmp_path, monkeypatch):
         asyncio.run(
             start_delegation(
                 agent_slug="ghost",
-                user_id=1,
-                chat_id=42,
                 task="x",
             )
         )
@@ -230,8 +222,6 @@ def test_trading_delegation_without_limits_errors_loudly(tmp_path, monkeypatch):
         asyncio.run(
             start_delegation(
                 agent_slug="trader",
-                user_id=1,
-                chat_id=42,
                 task="deploy a bot",
             )
         )
@@ -253,8 +243,6 @@ def test_executor_owning_agent_without_baseline_errors(tmp_path, monkeypatch):
         asyncio.run(
             start_delegation(
                 agent_slug="native_trader",
-                user_id=1,
-                chat_id=42,
                 task="open a position",
             )
         )
@@ -280,8 +268,6 @@ def test_trading_delegation_uses_agent_baseline(tmp_path, monkeypatch):
     async def scenario():
         dt = await start_delegation(
             agent_slug="trader",
-            user_id=1,
-            chat_id=42,
             task="deploy",
         )
         await _drain(dt)
@@ -317,8 +303,6 @@ def test_agent_with_baseline_is_risk_gated_even_without_executor_tool(
     async def scenario():
         dt = await start_delegation(
             agent_slug="lp_agent",
-            user_id=1,
-            chat_id=42,
             task="open an LP position",
         )
         await _drain(dt)
@@ -346,8 +330,6 @@ def test_explicit_caps_not_discarded(tmp_path, monkeypatch):
     async def scenario():
         dt = await start_delegation(
             agent_slug="lp_agent",
-            user_id=1,
-            chat_id=42,
             task="open an LP position",
             risk_limits={"max_position_size_quote": 5},
         )
@@ -376,8 +358,6 @@ def test_non_trading_specialist_without_baseline_stays_auto(tmp_path, monkeypatc
     async def scenario():
         dt = await start_delegation(
             agent_slug="builder",
-            user_id=1,
-            chat_id=42,
             task="build a routine",
         )
         await _drain(dt)
@@ -405,8 +385,6 @@ def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
     async def scenario():
         dt = await start_delegation(
             agent_slug="trader",
-            user_id=1,
-            chat_id=42,
             task="deploy with more room",
             risk_limits={"max_position_size_quote": 2000},
         )
@@ -456,8 +434,6 @@ def test_zero_seeded_gate_bounds_native_creates(tmp_path, monkeypatch):
     async def scenario():
         dt = await start_delegation(
             agent_slug="trader",
-            user_id=1,
-            chat_id=42,
             task="deploy",
         )
         await _drain(dt)
@@ -517,8 +493,6 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
     async def scenario():
         dt = await start_delegation(
             agent_slug="scout",
-            user_id=1,
-            chat_id=42,
             task="scan SOL pools",
         )
         await _drain(dt)

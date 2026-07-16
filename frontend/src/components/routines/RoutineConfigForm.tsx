@@ -4,7 +4,6 @@ import { useEffect, useState } from "react";
 
 import type { RoutineFieldInfo } from "@/lib/api";
 import { api } from "@/lib/api";
-import { useServer } from "@/hooks/useServer";
 
 interface Props {
   fields: Record<string, RoutineFieldInfo>;
@@ -21,11 +20,10 @@ function SelectField({
   value: unknown;
   onChange: (v: unknown) => void;
 }) {
-  const { server } = useServer();
   const { data, isLoading } = useQuery({
-    queryKey: ["routine-field-options", field.options_from, server],
-    queryFn: () => api.getRoutineFieldOptions(field.options_from!, server!),
-    enabled: !!field.options_from && !!server,
+    queryKey: ["routine-field-options", field.options_from],
+    queryFn: () => api.getRoutineFieldOptions(field.options_from!),
+    enabled: !!field.options_from,
     staleTime: 30_000,
   });
 

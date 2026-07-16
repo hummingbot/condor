@@ -8,7 +8,6 @@ actions), so we use a generous timeout.
 """
 
 from mcp_servers.condor.condor_client import call_control
-from mcp_servers.condor.settings import settings
 
 # Long enough to cover a pending user confirmation (CONFIRMATION_TIMEOUT=120) plus
 # the agent's own model/tool latency.
@@ -26,8 +25,6 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
             "agent": agent,
             "task": task,
             "context": context,
-            "chat_id": settings.chat_id,
-            "user_id": settings.user_id,
         },
         timeout=_CONSULT_TIMEOUT,
     )

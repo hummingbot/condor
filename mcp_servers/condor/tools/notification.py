@@ -24,8 +24,6 @@ async def send_notification(text: str) -> dict:
             "notify.emit",
             {
                 "text": text,
-                "user_id": settings.user_id,
-                "chat_id": settings.chat_id,
                 "agent_id": settings.agent_id or settings.agent_slug or "",
                 "kind": "agent",
                 "origin": "mcp",

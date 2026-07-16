@@ -32,7 +32,7 @@ def _make_engine(tmp_path, monkeypatch, config):
     _patch_roots(monkeypatch, tmp_path)
     agent = Agent(slug="acme", name="Acme", agent_key="claude-code")
     agent.agent_dir.mkdir(parents=True, exist_ok=True)
-    return TickEngine(agent=agent, config=config, chat_id=1, user_id=1)
+    return TickEngine(agent=agent, config=config)
 
 
 def test_run_once_becomes_max_ticks_1_session(tmp_path, monkeypatch):
@@ -71,7 +71,7 @@ def test_display_seq_increments_across_kinds(tmp_path, monkeypatch):
 
     agent = Agent(slug="acme", name="Acme", agent_key="claude-code")
     e2 = TickEngine(
-        agent=agent, config={"execution_mode": "experiment"}, chat_id=1, user_id=1
+        agent=agent, config={"execution_mode": "experiment"}
     )
     assert (e1.session_num, e2.session_num) == (1, 2)
     assert e1.agent_id != e2.agent_id
@@ -87,7 +87,7 @@ def test_engine_falls_back_to_agent_risk_baseline(tmp_path, monkeypatch):
         denomination="USDC",
     )
     agent.agent_dir.mkdir(parents=True, exist_ok=True)
-    engine = TickEngine(agent=agent, config={}, chat_id=1, user_id=1)
+    engine = TickEngine(agent=agent, config={})
     assert engine.risk.limits.max_position_size_quote == 250.0
     assert engine.risk.limits.max_open_executors == 2
 
@@ -96,8 +96,6 @@ def test_engine_falls_back_to_agent_risk_baseline(tmp_path, monkeypatch):
     engine2 = TickEngine(
         agent=agent,
         config={"risk_limits": {"max_position_size_quote": 100.0}},
-        chat_id=1,
-        user_id=1,
     )
     assert engine2.risk.limits.max_position_size_quote == 100.0
 
@@ -169,7 +167,7 @@ def test_consult_records_a_run(tmp_path, monkeypatch):
 
     answer = asyncio.run(
         consult_module.run_consult(
-            slug="oracle", user_id=1, chat_id=2, task="q"
+            slug="oracle", task="q"
         )
     )
     assert answer == "the answer"
@@ -206,7 +204,7 @@ def test_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
     captured = {}
 
     class _FakeEngine:
-        def __init__(self, *, agent, config, chat_id, user_id, kind_override="", scheduled_for=""):
+        def __init__(self, *, agent, config, kind_override="", scheduled_for=""):
             captured["config"] = config
             self.agent_id = "01JZX5B7Q2K4N8P1T3V5W7Y9ZB"
             self.session_num = 1

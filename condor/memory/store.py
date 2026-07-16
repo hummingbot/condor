@@ -1,4 +1,4 @@
-"""User memory store — one fact per file, keyed by ``(assistant, user_id)``.
+"""Memory store — one fact per file, keyed by the assistant (agent slug).
 
 Replicates the Claude Code / Hummingbot memory pattern that already lives in
 this repo: a file per fact (YAML frontmatter + markdown body) plus a small
@@ -9,10 +9,11 @@ This module is pure filesystem logic with **no** MCP/transport dependencies so
 it can run from the main process (prompt injection) and from the MCP
 subprocess (the ``manage_memory`` tool) alike.
 
-Each store lives under its assistant's home, keyed by ``user_id`` (FEAT-003);
-:func:`condor.memory.paths.store_root` resolves the root. Layout on disk::
+Each store lives under its assistant's home (§4.3 — two tiers: global and
+per-agent); :func:`condor.memory.paths.store_root` resolves the root. Layout
+on disk::
 
-    {assistant_home}/store/user_{user_id}/
+    {assistant_home}/store/memory/
         MEMORY.md            # injectable index: one line per memory
         memories/
             <slug>.md        # one fact per file (frontmatter + body)
@@ -160,17 +161,16 @@ def _trim_audit(audit_file: Path, cap: int | None = None) -> None:
 
 
 class MemoryStore:
-    """Per-assistant, per-user memory store.
+    """Per-assistant memory store.
 
-    Keyed by ``(agent_slug, user_id)`` (FEAT-003): ``agent_slug`` set selects a
-    trading agent's store, ``None`` the chat ``condor`` store. The root is
-    resolved by :func:`condor.memory.paths.store_root`; the rest of this class
-    (index, audit, atomic write, self-heal) is unchanged.
+    Keyed by ``agent_slug`` alone (§4.3): set selects a trading agent's store,
+    ``None`` the global/chat ``condor`` tier. The root is resolved by
+    :func:`condor.memory.paths.store_root`; the rest of this class (index,
+    audit, atomic write, self-heal) is unchanged.
     """
 
-    def __init__(self, user_id: int, agent_slug: str | None = None):
-        self.user_id = user_id
-        self.root = store_root(user_id, agent_slug)
+    def __init__(self, agent_slug: str | None = None):
+        self.root = store_root(agent_slug)
         self.memories_dir = self.root / "memories"
         self.index_file = self.root / "MEMORY.md"
         self.audit_file = self.root / "audit.log"

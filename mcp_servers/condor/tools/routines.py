@@ -167,24 +167,6 @@ def describe_routine(name: str) -> dict:
     }
 
 
-class MCPContext:
-    """Minimal mock context for routine execution."""
-
-    def __init__(self):
-        self._chat_id = settings.chat_id
-        self._user_id = settings.user_id
-        self._user_data: dict = {}
-        # Use the HTTP fallback bot from routine_store so messages are delivered
-        from condor.routine_store import _http_bot
-
-        self.bot = _http_bot
-        self.application = None
-
-    @property
-    def user_data(self):
-        return self._user_data
-
-
 async def run_routine(
     name: str, config: dict | None, agent_slug: str | None = None
 ) -> dict:

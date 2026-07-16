@@ -190,8 +190,6 @@ class AgentService:
         slug: str,
         config: Optional[dict] = None,
         trading_context: str = "",
-        chat_id: int = 0,
-        user_id: int = 0,
         kind: str = "",
         scheduled_for: str = "",
     ) -> dict:
@@ -202,8 +200,6 @@ class AgentService:
             slug,
             config=config,
             trading_context=trading_context,
-            chat_id=chat_id,
-            user_id=user_id,
             kind=kind,
             scheduled_for=scheduled_for,
         )
@@ -292,16 +288,12 @@ class AgentService:
         slug: str,
         task: str,
         context: str = "",
-        user_id: int = 0,
-        chat_id: int = 0,
     ) -> str:
         from condor.agents.consult import run_consult
 
         self._reject_tombstoned(slug, "consult")
         return await run_consult(
             slug=slug,
-            user_id=user_id,
-            chat_id=chat_id,
             task=task,
             context=context,
         )
@@ -310,8 +302,6 @@ class AgentService:
         self,
         slug: str,
         task: str,
-        user_id: int = 0,
-        chat_id: int = 0,
         risk_limits: Optional[dict] = None,
         timeout_s: Optional[int] = None,
     ) -> dict:
@@ -321,8 +311,6 @@ class AgentService:
         dt = await start_delegation(
             agent_slug=slug,
             task=task,
-            user_id=user_id,
-            chat_id=chat_id,
             risk_limits=risk_limits,
             timeout_s=timeout_s if timeout_s is not None else DEFAULT_TIMEOUT_S,
         )

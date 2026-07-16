@@ -1,13 +1,19 @@
-"""User memory — persistent facts the agent keeps about a user.
+"""Memory — persistent facts an assistant keeps.
 
-Pure-filesystem store (no MCP/transport deps) keyed by ``(assistant, user_id)``
-(FEAT-003): each assistant — the ``/agent`` chat and every trading agent — has
-its own isolated store, co-located with its definition. See ``paths.store_root``
-and ``store.MemoryStore``.
+Pure-filesystem store (no MCP/transport deps) keyed by the assistant alone
+(§4.3): the global/chat tier plus one isolated store per trading agent,
+co-located with its definition. See ``paths.store_root`` and
+``store.MemoryStore``.
 """
 
-from .paths import iter_user_stores, store_root
+from .paths import iter_stores, migrate_memory_tiers, store_root
 from .skills import SkillStore
 from .store import MemoryStore
 
-__all__ = ["MemoryStore", "SkillStore", "store_root", "iter_user_stores"]
+__all__ = [
+    "MemoryStore",
+    "SkillStore",
+    "store_root",
+    "iter_stores",
+    "migrate_memory_tiers",
+]

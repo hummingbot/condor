@@ -7,7 +7,6 @@ agent runtime lives) via the web API and returns a ``task_id`` to poll/stop.
 """
 
 from mcp_servers.condor.condor_client import call_control
-from mcp_servers.condor.settings import settings
 
 
 async def delegate(
@@ -28,8 +27,6 @@ async def delegate(
             {
                 "agent": agent,
                 "task": task,
-                "chat_id": settings.chat_id,
-                "user_id": settings.user_id,
                 "risk_limits": risk_limits,
             },
         )

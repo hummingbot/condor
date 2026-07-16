@@ -364,7 +364,7 @@ def _make_engine(tmp_path, monkeypatch):
         slug="acme", name="Acme", agent_key="claude-code"
     )
     agent.agent_dir.mkdir(parents=True, exist_ok=True)
-    return TickEngine(agent=agent, config={}, chat_id=1, user_id=1)
+    return TickEngine(agent=agent, config={})
 
 
 def test_directives_survive_failed_tick_and_clear_on_success(tmp_path, monkeypatch):

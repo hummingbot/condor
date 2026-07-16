@@ -1,50 +1,31 @@
 import { useState } from "react";
 import {
-  Activity,
-  Bot,
   Brain,
   Eye,
+  Landmark,
   Moon,
-  Settings,
   Sun,
-  Swords,
   Wallet,
   Zap,
 } from "lucide-react";
 import { NavLink, Outlet, useLocation } from "react-router-dom";
 
-import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ChatPanel } from "@/components/chat/ChatPanel";
-import { useCredentials } from "@/hooks/useCredentials";
-import { usePrefetchData } from "@/hooks/usePrefetchData";
-import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
 import { AgentToggleButton } from "./AgentToggleButton";
-import { CurrencySelector } from "./CurrencySelector";
-import { ServerSelector } from "./ServerSelector";
 
 const NAV_ITEMS = [
-  { to: "/", icon: Wallet, label: "Portfolio" },
-  { to: "/trade", icon: Swords, label: "Trade" },
-  { to: "/bots", icon: Bot, label: "Bots" },
-  { to: "/executors", icon: Activity, label: "Executors" },
+  { to: "/", icon: Wallet, label: "Positions" },
   { to: "/agents", icon: Brain, label: "Agents" },
   { to: "/routines", icon: Zap, label: "Routines" },
+  { to: "/venues", icon: Landmark, label: "Venues" },
 ] as const;
 
 export function AppShell() {
-  const { server } = useServer();
   const { pathname } = useLocation();
   const { theme, toggleTheme } = useTheme();
   const [chatOpen, setChatOpen] = useState(false);
-  const { hasKeys, isLoading: keysLoading } = useCredentials();
-
-  const exemptRoutes = ["/routines", "/settings"];
-  const showKeysOverlay = server && !keysLoading && !hasKeys && !exemptRoutes.some((r) => pathname.startsWith(r));
-
-  // Prefetch core data (executors, bots) and subscribe to WS channels early
-  usePrefetchData();
 
   return (
     <div className="flex h-screen flex-col">
@@ -78,41 +59,21 @@ export function AppShell() {
           </nav>
         </div>
 
-        {/* Right: server selector + controls */}
+        {/* Right: theme + chat controls */}
         <div className="ml-auto flex items-center gap-3">
-          <ServerSelector />
-          <CurrencySelector />
-
-          <div className="flex items-center gap-1">
-            <NavLink
-              to="/settings"
-              className={({ isActive }) =>
-                `rounded p-1.5 transition-colors ${
-                  isActive
-                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-                }`
-              }
-              title="Settings"
-            >
-              <Settings className="h-4 w-4" />
-            </NavLink>
-
-            <button
-              onClick={toggleTheme}
-              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
-              title={
-                theme === "dark" ? "Switch to light mode" :
-                theme === "light" ? "Switch to color-blind mode" :
-                "Switch to dark mode"
-              }
-            >
-              {theme === "dark" ? <Sun className="h-4 w-4" /> :
-               theme === "light" ? <Eye className="h-4 w-4" /> :
-               <Moon className="h-4 w-4" />}
-            </button>
-
-          </div>
+          <button
+            onClick={toggleTheme}
+            className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
+            title={
+              theme === "dark" ? "Switch to light mode" :
+              theme === "light" ? "Switch to color-blind mode" :
+              "Switch to dark mode"
+            }
+          >
+            {theme === "dark" ? <Sun className="h-4 w-4" /> :
+             theme === "light" ? <Eye className="h-4 w-4" /> :
+             <Moon className="h-4 w-4" />}
+          </button>
 
           <AgentToggleButton active={chatOpen} onClick={() => setChatOpen((v) => !v)} className="ml-2" />
         </div>
@@ -120,10 +81,9 @@ export function AppShell() {
 
       {/* Main content */}
       <main className="relative flex-1 overflow-auto p-6">
-        <ErrorBoundary resetKey={pathname + server}>
-          <Outlet key={server} />
+        <ErrorBoundary resetKey={pathname}>
+          <Outlet />
         </ErrorBoundary>
-        {showKeysOverlay && <ConnectKeysOverlay />}
       </main>
 
       {/* Chat panel */}

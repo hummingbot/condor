@@ -64,6 +64,9 @@ def _request_hash(type: str, config: dict) -> str:
             "strategy",
             "origin",
             "request_hash",
+            # user_id/chat_id are gone from ExecutorConfig (§4.3) but stay
+            # excluded here so a replay of a pre-migration create request
+            # (config carrying the old keys) hashes identically.
             "user_id",
             "chat_id",
             "notify_trades",
@@ -93,8 +96,6 @@ async def create(
     config: dict,
     capability: str = "",
     executor_id: str = "",
-    user_id: int = 0,
-    chat_id: int = 0,
 ) -> dict:
     """Create an executor. Authority comes from ``capability`` — an opaque id
     minted by the platform (agent run() or condor-direct registration §6.2).
@@ -159,8 +160,6 @@ async def create(
     config_data["agent_slug"] = cap.agent_slug
     config_data["agent_id"] = cap.run_id
     config_data["strategy"] = ""
-    config_data["user_id"] = user_id
-    config_data["chat_id"] = chat_id
 
     # order_spot: fill the declared notional from a live quote when omitted, so
     # the risk declaration is always computable.

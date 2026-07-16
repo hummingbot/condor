@@ -108,7 +108,6 @@ async def run_routine(
             routine_name=routine_name,
             config=body.config,
             server_name=server_name,
-            user_id=user.id,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -130,7 +129,6 @@ async def schedule_routine(
             config=body.config,
             server_name=server_name,
             interval_sec=body.interval_sec,
-            user_id=user.id,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -149,7 +147,6 @@ async def run_routine_v2(
             routine_name=body.routine_name,
             config=body.config,
             server_name=body.server_name,
-            user_id=user.id,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -169,7 +166,6 @@ async def schedule_routine_v2(
             config=body.config,
             server_name=body.server_name,
             interval_sec=body.interval_sec,
-            user_id=user.id,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))

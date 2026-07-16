@@ -145,22 +145,12 @@ def get_project_dir() -> str:
 
 
 def _condor_mcp_args(
-    chat_id: int | str,
-    user_id: int,
     agent_slug: str | None = None,
     agent_id: str | None = None,
     capability: str | None = None,
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess."""
-    # MCP server expects int chat_id. For web sessions (string keys like
-    # "web_42"), use user_id instead.
-    effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
-    args = [
-        "--chat-id",
-        str(effective_chat_id),
-        "--user-id",
-        str(user_id),
-    ]
+    args: list[str] = []
     if agent_slug:
         args.extend(["--agent-slug", agent_slug])
     if agent_id:
@@ -174,8 +164,6 @@ def _condor_mcp_args(
 
 
 def build_mcp_servers_for_session(
-    user_id: int,
-    chat_id: int | str,
     execution_mode: str = "loop",
     agent_slug: str | None = None,
     agent_id: str | None = None,
@@ -197,8 +185,7 @@ def build_mcp_servers_for_session(
             "command": "uv",
             "args": ["run", "python", "-m", "mcp_servers.condor"]
             + _condor_mcp_args(
-                chat_id, user_id, agent_slug, agent_id=agent_id,
-                capability=capability,
+                agent_slug, agent_id=agent_id, capability=capability,
             ),
             "env": [],
         }
@@ -206,8 +193,6 @@ def build_mcp_servers_for_session(
 
 
 def build_initial_context(
-    user_id: int,
-    chat_id: int | str,
     agent_key: str | None = None,
 ) -> str:
     """Build an initial context prompt: the chat brain, tool preload, memory/
@@ -238,14 +223,14 @@ def build_initial_context(
         "Do this silently without telling the user."
     )
 
-    # User memory index — what the chat assistant remembers about this user. This
-    # store is the chat's own (FEAT-003), not shared with the user's trading
-    # agents. Inject only the index; bodies are read on demand via
-    # manage_memory(action="read"). Nothing injected for new users.
+    # Memory index — what the chat assistant remembers. This store is the
+    # chat's own global tier (§4.3), not shared with trading agents. Inject
+    # only the index; bodies are read on demand via
+    # manage_memory(action="read"). Nothing injected when empty.
     try:
         from condor.memory import MemoryStore
 
-        memory_index = MemoryStore(user_id).list_index()
+        memory_index = MemoryStore().list_index()
         if memory_index:
             sections.append(
                 "[USER MEMORY — what you remember about this user]\n"
@@ -303,7 +288,6 @@ def build_initial_context(
 
 def build_agent_context(
     agent: "Agent",  # noqa: F821 — condor.agents.agent.Agent
-    user_id: int,
     task: str,
     context: str = "",
 ) -> str:
@@ -320,7 +304,7 @@ def build_agent_context(
     try:
         from condor.memory import MemoryStore
 
-        memory_index = MemoryStore(user_id, agent.slug).list_index()
+        memory_index = MemoryStore(agent.slug).list_index()
         if memory_index:
             sections.append(
                 "[DOMAIN MEMORY — what you remember in this domain]\n"

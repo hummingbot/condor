@@ -154,12 +154,7 @@ def _step_identity(args) -> int:
         for uid in ids:
             cm.register_pending(uid)
             cm.approve_user(uid, user_id)
-        print(
-            f"• Approved {len(ids)} extra user(s). Tier-A auto-bind is now OFF\n"
-            "  (it needs exactly one approved user): each user's MCP server\n"
-            "  registration must pass explicit identity, e.g.\n"
-            "    env CONDOR_USER_ID=<id> uv run python -m mcp_servers.condor"
-        )
+        print(f"• Approved {len(ids)} extra user(s) for dashboard login.")
     return user_id
 
 

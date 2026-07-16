@@ -200,7 +200,7 @@ async def get_notifications(
         agent_id: Filter to one run (session or delegation id).
 
     Returns:
-        {"notifications": [{ts, user_id, agent_id, kind, text, ...}]}
+        {"notifications": [{ts, agent_id, kind, text, ...}]}
     """
     return await notification.get_notifications(limit, since_ts, agent_id)
 

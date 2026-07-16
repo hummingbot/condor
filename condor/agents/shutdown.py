@@ -311,7 +311,7 @@ async def _run_llm_cleanup(
 
         running = _nonterminal_records(runtime, agent.slug)
         context = _build_llm_context(policy, running, failures)
-        prompt = build_agent_context(agent, engine.user_id, body, context)
+        prompt = build_agent_context(agent, body, context)
         async with asyncio.timeout(300):
             # Unattended auto-approve: the cleanup pass must be able to close
             # positions without a human in the loop (that is its whole point);
@@ -320,8 +320,6 @@ async def _run_llm_cleanup(
                 agent,
                 prompt,
                 permission_policy=AUTO,
-                user_id=engine.user_id,
-                chat_id=engine.chat_id,
                 timeout_s=300,
             )
     except asyncio.TimeoutError:

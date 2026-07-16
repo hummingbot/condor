@@ -15,10 +15,8 @@ import {
 import { useCallback, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 
-import { NoServerCard } from "@/components/NoServerCard";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { RoutineTable, type RoutineRow } from "@/components/routines/RoutineTable";
-import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 import { formatRelativeTime, toMs } from "@/lib/formatters";
 import { formatInterval } from "@/lib/routineUtils";
@@ -29,7 +27,6 @@ type ViewMode = "grid" | "table";
 const VIEW_STORAGE_KEY = "routines_view_mode";
 
 export function Routines() {
-  const { server } = useServer();
   const qc = useQueryClient();
   const [searchParams] = useSearchParams();
   const agentParam = searchParams.get("agent");
@@ -178,10 +175,6 @@ export function Routines() {
     qc.invalidateQueries({ queryKey: ["routine-instances"] });
     qc.invalidateQueries({ queryKey: ["reports-grouped"] });
   }, [qc]);
-
-  if (!server) {
-    return <NoServerCard message="Select a server from the sidebar to view routines." />;
-  }
 
   return (
     <>

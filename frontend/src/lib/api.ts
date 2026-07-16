@@ -1,11 +1,17 @@
-import { authHeaders } from "./auth-token";
+import { getCsrfToken } from "./csrf";
+
+const UNSAFE_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"]);
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
   const headers: Record<string, string> = {
     "Content-Type": "application/json",
-    ...authHeaders(),
     ...(init?.headers as Record<string, string>),
   };
+  // CSRF (§5.5): every unsafe method carries the per-process token.
+  if (UNSAFE_METHODS.has(method)) {
+    headers["X-Condor-Token"] = await getCsrfToken();
+  }
   const res = await fetch(path, { ...init, headers });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
@@ -14,299 +20,47 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-// ── Types ──
+// ── Native executors (snapshot API, §6.3) ──
 
-export interface ServerInfo {
-  name: string;
-  host: string;
-  port: number;
-  online: boolean;
-  permission: string;
-}
-
-export interface BalanceItem {
-  token: string;
-  total: number;
-  available: number;
-  usd_value: number;
-}
-
-export interface ConnectorBalance {
-  connector: string;
-  balances: BalanceItem[];
-  total_usd: number;
-  note?: string | null;
-}
-
-export interface PortfolioResponse {
-  server: string;
-  connectors: ConnectorBalance[];
-  total_usd: number;
-}
-
-export interface PortfolioHistoryPoint {
-  timestamp: number;
-  total_usd: number;
-  tokens?: Record<string, number>;
-}
-
-export interface PortfolioHistoryResponse {
-  server: string;
-  points: PortfolioHistoryPoint[];
-  interval: string;
-  top_tokens?: string[];
-}
-
-export interface BotInfo {
-  id: string;
-  name: string;
-  status: string;
-  connector: string;
-  trading_pair: string;
-  pnl: number;
-  uptime: number;
-  controller_type: string;
-}
-
-export interface BotDetail {
-  bot: BotInfo;
-  config: Record<string, unknown>;
-  performance: Record<string, unknown>;
-}
-
-export interface ControllerInfo {
-  controller_name: string;
-  controller_id: string;
-  bot_name: string;
-  status: string;
-  connector: string;
-  trading_pair: string;
-  realized_pnl_quote: number;
-  unrealized_pnl_quote: number;
-  global_pnl_quote: number;
-  global_pnl_pct: number;
-  volume_traded: number;
-  close_type_counts: Record<string, number>;
-  positions_summary: Record<string, unknown>[];
-  deployed_at: string | null;
-  config: Record<string, unknown>;
-}
-
-export interface BotLogEntry {
-  timestamp?: number;
-  msg?: string;
-  log_category?: string;
-  [key: string]: unknown;
-}
-
-export interface BotSummary {
-  bot_name: string;
-  status: string;
-  num_controllers: number;
-  error_count: number;
-  deployed_at: string | null;
-  error_logs: BotLogEntry[];
-  general_logs: BotLogEntry[];
-}
-
-export interface BotsPageResponse {
-  controllers: ControllerInfo[];
-  bots: BotSummary[];
-  total_pnl: number;
-  total_volume: number;
-  server_online?: boolean;
-  error_hint?: string;
-}
-
-export interface BotRunInfo {
-  bot_name: string;
-  bot_run_id: number | null;
-  account_name: string;
-  strategy_type: string;
-  strategy_name: string;
-  run_status: string;
-  deployment_status: string;
-  created_at: string | null;
-  stopped_at: string | null;
-  realized_pnl_quote: number;
-  unrealized_pnl_quote: number;
-  global_pnl_quote: number;
-  volume_traded: number;
-  num_controllers: number;
-}
-
-export interface BotRunsResponse {
-  runs: BotRunInfo[];
-  total: number;
-}
-
-export interface ControllerPerformanceSnapshot {
-  timestamp: string;
-  bot_name: string;
-  controller_id: string;
-  controller_name: string;
-  connector: string;
-  trading_pair: string;
-  realized_pnl_quote: number;
-  unrealized_pnl_quote: number;
-  global_pnl_quote: number;
-  global_pnl_pct: number;
-  volume_traded: number;
-  close_type_counts: Record<string, number>;
-  positions_summary: Record<string, unknown>[];
-  custom_info: Record<string, unknown>;
-}
-
-export interface ControllerPerformanceHistoryResponse {
-  snapshots: ControllerPerformanceSnapshot[];
-  next_cursor: string | null;
-  interval: string;
-  server_online?: boolean;
-  error_hint?: string;
-}
-
-export interface ExecutorInfo {
-  id: string;
-  type: string;
-  connector: string;
-  trading_pair: string;
+export interface SnapshotLiveOrder {
+  venue_order_id: string;
+  role: string;
   side: string;
   status: string;
-  close_type: string;
-  pnl: number;
-  volume: number;
-  timestamp: number;
-  controller_id: string;
-  cum_fees_quote: number;
-  net_pnl_pct: number;
-  entry_price: number;
-  current_price: number;
-  close_timestamp: number;
-  custom_info: Record<string, unknown>;
-  config: Record<string, unknown>;
 }
 
-export interface PositionHeld {
-  connector_name: string;
-  trading_pair: string;
-  position_side?: string;
-  side?: string;
-  net_amount_base?: number;
-  amount?: number;
-  buy_breakeven_price?: number;
-  entry_price?: number;
-  current_price?: number;
-  unrealized_pnl_quote?: number;
-  unrealized_pnl?: number;
-  leverage?: number;
-  controller_id?: string;
-}
-
-export interface PositionsResponse {
-  positions: PositionHeld[];
-  summary: Record<string, unknown>;
-}
-
-export interface ConsolidatedPosition {
-  connector_name: string;
-  trading_pair: string;
-  position_side: string;
-  amount: number;
-  entry_price: number;
-  notional_value: number;
-  current_price: number;
-  unrealized_pnl: number;
-  realized_pnl: number;
-  cum_fees: number;
-  executor_count: number;
-  leverage: number;
-  controller_id: string;
-  source: "executor" | "bot";
-  source_name: string;
-}
-
-export interface ConsolidatedPositionsResponse {
-  executor_positions: ConsolidatedPosition[];
-  bot_positions: ConsolidatedPosition[];
-}
-
-export interface CandleData {
-  timestamp: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-}
-
-export interface MarketPrice {
-  connector: string;
-  trading_pair: string;
-  mid_price: number;
-  best_bid: number;
-  best_ask: number;
-}
-
-export interface OrderBookLevel {
-  price: number;
-  amount: number;
-}
-
-export interface OrderBookResponse {
-  connector: string;
-  trading_pair: string;
-  bids: OrderBookLevel[];
-  asks: OrderBookLevel[];
-}
-
-export interface TradingRule {
-  trading_pair: string;
-  min_order_size: number;
-  min_notional_size: number;
-  min_price_increment: number;
-  min_base_amount_increment: number;
-}
-
-export interface TradingRulesResponse {
-  connector: string;
-  rules: TradingRule[];
-}
-
-// ── Deploy Bot ──
-
-export interface ControllerConfigSummary {
+export interface SnapshotExecutor {
   id: string;
-  controller_name: string;
-  controller_type: string;
-  connector_name: string;
-  trading_pair: string;
+  type: string;
+  status: string;
+  instrument: string;
+  venue: string;
+  agent_slug: string;
+  run_id: string;
+  origin: string;
+  phase: string;
+  exposure_quote: number;
+  live_orders: SnapshotLiveOrder[];
 }
 
-export interface AvailableControllersResponse {
-  configs: ControllerConfigSummary[];
-  controller_types: Record<string, string[]>;
-}
-
-export interface ControllerConfigDetail {
+export interface SnapshotTerminalExecutor {
   id: string;
-  controller_name: string;
-  controller_type: string;
-  config: Record<string, unknown>;
+  type: string;
+  status: string;
+  close_reason: string;
+  run_id: string;
 }
 
-export interface ControllerSourceResponse {
-  controller_name: string;
-  controller_type: string;
-  source: string;
-}
-
-export interface DeployBotRequest {
-  bot_name: string;
-  controllers_config: string[];
-  account_name?: string;
-  image?: string;
-  max_global_drawdown_quote?: number | null;
-  max_controller_drawdown_quote?: number | null;
+export interface ExecutorsSnapshot {
+  account: Record<string, unknown> | null;
+  filters: { agent_slug: string | null; run_id: string | null };
+  open_executors: SnapshotExecutor[];
+  open_count: number;
+  live_order_count: number;
+  attributed_exposure_quote: number;
+  /** instrument -> net owned base amount (decimal string) */
+  owned_inventory: Record<string, string>;
+  recent_terminal: SnapshotTerminalExecutor[];
 }
 
 // ── Agents ──
@@ -474,8 +228,6 @@ export interface Delegation {
   task_id: string; // === run_id (RunStore stream id)
   run_id?: string;
   agent: string;
-  user_id: number;
-  chat_id: number;
   server_name: string | null;
   task: string;
   status: "running" | "done" | "error" | "stopped";
@@ -528,55 +280,6 @@ export interface RoutineInstance {
   error?: string | null;
 }
 
-export interface RoutineHooks {
-  telegram: { enabled: boolean; chat_ids: string[] };
-  trigger: "success" | "always" | "failure";
-}
-
-// ── Archived Bots ──
-
-export interface ArchivedBotSummary {
-  bot_name: string;
-  db_path: string;
-  total_trades: number;
-  total_orders: number;
-  trading_pairs: string[];
-  exchanges: string[];
-  start_time: number | null;
-  end_time: number | null;
-}
-
-export interface PnlPoint {
-  timestamp: number;
-  pnl: number;
-}
-
-export interface ArchivedBotPerformance {
-  bot_name: string;
-  db_path: string;
-  total_pnl: number;
-  total_fees: number;
-  total_volume: number;
-  trade_count: number;
-  buy_count: number;
-  sell_count: number;
-  pnl_by_pair: Record<string, number>;
-  cumulative_pnl: PnlPoint[];
-  trading_pairs: string[];
-  exchanges: string[];
-  executors: ExecutorInfo[];
-  primary_connector: string;
-  primary_trading_pair: string;
-  executor_count: number;
-}
-
-export interface PaginatedExecutors {
-  executors: ExecutorInfo[];
-  total: number;
-  offset: number;
-  limit: number;
-}
-
 // ── Reports ──
 
 export interface ReportSummary {
@@ -602,47 +305,21 @@ export interface ReportGroup {
   all_tags: string[];
 }
 
-// ── Settings ──
+// ── Venues (account management, §6.2b) ──
 
-export interface GatewayStatus {
-  running: boolean;
-  info: Record<string, unknown> | null;
-  image?: string;
-  created_at?: string;
-  container_status?: string;
-}
-
-export interface CredentialInfo {
-  connector_name: string;
-  connector_type: string;
-}
-
-export interface ConnectorInfo {
+export interface VenueAccount {
+  address: string;
   name: string;
-  type: string;
-  [key: string]: unknown;
+  is_default: boolean;
 }
 
-export interface ConnectorFieldInfo {
-  key: string;
-  type: string;
-  required: boolean;
-  default?: unknown;
-  description?: string;
+export interface VenueEntry {
+  default_account: string | null;
+  accounts: VenueAccount[];
 }
 
-// ── Voice Settings ──
-
-export interface VoicePrefs {
-  whisper_model: string;
-  language: string | null;
-  auto_send: boolean;
-}
-
-export interface VoiceSettingsResponse {
-  voice: VoicePrefs;
-  available_models: Record<string, string>;
-  available_languages: Record<string, string>;
+export interface VenuesResponse {
+  venues: Record<string, VenueEntry>;
 }
 
 // ── Chat ──
@@ -657,296 +334,30 @@ export interface ChatOptionsResponse {
   default_agent: string;
 }
 
-// ── Backtesting ──
-
-export interface BacktestTask {
-  task_id: string;
-  status: "pending" | "running" | "completed" | "failed";
-  config?: Record<string, unknown>;
-  result?: Record<string, unknown>;
-  error?: string;
-  created_at?: number;
-  saved?: boolean;
-}
+// Routines are process-local now, but the routines API still requires a
+// server_name field in run/schedule bodies.
+// TODO(backend): drop server_name from RunRequestV2/ScheduleRequestV2.
+const ROUTINE_SERVER = "local";
 
 // ── API functions ──
 
 export const api = {
-  getServers: () => apiFetch<ServerInfo[]>("/api/v1/servers"),
+  // ── Native executors (snapshot + lifecycle) ──
 
-  getServerStatus: (name: string) =>
-    apiFetch<{ online: boolean; error?: string }>(
-      `/api/v1/servers/${encodeURIComponent(name)}/status`,
-    ),
-
-  getPortfolio: (server: string, refresh = false) =>
-    apiFetch<PortfolioResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/portfolio${refresh ? "?refresh=true" : ""}`,
-    ),
-
-  getPortfolioHistory: (server: string, range = "1D", breakdown = false) =>
-    apiFetch<PortfolioHistoryResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/portfolio/history?range=${encodeURIComponent(range)}${breakdown ? "&breakdown=true" : ""}`,
-    ),
-
-  getBots: (server: string) =>
-    apiFetch<BotsPageResponse>(`/api/v1/servers/${encodeURIComponent(server)}/bots`),
-
-  getBot: (server: string, botId: string) =>
-    apiFetch<BotDetail>(`/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botId)}`),
-
-  getAvailableConfigs: (server: string) =>
-    apiFetch<AvailableControllersResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs`,
-    ),
-
-  getConfigDetail: (server: string, configId: string) =>
-    apiFetch<ControllerConfigDetail>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`,
-    ),
-
-  updateConfig: (server: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
-
-  updateBotControllerConfig: (server: string, botName: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/${encodeURIComponent(configId)}/config`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
-
-  updateConfigYaml: (server: string, configId: string, yamlContent: string) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "PUT",
-      body: JSON.stringify({ yaml_content: yamlContent }),
-    }),
-
-  getControllerConfigTemplate: (server: string, controllerType: string, controllerName: string) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/template`,
-    ),
-
-  createControllerConfig: (server: string, configId: string, data: Record<string, unknown>) =>
-    apiFetch<{ created: boolean; config_id: string }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs`, {
-      method: "POST",
-      body: JSON.stringify({ ...data, id: configId }),
-    }),
-
-  deleteControllerConfig: (server: string, configId: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/controllers/configs/${encodeURIComponent(configId)}`, {
-      method: "DELETE",
-    }),
-
-  deleteController: (server: string, controllerType: string, controllerName: string) =>
-    apiFetch<{ deleted: boolean }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}`,
-      { method: "DELETE" },
-    ),
-
-  getControllerSource: (server: string, controllerType: string, controllerName: string) =>
-    apiFetch<ControllerSourceResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/source`,
-    ),
-
-  updateControllerSource: (server: string, controllerType: string, controllerName: string, source: string) =>
-    apiFetch<{ updated: boolean }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controllers/${encodeURIComponent(controllerType)}/${encodeURIComponent(controllerName)}/source`,
-      { method: "PUT", body: JSON.stringify({ source }) },
-    ),
-
-  deployBot: (server: string, data: DeployBotRequest) =>
-    apiFetch<Record<string, unknown>>(`/api/v1/servers/${encodeURIComponent(server)}/bots/deploy`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  stopBot: (server: string, botName: string) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/stop`,
-      { method: "POST" },
-    ),
-
-  stopControllers: (server: string, botName: string, controllerNames: string[]) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/stop`,
-      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
-    ),
-
-  startControllers: (server: string, botName: string, controllerNames: string[]) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/bots/${encodeURIComponent(botName)}/controllers/start`,
-      { method: "POST", body: JSON.stringify({ controller_names: controllerNames }) },
-    ),
-
-  getControllerPerformanceHistory: (
-    server: string,
-    params: {
-      bot_name?: string;
-      controller_id?: string;
-      start_time?: string;
-      end_time?: string;
-      interval?: string;
-      limit?: number;
-      cursor?: string;
-    } = {},
-  ) => {
+  getExecutorsSnapshot: (params?: { agent_slug?: string; agent_id?: string; venue_id?: string }) => {
     const qs = new URLSearchParams();
-    if (params.bot_name) qs.set("bot_name", params.bot_name);
-    if (params.controller_id) qs.set("controller_id", params.controller_id);
-    if (params.start_time) qs.set("start_time", params.start_time);
-    if (params.end_time) qs.set("end_time", params.end_time);
-    if (params.interval) qs.set("interval", params.interval);
-    if (params.limit) qs.set("limit", String(params.limit));
-    if (params.cursor) qs.set("cursor", params.cursor);
+    if (params?.agent_slug) qs.set("agent_slug", params.agent_slug);
+    if (params?.agent_id) qs.set("agent_id", params.agent_id);
+    if (params?.venue_id) qs.set("venue_id", params.venue_id);
     const q = qs.toString();
-    return apiFetch<ControllerPerformanceHistoryResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
-    );
+    return apiFetch<ExecutorsSnapshot>(`/api/v1/executors/snapshot${q ? `?${q}` : ""}`);
   },
 
-  getBotRuns: (
-    server: string,
-    params: {
-      bot_name?: string;
-      run_status?: string;
-      deployment_status?: string;
-      limit?: number;
-      offset?: number;
-    } = {},
-  ) => {
-    const qs = new URLSearchParams();
-    if (params.bot_name) qs.set("bot_name", params.bot_name);
-    if (params.run_status) qs.set("run_status", params.run_status);
-    if (params.deployment_status) qs.set("deployment_status", params.deployment_status);
-    if (params.limit) qs.set("limit", String(params.limit));
-    if (params.offset) qs.set("offset", String(params.offset));
-    const q = qs.toString();
-    return apiFetch<BotRunsResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/bot-runs${q ? `?${q}` : ""}`,
-    );
-  },
-
-  deleteBotRun: (server: string, botRunId: number) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/servers/${encodeURIComponent(server)}/bot-runs/${botRunId}`, {
-      method: "DELETE",
-    }),
-
-  getExecutors: (
-    server: string,
-    params?: { executor_type?: string; trading_pair?: string; status?: string; controller_id?: string; limit?: number },
-  ) => {
-    const qs = new URLSearchParams();
-    if (params?.executor_type) qs.set("executor_type", params.executor_type);
-    if (params?.trading_pair) qs.set("trading_pair", params.trading_pair);
-    if (params?.status) qs.set("status", params.status);
-    if (params?.controller_id) qs.set("controller_id", params.controller_id);
-    if (params?.limit) qs.set("limit", String(params.limit));
-    const q = qs.toString();
-    return apiFetch<ExecutorInfo[]>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors${q ? `?${q}` : ""}`,
-    );
-  },
-
-  getExecutorsPage: (
-    server: string,
-    params: {
-      cursor?: string;
-      limit?: number;
-      executor_type?: string;
-      trading_pair?: string;
-      status?: string;
-      controller_id?: string;
-    } = {},
-  ) => {
-    const qs = new URLSearchParams();
-    if (params.cursor) qs.set("cursor", params.cursor);
-    qs.set("limit", String(params.limit ?? 50));
-    if (params.executor_type) qs.set("executor_type", params.executor_type);
-    if (params.trading_pair) qs.set("trading_pair", params.trading_pair);
-    if (params.status) qs.set("status", params.status);
-    if (params.controller_id) qs.set("controller_id", params.controller_id);
-    return apiFetch<{ executors: ExecutorInfo[]; next_cursor: string | null }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors/page?${qs.toString()}`,
-    );
-  },
-
-  createExecutor: (
-    server: string,
-    data: { executor_type: string; config: Record<string, unknown>; account_name?: string; controller_id?: string },
-  ) =>
-    apiFetch<{ status: string; executor_id: string }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors`,
-      { method: "POST", body: JSON.stringify(data) },
+  stopExecutor: (executorId: string, keepPosition = true) =>
+    apiFetch<Record<string, unknown>>(
+      `/api/v1/executors/${encodeURIComponent(executorId)}/stop`,
+      { method: "POST", body: JSON.stringify({ keep_position: keepPosition }) },
     ),
-
-  stopExecutor: (server: string, executorId: string, keepPosition = false) =>
-    apiFetch<{ status: string; result: unknown }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors/${encodeURIComponent(executorId)}/stop?keep_position=${keepPosition}`,
-      { method: "POST" },
-    ),
-
-  getPositionsHeld: (server: string) =>
-    apiFetch<PositionsResponse>(`/api/v1/servers/${encodeURIComponent(server)}/executors/positions`),
-
-  clearPositionHeld: (server: string, connector: string, pair: string, controllerId?: string) => {
-    const params = controllerId ? `?controller_id=${encodeURIComponent(controllerId)}` : "";
-    return apiFetch<{ status: string }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/executors/positions/${encodeURIComponent(connector)}/${encodeURIComponent(pair)}${params}`,
-      { method: "DELETE" },
-    );
-  },
-
-  getConsolidatedPositions: (server: string) =>
-    apiFetch<ConsolidatedPositionsResponse>(`/api/v1/servers/${encodeURIComponent(server)}/positions`),
-
-  getConnectors: (server: string) =>
-    apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connectors`),
-
-  getConnectedExchanges: (server: string) =>
-    apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`),
-
-  getPrice: (server: string, connector: string, pair: string) =>
-    apiFetch<MarketPrice>(
-      `/api/v1/servers/${encodeURIComponent(server)}/market/prices?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
-    ),
-
-  getRateOracleRates: (server: string, tradingPairs: string[]) =>
-    apiFetch<{ rates: Record<string, number> }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/rate-oracle/rates`,
-      { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
-    ),
-
-  getTradingRules: (server: string, connector: string) =>
-    apiFetch<TradingRulesResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/market/trading-rules?connector=${encodeURIComponent(connector)}`,
-    ),
-
-  getOrderBook: (
-    server: string,
-    connector: string,
-    pair: string,
-    depth = 20,
-  ) =>
-    apiFetch<OrderBookResponse>(
-      `/api/v1/servers/${encodeURIComponent(server)}/market/order-book?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&depth=${depth}`,
-    ),
-
-  getCandles: (
-    server: string,
-    connector: string,
-    pair: string,
-    interval = "1m",
-    limit = 1000,
-    startTime?: number,
-    endTime?: number,
-  ) => {
-    let url = `/api/v1/servers/${encodeURIComponent(server)}/market/candles?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
-    if (startTime) url += `&start_time=${startTime}`;
-    if (endTime) url += `&end_time=${endTime}`;
-    return apiFetch<CandleData[]>(url);
-  },
 
   // ── Agents (identity + brain) ──
 
@@ -962,8 +373,6 @@ export const api = {
     agent_key?: string;
     tools?: string[];
     when_to_consult?: string;
-    server_required?: boolean;
-    server_name?: string;
   }) =>
     apiFetch<AgentSummary>("/api/v1/agents", {
       method: "POST",
@@ -981,10 +390,7 @@ export const api = {
       method: "DELETE",
     }),
 
-  consultAgent: (
-    slug: string,
-    data: { task: string; context?: string; chat_id?: number; server_name?: string },
-  ) =>
+  consultAgent: (slug: string, data: { task: string; context?: string }) =>
     apiFetch<{ agent: string; answer: string }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/consult`,
       { method: "POST", body: JSON.stringify(data) },
@@ -1077,61 +483,6 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ content }) },
     ),
 
-  // ── Backtesting ──
-
-  submitBacktest: (
-    server: string,
-    data: {
-      config_id: string;
-      start_time: number;
-      end_time: number;
-      backtesting_resolution?: string;
-      trade_cost?: number;
-    },
-  ) =>
-    apiFetch<BacktestTask>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  listBacktestTasks: (server: string) =>
-    apiFetch<BacktestTask[]>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks`),
-
-  getBacktestTask: (server: string, taskId: string) =>
-    apiFetch<BacktestTask>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks/${encodeURIComponent(taskId)}`,
-    ),
-
-  deleteBacktestTask: (server: string, taskId: string) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/tasks/${encodeURIComponent(taskId)}`,
-      { method: "DELETE" },
-    ),
-
-  getSavedBacktests: (server: string) =>
-    apiFetch<BacktestTask[]>(`/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved`),
-
-  deleteSavedBacktest: (server: string, taskId: string) =>
-    apiFetch<Record<string, unknown>>(
-      `/api/v1/servers/${encodeURIComponent(server)}/backtesting/saved/${encodeURIComponent(taskId)}`,
-      { method: "DELETE" },
-    ),
-
-  // ── Archived Bots ──
-
-  getArchivedBots: (server: string) =>
-    apiFetch<{ bots: ArchivedBotSummary[] }>(`/api/v1/servers/${encodeURIComponent(server)}/archived`),
-
-  getArchivedBotPerformance: (server: string, dbPath: string, includeExecutors = false) =>
-    apiFetch<ArchivedBotPerformance>(
-      `/api/v1/servers/${encodeURIComponent(server)}/archived/performance?db_path=${encodeURIComponent(dbPath)}&include_executors=${includeExecutors}`,
-    ),
-
-  getArchivedExecutors: (server: string, dbPath: string, offset = 0, limit = 50) =>
-    apiFetch<PaginatedExecutors>(
-      `/api/v1/servers/${encodeURIComponent(server)}/archived/executors?db_path=${encodeURIComponent(dbPath)}&offset=${offset}&limit=${limit}`,
-    ),
-
   // ── Reports ──
 
   getReports: (params?: { source_type?: string; tag?: string; search?: string; limit?: number; offset?: number }) => {
@@ -1160,21 +511,20 @@ export const api = {
   getRoutineInstance: (id: string) =>
     apiFetch<RoutineInstance>(`/api/v1/routines/instances/${encodeURIComponent(id)}`),
 
-  runRoutine: (server: string, name: string, config: Record<string, unknown> = {}) =>
+  runRoutine: (name: string, config: Record<string, unknown> = {}) =>
     apiFetch<{ instance_id: string }>(
       `/api/v1/routines/run`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config }) },
+      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: ROUTINE_SERVER, config }) },
     ),
 
   scheduleRoutine: (
-    server: string,
     name: string,
     config: Record<string, unknown> = {},
     interval_sec: number = 300,
   ) =>
     apiFetch<{ instance_id: string }>(
       `/api/v1/routines/schedule`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: server, config, interval_sec }) },
+      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: ROUTINE_SERVER, config, interval_sec }) },
     ),
 
   stopRoutineInstance: (id: string) =>
@@ -1192,19 +542,10 @@ export const api = {
       `/api/v1/routines/${encodeURIComponent(name)}/reports`,
     ),
 
-  getRoutineFieldOptions: (source: string, server: string) =>
+  getRoutineFieldOptions: (source: string) =>
     apiFetch<{ options: string[] }>(
-      `/api/v1/routines/options/${encodeURIComponent(source)}?server=${encodeURIComponent(server)}`,
+      `/api/v1/routines/options/${encodeURIComponent(source)}`,
     ),
-
-  getRoutineHooks: (name: string) =>
-    apiFetch<RoutineHooks>(`/api/v1/routines/${encodeURIComponent(name)}/hooks`),
-
-  saveRoutineHooks: (name: string, hooks: RoutineHooks) =>
-    apiFetch<RoutineHooks>(`/api/v1/routines/${encodeURIComponent(name)}/hooks`, {
-      method: "PUT",
-      body: JSON.stringify(hooks),
-    }),
 
   // ── Agent Routines & Reports ──
 
@@ -1214,101 +555,37 @@ export const api = {
   getAgentReports: (slug: string) =>
     apiFetch<ReportsListResponse>(`/api/v1/agents/${encodeURIComponent(slug)}/reports`),
 
-  // ── Settings ──
+  // ── Venues (account management) ──
 
-  getSettingsServers: () => apiFetch<ServerInfo[]>("/api/v1/settings/servers"),
+  getVenues: () => apiFetch<VenuesResponse>("/api/v1/venues"),
 
-  addServer: (data: { name: string; host: string; port: number; username: string; password: string }) =>
-    apiFetch<{ added: boolean; name: string }>("/api/v1/settings/servers", {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  updateServer: (name: string, data: { host?: string; port?: number; username?: string; password?: string }) =>
-    apiFetch<{ updated: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
-
-  deleteServer: (name: string) =>
-    apiFetch<{ deleted: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}`, {
-      method: "DELETE",
-    }),
-
-  setDefaultServer: (name: string) =>
-    apiFetch<{ default: boolean }>(`/api/v1/settings/servers/${encodeURIComponent(name)}/default`, {
-      method: "POST",
-    }),
-
-  getGatewayStatus: (server: string) =>
-    apiFetch<GatewayStatus>(`/api/v1/settings/gateway/status?server=${encodeURIComponent(server)}`),
-
-  startGateway: (server: string, data: { image: string; port?: number }) =>
-    apiFetch<{ started: boolean }>(`/api/v1/settings/gateway/start?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  stopGateway: (server: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/settings/gateway/stop?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-    }),
-
-  restartGateway: (server: string) =>
-    apiFetch<{ restarted: boolean }>(`/api/v1/settings/gateway/restart?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-    }),
-
-  pullGatewayImage: (server: string, data: { image: string }) =>
-    apiFetch<{ pulled: boolean; image: string }>(`/api/v1/settings/gateway/pull?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  getGatewayPullStatus: (server: string) =>
-    apiFetch<{ pull_operations: Record<string, { status: string; progress: string; duration_seconds: number; started_at: number }>; total_operations: number }>(
-      `/api/v1/settings/gateway/pull-status?server=${encodeURIComponent(server)}`,
+  onboardVenueAccount: (venueId: string, data: { credentials: Record<string, unknown>; name?: string }) =>
+    apiFetch<{ venue_id: string; account: VenueAccount }>(
+      `/api/v1/venues/${encodeURIComponent(venueId)}/accounts`,
+      { method: "POST", body: JSON.stringify(data) },
     ),
 
-  getGatewayLogs: (server: string) =>
-    apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
-
-  getCredentials: (server: string) =>
-    apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),
-
-  getAvailableConnectors: (server: string, type?: string) => {
-    let url = `/api/v1/settings/connectors?server=${encodeURIComponent(server)}`;
-    if (type) url += `&type=${encodeURIComponent(type)}`;
-    return apiFetch<{ connectors: ConnectorInfo[] }>(url);
-  },
-
-  getConnectorConfigMap: (server: string, name: string) =>
-    apiFetch<{ config_map: Record<string, unknown> }>(
-      `/api/v1/settings/connectors/${encodeURIComponent(name)}/config-map?server=${encodeURIComponent(server)}`,
+  editVenueAccount: (
+    venueId: string,
+    address: string,
+    data: { credentials?: Record<string, unknown>; name?: string },
+  ) =>
+    apiFetch<{ venue_id: string; account: VenueAccount }>(
+      `/api/v1/venues/${encodeURIComponent(venueId)}/accounts/${encodeURIComponent(address)}`,
+      { method: "PUT", body: JSON.stringify(data) },
     ),
 
-  addCredential: (server: string, data: { connector_name: string; credentials: Record<string, string> }) =>
-    apiFetch<{ added: boolean }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`, {
-      method: "POST",
-      body: JSON.stringify(data),
-    }),
-
-  deleteCredential: (server: string, connector: string) =>
-    apiFetch<{ deleted: boolean }>(
-      `/api/v1/settings/credentials/${encodeURIComponent(connector)}?server=${encodeURIComponent(server)}`,
+  removeVenueAccount: (venueId: string, address: string) =>
+    apiFetch<{ venue_id: string; removed: string; warning: string }>(
+      `/api/v1/venues/${encodeURIComponent(venueId)}/accounts/${encodeURIComponent(address)}`,
       { method: "DELETE" },
     ),
 
-  // ── Voice Settings ──
-
-  getVoiceSettings: () =>
-    apiFetch<VoiceSettingsResponse>("/api/v1/settings/voice"),
-
-  updateVoiceSettings: (data: Partial<VoicePrefs>) =>
-    apiFetch<{ voice: VoicePrefs }>("/api/v1/settings/voice", {
-      method: "PUT",
-      body: JSON.stringify(data),
-    }),
+  setDefaultVenueAccount: (venueId: string, account: string) =>
+    apiFetch<{ venue_id: string; default_account: string }>(
+      `/api/v1/venues/${encodeURIComponent(venueId)}/default`,
+      { method: "POST", body: JSON.stringify({ account }) },
+    ),
 
   // ── Chat ──
 

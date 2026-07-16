@@ -48,8 +48,6 @@ DEFAULT_TIMEOUT_S = 900
 class DelegateTask:
     task_id: str  # the RunStore run_id (opaque ULID)
     agent_slug: str
-    user_id: int
-    chat_id: int
     task: str
     started_at: str = ""
     ended_at: str = ""
@@ -67,8 +65,6 @@ class DelegateTask:
             "task_id": self.task_id,
             "run_id": self.task_id,
             "agent": self.agent_slug,
-            "user_id": self.user_id,
-            "chat_id": self.chat_id,
             "task": self.task,
             "status": self.status,
             "result": self.result,
@@ -116,8 +112,6 @@ def _resolve_delegation_limits(agent, risk_limits: dict | None) -> dict | None:
 async def start_delegation(
     *,
     agent_slug: str,
-    user_id: int,
-    chat_id: int,
     task: str,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     risk_limits: dict | None = None,
@@ -157,8 +151,6 @@ async def start_delegation(
     dt = DelegateTask(
         task_id=run_id,
         agent_slug=agent_slug,
-        user_id=user_id,
-        chat_id=chat_id,
         task=task,
         started_at=started_at,
         risk_limits=effective_limits,
@@ -221,7 +213,7 @@ async def _run(dt: DelegateTask, agent, timeout_s: int) -> None:
     else:
         policy = AUTO  # non-trading specialist — full auto-approve
 
-    prompt = build_agent_context(agent, dt.user_id, dt.task)
+    prompt = build_agent_context(agent, dt.task)
 
     def _persist_tool_call(tc: dict) -> None:
         try:
@@ -246,8 +238,6 @@ async def _run(dt: DelegateTask, agent, timeout_s: int) -> None:
             agent,
             prompt,
             permission_policy=policy,
-            user_id=dt.user_id,
-            chat_id=dt.chat_id,
             risk_limits=dt.risk_limits,
             timeout_s=timeout_s,
             event_sink=_make_event_sink(dt),
@@ -311,8 +301,6 @@ async def _notify_done(dt: DelegateTask) -> None:
 
     await notify(
         text,
-        user_id=dt.user_id,
-        chat_id=dt.chat_id,
         agent_id=dt.task_id,
         kind="delegation",
     )

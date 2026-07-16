@@ -249,7 +249,6 @@ async def _handle_start_session(
             chat_id=session_key,
             agent_key=agent_key,
             permission_callback=perm_cb,
-            user_id=user_id,
             platform="web",
             lazy_context=True,  # Don't block — inject context on first message
             server_name=server_name,

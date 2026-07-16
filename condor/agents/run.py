@@ -7,7 +7,7 @@ model resolution, MCP-server wiring, event streaming, timeout, and client
 reaping — exactly once. ACP is the only model runner (§9.3). Everything
 kind-specific stays at the call sites:
 
-    consult    = run_agent(policy=human_gate(chat_id))   → return text inline
+    consult    = run_agent(policy=human_gate(run_id=…))  → return text inline
     delegation = run_agent(policy=risk_gate(zero) | AUTO) → session + notify
     tick       = run_agent(policy=risk_gate(journal))     → journal write-back
 """
@@ -60,8 +60,6 @@ async def run_agent(
     prompt: str,
     *,
     permission_policy: Callable | None,
-    user_id: int,
-    chat_id: int,
     execution_mode: str = "loop",
     model: str | None = None,
     risk_limits: dict | None = None,
@@ -117,8 +115,6 @@ async def run_agent(
 
     # -- MCP toolset wiring (agent_slug scopes memory/skills to this Agent) --
     mcp_servers = build_mcp_servers_for_session(
-        user_id,
-        chat_id,
         execution_mode=execution_mode,
         agent_slug=agent.slug,
         agent_id=agent_id,

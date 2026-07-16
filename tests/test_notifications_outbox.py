@@ -18,14 +18,13 @@ def outbox(tmp_path, monkeypatch):
 
 def test_notify_appends_to_outbox(outbox):
     entry = asyncio.run(notify(
-        "position closed", user_id=7, chat_id=7, agent_id="range_trader_2",
+        "position closed", agent_id="range_trader_2",
         kind="session",
     ))
     assert entry["id"]
-    # §4.1: pure outbox entry — no delivery-mirror fields.
-    assert set(entry) == {
-        "id", "ts", "user_id", "chat_id", "agent_id", "kind", "origin", "text",
-    }
+    # §4.1: pure outbox entry — no delivery-mirror fields; §4.3: no user
+    # identity dimension.
+    assert set(entry) == {"id", "ts", "agent_id", "kind", "origin", "text"}
     lines = [json.loads(l) for l in outbox.read_text().splitlines()]
     assert lines[0]["agent_id"] == "range_trader_2"
     assert lines[0]["text"] == "position closed"
@@ -40,16 +39,16 @@ def test_notify_fail_soft_returns_entry(outbox, monkeypatch):
         raise OSError("disk full")
 
     monkeypatch.setattr(notifications, "_append_outbox", boom)
-    entry = asyncio.run(notify("tick error", user_id=7, chat_id=7))
+    entry = asyncio.run(notify("tick error"))
     assert entry["text"] == "tick error"
 
 
 def test_read_notifications_filters(outbox):
 
     async def run():
-        await notify("a", user_id=1, agent_id="x_1")
-        await notify("b", user_id=1, agent_id="y_1")
-        await notify("c", user_id=1, agent_id="x_1")
+        await notify("a", agent_id="x_1")
+        await notify("b", agent_id="y_1")
+        await notify("c", agent_id="x_1")
 
     asyncio.run(run())
     all_entries = read_notifications()
@@ -67,7 +66,7 @@ def test_session_builds_condor_only():
     from condor.agents.context import build_mcp_servers_for_session
 
     servers = build_mcp_servers_for_session(
-        user_id=1, chat_id=1, agent_slug="memecoin_trender",
+        agent_slug="memecoin_trender",
         agent_id="memecoin_trender_1",
     )
     assert [s["name"] for s in servers] == ["condor"]

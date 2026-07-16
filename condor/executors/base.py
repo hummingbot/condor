@@ -100,10 +100,6 @@ class ExecutorConfig(BaseModel):
     # at create; a replay with the same id + same hash returns the original
     # result, a different hash is rejected.
     request_hash: str = ""
-    # Notification routing for trade events (open/close). 0 = outbox-only
-    # e.g. CLI-created executors.
-    user_id: int = 0
-    chat_id: int = 0
     # Emit a notification on position open/close. Default on; set false to
     # silence a high-frequency strategy that would otherwise spam every fill.
     notify_trades: bool = True
@@ -274,8 +270,6 @@ class ExecutorBase:
 
             await notify(
                 text,
-                user_id=self.config.user_id,
-                chat_id=self.config.chat_id,
                 agent_id=self.config.agent_id,
                 kind="trade",
                 origin=self.config.type,

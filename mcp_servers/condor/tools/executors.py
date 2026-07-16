@@ -113,9 +113,6 @@ async def manage_executors(
                 # entry (§6.2) — never from caller-supplied fields.
                 "capability": cap,
                 "executor_id": eid,
-                # Trade-notification routing back to this run's owner
-                "user_id": settings.user_id or 0,
-                "chat_id": settings.chat_id or 0,
             },
             timeout=60,
         )

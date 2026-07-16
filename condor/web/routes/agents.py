@@ -216,11 +216,6 @@ class UpdateLearningsRequest(BaseModel):
 class ConsultRequest(BaseModel):
     task: str
     context: str = ""
-    # Chat that approves mutating tool calls. 0 (web default) means
-    # NO human gate is reachable: the consult still runs, but mutations are
-    # denied fail-closed (policies.deny_gate) rather than silently allowed.
-    chat_id: int = 0
-    user_id: int | None = None
 
 
 class StartAgentRequest(BaseModel):
@@ -229,14 +224,10 @@ class StartAgentRequest(BaseModel):
     strategy: str = ""
     config: dict[str, Any] = {}
     trading_context: str = ""
-    chat_id: int = 0  # Telegram chat for notifications (0 = web-launched, no chat)
-    user_id: int | None = None  # Accepted for compat but ignored (see handler)
 
 
 class DelegateRequest(BaseModel):
     task: str
-    chat_id: int = 0  # Chat for the completion notification
-    user_id: int | None = None  # Accepted for compat but ignored (see handler)
     timeout_s: int = 900
     # Per-delegation risk caps override — REPLACES the agent's AGENT.md baseline
     # for this one run (trading agents only).
@@ -736,16 +727,11 @@ async def consult_agent(
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
 
-    # Web callers always act as themselves; the ``user_id`` override is reserved
-    # for trusted internal/MCP callers and must not let a session impersonate
-    # another user's memory/skill scope.
     try:
         answer = await _svc().consult(
             slug,
             task=req.task,
             context=req.context,
-            user_id=user.id,
-            chat_id=req.chat_id,
         )
     except LifecycleError as e:
         raise _http(e)
@@ -771,15 +757,10 @@ async def delegate_agent(
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
 
-    # Web callers always act as themselves (mirror consult): honoring
-    # ``req.user_id`` here would let any authenticated session run a delegation
-    # under another user's memory scope.
     try:
         d = await _svc().delegate(
             slug,
             task=req.task,
-            user_id=user.id,
-            chat_id=req.chat_id,
             risk_limits=req.risk_limits,
             timeout_s=req.timeout_s,
         )
@@ -831,16 +812,11 @@ async def start_session(
     The AGENT.md is the one spec (§5.3): launch config merges over its
     ``default_config``; a legacy ``strategy`` field in the request is ignored.
     """
-    # Web callers always act as themselves (mirror consult): honoring
-    # ``req.user_id`` would let any authenticated session start the engine
-    # under another user's memory scope and accessible-servers fallback.
     try:
         return await _svc().run(
             slug,
             config=req.config,
             trading_context=req.trading_context,
-            chat_id=req.chat_id,
-            user_id=user.id,
         )
     except LifecycleError as e:
         raise _http(e)

@@ -50,8 +50,6 @@ async def start_session(
     agent_slug: str,
     config: Optional[dict] = None,
     trading_context: str = "",
-    chat_id: int = 0,
-    user_id: int = 0,
     kind: str = "",
     scheduled_for: str = "",
 ) -> dict:
@@ -101,8 +99,6 @@ async def start_session(
         engine = TickEngine(
             agent=agent,
             config=config_dict,
-            chat_id=chat_id,
-            user_id=user_id,
             kind_override=kind,
             scheduled_for=scheduled_for,
         )

@@ -91,8 +91,6 @@ def test_run_agent_folds_both_views_and_reaps():
             _agent(),
             "do the thing",
             permission_policy=None,
-            user_id=1,
-            chat_id=2,
         )
     )
 
@@ -118,8 +116,6 @@ def test_run_agent_timeout_marks_result_and_reaps():
             _agent(),
             "slow task",
             permission_policy=None,
-            user_id=1,
-            chat_id=2,
             timeout_s=0,
         )
     )
@@ -138,8 +134,6 @@ def test_run_agent_on_client_hook_for_cancellation_backstop():
             _agent(),
             "x",
             permission_policy=None,
-            user_id=1,
-            chat_id=2,
             on_client=seen.append,
         )
     )
@@ -156,8 +150,6 @@ def test_model_override_wins_over_agent_default():
             _agent(agent_key="claude-code"),
             "x",
             permission_policy=None,
-            user_id=1,
-            chat_id=2,
             model="claude-acp:sonnet",
         )
     )
@@ -175,8 +167,6 @@ def test_permission_policy_reaches_the_client():
             _agent(),
             "x",
             permission_policy=gate,
-            user_id=1,
-            chat_id=2,
         )
     )
     assert _FakeClient.instances[0].kwargs["permission_callback"] is gate

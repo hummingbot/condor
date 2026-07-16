@@ -26,8 +26,6 @@ CONSULT_TIMEOUT_S = 900
 
 async def run_consult(
     slug: str,
-    user_id: int,
-    chat_id: int,
     task: str,
     context: str = "",
 ) -> str:
@@ -50,7 +48,7 @@ async def run_consult(
         available = f"\n\nAvailable agents:\n{index}" if index else ""
         return f"No agent named '{slug}' is available.{available}"
 
-    prompt = build_agent_context(agent, user_id, task, context)
+    prompt = build_agent_context(agent, task, context)
 
     run_store = get_run_store()
     run_id = run_store.start_run(
@@ -82,9 +80,9 @@ async def run_consult(
         result = await run_agent(
             agent,
             prompt,
-            permission_policy=human_gate(chat_id, run_id=run_id, agent_slug=slug),
-            user_id=user_id,
-            chat_id=chat_id,
+            # Consults are runs (§7.1): the run_id routes approvals through
+            # the durable queue, so no interactive chat transport is needed.
+            permission_policy=human_gate(0, run_id=run_id, agent_slug=slug),
             timeout_s=CONSULT_TIMEOUT_S,
             agent_id=run_id,
             on_tool_call=_persist_tool_call,
