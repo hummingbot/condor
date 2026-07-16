@@ -31,7 +31,9 @@ def _run_relay_briefly(tmp_path, feed, template):
 
     async def scenario():
         relay.POLL_S = 0.05
-        task = asyncio.create_task(relay.run(template, outbox=outbox))
+        task = asyncio.create_task(
+            relay.run(template, outbox=outbox, state_path=tmp_path / "cursor")
+        )
         await asyncio.sleep(0.15)  # let it record EOF
         with outbox.open("a") as f:
             for e in feed:

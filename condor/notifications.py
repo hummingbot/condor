@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -32,10 +33,16 @@ _lock = threading.Lock()
 
 
 def _append_outbox(entry: dict) -> None:
+    """Serialized main-process append with fsync (§4.1) — the outbox is the
+    authoritative record, so it gets the durability the title implies. The
+    MCP subprocess never calls this directly: it enqueues over the control
+    socket ("notify.emit"), keeping one writer per file."""
     OUTBOX_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
         with OUTBOX_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
 
 
 async def _deliver_telegram(chat_id: int, text: str, bot: Any = None) -> bool:
@@ -78,7 +85,13 @@ async def notify(
 
     Returns the outbox entry (including ``delivered_telegram``).
     """
+    from condor.agents.runstore import new_ulid
+
     entry = {
+        # Stable notification id (§4.1): relay cursors track the last
+        # DELIVERED id — never a byte offset — for at-least-once delivery
+        # with id-based dedup across crashes.
+        "id": new_ulid(),
         "ts": time.time(),
         "user_id": user_id,
         "chat_id": chat_id,
@@ -107,8 +120,12 @@ def read_notifications(
     limit: int = 50,
     since_ts: Optional[float] = None,
     agent_id: Optional[str] = None,
+    since_id: Optional[str] = None,
 ) -> list[dict]:
-    """Read recent outbox entries, oldest first."""
+    """Read recent outbox entries, oldest first. A torn final line (crash
+    mid-append) is skipped, like any malformed line. ``since_id`` returns
+    entries strictly AFTER the entry carrying that id (the relay-cursor
+    read; unknown id → everything, the caller caps replay)."""
     if not OUTBOX_PATH.exists():
         return []
     entries: list[dict] = []
@@ -126,4 +143,9 @@ def read_notifications(
             if agent_id and e.get("agent_id") != agent_id:
                 continue
             entries.append(e)
+    if since_id:
+        for i, e in enumerate(entries):
+            if e.get("id") == since_id:
+                entries = entries[i + 1 :]
+                break
     return entries[-limit:]

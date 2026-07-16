@@ -104,6 +104,16 @@ def build_agent_handlers() -> dict[str, Handler]:
             raise LifecycleError(404, f"Delegation '{task_id}' not found")
         return {"stopped": await dg.stop_delegation(task_id)}
 
+    async def _notify_emit(text, user_id=0, chat_id=0, agent_id="", kind="agent",
+                           origin="mcp"):
+        from condor.notifications import notify
+
+        entry = await notify(
+            text, user_id=user_id, chat_id=chat_id, agent_id=agent_id,
+            kind=kind, origin=origin,
+        )
+        return {"entry": entry}
+
     def _approval_list():
         from condor.agents.approvals import get_approval_manager
 
@@ -152,6 +162,9 @@ def build_agent_handlers() -> dict[str, Handler]:
         # approvals (§4.2)
         "approval.list": _approval_list,
         "approval.resolve": _approval_resolve,
+        # notifications (§4.1): the MCP subprocess enqueues through the one
+        # serialized main-process outbox writer — never by writing the file.
+        "notify.emit": _notify_emit,
         "agent.start": lambda **kw: svc.run(**kw),
         "agent.verb": lambda slug, verb, agent_id=None: svc.control(
             slug, verb, agent_id=agent_id

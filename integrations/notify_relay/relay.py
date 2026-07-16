@@ -44,6 +44,29 @@ log = logging.getLogger(__name__)
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 OUTBOX = REPO_ROOT / "store" / "notifications.jsonl"
 POLL_S = float(os.environ.get("CONDOR_NOTIFY_POLL_S", "2"))
+STATE_PATH = Path(
+    os.environ.get("CONDOR_NOTIFY_STATE", REPO_ROOT / "store" / ".notify-relay-cursor")
+)
+
+
+def _read_cursor(state_path: Path) -> str:
+    """Last delivered notification id (§4.1) — "" when fresh/unreadable."""
+    try:
+        data = json.loads(state_path.read_text())
+        return str(data.get("last_id", ""))
+    except Exception:  # noqa: BLE001 — a missing/corrupt cursor means fresh
+        return ""
+
+
+def _persist_cursor(state_path: Path, last_id: str) -> None:
+    """Atomic tmp+rename, written only AFTER delivery: a crash in between
+    re-delivers that entry (same id — receivers dedup by it), never loses it."""
+    try:
+        tmp = state_path.with_name(f"{state_path.name}.tmp{os.getpid()}")
+        tmp.write_text(json.dumps({"last_id": last_id}))
+        tmp.replace(state_path)
+    except Exception:  # noqa: BLE001
+        log.warning("could not persist relay cursor", exc_info=True)
 
 
 def _render(template: list[str], entry: dict) -> list[str]:
@@ -71,35 +94,88 @@ def _deliver(template: list[str], entry: dict) -> bool:
     return True
 
 
-async def run(template: list[str], outbox: Path = OUTBOX, once: bool = False) -> None:
-    # Tail from EOF: history is available via get_notifications / the outbox
-    offset = outbox.stat().st_size if outbox.exists() else 0
-    partial = ""
+def _read_entries(outbox: Path) -> tuple[list[dict], int]:
+    """All good entries + the current end offset. A torn final line (crash
+    mid-append) is skipped and picked up whole on the next poll."""
+    entries: list[dict] = []
+    size = outbox.stat().st_size
+    with outbox.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.endswith("\n"):
+                break  # torn tail
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return entries, size
+
+
+def _start_index(entries: list[dict], last_id: str, fallback: int) -> int:
+    """First undelivered index: strictly after ``last_id`` when it is found,
+    else the in-memory fallback (id-less/legacy entries)."""
+    if last_id:
+        for i, e in enumerate(entries):
+            if str(e.get("id", "")) == last_id:
+                return i + 1
+    return fallback
+
+
+async def run(
+    template: list[str],
+    outbox: Path = OUTBOX,
+    once: bool = False,
+    state_path: Path | None = None,
+) -> None:
+    """Tail the outbox by DELIVERED ID (§4.1): the cursor is the last
+    delivered entry's id, persisted atomically after each delivery — a crash
+    between delivery and cursor advance re-delivers that one entry with the
+    same id (receivers dedup by it); nothing is silently lost. On a fresh
+    start (no cursor) history is skipped — it stays available via
+    get_notifications."""
+    state_path = state_path or STATE_PATH
+    last_id = _read_cursor(state_path)
+    processed = 0
+    offset = -1
+    if outbox.exists():
+        entries, offset = _read_entries(outbox)
+        if last_id:
+            processed = _start_index(entries, last_id, 0)
+            for entry in entries[processed:]:
+                ok = _deliver(template, entry)
+                log.info("delivered=%s (catch-up) agent=%s: %s", ok,
+                         entry.get("agent_id"), str(entry.get("text", ""))[:60])
+                eid = str(entry.get("id", ""))
+                if eid:
+                    last_id = eid
+                    _persist_cursor(state_path, last_id)
+            processed = len(entries)
+        else:
+            # Fresh start: anchor at the current tail, skip history.
+            processed = len(entries)
+            for e in reversed(entries):
+                if e.get("id"):
+                    last_id = str(e["id"])
+                    _persist_cursor(state_path, last_id)
+                    break
     log.info("relay started; tailing %s -> %s", outbox, template[0])
     while True:
         if outbox.exists():
             size = outbox.stat().st_size
-            if size < offset:  # truncated/rotated
-                offset, partial = 0, ""
-            if size > offset:
-                with outbox.open("r", encoding="utf-8") as f:
-                    f.seek(offset)
-                    chunk = f.read()
-                    offset = f.tell()
-                partial += chunk
-                lines = partial.split("\n")
-                partial = lines.pop()
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
+            if size != offset:
+                entries, offset = _read_entries(outbox)
+                start = _start_index(entries, last_id, min(processed, len(entries)))
+                for entry in entries[start:]:
                     ok = _deliver(template, entry)
                     log.info("delivered=%s agent=%s: %s", ok, entry.get("agent_id"),
                              str(entry.get("text", ""))[:60])
+                    eid = str(entry.get("id", ""))
+                    if eid:
+                        last_id = eid
+                        _persist_cursor(state_path, last_id)
+                processed = len(entries)
         if once:
             return
         await asyncio.sleep(POLL_S)
