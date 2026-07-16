@@ -89,28 +89,10 @@ def test_shipped_spec_renders_tick_prompt(slug):
 # Grep gate (§11 Phase 6)
 # ---------------------------------------------------------------------------
 
-# Files the PENDING auth-deletion pass owns (blocked awaiting operator
-# approval): login/JWT and the user-role remnant live only here. When the
-# auth pass lands, empty this set — the gate then tightens automatically.
-_AUTH_PASS_ALLOWLIST = {
-    "condor/web/auth.py",
-    "condor/web/routes/auth.py",
-    "condor/web/routes/chat_ws.py",
-    "condor/web/routes/ws.py",
-    "condor/web/ws_manager.py",
-    "condor/web/models.py",
-    "condor/web/routes/agents.py",   # chat_id doc comment only
-    "condor/web/routes/routines.py",  # get_current_user dependency
-    "condor/web/routes/reports.py",
-    "condor/web/routes/settings.py",
-    "condor/web/routes/native_executors.py",
-    "condor/web/routes/venues.py",
-    "condor/web/routes/notifications.py",
-    "config_manager.py",
-    "condor/preferences.py",
-    "condor/cli.py",  # login-token + ADMIN_USER_ID (auth pass)
-    "utils/config.py",
-}
+# The auth pass (§5.5 final step) landed 2026-07-15: login/JWT, the
+# user-role model, and config_manager.py are gone — loopback posture (§5.5)
+# is the sole gate. Nothing left to allowlist.
+_AUTH_PASS_ALLOWLIST: set[str] = set()
 
 _GATE_PATTERNS = (
     "telegram", "hummingbot_api", "get_bots_client", "bot_name",

@@ -1,6 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getViewContext } from "@/lib/viewContext";
-import { WS_AUTH_SUBPROTOCOL, getLegacyWsToken } from "@/lib/ws-auth";
+
+// Identifies this browser so a reconnect resumes the same session slots.
+// Carries no authority — the backend's loopback Origin/Host check (§5.5) is
+// the trust boundary; this is purely a continuity token.
+const CLIENT_ID_KEY = "condor_client_id";
+
+function getClientId(): string | null {
+  return localStorage.getItem(CLIENT_ID_KEY);
+}
+
+function setClientId(id: string): void {
+  localStorage.setItem(CLIENT_ID_KEY, id);
+}
 
 export interface ToolCall {
   tool_call_id: string;
@@ -117,15 +129,12 @@ export function useChatSocket() {
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = import.meta.env.DEV ? "localhost:8088" : window.location.host;
-    const url = `${protocol}//${host}/api/v1/ws/chat`;
+    const existingClientId = getClientId();
+    const url = existingClientId
+      ? `${protocol}//${host}/api/v1/ws/chat?client=${existingClientId}`
+      : `${protocol}//${host}/api/v1/ws/chat`;
 
-    // auth pass: remove — chat_ws.py still decodes a JWT from the
-    // Sec-WebSocket-Protocol handshake, so keep sending any legacy token
-    // until the auth pass deletes that requirement server-side.
-    const token = getLegacyWsToken();
-    const ws = token
-      ? new WebSocket(url, [WS_AUTH_SUBPROTOCOL, token])
-      : new WebSocket(url);
+    const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => setIsConnected(true);
@@ -157,6 +166,8 @@ export function useChatSocket() {
       switch (event) {
         case "sessions_list": {
           const sessions = data.sessions as SlotInfo[];
+          const clientId = data.client_id as string | undefined;
+          if (clientId) setClientId(clientId);
           hydrated.current = true;
           if (sessions.length > 0) {
             const stored = loadSlotMessages();

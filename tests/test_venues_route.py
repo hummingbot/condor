@@ -14,8 +14,6 @@ from solders.keypair import Keypair
 import condor.executors.wallets as wallets
 from condor.accounts import onboarding
 from condor.executors.log import ExecutorLog
-from condor.web.auth import get_current_user
-from condor.web.models import WebUser
 from condor.web.routes import venues
 
 _KEY = base64.b64encode(b"r" * 32).decode()
@@ -29,7 +27,7 @@ def client(tmp_path, monkeypatch):
     return _client(tmp_path, monkeypatch)
 
 
-def _client(tmp_path, monkeypatch, role="admin"):
+def _client(tmp_path, monkeypatch):
     monkeypatch.setenv("CONDOR_SECRETS_KEY", _KEY)
     monkeypatch.setattr(wallets, "_VENUES_PATH", tmp_path / "venues.json")
     monkeypatch.setitem(onboarding._PROBERS, "hyperliquid", lambda *a: None)
@@ -39,7 +37,6 @@ def _client(tmp_path, monkeypatch, role="admin"):
     monkeypatch.setattr(venues, "ExecutorLog", lambda: ExecutorLog(tmp_path / "agents"))
     app = FastAPI()
     app.include_router(venues.router)
-    app.dependency_overrides[get_current_user] = lambda: WebUser(id=1, role=role)
     return TestClient(app)
 
 
@@ -110,16 +107,6 @@ def test_duplicate_display_name_422(client):
     )
     assert r.status_code == 422
     assert "duplicate display name" in r.json()["detail"]
-
-
-def test_mutations_require_admin(tmp_path, monkeypatch):
-    client = _client(tmp_path, monkeypatch, role="user")
-    body = {"credentials": {"agent_private_key": HL_KEY, "account_address": HL_ACCT}}
-    assert client.post("/venues/hyperliquid/accounts", json=body).status_code == 403
-    assert client.put(f"/venues/hyperliquid/accounts/{HL_ACCT}", json={"name": "x"}).status_code == 403
-    assert client.delete(f"/venues/hyperliquid/accounts/{HL_ACCT}").status_code == 403
-    assert client.post("/venues/hyperliquid/default", json={"account": "x"}).status_code == 403
-    assert client.get("/venues").status_code == 200  # reads stay available
 
 
 # -- edit --

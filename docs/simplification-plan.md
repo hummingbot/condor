@@ -1,20 +1,19 @@
 # Condor Simplification Plan (v5)
 
-**Status:** Phases 1–6 IMPLEMENTED (2026-07-15, this branch), with two
-operator-gated exceptions:
+**Status:** Phases 1–6 IMPLEMENTED (2026-07-15, this branch). Both
+previously operator-gated exceptions are now closed:
 
-1. **Auth deletion (§5.5 final step) is PENDING operator approval** — the
-   loopback bind, Host/WS-Origin validation, and X-Condor-Token CSRF
-   posture are all LIVE; `condor/web/auth.py`, `routes/auth.py`, the JWT
+1. **Auth deletion (§5.5 final step) landed 2026-07-15** (operator
+   go-ahead given) — `condor/web/auth.py`, `routes/auth.py`, the JWT
    chat-WS handshake, `config_manager.py` (user roles), `python-jose`, and
-   the CLI login-token/ADMIN_USER_ID remnants await an explicit go-ahead
-   (removing an auth control needs the operator's own word, not a plan
-   citation). The Phase 6 grep gate carries an explicit allowlist for
-   exactly these files and tightens automatically when they go.
-2. **§7.3 legacy history deletion is PENDING operator action** — the
-   parsers are deleted and nothing reads `agents/*/sessions|delegations`
-   anymore, but the directories themselves were left in place (same
-   approval boundary). Delete or archive them at will.
+   the CLI login-token/ADMIN_USER_ID remnants are deleted. The chat WS now
+   identifies a browser by an opaque `client_id` (uuid4 hex, `?client=`
+   query param, no authority) purely for session-slot continuity; loopback
+   bind + Host/WS-Origin validation + X-Condor-Token CSRF posture (§5.5) is
+   the sole trust boundary. The Phase 6 grep gate's allowlist is now empty.
+2. **§7.3 legacy history deletion landed 2026-07-15** (operator
+   go-ahead given) — `agents/*/sessions/` and the tracked
+   `routine_builder/delegations/` are deleted; nothing read them.
 
 Everything else is live: RunStore + approvals + scheduler + notifications
 durability + routine worker (Phase 4), explicit MCP tools (Phase 5),

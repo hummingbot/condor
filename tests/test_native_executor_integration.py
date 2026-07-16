@@ -20,8 +20,6 @@ from condor.executors.hyperliquid import Position
 from condor.executors.order import OrderExecutor, OrderPerpConfig, OrderStates
 from condor.executors.position import PositionSpotConfig, PositionExecutor, PositionStates
 from condor.executors.log import ExecutorLog
-from condor.web.auth import get_current_user
-from condor.web.models import WebUser
 from condor.web.routes import native_executors
 
 WALLET = "82SggYRE2Vo4jN4a2pk3aQ4SET4ctafZJGbowmCqyHx5"
@@ -336,7 +334,6 @@ def _make_client(tmp_path, monkeypatch) -> TestClient:
 
     app = FastAPI()
     app.include_router(native_executors.router)
-    app.dependency_overrides[get_current_user] = lambda: WebUser(id=1, role="admin")
     return TestClient(app)
 
 

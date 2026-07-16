@@ -3,7 +3,8 @@
 Multi-account per venue over the structured store: list accounts (never
 secrets), onboard (custody derived from credentials + read-only probe),
 edit (custody identity revalidated), remove (cooperative warning), and pick
-the default account. Mutations are admin-gated, same as the old import route.
+the default account. Mutations are gated by loopback posture only (§5.5,
+single-operator model) — no per-request role check.
 
 Busy guard: editing/removing an account is rejected (409) while any durable
 nonterminal executor record exists for the venue — after a crash there is no
@@ -15,7 +16,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from condor.accounts import (
@@ -28,8 +29,6 @@ from condor.accounts import (
 from condor.accounts.registry import UnknownVenueError, default_registry
 from condor.executors import wallets
 from condor.executors.log import ExecutorLog
-from condor.web.auth import get_current_user
-from condor.web.models import WebUser
 
 router = APIRouter(tags=["venues"])
 
@@ -53,11 +52,6 @@ class EditAccountRequest(BaseModel):
 
 class DefaultAccountRequest(BaseModel):
     account: str
-
-
-def _require_admin(user: WebUser) -> None:
-    if getattr(user, "role", None) != "admin":
-        raise HTTPException(status_code=403, detail="admin role required to manage accounts")
 
 
 def _venue_busy(venue_id: str) -> bool:
@@ -95,7 +89,7 @@ def _canonical_address(venue_id: str, address: str) -> str:
 
 
 @router.get("/venues")
-async def list_venues(user: WebUser = Depends(get_current_user)):
+async def list_venues():
     """Per-venue accounts: custody address, display name, default marker —
     never credential fields, sealed or otherwise."""
     data = wallets.account_store().load()
@@ -122,11 +116,9 @@ async def list_venues(user: WebUser = Depends(get_current_user)):
 async def onboard_venue_account(
     venue_id: str,
     req: OnboardAccountRequest,
-    user: WebUser = Depends(get_current_user),
 ):
     """Onboard an account: custody derived FROM the credentials (a mismatched
     typed address is rejected), read-only probe must pass, secrets sealed."""
-    _require_admin(user)
     try:
         ref = onboard_account(
             venue_id, req.credentials or {}, name=req.name, probe=True
@@ -149,12 +141,10 @@ async def edit_venue_account(
     venue_id: str,
     address: str,
     req: EditAccountRequest,
-    user: WebUser = Depends(get_current_user),
 ):
     """Edit an account. Credential edits revalidate custody identity — the
     derived custody must EQUAL the address key (same derivation + probe as
     onboarding); a rename touches only the display name."""
-    _require_admin(user)
     canonical = _canonical_address(venue_id, address)
     store = wallets.account_store()
     data = store.load()
@@ -205,11 +195,9 @@ async def edit_venue_account(
 async def remove_venue_account(
     venue_id: str,
     address: str,
-    user: WebUser = Depends(get_current_user),
 ):
     """Remove an account (cooperative: warns, does not verify venue state).
     Removing the default just leaves the venue with no default."""
-    _require_admin(user)
     canonical = _canonical_address(venue_id, address)
     _reject_when_busy(venue_id)
     if not wallets.account_store().remove_account(venue_id, canonical):
@@ -221,11 +209,9 @@ async def remove_venue_account(
 async def set_default_account(
     venue_id: str,
     req: DefaultAccountRequest,
-    user: WebUser = Depends(get_current_user),
 ):
     """Point the venue's default_account at the resolved selector (address
     or display name)."""
-    _require_admin(user)
     try:
         ref = wallets.account_store().set_default(venue_id, req.account)
     except AccountResolutionError as e:

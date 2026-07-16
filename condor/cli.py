@@ -2,15 +2,11 @@
 
 Subcommands:
 
-    init         identity anchor + harness multi-select; emits
-                 per-harness config. Idempotent — re-run any time to
-                 add a harness.
+    init         harness multi-select; emits per-harness config.
+                 Idempotent — re-run any time to add a harness. Single
+                 operator, loopback-gated (§5.5) — no login/identity step.
     update       pull the latest Condor from the current branch and
                  sync dependencies (restart `condor serve` after).
-    login-token  mint a short-lived web login URL from the terminal
-                 (same trust model as Tier-A auto-bind: whoever runs
-                 commands on this box already owns config.yml and the
-                 JWT signing secret).
     account      structured account store (§6.2b) management:
                    import-env  EXPLICIT one-shot onboarding from the legacy
                                CONDOR_* env vars (custody derived from the
@@ -29,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import secrets
 import shutil
 import sys
 from pathlib import Path
@@ -54,14 +49,6 @@ def _ask(question: str, default: str = "") -> str:
     suffix = f" [{default}]" if default else ""
     answer = input(f"{question}{suffix}: ").strip()
     return answer or default
-
-
-def _ask_yes_no(question: str, default: bool = True) -> bool:
-    suffix = "[Y/n]" if default else "[y/N]"
-    answer = input(f"{question} {suffix} ").strip().lower()
-    if not answer:
-        return default
-    return answer in ("y", "yes")
 
 
 # ── .env handling ──
@@ -115,47 +102,6 @@ def detect_harnesses(home: Path | None = None) -> dict[str, bool]:
 
 
 # ── init steps ──
-
-
-def _step_identity(args) -> int:
-    """Anchor the sole approved user (or admin of a multi-user install)."""
-    env = _read_env_file()
-    existing = env.get("ADMIN_USER_ID", "")
-    if args.user_id:
-        user_id = args.user_id
-    elif existing:
-        user_id = int(existing)
-        print(f"• Identity: using existing admin user id {user_id} (.env)")
-    elif not _interactive():
-        _die(
-            "no ADMIN_USER_ID in .env and no --user-id given; "
-            "non-interactive init needs --user-id"
-        )
-    else:
-        user_id = 1_000_000 + secrets.randbelow(2_000_000_000)
-        print(f"• Minted user id {user_id} (an identifier, not a credential).")
-
-    _write_env_var("ADMIN_USER_ID", str(user_id))
-    os.environ["ADMIN_USER_ID"] = str(user_id)
-
-    # Materialize config.yml with this admin (creates it on first run).
-    from config_manager import get_config_manager
-
-    get_config_manager()
-
-    # Multi-user: extra approved users disable Tier-A auto-bind by design.
-    extra = args.extra_users or ""
-    if not extra and _interactive() and not args.harness:
-        if not _ask_yes_no("Single-user install?", default=True):
-            extra = _ask("Additional approved user ids (comma-separated)")
-    if extra:
-        cm = get_config_manager()
-        ids = [int(x) for x in extra.replace(" ", "").split(",") if x]
-        for uid in ids:
-            cm.register_pending(uid)
-            cm.approve_user(uid, user_id)
-        print(f"• Approved {len(ids)} extra user(s) for dashboard login.")
-    return user_id
 
 
 def _select_harnesses(args) -> list[str]:
@@ -240,15 +186,13 @@ def _emit_condor() -> None:
 
     print("\n── Condor harness (web) ──")
     print(
-        f"  Start Condor:  make run   (tmux session 'condor')\n"
-        f"  Web chat:      {WEB_URL}/login — mint a login URL with:\n"
-        "                 uv run python -m condor.cli login-token"
+        f"  Start Condor:  uv run python -m condor.cli serve   (or make run)\n"
+        f"  Web chat:      {WEB_URL} — loopback-only (§5.5), no login."
     )
 
 
 def cmd_init(args) -> None:
     print(f"Condor init — {REPO_ROOT}\n")
-    _step_identity(args)
     selected = _select_harnesses(args)
 
     emitters = {
@@ -261,31 +205,8 @@ def cmd_init(args) -> None:
         emitters[harness]()
     if not selected:
         print("\nNo harness selected: Tier 2 + monitoring dashboard only.")
-        print("Mint a dashboard login with: uv run python -m condor.cli login-token")
 
     print("\nDone. `init` is idempotent — re-run it any time to add a harness.")
-
-
-def cmd_login_token(args) -> None:
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-    user_id = args.user_id
-    if not user_id:
-        approved = cm.get_approved_users()
-        if len(approved) != 1:
-            _die(
-                f"{len(approved)} approved users in config.yml — pass --user-id "
-                "(implicit identity needs exactly one, like Tier-A auto-bind)"
-            )
-        user_id = approved[0]
-
-    from condor.web.auth import create_cli_login_token
-    from utils.config import WEB_URL
-
-    token = create_cli_login_token(user_id)
-    print(f"{WEB_URL}/login?token={token}")
-    print("Valid for 5 minutes. Requires the Condor web server to be running.")
 
 
 # ── account store (§6.2b activation) ──
@@ -447,14 +368,8 @@ def main(argv: list[str] | None = None) -> None:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_init = sub.add_parser("init", help="onboarding by harness selection")
-    p_init.add_argument("--user-id", type=int, help="approved user id (skips the identity question)")
-    p_init.add_argument("--extra-users", help="comma-separated additional approved user ids")
     p_init.add_argument("--harness", help=f"comma-separated selection from {list(HARNESSES)}, or 'none'")
     p_init.set_defaults(func=cmd_init)
-
-    p_token = sub.add_parser("login-token", help="mint a web dashboard login URL")
-    p_token.add_argument("--user-id", type=int, help="user to log in as (default: sole approved user)")
-    p_token.set_defaults(func=cmd_login_token)
 
     p_update = sub.add_parser("update", help="git pull the current branch + uv sync")
     p_update.add_argument(

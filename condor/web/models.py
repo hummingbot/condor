@@ -5,32 +5,9 @@ from pydantic import BaseModel
 # The Hummingbot-era model families (servers, portfolio, bots, controller
 # performance, hb executors, market data, deploy, archived bots, gateway/
 # credential settings) were deleted with their passthrough routes
-# (simplification plan §9.2). What remains backs the surviving routes.
-
-
-# ── Auth ──
-
-
-class LoginRequest(BaseModel):
-    id: int
-    first_name: str
-    last_name: str = ""
-    username: str = ""
-    photo_url: str = ""
-    auth_date: int
-    hash: str
-
-
-class LoginResponse(BaseModel):
-    token: str
-    user: WebUser
-
-
-class WebUser(BaseModel):
-    id: int
-    username: str = ""
-    first_name: str = ""
-    role: str  # "admin" | "user"
+# (simplification plan §9.2). Auth models (LoginRequest/LoginResponse/WebUser)
+# were deleted with condor/web/auth.py (§5.5 final step) — loopback posture
+# is the sole gate now. What remains backs the surviving routes.
 
 
 # ── Reports ──

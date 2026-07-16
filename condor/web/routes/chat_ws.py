@@ -1,7 +1,8 @@
 """Chat WebSocket endpoint for the AI assistant.
 
 Dedicated WS at /ws/chat (separate from the channel-based /ws).
-Manages multiple agent sessions per user and streams ACPEvents as JSON.
+Manages multiple agent sessions per browser client and streams ACPEvents as
+JSON. Loopback posture (§5.5) is the trust boundary — no per-request auth.
 """
 
 from __future__ import annotations
@@ -9,10 +10,11 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from condor.acp.client import (
     Heartbeat,
@@ -22,8 +24,6 @@ from condor.acp.client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
-from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
-from condor.web.models import WebUser
 from condor.agents.context import AGENT_OPTIONS, DEFAULT_AGENT
 from condor.agents.gating import is_dangerous_tool_call
 from condor.agents.confirmation import _format_tool_summary
@@ -33,30 +33,42 @@ log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
 
-# Pending permission futures for web clients: request_id -> (user_id, Future[bool])
-_pending_permissions: dict[str, tuple[int, asyncio.Future]] = {}
+# A client_id identifies one browser (persisted in its localStorage) so a
+# reconnect resumes the same session slots; it carries no authority — the
+# loopback Origin/Host check in create_app() (§5.5) is the trust boundary.
+_CLIENT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 
-# Track which session slots exist per user: user_id -> [slot_id, ...]
-_user_slots: dict[int, list[str]] = {}
+# Pending permission futures for web clients: request_id -> (client_id, Future[bool])
+_pending_permissions: dict[str, tuple[str, asyncio.Future]] = {}
 
-# Track active prompt tasks per slot: "user_id:slot_id" -> asyncio.Task
+# Track which session slots exist per client: client_id -> [slot_id, ...]
+_client_slots: dict[str, list[str]] = {}
+
+# Track active prompt tasks per slot: "client_id:slot_id" -> asyncio.Task
 _active_prompt_tasks: dict[str, asyncio.Task] = {}
 
 PERMISSION_TIMEOUT = 120  # seconds
-MAX_SESSIONS_PER_USER = 5
+MAX_SESSIONS_PER_CLIENT = 5
 
 
-def _session_key(user_id: int, slot_id: str) -> str:
-    """Build a session key that won't collide with Telegram int chat_ids."""
-    return f"web_{user_id}_{slot_id}"
+def _session_key(client_id: str, slot_id: str) -> str:
+    return f"web_{client_id}_{slot_id}"
 
 
-def _get_user_sessions(user_id: int) -> list[dict]:
-    """List all alive sessions for a user."""
-    slots = _user_slots.get(user_id, [])
+def _resolve_client_id(requested: str | None) -> str:
+    """Mint a fresh uuid4 hex client id unless the caller offered a
+    well-formed one (a returning browser resuming its slots)."""
+    if requested and _CLIENT_ID_RE.match(requested):
+        return requested
+    return uuid.uuid4().hex
+
+
+def _get_client_sessions(client_id: str) -> list[dict]:
+    """List all alive sessions for a client."""
+    slots = _client_slots.get(client_id, [])
     result = []
     for slot_id in slots:
-        key = _session_key(user_id, slot_id)
+        key = _session_key(client_id, slot_id)
         session = get_session(key)
         if session and session.client.alive:
             result.append(
@@ -80,7 +92,7 @@ async def _send(ws: WebSocket, event: dict) -> None:
 
 async def _web_permission_callback(
     ws: WebSocket,
-    user_id: int,
+    client_id: str,
     tool_call: dict[str, Any],
     options: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -108,7 +120,7 @@ async def _web_permission_callback(
     )
 
     future: asyncio.Future = asyncio.get_event_loop().create_future()
-    _pending_permissions[request_id] = (user_id, future)
+    _pending_permissions[request_id] = (client_id, future)
 
     try:
         approved = await asyncio.wait_for(future, timeout=PERMISSION_TIMEOUT)
@@ -131,39 +143,29 @@ async def _web_permission_callback(
 
 
 @router.websocket("/ws/chat")
-async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None)):
+async def chat_websocket(ws: WebSocket, client: str | None = Query(default=None)):
     """Chat WebSocket endpoint.
 
-    Authenticates via the JWT passed in the ``Sec-WebSocket-Protocol``
-    subprotocol header (preferred), falling back to the deprecated ``?token=``
-    query param for older clients / live sessions.
+    Loopback posture (§5.5) is the sole gate — no per-request identity. The
+    optional ``?client=`` query param lets a returning browser resume its
+    session slots across reconnects; a missing or unrecognized value mints a
+    fresh uuid4 hex, which the client is expected to persist (localStorage)
+    and send back on the next connect.
     """
-    # Loopback posture (§5.5): reject foreign Origin/Host before the upgrade.
     from condor.web.security import websocket_origin_allowed
 
     if not websocket_origin_allowed(ws):
         await ws.close(code=4003, reason="non-loopback origin")
         return
-    auth_token, accept_subprotocol = extract_ws_token(ws, token)
-    payload = decode_jwt(auth_token) if auth_token else None
-    if not payload:
-        await ws.close(code=4001, reason="Invalid token")
-        return
 
-    from config_manager import UserRole, get_config_manager
-
-    user_id = int(payload["sub"])
-    cm = get_config_manager()
-    role = cm.get_user_role(user_id)
-    if role not in (UserRole.USER, UserRole.ADMIN):
-        await ws.close(code=4003, reason="Forbidden")
-        return
-
-    await ws.accept(subprotocol=accept_subprotocol)
+    client_id = _resolve_client_id(client)
+    await ws.accept()
 
     # Send list of existing alive sessions on connect
-    sessions = _get_user_sessions(user_id)
-    await _send(ws, {"event": "sessions_list", "sessions": sessions})
+    sessions = _get_client_sessions(client_id)
+    await _send(
+        ws, {"event": "sessions_list", "client_id": client_id, "sessions": sessions}
+    )
 
     # Background tasks so long-running operations don't block the receive loop
     bg_tasks: set[asyncio.Task] = set()
@@ -185,18 +187,18 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
             action = msg.get("action")
 
             if action == "start_session":
-                _spawn(_handle_start_session(ws, user_id, msg))
+                _spawn(_handle_start_session(ws, client_id, msg))
             elif action == "send_message":
-                _spawn(_handle_send_message(ws, user_id, msg))
+                _spawn(_handle_send_message(ws, client_id, msg))
             elif action == "destroy_session":
-                _spawn(_handle_destroy_session(ws, user_id, msg))
+                _spawn(_handle_destroy_session(ws, client_id, msg))
             elif action == "list_sessions":
-                sessions = _get_user_sessions(user_id)
+                sessions = _get_client_sessions(client_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
-                _handle_resolve_permission(user_id, msg)
+                _handle_resolve_permission(client_id, msg)
             elif action == "abort_prompt":
-                _spawn(_handle_abort_prompt(ws, user_id, msg))
+                _spawn(_handle_abort_prompt(ws, client_id, msg))
             else:
                 await _send(
                     ws, {"event": "error", "message": f"Unknown action: {action}"}
@@ -205,7 +207,7 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
     except WebSocketDisconnect:
         pass
     except Exception:
-        log.exception("Chat WS error for user %d", user_id)
+        log.exception("Chat WS error for client %s", client_id)
     finally:
         # Cancel any in-flight background tasks on disconnect
         for task in bg_tasks:
@@ -216,33 +218,33 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
 
 async def _handle_start_session(
     ws: WebSocket,
-    user_id: int,
+    client_id: str,
     msg: dict,
 ) -> None:
     agent_key = msg.get("agent_key", DEFAULT_AGENT)
     server_name = msg.get("server_name")  # From frontend's selected server
 
     # Check slot limit
-    slots = _user_slots.get(user_id, [])
+    slots = _client_slots.get(client_id, [])
     # Clean dead slots
     alive_slots = []
     for s in slots:
-        session = get_session(_session_key(user_id, s))
+        session = get_session(_session_key(client_id, s))
         if session and session.client.alive:
             alive_slots.append(s)
-    _user_slots[user_id] = alive_slots
+    _client_slots[client_id] = alive_slots
 
-    if len(alive_slots) >= MAX_SESSIONS_PER_USER:
+    if len(alive_slots) >= MAX_SESSIONS_PER_CLIENT:
         await _send(
-            ws, {"event": "error", "message": f"Max {MAX_SESSIONS_PER_USER} sessions"}
+            ws, {"event": "error", "message": f"Max {MAX_SESSIONS_PER_CLIENT} sessions"}
         )
         return
 
     slot_id = str(uuid.uuid4())[:8]
-    session_key = _session_key(user_id, slot_id)
+    session_key = _session_key(client_id, slot_id)
 
     async def perm_cb(tool_call: dict, options: list[dict]) -> dict:
-        return await _web_permission_callback(ws, user_id, tool_call, options)
+        return await _web_permission_callback(ws, client_id, tool_call, options)
 
     try:
         session = await get_or_create_session(
@@ -254,7 +256,7 @@ async def _handle_start_session(
             server_name=server_name,
         )
 
-        _user_slots.setdefault(user_id, []).append(slot_id)
+        _client_slots.setdefault(client_id, []).append(slot_id)
         await _send(
             ws,
             {
@@ -265,13 +267,13 @@ async def _handle_start_session(
             },
         )
     except Exception as e:
-        log.exception("Failed to start chat session for user %d", user_id)
+        log.exception("Failed to start chat session for client %s", client_id)
         await _send(ws, {"event": "error", "message": f"Failed to start session: {e}"})
 
 
 async def _handle_send_message(
     ws: WebSocket,
-    user_id: int,
+    client_id: str,
     msg: dict,
 ) -> None:
     slot_id = msg.get("slot_id", "")
@@ -283,13 +285,13 @@ async def _handle_send_message(
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
 
-    session_key = _session_key(user_id, slot_id)
+    session_key = _session_key(client_id, slot_id)
     session = get_session(session_key)
 
     if not session or not session.client.alive:
         # Session died — clean up and notify frontend
         await destroy_session(session_key)
-        slots = _user_slots.get(user_id, [])
+        slots = _client_slots.get(client_id, [])
         if slot_id in slots:
             slots.remove(slot_id)
         await _send(
@@ -309,7 +311,7 @@ async def _handle_send_message(
         await _send(ws, {"event": "error", "message": "Agent is busy"})
         return
 
-    task_key = f"{user_id}:{slot_id}"
+    task_key = f"{client_id}:{slot_id}"
     task = asyncio.current_task()
     if task:
         _active_prompt_tasks[task_key] = task
@@ -374,7 +376,7 @@ async def _handle_send_message(
             ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"}
         )
     except Exception:
-        log.exception("Error streaming prompt for user %d", user_id)
+        log.exception("Error streaming prompt for client %s", client_id)
         await _send(
             ws, {"event": "error", "slot_id": slot_id, "message": "Stream error"}
         )
@@ -385,7 +387,7 @@ async def _handle_send_message(
         _active_prompt_tasks.pop(task_key, None)
 
 
-async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
+async def _handle_abort_prompt(ws: WebSocket, client_id: str, msg: dict) -> None:
     slot_id = msg.get("slot_id", "")
     if not slot_id:
         await _send(ws, {"event": "error", "message": "No slot_id"})
@@ -394,12 +396,12 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
     # Abort the ACP-level prompt so stale events don't leak into the next message.
     # session.abort() sets an event flag that makes prompt_stream break out on the
     # next iteration, triggering its finally block to release the lock properly.
-    session_key = _session_key(user_id, slot_id)
+    session_key = _session_key(client_id, slot_id)
     session = get_session(session_key)
     if session:
         session.abort()
 
-    task_key = f"{user_id}:{slot_id}"
+    task_key = f"{client_id}:{slot_id}"
     task = _active_prompt_tasks.get(task_key)
     if task and not task.done():
         task.cancel()
@@ -416,21 +418,21 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
         )
 
 
-async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> None:
+async def _handle_destroy_session(ws: WebSocket, client_id: str, msg: dict) -> None:
     slot_id = msg.get("slot_id", "")
     if not slot_id:
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
 
-    session_key = _session_key(user_id, slot_id)
+    session_key = _session_key(client_id, slot_id)
     destroyed = await destroy_session(session_key)
 
     # Clean up active prompt task to prevent memory leaks
-    task_key = f"{user_id}:{slot_id}"
+    task_key = f"{client_id}:{slot_id}"
     _active_prompt_tasks.pop(task_key, None)
 
     # Remove from user slots
-    slots = _user_slots.get(user_id, [])
+    slots = _client_slots.get(client_id, [])
     if slot_id in slots:
         slots.remove(slot_id)
 
@@ -439,18 +441,18 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
     )
 
 
-def _handle_resolve_permission(user_id: int, msg: dict) -> None:
+def _handle_resolve_permission(client_id: str, msg: dict) -> None:
     request_id = msg.get("request_id", "")
     approved = msg.get("approved", False)
     entry = _pending_permissions.get(request_id)
     if entry is None:
         return
     owner_id, future = entry
-    if owner_id != user_id:
-        # Ignore attempts to resolve another user's pending permission
+    if owner_id != client_id:
+        # Ignore attempts to resolve another client's pending permission
         log.warning(
-            "User %d tried to resolve permission %s owned by another user",
-            user_id,
+            "Client %s tried to resolve permission %s owned by another client",
+            client_id,
             request_id,
         )
         return
@@ -462,7 +464,7 @@ def _handle_resolve_permission(user_id: int, msg: dict) -> None:
 
 
 @router.get("/chat/options")
-async def get_chat_options(user: WebUser = Depends(get_current_user)):
+async def get_chat_options():
     """Return available agent models."""
     return {
         "agents": [{"key": k, "label": v["label"]} for k, v in AGENT_OPTIONS.items()],

@@ -1,15 +1,15 @@
-"""Tests for chat WS permission approval user scoping (SEC-053).
+"""Tests for chat WS permission approval client scoping (SEC-053).
 
 A resolve_permission message must only resolve futures created for the
-same authenticated user; foreign or unknown request_ids are ignored.
+same browser client_id; foreign or unknown request_ids are ignored.
 """
 
 import asyncio
 
 from condor.web.routes.chat_ws import _handle_resolve_permission, _pending_permissions
 
-USER_A = 111
-USER_B = 222
+USER_A = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+USER_B = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 def _run(coro):

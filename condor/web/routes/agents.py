@@ -27,15 +27,14 @@ import logging
 import time
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from condor.agents.learnings import learnings_path, read_learnings
 from condor.agents.lifecycle import LifecycleError
 from condor.agents.runstore import get_run_store
 from condor.agents.service import AgentService
-from condor.web.auth import get_current_user
-from condor.web.models import ReportSummary, WebUser
+from condor.web.models import ReportSummary
 
 # ── Simple in-memory TTL cache for performance data ──
 _PERF_CACHE: dict[str, tuple[float, Any]] = {}
@@ -444,7 +443,7 @@ async def _build_agent_summary(agent) -> AgentSummary:
 
 
 @router.get("", response_model=list[AgentSummary])
-async def list_agents(user: WebUser = Depends(get_current_user)):
+async def list_agents():
     """List all Agents with history rollups and live status."""
     import asyncio as _asyncio
 
@@ -464,7 +463,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
 
 
 @router.get("/delegations")
-async def list_delegations(user: WebUser = Depends(get_current_user)):
+async def list_delegations():
     """List in-flight and finished delegations (this process).
 
     Returns the full record per task (status + result/error) so the dashboard can
@@ -479,7 +478,7 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
 
 @router.get("/delegations/{task_id}")
 async def get_delegation_status(
-    task_id: str, user: WebUser = Depends(get_current_user)
+    task_id: str
 ):
     """Get a delegation's status + result/error.
 
@@ -514,7 +513,7 @@ async def get_delegation_status(
 
 @router.post("/delegations/{task_id}/stop")
 async def stop_delegation_route(
-    task_id: str, user: WebUser = Depends(get_current_user)
+    task_id: str
 ):
     """Cancel a running delegation (status -> stopped)."""
     from condor.agents.delegate import get_delegation, stop_delegation
@@ -532,7 +531,6 @@ async def stop_delegation_route(
 async def get_run_route(
     run_id: str,
     events: bool = False,
-    user: WebUser = Depends(get_current_user),
 ):
     """One run: RunStore meta (+ live engine overlay), ``?events=true`` inlines
     the full event envelope list."""
@@ -543,7 +541,7 @@ async def get_run_route(
 
 
 @router.get("/runs/{run_id}/export")
-async def export_run_route(run_id: str, user: WebUser = Depends(get_current_user)):
+async def export_run_route(run_id: str):
     """Markdown transcript of one run (generated view, §7.1)."""
     try:
         return {"run_id": run_id, "markdown": _svc().export_run(run_id)}
@@ -552,7 +550,7 @@ async def export_run_route(run_id: str, user: WebUser = Depends(get_current_user
 
 
 @router.get("/runs/{run_id}/executors")
-async def get_run_executors(run_id: str, user: WebUser = Depends(get_current_user)):
+async def get_run_executors(run_id: str):
     """Executors + performance for a single run (executors tag agent_id == run_id)."""
     from condor.executors import ops
     from condor.executors.service import get_executor_runtime
@@ -584,7 +582,7 @@ async def get_run_executors(run_id: str, user: WebUser = Depends(get_current_use
 
 
 @router.get("/{slug}", response_model=AgentDetail)
-async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
+async def get_agent(slug: str):
     """Get Agent detail: identity, spec fields, and the recent run history."""
     agent = _get_agent(slug)
 
@@ -642,7 +640,6 @@ async def list_agent_runs(
     slug: str,
     kind: str | None = None,
     limit: int = 50,
-    user: WebUser = Depends(get_current_user),
 ):
     """Run history for one agent (RunStore metas, newest first, live overlay).
 
@@ -654,7 +651,7 @@ async def list_agent_runs(
 
 @router.post("", response_model=AgentSummary)
 async def create_agent(
-    req: CreateAgentRequest, user: WebUser = Depends(get_current_user)
+    req: CreateAgentRequest
 ):
     """Create a new Agent (identity + spec; AGENT.md is the one spec, §5.3)."""
     try:
@@ -689,7 +686,7 @@ async def create_agent(
 
 @router.put("/{slug}")
 async def update_agent(
-    slug: str, req: UpdateAgentRequest, user: WebUser = Depends(get_current_user)
+    slug: str, req: UpdateAgentRequest
 ):
     """Patch the agent spec (AGENT.md body via ``instructions``, and/or fields)."""
     patch = req.model_dump(exclude_unset=True)
@@ -708,7 +705,7 @@ async def update_agent(
 
 
 @router.delete("/{slug}")
-async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
+async def delete_agent(slug: str):
     """Tombstone an Agent (§5.2): history preserved, slug reserved.
 
     Refuses (409) while it has running sessions or nonterminal executors.
@@ -721,7 +718,7 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
 
 @router.post("/{slug}/consult")
 async def consult_agent(
-    slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
+    slug: str, req: ConsultRequest
 ):
     """Run an Agent consult (its brain to completion) and return the answer."""
     if not req.task:
@@ -743,7 +740,7 @@ async def consult_agent(
 
 @router.post("/{slug}/delegate")
 async def delegate_agent(
-    slug: str, req: DelegateRequest, user: WebUser = Depends(get_current_user)
+    slug: str, req: DelegateRequest
 ):
     """Delegate a one-off task to a detached background Agent instance.
 
@@ -779,7 +776,6 @@ async def delegate_agent(
 @router.get("/{slug}/performance", response_model=AgentPerformanceResponse)
 async def get_agent_performance(
     slug: str,
-    user: WebUser = Depends(get_current_user),
 ):
     """Per-run performance + rollup totals for an agent."""
     agent = _get_agent(slug)
@@ -804,7 +800,6 @@ async def get_agent_performance(
 async def start_session(
     slug: str,
     req: StartAgentRequest,
-    user: WebUser = Depends(get_current_user),
 ):
     """Start a session — the stateful unit of capital engagement — or, with
     ``execution_mode: "experiment"``, one simulated tick.
@@ -833,7 +828,6 @@ async def _lifecycle_verb(slug: str, agent_id: str | None, verb: str) -> dict:
 async def stop_agent(
     slug: str,
     agent_id: str | None = None,
-    user: WebUser = Depends(get_current_user),
 ):
     """Stop a running session. If agent_id given, stop that instance; else all."""
     return await _lifecycle_verb(slug, agent_id, "stop")
@@ -843,7 +837,6 @@ async def stop_agent(
 async def shutdown_agent(
     slug: str,
     agent_id: str | None = None,
-    user: WebUser = Depends(get_current_user),
 ):
     """Emergency shutdown: wind down positions/executors per shutdown.md, then stop.
 
@@ -858,7 +851,6 @@ async def shutdown_agent(
 async def pause_agent(
     slug: str,
     agent_id: str | None = None,
-    user: WebUser = Depends(get_current_user),
 ):
     """Pause a running session."""
     return await _lifecycle_verb(slug, agent_id, "pause")
@@ -868,7 +860,6 @@ async def pause_agent(
 async def resume_agent(
     slug: str,
     agent_id: str | None = None,
-    user: WebUser = Depends(get_current_user),
 ):
     """Resume a paused session."""
     return await _lifecycle_verb(slug, agent_id, "resume")
@@ -878,7 +869,6 @@ async def resume_agent(
 async def inject_directive(
     slug: str,
     req: DirectiveRequest,
-    user: WebUser = Depends(get_current_user),
 ):
     """Queue an operator directive for the agent's running session(s)."""
     if not req.text:
@@ -893,7 +883,7 @@ async def inject_directive(
 
 
 @router.get("/{slug}/learnings")
-async def get_learnings(slug: str, user: WebUser = Depends(get_current_user)):
+async def get_learnings(slug: str):
     """Read the agent's learnings (curated agent memory, §7.1)."""
     agent = _get_agent(slug)
     return {"content": read_learnings(agent.agent_dir)}
@@ -903,7 +893,6 @@ async def get_learnings(slug: str, user: WebUser = Depends(get_current_user)):
 async def update_learnings(
     slug: str,
     req: UpdateLearningsRequest,
-    user: WebUser = Depends(get_current_user),
 ):
     """Replace the agent's learnings.md (operator curation)."""
     agent = _get_agent(slug)
@@ -915,7 +904,7 @@ async def update_learnings(
 
 
 @router.get("/{slug}/routines")
-async def get_agent_routines(slug: str, user: WebUser = Depends(get_current_user)):
+async def get_agent_routines(slug: str):
     """List routines owned by this agent (``agents/{slug}/routines``)."""
     _get_agent(slug)
     from condor.routine_store import get_routine_store
@@ -930,7 +919,6 @@ async def get_agent_routines(slug: str, user: WebUser = Depends(get_current_user
 async def get_agent_reports(
     slug: str,
     limit: int = 50,
-    user: WebUser = Depends(get_current_user),
 ):
     """Get reports generated by this agent's routines."""
     _get_agent(slug)

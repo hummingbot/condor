@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 
 from condor.reports import delete_report, get_report, list_reports, list_reports_grouped
-from condor.web.auth import get_current_user
-from condor.web.models import ReportSummary, ReportsListResponse, WebUser
+from condor.web.models import ReportSummary, ReportsListResponse
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -19,7 +18,6 @@ async def get_reports(
     agent: str | None = None,
     limit: int = 50,
     offset: int = 0,
-    user: WebUser = Depends(get_current_user),
 ):
     entries, total = list_reports(
         source_type=source_type,
@@ -36,12 +34,12 @@ async def get_reports(
 
 
 @router.get("/latest-by-source")
-async def get_reports_grouped(user: WebUser = Depends(get_current_user)):
+async def get_reports_grouped():
     return list_reports_grouped()
 
 
 @router.get("/{report_id}", response_model=ReportSummary)
-async def get_report_detail(report_id: str, user: WebUser = Depends(get_current_user)):
+async def get_report_detail(report_id: str):
     entry = get_report(report_id)
     if not entry:
         raise HTTPException(404, "Report not found")
@@ -50,7 +48,7 @@ async def get_report_detail(report_id: str, user: WebUser = Depends(get_current_
 
 @router.delete("/{report_id}")
 async def delete_report_endpoint(
-    report_id: str, user: WebUser = Depends(get_current_user)
+    report_id: str
 ):
     if not await delete_report(report_id):
         raise HTTPException(404, "Report not found")

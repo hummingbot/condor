@@ -12,7 +12,6 @@ from fastapi.staticfiles import StaticFiles
 
 from condor.web.routes import (
     agents,
-    auth,
     chat_ws,
     native_executors,
     venues,
@@ -124,7 +123,6 @@ def create_app() -> FastAPI:
         return {"token": CSRF_TOKEN}
 
     # ── API routes ──
-    app.include_router(auth.router, prefix="/api/v1")
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")

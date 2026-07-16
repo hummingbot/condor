@@ -9,13 +9,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from condor.executors import ops
 from condor.executors.service import get_executor_runtime
-from condor.web.auth import get_current_user
-from condor.web.models import WebUser
 
 router = APIRouter(tags=["native-executors"])
 
@@ -32,7 +30,6 @@ def _http(e: ops.ExecutorOpError) -> HTTPException:
 async def list_executors(
     agent_id: Optional[str] = None,
     limit: int = 50,
-    user: WebUser = Depends(get_current_user),
 ):
     return ops.list_(get_executor_runtime(), agent_id=agent_id, limit=limit)
 
@@ -42,7 +39,6 @@ async def executors_performance(
     group_by: str = "agent",
     agent_id: Optional[str] = None,
     agent_slug: Optional[str] = None,
-    user: WebUser = Depends(get_current_user),
 ):
     try:
         return ops.performance(
@@ -58,7 +54,6 @@ async def executors_snapshot(
     agent_slug: str | None = None,
     agent_id: str | None = None,
     venue_id: str | None = None,
-    user: WebUser = Depends(get_current_user),
 ):
     """One portfolio snapshot (§6.3): account view + attribution filters."""
     from condor.accounts.model import AccountRef
@@ -72,7 +67,7 @@ async def executors_snapshot(
 
 
 @router.get("/executors/{executor_id}")
-async def get_executor(executor_id: str, user: WebUser = Depends(get_current_user)):
+async def get_executor(executor_id: str):
     try:
         return ops.get(get_executor_runtime(), executor_id)
     except ops.ExecutorOpError as e:
@@ -89,7 +84,6 @@ async def get_executor(executor_id: str, user: WebUser = Depends(get_current_use
 async def stop_executor(
     executor_id: str,
     req: StopExecutorRequest | None = None,
-    user: WebUser = Depends(get_current_user),
 ):
     keep = req.keep_position if req is not None else True
     try:
