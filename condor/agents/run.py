@@ -3,8 +3,8 @@
 Refactor-02: the three ways an agent's brain gets invoked used to be two
 independent execution stacks (TickEngine's client/stream code vs the
 consult/delegate shared runner). This module owns the duplicated middle —
-model resolution, MCP-server wiring, the pydantic-ai-vs-ACP decision, event
-streaming, timeout, and client reaping — exactly once. Everything
+model resolution, MCP-server wiring, event streaming, timeout, and client
+reaping — exactly once. ACP is the only model runner (§9.3). Everything
 kind-specific stays at the call sites:
 
     consult    = run_agent(policy=human_gate(chat_id))   → return text inline
@@ -15,7 +15,6 @@ kind-specific stays at the call sites:
 from __future__ import annotations
 
 import logging
-import os
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -29,11 +28,6 @@ from condor.acp.client import (
     ToolCallUpdate,
     fold_tool_call_event,
     resolve_acp,
-)
-from condor.acp.pydantic_ai_client import (
-    PydanticAIClient,
-    healthcheck_local_backend,
-    is_pydantic_ai_model,
 )
 
 from .agent import Agent
@@ -59,7 +53,6 @@ class RunResult:
     error: str = ""
     timed_out: bool = False
     model: str = ""
-    fallback_note: str = ""
 
 
 async def run_agent(
@@ -69,15 +62,11 @@ async def run_agent(
     permission_policy: Callable | None,
     user_id: int,
     chat_id: int,
-    server_name: str | None = None,
     execution_mode: str = "loop",
     model: str | None = None,
-    model_base_url: str | None = None,
-    tool_filter_mode: str | None = None,
     risk_limits: dict | None = None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     event_sink: Callable[[Any], None] | None = None,
-    fallback_on_unhealthy: bool = False,
     on_client: Callable[[Any], None] | None = None,
     agent_id: str = "",
     on_tool_call: Callable[[dict], None] | None = None,
@@ -90,16 +79,8 @@ async def run_agent(
         agent_id: The run's opaque RunStore id (ULID, §7.1) threaded into the
             condor MCP subprocess so native executors are attributed to the
             run that created them; empty for plain chat sessions.
-        server_name: The EFFECTIVE hummingbot server for this run (caller
-            resolves pin-vs-ambient). None → session wiring (ambient server,
-            or none for serverless agents).
         model: Resolved model key; None → the agent's default. Callers own
             any override order (tick: config > agent).
-        fallback_on_unhealthy: When True and the (pydantic-ai) backend is
-            down, fall back to CONSULT_FALLBACK_MODEL (default claude-code)
-            with a visible note — consult/delegate behavior. When False, a
-            dead backend raises so a tick never silently trades on an
-            unintended model.
         event_sink: Optional callback fed every raw streamed event as it
             arrives (live progress views); the folded views are always
             returned on the result regardless.
@@ -109,14 +90,10 @@ async def run_agent(
         on_tool_call: Optional hook fired with each FOLDED tool call the
             moment it completes (RunStore streaming persistence) — the same
             dicts that land on ``result.tool_calls``, delivered live.
-
-    Raises:
-        RuntimeError: model backend unavailable and fallback disabled/unset.
     """
     import asyncio
 
     from condor.agents.context import (
-        build_mcp_servers_for_agent,
         build_mcp_servers_for_session,
         get_project_dir,
     )
@@ -136,89 +113,34 @@ async def run_agent(
             agent.slug, agent_id, risk_limits=risk_limits
         )
 
-    # -- model resolution (+ optional healthcheck/fallback) --
-    model_key = model or agent.agent_key
-    if is_pydantic_ai_model(model_key):
-        backend_err = await healthcheck_local_backend(model_key)
-        if backend_err:
-            fallback = os.environ.get("CONSULT_FALLBACK_MODEL", "claude-code").strip()
-            if fallback_on_unhealthy and fallback and fallback != model_key:
-                log.warning(
-                    "Backend for '%s' (%s) unavailable (%s); falling back to %s",
-                    agent.slug,
-                    model_key,
-                    backend_err,
-                    fallback,
-                )
-                result.fallback_note = (
-                    f"_(note: {agent.name}'s configured model was unavailable — "
-                    f"{backend_err} Answered with fallback `{fallback}`.)_\n\n"
-                )
-                model_key = fallback
-            else:
-                raise RuntimeError(
-                    f"The '{agent.slug}' agent's model backend is unavailable: "
-                    f"{backend_err}"
-                )
-    result.model = model_key
+    result.model = model or agent.agent_key
 
     # -- MCP toolset wiring (agent_slug scopes memory/skills to this Agent) --
-    # A serverless agent runs condor-only on EITHER branch: build_mcp_servers_for_agent
-    # wires hummingbot unconditionally, so route serverless agents to the session
-    # builder (include_hummingbot=False) even when a server_name is present.
-    if server_name and agent.server_required:
-        mcp_servers = build_mcp_servers_for_agent(
-            server_name,
-            user_id,
-            chat_id,
-            agent_slug=agent.slug,
-            execution_mode=execution_mode,
-            agent_id=agent_id,
-            capability=run_capability.id if run_capability else None,
-        )
-    else:
-        mcp_servers = build_mcp_servers_for_session(
-            user_id,
-            chat_id,
-            execution_mode=execution_mode,
-            agent_slug=agent.slug,
-            agent_id=agent_id,
-            capability=run_capability.id if run_capability else None,
-            # Serverless agents run condor-only: wiring mcp-hummingbot too
-            # exposes a second manage_executors with an incompatible schema.
-            include_hummingbot=agent.server_required,
-        )
+    mcp_servers = build_mcp_servers_for_session(
+        user_id,
+        chat_id,
+        execution_mode=execution_mode,
+        agent_slug=agent.slug,
+        agent_id=agent_id,
+        capability=run_capability.id if run_capability else None,
+    )
 
-    # Enforce the agent's declared tool scope for system mutations on BOTH client
-    # types. pydantic-ai already filters tools to the allowlist, but ACP agents
-    # get the full MCP surface — so an undeclared agent/routine/skill mutation is
+    # Enforce the agent's declared tool scope for system mutations: ACP agents
+    # get the full MCP surface, so an undeclared agent/routine/skill mutation is
     # denied at the gate here (#8). Empty tools = unrestricted (unchanged).
     from condor.agents.policies import scope_gate
 
     permission_policy = scope_gate(permission_policy, agent.tools)
 
-    # -- client factory: pydantic-ai (allowlist enforced) or ACP subprocess --
-    if is_pydantic_ai_model(model_key):
-        client = PydanticAIClient(
-            model=model_key,
-            mcp_servers=mcp_servers,
-            permission_callback=permission_policy,
-            base_url=model_base_url or None,
-            tool_filter_mode=tool_filter_mode
-            or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
-            or None,
-            allowed_tools=agent.tools or None,
-        )
-    else:
-        agent_cmd, model_env, model_pref = resolve_acp(model_key)
-        client = ACPClient(
-            command=agent_cmd,
-            working_dir=get_project_dir(),
-            mcp_servers=mcp_servers,
-            permission_callback=permission_policy,
-            extra_env=model_env or None,
-            model=model_pref or None,
-        )
+    agent_cmd, model_env, model_pref = resolve_acp(result.model)
+    client = ACPClient(
+        command=agent_cmd,
+        working_dir=get_project_dir(),
+        mcp_servers=mcp_servers,
+        permission_callback=permission_policy,
+        extra_env=model_env or None,
+        model=model_pref or None,
+    )
 
     if on_client is not None:
         on_client(client)

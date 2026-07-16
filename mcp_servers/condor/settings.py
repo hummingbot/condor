@@ -18,7 +18,6 @@ class Settings:
     # the sole execution authority for agent-run creates. Empty for chat
     # sessions (which register condor-direct instead).
     capability: str
-    active_server: str
 
 
 def _parse_settings() -> Settings:
@@ -29,7 +28,6 @@ def _parse_settings() -> Settings:
     parser.add_argument("--agent-id", default=None)
     parser.add_argument("--capability", default=None)
     parser.add_argument("--bot-token", default=None)
-    parser.add_argument("--server-name", default=None)
     args, _ = parser.parse_known_args()
 
     return Settings(
@@ -39,7 +37,6 @@ def _parse_settings() -> Settings:
         agent_slug=args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", ""),
         agent_id=args.agent_id or os.environ.get("CONDOR_AGENT_ID", ""),
         capability=args.capability or os.environ.get("CONDOR_RUN_CAPABILITY", ""),
-        active_server=args.server_name or os.environ.get("CONDOR_SERVER_NAME", ""),
     )
 
 

@@ -419,16 +419,12 @@ class TickEngine:
         self._last_tick_at = time.time()
         mode = self.config.get("execution_mode", "loop")
 
-        # 1. Get the hummingbot-api client IF one is configured — but treat it as
-        #    OPTIONAL. Gateway-native agents (condor-native position/swap/lp
-        #    executors) run in-process and are read via the native_executors
-        #    provider, which needs no hummingbot-api client.
-        client = await self._get_client()
+        # 1. Run core data providers (native executors only — the agent uses
+        #    MCP for market data). The provider reads the in-process executor
+        #    store directly.
+        core_data_summaries = await self._collect_provider_state()
 
-        # 2. Run core data providers (executors only -- agent uses MCP for market data)
-        native_active, core_data_summaries = await self._collect_provider_state(client)
-
-        # 3. Fold run context from the event stream (state + recent decisions)
+        # 2. Fold run context from the event stream (state + recent decisions)
         learnings = read_learnings(self.agent.agent_dir)
         try:
             store = get_run_store()
@@ -441,7 +437,7 @@ class TickEngine:
         summary = proj.get("state", "")
         recent_decisions = proj.get("recent_decisions", "")
 
-        # 4. Get risk state — exposure/count are venue-record truth via the
+        # 3. Get risk state — exposure/count are venue-record truth via the
         #    provider fold; the pnl series is this run's in-memory history.
         risk_state = self.risk.get_state(self.metrics)
 
@@ -467,7 +463,7 @@ class TickEngine:
             )
             return
 
-        # 5. Build prompt.
+        # 4. Build prompt.
         # Cache routine discovery on first tick — routines rarely change mid-run.
         if self._cached_routines_section is None:
             from .prompts import _build_routines_section
@@ -518,7 +514,7 @@ class TickEngine:
 
         self._emit("tick_started", {}, tick=next_tick)
 
-        # 6. One run_agent call per tick (fresh client, clean context window).
+        # 5. One run_agent call per tick (fresh client, clean context window).
         # risk_state was computed once above and threads into the gate so the
         # per-call checks accumulate against this tick's running totals.
         def _hold_client(c):
@@ -546,11 +542,8 @@ class TickEngine:
             permission_policy=risk_gate(self.risk, risk_state, experiment=self.is_experiment),
             user_id=self.user_id,
             chat_id=self.chat_id,
-            server_name=self.config.get("server_name") or None,
             execution_mode=mode,
             model=self._agent_key(),
-            model_base_url=self.config.get("model_base_url") or None,
-            tool_filter_mode=self.config.get("tool_filter_mode") or None,
             risk_limits=self.config.get("risk_limits") or None,
             timeout_s=300,
             on_client=_hold_client,
@@ -576,9 +569,7 @@ class TickEngine:
         # open=1, not the pre-action open=0). Failure keeps the pre-run view.
         if tool_calls:
             try:
-                native_active, core_data_summaries = (
-                    await self._collect_provider_state(client)
-                )
+                core_data_summaries = await self._collect_provider_state()
             except Exception:
                 log.exception(
                     "TickEngine %s: post-tick provider refresh failed", self.agent_id
@@ -627,34 +618,21 @@ class TickEngine:
     # Helpers
     # ------------------------------------------------------------------
 
-    async def _collect_provider_state(self, client) -> tuple[bool, dict[str, str]]:
+    async def _collect_provider_state(self) -> dict[str, str]:
         """Run core data providers and refresh ``_last_skill_data`` + the risk
-        tracker inputs. Returns (native_active, per-provider summary strings).
+        tracker inputs. Returns per-provider summary strings.
 
         Called once before the model runs (prompt data) and again after a tick
         that made tool calls — the persisted snapshot must record the COMPLETED
         tick's state, not the pre-action view.
         """
         skill_results = await self.provider_registry.run_core_providers(
-            client, self.config, agent_id=self.agent_id, agent_slug=self.agent.slug
+            self.config, agent_id=self.agent_id, agent_slug=self.agent.slug
         )
 
-        # Extract structured data from providers for tracking. Prefer the
-        # native_executors provider whenever it carries data: a Gateway-native
-        # agent's real positions/PnL live there, while the hummingbot-api
-        # `executors` provider is empty (no API client) — so reading it would
-        # record pnl=0/volume=0/open=0 snapshots for an agent that is actually
-        # trading. Fall back to the hummingbot-api provider for API-backed agents.
         native_result = skill_results.get("native_executors")
-        executors_result = skill_results.get("executors")
         nd = native_result.data if native_result else {}
-        native_active = bool(nd) and "error" not in nd and (
-            nd.get("executors")
-            or nd.get("open_count")
-            or nd.get("closed_count")
-            or nd.get("failed_count")
-        )
-        if native_active:
+        if nd and "error" not in nd:
             self._last_skill_data = {
                 "executors": nd.get("executors", []),
                 "total_exposure": nd.get("total_exposure", 0.0),
@@ -669,56 +647,12 @@ class TickEngine:
                 "closed_count": nd.get("closed_count", 0),
                 "failed_count": nd.get("failed_count", 0),
             }
-        elif executors_result:
-            self._last_skill_data = executors_result.data
-        positions_result = skill_results.get("positions")
-        if positions_result:
-            self._last_skill_data["positions"] = positions_result.data
 
-        core_data_summaries: dict[str, str] = {
-            name: result.summary for name, result in skill_results.items()
-        }
-        return native_active, core_data_summaries
+        return {name: result.summary for name, result in skill_results.items()}
 
     def _agent_key(self) -> str:
         """Resolve the model for this run: config override > Agent default."""
         return self.config.get("agent_key") or self.agent.agent_key
-
-    def _resolve_server(self) -> tuple[str | None, dict | None]:
-        """Resolve the server for this agent."""
-        from config_manager import get_config_manager, get_effective_server
-
-        cm = get_config_manager()
-        server_name = self.config.get("server_name")
-
-        if not server_name:
-            server_name = get_effective_server(self.chat_id)
-        if not server_name:
-            accessible = cm.get_accessible_servers(self.user_id)
-            server_name = accessible[0] if accessible else None
-        if not server_name:
-            return None, None
-
-        server = cm.get_server(server_name)
-        return server_name, server
-
-    async def _get_client(self):
-        """Get the Hummingbot API client for this agent."""
-        try:
-            server_name, server = self._resolve_server()
-            if not server:
-                from handlers.bots._shared import get_bots_client
-
-                client, _ = await get_bots_client(self.chat_id)
-                return client
-
-            from config_manager import get_config_manager
-
-            cm = get_config_manager()
-            return await cm.get_client(server_name)
-        except Exception:
-            log.exception("Failed to get API client for agent %s", self.agent_id)
-            return None
 
     async def _notify(self, message: str) -> None:
         """Notify the user: outbox (+ run stream mirror)."""
@@ -755,7 +689,6 @@ class TickEngine:
             "total_exposure": sd.get("total_exposure", 0.0),
             "open_executors": len(sd.get("executors", [])),
             "frequency_sec": self.config.get("frequency_sec", 60),
-            "server_name": self.config.get("server_name", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),
             "trading_context": self.config.get("trading_context", ""),
             "risk_limits": (

@@ -68,56 +68,25 @@ def _format_tool_summary(tool_call: dict[str, Any]) -> str:
     tool_name = tool_call.get("tool", "") or tool_call.get("title", "Unknown")
     input_data = tool_call.get("input", {})
 
-    if tool_name == "place_order":
-        side = input_data.get("trade_type", "?")
-        pair = input_data.get("trading_pair", "?")
-        amount = input_data.get("amount", "?")
-        order_type = input_data.get("order_type", "MARKET")
-        price = input_data.get("price", "")
-        connector = input_data.get("connector_name", "?")
-        summary = f"{side} {amount} {pair} ({order_type})"
-        if price:
-            summary += f" @ {price}"
-        summary += f" on {connector}"
-        return summary
-
     if tool_name == "manage_executors":
         action = input_data.get("action", "?")
         exec_type = input_data.get("executor_type", "")
         exec_id = input_data.get("executor_id", "")
         if action == "create" and exec_type:
-            config = input_data.get("executor_config", {})
-            pair = config.get("trading_pair", "?")
+            # Condor-native create: the instrument lives in the type's config
+            # (trading_pair for spot, coin for perp, market for pred).
+            config = input_data.get("config", {}) or {}
+            pair = (
+                config.get("trading_pair")
+                or config.get("coin")
+                or config.get("market")
+                or config.get("base_token")
+                or "?"
+            )
             return f"Create {exec_type} on {pair}"
         if action == "stop" and exec_id:
             return f"Stop executor {exec_id[:12]}..."
         return f"Executor: {action}"
-
-    if tool_name == "manage_bots":
-        action = input_data.get("action", "?")
-        bot_name = input_data.get("bot_name", "?")
-        if action == "deploy":
-            controllers = input_data.get("controllers_config", [])
-            return f"Deploy bot '{bot_name}' with controllers {controllers}"
-        if action == "update_config":
-            config_name = input_data.get("config_name", "?")
-            return f"Update config '{config_name}' on bot '{bot_name}'"
-        return f"Bot '{bot_name}': {action}"
-
-    if tool_name == "manage_gateway_swaps":
-        action = input_data.get("action", "?")
-        pair = input_data.get("trading_pair", "?")
-        side = input_data.get("side", "?")
-        amount = input_data.get("amount", "?")
-        return f"Swap {side} {amount} {pair}"
-
-    if tool_name == "manage_gateway_clmm":
-        action = input_data.get("action", "?")
-        if action == "open_position":
-            return "Open LP position"
-        if action == "close_position":
-            return "Close LP position"
-        return f"CLMM: {action}"
 
     # Generic fallback
     return tool_name

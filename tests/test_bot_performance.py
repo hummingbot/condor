@@ -8,7 +8,6 @@ controller-mode block.
 import asyncio
 from types import SimpleNamespace
 
-from condor.agents.config import AgentConfig, normalize_config
 from condor.agents.performance import (
     AgentPerformance,
     fetch_agent_performance,
@@ -178,77 +177,3 @@ def test_batch_merges_only_named_agents():
 
 
 # ── Config field ──
-
-
-def test_bot_name_config_field_defaults_empty():
-    assert AgentConfig().bot_name == ""
-    assert AgentConfig(bot_name="river").bot_name == "river"
-
-
-def test_bot_name_round_trips_through_full_config(tmp_path):
-    cfg = normalize_config({"bot_name": "river", "frequency_sec": 30})
-    assert cfg["bot_name"] == "river"
-    # absent default → empty string from AgentConfig defaults
-    cfg2 = normalize_config({})
-    assert cfg2["bot_name"] == ""
-
-
-# ── Provider wiring ──
-
-
-def test_executors_provider_forwards_bot_name(monkeypatch):
-    from condor.agents.providers.executors import ExecutorsProvider
-
-    captured = {}
-
-    async def _fake_fetch(client, agent_id, bot_name=""):
-        captured["agent_id"] = agent_id
-        captured["bot_name"] = bot_name
-        return AgentPerformance(agent_id=agent_id, bot_name=bot_name)
-
-    monkeypatch.setattr(
-        "condor.agents.performance.fetch_agent_performance", _fake_fetch
-    )
-
-    provider = ExecutorsProvider()
-    asyncio.run(
-        provider.execute(
-            client=object(),
-            config={"bot_name": "river"},
-            agent_id="river.scalp_1",
-        )
-    )
-    assert captured == {"agent_id": "river.scalp_1", "bot_name": "river"}
-
-
-# ── Prompt controller-mode block ──
-
-
-def _minimal_prompt(config):
-    from condor.agents.prompts import build_tick_prompt
-
-    agent = SimpleNamespace(
-        instructions="Do the thing.", agent_key="claude-code", slug="river"
-    )
-    return build_tick_prompt(
-        agent=agent,
-        config=config,
-        core_data={},
-        learnings="",
-        summary="",
-        recent_decisions="",
-        risk_state={},
-        tick_number=1,
-        agent_id="river.scalp_1",
-        cached_routines_section="",
-    )
-
-
-def test_prompt_controller_block_present_iff_bot_name():
-    with_bot = _minimal_prompt({"bot_name": "river", "execution_mode": "loop"})
-    assert "[CONTROLLER MODE]" in with_bot
-    assert "river" in with_bot
-    assert "manage_controllers" in with_bot
-
-    without = _minimal_prompt({"execution_mode": "loop"})
-    assert "[CONTROLLER MODE]" not in without

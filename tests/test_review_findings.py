@@ -235,7 +235,7 @@ def test_provider_sees_prior_session_executors_and_holdings(tmp_path, monkeypatc
     monkeypatch.setattr(service, "_runtime", SimpleNamespace(store=store))
 
     # Session 2 (fresh id) must still see both the survivor and the holding.
-    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="wc_2", agent_slug="wc"))
+    result = asyncio.run(NativeExecutorsProvider().execute({}, agent_id="wc_2", agent_slug="wc"))
     rows = {e["id"]: e for e in result.data["executors"]}
     assert "pos_old" in rows, "prior-session open executor must stay visible"
     assert rows["pos_old"]["owner"] == "wc_1"
@@ -260,7 +260,7 @@ def test_provider_typed_rows_for_pred_orders(tmp_path, monkeypatch):
     store.save(resting)
 
     monkeypatch.setattr(service, "_runtime", SimpleNamespace(store=store))
-    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="wc_1", agent_slug="wc"))
+    result = asyncio.run(NativeExecutorsProvider().execute({}, agent_id="wc_1", agent_slug="wc"))
     (row,) = result.data["executors"]
     assert row["pair"] == "world-cup-winner:No"  # not "?-?"
     assert row["side"] == "SHORT"
@@ -361,7 +361,7 @@ def _make_engine(tmp_path, monkeypatch):
     monkeypatch.setattr(agent_module, "_DATA_ROOT", root)
     set_run_store(RunStore(root=root))
     agent = Agent(
-        slug="acme", name="Acme", agent_key="claude-code", server_required=False
+        slug="acme", name="Acme", agent_key="claude-code"
     )
     agent.agent_dir.mkdir(parents=True, exist_ok=True)
     return TickEngine(agent=agent, config={}, chat_id=1, user_id=1)
@@ -376,11 +376,6 @@ def test_directives_survive_failed_tick_and_clear_on_success(tmp_path, monkeypat
     monkeypatch.setattr(
         service, "_runtime", SimpleNamespace(store=ExecutorLog(tmp_path / "log"))
     )
-
-    async def _no_client(self):
-        return None
-
-    monkeypatch.setattr(engine_mod.TickEngine, "_get_client", _no_client)
 
     async def boom(*a, **kw):
         raise RuntimeError("model down")

@@ -17,14 +17,14 @@ from condor.agents.risk import (
 
 
 def _create_call(amount: float = 100.0) -> dict:
+    # Condor-native create shape: the type's own RiskDeclaration computes the
+    # notional (position_pred: max_notional_quote == amount_quote).
     return {
         "tool": "manage_executors",
         "input": {
             "action": "create",
-            "executor_config": {
-                "controller_id": "test_controller",
-                "total_amount_quote": amount,
-            },
+            "executor_type": "position_pred",
+            "config": {"market": "world-cup-winner", "amount_quote": amount},
         },
     }
 
@@ -162,148 +162,74 @@ def test_callback_cumulative_exposure_cancelled_same_tick():
 
 
 # ---------------------------------------------------------------------------
-# experiment mode must block manage_bots deploy/mutate actions too, not just
-# manage_executors/place_order/gateway swaps — manage_bots(deploy) places real
-# capital via a controller-based bot, a separate path from manage_executors.
+# experiment mode blocks the mutating executor actions and nothing else
 # ---------------------------------------------------------------------------
 
 
-def _bot_call(action: str, **extra) -> dict:
-    return {"tool": "mcp__mcp-hummingbot__manage_bots", "input": {"action": action, **extra}}
+def test_experiment_blocks_create_and_stop():
+    engine = RiskEngine(RiskLimits())
+    state = RiskState()
+    callback = risk_gate(engine, state, experiment=True)
+
+    async def _drive():
+        create = await callback(_create_call(), _OPTIONS)
+        stop = await callback(
+            {"tool": "manage_executors", "input": {"action": "stop", "executor_id": "x"}},
+            _OPTIONS,
+        )
+        return create, stop
+
+    create, stop = asyncio.run(_drive())
+    assert create["outcome"]["outcome"] == "cancelled"
+    assert stop["outcome"]["outcome"] == "cancelled"
 
 
-def test_experiment_blocks_manage_bots_deploy():
+def test_experiment_allows_read_only_executor_actions():
+    """Read-only manage_executors actions must not be blocked in an experiment."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
     callback = risk_gate(engine, state, experiment=True)
 
     result = asyncio.run(
-        callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
+        callback({"tool": "manage_executors", "input": {"action": "status"}}, _OPTIONS)
     )
-    assert result["outcome"]["outcome"] == "cancelled"
-
-
-def test_experiment_blocks_manage_bots_update_config():
-    engine = RiskEngine(RiskLimits())
-    state = RiskState()
-    callback = risk_gate(engine, state, experiment=True)
-
-    result = asyncio.run(callback(_bot_call("update_config", bot_name="x"), _OPTIONS))
-    assert result["outcome"]["outcome"] == "cancelled"
-
-
-def test_experiment_allows_manage_bots_status():
-    """Read-only manage_bots actions must not be blocked in an experiment."""
-    engine = RiskEngine(RiskLimits())
-    state = RiskState()
-    callback = risk_gate(engine, state, experiment=True)
-
-    result = asyncio.run(callback(_bot_call("status"), _OPTIONS))
     assert result["outcome"]["outcome"] == "selected"
 
 
 # ---------------------------------------------------------------------------
-# loop mode: manage_bots(deploy) is risk-gated on a declared loss cap — the
-# capital lives in saved controller configs on the API server, so the deploy
-# must carry a max_global_drawdown_quote bounded by the position limit.
+# native creates fail CLOSED when the risk can't be computed
 # ---------------------------------------------------------------------------
 
 
-def test_loop_mode_blocks_bot_deploy_without_loss_cap():
-    """A deploy with no declared max_global_drawdown_quote is blocked."""
+def test_unknown_executor_type_fails_closed():
     engine = RiskEngine(RiskLimits())
     state = RiskState()
     callback = risk_gate(engine, state)
 
     result = asyncio.run(
-        callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
-    )
-    assert result["outcome"]["outcome"] == "cancelled"
-
-
-def test_loop_mode_approves_bot_deploy_with_bounded_loss_cap():
-    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
-    state = RiskState()
-    callback = risk_gate(engine, state)
-
-    result = asyncio.run(
         callback(
-            _bot_call(
-                "deploy",
-                bot_name="x",
-                controllers_config=["cfg"],
-                max_global_drawdown_quote=400.0,
-            ),
-            _OPTIONS,
-        )
-    )
-    assert result["outcome"]["outcome"] == "selected"
-
-
-def test_loop_mode_blocks_bot_deploy_with_excessive_loss_cap():
-    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
-    state = RiskState()
-    callback = risk_gate(engine, state)
-
-    result = asyncio.run(
-        callback(
-            _bot_call(
-                "deploy",
-                bot_name="x",
-                controllers_config=["cfg"],
-                max_global_drawdown_quote=5000.0,
-            ),
+            {
+                "tool": "manage_executors",
+                "input": {"action": "create", "executor_type": "mystery"},
+            },
             _OPTIONS,
         )
     )
     assert result["outcome"]["outcome"] == "cancelled"
 
 
-def test_loop_mode_blocks_update_config_raising_amount_beyond_limit():
-    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
-    state = RiskState()
-    callback = risk_gate(engine, state)
-
-    result = asyncio.run(
-        callback(
-            _bot_call(
-                "update_config",
-                bot_name="x",
-                config_name="cfg",
-                config_data={"total_amount_quote": 900.0},
-            ),
-            _OPTIONS,
-        )
-    )
-    assert result["outcome"]["outcome"] == "cancelled"
-
-
-def test_loop_mode_approves_update_config_within_limit():
-    engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
-    state = RiskState()
-    callback = risk_gate(engine, state)
-
-    result = asyncio.run(
-        callback(
-            _bot_call(
-                "update_config",
-                bot_name="x",
-                config_name="cfg",
-                config_data={"total_amount_quote": 300.0},
-            ),
-            _OPTIONS,
-        )
-    )
-    assert result["outcome"]["outcome"] == "selected"
-
-
-def test_loop_mode_still_approves_bot_stop():
-    """Stops are risk-reducing — never blocked by the loss-cap gate."""
+def test_loop_mode_still_approves_stop():
+    """Stops are risk-reducing — never blocked by the gate."""
     engine = RiskEngine(RiskLimits())
     state = RiskState()
     callback = risk_gate(engine, state)
 
-    result = asyncio.run(callback(_bot_call("stop_bot", bot_name="x"), _OPTIONS))
+    result = asyncio.run(
+        callback(
+            {"tool": "manage_executors", "input": {"action": "stop", "executor_id": "x"}},
+            _OPTIONS,
+        )
+    )
     assert result["outcome"]["outcome"] == "selected"
 
 

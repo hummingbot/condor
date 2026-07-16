@@ -1,8 +1,9 @@
-"""Shared aggregator for trading agent performance.
+"""Hummingbot-API performance rollup — WEB-ONLY, scheduled for deletion.
 
-Single source of truth for PnL / volume / trade stats for a given ``agent_id``
-(``controller_id`` tag on executors). Used both by the live ``ExecutorsProvider``
-and the web API so they always agree.
+The agent core no longer touches hummingbot (§9.2): the only remaining
+importers are ``condor/web/routes/agents.py`` (``fetch_agent_performance`` /
+``fetch_agent_performance_batch``). This module dies with the hb-backed web
+routes in the next pass; do not add new callers.
 """
 
 from __future__ import annotations

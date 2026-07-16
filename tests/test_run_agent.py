@@ -1,8 +1,8 @@
 """Unit tests for the run_agent primitive (refactor-02).
 
 One execution core under tick / delegation / consult: event folding into both
-views (transcript events + tool_calls), timeout semantics, client reaping (incl.
-the on_client cancellation hook), and model healthcheck/fallback behavior.
+views (transcript events + tool_calls), timeout semantics, and client reaping
+(incl. the on_client cancellation hook). ACP is the only model runner (§9.3).
 """
 
 import asyncio
@@ -55,12 +55,10 @@ def _wire_fakes(monkeypatch):
     _FakeClient.instances = []
     _FakeClient._script = []
     monkeypatch.setattr(run_module, "ACPClient", _FakeClient)
-    monkeypatch.setattr(run_module, "PydanticAIClient", _FakeClient)
 
     import condor.agents.context as shared
 
     monkeypatch.setattr(shared, "build_mcp_servers_for_session", lambda *a, **k: [])
-    monkeypatch.setattr(shared, "build_mcp_servers_for_agent", lambda *a, **k: [])
     yield
 
 
@@ -150,51 +148,20 @@ def test_run_agent_on_client_hook_for_cancellation_backstop():
     assert seen[1] is None
 
 
-def test_dead_backend_raises_without_fallback(monkeypatch):
-    async def dead(model_key):
-        return "backend unreachable."
-
-    monkeypatch.setattr(run_module, "healthcheck_local_backend", dead)
-    monkeypatch.setattr(run_module, "is_pydantic_ai_model", lambda k: True)
-    monkeypatch.setenv("CONSULT_FALLBACK_MODEL", "claude-code")
-
-    with pytest.raises(RuntimeError, match="unavailable"):
-        asyncio.run(
-            run_agent(
-                _agent(agent_key="ollama:qwen3:32b"),
-                "x",
-                permission_policy=None,
-                user_id=1,
-                chat_id=2,
-                fallback_on_unhealthy=False,  # tick semantics: never silently switch
-            )
-        )
-
-
-def test_dead_backend_falls_back_with_note(monkeypatch):
-    async def dead(model_key):
-        return "backend unreachable."
-
-    monkeypatch.setattr(run_module, "healthcheck_local_backend", dead)
-    monkeypatch.setattr(
-        run_module, "is_pydantic_ai_model", lambda k: k.startswith("ollama:")
-    )
-    monkeypatch.setenv("CONSULT_FALLBACK_MODEL", "claude-code")
-    _FakeClient._script = [TextChunk(text="hi"), PromptDone(stop_reason="end_turn")]
+def test_model_override_wins_over_agent_default():
+    _FakeClient._script = [PromptDone(stop_reason="end_turn")]
 
     result = asyncio.run(
         run_agent(
-            _agent(agent_key="ollama:qwen3:32b"),
+            _agent(agent_key="claude-code"),
             "x",
             permission_policy=None,
             user_id=1,
             chat_id=2,
-            fallback_on_unhealthy=True,  # consult/delegate semantics
+            model="claude-acp:sonnet",
         )
     )
-    assert result.model == "claude-code"
-    assert "fallback" in result.fallback_note
-    assert result.text == "hi"
+    assert result.model == "claude-acp:sonnet"
 
 
 def test_permission_policy_reaches_the_client():

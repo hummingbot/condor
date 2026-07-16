@@ -73,43 +73,36 @@ def test_read_notifications_filters(outbox):
     assert len(read_notifications(limit=1)) == 1
 
 
-# -- serverless agents: condor-only MCP -----------------------------------------
+# -- agent sessions: condor-only MCP ---------------------------------------------
 
 
-def test_serverless_session_builds_condor_only():
+def test_session_builds_condor_only():
     from condor.agents.context import build_mcp_servers_for_session
 
     servers = build_mcp_servers_for_session(
         user_id=1, chat_id=1, agent_slug="memecoin_trender",
         agent_id="memecoin_trender_1",
-        include_hummingbot=False,
     )
     assert [s["name"] for s in servers] == ["condor"]
     args = servers[0]["args"]
     assert "--agent-id" in args and "memecoin_trender_1" in args
+    assert "--server-name" not in args
 
 
-def test_serverless_prompt_has_no_hummingbot_refs():
+def test_tick_prompt_has_no_hummingbot_refs():
     """The prompt must match the condor-only wiring: no mcp-hummingbot tools,
-    the condor-native manage_executors instead, no controller_id line."""
+    the condor-native manage_executors, no controller_id line."""
     from types import SimpleNamespace
 
     from condor.agents.prompts import build_tick_prompt
 
-    def prompt(server_required):
-        agent = SimpleNamespace(slug="memecoin_trender", server_required=server_required,
-                                agent_key="claude-acp:sonnet",
-                                instructions="hunt memecoins\n\ntrend playbook")
-        return build_tick_prompt(agent, {"execution_mode": "loop"}, {}, "", "", "", {},
-                                 tick_number=1, agent_id="memecoin_trender_2")
+    agent = SimpleNamespace(slug="memecoin_trender",
+                            agent_key="claude-acp:sonnet",
+                            instructions="hunt memecoins\n\ntrend playbook")
+    prompt = build_tick_prompt(agent, {"execution_mode": "loop"}, {}, "", "", "", {},
+                               tick_number=1, agent_id="memecoin_trender_2")
 
-    serverless = prompt(False)
-    assert "mcp-hummingbot" not in serverless
-    assert "mcp__mcp-hummingbot" not in serverless
-    assert "mcp__condor__manage_executors" in serverless
-    assert "controller_id" not in serverless
-
-    backed = prompt(True)
-    assert "mcp__mcp-hummingbot__manage_executors" in backed
-    assert "pre-configured" in backed
-    assert "controller_id" in backed
+    assert "mcp-hummingbot" not in prompt
+    assert "mcp__mcp-hummingbot" not in prompt
+    assert "mcp__condor__manage_executors" in prompt
+    assert "controller_id" not in prompt

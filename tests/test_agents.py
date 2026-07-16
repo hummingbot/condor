@@ -1,14 +1,12 @@
 """Unit tests for the unified Agent model (AGENT.md is the ONE spec, §5.3).
 
 Covers the FEAT-004 capabilities derived from a definition (consultable vs
-runnable), the shared per-Agent skill library, and the pydantic-ai tool
-allowlist.
+runnable), the risk-baseline requirement for trading agents, and the shared
+per-Agent skill library.
 """
 
 import asyncio
-from types import SimpleNamespace
 
-from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.agents import agent as agent_module
 from condor.agents.agent import AgentStore
 
@@ -123,17 +121,25 @@ def test_agent_crud_roundtrip(tmp_path, monkeypatch):
     assert store.get("river_maker") is None
 
 
-def test_server_backed_agent_requires_risk_baseline(tmp_path, monkeypatch):
-    """The AGENT.md defines what the agent does — a server-backed agent
-    without a risk baseline is an incomplete definition and must not save.
-    {0, 0} is the explicit read-only statement and is accepted."""
+def test_trading_agent_requires_risk_baseline(tmp_path, monkeypatch):
+    """The AGENT.md defines what the agent does — an agent that can trade
+    (declares manage_executors, or no tool scope at all) without a risk
+    baseline is an incomplete definition and must not save. {0, 0} is the
+    explicit read-only statement and is accepted."""
     import pytest
 
     _patch_roots(monkeypatch, tmp_path)
     store = AgentStore()
 
+    # Empty tool list = unrestricted = trading — needs a baseline.
     with pytest.raises(ValueError, match="risk_limits"):
         store.create(name="No Budget", instructions="x")
+
+    # Declaring manage_executors — needs a baseline.
+    with pytest.raises(ValueError, match="risk_limits"):
+        store.create(
+            name="Trader", instructions="x", tools=["manage_executors"]
+        )
 
     # Explicit read-only baseline is a complete definition.
     ro = store.create(
@@ -144,14 +150,29 @@ def test_server_backed_agent_requires_risk_baseline(tmp_path, monkeypatch):
     )
     assert store.get(ro.slug).risk_limits["max_open_executors"] == 0
 
-    # Serverless specialists need no baseline (nothing they touch trades).
-    s = store.create(name="Specialist", instructions="x", server_required=False)
+    # Specialists with a declared non-trading scope need no baseline.
+    s = store.create(
+        name="Specialist", instructions="x", tools=["manage_routines"]
+    )
     assert store.get(s.slug).risk_limits == {}
+    assert store.get(s.slug).can_trade is False
 
     # update() goes through the same check: stripping the baseline must fail.
     ro.risk_limits = {}
     with pytest.raises(ValueError, match="risk_limits"):
         store.update(ro)
+
+
+def test_can_trade_derivation():
+    from condor.agents.agent import Agent
+
+    assert Agent(slug="a", name="a", tools=[]).can_trade is True  # unrestricted
+    assert Agent(slug="a", name="a", tools=["manage_executors"]).can_trade is True
+    assert (
+        Agent(slug="a", name="a", tools=["mcp__condor__manage_executors"]).can_trade
+        is True
+    )
+    assert Agent(slug="a", name="a", tools=["manage_routines"]).can_trade is False
 
 
 # ── MCP tools: explicit agent CRUD (the AGENT.md identity, §8) ──
@@ -281,173 +302,6 @@ def test_agent_skill_library_read_and_edit(tmp_path, monkeypatch):
     assert "stop-or-widen" not in store.list_index()
 
 
-# ── pydantic-ai tool allowlist (enforced on consult) ──
-
-
-def test_allowlist_filters_bare_and_namespaced_names():
-    client = PydanticAIClient(
-        model="ollama:x", allowed_tools=["manage_executors", "get_market_data"]
-    )
-    defs = [
-        SimpleNamespace(name="manage_executors"),
-        SimpleNamespace(name="mcp__condor__get_market_data"),
-        SimpleNamespace(name="manage_bots"),
-        SimpleNamespace(name="place_order"),
-    ]
-    kept = asyncio.run(client._prepare_tools(None, defs))
-    assert sorted(d.name for d in kept) == [
-        "manage_executors",
-        "mcp__condor__get_market_data",
-    ]
-
-
-def test_no_allowlist_means_no_filter():
-    assert PydanticAIClient(model="ollama:x").allowed_tools is None
-
-
-# ── prompt_stream PromptDone sentinel (CORR-041) ──
-
-
-class _FakeRun:
-    """Minimal stand-in for pydantic-ai's agent run iterator."""
-
-    def __init__(self, nodes):
-        self._nodes = nodes
-        self.result = None
-
-    async def __aenter__(self):
-        return self
-
-    async def __aexit__(self, *exc):
-        return False
-
-    async def __aiter__(self):
-        for node in self._nodes:
-            yield node
-
-
-def _collect_prompt_stream(client):
-    async def _run():
-        return [event async for event in client.prompt_stream("hi")]
-
-    return asyncio.run(_run())
-
-
-def _prompt_done_reasons(events):
-    from condor.acp.client import PromptDone
-
-    return [e.stop_reason for e in events if isinstance(e, PromptDone)]
-
-
-def test_prompt_stream_success_emits_single_end_turn():
-    client = PydanticAIClient(model="ollama:x")
-    client._agent = SimpleNamespace(iter=lambda *a, **k: _FakeRun([]))
-    client._request_semaphore = asyncio.Semaphore(1)
-
-    events = _collect_prompt_stream(client)
-    assert _prompt_done_reasons(events) == ["end_turn"]
-
-
-def test_prompt_stream_error_emits_text_then_single_error():
-    from condor.acp.client import PromptDone, TextChunk
-
-    client = PydanticAIClient(model="ollama:x")
-
-    def _boom(*a, **k):
-        raise RuntimeError("kaboom")
-
-    client._agent = SimpleNamespace(iter=_boom)
-    client._request_semaphore = asyncio.Semaphore(1)
-
-    events = _collect_prompt_stream(client)
-    assert _prompt_done_reasons(events) == ["error"]
-    # The error path emits a TextChunk before the PromptDone(error) sentinel.
-    assert isinstance(events[0], TextChunk)
-    assert isinstance(events[-1], PromptDone)
-
-
-def test_prompt_stream_timeout_emits_single_timeout():
-    client = PydanticAIClient(model="ollama:x")
-
-    def _timeout(*a, **k):
-        raise asyncio.TimeoutError()
-
-    client._agent = SimpleNamespace(iter=_timeout)
-    client._request_semaphore = asyncio.Semaphore(1)
-
-    events = _collect_prompt_stream(client)
-    assert _prompt_done_reasons(events) == ["timeout"]
-
-
-def test_prompt_stream_runs_without_semaphore_for_cloud_providers():
-    # Cloud providers leave _request_semaphore None (PERF-038): prompt_stream
-    # must still work, with the serialization guard acting as a no-op.
-    client = PydanticAIClient(model="anthropic:claude-sonnet-4-6")
-    client._agent = SimpleNamespace(iter=lambda *a, **k: _FakeRun([]))
-    client._request_semaphore = None
-
-    events = _collect_prompt_stream(client)
-    assert _prompt_done_reasons(events) == ["end_turn"]
-
-
-# ── per-server slot released during human confirmation (PERF-029) ──
-
-
-def test_release_request_slot_frees_semaphore_during_wait():
-    # PERF-029: while one session blocks on a human confirmation, the global
-    # per-server slot must be free so a concurrent session on the same backend
-    # can proceed instead of stalling for the whole confirmation timeout.
-    async def _run():
-        sem = asyncio.Semaphore(1)
-        client = PydanticAIClient(model="ollama:x")
-        client._request_semaphore = sem
-
-        await sem.acquire()  # this session holds the only slot
-        assert sem.locked()
-
-        async with client._release_request_slot():
-            # During the "human is deciding" window the slot is free…
-            assert not sem.locked()
-            # …and a concurrent session can grab it.
-            await asyncio.wait_for(sem.acquire(), timeout=0.1)
-            sem.release()
-        # Re-acquired before returning, so model HTTP work stays serialized.
-        assert sem.locked()
-
-    asyncio.run(_run())
-
-
-def test_release_request_slot_noop_for_cloud_providers():
-    # PERF-038: cloud providers keep _request_semaphore None; the release helper
-    # must be a no-op rather than crash on a None semaphore.
-    async def _run():
-        client = PydanticAIClient(model="anthropic:claude-sonnet-4-6")
-        client._request_semaphore = None
-        async with client._release_request_slot():
-            pass
-
-    asyncio.run(_run())
-
-
-def test_resolve_base_url_distinguishes_cloud_from_local_backends():
-    # PERF-038: only backends with a resolved base URL get serialized. Cloud
-    # providers pydantic-ai resolves natively return None (no semaphore).
-    from condor.acp.pydantic_ai_client import resolve_base_url
-
-    # Cloud providers -> no base URL -> run concurrently (no semaphore).
-    assert resolve_base_url("anthropic:claude-sonnet-4-6") is None
-    assert resolve_base_url("groq:llama-3.3-70b-versatile") is None
-    assert resolve_base_url("openai:gpt-4o") is None
-
-    # Local / custom backends -> base URL -> stay serialized.
-    assert resolve_base_url("ollama:llama3.1") == "http://localhost:11434/v1"
-    assert resolve_base_url("lmstudio:qwen-14b") == "http://localhost:1234/v1"
-    assert (
-        resolve_base_url("openai:my-model", "http://localhost:8000/v1")
-        == "http://localhost:8000/v1"
-    )
-
-
 def test_assistant_routines_dir_layout():
     from routines.base import assistant_routines_dir
 
@@ -547,86 +401,6 @@ def test_resolve_model_id_matching():
     assert resolve_model_id("nonsense", models) is None
     assert resolve_model_id("", models) is None
     assert resolve_model_id("sonnet", []) is None
-
-
-def test_claude_acp_takes_acp_path_not_pydantic_ai():
-    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
-
-    assert is_pydantic_ai_model("claude-acp:opus") is False  # ACP subprocess path
-    assert is_pydantic_ai_model("anthropic:claude-opus-4-8") is True  # API path
-    assert is_pydantic_ai_model("ollama:qwen3:32b") is True
-
-
-# ── consult endpoint authorization (SEC-035) ──
-
-
-def _consult_request(**kw):
-    from condor.web.routes.agents import ConsultRequest
-
-    kw.setdefault("task", "what's my balance?")
-    return ConsultRequest(**kw)
-
-
-def _web_user(uid):
-    return SimpleNamespace(id=uid, username="", first_name="", role="user")
-
-
-def test_consult_denies_server_without_access(monkeypatch):
-    """A user without access to server 'X' gets 403 and run_consult is not called."""
-    import config_manager
-    from condor.agents import consult as consult_module
-    from condor.web.routes import agents as agents_module
-
-    called = {"run": False}
-
-    async def _fail_run_consult(**kw):  # pragma: no cover - must not be reached
-        called["run"] = True
-        return "should not run"
-
-    monkeypatch.setattr(consult_module, "run_consult", _fail_run_consult)
-    monkeypatch.setattr(
-        config_manager,
-        "get_config_manager",
-        lambda: SimpleNamespace(has_server_access=lambda uid, name: False),
-    )
-
-    from fastapi import HTTPException
-
-    req = _consult_request(server_name="X", user_id=999)
-    try:
-        asyncio.run(agents_module.consult_agent("em", req, user=_web_user(42)))
-        assert False, "expected 403"
-    except HTTPException as exc:
-        assert exc.status_code == 403
-    assert called["run"] is False  # no MCP client built for X
-
-
-def test_consult_forces_caller_user_id(monkeypatch):
-    """An accessible-server consult runs, but user_id is forced to the caller's."""
-    import config_manager
-    from condor.agents import consult as consult_module
-    from condor.web.routes import agents as agents_module
-
-    seen = {}
-
-    async def _capture_run_consult(**kw):
-        seen.update(kw)
-        return "ok"
-
-    monkeypatch.setattr(consult_module, "run_consult", _capture_run_consult)
-    monkeypatch.setattr(
-        config_manager,
-        "get_config_manager",
-        lambda: SimpleNamespace(has_server_access=lambda uid, name: True),
-    )
-
-    # Caller is 42 but tries to impersonate user 999.
-    req = _consult_request(server_name="X", user_id=999)
-    result = asyncio.run(agents_module.consult_agent("em", req, user=_web_user(42)))
-
-    assert result["answer"] == "ok"
-    assert seen["user_id"] == 42  # caller's id, not the 999 override
-    assert seen["server_name"] == "X"
 
 
 def test_condor_brain_loads_from_repo_root():

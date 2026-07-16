@@ -47,14 +47,9 @@ class RiskLimitsConfig(BaseModel):
 
 
 class AgentConfig(BaseModel):
-    server_name: str = Field(default="local", description="Hummingbot API server name")
     agent_key: str = Field(
         default="",
-        description="LLM model to use (e.g. 'claude-code', 'ollama:llama3.1'). Empty = use strategy default.",
-    )
-    model_base_url: str = Field(
-        default="",
-        description="Custom base URL for OpenAI-compatible endpoints (LM Studio, vLLM). Leave empty for standard providers.",
+        description="LLM model to use (e.g. 'claude-code', 'claude-acp:sonnet'). Empty = use agent default.",
     )
     total_amount_quote: float = Field(
         default=100.0,
@@ -78,12 +73,6 @@ class AgentConfig(BaseModel):
         description="On plain stop: True (default) detaches — positions stay "
         "open, unmanaged; False closes them out. Liquidation is otherwise "
         "reserved for the explicit shutdown escalation.",
-    )
-    bot_name: str = Field(
-        default="",
-        description="If set, the agent operates this Hummingbot bot's controllers "
-        "(deploy/retune) instead of creating standalone executors, and the bot's "
-        "PnL is merged into the agent's reported performance. Empty = executor mode.",
     )
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 

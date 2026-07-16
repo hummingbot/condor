@@ -4,8 +4,8 @@ Covers the lifecycle (running -> done/error/stopped), result capture, the flat
 transcript persistence (delegations/{date}-dN.md: husk at start, full rewrite
 in finally — refactor-07), the completion notification, and the refactor-02
 authorization flip: trading agents run under a zero-seeded risk_gate (AGENT.md
-baseline or per-call override, loud error with neither), serverless agents
-keep full auto-approve.
+baseline or per-call override, loud error with neither), non-trading
+specialists keep full auto-approve.
 """
 
 import asyncio
@@ -32,12 +32,13 @@ class _FakeBot:
         self.messages.append(kw.get("text") or (a[1] if len(a) > 1 else ""))
 
 
-def _write_agent(root, slug, *, server_required=False, risk_limits=None, tools=None):
+def _write_agent(root, slug, *, risk_limits=None, tools=("manage_routines",)):
+    """Write an AGENT.md. Default tools are a declared NON-trading scope; pass
+    tools=() for an unrestricted (⇒ trading) agent or an explicit list."""
     d = root / slug
     d.mkdir(parents=True, exist_ok=True)
-    fm = [f"name: {slug}", "when_to_consult: always",
-          f"server_required: {str(server_required).lower()}"]
-    if tools is not None:
+    fm = [f"name: {slug}", "when_to_consult: always"]
+    if tools:
         fm.append("tools:")
         for t in tools:
             fm.append(f"- {t}")
@@ -105,7 +106,6 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
             agent_slug="scout",
             user_id=1,
             chat_id=42,
-            server_name=None,
             task="scan SOL pools",
             bot=bot,
         )
@@ -157,7 +157,6 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
             agent_slug="scout",
             user_id=1,
             chat_id=42,
-            server_name=None,
             task="do thing",
             bot=bot,
         )
@@ -190,7 +189,6 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
             agent_slug="scout",
             user_id=1,
             chat_id=42,
-            server_name=None,
             task="long task",
             bot=bot,
         )
@@ -222,7 +220,6 @@ def test_unknown_agent_errors_at_start(tmp_path, monkeypatch):
                 agent_slug="ghost",
                 user_id=1,
                 chat_id=42,
-                server_name=None,
                 task="x",
             )
         )
@@ -233,7 +230,8 @@ def test_unknown_agent_errors_at_start(tmp_path, monkeypatch):
 
 def test_trading_delegation_without_limits_errors_loudly(tmp_path, monkeypatch):
     _patch_roots(monkeypatch, tmp_path)
-    _write_agent(tmp_path, "trader", server_required=True)  # no baseline
+    # No tool scope declared = unrestricted = trading, and no baseline.
+    _write_agent(tmp_path, "trader", tools=())
 
     with pytest.raises(ValueError, match="risk baseline"):
         asyncio.run(
@@ -241,7 +239,6 @@ def test_trading_delegation_without_limits_errors_loudly(tmp_path, monkeypatch):
                 agent_slug="trader",
                 user_id=1,
                 chat_id=42,
-                server_name="srv",
                 task="deploy a bot",
             )
         )
@@ -251,12 +248,12 @@ def test_trading_delegation_without_limits_errors_loudly(tmp_path, monkeypatch):
     )
 
 
-def test_serverless_trading_agent_without_baseline_errors(tmp_path, monkeypatch):
-    """#4: a SERVERLESS agent that owns manage_executors can still move real
-    capital via condor-native executors, so it must carry a baseline — a
-    delegation with none must error loudly, not silently auto-approve."""
+def test_executor_owning_agent_without_baseline_errors(tmp_path, monkeypatch):
+    """#4: an agent that owns manage_executors can move real capital via
+    condor-native executors, so it must carry a baseline — a delegation with
+    none must error loudly, not silently auto-approve."""
     _patch_roots(monkeypatch, tmp_path)
-    _write_agent(tmp_path, "native_trader", server_required=False,
+    _write_agent(tmp_path, "native_trader",
                  tools=["manage_executors"])  # trades, but no baseline
 
     with pytest.raises(ValueError, match="risk baseline"):
@@ -265,7 +262,6 @@ def test_serverless_trading_agent_without_baseline_errors(tmp_path, monkeypatch)
                 agent_slug="native_trader",
                 user_id=1,
                 chat_id=42,
-                server_name="",
                 task="open a position",
             )
         )
@@ -276,7 +272,7 @@ def test_trading_delegation_uses_agent_baseline(tmp_path, monkeypatch):
     _write_agent(
         tmp_path,
         "trader",
-        server_required=True,
+        tools=["manage_executors"],
         risk_limits={"max_position_size_quote": 500, "max_open_executors": 5},
     )
 
@@ -293,7 +289,6 @@ def test_trading_delegation_uses_agent_baseline(tmp_path, monkeypatch):
             agent_slug="trader",
             user_id=1,
             chat_id=42,
-            server_name="srv",
             task="deploy",
             bot=_FakeBot(),
         )
@@ -307,15 +302,15 @@ def test_trading_delegation_uses_agent_baseline(tmp_path, monkeypatch):
     assert seen["permission_policy"] is not None
 
 
-def test_serverless_agent_with_baseline_is_risk_gated(tmp_path, monkeypatch):
-    """A SERVERLESS agent with an AGENT.md risk baseline must be gated: it can
-    trade through condor-native executors (gateway venues), so server_required
-    alone is not the trading test."""
+def test_agent_with_baseline_is_risk_gated_even_without_executor_tool(
+    tmp_path, monkeypatch
+):
+    """An agent with an AGENT.md risk baseline must be gated regardless of its
+    declared tool scope — the baseline is the operator saying "bound this"."""
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(
         tmp_path,
         "lp_agent",
-        server_required=False,
         risk_limits={"max_position_size_quote": 50, "max_open_executors": 2},
     )
 
@@ -332,7 +327,6 @@ def test_serverless_agent_with_baseline_is_risk_gated(tmp_path, monkeypatch):
             agent_slug="lp_agent",
             user_id=1,
             chat_id=42,
-            server_name=None,
             task="open an LP position",
             bot=_FakeBot(),
         )
@@ -344,11 +338,11 @@ def test_serverless_agent_with_baseline_is_risk_gated(tmp_path, monkeypatch):
     assert seen["permission_policy"] is not None  # gated, never AUTO
 
 
-def test_serverless_agent_explicit_caps_not_discarded(tmp_path, monkeypatch):
-    """Per-call caps on a serverless delegation must govern the run (they were
-    silently dropped before the condor-simple fix)."""
+def test_explicit_caps_not_discarded(tmp_path, monkeypatch):
+    """Per-call caps on a delegation must govern the run (they were silently
+    dropped before the condor-simple fix)."""
     _patch_roots(monkeypatch, tmp_path)
-    _write_agent(tmp_path, "lp_agent", server_required=False)  # no baseline
+    _write_agent(tmp_path, "lp_agent")  # non-trading scope, no baseline
 
     seen = {}
 
@@ -363,7 +357,6 @@ def test_serverless_agent_explicit_caps_not_discarded(tmp_path, monkeypatch):
             agent_slug="lp_agent",
             user_id=1,
             chat_id=42,
-            server_name=None,
             task="open an LP position",
             bot=_FakeBot(),
             risk_limits={"max_position_size_quote": 5},
@@ -376,10 +369,11 @@ def test_serverless_agent_explicit_caps_not_discarded(tmp_path, monkeypatch):
     assert seen["permission_policy"] is not None
 
 
-def test_serverless_agent_without_baseline_stays_auto(tmp_path, monkeypatch):
-    """True serverless specialists (no baseline, no caps) keep full auto-approve."""
+def test_non_trading_specialist_without_baseline_stays_auto(tmp_path, monkeypatch):
+    """Specialists with a declared non-trading scope (no baseline, no caps)
+    keep full auto-approve."""
     _patch_roots(monkeypatch, tmp_path)
-    _write_agent(tmp_path, "builder", server_required=False)
+    _write_agent(tmp_path, "builder")
 
     seen = {}
 
@@ -394,7 +388,6 @@ def test_serverless_agent_without_baseline_stays_auto(tmp_path, monkeypatch):
             agent_slug="builder",
             user_id=1,
             chat_id=42,
-            server_name=None,
             task="build a routine",
             bot=_FakeBot(),
         )
@@ -411,7 +404,7 @@ def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
     _write_agent(
         tmp_path,
         "trader",
-        server_required=True,
+        tools=["manage_executors"],
         risk_limits={"max_position_size_quote": 500},
     )
 
@@ -425,7 +418,6 @@ def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
             agent_slug="trader",
             user_id=1,
             chat_id=42,
-            server_name="srv",
             task="deploy with more room",
             bot=_FakeBot(),
             risk_limits={"max_position_size_quote": 2000},
@@ -441,14 +433,15 @@ def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
     assert started["payload"]["risk_limits"]["max_position_size_quote"] == 2000
 
 
-def test_zero_seeded_gate_blocks_uncapped_deploy_and_place_order(tmp_path, monkeypatch):
-    """End-to-end policy check: the delegation's risk_gate cancels an uncapped
-    bot deploy and a direct place_order, and approves a capped deploy."""
+def test_zero_seeded_gate_bounds_native_creates(tmp_path, monkeypatch):
+    """End-to-end policy check: the delegation's risk_gate cancels a native
+    create over the position cap (and one whose risk can't be computed — fail
+    closed), and approves an in-cap create."""
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(
         tmp_path,
         "trader",
-        server_required=True,
+        tools=["manage_executors"],
         risk_limits={"max_position_size_quote": 500},
     )
 
@@ -462,35 +455,46 @@ def test_zero_seeded_gate_blocks_uncapped_deploy_and_place_order(tmp_path, monke
 
     options = [{"kind": "allow_once", "optionId": "allow"}]
 
+    def _create(config):
+        return {
+            "tool": "manage_executors",
+            "input": {
+                "action": "create",
+                "executor_type": "position_pred",
+                "config": config,
+            },
+        }
+
     async def scenario():
         dt = await start_delegation(
             agent_slug="trader",
             user_id=1,
             chat_id=42,
-            server_name="srv",
             task="deploy",
             bot=_FakeBot(),
         )
         await _drain(dt)
         policy = captured["policy"]
 
-        uncapped = await policy(
-            {"tool": "manage_bots", "input": {"action": "deploy"}}, options
+        over_cap = await policy(
+            _create({"market": "world-cup", "amount_quote": 600}), options
         )
-        capped = await policy(
+        in_cap = await policy(
+            _create({"market": "world-cup", "amount_quote": 100}), options
+        )
+        unknown = await policy(
             {
-                "tool": "manage_bots",
-                "input": {"action": "deploy", "max_global_drawdown_quote": 100},
+                "tool": "manage_executors",
+                "input": {"action": "create", "executor_type": "mystery"},
             },
             options,
         )
-        order = await policy({"tool": "place_order", "input": {}}, options)
-        return uncapped, capped, order
+        return over_cap, in_cap, unknown
 
-    uncapped, capped, order = asyncio.run(scenario())
-    assert uncapped["outcome"]["outcome"] == "cancelled"
-    assert capped["outcome"]["outcome"] == "selected"
-    assert order["outcome"]["outcome"] == "cancelled"
+    over_cap, in_cap, unknown = asyncio.run(scenario())
+    assert over_cap["outcome"]["outcome"] == "cancelled"
+    assert in_cap["outcome"]["outcome"] == "selected"
+    assert unknown["outcome"]["outcome"] == "cancelled"  # fail closed
 
 
 def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
@@ -528,7 +532,6 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
             agent_slug="scout",
             user_id=1,
             chat_id=42,
-            server_name=None,
             task="scan SOL pools",
             bot=_FakeBot(),
         )

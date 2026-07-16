@@ -1,16 +1,13 @@
-"""Core data provider: Condor-native executors (gateway-backed).
+"""Core data provider: Condor-native executors.
 
 Reads the executor store directly — the provider runs in the main
-process, same as the runtime. Mirrors the reporting shape of the
-hummingbot ``executors`` provider so the journal and prompt summaries
-treat both venues uniformly.
+process, same as the runtime.
 """
 
 from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
-from typing import Any
 
 from . import register_provider
 from .base import BaseProvider, ProviderResult
@@ -249,7 +246,7 @@ class NativeExecutorsProvider(BaseProvider):
     is_core = True
 
     async def execute(
-        self, client: Any, config: dict, agent_id: str = "", agent_slug: str = ""
+        self, config: dict, agent_id: str = "", agent_slug: str = ""
     ) -> ProviderResult:
         from condor.executors.service import get_executor_runtime
 

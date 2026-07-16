@@ -158,7 +158,6 @@ def _condor_mcp_args(
     chat_id: int | str,
     user_id: int,
     agent_slug: str | None = None,
-    server_name: str | None = None,
     agent_id: str | None = None,
     capability: str | None = None,
 ) -> list[str]:
@@ -185,294 +184,75 @@ def _condor_mcp_args(
         # subprocess carries; ExecutionService derives attribution from the
         # server-side entry, never from these args.
         args.extend(["--capability", capability])
-    if server_name:
-        args.extend(["--server-name", server_name])
     return args
 
 
 def build_mcp_servers_for_session(
     user_id: int,
     chat_id: int | str,
-    user_data: dict | None = None,
     execution_mode: str = "loop",
-    server_name: str | None = None,
     agent_slug: str | None = None,
     agent_id: str | None = None,
     capability: str | None = None,
-    include_hummingbot: bool = True,
 ) -> list[dict[str, Any]]:
-    """Build dynamic MCP server configs for an agent session.
-
-    ``include_hummingbot=False`` returns the condor MCP alone — REQUIRED for
-    serverless agents: with both servers wired, the model sees two
-    ``manage_executors`` tools (condor-native vs hummingbot-api) with
-    incompatible schemas and picks wrong.
-
-    Resolves the user's default Condor server and returns ACP-format mcpServers
-    that override the static .mcp.json entries by name.
-    Always includes the condor MCP server; hummingbot is added when a valid
-    server can be resolved for the user.
+    """Build the MCP server configs for an agent/chat session: the condor MCP
+    alone (§9.2 — every agent is condor-native).
 
     ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
     own stores (``agents/{slug}/``). Without it the tools target the chat
     condor's stores — correct for chat sessions, wrong for an Agent run: a
-    serverless consult/tick would silently read and write the CHAT's memory
-    and skills instead of the Agent's own (e.g. routine_builder unable to
-    find its routine-cookbook skill).
+    consult/tick would silently read and write the CHAT's memory and skills
+    instead of the Agent's own (e.g. routine_builder unable to find its
+    routine-cookbook skill).
     """
-    from config_manager import get_config_manager, get_effective_server
-
-    cm = get_config_manager()
-
-    if not include_hummingbot:
-        return [
-            {
-                "name": "condor",
-                "command": "uv",
-                "args": ["run", "python", "-m", "mcp_servers.condor"]
-                + _condor_mcp_args(
-                    chat_id, user_id, agent_slug, agent_id=agent_id,
-                    capability=capability,
-                ),
-                "env": [],
-            }
-        ]
-
-    # Resolve which hummingbot server to use (explicit override > user preferences)
-    if not server_name:
-        server_name = get_effective_server(chat_id, user_data)
-    if not server_name:
-        accessible = cm.get_accessible_servers(user_id)
-        server_name = accessible[0] if accessible else None
-
-    # Condor MCP -- runs as stdio subprocess, tools work locally without TCP bridge
-    # Pass resolved server_name so start_agent uses the correct server
-    condor = {
-        "name": "condor",
-        "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(
-            chat_id, user_id, agent_slug, server_name=server_name,
-            agent_id=agent_id, capability=capability,
-        ),
-        "env": [],
-    }
-
-    if not server_name:
-        log.warning(
-            "No accessible server for user %s (chat %s) — "
-            "agent will start without mcp-hummingbot",
-            user_id,
-            chat_id,
-        )
-        return [condor]
-
-    server = cm.get_server(server_name)
-    if not server:
-        log.warning(
-            "Server '%s' resolved for user %s but not found in servers config — "
-            "agent will start without mcp-hummingbot",
-            server_name,
-            user_id,
-        )
-        return [condor]
-
-    api_url = f"http://{server['host']}:{server['port']}"
-
-    mcp_hummingbot = {
-        "name": "mcp-hummingbot",
-        "command": "uv",
-        "args": [
-            "run",
-            "python",
-            "-m",
-            "mcp_servers.hummingbot_api",
-            "--url",
-            api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
-            "--server-name",
-            server_name,
-        ],
-        "env": [],
-    }
-
-    return [mcp_hummingbot, condor]
-
-
-def build_mcp_servers_for_agent(
-    server_name: str,
-    user_id: int,
-    chat_id: int,
-    agent_slug: str | None = None,
-    execution_mode: str = "loop",
-    agent_id: str | None = None,
-    capability: str | None = None,
-) -> list[dict[str, Any]]:
-    """Build MCP server configs for a trading agent bound to a specific server.
-
-    Unlike build_mcp_servers_for_session(), this resolves the server by name
-    directly instead of using chat-based resolution.
-    Always includes the condor MCP server.
-    """
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-
-    condor = {
-        "name": "condor",
-        "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(
-            chat_id, user_id, agent_slug, server_name=server_name,
-            agent_id=agent_id, capability=capability,
-        ),
-        "env": [],
-    }
-
-    server = cm.get_server(server_name)
-    if not server:
-        log.warning(
-            "Server '%s' not found in servers config — "
-            "trading agent will start without mcp-hummingbot",
-            server_name,
-        )
-        return [condor]
-
-    api_url = f"http://{server['host']}:{server['port']}"
-
-    mcp_hummingbot = {
-        "name": "mcp-hummingbot",
-        "command": "uv",
-        "args": [
-            "run",
-            "python",
-            "-m",
-            "mcp_servers.hummingbot_api",
-            "--url",
-            api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
-            "--server-name",
-            server_name,
-        ],
-        "env": [],
-    }
-
-    return [mcp_hummingbot, condor]
+    return [
+        {
+            "name": "condor",
+            "command": "uv",
+            "args": ["run", "python", "-m", "mcp_servers.condor"]
+            + _condor_mcp_args(
+                chat_id, user_id, agent_slug, agent_id=agent_id,
+                capability=capability,
+            ),
+            "env": [],
+        }
+    ]
 
 
 def build_initial_context(
     user_id: int,
     chat_id: int | str,
-    user_data: dict | None = None,
     agent_key: str | None = None,
     platform: str = "telegram",
-    server_name: str | None = None,
 ) -> str:
-    """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
-    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
-    from config_manager import (
-        get_config_manager,
-        get_effective_server,
-    )
-
-    cm = get_config_manager()
-
+    """Build an initial context prompt: the chat brain, tool preload, memory/
+    skills/agents indexes, and platform formatting rules."""
     # Build system prompt from CONDOR.md + platform formatting
     system_prompt = _build_system_prompt(platform)
     sections: list[str] = [system_prompt]
 
-    # Resolve active server (explicit override > user preferences)
-    active_name = server_name or get_effective_server(chat_id, user_data)
-    accessible = cm.get_accessible_servers(user_id)
-    if not active_name:
-        active_name = accessible[0] if accessible else None
-
-    if active_name:
-        # Build server list with permissions (no credentials needed — MCP is pre-configured)
-        server_lines: list[str] = []
-        for name in accessible:
-            server = cm.get_server(name)
-            if not server:
-                continue
-            perm = cm.get_server_permission(user_id, name)
-            perm_label = perm.value.upper() if perm else "UNKNOWN"
-            active_tag = " (active)" if name == active_name else ""
-            server_lines.append(f"- {name}{active_tag} [{perm_label}]")
-
-        # Get active server permission for enforcement
-        active_perm = cm.get_server_permission(user_id, active_name)
-        active_perm_label = active_perm.value.upper() if active_perm else "UNKNOWN"
-
-        # For ACP agents (Claude Code): instruct them to preload MCP tools via ToolSearch
-        # Pydantic-ai agents get tools directly, no preload needed
-        tool_preload_hint = ""
-        if agent_key and not is_pydantic_ai_model(agent_key):
-            mcp_tools = [
-                "mcp__mcp-hummingbot__get_market_data",
-                "mcp__mcp-hummingbot__get_portfolio_overview",
-                "mcp__mcp-hummingbot__manage_executors",
-                "mcp__mcp-hummingbot__manage_bots",
-                "mcp__mcp-hummingbot__manage_controllers",
-                "mcp__mcp-hummingbot__explore_dex_pools",
-                "mcp__mcp-hummingbot__explore_geckoterminal",
-                "mcp__mcp-hummingbot__manage_gateway_swaps",
-                "mcp__mcp-hummingbot__manage_gateway_config",
-                "mcp__mcp-hummingbot__manage_gateway_container",
-                "mcp__mcp-hummingbot__search_history",
-                "mcp__mcp-hummingbot__set_account_position_mode_and_leverage",
-                "mcp__condor__manage_routines",
-                "mcp__condor__list_agents",
-                "mcp__condor__get_agent",
-                "mcp__condor__run_agent",
-                "mcp__condor__list_runs",
-                "mcp__condor__get_run",
-                "mcp__condor__control_run",
-                "mcp__condor__resolve_approval",
-                "mcp__condor__send_notification",
-                "mcp__condor__manage_memory",
-                "mcp__condor__manage_skill",
-            ]
-            tool_preload_hint = (
-                "IMPORTANT: At the very start of the session (before your first response), "
-                "load ALL MCP tools in a single ToolSearch call:\n"
-                f'ToolSearch(query="select:{",".join(mcp_tools)}")\n'
-                "This avoids repeated ToolSearch calls that waste context tokens. "
-                "Do this silently without telling the user."
-            )
-
-        # Build server info section
-        server_info = [
-            f"Active server: {active_name} (permission: {active_perm_label})",
-            "The MCP server is already connected to this server. Do NOT call configure_server — it is pre-configured.",
-            "",
-        ]
-
-        if tool_preload_hint:
-            server_info.extend([tool_preload_hint, ""])
-
-        server_info.extend(
-            [
-                "Available servers:",
-                *server_lines,
-                "",
-                "Server switching is not supported mid-session. If the user wants a different server, "
-                "tell them to start a new session with that server selected.",
-                "",
-                "Permission rules:",
-                f"- Your current permission on '{active_name}' is {active_perm_label}.",
-                "- OWNER: Full access including trading operations and server management.",
-                "- TRADER: Can trade, view balances, and manage own settings.",
-                "- Enforce the permission level for this server.",
-            ]
-        )
-
-        sections.append("\n".join(server_info))
+    # ACP sessions load MCP tools via ToolSearch — preload them all in one call.
+    mcp_tools = [
+        "mcp__condor__manage_executors",
+        "mcp__condor__manage_routines",
+        "mcp__condor__list_agents",
+        "mcp__condor__get_agent",
+        "mcp__condor__run_agent",
+        "mcp__condor__list_runs",
+        "mcp__condor__get_run",
+        "mcp__condor__control_run",
+        "mcp__condor__resolve_approval",
+        "mcp__condor__send_notification",
+        "mcp__condor__manage_memory",
+        "mcp__condor__manage_skill",
+    ]
+    sections.append(
+        "IMPORTANT: At the very start of the session (before your first response), "
+        "load ALL MCP tools in a single ToolSearch call:\n"
+        f'ToolSearch(query="select:{",".join(mcp_tools)}")\n'
+        "This avoids repeated ToolSearch calls that waste context tokens. "
+        "Do this silently without telling the user."
+    )
 
     # User memory index — what the chat assistant remembers about this user. This
     # store is the chat's own (FEAT-003), not shared with the user's trading

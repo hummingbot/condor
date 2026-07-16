@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from .base import BaseProvider, ProviderResult
 
@@ -15,9 +14,7 @@ _REGISTRY: dict[str, BaseProvider] = {}
 
 def _auto_register() -> None:
     """Import built-in provider modules."""
-    from . import executors  # noqa: F401
     from . import native_executors  # noqa: F401
-    from . import positions  # noqa: F401
 
 
 def register_provider(provider: BaseProvider) -> None:
@@ -45,7 +42,7 @@ class ProviderRegistry:
     """Convenience wrapper used by TickEngine."""
 
     async def run_core_providers(
-        self, client: Any, config: dict, agent_id: str = "", agent_slug: str = ""
+        self, config: dict, agent_id: str = "", agent_slug: str = ""
     ) -> dict[str, ProviderResult]:
         """Run all core providers and return {name: ProviderResult} dict."""
         if not _REGISTRY:
@@ -55,7 +52,7 @@ class ProviderRegistry:
         for provider in list_core_providers():
             try:
                 result = await provider.execute(
-                    client, config, agent_id=agent_id, agent_slug=agent_slug
+                    config, agent_id=agent_id, agent_slug=agent_slug
                 )
                 results[result.name] = result
             except Exception:
@@ -65,9 +62,9 @@ class ProviderRegistry:
                 )
         return results
 
-    async def run_provider(self, name: str, client: Any, config: dict) -> ProviderResult | None:
+    async def run_provider(self, name: str, config: dict) -> ProviderResult | None:
         """Run a single provider by name."""
         provider = get_provider(name)
         if not provider:
             return None
-        return await provider.execute(client, config)
+        return await provider.execute(config)

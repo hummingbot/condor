@@ -35,7 +35,9 @@ def client():
     prev = os.environ.get("CONDOR_CONTROL_SOCKET")
     os.environ["CONDOR_CONTROL_SOCKET"] = f"/tmp/condor-spa-{uuid.uuid4().hex[:8]}.sock"
     try:
-        with TestClient(create_app()) as test_client:
+        # base_url must be loopback: the §5.5 posture middleware rejects
+        # non-loopback Host headers (TestClient defaults to "testserver").
+        with TestClient(create_app(), base_url="http://127.0.0.1") as test_client:
             yield test_client
     finally:
         if prev is None:

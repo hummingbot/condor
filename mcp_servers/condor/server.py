@@ -25,7 +25,7 @@ def _build_instructions() -> str:
     An external MCP client (Claude Code, Cursor, …) only receives a flat list of
     tool names — it never sees Condor's skills/agents indexes, which are injected
     only into the in-bot `/agent` brain prompt. Without this, the host reaches for
-    whatever obvious tool is in scope (e.g. a raw `manage_bots`) instead of the
+    whatever obvious tool is in scope (e.g. a raw `manage_executors`) instead of the
     matching Condor playbook. We embed the live indexes here so any host can route
     a request to the right skill/agent. Built once at import; cheap and read-only.
     """
@@ -128,15 +128,15 @@ async def delegate(
     it for "go build/scan/produce X and ping me when finished" (e.g. "create a
     routine that scans SOL pools").
 
-    Authorization: a delegation to a TRADING agent (one that needs a hummingbot
-    server, has an AGENT.md risk_limits baseline, or is given caps here) runs under a
-    zero-seeded risk gate — tool calls auto-approve within caps, uncapped bot
-    deploys and place_order are blocked. The caps come from the optional
-    risk_limits arg when given (it REPLACES the agent's AGENT.md baseline for
-    this one run — what you pass is exactly what governs), else the baseline. A
-    trading delegation with neither errors at start; "unbounded" is expressed by
-    passing explicitly large caps. Serverless agents (e.g. routine_builder) run
-    with full auto-approve.
+    Authorization: a delegation to a TRADING agent (one that has an AGENT.md
+    risk_limits baseline, is given caps here, or can reach manage_executors —
+    declaring it, or declaring no tool scope at all) runs under a zero-seeded
+    risk gate — tool calls auto-approve within caps. The caps come from the
+    optional risk_limits arg when given (it REPLACES the agent's AGENT.md
+    baseline for this one run — what you pass is exactly what governs), else
+    the baseline. A trading delegation with neither errors at start;
+    "unbounded" is expressed by passing explicitly large caps. Non-trading
+    specialists (e.g. routine_builder) run with full auto-approve.
 
     The user tracks a delegation in Telegram with the /delegations command (NOT
     "/task" — that does not exist) and is pinged automatically when it finishes.
@@ -404,8 +404,6 @@ async def create_agent(
     agent_key: str = "",
     tools: list[str] | None = None,
     when_to_consult: str = "",
-    server_required: bool = True,
-    server_name: str = "",
     risk_limits: dict | None = None,
     denomination: str = "",
     default_config: dict | None = None,
@@ -424,10 +422,9 @@ async def create_agent(
         description: One-line purpose.
         instructions: The strategy/playbook body (markdown).
         agent_key: Model key (default: the platform default).
-        tools: Declared tool scope; empty = unrestricted.
+        tools: Declared tool scope; empty = unrestricted (and therefore
+            trading — an agent that can trade must declare risk_limits).
         when_to_consult: When the chat brain should consult this agent.
-        server_required: Needs a hummingbot server (False = serverless).
-        server_name: Pinned server (optional).
         risk_limits: {max_position_size_quote, max_open_executors,
             max_drawdown_pct?, shutdown_drawdown_pct?}.
         denomination: Numeraire for risk limits (e.g. "USDC", "SOL").
@@ -442,8 +439,6 @@ async def create_agent(
         agent_key=agent_key,
         tools=tools,
         when_to_consult=when_to_consult,
-        server_required=server_required,
-        server_name=server_name,
         risk_limits=risk_limits,
         denomination=denomination,
         default_config=default_config,
@@ -462,8 +457,6 @@ async def update_agent(
     agent_key: str | None = None,
     tools: list[str] | None = None,
     when_to_consult: str | None = None,
-    server_required: bool | None = None,
-    server_name: str | None = None,
     risk_limits: dict | None = None,
     denomination: str | None = None,
     default_config: dict | None = None,
@@ -482,8 +475,6 @@ async def update_agent(
         agent_key=agent_key,
         tools=tools,
         when_to_consult=when_to_consult,
-        server_required=server_required,
-        server_name=server_name,
         risk_limits=risk_limits,
         denomination=denomination,
         default_config=default_config,

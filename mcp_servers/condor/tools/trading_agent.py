@@ -14,7 +14,6 @@ exactly once (§5.2).
 """
 
 from mcp_servers.condor.condor_client import call_control
-from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
 
 
@@ -58,8 +57,6 @@ async def create_agent(
     agent_key: str = "",
     tools: list[str] | None = None,
     when_to_consult: str = "",
-    server_required: bool = True,
-    server_name: str = "",
     risk_limits: dict | None = None,
     denomination: str = "",
     default_config: dict | None = None,
@@ -77,8 +74,6 @@ async def create_agent(
             "agent_key": agent_key,
             "tools": tools or [],
             "when_to_consult": when_to_consult,
-            "server_required": server_required,
-            "server_name": server_name,
             "risk_limits": risk_limits or {},
             "denomination": denomination,
             "default_config": default_config or {},
@@ -135,31 +130,13 @@ async def run_agent(
     if not agent_slug:
         return {"error": "agent_slug is required"}
 
-    # Existence check + the agent's pinned server. Launch defaults and risk
-    # merging are owned by the main-process service (§5.3) — we only send
-    # the caller's overrides.
-    result = await call_control("agent.get", {"slug": agent_slug})
-    owner = result.get("agent", {}) if isinstance(result, dict) else {}
+    # Existence check. Launch defaults and risk merging are owned by the
+    # main-process service (§5.3) — we only send the caller's overrides.
+    await call_control("agent.get", {"slug": agent_slug})
 
     config_dict = dict(config or {})
     if dry_run or config_dict.pop("dry_run", False):
         config_dict["execution_mode"] = "experiment"
-    if "server_name" not in config_dict:
-        from config_manager import get_config_manager, get_effective_server
-
-        # A server pinned on the Agent wins over the ambient chat server,
-        # mirroring consult/delegate resolution.
-        effective = (
-            owner.get("server_name")
-            or settings.active_server
-            or get_effective_server(settings.chat_id)
-        )
-        if not effective:
-            cm = get_config_manager()
-            accessible = cm.get_accessible_servers(settings.user_id)
-            effective = accessible[0] if accessible else None
-        if effective:
-            config_dict["server_name"] = effective
 
     trading_context = trading_context or config_dict.pop("trading_context", "")
 

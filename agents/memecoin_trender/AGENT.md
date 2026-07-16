@@ -13,8 +13,6 @@ tools:
 when_to_consult: When the user asks what memecoins are trending on Solana, whether
   a token's momentum is tradeable, or wants a small barrier-protected position opened
   on a trending token.
-server_required: false
-server_name: null
 risk_limits:
   max_position_size_quote: 0.1
   max_open_executors: 3

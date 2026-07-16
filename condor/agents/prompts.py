@@ -15,8 +15,8 @@ BASE_PROMPT_LIVE = """\
 You are an autonomous trading agent running inside Condor.
 
 RULES:
-- Trade ONLY via manage_executors(action="create"). NEVER use place_order.
-{controller_rule}- Be conservative. When in doubt, hold and say why in your response.
+- Trade ONLY via manage_executors(action="create").
+- Be conservative. When in doubt, hold and say why in your response.
 
 ERROR RECOVERY:
 - If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
@@ -28,11 +28,8 @@ BASE_PROMPT_EXPERIMENT = """\
 You are an autonomous trading agent running inside Condor in 🧪 EXPERIMENT mode.
 
 RULES:
-- This is OBSERVATION ONLY. Do NOT create or stop executors, and do NOT deploy,
-  stop, or update a controller-based bot (manage_bots with action="deploy",
-  "stop_bot", "stop_controllers", "start_controllers", or "update_config").
-- manage_executors and manage_bots are available for read-only queries
-  (performance_report; status/logs/get_config).
+- This is OBSERVATION ONLY. Do NOT create or stop executors.
+- manage_executors is available for read-only queries (status/performance).
 - Analyze the market and describe what you WOULD do, but take NO trading action.
 
 EXPERIMENT MESSAGING:
@@ -40,23 +37,6 @@ EXPERIMENT MESSAGING:
 - Prefix actions with 🧪 to signal the experiment
 - End with: "No executors were created (experiment)"
 """
-
-# The mcp-hummingbot line is added only for server-backed agents (see
-# build_tick_prompt); serverless agents run condor-only and must not be told a
-# hummingbot server exists — they'd otherwise reach for its tools.
-HUMMINGBOT_PRECONFIGURED_LINE = (
-    "- The mcp-hummingbot server is pre-configured. Do NOT call configure_server.\n"
-)
-
-# Controller-based bots (manage_bots) only exist for server-backed agents;
-# serverless agents trade purely through condor-native executors, so this rule
-# is dead weight in their prompt. Injected into BASE_PROMPT_LIVE only when
-# uses_hummingbot (see build_tick_prompt).
-CONTROLLER_DEPLOY_RULE = (
-    "- If your strategy deploys a controller-based bot, manage_bots(action=\"deploy\")\n"
-    "  MUST include max_global_drawdown_quote within your risk limits — deploys\n"
-    "  without a declared loss cap are blocked by the risk engine.\n"
-)
 
 BASE_PROMPT_COMMON = """\
 GENERAL:
@@ -84,7 +64,7 @@ MEMORY (about the user, NOT operational learnings):
   Operational/market learnings go to agent memory (see RECORDING above), NOT here.
 
 NOTIFICATIONS:
-- Use send_notification(text="...") to message the user on Telegram.
+- Use send_notification(text="...") to message the user.
 """
 
 # Recording guidance (§7.1): the run's event stream is the one history — the
@@ -108,25 +88,13 @@ RECORDING:
 """
 
 
-def _build_tool_preload(*, is_experiment: bool, uses_hummingbot: bool = True) -> str:
-    """ToolSearch preload line for ACP sessions.
+def _build_tool_preload(*, is_experiment: bool) -> str:
+    """ToolSearch preload line for the tick's ACP session.
 
-    Experiments omit manage_executors (read-only). Serverless agents
-    (``uses_hummingbot=False``)
-    load the CONDOR-native manage_executors and NO mcp-hummingbot tools — wiring
-    both would expose two manage_executors with incompatible schemas, and market
-    data comes from the agent's own routines.
+    Experiments omit manage_executors (read-only).
     """
     tools: list[str] = []
-    if uses_hummingbot:
-        tools.append("mcp__mcp-hummingbot__get_market_data")
-        if not is_experiment:
-            tools.append("mcp__mcp-hummingbot__manage_executors")
-        tools += [
-            "mcp__mcp-hummingbot__search_history",
-            "mcp__mcp-hummingbot__explore_geckoterminal",
-        ]
-    elif not is_experiment:
+    if not is_experiment:
         tools.append("mcp__condor__manage_executors")
     tools += [
         "mcp__condor__send_notification",
@@ -187,54 +155,24 @@ def build_tick_prompt(
     The AGENT.md body IS the spec (§5.3 collapse): domain identity + the
     strategy tactic in one document (``agent.instructions``).
     """
-    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
-
     execution_mode = config.get("execution_mode", "loop")
     is_experiment = execution_mode == "experiment"
-    agent_key = config.get("agent_key") or agent.agent_key
-    use_pydantic_ai = is_pydantic_ai_model(agent_key)
-    # Serverless agents run condor-only (no mcp-hummingbot); the prompt must
-    # match the actual wiring (condor/agents/run.py) or the model reaches for
-    # tools that aren't there — or, worse, a second manage_executors that is.
-    uses_hummingbot = getattr(agent, "server_required", True)
 
     # Select base prompt and journal protocol based on mode
-    if is_experiment:
-        base_prompt = BASE_PROMPT_EXPERIMENT
-    else:
-        # The controller-deploy rule is only meaningful for server-backed agents.
-        base_prompt = BASE_PROMPT_LIVE.format(
-            controller_rule=CONTROLLER_DEPLOY_RULE if uses_hummingbot else ""
-        )
+    base_prompt = BASE_PROMPT_EXPERIMENT if is_experiment else BASE_PROMPT_LIVE
     journal_section = (
         JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
     )
-    common = BASE_PROMPT_COMMON
-    if uses_hummingbot:
-        common = common.replace(
-            "GENERAL:\n", "GENERAL:\n" + HUMMINGBOT_PRECONFIGURED_LINE
-        )
-    sections: list[str] = [base_prompt, journal_section, common]
+    sections: list[str] = [base_prompt, journal_section, BASE_PROMPT_COMMON]
 
-    # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
-    if not use_pydantic_ai:
-        sections.append(
-            _build_tool_preload(is_experiment=is_experiment, uses_hummingbot=uses_hummingbot)
-        )
-    else:
-        sections.append(
-            "TOOLS:\n"
-            "All MCP tools are pre-loaded and available. Call them directly by name."
-        )
+    # Tool preload is ACP-specific (ToolSearch)
+    sections.append(_build_tool_preload(is_experiment=is_experiment))
 
-    # Tick identity
+    # Tick identity. Condor-native executors are attributed automatically
+    # (agent_slug/agent_id) — no attribution arg needed in tool calls.
     tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in notifications."
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
-        # controller_id is the hummingbot-executors attribution arg; condor-native
-        # executors are attributed automatically (agent_slug/agent_id/strategy).
-        if not is_experiment and uses_hummingbot:
-            tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
     sections.append(tick_info)
 
     # Single-tick session note (run_once maps to max_ticks=1)
@@ -244,9 +182,6 @@ def build_tick_prompt(
             "Single-tick session with LIVE execution. The engine will stop after this tick. "
             "Make your best move now — there will be no follow-up ticks."
         )
-
-    # Server credentials are injected via env vars into the MCP process,
-    # so no need to include them in the prompt or call configure_server.
 
     # The agent spec: identity + domain knowledge + strategy tactic, one
     # document (AGENT.md body — §5.3 collapse).
@@ -289,7 +224,6 @@ def build_tick_prompt(
         "trading_context",
         "risk_limits",  # shown in dedicated sections
         "agent_key",
-        "server_name",
         "frequency_sec",
         "execution_mode",  # noise / internal
     }
@@ -302,22 +236,6 @@ def build_tick_prompt(
             continue
         config_lines.append(f"{k}: {v}")
     sections.append("\n".join(config_lines))
-
-    # Controller mode: the agent steers a named bot's controllers instead of
-    # spawning standalone executors. Triggered solely by a non-empty bot_name.
-    bot_name = config.get("bot_name", "")
-    if bot_name:
-        sections.append(
-            "[CONTROLLER MODE]\n"
-            f"You operate the Hummingbot bot '{bot_name}'. Steer its controllers "
-            "instead of creating standalone executors:\n"
-            '- Check current state first: manage_bots(action="status").\n'
-            "- Define/update controller config templates with manage_controllers.\n"
-            f"- Apply them with manage_bots: deploy if '{bot_name}' is not running, "
-            "otherwise update_config / start_controllers / stop_controllers.\n"
-            "Do NOT create standalone executors unless the strategy instructions "
-            "explicitly tell you to. The bot's PnL is attributed to you automatically."
-        )
 
     # Risk state
     rs = risk_state

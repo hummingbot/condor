@@ -47,8 +47,8 @@ def test_deny_gate_blocks_all_dangerous_kinds():
     async def run():
         results = []
         for tc in (
-            {"tool": "place_order", "input": {}},
-            {"tool": "manage_bots", "input": {"action": "deploy"}},
+            {"tool": "manage_executors", "input": {"action": "create"}},
+            {"tool": "mcp__condor__manage_executors", "input": {"action": "create"}},
             {"tool": "manage_executors", "input": {"action": "stop"}},
         ):
             results.append(await gate(tc, OPTIONS))

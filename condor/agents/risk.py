@@ -168,22 +168,13 @@ class RiskEngine:
                 f"Max open executors ({self.limits.max_open_executors}) reached",
             )
 
-        # Check position size. Two call shapes:
-        # - hummingbot-api (mcp-hummingbot manage_executors): amount is in
-        #   executor_config.total_amount_quote
-        # - condor-native (condor manage_executors): the executor type's own
-        #   RiskDeclaration computes the notional from the declared config;
-        #   if it can't be computed, fail CLOSED.
-        if "executor_config" in input_data:
-            config = input_data.get("executor_config", {})
-            amount = float(
-                config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
-            )
-        else:
-            try:
-                amount = self._native_notional(input_data)
-            except Exception as exc:
-                return False, f"Cannot compute risk for native executor: {exc}"
+        # Check position size: the executor type's own RiskDeclaration computes
+        # the notional from the declared config; if it can't be computed, fail
+        # CLOSED.
+        try:
+            amount = self._native_notional(input_data)
+        except Exception as exc:
+            return False, f"Cannot compute risk for native executor: {exc}"
 
         if current_state.total_exposure + amount > self.limits.max_position_size_quote:
             return False, (
@@ -218,48 +209,6 @@ class RiskEngine:
         declaration = validate_risk_declaration(config.risk_declaration())
         return float(declaration.max_notional_quote)
 
-    def check_bot_action(self, tool_call: dict) -> tuple[bool, str]:
-        """Check a manage_bots call against risk limits.
-
-        A bot's capital lives in saved controller configs on the API server,
-        so exposure can't be computed from the tool inputs alone. Instead,
-        bound the loss: a deploy must declare ``max_global_drawdown_quote``
-        (the platform-enforced kill switch) no larger than the strategy's
-        position limit. Stops are risk-reducing and always allowed; an
-        ``update_config`` is only gated when it declares a
-        ``total_amount_quote`` above the position limit.
-
-        Returns (allowed, reason).
-        """
-        input_data = tool_call.get("input", {})
-        action = input_data.get("action", "")
-
-        if action == "deploy":
-            cap = input_data.get("max_global_drawdown_quote")
-            if not cap:
-                return False, (
-                    "Bot deploy must declare max_global_drawdown_quote "
-                    f"(≤ ${self.limits.max_position_size_quote:.2f}) so the "
-                    "platform kill switch bounds the loss"
-                )
-            if float(cap) > self.limits.max_position_size_quote:
-                return False, (
-                    f"max_global_drawdown_quote ${float(cap):.2f} exceeds "
-                    f"position limit ${self.limits.max_position_size_quote:.2f}"
-                )
-        elif action == "update_config":
-            amount = float(
-                (input_data.get("config_data") or {}).get("total_amount_quote", 0) or 0
-            )
-            if amount > self.limits.max_position_size_quote:
-                return False, (
-                    f"update_config total_amount_quote ${amount:.2f} exceeds "
-                    f"position limit ${self.limits.max_position_size_quote:.2f}"
-                )
-
-        return True, ""
-
-
 def risk_gate(
     risk_engine: RiskEngine,
     risk_state: RiskState,
@@ -272,48 +221,21 @@ def risk_gate(
     ``RiskState()`` at zero for delegations (the caps act as a per-run budget).
     ``experiment=True`` additionally cancels every mutating action (tick-only).
     """
-    from condor.agents.gating import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
+    from condor.agents.gating import is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
             raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
             tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
 
-            # Experiment mode: block ALL mutating actions
-            if experiment:
-                if tool_name == "manage_executors":
-                    input_data = tool_call.get("input", {})
-                    action = input_data.get("action", "")
-                    if action in ("create", "stop"):
-                        log.info("Experiment mode: blocked manage_executors(%s)", action)
-                        return {"outcome": {"outcome": "cancelled"}}
-                elif tool_name == "manage_bots":
-                    input_data = tool_call.get("input", {})
-                    action = input_data.get("action", "")
-                    if action in DANGEROUS_BOT_ACTIONS:
-                        log.info("Experiment mode: blocked manage_bots(%s)", action)
-                        return {"outcome": {"outcome": "cancelled"}}
-                elif tool_name in (
-                    "place_order",
-                    "manage_gateway_swaps",
-                    "manage_gateway_clmm",
-                ):
-                    log.info("Experiment mode: blocked %s", tool_name)
-                    return {"outcome": {"outcome": "cancelled"}}
-
-            # For executor actions, run risk check
             if tool_name == "manage_executors":
                 input_data = tool_call.get("input", {})
                 action = input_data.get("action", "")
 
-                # Validate controller_id on create (hummingbot-api shape only;
-                # condor-native creates carry "config" and are bounded by
-                # their RiskDeclaration in check_executor_action)
-                if action == "create" and "executor_config" in input_data:
-                    executor_config = input_data.get("executor_config", {})
-                    if not executor_config.get("controller_id"):
-                        log.warning("Blocked executor create: missing controller_id")
-                        return {"outcome": {"outcome": "cancelled"}}
+                # Experiment mode: block ALL mutating actions
+                if experiment and action in ("create", "stop"):
+                    log.info("Experiment mode: blocked manage_executors(%s)", action)
+                    return {"outcome": {"outcome": "cancelled"}}
 
                 allowed, reason = risk_engine.check_executor_action(
                     tool_call, risk_state
@@ -321,19 +243,6 @@ def risk_gate(
                 if not allowed:
                     log.warning("Risk engine blocked tool call: %s", reason)
                     return {"outcome": {"outcome": "cancelled"}}
-
-            # Bot deploys place real capital via controllers — bound the loss
-            # (declared drawdown kill switch) since the amount isn't in the call
-            if tool_name == "manage_bots":
-                allowed, reason = risk_engine.check_bot_action(tool_call)
-                if not allowed:
-                    log.warning("Risk engine blocked tool call: %s", reason)
-                    return {"outcome": {"outcome": "cancelled"}}
-
-            # Block direct order placement entirely
-            if tool_name == "place_order":
-                log.warning("Blocked direct place_order (agents must use executors)")
-                return {"outcome": {"outcome": "cancelled"}}
 
         # Auto-approve everything else
         for opt in options:

@@ -70,18 +70,17 @@ def build_agent_handlers() -> dict[str, Handler]:
 
     svc = AgentService()
 
-    async def _consult(agent, task, context="", chat_id=0, user_id=0, server_name=None):
+    async def _consult(agent, task, context="", chat_id=0, user_id=0):
         answer = await svc.consult(
             agent, task, context=context, user_id=user_id, chat_id=chat_id,
-            server_name=server_name,
         )
         return {"agent": agent, "answer": answer}
 
-    async def _delegate_start(agent, task, chat_id=0, user_id=0, server_name=None,
+    async def _delegate_start(agent, task, chat_id=0, user_id=0,
                               risk_limits=None, timeout_s=None):
         dt = await dg.start_delegation(
             agent_slug=agent, user_id=user_id, chat_id=chat_id,
-            server_name=server_name, task=task, timeout_s=timeout_s,
+            task=task, timeout_s=timeout_s,
             risk_limits=risk_limits,
         )
         return {"task_id": dt.task_id, "status": dt.status}

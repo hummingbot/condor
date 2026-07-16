@@ -16,7 +16,6 @@ from dataclasses import dataclass, field
 from typing import Awaitable, Callable
 
 from condor.acp import ACPClient, PermissionCallback, PromptDone, resolve_acp
-from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from condor.agents.context import (
     build_initial_context,
     build_mcp_servers_for_session,
@@ -46,9 +45,10 @@ _health_notifier: Callable[[int | str], Awaitable[None]] | None = None
 @dataclass
 class AgentSession:
     chat_id: int | str
-    agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
-    client: ACPClient | PydanticAIClient
-    server_name: str | None = None  # Which Condor server this session uses
+    agent_key: str  # ACP key: "claude-code", "claude-acp:opus", "gemini", ...
+    client: ACPClient
+    # Kept for the web session_started payload; no server is wired anymore.
+    server_name: str | None = None
     is_busy: bool = False
     pending_context: str | None = None  # Lazy context: injected on first prompt
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
@@ -153,81 +153,37 @@ async def get_or_create_session(
         "CONDOR_USER_ID": str(user_id or effective_chat_id),
     }
 
-    # Build dynamic MCP servers from user's Condor permissions
+    # Build dynamic MCP servers (condor MCP only — §9.2)
     mcp_servers: list[dict] = []
     if user_id:
-        mcp_servers = build_mcp_servers_for_session(
-            user_id, chat_id, user_data, server_name=server_name
-        )
+        mcp_servers = build_mcp_servers_for_session(user_id, chat_id)
 
-    # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
-    use_pydantic_ai = is_pydantic_ai_model(agent_key)
-
-    if use_pydantic_ai:
-        # For Pydantic AI models: auto-detect or use configured filter mode
-        import os
-
-        from condor.preferences import get_agent_prefs
-
-        # Priority: user preference > env variable > auto-detect (None)
-        agent_prefs = get_agent_prefs(user_data) if user_data else {}
-        tool_filter_mode = (
-            agent_prefs.get("tool_filter_mode")
-            or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
-            or None  # None triggers auto-detection based on model size
-        )
-
-        base_url = (
-            agent_prefs.get("base_url") or os.environ.get("LMSTUDIO_BASE_URL") or None
-        )
-
-        client = PydanticAIClient(
-            model=agent_key,
-            mcp_servers=mcp_servers,
-            permission_callback=permission_callback,
-            extra_env=extra_env,
-            tool_filter_mode=tool_filter_mode,  # Auto-detects if None
-            base_url=base_url,
-        )
-    else:
-        # For ACP subprocess models: claude-code, gemini, codex.
-        # A Claude model can be pinned via a suffix, e.g. "claude-acp:opus" /
-        # "claude-acp:sonnet"; ACPClient selects it via session/set_model after
-        # handshake (the bridge ignores ANTHROPIC_MODEL). Bare key = agent default.
-        command, model_env, model_pref = resolve_acp(agent_key)
-        client = ACPClient(
-            command=command,
-            working_dir=get_project_dir(),
-            mcp_servers=mcp_servers,
-            permission_callback=permission_callback,
-            extra_env={**extra_env, **model_env},
-            model=model_pref,
-        )
+    # ACP subprocess models: claude-code, gemini, codex. A Claude model can be
+    # pinned via a suffix, e.g. "claude-acp:opus" / "claude-acp:sonnet";
+    # ACPClient selects it via session/set_model after handshake (the bridge
+    # ignores ANTHROPIC_MODEL). Bare key = agent default.
+    command, model_env, model_pref = resolve_acp(agent_key)
+    client = ACPClient(
+        command=command,
+        working_dir=get_project_dir(),
+        mcp_servers=mcp_servers,
+        permission_callback=permission_callback,
+        extra_env={**extra_env, **model_env},
+        model=model_pref,
+    )
 
     await client.start()
 
     try:
-        # Build initial context about server and permissions
+        # Build initial context (chat brain + tool preload + indexes)
         initial_context = ""
         if user_id:
             initial_context = build_initial_context(
                 user_id,
                 chat_id,
-                user_data,
                 agent_key=agent_key,
                 platform=platform,
-                server_name=server_name,
             )
-        # Resolve the server name that was actually used for this session
-        resolved_server = server_name
-        if not resolved_server and user_id:
-            from config_manager import get_config_manager, get_effective_server
-
-            resolved_server = get_effective_server(chat_id, user_data)
-            if not resolved_server:
-                cm = get_config_manager()
-                accessible = cm.get_accessible_servers(user_id)
-                resolved_server = accessible[0] if accessible else None
 
         if initial_context and not lazy_context:
             # Eager: send context now (blocks until agent processes it)
@@ -241,7 +197,7 @@ async def get_or_create_session(
             chat_id=chat_id,
             agent_key=agent_key,
             client=client,
-            server_name=resolved_server,
+            server_name=server_name,
             pending_context=initial_context or None,
         )
     except Exception:

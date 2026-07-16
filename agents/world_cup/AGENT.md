@@ -13,8 +13,6 @@ tools:
 when_to_consult: When the user asks about World Cup winner odds on Polymarket, what
   an attractive entry for Argentina/Spain/England looks like, or how the accumulated
   position stands. Delegate to run the accumulation loop.
-server_required: false
-server_name: null
 risk_limits:
   max_position_size_quote: 100
   max_open_executors: 8

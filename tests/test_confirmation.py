@@ -3,27 +3,34 @@
 from condor.agents.confirmation import _format_tool_summary
 
 
-def _bot_call(action: str, **extra) -> dict:
-    return {"tool": "manage_bots", "input": {"action": action, **extra}}
+def _exec_call(action: str, **extra) -> dict:
+    return {"tool": "manage_executors", "input": {"action": action, **extra}}
 
 
-def test_format_manage_bots_deploy():
+def test_format_native_create_shows_type_and_instrument():
     summary = _format_tool_summary(
-        _bot_call("deploy", bot_name="mm-bot", controllers_config=["cfg_a"])
+        _exec_call(
+            "create",
+            executor_type="position_spot",
+            config={"trading_pair": "BONK-SOL"},
+        )
     )
-    assert "mm-bot" in summary
-    assert "cfg_a" in summary
+    assert "position_spot" in summary
+    assert "BONK-SOL" in summary
+
+    perp = _format_tool_summary(
+        _exec_call("create", executor_type="position_perp", config={"coin": "ETH"})
+    )
+    assert "position_perp" in perp and "ETH" in perp
 
 
-def test_format_manage_bots_update_config():
+def test_format_stop_shows_executor_id():
     summary = _format_tool_summary(
-        _bot_call("update_config", bot_name="mm-bot", config_name="cfg_a")
+        _exec_call("stop", executor_id="pos_abcdef1234567890")
     )
-    assert "mm-bot" in summary
-    assert "cfg_a" in summary
+    assert "Stop executor" in summary
+    assert "pos_abcdef12" in summary
 
 
-def test_format_manage_bots_stop_bot():
-    summary = _format_tool_summary(_bot_call("stop_bot", bot_name="mm-bot"))
-    assert "mm-bot" in summary
-    assert "stop_bot" in summary
+def test_format_unknown_tool_falls_back_to_name():
+    assert _format_tool_summary({"tool": "weird_tool", "input": {}}) == "weird_tool"

@@ -28,7 +28,6 @@ async def run_consult(
     slug: str,
     user_id: int,
     chat_id: int,
-    server_name: str | None,
     task: str,
     context: str = "",
 ) -> str:
@@ -50,10 +49,6 @@ async def run_consult(
         index = store.list_consultable_index()
         available = f"\n\nAvailable agents:\n{index}" if index else ""
         return f"No agent named '{slug}' is available.{available}"
-
-    # A server pinned on the Agent itself wins over the ambient chat server; a
-    # serverless agent gets session wiring (its own memory/skill scope, no pin).
-    effective_server = (agent.server_name or server_name) if agent.server_required else None
 
     prompt = build_agent_context(agent, user_id, task, context)
 
@@ -90,25 +85,15 @@ async def run_consult(
             permission_policy=human_gate(chat_id, run_id=run_id, agent_slug=slug),
             user_id=user_id,
             chat_id=chat_id,
-            server_name=effective_server,
             timeout_s=CONSULT_TIMEOUT_S,
-            fallback_on_unhealthy=True,
             agent_id=run_id,
             on_tool_call=_persist_tool_call,
-        )
-    except RuntimeError as e:
-        run_store.end_run(run_id, "error", str(e))
-        # Model backend down and no fallback configured — fail with the fix.
-        return (
-            f"{e}\n\n"
-            "Start the model backend, or set CONSULT_FALLBACK_MODEL to a "
-            "reachable model to auto-fall-back."
         )
     except BaseException:
         run_store.end_run(run_id, "error", "consult crashed/cancelled")
         raise
 
-    answer = result.fallback_note + (result.text or "(the agent returned no answer)")
+    answer = result.text or "(the agent returned no answer)"
     try:
         run_store.emit(run_id, "state_snapshot", {"result": answer})
     finally:

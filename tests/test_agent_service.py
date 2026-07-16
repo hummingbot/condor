@@ -19,7 +19,8 @@ def _create(svc, name="Tomb Test"):
     return svc.create(
         name=name,
         instructions="body",
-        server_required=False,
+        # A declared non-trading scope — no risk baseline required.
+        tools=["manage_routines"],
         default_config={},
     )
 

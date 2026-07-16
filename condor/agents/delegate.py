@@ -10,15 +10,15 @@ It is NOT a new engine: it drives the same :func:`condor.agents.run.run_agent`
 primitive under an unattended policy (refactor-02 §4.1):
 
 - **Trading agents** run under a zero-seeded ``risk_gate``: tool calls
-  auto-approve *within caps* (the caps act as a per-run budget), uncapped bot
-  deploys and ``place_order`` are blocked. "Trading" means: needs a hummingbot
-  server, OR carries an AGENT.md ``risk_limits:`` baseline, OR the caller
-  passed caps. The limits come from the per-call ``risk_limits`` override when
-  given (it REPLACES the baseline — what you pass is exactly what governs),
-  else the baseline. A server-backed delegation with NEITHER errors loudly at
-  start.
-- **Serverless specialists with no baseline** (e.g. ``routine_builder``) keep
-  full auto-approve.
+  auto-approve *within caps* (the caps act as a per-run budget). "Trading"
+  means: carries an AGENT.md ``risk_limits:`` baseline, OR the caller passed
+  caps, OR ``agent.can_trade`` (declares ``manage_executors``, or declares no
+  tool scope at all). The limits come from the per-call ``risk_limits``
+  override when given (it REPLACES the baseline — what you pass is exactly
+  what governs), else the baseline. A can-trade delegation with NEITHER
+  errors loudly at start.
+- **Specialists that cannot trade and carry no baseline** (e.g.
+  ``routine_builder``) keep full auto-approve.
 
 The in-memory registry dies with the process, like a running ``TickEngine`` in
 ``_engines``. Each delegation is persisted as a ``kind: delegation`` RunStore
@@ -50,7 +50,6 @@ class DelegateTask:
     agent_slug: str
     user_id: int
     chat_id: int
-    server_name: str | None
     task: str
     started_at: str = ""
     ended_at: str = ""
@@ -70,7 +69,6 @@ class DelegateTask:
             "agent": self.agent_slug,
             "user_id": self.user_id,
             "chat_id": self.chat_id,
-            "server_name": self.server_name,
             "task": self.task,
             "status": self.status,
             "result": self.result,
@@ -91,23 +89,21 @@ def get_all_delegations() -> dict[str, DelegateTask]:
 def _resolve_delegation_limits(agent, risk_limits: dict | None) -> dict | None:
     """Resolve the risk caps governing an unattended run of ``agent``.
 
-    An agent counts as TRADING when it needs a hummingbot server, carries an
-    AGENT.md ``risk_limits:`` baseline, or the caller passed caps — NOT just
-    ``server_required``: serverless agents can trade through condor-native
-    executors (gateway venues), so a baseline or override must gate them too.
-    Returns the caps dict for trading agents, or None only for true
-    serverless specialists with no baseline and no override (full
-    auto-approve, e.g. routine_builder). Raises when a server-backed
-    delegation has neither a baseline nor an override — unbounded-capital
-    delegations must say their numbers out loud.
+    An agent counts as TRADING when it carries an AGENT.md ``risk_limits:``
+    baseline, the caller passed caps, or ``agent.can_trade`` (declares
+    ``manage_executors`` — or no tool scope at all, which is unrestricted and
+    therefore trading). Returns the caps dict for trading agents, or None only
+    for specialists that cannot trade and carry no baseline/override (full
+    auto-approve, e.g. routine_builder). Raises when a can-trade delegation
+    has neither a baseline nor an override — unbounded-capital delegations
+    must say their numbers out loud.
     """
     limits = risk_limits or agent.risk_limits
     if limits:
         return dict(limits)
-    # Full auto-approve (None) is only for true serverless specialists that
-    # cannot trade: neither server-backed NOR owning manage_executors. A
-    # serverless agent that owns the executor tool must still be bounded (#4).
-    if not agent.server_required and not agent.can_trade:
+    # Full auto-approve (None) is only for specialists that cannot trade. An
+    # agent that can reach the executor tool must be bounded (#4).
+    if not agent.can_trade:
         return None
     raise ValueError(
         f"Agent '{agent.slug}' can touch live trading but has no risk baseline: "
@@ -122,7 +118,6 @@ async def start_delegation(
     agent_slug: str,
     user_id: int,
     chat_id: int,
-    server_name: str | None,
     task: str,
     bot=None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
@@ -158,7 +153,6 @@ async def start_delegation(
             "task": task,
             "model": agent.agent_key,
             "risk_limits": effective_limits or {},
-            "server": server_name or "",
         },
     )
     dt = DelegateTask(
@@ -166,7 +160,6 @@ async def start_delegation(
         agent_slug=agent_slug,
         user_id=user_id,
         chat_id=chat_id,
-        server_name=server_name,
         task=task,
         started_at=started_at,
         risk_limits=effective_limits,
@@ -227,11 +220,8 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
     if dt.risk_limits is not None:
         policy = risk_gate(dt.risk_limits)  # zero-seeded: caps = per-run budget
     else:
-        policy = AUTO  # serverless specialist — full auto-approve
+        policy = AUTO  # non-trading specialist — full auto-approve
 
-    effective_server = (
-        (agent.server_name or dt.server_name) if agent.server_required else None
-    )
     prompt = build_agent_context(agent, dt.user_id, dt.task)
 
     def _persist_tool_call(tc: dict) -> None:
@@ -259,11 +249,9 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
             permission_policy=policy,
             user_id=dt.user_id,
             chat_id=dt.chat_id,
-            server_name=effective_server,
             risk_limits=dt.risk_limits,
             timeout_s=timeout_s,
             event_sink=_make_event_sink(dt),
-            fallback_on_unhealthy=True,
             # Executor attribution: the run id is the one execution key.
             agent_id=dt.task_id,
             on_tool_call=_persist_tool_call,
@@ -274,9 +262,7 @@ async def _run(dt: DelegateTask, agent, bot, timeout_s: int) -> None:
             end_status, end_reason = "error", result.error
             log.warning("Delegation %s timed out after %ss", dt.task_id, timeout_s)
         else:
-            dt.result = result.fallback_note + (
-                result.text or "(the agent returned no answer)"
-            )
+            dt.result = result.text or "(the agent returned no answer)"
             dt.status = "done"
     except asyncio.CancelledError:
         dt.status = "stopped"

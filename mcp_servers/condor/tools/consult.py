@@ -28,7 +28,6 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
             "context": context,
             "chat_id": settings.chat_id,
             "user_id": settings.user_id,
-            "server_name": settings.active_server or None,
         },
         timeout=_CONSULT_TIMEOUT,
     )

@@ -98,8 +98,6 @@ class AgentService:
             "agent_key",
             "tools",
             "when_to_consult",
-            "server_required",
-            "server_name",
             "risk_limits",
             "denomination",
             "default_config",
@@ -296,7 +294,6 @@ class AgentService:
         context: str = "",
         user_id: int = 0,
         chat_id: int = 0,
-        server_name: Optional[str] = None,
     ) -> str:
         from condor.agents.consult import run_consult
 
@@ -305,7 +302,6 @@ class AgentService:
             slug=slug,
             user_id=user_id,
             chat_id=chat_id,
-            server_name=server_name,
             task=task,
             context=context,
         )
@@ -316,7 +312,6 @@ class AgentService:
         task: str,
         user_id: int = 0,
         chat_id: int = 0,
-        server_name: Optional[str] = None,
         risk_limits: Optional[dict] = None,
         timeout_s: Optional[int] = None,
     ) -> dict:
@@ -328,7 +323,6 @@ class AgentService:
             task=task,
             user_id=user_id,
             chat_id=chat_id,
-            server_name=server_name,
             risk_limits=risk_limits,
             timeout_s=timeout_s if timeout_s is not None else DEFAULT_TIMEOUT_S,
         )

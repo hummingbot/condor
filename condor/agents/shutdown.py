@@ -3,7 +3,7 @@
 When a session hits a kill-switch (a hard risk breach or a manual emergency
 stop) its open **positions and executors** must be wound down, not left stranded.
 The policy is declared per agent in a ``shutdown.md`` file that reuses the exact
-YAML-frontmatter + markdown-body format of ``strategy.md``:
+YAML-frontmatter + markdown-body format of ``AGENT.md``:
 
     agents/{slug}/shutdown.md      # this agent (all its sessions)
     agents/_defaults/shutdown.md   # shipped default
@@ -13,6 +13,10 @@ them, so there is no per-strategy tier — refactor-01b.)
 
 The front-matter is a machine-executable policy the deterministic winddown reads;
 the body is free-form instructions handed to the bounded LLM cleanup pass.
+
+The winddown runs on the NATIVE executor runtime (``condor.executors``): the
+slug's nonterminal records are read from the executor store and stopped through
+``condor.executors.ops.stop`` — no external API in the loop.
 """
 
 from __future__ import annotations
@@ -21,8 +25,11 @@ import asyncio
 import logging
 from typing import Any
 
-from .agent import Agent
+from condor.executors import ops
+from condor.executors.service import peek_executor_runtime
 from condor.memory.store import _parse_frontmatter
+
+from .agent import Agent
 
 log = logging.getLogger(__name__)
 
@@ -33,6 +40,13 @@ POLICY_KEEP_SPOT_CLOSE_PERP = "keep_spot_close_perp"
 POLICY_KEEP_ALL = "keep_all"
 VALID_POLICIES = (POLICY_FLATTEN_ALL, POLICY_KEEP_SPOT_CLOSE_PERP, POLICY_KEEP_ALL)
 DEFAULT_POLICY = POLICY_KEEP_SPOT_CLOSE_PERP
+
+# Executor-record statuses that mean "still holding/able to hold inventory".
+_NONTERMINAL = {"PENDING", "ACTIVE", "CLOSING"}
+
+# How long stops get to settle (executor loops close asynchronously) before the
+# verify re-read. Module constant so tests can zero it.
+_SETTLE_DELAY_S = 2.0
 
 
 class ShutdownPolicy:
@@ -103,166 +117,157 @@ def load_shutdown_policy(agent: Agent) -> tuple[ShutdownPolicy, str]:
 #
 # This runs first and without any LLM, so a kill switch is guaranteed to act even
 # when the model or market is misbehaving (the exact conditions that trigger it).
-# The reliable close primitive is ``stop_executor(keep_position=False)``, which
-# closes the position the executor holds. We deliberately do NOT call
-# ``clear_position_held`` on live positions: it only clears *tracking* (for
-# already externally-closed positions) and would hide a still-open one. Genuine
-# orphan positions (open, no executor) are left to the LLM cleanup pass and, if
-# they persist, the verify step raises a loud alert.
+# The reliable close primitive is ``ops.stop(keep_position=False)``, which closes
+# the position the executor holds. Genuine orphan inventory (open on venue, no
+# executor) is left to the LLM cleanup pass and, if a record the policy said to
+# close persists, the verify step raises a loud alert.
 
 
-def _is_perp(connector: str) -> bool:
-    """Whether a connector is a perpetual/futures market.
+def _is_perp(executor_type: str) -> bool:
+    """Whether an executor type carries perpetual/leveraged risk.
 
-    Hummingbot encodes market type in the connector name (``binance`` vs
-    ``binance_perpetual``). Unknown/ambiguous connectors are treated as perp so a
-    kill switch errs toward *closing* leveraged risk rather than leaving it open.
+    Condor-native executors encode the instrument in the type suffix
+    (``position_perp`` / ``order_perp`` vs ``position_spot`` / ``order_pred``).
+    Unknown/ambiguous types are treated as perp so a kill switch errs toward
+    *closing* leveraged risk rather than leaving it open.
     """
-    c = (connector or "").lower()
-    if not c:
+    t = (executor_type or "").lower()
+    if not t:
         return True
-    return "perpetual" in c or c.endswith("_perp")
+    if t.endswith("_perp"):
+        return True
+    # Only the known non-leveraged suffixes count as "not perp" — everything
+    # else fails closed.
+    return not (t.endswith("_spot") or t.endswith("_pred"))
 
 
-def _keep_position(executor: dict, policy: ShutdownPolicy) -> bool:
-    """Whether stopping ``executor`` should keep its position, per the policy."""
+def _keep_position(record: Any, policy: ShutdownPolicy) -> bool:
+    """Whether stopping ``record``'s executor should keep its position."""
     if policy.on_kill_switch == POLICY_FLATTEN_ALL:
         return False
     if policy.on_kill_switch == POLICY_KEEP_ALL:
         return True
     # keep_spot_close_perp: keep spot, close perp
-    return not _is_perp(executor.get("connector", ""))
+    return not _is_perp(getattr(record, "type", ""))
 
 
-def _position_connector(position: dict) -> str:
-    return position.get("connector_name") or position.get("connector") or ""
+# Position-executor states that mean inventory is (still) on the venue.
+_LIVE_POSITION_STATES = {"OPENING", "ACTIVE", "CLOSING"}
 
 
-def _position_pair(position: dict) -> str:
-    return position.get("trading_pair") or position.get("pair") or ""
+def _holds_inventory(record: Any) -> bool:
+    """Whether a position-kind record's state still holds venue inventory.
 
-
-def _describe_position(position: dict) -> str:
-    return f"{_position_connector(position)} {_position_pair(position)}".strip()
-
-
-def _should_remain_open(position: dict, policy: ShutdownPolicy) -> bool:
-    """Whether ``position`` is *expected* to still be open after a clean winddown.
-
-    Used by the verify step: any position the policy said to close that is still
-    open is a stranded position and triggers a loud alert.
+    A closed-with-``detached`` record ended its loop but deliberately left the
+    position on the venue — stranded whenever the policy said to close it.
     """
-    if policy.on_kill_switch == POLICY_KEEP_ALL:
-        return True
-    if policy.on_kill_switch == POLICY_FLATTEN_ALL:
+    if not str(getattr(record, "type", "")).startswith("position"):
         return False
-    # keep_spot_close_perp: spot should remain, perp should be gone
-    return not _is_perp(_position_connector(position))
+    state = getattr(record, "state", None) or {}
+    if str(state.get("state") or "") in _LIVE_POSITION_STATES:
+        return True
+    return state.get("close_type") == "detached"
 
 
-async def _get_running_executors(engine: Any, client: Any) -> list[dict]:
-    """This session's running executors -- fresh if possible, else last snapshot.
+def _describe_record(record: Any) -> str:
+    from .providers.native_executors import _pair
 
-    Re-runs the core providers so the winddown acts on current truth; on any
-    failure it falls back to ``engine._last_skill_data`` (already scoped to this
-    session's ``agent_id`` by the last tick).
-    """
     try:
-        results = await engine.provider_registry.run_core_providers(
-            client,
-            engine.config,
-            agent_id=engine.agent_id,
-            agent_slug=engine.agent.slug,
-        )
-        ex_result = results.get("executors")
-        if ex_result is not None and "executors" in getattr(ex_result, "data", {}):
-            return list(ex_result.data["executors"])
+        pair = _pair(record)
     except Exception:
-        log.exception("shutdown: executor refresh failed; using last snapshot")
-    return list((engine._last_skill_data or {}).get("executors", []))
+        pair = "?"
+    return f"{record.id} {record.type} {pair}".strip()
 
 
-async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:
-    """Positions summary scoped to this session (``controller_id``)."""
-    try:
-        result = await client.executors.get_positions_summary(
-            controller_id=agent_id or None
-        )
-    except Exception:
-        log.exception("shutdown: failed to fetch positions summary")
-        return []
-    positions = result.get("positions", result) if isinstance(result, dict) else result
-    if not isinstance(positions, list):
-        positions = [positions] if positions else []
-    return [p for p in positions if isinstance(p, dict)]
+def _load_slug_records(runtime: Any, slug: str) -> list:
+    """All executor records of the slug, with live in-memory state overlaid on
+    running ones (the durable log is transition-only)."""
+    from .providers.native_executors import _overlay_live_record
+
+    return [
+        _overlay_live_record(r, runtime) for r in runtime.store.load_by_slug(slug)
+    ]
+
+
+def _nonterminal_records(runtime: Any, slug: str) -> list:
+    return [r for r in _load_slug_records(runtime, slug) if r.status in _NONTERMINAL]
 
 
 async def _deterministic_baseline(
-    engine: Any, client: Any, policy: ShutdownPolicy
-) -> tuple[int, list[str]]:
-    """Stop this session's executors with ``keep_position`` per policy.
+    runtime: Any, slug: str, policy: ShutdownPolicy
+) -> tuple[int, list[str], list[str]]:
+    """Stop the slug's nonterminal executors with ``keep_position`` per policy.
 
     Each stop is isolated so one failure never aborts the rest. Returns
-    ``(stopped_count, failures)``.
+    ``(stopped_count, failures, attempted_ids)``.
     """
-    from condor.fetchers.executors import stop_executor
-
-    running = await _get_running_executors(engine, client)
+    running = _nonterminal_records(runtime, slug)
     stopped = 0
     failures: list[str] = []
-    for ex in running:
-        ex_id = ex.get("id") or ex.get("executor_id")
-        if not ex_id:
-            continue
-        keep = _keep_position(ex, policy)
+    attempted: list[str] = []
+    for record in running:
+        attempted.append(record.id)
+        keep = _keep_position(record, policy)
         try:
-            result = await stop_executor(client, ex_id, keep_position=keep)
-        except Exception as e:  # stop_executor already guards, but be defensive
-            failures.append(f"stop {ex_id}: {e}")
+            await ops.stop(runtime, executor_id=record.id, keep_position=keep)
+        except Exception as e:
+            failures.append(f"stop {record.id}: {e}")
             continue
-        if isinstance(result, dict) and result.get("status") == "error":
-            failures.append(f"stop {ex_id}: {result.get('message')}")
-        else:
-            stopped += 1
-    return stopped, failures
+        stopped += 1
+    return stopped, failures, attempted
+
+
+def _stranded_records(
+    records: list, policy: ShutdownPolicy, attempted_ids: set[str]
+) -> list:
+    """Records the policy said to close that still hold risk.
+
+    Two ways to be stranded: still nonterminal after the stops settled, or a
+    position-kind record we stopped whose state still holds venue inventory
+    (e.g. a detach where the policy demanded a close).
+    """
+    out = []
+    for r in records:
+        if _keep_position(r, policy):
+            continue
+        if r.status in _NONTERMINAL or (r.id in attempted_ids and _holds_inventory(r)):
+            out.append(r)
+    return out
 
 
 async def _verify_and_retry(
-    engine: Any, client: Any, policy: ShutdownPolicy
-) -> list[dict]:
-    """Re-query positions; retry the deterministic close once; return residuals.
+    runtime: Any, slug: str, policy: ShutdownPolicy, attempted_ids: set[str]
+) -> list:
+    """Re-read the store after stops settle; retry the close once; return the
+    records still stranded.
 
-    Never trusts the LLM: computes which positions *should* be gone under the
-    policy, and if any remain, stops any still-running executor that should be
-    closed and re-checks. Returns the list of positions still stranded.
+    Never trusts the LLM: computes which records *should* be flat under the
+    policy, and if any remain, stops any still-nonterminal one that should be
+    closed and re-checks.
     """
-    positions = await _fetch_positions(client, engine.agent_id)
-    stranded = [p for p in positions if not _should_remain_open(p, policy)]
+    await asyncio.sleep(_SETTLE_DELAY_S)
+    records = _load_slug_records(runtime, slug)
+    stranded = _stranded_records(records, policy, attempted_ids)
     if not stranded:
         return []
 
-    from condor.fetchers.executors import stop_executor
-
-    running = await _get_running_executors(engine, client)
-    for ex in running:
-        if _keep_position(ex, policy):
-            continue
-        ex_id = ex.get("id") or ex.get("executor_id")
-        if not ex_id:
+    for r in stranded:
+        if r.status not in _NONTERMINAL:
             continue
         try:
-            await stop_executor(client, ex_id, keep_position=False)
+            await ops.stop(runtime, executor_id=r.id, keep_position=False)
+            attempted_ids.add(r.id)
         except Exception:
-            log.exception("shutdown: retry stop failed for %s", ex_id)
+            log.exception("shutdown: retry stop failed for %s", r.id)
 
-    positions = await _fetch_positions(client, engine.agent_id)
-    return [p for p in positions if not _should_remain_open(p, policy)]
+    await asyncio.sleep(_SETTLE_DELAY_S)
+    records = _load_slug_records(runtime, slug)
+    return _stranded_records(records, policy, attempted_ids)
 
 
 def _build_llm_context(
     policy: ShutdownPolicy,
-    running: list[dict],
-    positions: list[dict],
+    running: list,
     failures: list[str],
 ) -> str:
     """Post-baseline state handed to the LLM cleanup pass."""
@@ -274,15 +279,7 @@ def _build_llm_context(
         f"Executors still running after the baseline stop ({len(running)}):",
     ]
     lines += [
-        f"  - {ex.get('id') or ex.get('executor_id') or '?'} "
-        f"{ex.get('connector', '?')} {ex.get('pair', '')}".rstrip()
-        for ex in running
-    ] or ["  (none)"]
-    lines += ["", f"Open positions after the baseline stop ({len(positions)}):"]
-    lines += [
-        f"  - {_describe_position(p)} pnl="
-        f"{p.get('unrealized_pnl_quote', p.get('unrealized_pnl', '?'))}"
-        for p in positions
+        f"  - {_describe_record(r)} [{r.status}]" for r in running
     ] or ["  (none)"]
     if failures:
         lines += ["", f"Deterministic winddown errors ({len(failures)}):"]
@@ -292,7 +289,7 @@ def _build_llm_context(
 
 async def _run_llm_cleanup(
     engine: Any,
-    client: Any,
+    runtime: Any,
     policy: ShutdownPolicy,
     body: str,
     failures: list[str],
@@ -312,9 +309,8 @@ async def _run_llm_cleanup(
         from .run import run_agent
         from condor.agents.context import build_agent_context
 
-        running = await _get_running_executors(engine, client)
-        positions = await _fetch_positions(client, engine.agent_id)
-        context = _build_llm_context(policy, running, positions, failures)
+        running = _nonterminal_records(runtime, agent.slug)
+        context = _build_llm_context(policy, running, failures)
         prompt = build_agent_context(agent, engine.user_id, body, context)
         async with asyncio.timeout(300):
             # Unattended auto-approve: the cleanup pass must be able to close
@@ -326,7 +322,6 @@ async def _run_llm_cleanup(
                 permission_policy=AUTO,
                 user_id=engine.user_id,
                 chat_id=engine.chat_id,
-                server_name=engine.config.get("server_name") or None,
                 timeout_s=300,
             )
     except asyncio.TimeoutError:
@@ -342,23 +337,25 @@ async def _run_llm_cleanup(
 
 
 async def run_shutdown(engine: Any, reason: str) -> None:
-    """Wind down this session's executors/positions per its ``shutdown.md`` policy.
+    """Wind down this agent's executors/positions per its ``shutdown.md`` policy.
 
     Sequence (the LLM judgment pass is inserted between baseline and verify):
 
     1. Load the resolved policy + body; record ``shutdown_start``.
-    2. Deterministic baseline: stop this session's executors with ``keep_position``
-       per policy (the guaranteed floor).
-    3. Verify: re-query positions, retry the close once, and loudly alert the user
-       if anything the policy said to close is still open.
+    2. Deterministic baseline: stop the slug's nonterminal executors with
+       ``keep_position`` per policy (the guaranteed floor).
+    3. Verify: re-read the store after the stops settle, retry the close once,
+       and loudly alert the user if anything the policy said to close still
+       holds risk.
     4. Record ``shutdown_done``.
 
     The caller (:meth:`TickEngine._run_shutdown`) owns the idempotency guard and
     the self-stop; this function performs the winddown itself and never raises for
-    an individual API failure -- failures are collected and surfaced.
+    an individual stop failure -- failures are collected and surfaced.
     """
     policy, body = load_shutdown_policy(engine.agent)
     agent_id = engine.agent_id
+    slug = engine.agent.slug
     log.warning(
         "TickEngine %s: SHUTDOWN starting -- %s (policy=%s)",
         agent_id,
@@ -369,26 +366,26 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         "shutdown_start", f"{reason} (policy={policy.on_kill_switch})"
     )
 
-    client = await engine._get_client()
-    if client is None:
+    runtime = peek_executor_runtime()
+    if runtime is None:
         msg = (
-            f"🚨 Agent {agent_id}: emergency shutdown could NOT reach the API — "
-            f"positions may be OPEN, check manually! ({reason})"
+            f"🚨 Agent {agent_id}: emergency shutdown could NOT reach the executor "
+            f"runtime — positions may be OPEN, check manually! ({reason})"
         )
         log.error(msg)
         await engine._notify(msg)
-        engine.record_decision("shutdown_failed", "no API client")
+        engine.record_decision("shutdown_failed", "no executor runtime")
         return
 
-    stopped, failures = await _deterministic_baseline(engine, client, policy)
+    stopped, failures, attempted = await _deterministic_baseline(runtime, slug, policy)
 
     # LLM nuance pass on top of the guaranteed floor (best-effort, bounded).
-    await _run_llm_cleanup(engine, client, policy, body, failures)
+    await _run_llm_cleanup(engine, runtime, policy, body, failures)
 
-    stranded = await _verify_and_retry(engine, client, policy)
+    stranded = await _verify_and_retry(runtime, slug, policy, set(attempted))
 
     if stranded:
-        details = ", ".join(_describe_position(p) for p in stranded) or "unknown"
+        details = ", ".join(_describe_record(r) for r in stranded) or "unknown"
         msg = (
             f"🚨 Agent {agent_id}: emergency shutdown left {len(stranded)} position(s) "
             f"OPEN that the '{policy.on_kill_switch}' policy said to close: {details}. "

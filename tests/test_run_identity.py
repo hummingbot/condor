@@ -30,7 +30,7 @@ def _make_engine(tmp_path, monkeypatch, config):
     from condor.agents.engine import TickEngine
 
     _patch_roots(monkeypatch, tmp_path)
-    agent = Agent(slug="acme", name="Acme", agent_key="claude-code", server_required=False)
+    agent = Agent(slug="acme", name="Acme", agent_key="claude-code")
     agent.agent_dir.mkdir(parents=True, exist_ok=True)
     return TickEngine(agent=agent, config=config, chat_id=1, user_id=1)
 
@@ -69,7 +69,7 @@ def test_display_seq_increments_across_kinds(tmp_path, monkeypatch):
     e1 = _make_engine(tmp_path, monkeypatch, {})
     from condor.agents.engine import TickEngine
 
-    agent = Agent(slug="acme", name="Acme", agent_key="claude-code", server_required=False)
+    agent = Agent(slug="acme", name="Acme", agent_key="claude-code")
     e2 = TickEngine(
         agent=agent, config={"execution_mode": "experiment"}, chat_id=1, user_id=1
     )
@@ -82,7 +82,7 @@ def test_engine_falls_back_to_agent_risk_baseline(tmp_path, monkeypatch):
 
     _patch_roots(monkeypatch, tmp_path)
     agent = Agent(
-        slug="acme", name="Acme", agent_key="claude-code", server_required=False,
+        slug="acme", name="Acme", agent_key="claude-code",
         risk_limits={"max_position_size_quote": 250.0, "max_open_executors": 2},
         denomination="USDC",
     )
@@ -159,7 +159,7 @@ def test_consult_records_a_run(tmp_path, monkeypatch):
     agent_dir = tmp_path / "oracle"
     agent_dir.mkdir(parents=True)
     (agent_dir / "AGENT.md").write_text(
-        "---\nname: oracle\nwhen_to_consult: always\nserver_required: false\n---\n\nBody.\n"
+        "---\nname: oracle\nwhen_to_consult: always\n---\n\nBody.\n"
     )
 
     async def fake_run(agent, prompt, **kw):
@@ -169,7 +169,7 @@ def test_consult_records_a_run(tmp_path, monkeypatch):
 
     answer = asyncio.run(
         consult_module.run_consult(
-            slug="oracle", user_id=1, chat_id=2, server_name=None, task="q"
+            slug="oracle", user_id=1, chat_id=2, task="q"
         )
     )
     assert answer == "the answer"
@@ -196,7 +196,7 @@ def test_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
     agent_dir = tmp_path / "watcher"
     agent_dir.mkdir(parents=True)
     (agent_dir / "AGENT.md").write_text(
-        "---\nname: watcher\nserver_required: true\n"
+        "---\nname: watcher\n"
         "risk_limits:\n  max_position_size_quote: 0\n  max_open_executors: 0\n"
         "denomination: USD\n"
         "default_config:\n  frequency_sec: 120\n"
@@ -229,7 +229,7 @@ def test_start_seeds_agent_risk_baseline(tmp_path, monkeypatch):
 
     # A default_config-level risk_limits wins over the bare baseline seed.
     (agent_dir / "AGENT.md").write_text(
-        "---\nname: watcher\nserver_required: true\n"
+        "---\nname: watcher\n"
         "risk_limits:\n  max_position_size_quote: 0\n  max_open_executors: 0\n"
         "denomination: USD\n"
         "default_config:\n  risk_limits:\n    max_position_size_quote: 50\n"

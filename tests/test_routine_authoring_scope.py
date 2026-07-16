@@ -25,7 +25,7 @@ def _patch_agents(monkeypatch, tmp_path):
         d = tmp_path / slug
         d.mkdir(parents=True)
         (d / "AGENT.md").write_text(
-            f"---\nname: {slug}\nserver_required: false\n---\n\nBody.\n"
+            f"---\nname: {slug}\n---\n\nBody.\n"
         )
     monkeypatch.setattr(
         "routines.base.assistant_routines_dir",

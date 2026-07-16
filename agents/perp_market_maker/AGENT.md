@@ -14,8 +14,6 @@ when_to_consult: When the user asks about market regime for a perp, whether spre
   are appropriate, inventory skew, or whether to pause/adjust quoting — use consult.
   When the user wants to run the perp market maker on a coin — use delegate so the
   agent runs the dual_position_mm loop and pings when done.
-server_required: false
-server_name: null
 created_at: '2026-06-24T22:39:20.729730+00:00'
 risk_limits:
   max_position_size_quote: 200

@@ -70,21 +70,17 @@ class Agent:
     name: str
     description: str = ""
     instructions: str = ""  # AGENT.md body: identity + domain knowledge + strategy
-    agent_key: str = ""  # default model (pydantic-ai or ACP, e.g. "claude-code")
-    # Tool-name allowlist (pydantic-ai only), enforced on BOTH consult and loop.
+    agent_key: str = ""  # default model (ACP key, e.g. "claude-code")
+    # Declared tool scope, enforced on BOTH consult and loop (scope_gate for
+    # system mutations, can_trade for the risk baseline requirement).
     # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
-    # Empty => UNRESTRICTED (all discovered tools, subject to tool_filter_mode).
+    # Empty => UNRESTRICTED (all discovered tools) — and therefore trading.
     tools: list[str] = field(default_factory=list)
     when_to_consult: str = ""  # empty => not offered as consultable
-    server_required: bool = True
-    # Pin this agent to a specific hummingbot-api server. When set, the agent's
-    # mcp-hummingbot subprocess is initialized against THIS server regardless of
-    # the chat's active server. Empty => fall back to the ambient chat server.
-    server_name: str = ""
     # Agent-level risk baseline (RiskLimits keys). Governs unattended delegations
     # (zero-seeded risk_gate) and is the baseline for tick sessions (launch
     # overrides may only TIGHTEN it, §5.3). The AGENT.md defines what the agent
-    # does — a server-backed agent MUST declare a baseline (enforced on save);
+    # does — an agent that can trade MUST declare a baseline (enforced on save);
     # {max_position_size_quote: 0, max_open_executors: 0} is the explicit
     # "read-only, never trades" statement.
     risk_limits: dict = field(default_factory=dict)
@@ -124,23 +120,24 @@ class Agent:
 
     @property
     def can_trade(self) -> bool:
-        """True if this agent explicitly owns the executor tool. Such an agent
-        MUST declare a risk baseline — enforced on save and at delegation —
-        whether or not it needs a hummingbot server, because condor-native
-        executors trade on serverless agents too (#4)."""
+        """True if this agent can reach the executor tool: it declares
+        ``manage_executors``, or declares no tool list at all (empty =
+        unrestricted — the full surface includes the executor tool). Such an
+        agent MUST declare a risk baseline — enforced on save and at
+        delegation (#4)."""
+        if not self.tools:
+            return True
         return any(
             t == self._TRADING_TOOL or t.endswith(f"__{self._TRADING_TOOL}")
-            for t in (self.tools or [])
+            for t in self.tools
         )
 
     @property
     def consultable(self) -> bool:
         """DERIVED capability: any Agent with a non-empty consult trigger.
 
-        Consult works on any model — there is no separate "expert" kind of agent.
-        A pydantic-ai key runs the consult with the tool allowlist enforced; an
-        ACP key (claude-code/gemini/copilot) runs it unrestricted but with every
-        mutation still gated by the user's confirmation (see consult.py).
+        Consult works on any model — there is no separate "expert" kind of
+        agent. Every mutation is gated by the user's confirmation (consult.py).
         """
         return bool(self.when_to_consult)
 
@@ -160,8 +157,6 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
             agent_key=meta.get("agent_key", ""),
             tools=meta.get("tools", []) or [],
             when_to_consult=meta.get("when_to_consult", ""),
-            server_required=meta.get("server_required", True),
-            server_name=meta.get("server_name", "") or "",
             risk_limits=meta.get("risk_limits", {}) or {},
             denomination=meta.get("denomination", "") or "",
             default_config=meta.get("default_config", {}) or {},
@@ -222,8 +217,6 @@ class AgentStore:
         agent_key: str = "",
         tools: list[str] | None = None,
         when_to_consult: str = "",
-        server_required: bool = True,
-        server_name: str = "",
         risk_limits: dict | None = None,
         denomination: str = "",
         default_config: dict | None = None,
@@ -238,8 +231,6 @@ class AgentStore:
             agent_key=agent_key,
             tools=tools or [],
             when_to_consult=when_to_consult,
-            server_required=server_required,
-            server_name=server_name,
             risk_limits=risk_limits or {},
             denomination=denomination,
             default_config=default_config or {},
@@ -270,12 +261,16 @@ class AgentStore:
         return True
 
     def _save(self, agent: Agent) -> None:
-        # The AGENT.md defines what the agent does — for a server-backed agent
-        # that includes how much it may do unattended. Refusing to save an
-        # incomplete definition moves the loud error from delegate time to
+        # The AGENT.md defines what the agent does — for an agent that can
+        # trade that includes how much it may do unattended. Refusing to save
+        # an incomplete definition moves the loud error from delegate time to
         # authoring time.
-        if (agent.server_required or agent.can_trade) and not agent.risk_limits:
-            why = "is server-backed" if agent.server_required else "owns manage_executors"
+        if agent.can_trade and not agent.risk_limits:
+            why = (
+                "owns manage_executors"
+                if agent.tools
+                else "declares no tool scope (unrestricted ⇒ trading)"
+            )
             raise ValueError(
                 f"Agent '{agent.slug}' {why} but declares no risk_limits "
                 "baseline. Say the numbers in AGENT.md — use "
@@ -294,8 +289,6 @@ class AgentStore:
             "agent_key": agent.agent_key,
             "tools": agent.tools,
             "when_to_consult": agent.when_to_consult,
-            "server_required": agent.server_required,
-            "server_name": agent.server_name,
             "risk_limits": agent.risk_limits,
             "denomination": agent.denomination,
             "default_config": agent.default_config,

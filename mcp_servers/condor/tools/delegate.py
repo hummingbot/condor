@@ -30,7 +30,6 @@ async def delegate(
                 "task": task,
                 "chat_id": settings.chat_id,
                 "user_id": settings.user_id,
-                "server_name": settings.active_server or None,
                 "risk_limits": risk_limits,
             },
         )

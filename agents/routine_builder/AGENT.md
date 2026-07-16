@@ -3,10 +3,13 @@ name: Routine Builder
 description: Specialist agent that creates, edits, tests, and debugs Python routines
   — both global (routines/) and agent-local (agents/{slug}/routines/).
 agent_key: claude-code:sonnet
-tools: []
+tools:
+- manage_routines
+- manage_memory
+- manage_skill
+- send_notification
 when_to_consult: When the user wants to create, modify, fix, or debug a routine (market
   analysis, monitoring, charts, reports) — or delegate routine creation to the background.
-server_required: false
 created_at: '2026-06-30T08:39:27.451630+00:00'
 ---
 

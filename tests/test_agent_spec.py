@@ -25,7 +25,6 @@ def _agent(**kw):
         description="d",
         instructions="body",
         agent_key="claude-code",
-        server_required=False,
         risk_limits={"max_position_size_quote": 100, "max_open_executors": 3},
         denomination="USDC",
         default_config={"frequency_sec": 60},
@@ -134,7 +133,6 @@ async def test_start_session_rejects_widening_override(tmp_path, monkeypatch):
     AgentStore().create(
         name="widen_me",
         instructions="body",
-        server_required=False,
         tools=["manage_executors"],
         risk_limits={"max_position_size_quote": 10, "max_open_executors": 2},
         denomination="USDC",
@@ -182,7 +180,7 @@ def test_agent_save_validates_schedule(tmp_path, monkeypatch):
         AgentStore().create(
             name="sched",
             instructions="x",
-            server_required=False,
+            tools=["manage_routines"],  # non-trading scope: no baseline needed
             schedule={"cron": "0 * * * *"},
             default_config={},
         )

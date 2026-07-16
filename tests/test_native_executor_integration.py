@@ -182,7 +182,7 @@ def test_native_provider_reports_exposure_and_unrealized(tmp_path, monkeypatch):
         service, "_runtime", SimpleNamespace(store=store, gateway=SimpleNamespace())
     )
 
-    result = asyncio.run(NativeExecutorsProvider().execute(None, {}, agent_id="agent_x_1", agent_slug="agent_x"))
+    result = asyncio.run(NativeExecutorsProvider().execute({}, agent_id="agent_x_1", agent_slug="agent_x"))
     assert result.data["open_count"] == 1
     # open notional at cost basis: quote_spent = 1
     assert result.data["total_exposure"] == pytest.approx(1.0)
@@ -223,7 +223,7 @@ def test_native_provider_reads_live_pnl_after_deduped_poll(tmp_path, monkeypatch
     )
 
     result = asyncio.run(
-        NativeExecutorsProvider().execute(None, {}, agent_id="agent_x_1", agent_slug="agent_x")
+        NativeExecutorsProvider().execute({}, agent_id="agent_x_1", agent_slug="agent_x")
     )
     assert result.data["unrealized_pnl"] == pytest.approx(0.1)
 
@@ -274,7 +274,7 @@ def test_filled_order_perp_inventory_remains_risk_exposure(tmp_path, monkeypatch
 
     result = asyncio.run(
         NativeExecutorsProvider().execute(
-            None, {}, agent_id="perp_market_maker_1", agent_slug="perp_market_maker"
+            {}, agent_id="perp_market_maker_1", agent_slug="perp_market_maker"
         )
     )
     assert result.data["total_exposure"] == pytest.approx(20.0)
