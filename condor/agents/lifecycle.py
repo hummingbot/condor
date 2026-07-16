@@ -116,16 +116,34 @@ async def start_session(
     }
 
 
-async def apply_verb(slug: str, agent_id: Optional[str], verb: str) -> dict:
-    """stop (position-preserving) | shutdown (winddown) | pause | resume."""
+async def apply_verb(
+    slug: str, agent_id: Optional[str], verb: str, close: bool = False
+) -> dict:
+    """stop (position-preserving; ``close=True`` liquidates the run scope) |
+    shutdown (agent-scoped emergency winddown) | pause | resume."""
     if verb == "stop":
         for engine in select_engines(slug, agent_id):
-            await engine.stop()
-        return {"stopped": True}
+            await engine.stop(close=close)
+        return {"stopped": True, "closed": close}
     if verb == "shutdown":
-        for engine in select_engines(slug, agent_id):
+        # Agent-SCOPED (§6.2): every live run winds down, and executors
+        # surviving from prior runs of the slug stop too — a dead run's
+        # financial scope must not escape the emergency stop.
+        engines = select_engines(slug, agent_id) if agent_id else engines_for_slug(slug)
+        for engine in engines:
             await engine._run_shutdown(reason="manual emergency stop")
-        return {"shutdown": True}
+        stopped_leftovers: list[str] = []
+        if slug:
+            from condor.executors.service import peek_executor_runtime
+
+            runtime = peek_executor_runtime()
+            if runtime is not None:
+                stopped_leftovers = runtime.stop_slug_executors(
+                    slug, keep_position=False
+                )
+        if not engines and not stopped_leftovers and not agent_id:
+            raise LifecycleError(404, f"nothing to shut down for '{slug}'")
+        return {"shutdown": True, "stopped_executors": stopped_leftovers}
     if verb == "pause":
         select_engines(slug, agent_id, running_only=True)[0].pause()
         return {"paused": True}

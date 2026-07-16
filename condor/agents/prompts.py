@@ -16,7 +16,7 @@ You are an autonomous trading agent running inside Condor.
 
 RULES:
 - Trade ONLY via manage_executors(action="create"). NEVER use place_order.
-{controller_rule}- Be conservative. When in doubt, hold and journal why.
+{controller_rule}- Be conservative. When in doubt, hold and say why in your response.
 
 ERROR RECOVERY:
 - If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
@@ -72,53 +72,47 @@ SKILLS & ROUTINES:
   manage_routines(action="run", name="...", config={...}). manage_routines(action="list")
   to discover routines; routines tagged "agent" are local to your strategy.
 - Skills are read-only playbooks shipped with this agent — follow them, you can't
-  create or edit them. Operational facts you learn go to [LEARNINGS] (journal).
+  create or edit them. Operational facts you learn go to agent memory.
 
 MEMORY (about the user, NOT operational learnings):
 - [USER MEMORY] below is what is known about the OWNER (preferences, profile).
-  This is distinct from [LEARNINGS] (market/execution), which go to the journal.
+  This is distinct from operational/market learnings (agent memory).
 - Read detail with manage_memory(action="read", name="...").
 - If you learn something new and stable about the USER (a standing preference,
   a profile fact, a correction), save it with manage_memory(action="write",
   name="short-name", description="one line", content="...", type="preference|fact").
-  Operational/market learnings go to the journal (see JOURNAL above), NOT here.
+  Operational/market learnings go to agent memory (see RECORDING above), NOT here.
 
 NOTIFICATIONS:
 - Use send_notification(text="...") to message the user on Telegram.
 """
 
-# Journal guidance. In experiments the engine keeps NO journal — the whole
-# tick is captured in an experiment snapshot instead — so the agent must not
-# call trading_agent_journal_write (it would fail with "no journal available").
-# Everything else (loop, incl. max_ticks=1 run-once sessions) gets the full
-# journal protocol.
+# Recording guidance (§7.1): the run's event stream is the one history — the
+# engine records the tick (your response, tool calls, metrics) automatically.
+# Durable operational learnings go to agent memory (an explicit tool call).
 JOURNAL_SECTION_LIVE = """\
-JOURNAL:
-- Write ONE action entry per tick via trading_agent_journal_write(entry_type="action"). One line.
-- Learnings must specify a category: "market" or "execution".
-  trading_agent_journal_write(entry_type="learning", category="market|execution", text="...")
-  - market: band behavior, volatility regimes, S/R patterns, routine observations.
-  - execution: executor errors, schema issues, fill problems, timing.
-- Keep learnings factual and short (1 line). No speculation.
-- Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
-- Do NOT call trading_agent_journal_read — context is already in this prompt.
+RECORDING:
+- Your response and tool calls are recorded on the run automatically —
+  state your decision and reasoning in ONE short line at the top of your
+  response; no tool call needed for that.
+- A genuinely NEW durable fact (market behavior, execution quirk) goes to
+  agent memory: manage_memory(action="write", ...) — factual, one line.
 """
 
 JOURNAL_SECTION_EXPERIMENT = """\
-JOURNAL:
-- This is an experiment: there is NO journal this tick.
-- Do NOT call trading_agent_journal_write or trading_agent_journal_read — they are
-  unavailable here and will error.
-- Put all observations, reasoning, and what you WOULD record straight into your
-  response. The full tick is saved automatically as an experiment snapshot.
+RECORDING:
+- This is an experiment (dry run): mutating actions are cancelled, and the
+  whole tick is recorded automatically on the run's event stream.
+- Put all observations, reasoning, and what you WOULD do straight into your
+  response.
 """
 
 
 def _build_tool_preload(*, is_experiment: bool, uses_hummingbot: bool = True) -> str:
     """ToolSearch preload line for ACP sessions.
 
-    Experiments omit manage_executors (read-only) and trading_agent_journal_write
-    (experiments keep no journal). Serverless agents (``uses_hummingbot=False``)
+    Experiments omit manage_executors (read-only). Serverless agents
+    (``uses_hummingbot=False``)
     load the CONDOR-native manage_executors and NO mcp-hummingbot tools — wiring
     both would expose two manage_executors with incompatible schemas, and market
     data comes from the agent's own routines.
@@ -134,8 +128,6 @@ def _build_tool_preload(*, is_experiment: bool, uses_hummingbot: bool = True) ->
         ]
     elif not is_experiment:
         tools.append("mcp__condor__manage_executors")
-    if not is_experiment:
-        tools.append("mcp__condor__trading_agent_journal_write")
     tools += [
         "mcp__condor__send_notification",
         "mcp__condor__manage_memory",
@@ -236,7 +228,7 @@ def build_tick_prompt(
         )
 
     # Tick identity
-    tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in journal entries and notifications."
+    tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in notifications."
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
         # controller_id is the hummingbot-executors attribution arg; condor-native

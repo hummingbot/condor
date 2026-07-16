@@ -154,7 +154,7 @@ def test_server_backed_agent_requires_risk_baseline(tmp_path, monkeypatch):
         store.update(ro)
 
 
-# ── MCP tool: manage_trading_agent agent CRUD (the AGENT.md identity) ──
+# ── MCP tools: explicit agent CRUD (the AGENT.md identity, §8) ──
 
 
 def _stub_control(monkeypatch):
@@ -176,8 +176,8 @@ def _stub_control(monkeypatch):
     monkeypatch.setattr(ta, "call_control", fake_call_control)
 
 
-def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
-    """create_agent/get_agent/update_agent/delete_agent through the MCP tool."""
+def test_explicit_agent_crud_tools(tmp_path, monkeypatch):
+    """create_agent/get_agent/update_agent/delete_agent explicit tools."""
     from mcp_servers.condor.settings import settings
     from mcp_servers.condor.tools import trading_agent as ta
 
@@ -186,8 +186,7 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "user_id", 7, raising=False)
 
     created = asyncio.run(
-        ta.manage_trading_agent(
-            action="create_agent",
+        ta.create_agent(
             name="Risk Sentry",
             description="watches drawdown",
             instructions="identity + domain knowledge",
@@ -203,15 +202,14 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
     assert created["consultable"] is True  # has a consult trigger
 
     got = asyncio.run(
-        ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
+        ta.get_agent("risk_sentry")
     )
     assert got["instructions"].strip() == "identity + domain knowledge"
     assert got["tools"] == ["get_market_data"]
 
     updated = asyncio.run(
-        ta.manage_trading_agent(
-            action="update_agent",
-            agent_slug="risk_sentry",
+        ta.update_agent(
+            "risk_sentry",
             instructions="new body",
             when_to_consult="",  # demote from consultable
         )
@@ -220,28 +218,22 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
     assert updated["consultable"] is False
     assert (
         asyncio.run(
-            ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
+            ta.get_agent("risk_sentry")
         )["instructions"].strip()
         == "new body"
     )
 
-    listed = asyncio.run(ta.manage_trading_agent(action="list_agent_definitions"))[
-        "agents"
-    ]
+    listed = asyncio.run(ta.list_agents())["agents"]
     assert any(a["slug"] == "risk_sentry" for a in listed)
 
-    deleted = asyncio.run(
-        ta.manage_trading_agent(action="delete_agent", agent_slug="risk_sentry")
-    )
+    deleted = asyncio.run(ta.delete_agent("risk_sentry"))
     assert deleted["deleted"] is True and deleted["tombstoned"] is True
     # Tombstone, not erase: history stays readable, but the agent leaves the
     # default listing and the slug is reserved.
     assert "instructions" in asyncio.run(
-        ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
+        ta.get_agent("risk_sentry")
     )
-    listed_after = asyncio.run(
-        ta.manage_trading_agent(action="list_agent_definitions")
-    )["agents"]
+    listed_after = asyncio.run(ta.list_agents())["agents"]
     assert not any(a["slug"] == "risk_sentry" for a in listed_after)
 
 

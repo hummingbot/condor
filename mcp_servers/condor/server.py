@@ -8,14 +8,12 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import consult as consult_tool
-from mcp_servers.condor.tools import context
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
     executors as executors_tool,
     memory,
     notification,
     routines,
-    servers,
     skills,
     trading_agent,
 )
@@ -309,28 +307,6 @@ async def manage_routines(
 
 
 @mcp.tool()
-@handle_errors("manage servers")
-async def manage_servers(
-    action: str,
-    name: str | None = None,
-) -> dict:
-    """Manage Hummingbot API servers (list, check status).
-
-    Actions:
-    - "list": List all accessible servers with permissions and active status
-    - "status": Check if a server is online (optional name, defaults to active server)
-
-    Args:
-        action: The action to perform (list, status)
-        name: Server name (optional for status)
-
-    Returns:
-        Action-specific result dict.
-    """
-    return await servers.manage_servers(action, name)
-
-
-@mcp.tool()
 @handle_errors("manage executors")
 async def manage_executors(
     action: str,
@@ -399,145 +375,71 @@ async def manage_executors(
 
 
 @mcp.tool()
-@handle_errors("get user context")
-async def get_user_context() -> dict:
-    """Get the current user's context within Condor.
+@handle_errors("list agents")
+async def list_agents() -> dict:
+    """List agent summaries (slug, name, description, capabilities).
 
-    Returns:
-        A dict with:
-        - active_server: Currently active Hummingbot server name
-        - user_role: User's role (admin, user, pending, blocked)
-        - is_admin: Whether the user is an admin
+    Summaries only — fetch the full editable spec with get_agent. Live runs
+    are listed by list_runs; history by list_runs/get_run.
     """
-    return await context.get_user_context()
+    return await trading_agent.list_agents()
 
 
 @mcp.tool()
-@handle_errors("manage trading agent")
-async def manage_trading_agent(
-    action: str,
-    agent_id: str | None = None,
-    agent_slug: str | None = None,
-    name: str | None = None,
-    description: str | None = None,
-    instructions: str | None = None,
-    agent_key: str | None = None,
-    config: dict | None = None,
+@handle_errors("get agent")
+async def get_agent(agent_slug: str) -> dict:
+    """Get one agent's FULL editable spec (the AGENT.md identity, §5.3):
+    name, description, instructions, model, tools, risk_limits,
+    denomination, default_config, default_trading_context, schedule.
+    """
+    return await trading_agent.get_agent(agent_slug)
+
+
+@mcp.tool()
+@handle_errors("create agent")
+async def create_agent(
+    name: str,
+    description: str = "",
+    instructions: str = "",
+    agent_key: str = "",
     tools: list[str] | None = None,
-    when_to_consult: str | None = None,
-    server_required: bool | None = None,
-    server_name: str | None = None,
+    when_to_consult: str = "",
+    server_required: bool = True,
+    server_name: str = "",
     risk_limits: dict | None = None,
-    denomination: str | None = None,
+    denomination: str = "",
     default_config: dict | None = None,
-    default_trading_context: str | None = None,
+    default_trading_context: str = "",
     schedule: dict | None = None,
 ) -> dict:
-    """Manage trading agents (definition, lifecycle, routines, monitoring).
+    """Create a new agent (writes agents/{slug}/AGENT.md — the ONE spec).
 
-    An *agent* (e.g. "executor_manager", "brigado") is an identity defined in
-    agents/{slug}/AGENT.md — the ONE spec and the agent "brain": identity +
-    strategy body (instructions) + launch defaults (default_config) + risk
-    baseline (risk_limits + denomination) + optional schedule. It is distinct
-    from a running *instance*. Capability is DERIVED, not flagged: an agent
-    with ``when_to_consult`` is consultable (on any model); the same AGENT.md
-    is what a session loops. There is NO separate strategy object.
-    Running sessions are identified as "{agent_slug}_{N}" ("{agent_slug}_e{N}"
-    for experiments); all history (sessions, learnings, experiments) lives at
-    the agent level.
-
-    Actions -- Agents (identities):
-    - "list_agent_definitions": List all agents (AGENT.md identities) with their
-      capabilities — consultable (can be used via the `consult` tool),
-      when_to_consult, can_trade, denomination, schedule, agent_key, tools. Use
-      this to answer "what agents exist?" — list_agents (instances) does NOT
-      show idle or consult-only agents.
-    - "create_agent": Create a new agent (AGENT.md identity + brain). Requires name.
-      Optional: description, instructions (the AGENT.md body — identity + domain
-      knowledge + strategy), agent_key, tools (tool-name allowlist for pydantic-ai
-      consults), when_to_consult (set it to make the agent consultable —
-      recommended for every agent), server_required, server_name, risk_limits +
-      denomination, default_config, default_trading_context, schedule.
-      NOTE: a server-backed agent (server_required, the default) or one whose
-      tools include manage_executors MUST declare risk_limits, and risk_limits
-      always require a denomination. Returns agent_slug.
-    - "get_agent": Get full agent definition including the AGENT.md body (requires agent_slug)
-    - "update_agent": Update an agent's AGENT.md / metadata (requires agent_slug, plus fields to change)
-    - "delete_agent": Delete (tombstone) an agent (requires agent_slug). Refused
-      while it has running sessions or open executors; its history stays
-      readable and the slug is reserved forever.
-
-    Actions -- Lifecycle:
-    - "list_agents": List all running agent instances with status
-    - "start_session": Start a new agent SESSION — the stateful unit of capital
-      engagement: frozen config, journal, risk state, its own track-record entry
-      (requires agent_slug; optional config overrides on top of the agent's
-      default_config, e.g. execution_mode "run_once" for a single live tick)
-    - "start_experiment": Run ONE simulated tick with every mutation blocked —
-      a.k.a. a dry run — saved as a flat experiment snapshot, never a session
-      (requires agent_slug; same config args as start_session)
-    - "stop_agent": Stop a running agent, KEEPING its open positions (requires agent_id)
-    - "shutdown_agent": Emergency stop that WINDS DOWN this session's positions/executors
-      per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
-    - "pause_agent": Pause a running agent (requires agent_id)
-    - "resume_agent": Resume a paused agent (requires agent_id)
-
-    Actions -- Routines (scoped to an agent):
-    - "list_routines": List global + agent-local routines for an agent (requires agent_slug)
-    - "run_routine": Execute a one-shot routine (requires agent_slug, name, optional config)
-
-    Journal reads/writes are the dedicated trading_agent_journal_read /
-    trading_agent_journal_write tools, not actions of this tool.
-
-    Actions -- Monitoring:
-    - "agent_tracker": Get the full tracker markdown (tick history, executor ledger, snapshots) (requires agent_id)
-    - "agent_journal": Get recent journal entries and learnings (requires agent_id)
+    Validation is service-owned: risk_limits require a denomination (the
+    numeraire the caps are expressed in); a schedule requires a valid
+    5-field cron + IANA tz AND a bounded duration (max_ticks > 0 in
+    default_config); a tombstoned slug is reserved forever.
 
     Args:
-        action: The action to perform.
-        agent_id: Agent session ID "{agent_slug}_{N}" (for lifecycle/monitoring/journal actions).
-        agent_slug: Agent slug — required for start_session/start_experiment,
-            routine actions, and the agent CRUD actions get/update/delete_agent.
-        name: Agent name (create/update_agent) or routine name (run_routine).
-        description: Agent description (create/update_agent).
-        instructions: AGENT.md body (create/update_agent) — identity + domain knowledge + strategy.
-        agent_key: Default LLM. Examples: "claude-code", "gemini", "copilot", "ollama:llama3.1", "ollama:qwen3:32b", "groq:llama-3.3-70b-versatile". Any model can be consulted; a pydantic-ai key (e.g. "ollama:...") additionally enforces the tools allowlist on consult. Default "claude-code".
-        config: Launch config overrides (start_session/start_experiment) or routine config (run_routine).
-            For start_session, supports: agent_key (override agent default), model_base_url (for LM Studio/vLLM),
-            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits (stricter-only), server_name, max_ticks.
-        tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
-        when_to_consult: Trigger describing when to consult the agent (create/update_agent). Set it to make the agent consultable — recommended for every agent, on any model.
-        server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
-        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any session it runs use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
-        risk_limits: Agent-level risk baseline dict (create/update_agent). Keys:
-            max_position_size_quote, max_open_executors, max_drawdown_pct,
-            shutdown_drawdown_pct. Governs unattended delegations and is the
-            baseline for tick sessions (launch overrides may only tighten it).
-            REQUIRED for server-backed/trading agents; use
-            {"max_position_size_quote": 0, "max_open_executors": 0} for a
-            read-only agent that must never trade.
-        denomination: Numeraire the risk_limits are expressed in, e.g. "USDC",
-            "SOL", "USD" (create/update_agent). REQUIRED whenever risk_limits
-            are declared.
-        default_config: Launch defaults baked into the AGENT.md (create/update_agent) —
-            AgentConfig keys: frequency_sec, total_amount_quote, execution_mode, max_ticks, ...
-        default_trading_context: Default trading context injected when a launch
-            passes none (create/update_agent).
-        schedule: Optional unattended schedule (create/update_agent), e.g.
-            {"cron": "0 * * * *", "tz": "UTC"}.
-
-    Returns:
-        Action-specific result dict.
+        name: Display name; the slug is derived from it.
+        description: One-line purpose.
+        instructions: The strategy/playbook body (markdown).
+        agent_key: Model key (default: the platform default).
+        tools: Declared tool scope; empty = unrestricted.
+        when_to_consult: When the chat brain should consult this agent.
+        server_required: Needs a hummingbot server (False = serverless).
+        server_name: Pinned server (optional).
+        risk_limits: {max_position_size_quote, max_open_executors,
+            max_drawdown_pct?, shutdown_drawdown_pct?}.
+        denomination: Numeraire for risk limits (e.g. "USDC", "SOL").
+        default_config: Launch defaults (frequency_sec, max_ticks, ...).
+        default_trading_context: Default context string for runs.
+        schedule: {cron: "m h dom mon dow", tz?: "UTC"} — unattended fires.
     """
-    return await trading_agent.manage_trading_agent(
-        action,
-        agent_id=agent_id,
-        agent_slug=agent_slug,
+    return await trading_agent.create_agent(
         name=name,
         description=description,
         instructions=instructions,
         agent_key=agent_key,
-        config=config,
         tools=tools,
         when_to_consult=when_to_consult,
         server_required=server_required,
@@ -548,6 +450,135 @@ async def manage_trading_agent(
         default_trading_context=default_trading_context,
         schedule=schedule,
     )
+
+
+@mcp.tool()
+@handle_errors("update agent")
+async def update_agent(
+    agent_slug: str,
+    name: str | None = None,
+    description: str | None = None,
+    instructions: str | None = None,
+    agent_key: str | None = None,
+    tools: list[str] | None = None,
+    when_to_consult: str | None = None,
+    server_required: bool | None = None,
+    server_name: str | None = None,
+    risk_limits: dict | None = None,
+    denomination: str | None = None,
+    default_config: dict | None = None,
+    default_trading_context: str | None = None,
+    schedule: dict | None = None,
+) -> dict:
+    """Update fields of an agent's spec (only the fields you pass change).
+
+    Same validation as create_agent; rejected for tombstoned slugs.
+    """
+    return await trading_agent.update_agent(
+        agent_slug,
+        name=name,
+        description=description,
+        instructions=instructions,
+        agent_key=agent_key,
+        tools=tools,
+        when_to_consult=when_to_consult,
+        server_required=server_required,
+        server_name=server_name,
+        risk_limits=risk_limits,
+        denomination=denomination,
+        default_config=default_config,
+        default_trading_context=default_trading_context,
+        schedule=schedule,
+    )
+
+
+@mcp.tool()
+@handle_errors("delete agent")
+async def delete_agent(agent_slug: str) -> dict:
+    """Delete an agent — a TOMBSTONE, not an erase (§5.2).
+
+    Rejected while the agent has running engines or nonterminal executors.
+    Its history stays readable forever and the slug is reserved (a future
+    create cannot re-acquire the old attribution).
+    """
+    return await trading_agent.delete_agent(agent_slug)
+
+
+@mcp.tool()
+@handle_errors("run agent")
+async def run_agent(
+    agent_slug: str,
+    config: dict | None = None,
+    dry_run: bool = False,
+    trading_context: str = "",
+) -> dict:
+    """Launch a run of an agent. Returns {"agent_id": <run_id>} immediately.
+
+    dry_run=True runs ONE experiment tick: the agent plans and records but
+    every mutating action is cancelled — use it to preview behavior.
+    Launch config overrides are limited (trading_context, duration knobs,
+    dry-run) and risk overrides are STRICTER-ONLY — widening a baseline cap
+    is rejected (§5.3).
+
+    Args:
+        agent_slug: Which agent to run.
+        config: Launch overrides (max_ticks, frequency_sec, risk_limits...).
+        dry_run: One read-only experiment tick instead of a live loop.
+        trading_context: Context string for this run.
+    """
+    return await trading_agent.run_agent(
+        agent_slug, config=config, dry_run=dry_run, trading_context=trading_context
+    )
+
+
+@mcp.tool()
+@handle_errors("list runs")
+async def list_runs(agent_slug: str = "", kind: str = "", limit: int = 20) -> dict:
+    """Run history (newest first): sessions, experiments, delegations,
+    consults, scheduled fires — with status and display seq. Running runs
+    carry live engine info under "live".
+
+    Args:
+        agent_slug: Filter to one agent ("" = all).
+        kind: session | experiment | delegation | consult | scheduled ("" = all).
+        limit: Max runs returned.
+    """
+    return await trading_agent.list_runs(agent_slug, kind=kind, limit=limit)
+
+
+@mcp.tool()
+@handle_errors("get run")
+async def get_run(run_id: str, include_events: bool = False) -> dict:
+    """One run's status + metadata (live engine info while it runs; the
+    durable RunStore record after). include_events=True returns the full
+    event stream (ticks, tool calls, permissions, directives).
+    """
+    return await trading_agent.get_run(run_id, include_events=include_events)
+
+
+@mcp.tool()
+@handle_errors("control run")
+async def control_run(run_id: str, verb: str, close: bool = False) -> dict:
+    """Run-scoped control: pause | resume | stop.
+
+    stop is position-preserving by default (executors detach; barriers on
+    surviving executors keep managing). close=True additionally closes the
+    run's remaining owned inventory (never external/manual positions —
+    §6.2 owned_net_base). Works for interrupted/terminal runs' surviving
+    financial scope too. Agent-wide emergency winddown is shutdown_agent.
+    """
+    return await trading_agent.control_run(run_id, verb, close=close)
+
+
+@mcp.tool()
+@handle_errors("shutdown agent")
+async def shutdown_agent(agent_slug: str) -> dict:
+    """AGENT-scoped emergency winddown (§6.2): stops every live run of the
+    slug, cancels ALL of the agent's persisted orders (including native
+    TP/SL triggers, never external ones), and closes its remaining owned
+    inventory per its shutdown policy.
+    """
+    return await trading_agent.shutdown_agent(agent_slug)
 
 
 @mcp.tool()
@@ -719,80 +750,3 @@ async def manage_skill(
 # rather than manage_trading_agent actions so the agent's ergonomic, oft-used
 # write path is a single named tool.
 # ---------------------------------------------------------------------------
-
-
-@mcp.tool()
-@handle_errors("journal read")
-async def trading_agent_journal_read(
-    agent_id: str,
-    section: str = "recent",
-    max_entries: int = 30,
-) -> dict:
-    """Read the trading agent's journal.
-
-    Args:
-        agent_id: The trading agent instance ID.
-        section: What to read:
-                 "recent" (last 10 decisions from run snapshots),
-                 "learnings" (all learnings, max 20),
-                 "summary" (current status one-liner),
-                 "state" (alias for summary),
-                 "full" (entire journal),
-                 "runs" (list recent run snapshots),
-                 "run:N" (read specific run snapshot, e.g. "run:3").
-        max_entries: Max entries for recent/runs (default 30).
-
-    Returns:
-        {"content": "<journal text>"} or {"runs": [...]} for runs listing.
-    """
-    return trading_agent.journal_read(agent_id, section, max_entries)
-
-
-@mcp.tool()
-@handle_errors("journal write")
-async def trading_agent_journal_write(
-    agent_id: str,
-    entry_type: str,
-    text: str,
-    reasoning: str = "",
-    risk_note: str = "",
-    tick: int = 0,
-    category: str = "",
-) -> dict:
-    """Write to the trading agent's journal. Keep entries SHORT (one line).
-
-    Args:
-        agent_id: The trading agent instance ID ("{slug}_{N}"). For
-            entry_type="promote_learning" the bare agent slug also works —
-            learnings live at the agent level, no session handle needed.
-        entry_type: "action", "learning", "state", or "promote_learning".
-            - "action": What you did this tick (auto-trimmed to last 10).
-            - "learning": A new insight. Duplicates are auto-filtered. Only write
-              if this is genuinely new and not already in learnings (max 20).
-            - "state": Overwrite the current state snapshot (e.g. price, position, grids).
-            - "promote_learning": Move an existing learning to the Promoted
-              section after folding it into a skill (text must match the line).
-        text: The entry content. Keep it to ONE short line.
-        reasoning: One-sentence reasoning (for actions only).
-        risk_note: Optional risk note (for actions only).
-        tick: Current tick number (for actions only).
-        category: Learning category: "market" (observations, patterns, volatility)
-            or "execution" (errors, fills, timing). Only used when entry_type="learning".
-            Defaults to "market".
-
-    Returns:
-        {"written": true}
-    """
-    return await trading_agent.journal_write(
-        agent_id,
-        entry_type,
-        text,
-        reasoning,
-        risk_note,
-        tick,
-        category,
-    )
-
-
-if __name__ == "__main__":
-    mcp.run()

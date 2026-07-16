@@ -60,8 +60,8 @@ def test_deny_gate_blocks_all_dangerous_kinds():
 
 # -- scope_gate: enforce declared tool scope for system mutations (#8) ----------
 
-CREATE_AGENT = {"tool": "mcp__condor__manage_trading_agent",
-                "input": {"action": "create_agent", "name": "x"}}
+CREATE_AGENT = {"tool": "mcp__condor__create_agent",
+                "input": {"name": "x"}}
 CREATE_ROUTINE = {"tool": "manage_routines", "input": {"action": "create_routine"}}
 RUN_ROUTINE = {"tool": "manage_routines", "input": {"action": "run", "name": "scan"}}
 WRITE_MEMORY = {"tool": "manage_memory", "input": {"action": "write"}}
@@ -73,7 +73,7 @@ def _auto_approves(call, tools):
 
 
 def test_scope_gate_denies_undeclared_agent_mutation():
-    # An agent that does not declare manage_trading_agent cannot create agents.
+    # An agent that does not declare create_agent cannot create agents.
     gate = policies.scope_gate(policies.AUTO, ["manage_executors", "manage_routines"])
     out = asyncio.run(gate(CREATE_AGENT, OPTIONS))
     assert out["outcome"]["outcome"] == "cancelled"

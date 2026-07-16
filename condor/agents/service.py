@@ -210,9 +210,15 @@ class AgentService:
             scheduled_for=scheduled_for,
         )
 
-    async def control(self, slug: str, verb: str, agent_id: Optional[str] = None) -> dict:
-        """pause | resume | stop | shutdown (§5.2 verbs)."""
-        return await apply_verb(slug, agent_id, verb)
+    async def control(
+        self,
+        slug: str,
+        verb: str,
+        agent_id: Optional[str] = None,
+        close: bool = False,
+    ) -> dict:
+        """pause | resume | stop [--close] | shutdown (§5.2/§6.2 verbs)."""
+        return await apply_verb(slug, agent_id, verb, close=close)
 
     def list_runs(
         self,

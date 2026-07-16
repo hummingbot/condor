@@ -203,8 +203,10 @@ class TickEngine:
             self.config.get("frequency_sec", 60),
         )
 
-    async def stop(self) -> None:
-        """Stop gracefully."""
+    async def stop(self, close: bool = False) -> None:
+        """Stop gracefully. ``close=True`` (control_run stop --close, §6.2)
+        overrides the config's position-preserving default and closes this
+        run's remaining owned inventory."""
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
@@ -234,7 +236,9 @@ class TickEngine:
 
         runtime = peek_executor_runtime()
         if runtime is not None:
-            keep_position = bool(self.config.get("keep_position_on_stop", True))
+            keep_position = (
+                False if close else bool(self.config.get("keep_position_on_stop", True))
+            )
             stopped = runtime.stop_agent_executors(
                 self.agent_id, keep_position=keep_position
             )

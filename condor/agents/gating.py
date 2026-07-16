@@ -80,15 +80,19 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     return False
 
 
-# System-MUTATION actions per tool — reshaping the agent/routine/skill system,
-# distinct from placing trades or writing an agent's own memory. Read/run/list
-# actions are deliberately excluded (they are safe). Used to gate ACP agents to
-# their declared tool scope (#8): mutations they never declared are denied.
+# System MUTATIONS — reshaping the agent/routine/skill system, distinct from
+# placing trades or writing an agent's own memory. Read/run/list actions are
+# deliberately excluded (they are safe). Used to gate ACP agents to their
+# declared tool scope (#8): mutations they never declared are denied.
+#
+# Agent CRUD is explicit tools now (§8) — the whole tool is the mutation;
+# routines/skills keep action-scoped dispatchers.
+SYSTEM_MUTATION_TOOLS: set[str] = {"create_agent", "update_agent", "delete_agent"}
 SYSTEM_MUTATION_ACTIONS: dict[str, set[str]] = {
-    "manage_trading_agent": {
-        "create_agent", "update_agent", "delete_agent",
+    "manage_routines": {
+        "create_routine", "edit_routine", "delete_routine",
+        "schedule_routine", "unschedule_routine",
     },
-    "manage_routines": {"create_routine", "edit_routine", "delete_routine"},
     "manage_skill": {"create", "write_file", "patch", "edit", "delete"},
 }
 
@@ -99,6 +103,8 @@ def system_mutation_tool(tool_call: dict[str, Any]) -> str | None:
     read/run/list action are NOT system mutations."""
     raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
     tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+    if tool_name in SYSTEM_MUTATION_TOOLS:
+        return tool_name
     actions = SYSTEM_MUTATION_ACTIONS.get(tool_name)
     if actions is None:
         return None

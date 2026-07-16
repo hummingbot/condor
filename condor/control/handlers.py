@@ -166,8 +166,8 @@ def build_agent_handlers() -> dict[str, Handler]:
         # serialized main-process outbox writer — never by writing the file.
         "notify.emit": _notify_emit,
         "agent.start": lambda **kw: svc.run(**kw),
-        "agent.verb": lambda slug, verb, agent_id=None: svc.control(
-            slug, verb, agent_id=agent_id
+        "agent.verb": lambda slug, verb, agent_id=None, close=False: svc.control(
+            slug, verb, agent_id=agent_id, close=close
         ),
         "agent.consult": lambda **kw: _consult(**kw),
         # CRUD (the service owns guards — tombstone semantics, spec validation)
