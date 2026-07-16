@@ -138,6 +138,12 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
     subprotocol header (preferred), falling back to the deprecated ``?token=``
     query param for older clients / live sessions.
     """
+    # Loopback posture (§5.5): reject foreign Origin/Host before the upgrade.
+    from condor.web.security import websocket_origin_allowed
+
+    if not websocket_origin_allowed(ws):
+        await ws.close(code=4003, reason="non-loopback origin")
+        return
     auth_token, accept_subprotocol = extract_ws_token(ws, token)
     payload = decode_jwt(auth_token) if auth_token else None
     if not payload:

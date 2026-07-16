@@ -13,6 +13,13 @@ log = logging.getLogger(__name__)
 
 @router.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket, token: str | None = Query(default=None)):
+    # Loopback posture (§5.5): reject foreign Origin/Host before the upgrade
+    # (DNS rebinding / hostile pages driving the local API).
+    from condor.web.security import websocket_origin_allowed
+
+    if not websocket_origin_allowed(ws):
+        await ws.close(code=4003, reason="non-loopback origin")
+        return
     # Token comes from the Sec-WebSocket-Protocol subprotocol header (preferred)
     # or the deprecated ?token= query param (fallback for older clients).
     auth_token, accept_subprotocol = extract_ws_token(ws, token)

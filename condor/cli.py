@@ -476,6 +476,26 @@ def cmd_account_list(args) -> None:
         print(f"{venue_id}  {addr}{label}{marker}")
 
 
+def cmd_serve(args) -> None:
+    """The ONE process (§9.3): control socket + scheduler + execution runtime
+    + web app, in the web app's lifespan. ``--headless`` skips the frontend
+    assets. The bind is mechanically loopback-only (§5.5)."""
+    import uvicorn
+
+    from condor.web.security import validate_bind_host
+
+    validate_bind_host(args.host)
+    if args.headless:
+        os.environ["CONDOR_HEADLESS"] = "1"
+    uvicorn.run(
+        "condor.web.app:create_app",
+        factory=True,
+        host=args.host,
+        port=args.port,
+        log_level="info",
+    )
+
+
 def main(argv: list[str] | None = None) -> None:
     # The whole app resolves config.yml, .env and store/ relative to the
     # repo root — anchor there no matter where the CLI is invoked from.
@@ -495,6 +515,21 @@ def main(argv: list[str] | None = None) -> None:
     p_token = sub.add_parser("login-token", help="mint a web dashboard login URL")
     p_token.add_argument("--user-id", type=int, help="user to log in as (default: sole approved user)")
     p_token.set_defaults(func=cmd_login_token)
+
+    p_serve = sub.add_parser(
+        "serve",
+        help="run Condor: control socket + scheduler + executor runtime + web app",
+    )
+    p_serve.add_argument(
+        "--host", default="127.0.0.1",
+        help="bind host — loopback only; non-loopback is rejected (§5.5)",
+    )
+    p_serve.add_argument("--port", type=int, default=3000)
+    p_serve.add_argument(
+        "--headless", action="store_true",
+        help="disable HTTP assets (no dashboard frontend; API + socket only)",
+    )
+    p_serve.set_defaults(func=cmd_serve)
 
     p_account = sub.add_parser("account", help="structured account store management (§6.2b)")
     account_sub = p_account.add_subparsers(dest="account_command", required=True)

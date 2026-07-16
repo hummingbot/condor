@@ -118,6 +118,21 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
 
+    # Loopback-only posture (§5.5): Host validation on every request, and
+    # unsafe methods need a loopback Origin/Referer or the per-process
+    # X-Condor-Token. Outermost so it runs before anything else.
+    from condor.web.security import CSRF_TOKEN, LoopbackPostureMiddleware
+
+    app.add_middleware(LoopbackPostureMiddleware)
+
+    @app.get("/api/v1/security/token")
+    async def security_token():
+        # Same-origin GET (cross-origin reads are blocked by CORS): the
+        # dashboard attaches this as X-Condor-Token on every unsafe request.
+        # This is the CSRF token ONLY — it never bootstraps execution
+        # authority (that is store/.direct-token over the control socket).
+        return {"token": CSRF_TOKEN}
+
     # ── API routes ──
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(servers.router, prefix="/api/v1")
@@ -146,8 +161,11 @@ def create_app() -> FastAPI:
     app.mount("/reports", StaticFiles(directory=str(reports_dir)), name="reports")
 
     # ── Serve built frontend (production) ──
+    # `condor serve --headless` disables the HTTP assets (§9.3): API + control
+    # socket only, no dashboard shell.
+    headless = os.environ.get("CONDOR_HEADLESS", "").strip() in ("1", "true", "yes")
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
-    if dist.is_dir():
+    if dist.is_dir() and not headless:
         index_html = dist / "index.html"
         dist_root = dist.resolve()
         app.mount(

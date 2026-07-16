@@ -65,6 +65,31 @@ async def manage_skill(
     elif scope:
         return {"error": f"unknown scope '{scope}' (only 'shared')"}
     else:
+        # Mutations are target-scoped by the session's invocation context
+        # (§5.5), never by a caller-supplied slug: an agent session may
+        # mutate ONLY its own skills; the chat coordinator (no session
+        # agent) acts for the human and may target any agent explicitly.
+        _MUTATIONS = {"create", "write_file", "patch", "edit", "delete"}
+        if (
+            action in _MUTATIONS
+            and settings.agent_slug
+            and agent_slug
+            and agent_slug != settings.agent_slug
+        ):
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "skill mutation denied: session agent %r attempted to target %r",
+                settings.agent_slug,
+                agent_slug,
+            )
+            return {
+                "error": (
+                    f"skill mutations are scoped to your own agent "
+                    f"('{settings.agent_slug}') — you cannot {action} another "
+                    f"agent's skills ('{agent_slug}')"
+                )
+            }
         target_slug, ok = _resolve_agent_slug(agent_slug)
         if agent_slug and not ok:
             return {"error": f"No agent found for agent_slug '{agent_slug}'"}
