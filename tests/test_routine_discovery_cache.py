@@ -185,9 +185,9 @@ class TestRoutineStoreResolve:
             rs_module, "__file__", str(tmp_path / "condor" / "routine_store.py")
         )
 
-        assert store._resolve_routine("myagent/alpha") is not None
-        assert store._resolve_routine("myagent/alpha") is not None
-        assert store._resolve_routine("myagent/beta") is not None
+        assert store.get_routine("alpha", "myagent") is not None
+        assert store.get_routine("alpha", "myagent") is not None
+        assert store.get_routine("beta", "myagent") is not None
 
         assert _exec_count(s1) == 1
         assert _exec_count(s2) == 1

@@ -7,8 +7,8 @@ import {
   Loader2,
   RefreshCw,
   Search,
-  Square,
   Table2,
+  Trash2,
   X,
   Zap,
 } from "lucide-react";
@@ -19,7 +19,7 @@ import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { RoutineTable, type RoutineRow } from "@/components/routines/RoutineTable";
 import { api } from "@/lib/api";
 import { formatRelativeTime, toMs } from "@/lib/formatters";
-import { formatInterval } from "@/lib/routineUtils";
+import { scheduleRoutineName } from "@/lib/routineUtils";
 
 type SourceTypeFilter = "all" | "routine" | "agent" | string;
 type ViewMode = "grid" | "table";
@@ -51,11 +51,12 @@ export function Routines() {
     queryFn: api.getRoutines,
   });
 
-  const { data: instances = [] } = useQuery({
-    queryKey: ["routine-instances"],
-    queryFn: api.getRoutineInstances,
-    refetchInterval: 5000,
+  const { data: schedulesData } = useQuery({
+    queryKey: ["routine-schedules"],
+    queryFn: api.getRoutineSchedules,
+    refetchInterval: 30000,
   });
+  const schedules = useMemo(() => schedulesData?.schedules ?? [], [schedulesData]);
 
   const { data: groups = [] } = useQuery({
     queryKey: ["reports-grouped"],
@@ -117,23 +118,18 @@ export function Routines() {
     return result;
   }, [routines, sourceTypeFilter, search]);
 
-  const activeInstances = useMemo(
-    () => instances.filter((i) => i.status === "running" || i.status === "scheduled"),
-    [instances],
-  );
-
-  // Latest execution time (epoch ms) per routine, from instance runs.
+  // Latest fire time (epoch ms) per routine, from schedules.
   const lastRunByRoutine = useMemo(() => {
     const map = new Map<string, number>();
-    for (const i of instances) {
-      const ts = i.last_run_at ?? i.created_at;
-      if (!ts) continue;
-      const ms = toMs(ts);
-      const prev = map.get(i.routine_name) ?? 0;
-      if (ms > prev) map.set(i.routine_name, ms);
+    for (const s of schedules) {
+      if (!s.last_fired) continue;
+      const name = scheduleRoutineName(s);
+      const ms = toMs(s.last_fired);
+      const prev = map.get(name) ?? 0;
+      if (ms > prev) map.set(name, ms);
     }
     return map;
-  }, [instances]);
+  }, [schedules]);
 
   // Enriched rows for the table view.
   const tableRows = useMemo<RoutineRow[]>(() => {
@@ -154,25 +150,23 @@ export function Routines() {
         reportCount: info?.count ?? r.report_count,
         lastModified: r.last_modified,
         lastExecuted,
-        hasActive: instances.some(
-          (i) =>
-            i.routine_name === r.name &&
-            (i.status === "running" || i.status === "scheduled"),
+        hasActive: schedules.some(
+          (s) => scheduleRoutineName(s) === r.name && !s.disabled,
         ),
       };
     });
-  }, [filteredRoutines, reportInfo, lastRunByRoutine, instances]);
+  }, [filteredRoutines, reportInfo, lastRunByRoutine, schedules]);
 
-  const stopMutation = useMutation({
-    mutationFn: (id: string) => api.stopRoutineInstance(id),
+  const removeScheduleMutation = useMutation({
+    mutationFn: (id: string) => api.removeRoutineSchedule(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      qc.invalidateQueries({ queryKey: ["routine-schedules"] });
     },
   });
 
   const refreshAll = useCallback(() => {
     qc.invalidateQueries({ queryKey: ["routines"] });
-    qc.invalidateQueries({ queryKey: ["routine-instances"] });
+    qc.invalidateQueries({ queryKey: ["routine-schedules"] });
     qc.invalidateQueries({ queryKey: ["reports-grouped"] });
   }, [qc]);
 
@@ -287,55 +281,61 @@ export function Routines() {
           </button>
         </div>
 
-        {/* Active instances strip */}
-        {activeInstances.length > 0 && (
+        {/* Schedules strip */}
+        {schedules.length > 0 && (
           <div>
             <h2 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-              Active
+              Scheduled
             </h2>
             <div className="flex flex-wrap gap-2">
-              {activeInstances.map((inst) => (
-                <div
-                  key={inst.instance_id}
-                  className="group flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 transition-all hover:border-[var(--color-primary)]/30"
-                >
-                  <button
-                    onClick={() => setBrowserSource(inst.routine_name)}
-                    className="flex items-center gap-2 text-left"
+              {schedules.map((s) => {
+                const name = scheduleRoutineName(s);
+                return (
+                  <div
+                    key={s.schedule_id}
+                    className="group flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 transition-all hover:border-[var(--color-primary)]/30"
                   >
-                    <span
-                      className={`h-2 w-2 rounded-full shrink-0 ${
-                        inst.status === "running"
-                          ? "bg-emerald-400 animate-pulse"
-                          : "bg-amber-400"
-                      }`}
-                    />
-                    <div>
-                      <span className="text-xs font-medium text-[var(--color-text)]">
-                        {inst.routine_name.replace(/_/g, " ")}
-                      </span>
-                      <div className="flex items-center gap-2 text-[9px] text-[var(--color-text-muted)]">
-                        <span className="capitalize">{inst.status}</span>
-                        {inst.schedule?.type === "interval" && (
-                          <span className="flex items-center gap-0.5">
+                    <button
+                      onClick={() => setBrowserSource(name)}
+                      className="flex items-center gap-2 text-left"
+                    >
+                      <span
+                        className={`h-2 w-2 rounded-full shrink-0 ${
+                          s.disabled ? "bg-amber-400" : "bg-emerald-400 animate-pulse"
+                        }`}
+                      />
+                      <div>
+                        <span className="text-xs font-medium text-[var(--color-text)]">
+                          {name.replace(/_/g, " ")}
+                        </span>
+                        <div className="flex items-center gap-2 text-[9px] text-[var(--color-text-muted)]">
+                          <span className="flex items-center gap-0.5 font-mono">
                             <Clock className="h-2 w-2" />
-                            {formatInterval(inst.schedule.interval_sec as number)}
+                            {s.cron}
                           </span>
-                        )}
-                        {inst.run_count > 0 && <span>{inst.run_count} runs</span>}
+                          {s.disabled ? (
+                            <span className="max-w-48 truncate text-amber-400">
+                              disabled{s.disabled_reason ? `: ${s.disabled_reason}` : ""}
+                            </span>
+                          ) : (
+                            s.last_fired && (
+                              <span>fired {formatRelativeTime(s.last_fired)}</span>
+                            )
+                          )}
+                        </div>
                       </div>
-                    </div>
-                  </button>
-                  <button
-                    onClick={() => stopMutation.mutate(inst.instance_id)}
-                    disabled={stopMutation.isPending}
-                    className="rounded p-1 text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)] transition-all"
-                    title="Stop"
-                  >
-                    <Square className="h-3 w-3" />
-                  </button>
-                </div>
-              ))}
+                    </button>
+                    <button
+                      onClick={() => removeScheduleMutation.mutate(s.schedule_id)}
+                      disabled={removeScheduleMutation.isPending}
+                      className="rounded p-1 text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)] transition-all"
+                      title="Remove schedule"
+                    >
+                      <Trash2 className="h-3 w-3" />
+                    </button>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -359,9 +359,13 @@ export function Routines() {
             {filteredRoutines.map((r) => {
               const isAgent = r.source.startsWith("agent:");
               const info = reportInfo.get(r.name);
-              const hasActive = instances.some(
-                (i) => i.routine_name === r.name && (i.status === "running" || i.status === "scheduled"),
+              const routineSchedules = schedules.filter(
+                (s) => scheduleRoutineName(s) === r.name,
               );
+              const liveSchedule = routineSchedules.find((s) => !s.disabled);
+              const disabledSchedule = liveSchedule
+                ? undefined
+                : routineSchedules.find((s) => s.disabled);
               return (
                 <button
                   key={r.name}
@@ -371,8 +375,22 @@ export function Routines() {
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-1.5">
-                        {hasActive && (
-                          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" />
+                        {liveSchedule && (
+                          <span
+                            className="flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[8px] text-emerald-400"
+                            title={`cron ${liveSchedule.cron} (${liveSchedule.tz})`}
+                          >
+                            <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" />
+                            {liveSchedule.cron}
+                          </span>
+                        )}
+                        {disabledSchedule && (
+                          <span
+                            className="max-w-24 shrink-0 truncate rounded-full bg-amber-500/10 px-1.5 py-0.5 text-[8px] text-amber-400"
+                            title={disabledSchedule.disabled_reason || "schedule disabled"}
+                          >
+                            disabled{disabledSchedule.disabled_reason ? `: ${disabledSchedule.disabled_reason}` : ""}
+                          </span>
                         )}
                         <p className="text-xs font-semibold text-[var(--color-text)] truncate">
                           {r.name.replace(/_/g, " ")}
@@ -427,7 +445,6 @@ export function Routines() {
         <ReportBrowser
           initialSource={browserSource}
           initialSourceTypeFilter={sourceTypeFilter}
-          instances={instances}
           onClose={() => setBrowserSource(null)}
         />
       )}

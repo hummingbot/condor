@@ -16,9 +16,6 @@ logger = logging.getLogger(__name__)
 UPDATE_CHECK_INTERVAL = int(os.environ.get("UPDATE_CHECK_INTERVAL", "3600"))  # 1h default
 
 CONDOR_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HUMMINGBOT_API_DIR = os.path.normpath(
-    os.environ.get("HUMMINGBOT_API_DIR", os.path.join(CONDOR_DIR, "..", "hummingbot-api"))
-)
 
 
 async def _run_cmd(*args: str, cwd: str | None = None) -> tuple[int, str]:
@@ -169,88 +166,3 @@ def restart_process() -> None:
 # ---------------------------------------------------------------------------
 # Hummingbot API helpers
 # ---------------------------------------------------------------------------
-
-
-def hb_api_available() -> bool:
-    """Check if the hummingbot-api directory exists."""
-    return os.path.isdir(HUMMINGBOT_API_DIR)
-
-
-async def get_docker_container_info(container_name: str = "hummingbot-api") -> dict | None:
-    """
-    Inspect a Docker container and return basic info.
-
-    Returns {"status", "started_at", "image"} or None if unavailable.
-    """
-    rc, output = await _run_cmd(
-        "docker", "inspect",
-        "--format", '{{.State.Status}}|{{.State.StartedAt}}|{{.Config.Image}}',
-        container_name,
-    )
-    if rc != 0 or not output:
-        return None
-
-    parts = output.split("|", 2)
-    if len(parts) < 3:
-        return None
-
-    return {
-        "status": parts[0],
-        "started_at": parts[1],
-        "image": parts[2],
-    }
-
-
-async def check_hb_api_updates() -> dict:
-    """
-    Check hummingbot-api for git updates and Docker status.
-
-    Returns {"available": bool, "git_info": dict, "docker": dict | None}.
-    If HUMMINGBOT_API_DIR doesn't exist, returns {"available": False}.
-    """
-    if not hb_api_available():
-        return {"available": False}
-
-    git_info = await check_for_updates(repo_dir=HUMMINGBOT_API_DIR)
-
-    # Try to get Docker container info (non-fatal if Docker unavailable)
-    docker = await get_docker_container_info()
-
-    return {
-        "available": True,
-        "git_info": git_info,
-        "docker": docker,
-    }
-
-
-async def update_hb_api() -> tuple[bool, str]:
-    """
-    Update hummingbot-api: git pull, docker compose build, docker compose up -d.
-
-    Returns (success, message).
-    """
-    if not hb_api_available():
-        return False, f"Hummingbot API directory not found: {HUMMINGBOT_API_DIR}"
-
-    # Git pull
-    success, msg = await pull_updates(repo_dir=HUMMINGBOT_API_DIR)
-    if not success:
-        return False, f"Git pull failed: {msg}"
-
-    # Docker compose build
-    rc, output = await _run_cmd(
-        "docker", "compose", "build",
-        cwd=HUMMINGBOT_API_DIR,
-    )
-    if rc != 0:
-        return False, f"Docker build failed:\n{output}"
-
-    # Docker compose up -d
-    rc, output = await _run_cmd(
-        "docker", "compose", "up", "-d",
-        cwd=HUMMINGBOT_API_DIR,
-    )
-    if rc != 0:
-        return False, f"Docker restart failed:\n{output}"
-
-    return True, "Hummingbot API updated and restarted successfully."

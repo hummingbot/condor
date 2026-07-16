@@ -1,14 +1,26 @@
 # Condor Simplification Plan (v5)
 
-**Status:** Phases 1–3 IMPLEMENTED (2026-07-15, this branch) — Phase 1
-(boundary + deletions), Phase 2 (AgentService, AgentSpec collapse, dormant
-account foundation), Phase 3 (executor-log durability, creation
-capabilities, idempotent creates, leases, orders[], §6.1 risk buckets,
-owned_net_base stop sizing, snapshot, account-store activation +
-onboarding + `condor account import-env`, venue packages + conformance
-suite). **Operator cutover (§12) is pending the next live restart** — the
-flat `store/venues.json` will be rejected; re-onboard first. Phases 4–6
-not yet implemented.
+**Status:** Phases 1–6 IMPLEMENTED (2026-07-15, this branch), with two
+operator-gated exceptions:
+
+1. **Auth deletion (§5.5 final step) is PENDING operator approval** — the
+   loopback bind, Host/WS-Origin validation, and X-Condor-Token CSRF
+   posture are all LIVE; `condor/web/auth.py`, `routes/auth.py`, the JWT
+   chat-WS handshake, `config_manager.py` (user roles), `python-jose`, and
+   the CLI login-token/ADMIN_USER_ID remnants await an explicit go-ahead
+   (removing an auth control needs the operator's own word, not a plan
+   citation). The Phase 6 grep gate carries an explicit allowlist for
+   exactly these files and tightens automatically when they go.
+2. **§7.3 legacy history deletion is PENDING operator action** — the
+   parsers are deleted and nothing reads `agents/*/sessions|delegations`
+   anymore, but the directories themselves were left in place (same
+   approval boundary). Delete or archive them at will.
+
+Everything else is live: RunStore + approvals + scheduler + notifications
+durability + routine worker (Phase 4), explicit MCP tools (Phase 5),
+Telegram/Hummingbot/pydantic-ai deletion, store re-keying, serverless-only
+ACP agents, `condor serve`, and the frontend sweep (Phase 6). Account
+cutover (§12) was executed 2026-07-15.
 **Date:** 2026-07-15
 **Inputs:** two independent full-system surveys + ~27 review rounds
 (scope, account model, ownership, lifecycle) — every finding resolved in

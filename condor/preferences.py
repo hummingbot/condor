@@ -181,7 +181,7 @@ class DEXPrefs(TypedDict, total=False):
 
 
 class GeneralPrefs(TypedDict, total=False):
-    active_server: Optional[str]
+    pass
 
 
 class WalletNetworkPrefs(TypedDict, total=False):
@@ -274,7 +274,6 @@ def _get_default_preferences() -> UserPreferences:
             "last_pool": {},
         },
         "general": {
-            "active_server": None,
         },
         "gateway": {
             "wallet_networks": {},  # wallet_address -> list of enabled network IDs
@@ -460,7 +459,7 @@ def get_general_prefs(user_data: Dict) -> GeneralPrefs:
     """Get general preferences
 
     Returns:
-        General preferences with active_server
+        General preferences
     """
     _migrate_legacy_data(user_data)
     return deepcopy(user_data[USER_PREFERENCES_KEY]["general"])
@@ -657,15 +656,8 @@ def get_dex_swap_defaults(user_data: Dict) -> DEXSwapParams:
 # ============================================
 
 
-def get_active_server(user_data: Dict) -> Optional[str]:
-    """Get active server name"""
-    return get_general_prefs(user_data).get("active_server")
 
 
-def set_active_server(user_data: Dict, server_name: Optional[str]) -> None:
-    """Set active server name"""
-    prefs = _ensure_preferences(user_data)
-    prefs["general"]["active_server"] = server_name
     _sync_section_to_cm(user_data, "general")
     logger.info(f"Set active server to {server_name}")
 

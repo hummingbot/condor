@@ -35,31 +35,43 @@ Always clarify upfront: **global or agent-local?** If agent-local, ask for the `
 
 ## Basic Routine Anatomy
 
+Routines are STRICTLY READ-ONLY (§7.2): they fetch public/native data and
+produce reports. They never place, cancel, or mutate anything on a venue —
+execution belongs to executors. They run one-shot in a disposable worker
+with a hard 120s timeout; repetition comes from cron schedules
+(`schedule_routine`), never internal loops.
+
 ```python
-from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
-from config_manager import get_client
 import logging
+
+import httpx
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
-CATEGORY = "Market Data"  # Market Data | Analysis | Arbitrage | Monitoring | Bot Analysis
+CATEGORY = "Market Data"  # Market Data | Analysis | Arbitrage | Monitoring
 
 class Config(BaseModel):
     """One-line description shown in UI."""
     trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
-    connector_name: str = Field(default="binance_perpetual", description="Exchange")
 
-async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
-    client = await get_client(context._chat_id, context=context)
-    if not client:
-        return "No server available"
+async def run(config: Config, context=None) -> str:
+    # context is a plain RunContext (attribution only: .agent_slug) or None —
+    # no clients, credentials, or sockets are ever passed in. Fetch data
+    # yourself from public REST endpoints or condor-native stores.
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.get(
+            "https://api.binance.com/api/v3/ticker/price",
+            params={"symbol": config.trading_pair.replace("-", "")},
+        )
+        r.raise_for_status()
     # ... work ...
     return "result string"
 ```
 
-Must export: `Config` (Pydantic BaseModel) and `async def run(config, context) -> str`.
+Must export: `Config` (Pydantic BaseModel) and `async def run(config, context=None) -> str`.
 The `Config` docstring is the UI description. `CATEGORY` groups it in the catalog.
+A routine that trades (directly or indirectly) is a review defect.
 
 ## Workflow
 
@@ -79,10 +91,11 @@ manage_routines(action="create_routine", name="x", code="...")
 manage_routines(action="read_routine", name="x")
 manage_routines(action="edit_routine", name="x", code="...")
 manage_routines(action="delete_routine", name="x")
-manage_routines(action="run", name="x", config={})       # one-shot
-manage_routines(action="start", name="x", config={})     # continuous
-manage_routines(action="stop", name="instance_id")       # stop continuous
-manage_routines(action="list_instances")                 # list running
+manage_routines(action="run", name="x", config={})       # one-shot (worker, 120s cap)
+manage_routines(action="schedule_routine", name="x",      # durable cron schedule
+                config={"cron": "*/15 * * * *", "tz": "UTC"})
+manage_routines(action="unschedule_routine", name="<schedule_id>")
+manage_routines(action="list_schedules")
 
 # Agent-local — add agent_slug to any of the above
 manage_routines(action="create_routine", name="x", code="...", agent_slug="<agent_slug>")
@@ -101,11 +114,13 @@ manage_skill(action="read_file", name="routine-cookbook", file="report_builder.m
 
 Companion files (pull only what you need):
 
-- **Fetching market data, candles, prices, order book, portfolio, executors** → `hummingbot_client.md`
 - **Multiple parallel API calls, bulk fetches, rate limiting** → `async_patterns.md`
 - **Reports, KPIs, tables, Plotly charts, ReportBuilder, LiveReport** → `report_builder.md`
-- **Continuous / monitoring routines with internal loops** → `continuous.md`
 - **Candlestick charts, indicator overlays, volume footprint** → `candles_chart.md`
+
+(Data comes from public REST — see the shipped `market_scanner`/`ta_chart`/
+`arb_check` routines for working Binance/OKX/KuCoin/GeckoTerminal fetch
+patterns. Monitoring is one-shot + a cron schedule, never an internal loop.)
 
 ## Rules
 

@@ -1,4 +1,9 @@
-"""Routines API routes — discover, run, schedule, and view routine results."""
+"""Routines API routes — discover, run, schedule, and view routine results.
+
+Runs execute in the disposable worker subprocess (§7.2 — same containment
+as the MCP path); schedules are the DURABLE cron schedules in
+store/schedules.json (§5.4), not in-memory intervals.
+"""
 
 from __future__ import annotations
 
@@ -7,10 +12,8 @@ import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import Response
 from pydantic import BaseModel
 
-from condor import routine_hooks
 from condor.reports import list_reports
 from condor.routine_store import get_routine_store
 from condor.web.auth import get_current_user
@@ -24,35 +27,15 @@ router = APIRouter(prefix="/routines", tags=["routines"])
 
 
 class RunRequest(BaseModel):
+    routine_name: str
     config: dict = {}
 
 
 class ScheduleRequest(BaseModel):
-    config: dict = {}
-    interval_sec: int = 300
-
-
-class RunRequestV2(BaseModel):
     routine_name: str
-    server_name: str
     config: dict = {}
-
-
-class ScheduleRequestV2(BaseModel):
-    routine_name: str
-    server_name: str
-    config: dict = {}
-    interval_sec: int = 300
-
-
-class HookTelegram(BaseModel):
-    enabled: bool = False
-    chat_ids: list[str] = []
-
-
-class HooksRequest(BaseModel):
-    telegram: HookTelegram = HookTelegram()
-    trigger: str = "success"
+    cron: str = ""
+    tz: str = "UTC"
 
 
 # ── Routes ──
@@ -65,137 +48,70 @@ async def list_routines(user: WebUser = Depends(get_current_user)):
     return store.list_routines()
 
 
-@router.get("/instances")
-async def list_instances(user: WebUser = Depends(get_current_user)):
-    """List all active routine instances."""
-    store = get_routine_store()
-    return store.list_instances()
-
-
-@router.get("/instances/{instance_id}")
-async def get_instance(instance_id: str, user: WebUser = Depends(get_current_user)):
-    """Get instance detail including last result."""
-    store = get_routine_store()
-    inst = store.get_instance(instance_id)
-    if not inst:
-        raise HTTPException(404, "Instance not found")
-    return inst
-
-
-@router.get("/instances/{instance_id}/image")
-async def get_instance_image(
-    instance_id: str, user: WebUser = Depends(get_current_user)
-):
-    """Serve the chart PNG for an instance result."""
-    store = get_routine_store()
-    result = store.get_result(instance_id)
-    if not result or not result.chart_image:
-        raise HTTPException(404, "No chart image available")
-    return Response(content=result.chart_image, media_type="image/png")
-
-
-@router.post("/servers/{server_name}/{routine_name}/run")
+@router.post("/run")
 async def run_routine(
-    server_name: str,
-    routine_name: str,
     body: RunRequest,
     user: WebUser = Depends(get_current_user),
 ):
-    """Execute a one-shot routine. Returns instance_id for polling."""
-    store = get_routine_store()
-    try:
-        instance_id = await store.execute(
-            routine_name=routine_name,
-            config=body.config,
-            server_name=server_name,
-        )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
+    """Execute a one-shot routine in the disposable worker (hard timeout)."""
+    from condor.routines_worker import run_routine_in_worker
 
-
-@router.post("/servers/{server_name}/{routine_name}/schedule")
-async def schedule_routine(
-    server_name: str,
-    routine_name: str,
-    body: ScheduleRequest,
-    user: WebUser = Depends(get_current_user),
-):
-    """Schedule a routine at an interval. Returns instance_id."""
-    store = get_routine_store()
-    try:
-        instance_id = await store.schedule(
-            routine_name=routine_name,
-            config=body.config,
-            server_name=server_name,
-            interval_sec=body.interval_sec,
-        )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
-
-
-@router.post("/run")
-async def run_routine_v2(
-    body: RunRequestV2,
-    user: WebUser = Depends(get_current_user),
-):
-    """Execute a routine (supports names with slashes like agent/routine)."""
-    store = get_routine_store()
-    try:
-        instance_id = await store.execute(
-            routine_name=body.routine_name,
-            config=body.config,
-            server_name=body.server_name,
-        )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
+    name = body.routine_name
+    agent_slug = ""
+    if "/" in name:
+        agent_slug, name = name.split("/", 1)
+    out = await run_routine_in_worker(name, body.config, agent_slug=agent_slug)
+    if out.get("error"):
+        raise HTTPException(422, out["error"])
+    return out
 
 
 @router.post("/schedule")
-async def schedule_routine_v2(
-    body: ScheduleRequestV2,
+async def schedule_routine(
+    body: ScheduleRequest,
     user: WebUser = Depends(get_current_user),
 ):
-    """Schedule a routine (supports names with slashes like agent/routine)."""
-    store = get_routine_store()
+    """Create a durable cron schedule (store/schedules.json, §5.4)."""
+    from condor.agents.scheduler import create_routine_schedule
+
+    if not body.cron:
+        raise HTTPException(422, "cron is required (5-field cron expression)")
+    name = body.routine_name
+    agent_slug = ""
+    if "/" in name:
+        agent_slug, name = name.split("/", 1)
     try:
-        instance_id = await store.schedule(
-            routine_name=body.routine_name,
+        return create_routine_schedule(
+            routine=name,
+            agent_slug=agent_slug,
             config=body.config,
-            server_name=body.server_name,
-            interval_sec=body.interval_sec,
+            cron=body.cron,
+            tz=body.tz,
         )
-    except ValueError as e:
-        raise HTTPException(404, str(e))
-    return {"instance_id": instance_id}
+    except Exception as e:
+        raise HTTPException(422, f"could not schedule: {e}")
 
 
-@router.post("/instances/{instance_id}/stop")
-async def stop_instance(instance_id: str, user: WebUser = Depends(get_current_user)):
-    """Stop a running or scheduled instance."""
-    store = get_routine_store()
-    if not store.stop(instance_id):
-        raise HTTPException(404, "Instance not found")
-    return {"stopped": True}
+@router.get("/schedules")
+async def list_schedules(user: WebUser = Depends(get_current_user)):
+    """List durable routine schedules."""
+    from condor.agents.scheduler import RoutineScheduleStore
+
+    data = RoutineScheduleStore().load()
+    return {
+        "schedules": [
+            {"schedule_id": sid, **entry} for sid, entry in sorted(data.items())
+        ]
+    }
 
 
-@router.get("/{routine_name:path}/hooks")
-async def get_hooks(routine_name: str, user: WebUser = Depends(get_current_user)):
-    """Get the post-execution hook config for a routine."""
-    cfg = routine_hooks.load_hooks(routine_name)
-    return cfg if cfg is not None else routine_hooks._default_config()
+@router.delete("/schedules/{schedule_id}")
+async def unschedule(schedule_id: str, user: WebUser = Depends(get_current_user)):
+    from condor.agents.scheduler import RoutineScheduleStore
 
-
-@router.put("/{routine_name:path}/hooks")
-async def put_hooks(
-    routine_name: str,
-    body: HooksRequest,
-    user: WebUser = Depends(get_current_user),
-):
-    """Save the post-execution hook config for a routine."""
-    return routine_hooks.save_hooks(routine_name, body.model_dump())
+    if not RoutineScheduleStore().remove(schedule_id):
+        raise HTTPException(404, "Schedule not found")
+    return {"removed": True}
 
 
 @router.get("/options/{source}")

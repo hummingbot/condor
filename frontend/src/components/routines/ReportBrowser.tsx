@@ -22,8 +22,8 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
-import { type RoutineInstance, api } from "@/lib/api";
-import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
+import { type RoutineRunResponse, api } from "@/lib/api";
+import { buildConfigValues, formatAgo, invalidateRoutineQueries, saveConfig, scheduleRoutineName } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
 import { RoutineConfigForm } from "./RoutineConfigForm";
 import { ScheduleDropdown } from "./ScheduleDropdown";
@@ -31,12 +31,10 @@ import { ScheduleDropdown } from "./ScheduleDropdown";
 interface ReportBrowserProps {
   initialSource?: string;
   initialSourceTypeFilter?: string;
-  instances: RoutineInstance[];
   onClose: () => void;
 }
 
 export function ReportBrowser({
-  instances,
   initialSource,
   initialSourceTypeFilter,
   onClose,
@@ -55,6 +53,14 @@ export function ReportBrowser({
     queryKey: ["routines"],
     queryFn: api.getRoutines,
   });
+
+  // Durable cron schedules — drive the "active" markers.
+  const { data: schedulesData } = useQuery({
+    queryKey: ["routine-schedules"],
+    queryFn: api.getRoutineSchedules,
+    refetchInterval: 30_000,
+  });
+  const schedules = useMemo(() => schedulesData?.schedules ?? [], [schedulesData]);
 
   const [activeSource, setActiveSource] = useState(initialSource ?? "");
 
@@ -95,15 +101,15 @@ export function ReportBrowser({
   );
   const isAgent = activeRoutine?.source.startsWith("agent:") ?? false;
 
-  // Reports for active source — poll when a scheduled instance is active
-  const hasScheduledInstance = instances.some(
-    (i) => i.routine_name === activeSource && (i.status === "running" || i.status === "scheduled"),
+  // Reports for active source — poll when a schedule is live for it
+  const hasLiveSchedule = schedules.some(
+    (s) => scheduleRoutineName(s) === activeSource && !s.disabled,
   );
   const { data: reportsData, isLoading: loadingReports } = useQuery({
     queryKey: ["routine-reports", activeSource],
     queryFn: () => api.getRoutineReports(activeSource),
     enabled: !!activeSource,
-    refetchInterval: hasScheduledInstance ? 10_000 : false,
+    refetchInterval: hasLiveSchedule ? 10_000 : false,
   });
   const reports = reportsData?.reports ?? [];
 
@@ -122,16 +128,10 @@ export function ReportBrowser({
     setSelectedReportIdx(0);
   }, [activeSource]);
 
-  // Active instances for current source
-  const sourceInstances = useMemo(
-    () => instances.filter((i) => i.routine_name === activeSource && (i.status === "running" || i.status === "scheduled")),
-    [instances, activeSource],
-  );
-
-  // Latest failed instance for error display
-  const latestFailedInstance = useMemo(
-    () => instances.find((i) => i.routine_name === activeSource && i.status === "failed"),
-    [instances, activeSource],
+  // Schedules for current source (agent routines match "slug/name")
+  const sourceSchedules = useMemo(
+    () => schedules.filter((s) => scheduleRoutineName(s) === activeSource),
+    [schedules, activeSource],
   );
 
   // Config state: merge routine fields with saved localStorage values
@@ -143,46 +143,37 @@ export function ReportBrowser({
     setShowConfigPanel(false);
   }, [activeSource, activeRoutine]);
 
-  // Track running instance to poll for completion
-  const [pollingInstanceId, setPollingInstanceId] = useState<string | null>(null);
+  // Result of the last synchronous run for this source.
+  const [runResult, setRunResult] = useState<RoutineRunResponse | null>(null);
 
-  const { data: polledInstance } = useQuery({
-    queryKey: ["routine-instance", pollingInstanceId],
-    queryFn: () => api.getRoutineInstance(pollingInstanceId!),
-    enabled: !!pollingInstanceId,
-    refetchInterval: 2000,
-  });
-
-  // When polled instance completes, refresh reports
+  // Clear the stale result when switching sources.
   useEffect(() => {
-    if (polledInstance && polledInstance.status !== "running") {
-      setPollingInstanceId(null);
-      invalidateRoutineQueries(qc, activeSource);
-    }
-  }, [polledInstance, activeSource, qc]);
+    setRunResult(null);
+  }, [activeSource]);
 
   const runMutation = useMutation({
     mutationFn: () => api.runRoutine(activeSource, configValues),
     onSuccess: (data) => {
-      setPollingInstanceId(data.instance_id);
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      setRunResult(data);
       setShowConfigPanel(false);
+      // Routines usually save reports — refresh them.
+      invalidateRoutineQueries(qc, activeSource);
     },
   });
 
   const scheduleMutation = useMutation({
-    mutationFn: (intervalSec: number) =>
-      api.scheduleRoutine(activeSource, configValues, intervalSec),
+    mutationFn: ({ cron, tz }: { cron: string; tz?: string }) =>
+      api.scheduleRoutine(activeSource, configValues, cron, tz),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      qc.invalidateQueries({ queryKey: ["routine-schedules"] });
       setShowConfigPanel(false);
     },
   });
 
-  const stopMutation = useMutation({
-    mutationFn: (id: string) => api.stopRoutineInstance(id),
+  const removeScheduleMutation = useMutation({
+    mutationFn: (id: string) => api.removeRoutineSchedule(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ["routine-instances"] });
+      qc.invalidateQueries({ queryKey: ["routine-schedules"] });
     },
   });
 
@@ -371,8 +362,8 @@ export function ReportBrowser({
         <div ref={sidebarRef} className="flex-1 overflow-y-auto scrollbar-thin">
           {filteredRoutines.map((r) => {
             const isActive = r.name === activeSource;
-            const hasActiveInstance = instances.some(
-              (i) => i.routine_name === r.name && (i.status === "running" || i.status === "scheduled"),
+            const hasSchedule = schedules.some(
+              (s) => scheduleRoutineName(s) === r.name && !s.disabled,
             );
             const isRoutineAgent = r.source.startsWith("agent:");
             const displayName = r.name.replace(/_/g, " ");
@@ -392,7 +383,7 @@ export function ReportBrowser({
                 >
                   {isRoutineAgent ? (
                     <Brain className="h-4 w-4 text-purple-400" />
-                  ) : hasActiveInstance ? (
+                  ) : hasSchedule ? (
                     <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]" />
                   ) : (
                     <span className="text-[10px] font-bold uppercase leading-none">
@@ -419,7 +410,7 @@ export function ReportBrowser({
                     {displayName}
                   </span>
                   <div className="flex items-center gap-1 shrink-0">
-                    {hasActiveInstance && (
+                    {hasSchedule && (
                       <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-[0_0_4px_theme(colors.emerald.400)]" />
                     )}
                     {r.report_count > 0 && (
@@ -489,23 +480,35 @@ export function ReportBrowser({
                 {activeRoutine?.source.replace("agent:", "")}
               </span>
             )}
-            {sourceInstances.length > 0 && (
+            {sourceSchedules.length > 0 && (
               <div className="flex items-center gap-2">
-                {sourceInstances.map((inst) => (
-                  <div key={inst.instance_id} className="flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2.5 py-1 text-[10px]">
-                    <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                    <span className="text-emerald-400 capitalize">{inst.status}</span>
-                    {inst.schedule?.type === "interval" && (
-                      <span className="text-[var(--color-text-muted)]">
-                        <Clock className="inline h-2.5 w-2.5" /> {formatInterval(inst.schedule.interval_sec as number)}
+                {sourceSchedules.map((s) => (
+                  <div
+                    key={s.schedule_id}
+                    className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] ${
+                      s.disabled ? "bg-amber-500/10" : "bg-emerald-500/10"
+                    }`}
+                    title={s.disabled ? s.disabled_reason || "disabled" : `cron ${s.cron} (${s.tz})`}
+                  >
+                    <span
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        s.disabled ? "bg-amber-400" : "bg-emerald-400 animate-pulse"
+                      }`}
+                    />
+                    {s.disabled ? (
+                      <span className="max-w-48 truncate text-amber-400">
+                        disabled{s.disabled_reason ? `: ${s.disabled_reason}` : ""}
+                      </span>
+                    ) : (
+                      <span className="font-mono text-emerald-400">
+                        <Clock className="inline h-2.5 w-2.5" /> {s.cron}
                       </span>
                     )}
-                    <span className="text-[var(--color-text-muted)]">{inst.run_count} runs</span>
                     <button
-                      onClick={() => stopMutation.mutate(inst.instance_id)}
-                      disabled={stopMutation.isPending}
+                      onClick={() => removeScheduleMutation.mutate(s.schedule_id)}
+                      disabled={removeScheduleMutation.isPending}
                       className="ml-0.5 rounded p-0.5 text-[var(--color-red)] hover:bg-[var(--color-red)]/10"
-                      title="Stop"
+                      title="Remove schedule"
                     >
                       <Trash2 className="h-2.5 w-2.5" />
                     </button>
@@ -553,7 +556,9 @@ export function ReportBrowser({
                 </button>
                 {!activeRoutine.is_continuous && (
                   <ScheduleDropdown
-                    onSchedule={(sec) => scheduleMutation.mutate(sec)}
+                    schedules={sourceSchedules}
+                    onSchedule={(cron, tz) => scheduleMutation.mutate({ cron, tz })}
+                    onRemove={(id) => removeScheduleMutation.mutate(id)}
                     disabled={scheduleMutation.isPending}
                   />
                 )}
@@ -697,6 +702,11 @@ export function ReportBrowser({
                 {(runMutation.error as Error).message}
               </p>
             )}
+            {scheduleMutation.isError && (
+              <p className="mt-2 text-xs text-[var(--color-red)]">
+                {(scheduleMutation.error as Error).message}
+              </p>
+            )}
           </div>
         )}
 
@@ -754,14 +764,70 @@ export function ReportBrowser({
 
         {/* Report content */}
         <div className="relative flex-1">
-          {loadingReports ? (
+          {runResult ? (
+            // Result of the last synchronous run
+            <div className="h-full overflow-y-auto px-6 py-4">
+              <div className="mx-auto max-w-4xl">
+                <div className="mb-3 flex items-center justify-between">
+                  <h3 className="text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Run result — {runResult.name.replace(/_/g, " ")}
+                  </h3>
+                  <button
+                    onClick={() => setRunResult(null)}
+                    className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                    title="Dismiss result"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                {runResult.result.text && (
+                  <pre className="whitespace-pre-wrap break-words rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 font-mono text-xs leading-relaxed text-[var(--color-text)]">
+                    {runResult.result.text}
+                  </pre>
+                )}
+                {runResult.result.table_data && runResult.result.table_data.length > 0 && (
+                  <div className="mt-3 overflow-x-auto rounded-lg border border-[var(--color-border)]">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-[var(--color-border)] bg-[var(--color-surface)]">
+                          {(runResult.result.table_columns ?? Object.keys(runResult.result.table_data[0])).map((col) => (
+                            <th key={col} className="px-3 py-2 text-left font-semibold text-[var(--color-text-muted)]">
+                              {col}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {runResult.result.table_data.map((row, i) => (
+                          <tr key={i} className="border-b border-[var(--color-border)]/50 last:border-0">
+                            {(runResult.result.table_columns ?? Object.keys(runResult.result.table_data![0])).map((col) => (
+                              <td key={col} className="px-3 py-1.5 text-[var(--color-text)]">
+                                {String(row[col] ?? "")}
+                              </td>
+                            ))}
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+                {runResult.result.chart_image_b64 && (
+                  <img
+                    src={`data:image/png;base64,${runResult.result.chart_image_b64}`}
+                    alt="Routine chart"
+                    className="mt-3 max-w-full rounded-lg border border-[var(--color-border)]"
+                  />
+                )}
+              </div>
+            </div>
+          ) : loadingReports ? (
             <div className="flex h-full items-center justify-center">
               <Loader2 className="h-6 w-6 animate-spin text-[var(--color-text-muted)]" />
             </div>
           ) : !selectedReport ? (
-            // No reports — show error if failed, otherwise prompt to run
+            // No reports — show run error if the last run failed, otherwise prompt to run
             <div className="flex h-full flex-col items-center justify-center text-center px-8">
-              {(polledInstance?.status === "failed" || latestFailedInstance) ? (
+              {runMutation.isError ? (
                 <>
                   <div className="w-full max-w-lg rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/5 p-5">
                     <div className="flex items-center gap-2 mb-3">
@@ -769,7 +835,7 @@ export function ReportBrowser({
                       <span className="text-sm font-semibold text-[var(--color-red)]">Routine Failed</span>
                     </div>
                     <pre className="whitespace-pre-wrap break-words text-left font-mono text-xs text-[var(--color-text-muted)] bg-[var(--color-surface)] rounded p-3 max-h-60 overflow-y-auto">
-                      {(polledInstance?.status === "failed" ? polledInstance.error : latestFailedInstance?.error) || "Unknown error"}
+                      {(runMutation.error as Error).message || "Unknown error"}
                     </pre>
                     {activeRoutine && (
                       <button
@@ -827,11 +893,6 @@ export function ReportBrowser({
                       )}
                       Run for the first time
                     </button>
-                  )}
-                  {runMutation.isError && (
-                    <p className="mt-2 text-xs text-[var(--color-red)]">
-                      {(runMutation.error as Error).message}
-                    </p>
                   )}
                 </>
               )}

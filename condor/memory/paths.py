@@ -15,7 +15,7 @@ trading agents' under ``agents/{slug}/``, so even an agent literally named
 
 Memory is two tiers only (§4.3): the **global/local tier** (repo-root
 ``store/memory/``) and the **agent tier** (``agents/{slug}/store/memory/``).
-The Telegram-era per-user dimension (``store/user_{id}/``) is gone; the sole
+The legacy per-user dimension (``store/user_{id}/``) is gone; the sole
 key of a store is the agent slug (``None`` = the chat/global tier).
 
 Pure filesystem logic with **no** MCP/transport deps, so it runs from the main
@@ -47,7 +47,7 @@ def store_root(agent_slug: str | None = None) -> Path:
 
 
 def migrate_memory_tiers() -> list[str]:
-    """One-time rename of Telegram-era ``store/user_*`` dirs to the new tiers.
+    """One-time rename of legacy ``store/user_*`` dirs to the new tiers.
 
     A plain ``mv``, not a compat layer (§4.3): for the repo root and each
     ``agents/{slug}`` home, if ``store/user_*`` dirs exist and ``store/memory``

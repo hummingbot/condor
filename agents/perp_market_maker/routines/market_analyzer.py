@@ -2,7 +2,7 @@
 
 Fetches Hyperliquid candles (public info API — no creds) across timeframes,
 computes the standard indicators, classifies the market regime, and turns it
-into the spread guidance the dual_position_mm strategy consumes (regime → spread
+into the spread guidance the market-maker consumes (regime → spread
 multiplier off an ATR base, floored at the perp fee TP).
 """
 import logging
@@ -259,7 +259,7 @@ def _spread_recommendation(regime: str) -> str:
     return "moderate symmetric (base x1.5)"
 
 
-# Regime → spread multiplier (matches the dual_position_mm strategy table).
+# Regime → spread multiplier (matches the AGENT.md regime table).
 _REGIME_MULT = {"quiet": 1.0, "ranging": 1.5, "volatile": 4.0,
                 "trending_up": 3.0, "trending_down": 3.0}
 

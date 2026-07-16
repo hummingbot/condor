@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import type { RoutineInfo } from "@/lib/api";
+import type { RoutineInfo, RoutineSchedule } from "@/lib/api";
 
 // ── Config persistence ──
 
@@ -60,13 +60,9 @@ export function formatAgo(iso: string): string {
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
-// Format a schedule interval (in seconds) into a compact label, e.g. 86400 -> "1d"
-export function formatInterval(sec: number): string {
-  if (sec % 604800 === 0) return `${sec / 604800}w`;
-  if (sec % 86400 === 0) return `${sec / 86400}d`;
-  if (sec % 3600 === 0) return `${sec / 3600}h`;
-  if (sec % 60 === 0) return `${sec / 60}m`;
-  return `${sec}s`;
+// Full routine name for a schedule entry — agent routines are "slug/name".
+export function scheduleRoutineName(s: RoutineSchedule): string {
+  return s.agent_slug ? `${s.agent_slug}/${s.routine}` : s.routine;
 }
 
 // ── Query invalidation ──
@@ -75,7 +71,7 @@ export function invalidateRoutineQueries(
   qc: QueryClient,
   routineName?: string,
 ): void {
-  qc.invalidateQueries({ queryKey: ["routine-instances"] });
+  qc.invalidateQueries({ queryKey: ["routine-schedules"] });
   qc.invalidateQueries({ queryKey: ["reports-grouped"] });
   qc.invalidateQueries({ queryKey: ["routines"] });
   if (routineName) {

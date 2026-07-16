@@ -259,25 +259,31 @@ export interface RoutineInfo {
   report_count: number;
 }
 
-export interface RoutineInstance {
-  instance_id: string;
-  routine_name: string;
-  config: Record<string, unknown>;
-  status: string;
-  source: string;
-  schedule?: Record<string, unknown>;
-  created_at: number;
-  last_run_at: number | null;
-  last_result: string | null;
-  last_duration: number | null;
-  run_count: number;
-  has_result?: boolean;
-  result_text?: string;
-  has_chart?: boolean;
+// Synchronous worker output from POST /routines/run.
+export interface RoutineRunResult {
+  text: string;
   table_data?: Record<string, unknown>[] | null;
   table_columns?: string[] | null;
+  chart_image_b64?: string | null;
   sections?: Record<string, unknown>[] | null;
-  error?: string | null;
+}
+
+export interface RoutineRunResponse {
+  name: string;
+  result: RoutineRunResult;
+}
+
+// Durable cron schedule (store/schedules.json).
+export interface RoutineSchedule {
+  schedule_id: string;
+  routine: string;
+  agent_slug: string;
+  config: Record<string, unknown>;
+  cron: string;
+  tz: string;
+  last_fired: string;
+  disabled: boolean;
+  disabled_reason?: string;
 }
 
 // ── Reports ──
@@ -333,11 +339,6 @@ export interface ChatOptionsResponse {
   agents: ChatAgentOption[];
   default_agent: string;
 }
-
-// Routines are process-local now, but the routines API still requires a
-// server_name field in run/schedule bodies.
-// TODO(backend): drop server_name from RunRequestV2/ScheduleRequestV2.
-const ROUTINE_SERVER = "local";
 
 // ── API functions ──
 
@@ -505,32 +506,34 @@ export const api = {
 
   getRoutines: () => apiFetch<RoutineInfo[]>("/api/v1/routines"),
 
-  getRoutineInstances: () =>
-    apiFetch<RoutineInstance[]>("/api/v1/routines/instances"),
-
-  getRoutineInstance: (id: string) =>
-    apiFetch<RoutineInstance>(`/api/v1/routines/instances/${encodeURIComponent(id)}`),
-
+  // Synchronous: resolves with the worker output (hard 120s worker timeout;
+  // 422 with detail on error). name may be "slug/name" for agent routines.
   runRoutine: (name: string, config: Record<string, unknown> = {}) =>
-    apiFetch<{ instance_id: string }>(
+    apiFetch<RoutineRunResponse>(
       `/api/v1/routines/run`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: ROUTINE_SERVER, config }) },
+      { method: "POST", body: JSON.stringify({ routine_name: name, config }) },
     ),
 
+  // Durable cron schedule (5-field cron expression; 422 if missing/invalid).
   scheduleRoutine: (
     name: string,
     config: Record<string, unknown> = {},
-    interval_sec: number = 300,
+    cron: string,
+    tz?: string,
   ) =>
-    apiFetch<{ instance_id: string }>(
+    apiFetch<RoutineSchedule>(
       `/api/v1/routines/schedule`,
-      { method: "POST", body: JSON.stringify({ routine_name: name, server_name: ROUTINE_SERVER, config, interval_sec }) },
+      { method: "POST", body: JSON.stringify({ routine_name: name, config, cron, ...(tz ? { tz } : {}) }) },
     ),
 
-  stopRoutineInstance: (id: string) =>
-    apiFetch<{ stopped: boolean }>(`/api/v1/routines/instances/${encodeURIComponent(id)}/stop`, {
-      method: "POST",
-    }),
+  getRoutineSchedules: () =>
+    apiFetch<{ schedules: RoutineSchedule[] }>("/api/v1/routines/schedules"),
+
+  removeRoutineSchedule: (scheduleId: string) =>
+    apiFetch<{ removed: boolean }>(
+      `/api/v1/routines/schedules/${encodeURIComponent(scheduleId)}`,
+      { method: "DELETE" },
+    ),
 
   getRoutineSource: (name: string) =>
     apiFetch<{ filename: string; source: string }>(

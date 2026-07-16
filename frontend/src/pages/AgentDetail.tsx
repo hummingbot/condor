@@ -203,14 +203,6 @@ export function AgentDetail() {
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
   const [reviewerRunId, setReviewerRunId] = useState<string | null>(null);
 
-  // Routine instances for ReportBrowser (routines live at the agent level)
-  const { data: routineInstances = [] } = useQuery({
-    queryKey: ["routine-instances"],
-    queryFn: api.getRoutineInstances,
-    enabled: showRoutinesBrowser,
-    refetchInterval: 5000,
-  });
-
   const deleteAgentMutation = useMutation({
     mutationFn: () => api.deleteAgent(slug!),
     onSuccess: () => {
@@ -418,7 +410,6 @@ export function AgentDetail() {
       {showRoutinesBrowser && (
         <ReportBrowser
           initialSourceTypeFilter={slug}
-          instances={routineInstances}
           onClose={() => setShowRoutinesBrowser(false)}
         />
       )}
