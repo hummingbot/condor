@@ -35,6 +35,8 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
+from condor.accounts.model import AccountRef
+
 log = logging.getLogger(__name__)
 
 # Module-level registry of live delegations (mirrors engine._engines).
@@ -52,6 +54,7 @@ class DelegateTask:
     started_at: str = ""
     ended_at: str = ""
     risk_limits: dict | None = None  # per-call override; None → agent baseline
+    account_ref: AccountRef | None = None
     status: str = "running"  # running | done | error | stopped
     result: str = ""  # final answer text once done
     error: str = ""
@@ -135,6 +138,11 @@ async def start_delegation(
     # Validate the policy up front so the caller gets the loud error, not a
     # background failure notification.
     effective_limits = _resolve_delegation_limits(agent, risk_limits)
+    account_ref = None
+    if agent.can_trade:
+        from condor.agents.spec import resolve_agent_account
+
+        account_ref = resolve_agent_account(agent, agent.default_config or {})
 
     started_at = datetime.now(timezone.utc).isoformat()
     # run_started persists BEFORE the run: a crash mid-delegation leaves a
@@ -146,6 +154,7 @@ async def start_delegation(
             "task": task,
             "model": agent.agent_key,
             "risk_limits": effective_limits or {},
+            **({"account_ref": account_ref.as_dict()} if account_ref else {}),
         },
     )
     dt = DelegateTask(
@@ -154,6 +163,7 @@ async def start_delegation(
         task=task,
         started_at=started_at,
         risk_limits=effective_limits,
+        account_ref=account_ref,
     )
     _delegations[dt.task_id] = dt
     dt._task = asyncio.create_task(_run(dt, agent, timeout_s))
@@ -200,10 +210,10 @@ def _make_event_sink(dt: DelegateTask):
 
 async def _run(dt: DelegateTask, agent, timeout_s: int) -> None:
     """Background runner: drive the agent to completion, persist, notify."""
+    from condor.agents.context import build_agent_context
     from condor.agents.gating import is_dangerous_tool_call
     from condor.agents.policies import AUTO, risk_gate
     from condor.agents.run import run_agent
-    from condor.agents.context import build_agent_context
     from condor.agents.runstore import get_run_store
 
     run_store = get_run_store()
@@ -239,6 +249,7 @@ async def _run(dt: DelegateTask, agent, timeout_s: int) -> None:
             prompt,
             permission_policy=policy,
             risk_limits=dt.risk_limits,
+            account_ref=dt.account_ref,
             timeout_s=timeout_s,
             event_sink=_make_event_sink(dt),
             # Executor attribution: the run id is the one execution key.

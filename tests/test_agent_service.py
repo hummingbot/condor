@@ -96,6 +96,39 @@ def test_delete_rejected_with_nonterminal_executors(svc, monkeypatch):
     assert "nonterminal" in ei.value.message
 
 
+def test_terminal_filled_inventory_blocks_delete(svc, monkeypatch):
+    from types import SimpleNamespace
+
+    agent = _create(svc)
+    record = SimpleNamespace(
+        id="filled-order",
+        status="CLOSED",
+        type="order_spot",
+        config={"base_token": "WIF"},
+        state={
+            "orders": [
+                {
+                    "venue_order_id": "v1",
+                    "role": "entry",
+                    "side": "buy",
+                    "requested_qty": "1",
+                    "requested_unit": "base",
+                    "cumulative_filled_base_qty": "1",
+                    "cumulative_filled_quote_qty": "10",
+                    "fees_by_asset": {},
+                    "status": "FILLED",
+                }
+            ]
+        },
+    )
+    runtime = SimpleNamespace(store=SimpleNamespace(load_by_slug=lambda slug: [record]))
+    monkeypatch.setattr(
+        "condor.executors.service.peek_executor_runtime", lambda: runtime
+    )
+    with pytest.raises(LifecycleError, match="inventory-bearing"):
+        svc.delete(agent.slug)
+
+
 def test_update_rejects_unknown_fields(svc):
     agent = _create(svc)
     with pytest.raises(LifecycleError) as ei:

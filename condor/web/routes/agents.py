@@ -110,6 +110,8 @@ class AgentSummary(BaseModel):
     when_to_consult: str = ""
     agent_key: str = ""
     denomination: str = ""
+    account: str = ""
+    account_label: str = ""
     default_config: dict[str, Any] = {}
     schedule: dict[str, Any] = {}
     # Agent-level rollups (all history lives at the agent).
@@ -161,6 +163,8 @@ class AgentDetail(BaseModel):
     can_trade: bool = False
     risk_limits: dict[str, Any] = {}
     denomination: str = ""
+    account: str = ""
+    account_label: str = ""
     default_config: dict[str, Any] = {}
     default_trading_context: str = ""
     schedule: dict[str, Any] = {}
@@ -181,6 +185,8 @@ class CreateAgentRequest(BaseModel):
     when_to_consult: str = ""
     risk_limits: dict[str, Any] = {}
     denomination: str = ""
+    account: str = ""
+    account_label: str = ""
     default_config: dict[str, Any] = {}
     default_trading_context: str = ""
     schedule: dict[str, Any] = {}
@@ -202,6 +208,8 @@ class UpdateAgentRequest(BaseModel):
     when_to_consult: str | None = None
     risk_limits: dict[str, Any] | None = None
     denomination: str | None = None
+    account: str | None = None
+    account_label: str | None = None
     default_config: dict[str, Any] | None = None
     default_trading_context: str | None = None
     schedule: dict[str, Any] | None = None
@@ -425,6 +433,8 @@ async def _build_agent_summary(agent) -> AgentSummary:
         when_to_consult=agent.when_to_consult,
         agent_key=agent.agent_key,
         denomination=agent.denomination,
+        account=agent.account,
+        account_label=agent.account_label,
         default_config=agent.default_config or {},
         schedule=agent.schedule or {},
         status=status,
@@ -477,9 +487,7 @@ async def list_delegations():
 
 
 @router.get("/delegations/{task_id}")
-async def get_delegation_status(
-    task_id: str
-):
+async def get_delegation_status(task_id: str):
     """Get a delegation's status + result/error.
 
     Live tasks come from the in-process registry; after a restart the
@@ -512,9 +520,7 @@ async def get_delegation_status(
 
 
 @router.post("/delegations/{task_id}/stop")
-async def stop_delegation_route(
-    task_id: str
-):
+async def stop_delegation_route(task_id: str):
     """Cancel a running delegation (status -> stopped)."""
     from condor.agents.delegate import get_delegation, stop_delegation
 
@@ -624,6 +630,8 @@ async def get_agent(slug: str):
         can_trade=agent.can_trade,
         risk_limits=agent.risk_limits,
         denomination=agent.denomination,
+        account=agent.account,
+        account_label=agent.account_label,
         default_config=agent.default_config or {},
         default_trading_context=agent.default_trading_context,
         schedule=agent.schedule or {},
@@ -650,9 +658,7 @@ async def list_agent_runs(
 
 
 @router.post("", response_model=AgentSummary)
-async def create_agent(
-    req: CreateAgentRequest
-):
+async def create_agent(req: CreateAgentRequest):
     """Create a new Agent (identity + spec; AGENT.md is the one spec, §5.3)."""
     try:
         agent = _svc().create(
@@ -664,6 +670,8 @@ async def create_agent(
             when_to_consult=req.when_to_consult,
             risk_limits=req.risk_limits,
             denomination=req.denomination,
+            account=req.account,
+            account_label=req.account_label,
             default_config=req.default_config,
             default_trading_context=req.default_trading_context,
             schedule=req.schedule,
@@ -679,15 +687,15 @@ async def create_agent(
         when_to_consult=agent.when_to_consult,
         agent_key=agent.agent_key,
         denomination=agent.denomination,
+        account=agent.account,
+        account_label=agent.account_label,
         default_config=agent.default_config or {},
         schedule=agent.schedule or {},
     )
 
 
 @router.put("/{slug}")
-async def update_agent(
-    slug: str, req: UpdateAgentRequest
-):
+async def update_agent(slug: str, req: UpdateAgentRequest):
     """Patch the agent spec (AGENT.md body via ``instructions``, and/or fields)."""
     patch = req.model_dump(exclude_unset=True)
     content = patch.pop("content", None)
@@ -717,9 +725,7 @@ async def delete_agent(slug: str):
 
 
 @router.post("/{slug}/consult")
-async def consult_agent(
-    slug: str, req: ConsultRequest
-):
+async def consult_agent(slug: str, req: ConsultRequest):
     """Run an Agent consult (its brain to completion) and return the answer."""
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
@@ -739,9 +745,7 @@ async def consult_agent(
 
 
 @router.post("/{slug}/delegate")
-async def delegate_agent(
-    slug: str, req: DelegateRequest
-):
+async def delegate_agent(slug: str, req: DelegateRequest):
     """Delegate a one-off task to a detached background Agent instance.
 
     Returns immediately with a ``task_id`` (also the run id); the agent runs

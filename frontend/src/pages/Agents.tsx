@@ -13,7 +13,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Link, useNavigate } from "react-router-dom";
@@ -479,16 +479,12 @@ export function Agents() {
   const running = agents.filter((a) => deriveAgentStatus(a) === "running");
   const others = agents.filter((a) => deriveAgentStatus(a) !== "running");
 
-  const activeSessions = useMemo<ActiveSession[]>(
-    () =>
-      agents.flatMap((a) =>
-        (a.instances || []).map((inst) => ({
-          ...inst,
-          agentName: a.name,
-          agentSlug: a.slug,
-        })),
-      ),
-    [agents],
+  const activeSessions: ActiveSession[] = agents.flatMap((a) =>
+    (a.instances || []).map((inst) => ({
+      ...inst,
+      agentName: a.name,
+      agentSlug: a.slug,
+    })),
   );
 
   const aggTotalPnl = agents.reduce((sum, a) => sum + (a.total_pnl ?? 0), 0);

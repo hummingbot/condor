@@ -16,7 +16,6 @@ exactly once (§5.2).
 from mcp_servers.condor.condor_client import call_control
 from mcp_servers.condor.settings import settings
 
-
 # ---------------------------------------------------------------------------
 # Definitions (the AGENT.md identities)
 # ---------------------------------------------------------------------------
@@ -37,6 +36,7 @@ async def list_agents() -> dict:
                 "when_to_consult": a.get("when_to_consult"),
                 "can_trade": a.get("can_trade"),
                 "denomination": a.get("denomination"),
+                "account": a.get("account"),
                 "schedule": a.get("schedule"),
             }
             for a in agents
@@ -59,6 +59,8 @@ async def create_agent(
     when_to_consult: str = "",
     risk_limits: dict | None = None,
     denomination: str = "",
+    account: str = "",
+    account_label: str = "",
     default_config: dict | None = None,
     default_trading_context: str = "",
     schedule: dict | None = None,
@@ -76,6 +78,8 @@ async def create_agent(
             "when_to_consult": when_to_consult,
             "risk_limits": risk_limits or {},
             "denomination": denomination,
+            "account": account,
+            "account_label": account_label,
             "default_config": default_config or {},
             "default_trading_context": default_trading_context,
             "schedule": schedule or {},
@@ -194,6 +198,4 @@ async def shutdown_agent(agent_slug: str) -> dict:
     owned inventory per its shutdown policy."""
     if not agent_slug:
         return {"error": "agent_slug is required"}
-    return await call_control(
-        "agent.verb", {"slug": agent_slug, "verb": "shutdown"}
-    )
+    return await call_control("agent.verb", {"slug": agent_slug, "verb": "shutdown"})

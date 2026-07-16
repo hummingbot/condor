@@ -1,3 +1,7 @@
+/* State resets here intentionally synchronize a multi-pane editor when its
+ * selected routine changes. Keeping the draft/result panes stateful avoids
+ * remounting the report iframe on every query refresh. */
+/* eslint-disable react-hooks/set-state-in-effect */
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Brain,

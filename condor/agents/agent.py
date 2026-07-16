@@ -87,6 +87,12 @@ class Agent:
     # The numeraire the risk limits are expressed in (e.g. "USDC", "SOL",
     # "USD") — REQUIRED whenever risk_limits are declared (§5.3/§6.1).
     denomination: str = ""
+    # Canonical custody address selected for this agent. At authoring time a
+    # display-name selector is resolved and this field is rewritten to the
+    # address, so later renames cannot change or break execution. Empty means
+    # resolve the venue's default account at run freeze time.
+    account: str = ""
+    account_label: str = ""
     # Launch defaults (the former strategy default_config): AgentConfig keys —
     # frequency_sec, total_amount_quote, execution_mode, max_ticks, …
     default_config: dict = field(default_factory=dict)
@@ -159,6 +165,8 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
             when_to_consult=meta.get("when_to_consult", ""),
             risk_limits=meta.get("risk_limits", {}) or {},
             denomination=meta.get("denomination", "") or "",
+            account=meta.get("account", "") or "",
+            account_label=meta.get("account_label", "") or "",
             default_config=meta.get("default_config", {}) or {},
             default_trading_context=meta.get("default_trading_context", "") or "",
             schedule=meta.get("schedule", {}) or {},
@@ -219,6 +227,8 @@ class AgentStore:
         when_to_consult: str = "",
         risk_limits: dict | None = None,
         denomination: str = "",
+        account: str = "",
+        account_label: str = "",
         default_config: dict | None = None,
         default_trading_context: str = "",
         schedule: dict | None = None,
@@ -233,6 +243,8 @@ class AgentStore:
             when_to_consult=when_to_consult,
             risk_limits=risk_limits or {},
             denomination=denomination,
+            account=account,
+            account_label=account_label,
             default_config=default_config or {},
             default_trading_context=default_trading_context,
             schedule=schedule or {},
@@ -283,6 +295,16 @@ class AgentStore:
         from condor.agents.spec import validate_agent_spec
 
         validate_agent_spec(agent)
+        if agent.account:
+            # Persist the canonical custody address, never a display-name
+            # selector. Venue deployment is part of AccountRef identity.
+            from condor.executors.wallets import account_store
+
+            venue_id = str((agent.default_config or {}).get("venue") or "solana")
+            ref = account_store().resolve(venue_id, agent.account)
+            if not agent.account_label:
+                agent.account_label = agent.account
+            agent.account = ref.custody_address
         meta = {
             "name": agent.name,
             "description": agent.description,
@@ -295,6 +317,10 @@ class AgentStore:
             "default_trading_context": agent.default_trading_context,
             "created_at": agent.created_at,
         }
+        if agent.account:
+            meta["account"] = agent.account
+        if agent.account_label:
+            meta["account_label"] = agent.account_label
         if agent.schedule:
             meta["schedule"] = agent.schedule
         agent.agent_dir.mkdir(parents=True, exist_ok=True)

@@ -10,7 +10,11 @@ from condor.executors.base import ExecutorStatus
 from condor.executors.hyperliquid import Fill, OrderAck, Position
 from condor.executors.log import ExecutorLog
 from condor.executors.order import OrderExecutor, OrderPerpConfig, OrderStates
-from condor.executors.position import PositionExecutor, PositionPerpConfig, PositionStates
+from condor.executors.position import (
+    PositionExecutor,
+    PositionPerpConfig,
+    PositionStates,
+)
 from condor.executors.runtime import ExecutorRuntime
 
 
@@ -42,7 +46,9 @@ class FakeHL:
         self.size = size
         return Fill(oid=1, avg_px=self.entry, size=size)
 
-    async def place_trigger(self, coin, is_buy, size, trigger_px, kind, reduce_only=True):
+    async def place_trigger(
+        self, coin, is_buy, size, trigger_px, kind, reduce_only=True
+    ):
         self._oid += 1
         self.triggers.append((kind, float(trigger_px)))
         return OrderAck(oid=self._oid, status="resting")
@@ -58,9 +64,15 @@ class FakeHL:
         if self.vanish and self._pos_calls > 1:
             return None
         return Position(
-            coin=coin, side="LONG", size=self.size, entry_px=self.entry,
-            unrealized_pnl=Decimal("0"), liquidation_px=self.liq,
-            margin_used=Decimal("0"), leverage=2, funding=Decimal("0"),
+            coin=coin,
+            side="LONG",
+            size=self.size,
+            entry_px=self.entry,
+            unrealized_pnl=Decimal("0"),
+            liquidation_px=self.liq,
+            margin_used=Decimal("0"),
+            leverage=2,
+            funding=Decimal("0"),
         )
 
     async def market_close(self, coin, size=None):
@@ -73,7 +85,15 @@ class FakeHL:
         self.cancels.append(oid)
 
     async def fills(self, since_ms=None):
-        return [{"coin": "ETH", "closedPnl": "1.5", "fee": "0.02", "dir": "Close Long", "px": "106"}]
+        return [
+            {
+                "coin": "ETH",
+                "closedPnl": "1.5",
+                "fee": "0.02",
+                "dir": "Close Long",
+                "px": "106",
+            }
+        ]
 
 
 class CancelFailHL(FakeHL):
@@ -89,7 +109,7 @@ class CancelFailHL(FakeHL):
 def _run(tmp_path, fake, cfg):
     store = ExecutorLog(tmp_path)
     runtime = ExecutorRuntime(store=store)
-    runtime._connectors[("hyperliquid", "perp")] = fake
+    runtime._connector_overrides[("hyperliquid", "perp")] = fake
 
     async def go():
         eid = runtime.create_executor(cfg)
@@ -100,8 +120,18 @@ def _run(tmp_path, fake, cfg):
 
 
 def _cfg(**over):
-    kw = dict(coin="ETH", side="LONG", notional_quote=Decimal("20"), leverage=2,
-              update_interval=0.01, native_triggers=False, notify_trades=False)
+    from condor.accounts.model import AccountRef
+
+    kw = dict(
+        coin="ETH",
+        side="LONG",
+        notional_quote=Decimal("20"),
+        leverage=2,
+        account_ref=AccountRef("hyperliquid", "0x" + "a" * 40),
+        update_interval=0.01,
+        native_triggers=False,
+        notify_trades=False,
+    )
     kw.update(over)
     return PositionPerpConfig(**kw)
 
@@ -135,8 +165,15 @@ def test_time_limit_closes(tmp_path):
 
 def test_native_triggers_placed(tmp_path):
     fake = FakeHL(entry=100, marks=[106], liq=50)
-    _run(tmp_path, fake, _cfg(take_profit_pct=Decimal("0.05"),
-                              stop_loss_pct=Decimal("0.03"), native_triggers=True))
+    _run(
+        tmp_path,
+        fake,
+        _cfg(
+            take_profit_pct=Decimal("0.05"),
+            stop_loss_pct=Decimal("0.03"),
+            native_triggers=True,
+        ),
+    )
     kinds = {k for k, _ in fake.triggers}
     assert kinds == {"tp", "sl"}
 
@@ -160,12 +197,23 @@ def test_order_perp_market_fills(tmp_path):
     fake = FakeHL(entry=100, marks=[100])
     store = ExecutorLog(tmp_path)
     rt = ExecutorRuntime(store=store)
-    rt._connectors[("hyperliquid", "perp")] = fake
+    rt._connector_overrides[("hyperliquid", "perp")] = fake
 
     async def go():
-        eid = rt.create_executor(OrderPerpConfig(
-            coin="ETH", side="LONG", notional_quote=Decimal("20"), leverage=2,
-            update_interval=0.01, notify_trades=False))
+        eid = rt.create_executor(
+            OrderPerpConfig(
+                coin="ETH",
+                side="LONG",
+                notional_quote=Decimal("20"),
+                leverage=2,
+                account_ref={
+                    "venue_id": "hyperliquid",
+                    "custody_address": "0x" + "a" * 40,
+                },
+                update_interval=0.01,
+                notify_trades=False,
+            )
+        )
         await asyncio.wait_for(rt.wait_all(), timeout=5)
         return rt.store.load(eid)
 
@@ -184,8 +232,13 @@ def test_order_cancel_failure_keeps_resting_order_non_terminal(tmp_path):
     ex = OrderExecutor(
         "order_live",
         OrderPerpConfig(
-            coin="ETH", side="LONG", notional_quote=Decimal("20"), leverage=2,
-            order_type="limit", limit_px=Decimal("99"), notify_trades=False,
+            coin="ETH",
+            side="LONG",
+            notional_quote=Decimal("20"),
+            leverage=2,
+            order_type="limit",
+            limit_px=Decimal("99"),
+            notify_trades=False,
         ),
         fake,
         ExecutorLog(tmp_path),
@@ -227,5 +280,5 @@ def test_early_stop_detach_keeps_position():
     ex.state.state = PositionStates.ACTIVE
     ex.state.size = Decimal("0.2")
     ex.early_stop(keep_position=True)
-    assert ex.state.state == PositionStates.COMPLETE
-    assert ex.state.close_type == "detached"
+    assert ex.state.state == PositionStates.DETACHING
+    assert ex.state.close_type == "detaching"

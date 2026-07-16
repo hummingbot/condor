@@ -109,7 +109,9 @@ def test_resolve_by_name_and_address_and_default(tmp_path):
     assert store.resolve("hyperliquid", "alt") == expected_alt
     assert store.resolve("hyperliquid", ADDR_B) == expected_alt
     # Mixed-case EVM address input normalizes to the canonical key
-    assert store.resolve("hyperliquid", ADDR_B.upper().replace("0X", "0x")) == expected_alt
+    assert (
+        store.resolve("hyperliquid", ADDR_B.upper().replace("0X", "0x")) == expected_alt
+    )
     # No selector → default_account
     assert store.resolve("hyperliquid") == AccountRef("hyperliquid", ADDR_A)
 
@@ -145,7 +147,9 @@ def test_duplicate_custody_structurally_impossible(tmp_path):
     """Accounts are a map keyed by custody address: upserting the same address
     twice (any case) yields ONE entry, never a duplicate AccountRef."""
     store = _store(tmp_path, _structured())
-    store.upsert_account("hyperliquid", ADDR_A.upper().replace("0X", "0x"), {"name": "main2"})
+    store.upsert_account(
+        "hyperliquid", ADDR_A.upper().replace("0X", "0x"), {"name": "main2"}
+    )
     data = store.load()
     assert list(data["hyperliquid"]["accounts"]).count(ADDR_A) == 1
     assert data["hyperliquid"]["accounts"][ADDR_A]["name"] == "main2"
@@ -179,11 +183,32 @@ def test_store_activated_as_loader_source():
     """Phase 3 ACTIVATION: the wallets loaders resolve credentials through
     this store (one path knob, ``wallets._VENUES_PATH``); the flat reader is
     gone."""
-    from condor.accounts import store as store_mod
-
     import condor.executors.wallets as wallets
+    from condor.accounts import store as store_mod
 
     assert store_mod._default_store_path().name == "venues.json"
     assert wallets.account_store()._path == wallets._VENUES_PATH
     assert not hasattr(wallets, "save_venue")  # flat writer deleted
     assert not hasattr(wallets, "import_env_to_store")  # replaced by the CLI
+
+
+def test_concurrent_store_instances_do_not_lose_updates(tmp_path):
+    import threading
+
+    path = tmp_path / "venues.json"
+    first = AccountStore(path=path)
+    second = AccountStore(path=path)
+    barrier = threading.Barrier(2)
+
+    def write(store, address, name):
+        barrier.wait()
+        store.upsert_account("hyperliquid", address, {"name": name})
+
+    t1 = threading.Thread(target=write, args=(first, ADDR_A, "main"))
+    t2 = threading.Thread(target=write, args=(second, ADDR_B, "alt"))
+    t1.start()
+    t2.start()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+    assert not t1.is_alive() and not t2.is_alive()
+    assert set(first.load()["hyperliquid"]["accounts"]) == {ADDR_A, ADDR_B}

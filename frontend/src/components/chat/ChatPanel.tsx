@@ -27,6 +27,7 @@ interface ChatPanelProps {
 
 export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const chat = useChatSocket();
+  const connect = chat.connect;
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -68,8 +69,8 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
   // Connect when panel opens
   useEffect(() => {
-    if (isOpen) chat.connect();
-  }, [isOpen, chat.connect]);
+    if (isOpen) connect();
+  }, [isOpen, connect]);
 
   // Auto-scroll on new messages in the active slot
   useEffect(() => {
@@ -89,7 +90,8 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   // Clear pending state when active slot becomes available
   useEffect(() => {
     if (chat.activeSlot && pendingSession) {
-      setPendingSession(false);
+      const timer = window.setTimeout(() => setPendingSession(false), 0);
+      return () => window.clearTimeout(timer);
     }
   }, [chat.activeSlot, pendingSession]);
 

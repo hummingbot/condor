@@ -30,7 +30,6 @@ from typing import Any, Literal, Optional
 from pydantic import BaseModel, Field
 
 from condor.executors.adapters import make_adapter
-from condor.executors.orders import LandedOrder, orders_digest
 from condor.executors.base import (
     BarrierFields,
     ExecutorBase,
@@ -38,6 +37,7 @@ from condor.executors.base import (
     ExecutorStatus,
     RiskDeclaration,
 )
+from condor.executors.orders import LandedOrder, orders_digest
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,7 @@ class PositionStates(str, Enum):
     NOT_ACTIVE = "NOT_ACTIVE"
     OPENING = "OPENING"
     ACTIVE = "ACTIVE"
+    DETACHING = "DETACHING"
     CLOSING = "CLOSING"
     COMPLETE = "COMPLETE"
     FAILED = "FAILED"
@@ -208,6 +209,16 @@ class PositionExecutor(ExecutorBase):
                 await self._open()
             case PositionStates.ACTIVE:
                 await self._control_barriers()
+            case PositionStates.DETACHING:
+                # Position-preserving stop still has to cancel and confirm all
+                # executor-owned protection orders before management ends.
+                self.status = ExecutorStatus.CLOSING
+                await self.adapter.on_close(s)
+                await self.adapter.settle(s)
+                s.size = self._close_size()
+                s.close_type = "detached"
+                self.close_reason = f"stopped — holding {s.size} units (detached)"
+                s.state = PositionStates.COMPLETE
             case PositionStates.CLOSING:
                 self.status = ExecutorStatus.CLOSING
                 await self._close()
@@ -238,8 +249,15 @@ class PositionExecutor(ExecutorBase):
         s.opened_at = time.time()
         s.state = PositionStates.ACTIVE
         await self.adapter.on_open(s)
-        logger.info("position %s: opened %s @ %s (%s) ref=%s (%s)",
-                    self.id, s.size, s.entry_price, amount_spent, s.open_ref, self.config.type)
+        logger.info(
+            "position %s: opened %s @ %s (%s) ref=%s (%s)",
+            self.id,
+            s.size,
+            s.entry_price,
+            amount_spent,
+            s.open_ref,
+            self.config.type,
+        )
         await self.notify_trade(self.adapter.open_note(s))
 
     def _opening_expired(self) -> bool:
@@ -301,7 +319,10 @@ class PositionExecutor(ExecutorBase):
             pnl = s.pnl_pct
             if cfg.stop_loss_pct is not None and pnl <= -cfg.stop_loss_pct:
                 return self._trigger_close("stop_loss", pnl)
-            if cfg.trailing_activation_pct is not None and cfg.trailing_delta_pct is not None:
+            if (
+                cfg.trailing_activation_pct is not None
+                and cfg.trailing_delta_pct is not None
+            ):
                 if s.trailing_trigger_pct is None:
                     if pnl > cfg.trailing_activation_pct:
                         s.trailing_trigger_pct = pnl - cfg.trailing_delta_pct
@@ -320,8 +341,11 @@ class PositionExecutor(ExecutorBase):
     def _trigger_close(self, close_type: str, pnl) -> None:
         s = self.state
         s.close_type = close_type
-        self.close_reason = f"{close_type} hit (pnl {float(pnl) * 100:+.2f}%)" if pnl is not None \
+        self.close_reason = (
+            f"{close_type} hit (pnl {float(pnl) * 100:+.2f}%)"
+            if pnl is not None
             else f"{close_type} hit"
+        )
         logger.info("position %s: %s", self.id, self.close_reason)
         s.state = PositionStates.CLOSING
 
@@ -336,7 +360,8 @@ class PositionExecutor(ExecutorBase):
             # settle without placing a close order.
             logger.info(
                 "position %s: owned_net_base is 0 after cancellations — "
-                "nothing to close", self.id,
+                "nothing to close",
+                self.id,
             )
             await self.adapter.settle(s)
             s.state = PositionStates.COMPLETE
@@ -347,8 +372,14 @@ class PositionExecutor(ExecutorBase):
         s.close_ref = str(ref) if ref is not None else None
         await self.adapter.settle(s)
         pnl = self.net_pnl_quote()
-        logger.info("position %s: closed (%s) exit=%s proceeds=%s ref=%s",
-                    self.id, s.close_type, exit_px, proceeds, s.close_ref)
+        logger.info(
+            "position %s: closed (%s) exit=%s proceeds=%s ref=%s",
+            self.id,
+            s.close_type,
+            exit_px,
+            proceeds,
+            s.close_ref,
+        )
         await self.notify_trade(self.adapter.close_note(s, pnl))
         s.state = PositionStates.COMPLETE
 
@@ -356,13 +387,18 @@ class PositionExecutor(ExecutorBase):
         """Close sizing (§6.2): the scope's REMAINING SIGNED inventory folded
         from orders[] — never raw gross entry fills, which over-close after a
         partial exit, a cancel/fill race, base-asset fees, or offsetting
-        two-sided fills. Falls back to the legacy scalar while orders[] is
-        empty (pre-§6.2b records); divergence is logged, the fold wins."""
+        two-sided fills. A nonzero legacy scalar without orders[] is rejected:
+        there is no auditable basis for an automatic close size."""
         from condor.executors.orders import owned_net_base
 
         s = self.state
         if not s.orders:
-            return s.size
+            if s.size:
+                raise RuntimeError(
+                    "position has nonzero legacy size but no landed orders[]; "
+                    "manual attribution/reconciliation required"
+                )
+            return Decimal("0")
         net = owned_net_base(
             s.orders,
             product=self.config.instrument or "spot",
@@ -373,7 +409,9 @@ class PositionExecutor(ExecutorBase):
             logger.warning(
                 "position %s: close sizing from orders[] fold %s diverges from "
                 "legacy scalar %s — using the fold (§6.2)",
-                self.id, size, s.size,
+                self.id,
+                size,
+                s.size,
             )
         return size
 
@@ -385,9 +423,9 @@ class PositionExecutor(ExecutorBase):
         s = self.state
         if s.state == PositionStates.ACTIVE:
             if keep_position:
-                s.close_type = "detached"
-                self.close_reason = f"stopped — holding {s.size} units (detached)"
-                s.state = PositionStates.COMPLETE
+                s.close_type = "detaching"
+                self.close_reason = "stopping — cancelling protection before detach"
+                s.state = PositionStates.DETACHING
             else:
                 s.close_type = "early_stop"
                 self.close_reason = "early stop (closing position)"
@@ -420,8 +458,11 @@ class PositionExecutor(ExecutorBase):
             "amount_spent": float(s.amount_spent),
             "proceeds": float(s.proceeds) if s.proceeds is not None else None,
             "exit_price": float(s.exit_price) if s.exit_price is not None else None,
-            "trailing_trigger_pct": float(s.trailing_trigger_pct)
-            if s.trailing_trigger_pct is not None else None,
+            "trailing_trigger_pct": (
+                float(s.trailing_trigger_pct)
+                if s.trailing_trigger_pct is not None
+                else None
+            ),
             "close_type": s.close_type,
             "open_ref": s.open_ref,
             "close_ref": s.close_ref,

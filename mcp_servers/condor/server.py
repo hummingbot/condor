@@ -9,8 +9,8 @@ from mcp.server.fastmcp import FastMCP
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import consult as consult_tool
 from mcp_servers.condor.tools import delegate as delegate_tool
+from mcp_servers.condor.tools import executors as executors_tool
 from mcp_servers.condor.tools import (
-    executors as executors_tool,
     memory,
     notification,
     routines,
@@ -386,7 +386,7 @@ async def list_agents() -> dict:
 async def get_agent(agent_slug: str) -> dict:
     """Get one agent's FULL editable spec (the AGENT.md identity, §5.3):
     name, description, instructions, model, tools, risk_limits,
-    denomination, default_config, default_trading_context, schedule.
+    denomination, account, default_config, default_trading_context, schedule.
     """
     return await trading_agent.get_agent(agent_slug)
 
@@ -402,6 +402,8 @@ async def create_agent(
     when_to_consult: str = "",
     risk_limits: dict | None = None,
     denomination: str = "",
+    account: str = "",
+    account_label: str = "",
     default_config: dict | None = None,
     default_trading_context: str = "",
     schedule: dict | None = None,
@@ -424,6 +426,8 @@ async def create_agent(
         risk_limits: {max_position_size_quote, max_open_executors,
             max_drawdown_pct?, shutdown_drawdown_pct?}.
         denomination: Numeraire for risk limits (e.g. "USDC", "SOL").
+        account: Account display name or custody address. Names are resolved
+            immediately and the canonical address is persisted.
         default_config: Launch defaults (frequency_sec, max_ticks, ...).
         default_trading_context: Default context string for runs.
         schedule: {cron: "m h dom mon dow", tz?: "UTC"} — unattended fires.
@@ -437,6 +441,8 @@ async def create_agent(
         when_to_consult=when_to_consult,
         risk_limits=risk_limits,
         denomination=denomination,
+        account=account,
+        account_label=account_label,
         default_config=default_config,
         default_trading_context=default_trading_context,
         schedule=schedule,
@@ -455,6 +461,8 @@ async def update_agent(
     when_to_consult: str | None = None,
     risk_limits: dict | None = None,
     denomination: str | None = None,
+    account: str | None = None,
+    account_label: str | None = None,
     default_config: dict | None = None,
     default_trading_context: str | None = None,
     schedule: dict | None = None,
@@ -473,6 +481,8 @@ async def update_agent(
         when_to_consult=when_to_consult,
         risk_limits=risk_limits,
         denomination=denomination,
+        account=account,
+        account_label=account_label,
         default_config=default_config,
         default_trading_context=default_trading_context,
         schedule=schedule,
@@ -509,7 +519,7 @@ async def run_agent(
 
     Args:
         agent_slug: Which agent to run.
-        config: Launch overrides (max_ticks, frequency_sec, risk_limits...).
+        config: Launch overrides (max_ticks and stricter risk_limits only).
         dry_run: One read-only experiment tick instead of a live loop.
         trading_context: Context string for this run.
     """

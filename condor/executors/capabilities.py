@@ -33,6 +33,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from condor.accounts.model import AccountRef
+
 log = logging.getLogger(__name__)
 
 _STORE_DIR = Path(__file__).resolve().parents[2] / "store"
@@ -52,6 +54,9 @@ class Capability:
     agent_slug: str = ""  # agent origin only
     run_id: str = ""  # agent origin only ("{slug}_{N}" today; ULID in Phase 4)
     risk_limits: dict = field(default_factory=dict)  # frozen run risk policy
+    # Exact resolved custody identity for agent runs.  This is immutable run
+    # context, never caller-supplied executor config.
+    account_ref: AccountRef | None = None
     # condor-direct only: the persistent control-connection id whose closure
     # revokes this capability.
     connection_id: str = ""
@@ -67,7 +72,11 @@ class CapabilityRegistry:
     # -- agent run capabilities --
 
     def mint_run_capability(
-        self, agent_slug: str, run_id: str, risk_limits: dict | None = None
+        self,
+        agent_slug: str,
+        run_id: str,
+        risk_limits: dict | None = None,
+        account_ref: AccountRef | None = None,
     ) -> Capability:
         cap = Capability(
             id=secrets.token_urlsafe(24),
@@ -75,6 +84,7 @@ class CapabilityRegistry:
             agent_slug=agent_slug,
             run_id=run_id,
             risk_limits=dict(risk_limits or {}),
+            account_ref=account_ref,
         )
         with self._lock:
             self._caps[cap.id] = cap

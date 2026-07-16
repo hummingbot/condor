@@ -100,6 +100,8 @@ class AgentService:
             "when_to_consult",
             "risk_limits",
             "denomination",
+            "account",
+            "account_label",
             "default_config",
             "default_trading_context",
             "schedule",
@@ -142,8 +144,10 @@ class AgentService:
         if open_execs:
             raise LifecycleError(
                 409,
-                f"agent '{slug}' still has {len(open_execs)} nonterminal "
-                f"executor(s) {open_execs[:5]} — stop/close them first",
+                f"agent '{slug}' still has {len(open_execs)} nonterminal or "
+                "inventory-bearing executor scope(s) "
+                f"with live work or attributed inventory {open_execs[:5]} — "
+                "stop/close or explicitly dispose of them first",
             )
 
         tomb = {
@@ -168,18 +172,36 @@ class AgentService:
 
     @staticmethod
     def _nonterminal_executors(slug: str) -> list[str]:
-        try:
-            from condor.executors.log import _TERMINAL
-            from condor.executors.service import peek_executor_runtime
+        """Durable financial-state deletion guard.
 
-            runtime = peek_executor_runtime()
-            if runtime is None:
-                return []
-            records = runtime.store.load_by_slug(slug)
-            return [r.id for r in records if r.status not in _TERMINAL]
-        except Exception:
-            log.exception("nonterminal-executor check failed for %s", slug)
-            return []
+        Terminal single-leg executors may still own inventory, so terminal
+        status alone is not deletion-safe. Read the log even when no runtime
+        exists and let projection failures propagate (fail closed).
+        """
+        from condor.executors.log import _TERMINAL, ExecutorLog
+        from condor.executors.orders import LandedOrder, live_orders, owned_net_base
+        from condor.executors.service import peek_executor_runtime
+
+        runtime = peek_executor_runtime()
+        store = runtime.store if runtime is not None else ExecutorLog()
+        blocked: list[str] = []
+        for record in store.load_by_slug(slug):
+            if record.status not in _TERMINAL:
+                blocked.append(record.id)
+                continue
+            cfg = record.config or {}
+            orders = [
+                LandedOrder(**raw) for raw in ((record.state or {}).get("orders") or [])
+            ]
+            product = record.type.split("_", 1)[1] if "_" in record.type else "spot"
+            net = owned_net_base(
+                orders,
+                product=product,
+                base_asset=str(cfg.get("base_token") or ""),
+            )
+            if live_orders(orders) or net:
+                blocked.append(record.id)
+        return blocked
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -273,7 +295,9 @@ class AgentService:
         events = meta.pop("events")
         return render_run_markdown(meta, events)
 
-    def inject_directive(self, slug: str, text: str, agent_id: Optional[str] = None) -> dict:
+    def inject_directive(
+        self, slug: str, text: str, agent_id: Optional[str] = None
+    ) -> dict:
         engines = select_engines(slug, agent_id, running_only=True)
         for e in engines:
             e.inject_directive(text)

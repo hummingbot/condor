@@ -32,7 +32,7 @@ def _runtime(tmp_path):
     gateway = _QuoteGateway()
     created: list[str] = []
 
-    def fake_create(config, executor_id=None):
+    def fake_create(config, executor_id=None, *, connector=None):
         eid = executor_id or "gen_1"
         created.append(eid)
         # persist an opener so replay checks can read the record back
@@ -41,9 +41,7 @@ def _runtime(tmp_path):
             status=SimpleNamespace(value="PENDING"),
             close_reason=None,
             config=config,
-            state_model=lambda: SimpleNamespace(
-                model_dump_json=lambda: "{}"
-            ),
+            state_model=lambda: SimpleNamespace(model_dump_json=lambda: "{}"),
         )
         store._append(
             config.agent_slug or "_manual",
@@ -64,7 +62,7 @@ def _runtime(tmp_path):
     rt = SimpleNamespace(
         store=store,
         leases=LeaseManager(),
-        connector_for_spec=lambda type_, venue: gateway,
+        connector_for_spec=lambda type_, venue, account_ref=None: gateway,
         create_executor=fake_create,
         list_running=lambda: [],
         gateway=gateway,
@@ -82,6 +80,7 @@ SWAP_CONFIG = {
     "side": "SELL",
     "notional_quote": "50",
 }
+SOL_REF = AccountRef("solana", SWAP_CONFIG["wallet_address"])
 
 
 def _create(rt, cap_id, executor_id="", config=None):
@@ -114,7 +113,7 @@ def test_unknown_and_expired_capability_rejected(tmp_path):
     assert ei.value.status == 403
 
     reg = get_capability_registry()
-    cap = reg.mint_run_capability("acme", "acme_9")
+    cap = reg.mint_run_capability("acme", "acme_9", account_ref=SOL_REF)
     reg.revoke_run("acme_9")  # run ended
     with pytest.raises(ops.ExecutorOpError) as ei:
         _create(rt, cap.id)
@@ -123,7 +122,9 @@ def test_unknown_and_expired_capability_rejected(tmp_path):
 
 def test_agent_capability_attributes_from_server_side_entry(tmp_path):
     rt = _runtime(tmp_path)
-    cap = get_capability_registry().mint_run_capability("acme", "acme_3")
+    cap = get_capability_registry().mint_run_capability(
+        "acme", "acme_3", account_ref=SOL_REF
+    )
     result = _create(rt, cap.id, executor_id="e-attr")
     assert result["origin"] == "agent"
     rec = rt.store.load("e-attr")
@@ -135,7 +136,9 @@ def test_agent_capability_attributes_from_server_side_entry(tmp_path):
 def test_condor_direct_not_risk_capped_but_leased(tmp_path):
     reg = CapabilityRegistry()
     reg.write_direct_token()
-    token = __import__("condor.executors.capabilities", fromlist=["DIRECT_TOKEN_PATH"]).DIRECT_TOKEN_PATH.read_text()
+    token = __import__(
+        "condor.executors.capabilities", fromlist=["DIRECT_TOKEN_PATH"]
+    ).DIRECT_TOKEN_PATH.read_text()
     cap = reg.register_direct(token, "conn-1")
     assert cap.origin == "condor"
     # connection close revokes
@@ -150,7 +153,7 @@ def test_agent_session_cannot_downgrade_to_direct():
     from condor.executors.capabilities import DIRECT_TOKEN_PATH
 
     token = DIRECT_TOKEN_PATH.read_text()
-    run_cap = reg.mint_run_capability("acme", "acme_1")
+    run_cap = reg.mint_run_capability("acme", "acme_1", account_ref=SOL_REF)
     with pytest.raises(CapabilityError, match="cannot register as condor-direct"):
         reg.register_direct(token, "conn-2", session_capability=run_cap.id)
     # altered token also rejected
@@ -163,7 +166,9 @@ def test_agent_session_cannot_downgrade_to_direct():
 
 def test_duplicate_create_same_id_same_hash_replays(tmp_path):
     rt = _runtime(tmp_path)
-    cap = get_capability_registry().mint_run_capability("acme", "acme_4")
+    cap = get_capability_registry().mint_run_capability(
+        "acme", "acme_4", account_ref=SOL_REF
+    )
     r1 = _create(rt, cap.id, executor_id="e-dup")
     r2 = _create(rt, cap.id, executor_id="e-dup")
     assert r1["id"] == r2["id"] == "e-dup"
@@ -175,7 +180,9 @@ def test_duplicate_create_same_id_same_hash_replays(tmp_path):
 
 def test_same_id_different_hash_rejected(tmp_path):
     rt = _runtime(tmp_path)
-    cap = get_capability_registry().mint_run_capability("acme", "acme_5")
+    cap = get_capability_registry().mint_run_capability(
+        "acme", "acme_5", account_ref=SOL_REF
+    )
     _create(rt, cap.id, executor_id="e-rebind")
     other = dict(SWAP_CONFIG, amount="0.9", notional_quote="90")
     with pytest.raises(ops.ExecutorOpError) as ei:
@@ -185,14 +192,53 @@ def test_same_id_different_hash_rejected(tmp_path):
     get_capability_registry().revoke_run("acme_5")
 
 
+def test_same_id_same_hash_different_owner_is_rejected(tmp_path):
+    rt = _runtime(tmp_path)
+    reg = get_capability_registry()
+    owner_a = reg.mint_run_capability("acme", "run-a", account_ref=SOL_REF)
+    owner_b = reg.mint_run_capability("other", "run-b", account_ref=SOL_REF)
+    _create(rt, owner_a.id, executor_id="shared-id")
+    with pytest.raises(ops.ExecutorOpError) as ei:
+        _create(rt, owner_b.id, executor_id="shared-id")
+    assert ei.value.status == 409
+    assert "owner" in ei.value.message
+    reg.revoke_run("run-a")
+    reg.revoke_run("run-b")
+
+
+def test_two_accounts_same_venue_bind_and_lease_independently(tmp_path):
+    from condor.executors.wallets import account_store
+
+    alt_ref = AccountRef("solana", "AltSolanaCustody111111111111111111111111111")
+    account_store().upsert_account("solana", alt_ref.custody_address, {"name": "alt"})
+    reg = get_capability_registry()
+    main = reg.mint_run_capability("main-agent", "main-run", account_ref=SOL_REF)
+    alt = reg.mint_run_capability("alt-agent", "alt-run", account_ref=alt_ref)
+    rt = _runtime(tmp_path)
+
+    first = _create(rt, main.id, executor_id="main-order")
+    second = _create(rt, alt.id, executor_id="alt-order")
+    assert first["id"] == "main-order" and second["id"] == "alt-order"
+    assert rt.store.load("main-order").config["account_ref"] == SOL_REF.as_dict()
+    assert rt.store.load("alt-order").config["account_ref"] == alt_ref.as_dict()
+    leases = rt.leases.snapshot()
+    assert {key[0]: owner for key, owner in leases.items()} == {
+        str(SOL_REF): "main-run",
+        str(alt_ref): "alt-run",
+    }
+    assert len({key[1] for key in leases}) == 1
+    reg.revoke_run("main-run")
+    reg.revoke_run("alt-run")
+
+
 # -- leases (§11: two concurrent actors on one (AccountRef, instrument)) --
 
 
 def test_lease_second_actor_rejected(tmp_path):
     rt = _runtime(tmp_path)
     reg = get_capability_registry()
-    cap_a = reg.mint_run_capability("acme", "acme_6")
-    cap_b = reg.mint_run_capability("other", "other_1")
+    cap_a = reg.mint_run_capability("acme", "acme_6", account_ref=SOL_REF)
+    cap_b = reg.mint_run_capability("other", "other_1", account_ref=SOL_REF)
     _create(rt, cap_a.id, executor_id="e-lease-a")
     with pytest.raises(ops.ExecutorOpError) as ei:
         _create(rt, cap_b.id, executor_id="e-lease-b")

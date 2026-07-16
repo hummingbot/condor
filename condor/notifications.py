@@ -31,10 +31,39 @@ def _append_outbox(entry: dict) -> None:
     socket ("notify.emit"), keeping one writer per file."""
     OUTBOX_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _lock:
+        created = not OUTBOX_PATH.exists()
+        _truncate_torn_tail(OUTBOX_PATH)
         with OUTBOX_PATH.open("a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
             f.flush()
             os.fsync(f.fileno())
+        if created:
+            try:
+                dir_fd = os.open(OUTBOX_PATH.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                # Unsupported on some filesystems; the file data itself is
+                # still synchronously durable.
+                pass
+
+
+def _truncate_torn_tail(path: Path) -> None:
+    """Remove a crash-truncated final record before the next append."""
+    if not path.exists() or path.stat().st_size == 0:
+        return
+    with path.open("rb+") as fh:
+        fh.seek(-1, os.SEEK_END)
+        if fh.read(1) == b"\n":
+            return
+        fh.seek(0)
+        data = fh.read()
+        cut = data.rfind(b"\n")
+        fh.truncate(cut + 1 if cut >= 0 else 0)
+        fh.flush()
+        os.fsync(fh.fileno())
 
 
 async def notify(
@@ -63,12 +92,10 @@ async def notify(
         "text": text,
     }
 
-    try:
-        _append_outbox(entry)
-    except Exception:
-        # The outbox is load-bearing: log loudly, still return the entry
-        log.exception("failed to append notification outbox")
-
+    # The outbox is the authoritative delivery record. Returning a
+    # success-shaped notification that was never persisted loses the only
+    # user-visible safety signal, so persistence errors propagate.
+    _append_outbox(entry)
     return entry
 
 

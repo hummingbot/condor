@@ -80,11 +80,15 @@ def test_account_change_alters_only_resolved_hash():
     agent = _agent()
     src = "SAME AUTHORED TEXT"
     f_main = freeze_spec(
-        agent, {"frequency_sec": 60}, source_text=src,
+        agent,
+        {"frequency_sec": 60},
+        source_text=src,
         account_ref=AccountRef("hyperliquid", "0x" + "a" * 40),
     )
     f_alt = freeze_spec(
-        agent, {"frequency_sec": 60}, source_text=src,
+        agent,
+        {"frequency_sec": 60},
+        source_text=src,
         account_ref=AccountRef("hyperliquid", "0x" + "b" * 40),
     )
     assert f_main.source_hash == f_alt.source_hash
@@ -147,6 +151,25 @@ async def test_start_session_rejects_widening_override(tmp_path, monkeypatch):
     assert "widens" in ei.value.message
 
 
+@pytest.mark.asyncio
+async def test_start_session_rejects_forbidden_launch_overrides(tmp_path, monkeypatch):
+    import condor.agents.agent as agent_mod
+    from condor.agents.agent import AgentStore
+    from condor.agents.lifecycle import LifecycleError, start_session
+
+    monkeypatch.setattr(agent_mod, "_DATA_ROOT", tmp_path)
+    AgentStore().create(
+        name="fixed_spec",
+        instructions="body",
+        tools=["manage_routines"],
+        default_config={"frequency_sec": 60},
+    )
+    with pytest.raises(LifecycleError, match="forbidden"):
+        await start_session("fixed_spec", config={"frequency_sec": 1})
+    with pytest.raises(LifecycleError, match="forbidden"):
+        await start_session("fixed_spec", config={"agent_key": "other-model"})
+
+
 # -- schedule schema (§5.4 — schema only in Phase 2) --
 
 
@@ -197,3 +220,25 @@ def test_risk_limits_without_denomination_fails_validation():
 
 def test_no_risk_limits_needs_no_denomination():
     validate_agent_spec(_agent(risk_limits={}, denomination=""))
+
+
+def test_agent_account_name_is_persisted_as_canonical_address(tmp_path, monkeypatch):
+    import condor.agents.agent as agent_mod
+    from condor.agents.agent import AgentStore
+    from condor.executors.wallets import account_store
+
+    address = "0x" + "c" * 40
+    account_store().upsert_account("hyperliquid", address, {"name": "alt"})
+    monkeypatch.setattr(agent_mod, "_DATA_ROOT", tmp_path)
+    agent = AgentStore().create(
+        name="bound",
+        instructions="body",
+        tools=["manage_executors"],
+        risk_limits={"max_position_size_quote": 10, "max_open_executors": 1},
+        denomination="USDC",
+        account="alt",
+        default_config={"venue": "hyperliquid"},
+    )
+    assert agent.account == address
+    assert AgentStore().get(agent.slug).account == address
+    assert "account: alt\n" not in agent.path.read_text()

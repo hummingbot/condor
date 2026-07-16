@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 // Single source of truth for run-kind and run-status encodings (RunStore §7.1).
 
 // Run kinds whose executors are attributed to the agent (they launch the tick

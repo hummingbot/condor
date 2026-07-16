@@ -2,6 +2,44 @@
 
 import pytest
 
+TEST_SOL_ACCOUNT = "7fEsqLYz3Zr7SNoBn9GnCTHU5V2Ta8DFXECfWQEmYVWk"
+TEST_HL_ACCOUNT = "0x" + "a" * 40
+TEST_PM_ACCOUNT = "0x" + "b" * 40
+
+
+@pytest.fixture(autouse=True)
+def _isolate_account_store(tmp_path_factory, monkeypatch):
+    """Every test gets a structured multi-venue account store.
+
+    Production executor creation now requires an exact persisted AccountRef;
+    tests that exercise only adapters use these credential-free identities
+    with injected connector overrides.
+    """
+    import json
+
+    from condor.executors import wallets
+
+    path = tmp_path_factory.mktemp("accounts") / "venues.json"
+    path.write_text(
+        json.dumps(
+            {
+                "solana": {
+                    "default_account": TEST_SOL_ACCOUNT,
+                    "accounts": {TEST_SOL_ACCOUNT: {"name": "test-solana"}},
+                },
+                "hyperliquid": {
+                    "default_account": TEST_HL_ACCOUNT,
+                    "accounts": {TEST_HL_ACCOUNT: {"name": "test-hl"}},
+                },
+                "polymarket": {
+                    "default_account": TEST_PM_ACCOUNT,
+                    "accounts": {TEST_PM_ACCOUNT: {"name": "test-pm"}},
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(wallets, "_VENUES_PATH", path)
+
 
 @pytest.fixture(autouse=True)
 def _isolate_notifications_outbox(tmp_path_factory, monkeypatch):
@@ -31,8 +69,6 @@ def _isolate_run_store(tmp_path_factory, monkeypatch):
     """
     from condor.agents import runstore
 
-    runstore.set_run_store(
-        runstore.RunStore(root=tmp_path_factory.mktemp("runstore"))
-    )
+    runstore.set_run_store(runstore.RunStore(root=tmp_path_factory.mktemp("runstore")))
     yield
     runstore.set_run_store(None)

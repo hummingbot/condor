@@ -33,7 +33,12 @@ from typing import Optional
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from solders.keypair import Keypair
 
-from condor.accounts import AccountRef, AccountResolutionError, AccountStore, default_registry
+from condor.accounts import (
+    AccountRef,
+    AccountResolutionError,
+    AccountStore,
+    default_registry,
+)
 
 _VENUES_PATH = Path(__file__).resolve().parents[2] / "store" / "venues.json"
 _SCRYPT_MAXMEM = 512 * 1024 * 1024  # covers Gateway's n=131072,r=8 (~134 MB)
@@ -113,19 +118,18 @@ def save_service(name: str, fields: dict) -> dict:
             f"unknown service {name!r} (known: {sorted(_SERVICE_SECRET_FIELDS)})"
         )
     store = account_store()
-    data = store.load()
-    entry = dict(data.get("_services", {}).get(name, {}))
-    secret_fields = _SERVICE_SECRET_FIELDS[name]
-    for k, v in fields.items():
-        if v is None:
-            continue
-        entry[k] = (
-            encrypt_secret(str(v))
-            if (k in secret_fields and not is_encrypted(v))
-            else v
-        )
-    data.setdefault("_services", {})[name] = entry
-    store.save(data)
+    with store.transaction() as data:
+        entry = dict(data.get("_services", {}).get(name, {}))
+        secret_fields = _SERVICE_SECRET_FIELDS[name]
+        for k, v in fields.items():
+            if v is None:
+                continue
+            entry[k] = (
+                encrypt_secret(str(v))
+                if (k in secret_fields and not is_encrypted(v))
+                else v
+            )
+        data.setdefault("_services", {})[name] = entry
     return entry
 
 
@@ -136,11 +140,18 @@ def decrypt_gateway_keystore(keystore: dict, passphrase: str) -> str:
     """Decrypt a Gateway wallet keystore (scrypt KDF + AES-256-GCM) to its
     secret. Gateway stores the Solana secret key as a base58 string."""
     if keystore.get("kdf") != "scrypt" or keystore.get("cipher") != "aes-256-gcm":
-        raise ValueError(f"unsupported keystore format: kdf={keystore.get('kdf')} cipher={keystore.get('cipher')}")
+        raise ValueError(
+            f"unsupported keystore format: kdf={keystore.get('kdf')} cipher={keystore.get('cipher')}"
+        )
     p = keystore["kdfparams"]
     key = hashlib.scrypt(
-        passphrase.encode(), salt=bytes.fromhex(p["salt"]),
-        n=p["n"], r=p["r"], p=p["p"], dklen=p["dklen"], maxmem=_SCRYPT_MAXMEM,
+        passphrase.encode(),
+        salt=bytes.fromhex(p["salt"]),
+        n=p["n"],
+        r=p["r"],
+        p=p["p"],
+        dklen=p["dklen"],
+        maxmem=_SCRYPT_MAXMEM,
     )
     ct = bytes.fromhex(keystore["ciphertext"])
     iv = bytes.fromhex(keystore["cipherparams"]["iv"])
@@ -284,6 +295,9 @@ def make_polymarket_client(account: Optional[str] = None):
 
     c = load_polymarket_creds(account)
     return PolymarketClient(
-        c["private_key"], funder=c.get("funder"), signature_type=c["signature_type"],
-        creds=c.get("creds"), host=c["host"],
+        c["private_key"],
+        funder=c.get("funder"),
+        signature_type=c["signature_type"],
+        creds=c.get("creds"),
+        host=c["host"],
     )

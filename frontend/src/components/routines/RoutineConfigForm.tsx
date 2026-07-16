@@ -1,3 +1,6 @@
+/* The numeric input keeps a local text draft so transient values such as '-'
+ * remain editable; external config changes deliberately reset that draft. */
+/* eslint-disable react-hooks/set-state-in-effect */
 import { useQuery } from "@tanstack/react-query";
 import { ChevronDown } from "lucide-react";
 import { useEffect, useState } from "react";

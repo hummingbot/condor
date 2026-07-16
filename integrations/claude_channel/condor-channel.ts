@@ -128,7 +128,6 @@ async function deliver(entry: Record<string, unknown>, replayed = false) {
     agent_id: String(entry.agent_id ?? ''),
     kind: String(entry.kind ?? 'info'),
     ts: String(entry.ts ?? ''),
-    delivered_telegram: String(entry.delivered_telegram ?? ''),
   }
   if (replayed) meta.replayed = 'true'
   await mcp.notification({

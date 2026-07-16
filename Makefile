@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: help setup install init login-token run test lint build-frontend setup-chrome register-mcp
+.PHONY: help setup install init run test lint build-frontend setup-chrome register-mcp
 
 # Helper function to find node/npm via nvm or system
 define find_node
@@ -20,20 +20,16 @@ help:
 	@echo "  make setup       - Interactive setup wizard"
 	@echo "  make install     - Setup + install all dependencies"
 	@echo "  make init        - Onboarding: identity + harness selection"
-	@echo "  make login-token - Mint a web dashboard login URL"
 	@echo "  make run         - Run locally (dev)"
 	@echo "  make test        - Run tests"
 	@echo "  make lint        - Run black + isort"
 	@echo "  make register-mcp - Register MCP servers with OpenClaw (no-op if absent)"
 
 setup:
-	@chmod +x setup-environment.sh && ./setup-environment.sh
+	@./install.sh --dir "$(CURDIR)"
 
 init:
 	@uv run python -m condor.cli init
-
-login-token:
-	@uv run python -m condor.cli login-token
 
 install: setup
 	uv sync --dev
@@ -69,5 +65,5 @@ test:
 	uv run pytest
 
 lint:
-	uv run black .
-	uv run isort .
+	uv run black --check .
+	uv run isort --check-only .

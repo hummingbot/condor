@@ -6,7 +6,7 @@ import {
   Save,
   Zap,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 
 import { AgentPnlChart, sessionsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { ModeBadge } from "@/components/agent/ModeBadge";
@@ -117,10 +117,6 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
           </div>
         )}
         <div className="flex justify-between">
-          <span className="text-[var(--color-text-muted)]">server</span>
-          <span className="text-[var(--color-text)]">{instance.server_name || "auto"}</span>
-        </div>
-        <div className="flex justify-between">
           <span className="text-[var(--color-text-muted)]">budget</span>
           <span className="text-[var(--color-text)]">${instance.total_amount_quote}</span>
         </div>
@@ -181,7 +177,7 @@ export function PerformancePanel({
   const trades = sessions.reduce((s, x) => s + x.trade_count, 0);
 
   // PnL chart data from session-level performance
-  const pnlData = useMemo(() => sessionsToDataPoints(sessions), [sessions]);
+  const pnlData = sessionsToDataPoints(sessions);
 
   return (
     <div className="space-y-4 lg:col-span-2">
@@ -318,4 +314,3 @@ export function PerformancePanel({
     </div>
   );
 }
-

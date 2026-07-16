@@ -46,7 +46,9 @@ from __future__ import annotations
 import json
 import os
 import threading
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Callable, Iterator
 
 from condor.accounts.model import AccountRef
 from condor.accounts.registry import VenueRegistry, default_registry
@@ -64,6 +66,19 @@ class AccountResolutionError(AccountStoreError):
     """A selector could not be resolved to exactly one account."""
 
 
+# AccountStore is deliberately cheap to construct.  All instances targeting
+# the same path therefore need the same process-wide transaction lock; an
+# instance-local lock loses concurrent read/modify/write updates.
+_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[Path, threading.RLock] = {}
+
+
+def _lock_for(path: Path) -> threading.RLock:
+    key = path.expanduser().resolve()
+    with _LOCKS_GUARD:
+        return _PATH_LOCKS.setdefault(key, threading.RLock())
+
+
 def _default_store_path() -> Path:
     return Path(__file__).resolve().parents[2] / "store" / "venues.json"
 
@@ -78,7 +93,7 @@ class AccountStore:
     ):
         self._path = path or _default_store_path()
         self._registry = registry or default_registry()
-        self._write_lock = threading.Lock()
+        self._write_lock = _lock_for(self._path)
 
     # -- loading + validation --
 
@@ -157,7 +172,12 @@ class AccountStore:
     def resolve(self, venue_id: str, selector: str | None = None) -> AccountRef:
         """Resolve an account selector (address or display name) to the
         canonical AccountRef. ``None`` → the venue's ``default_account``."""
-        data = self.load()
+        return self._resolve_in_data(self.load(), venue_id, selector)
+
+    def _resolve_in_data(
+        self, data: dict, venue_id: str, selector: str | None = None
+    ) -> AccountRef:
+        """Resolve against an already-loaded transaction snapshot."""
         entry = data.get(venue_id)
         if entry is None:
             raise AccountResolutionError(
@@ -205,19 +225,65 @@ class AccountStore:
 
     # -- writing (serialized + atomic) --
 
-    def save(self, data: dict) -> None:
-        """Validate + atomically persist (tmp+rename+fsync, 0700/0600)."""
+    def _write_locked(self, data: dict) -> None:
+        """Persist a validated snapshot while ``_write_lock`` is held."""
         self.validate(data)
-        with self._write_lock:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            os.chmod(self._path.parent, 0o700)
-            tmp = self._path.with_suffix(".json.tmp")
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(self._path.parent, 0o700)
+        tmp = self._path.with_name(
+            f".{self._path.name}.{os.getpid()}.{threading.get_ident()}.tmp"
+        )
+        try:
             with open(tmp, "w") as f:
                 json.dump(data, f, indent=2, sort_keys=True)
                 f.flush()
                 os.fsync(f.fileno())
             os.chmod(tmp, 0o600)
             os.replace(tmp, self._path)
+            try:
+                dir_fd = os.open(self._path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                # Some filesystems do not support directory fsync. The file
+                # itself is still fsynced and atomically replaced.
+                pass
+        finally:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+
+    def save(self, data: dict) -> None:
+        """Validate + atomically persist (tmp+rename+fsync, 0700/0600)."""
+        with self._write_lock:
+            self._write_locked(data)
+
+    @contextmanager
+    def transaction(self) -> Iterator[dict]:
+        """Hold the shared lock across a complete read/modify/write.
+
+        Normal exit commits atomically; an exception aborts. Executor create
+        and account edits use this same guard so credentials cannot change
+        between account resolution and durable creation.
+        """
+        with self._write_lock:
+            data = self.load()
+            yield data
+            self._write_locked(data)
+
+    @contextmanager
+    def locked_snapshot(self) -> Iterator[dict]:
+        """Yield a validated snapshot while holding the shared path lock.
+
+        This is the account/executor transaction guard for operations that do
+        not themselves mutate venues.json (credential binding + durable
+        executor opener, and exact-account busy checks).
+        """
+        with self._write_lock:
+            yield self.load()
 
     def upsert_account(
         self,
@@ -226,6 +292,7 @@ class AccountStore:
         fields: dict,
         *,
         make_default: bool = False,
+        guard: Callable[[AccountRef, dict], None] | None = None,
     ) -> AccountRef:
         """Add or update one account entry (validated, atomic).
 
@@ -233,13 +300,14 @@ class AccountStore:
         this AFTER validation; the store itself only enforces schema rules.
         """
         ref = self._registry.account_ref(venue_id, custody_address)
-        data = self.load()
-        entry = data.setdefault(venue_id, {"accounts": {}})
-        entry.setdefault("accounts", {})
-        entry["accounts"][ref.custody_address] = dict(fields)
-        if make_default or "default_account" not in entry:
-            entry["default_account"] = ref.custody_address
-        self.save(data)
+        with self.transaction() as data:
+            if guard is not None:
+                guard(ref, data)
+            entry = data.setdefault(venue_id, {"accounts": {}})
+            entry.setdefault("accounts", {})
+            entry["accounts"][ref.custody_address] = dict(fields)
+            if make_default or "default_account" not in entry:
+                entry["default_account"] = ref.custody_address
         return ref
 
     def account_fields(self, ref: AccountRef) -> dict:
@@ -254,24 +322,22 @@ class AccountStore:
 
     def set_default(self, venue_id: str, selector: str) -> AccountRef:
         """Point the venue's ``default_account`` at the resolved selector."""
-        ref = self.resolve(venue_id, selector)
-        data = self.load()
-        data[venue_id]["default_account"] = ref.custody_address
-        self.save(data)
+        with self.transaction() as data:
+            ref = self._resolve_in_data(data, venue_id, selector)
+            data[venue_id]["default_account"] = ref.custody_address
         return ref
 
     def remove_account(self, venue_id: str, custody_address: str) -> bool:
         """Remove one account entry. Removing the default just leaves the
         venue with no default. Returns True if the account existed."""
         ref = self._registry.account_ref(venue_id, custody_address)
-        data = self.load()
-        entry = data.get(venue_id)
-        if not entry or ref.custody_address not in entry.get("accounts", {}):
-            return False
-        del entry["accounts"][ref.custody_address]
-        if entry.get("default_account") == ref.custody_address:
-            entry.pop("default_account", None)
-        if not entry["accounts"]:
-            del data[venue_id]
-        self.save(data)
+        with self.transaction() as data:
+            entry = data.get(venue_id)
+            if not entry or ref.custody_address not in entry.get("accounts", {}):
+                return False
+            del entry["accounts"][ref.custody_address]
+            if entry.get("default_account") == ref.custody_address:
+                entry.pop("default_account", None)
+            if not entry["accounts"]:
+                del data[venue_id]
         return True

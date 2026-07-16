@@ -46,7 +46,9 @@ class PendingApproval:
     executor_id: str = ""
     created_at: float = 0.0
     # resolution
-    decision: str = ""  # approved | denied | timeout_deny | interrupted_void
+    # approved | denied | timeout_deny | interrupted_void |
+    # notification_failed_deny
+    decision: str = ""
     channel: str = ""
     note: str = ""
     consumed: bool = False
@@ -145,6 +147,20 @@ class ApprovalManager:
             )
         except Exception:
             log.exception("approval %s: outbox surfacing failed", ap.approval_id)
+            # An approval the operator could not see must never authorize a
+            # mutation or sit waiting as if it had been surfaced. Persist the
+            # explicit deny when possible; regardless, return False.
+            try:
+                self._record_decision(
+                    ap, "notification_failed_deny", channel="outbox_failure"
+                )
+            except Exception:
+                log.exception(
+                    "approval %s: failed to persist outbox-failure deny",
+                    ap.approval_id,
+                )
+                self._approvals.pop(ap.approval_id, None)
+            return False
 
         try:
             await asyncio.wait_for(ap._event.wait(), timeout=timeout_s)
@@ -173,8 +189,10 @@ class ApprovalManager:
         if ap.decision:
             return {**ap.to_dict(), "already_resolved": True}
         self._record_decision(
-            ap, "approved" if decision == "approve" else "denied",
-            channel=channel, note=note,
+            ap,
+            "approved" if decision == "approve" else "denied",
+            channel=channel,
+            note=note,
         )
         ap._event.set()
         return ap.to_dict()
@@ -184,24 +202,24 @@ class ApprovalManager:
     ) -> None:
         from condor.agents.runstore import get_run_store
 
+        # Permission is financial authority: durable event first, in-memory
+        # grant second. If append/fsync fails the exception propagates, the
+        # waiter stays blocked/default-deny, and no mutation is authorized.
+        get_run_store().emit(
+            ap.run_id,
+            "permission",
+            {
+                "approval_id": ap.approval_id,
+                "decision": decision,
+                "channel": channel,
+                **({"note": note} if note else {}),
+            },
+            tool_call_id=ap.tool_call_id or None,
+            executor_id=ap.executor_id or None,
+        )
         ap.decision = decision
         ap.channel = channel
         ap.note = note
-        try:
-            get_run_store().emit(
-                ap.run_id,
-                "permission",
-                {
-                    "approval_id": ap.approval_id,
-                    "decision": decision,
-                    "channel": channel,
-                    **({"note": note} if note else {}),
-                },
-                tool_call_id=ap.tool_call_id or None,
-                executor_id=ap.executor_id or None,
-            )
-        except Exception:
-            log.exception("approval %s: decision event emit failed", ap.approval_id)
 
     # -- one-use grants ---------------------------------------------------
 

@@ -9,7 +9,6 @@ import {
   MessageSquareText,
   ScrollText,
   Send,
-  Server,
   Trash2,
   Wrench,
   X,
@@ -312,14 +311,6 @@ export function AgentDetail() {
               {agent.tools && agent.tools.length > 0 && (
                 <span className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
                   <Wrench className="h-3 w-3" /> {agent.tools.length} tool{agent.tools.length !== 1 ? "s" : ""}
-                </span>
-              )}
-              {agent.server_name && (
-                <span
-                  className="flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 font-mono text-emerald-400"
-                  title="Pinned server"
-                >
-                  <Server className="h-3 w-3" /> {agent.server_name}
                 </span>
               )}
               {Object.keys(agent.risk_limits || {}).length > 0 && (

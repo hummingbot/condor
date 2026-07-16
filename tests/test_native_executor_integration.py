@@ -17,9 +17,13 @@ import condor.executors.service as service
 from condor.agents.risk import RiskEngine, RiskLimits, RiskState, risk_gate
 from condor.executors.base import ExecutorStatus
 from condor.executors.hyperliquid import Position
-from condor.executors.order import OrderExecutor, OrderPerpConfig, OrderStates
-from condor.executors.position import PositionSpotConfig, PositionExecutor, PositionStates
 from condor.executors.log import ExecutorLog
+from condor.executors.order import OrderExecutor, OrderPerpConfig, OrderStates
+from condor.executors.position import (
+    PositionExecutor,
+    PositionSpotConfig,
+    PositionStates,
+)
 from condor.web.routes import native_executors
 
 WALLET = "82SggYRE2Vo4jN4a2pk3aQ4SET4ctafZJGbowmCqyHx5"
@@ -44,9 +48,14 @@ def _native_pos_create(amount_quote: float = 100.0) -> dict:
 
 
 def pos_config(**over):
-    kw = dict(chain_network="solana-mainnet-beta", wallet_address=WALLET,
-              base_token="Mint111", quote_token="USDC", amount_quote=Decimal("1"),
-              update_interval=0.01)
+    kw = dict(
+        chain_network="solana-mainnet-beta",
+        wallet_address=WALLET,
+        base_token="Mint111",
+        quote_token="USDC",
+        amount_quote=Decimal("1"),
+        update_interval=0.01,
+    )
     kw.update(over)
     return PositionSpotConfig(**kw)
 
@@ -86,8 +95,10 @@ def test_native_negative_notional_fails_closed():
 
 def test_native_unknown_type_fails_closed():
     engine = RiskEngine(RiskLimits())
-    call = {"tool": "manage_executors",
-            "input": {"action": "create", "executor_type": "nope", "config": {}}}
+    call = {
+        "tool": "manage_executors",
+        "input": {"action": "create", "executor_type": "nope", "config": {}},
+    }
     allowed, reason = engine.check_executor_action(call, RiskState())
     assert not allowed
     assert "Cannot compute risk" in reason
@@ -101,9 +112,12 @@ def test_native_swap_without_notional_fails_closed():
             "action": "create",
             "executor_type": "order_spot",
             "config": {
-                "chain_network": "solana-mainnet-beta", "wallet_address": WALLET,
-                "base_token": "SOL", "quote_token": "USDC",
-                "amount": "0.5", "side": "SELL",
+                "chain_network": "solana-mainnet-beta",
+                "wallet_address": WALLET,
+                "base_token": "SOL",
+                "quote_token": "USDC",
+                "amount": "0.5",
+                "side": "SELL",
             },
         },
     }
@@ -141,8 +155,12 @@ def test_risk_gate_experiment_blocks_native_create():
 def test_store_agent_id_filter(tmp_path):
     store = ExecutorLog(tmp_path)
     gw = SimpleNamespace()
-    a = PositionExecutor("pos_a", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store)
-    b = PositionExecutor("pos_b", pos_config(agent_slug="agent_y", agent_id="agent_y_1"), gw, store)
+    a = PositionExecutor(
+        "pos_a", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store
+    )
+    b = PositionExecutor(
+        "pos_b", pos_config(agent_slug="agent_y", agent_id="agent_y_1"), gw, store
+    )
     store.save(a)
     store.save(b)
     mine = store.load_by_agent("agent_x_1")
@@ -154,7 +172,9 @@ def _seed_store(tmp_path) -> ExecutorLog:
     store = ExecutorLog(tmp_path)
     gw = SimpleNamespace()
 
-    open_ex = PositionExecutor("pos_open", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store)
+    open_ex = PositionExecutor(
+        "pos_open", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store
+    )
     open_ex.status = ExecutorStatus.ACTIVE
     open_ex.state.state = PositionStates.ACTIVE
     open_ex.state.size = Decimal("0.01")
@@ -163,7 +183,9 @@ def _seed_store(tmp_path) -> ExecutorLog:
     open_ex.state.mark_price = Decimal("110")
     store.save(open_ex)
 
-    closed = PositionExecutor("pos_closed", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store)
+    closed = PositionExecutor(
+        "pos_closed", pos_config(agent_slug="agent_x", agent_id="agent_x_1"), gw, store
+    )
     closed.status = ExecutorStatus.CLOSED
     closed.state.state = PositionStates.COMPLETE
     closed.state.amount_spent = Decimal("1")
@@ -180,7 +202,11 @@ def test_native_provider_reports_exposure_and_unrealized(tmp_path, monkeypatch):
         service, "_runtime", SimpleNamespace(store=store, gateway=SimpleNamespace())
     )
 
-    result = asyncio.run(NativeExecutorsProvider().execute({}, agent_id="agent_x_1", agent_slug="agent_x"))
+    result = asyncio.run(
+        NativeExecutorsProvider().execute(
+            {}, agent_id="agent_x_1", agent_slug="agent_x"
+        )
+    )
     assert result.data["open_count"] == 1
     # open notional at cost basis: quote_spent = 1
     assert result.data["total_exposure"] == pytest.approx(1.0)
@@ -221,7 +247,9 @@ def test_native_provider_reads_live_pnl_after_deduped_poll(tmp_path, monkeypatch
     )
 
     result = asyncio.run(
-        NativeExecutorsProvider().execute({}, agent_id="agent_x_1", agent_slug="agent_x")
+        NativeExecutorsProvider().execute(
+            {}, agent_id="agent_x_1", agent_slug="agent_x"
+        )
     )
     assert result.data["unrealized_pnl"] == pytest.approx(0.1)
 
@@ -249,8 +277,12 @@ def test_filled_order_perp_inventory_remains_risk_exposure(tmp_path, monkeypatch
     ex = OrderExecutor(
         "filled_bid",
         OrderPerpConfig(
-            coin="ETH", side="LONG", notional_quote=Decimal("20"), leverage=2,
-            agent_slug="perp_market_maker", agent_id="perp_market_maker_1",
+            coin="ETH",
+            side="LONG",
+            notional_quote=Decimal("20"),
+            leverage=2,
+            agent_slug="perp_market_maker",
+            agent_id="perp_market_maker_1",
         ),
         _LivePerp(),
         store,
@@ -299,14 +331,14 @@ def _make_runtime(tmp_path, monkeypatch):
     store = ExecutorLog(tmp_path)
     gateway = _QuoteOnlyGateway()
 
-    def fake_create(config, executor_id=None):
+    def fake_create(config, executor_id=None, *, connector=None):
         return executor_id or "fake_id_1"
 
     return SimpleNamespace(
         store=store,
         gateway=gateway,
         leases=LeaseManager(),
-        connector_for_spec=lambda type_, venue: gateway,
+        connector_for_spec=lambda type_, venue, account_ref=None: gateway,
         create_executor=fake_create,
         list_running=lambda: [],
         stop_executor=lambda eid, keep_position=True: None,
@@ -317,7 +349,7 @@ def _make_client(tmp_path, monkeypatch) -> TestClient:
     store = ExecutorLog(tmp_path)
     created = {}
 
-    def fake_create(config):
+    def fake_create(config, executor_id=None, *, connector=None):
         created["config"] = config
         return "fake_id_1"
 
@@ -325,7 +357,7 @@ def _make_client(tmp_path, monkeypatch) -> TestClient:
     runtime = SimpleNamespace(
         store=store,
         gateway=gateway,
-        connector_for_spec=lambda type_, venue: gateway,
+        connector_for_spec=lambda type_, venue, account_ref=None: gateway,
         create_executor=fake_create,
         list_running=lambda: [],
         stop_executor=lambda eid, keep_position=True: None,
@@ -347,18 +379,31 @@ def test_ops_create_swap_fills_notional_from_quote(tmp_path, monkeypatch):
 
     runtime = _make_runtime(tmp_path, monkeypatch)
     monkeypatch.setattr(service, "_runtime", runtime, raising=False)
-    cap = get_capability_registry().mint_run_capability("mm", "mm_1")
+    from condor.accounts.model import AccountRef
 
-    result = asyncio.run(ops.create(
-        runtime,
-        type="order_spot",
-        config={
-            "chain_network": "solana-mainnet-beta", "wallet_address": WALLET,
-            "base_token": "SOL", "quote_token": "USDC",
-            "amount": "0.5", "side": "SELL",
-        },
-        capability=cap.id,
-    ))
+    cap = get_capability_registry().mint_run_capability(
+        "mm",
+        "mm_1",
+        account_ref=AccountRef(
+            "solana", "7fEsqLYz3Zr7SNoBn9GnCTHU5V2Ta8DFXECfWQEmYVWk"
+        ),
+    )
+
+    result = asyncio.run(
+        ops.create(
+            runtime,
+            type="order_spot",
+            config={
+                "chain_network": "solana-mainnet-beta",
+                "wallet_address": WALLET,
+                "base_token": "SOL",
+                "quote_token": "USDC",
+                "amount": "0.5",
+                "side": "SELL",
+            },
+            capability=cap.id,
+        )
+    )
     # 0.5 SOL @ quoted 100 -> 50 quote notional
     assert result["risk_declaration"]["max_notional_quote"] == pytest.approx(50.0)
 

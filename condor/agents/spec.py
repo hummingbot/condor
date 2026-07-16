@@ -288,3 +288,18 @@ def freeze_spec(
     )
     frozen.resolved_hash = resolved_spec_hash(frozen.to_public_dict())
     return frozen
+
+
+def resolve_agent_account(agent, launch_config: dict[str, Any]) -> AccountRef:
+    """Resolve the exact custody identity for a trading run.
+
+    An authored ``agent.account`` is already a canonical custody address.
+    Empty means the venue default is intentionally late-bound once, here, at
+    run freeze time. The returned AccountRef is then carried by the frozen
+    spec and capability; executor requests never re-resolve a default.
+    """
+    from condor.executors.wallets import account_store
+
+    venue_id = str(launch_config.get("venue") or "solana")
+    selector = (getattr(agent, "account", "") or "").strip() or None
+    return account_store().resolve(venue_id, selector)

@@ -42,8 +42,10 @@ async def executors_performance(
 ):
     try:
         return ops.performance(
-            get_executor_runtime(), group_by=group_by,
-            agent_id=agent_id, agent_slug=agent_slug,
+            get_executor_runtime(),
+            group_by=group_by,
+            agent_id=agent_id,
+            agent_slug=agent_slug,
         )
     except ops.ExecutorOpError as e:
         raise _http(e)
@@ -54,15 +56,18 @@ async def executors_snapshot(
     agent_slug: str | None = None,
     agent_id: str | None = None,
     venue_id: str | None = None,
+    account: str | None = None,
 ):
     """One portfolio snapshot (§6.3): account view + attribution filters."""
-    from condor.accounts.model import AccountRef
     from condor.executors.snapshot import snapshot
+    from condor.executors.wallets import account_store
 
-    ref = AccountRef(venue_id=venue_id, custody_address="_default") if venue_id else None
+    ref = account_store().resolve(venue_id, account) if venue_id else None
     return snapshot(
-        get_executor_runtime(), account_ref=ref,
-        agent_slug=agent_slug, agent_id=agent_id,
+        get_executor_runtime(),
+        account_ref=ref,
+        agent_slug=agent_slug,
+        agent_id=agent_id,
     )
 
 

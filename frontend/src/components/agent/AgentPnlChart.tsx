@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { useEffect, useRef, useState } from "react";
 
 import { formatCurrencyPnl } from "@/lib/formatters";
@@ -121,7 +122,7 @@ export function AgentPnlChart({ data, height = 180, title }: AgentPnlChartProps)
       }
       lastLenRef.current = 0;
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Re-apply chart colors on theme change ──
   useEffect(() => {

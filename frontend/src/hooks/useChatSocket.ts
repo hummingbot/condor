@@ -92,6 +92,10 @@ export function useChatSocket() {
   // Set by events that should persist immediately (e.g. prompt_done) instead
   // of waiting for the trailing debounce.
   const persistNow = useRef(false);
+  const connectRef = useRef<() => void>(() => undefined);
+  const handleEventRef = useRef<(data: Record<string, unknown>) => void>(
+    () => undefined,
+  );
   // Track current assistant message per slot
   const currentAssistantMsg = useRef<Record<string, string | null>>({});
 
@@ -140,11 +144,11 @@ export function useChatSocket() {
     ws.onopen = () => setIsConnected(true);
     ws.onclose = () => {
       setIsConnected(false);
-      reconnectTimer.current = setTimeout(() => connect(), 3000);
+      reconnectTimer.current = setTimeout(() => connectRef.current(), 3000);
     };
     ws.onmessage = (ev) => {
       try {
-        handleEvent(JSON.parse(ev.data));
+        handleEventRef.current(JSON.parse(ev.data));
       } catch {
         /* ignore */
       }
@@ -401,6 +405,11 @@ export function useChatSocket() {
     },
     [],
   );
+
+  useEffect(() => {
+    connectRef.current = connect;
+    handleEventRef.current = handleEvent;
+  }, [connect, handleEvent]);
 
   const send = useCallback((msg: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

@@ -17,10 +17,13 @@ def outbox(tmp_path, monkeypatch):
 
 
 def test_notify_appends_to_outbox(outbox):
-    entry = asyncio.run(notify(
-        "position closed", agent_id="range_trader_2",
-        kind="session",
-    ))
+    entry = asyncio.run(
+        notify(
+            "position closed",
+            agent_id="range_trader_2",
+            kind="session",
+        )
+    )
     assert entry["id"]
     # §4.1: pure outbox entry — no delivery-mirror fields; §4.3: no user
     # identity dimension.
@@ -31,16 +34,26 @@ def test_notify_appends_to_outbox(outbox):
     assert lines[0]["kind"] == "session"
 
 
-def test_notify_fail_soft_returns_entry(outbox, monkeypatch):
-    """An append failure never raises into the emitter."""
+def test_notify_append_failure_propagates(outbox, monkeypatch):
+    """The authoritative outbox must never report an unpersisted success."""
     import condor.notifications as notifications
 
     def boom(entry):
         raise OSError("disk full")
 
     monkeypatch.setattr(notifications, "_append_outbox", boom)
-    entry = asyncio.run(notify("tick error"))
-    assert entry["text"] == "tick error"
+    with pytest.raises(OSError, match="disk full"):
+        asyncio.run(notify("tick error"))
+
+
+def test_append_repairs_torn_tail_before_writing(outbox):
+    asyncio.run(notify("first"))
+    with outbox.open("ab") as fh:
+        fh.write(b'{"id":"torn"')
+    asyncio.run(notify("second"))
+    assert [e["text"] for e in read_notifications()] == ["first", "second"]
+    for line in outbox.read_text().splitlines():
+        json.loads(line)
 
 
 def test_read_notifications_filters(outbox):
@@ -82,11 +95,22 @@ def test_tick_prompt_has_no_hummingbot_refs():
 
     from condor.agents.prompts import build_tick_prompt
 
-    agent = SimpleNamespace(slug="memecoin_trender",
-                            agent_key="claude-acp:sonnet",
-                            instructions="hunt memecoins\n\ntrend playbook")
-    prompt = build_tick_prompt(agent, {"execution_mode": "loop"}, {}, "", "", "", {},
-                               tick_number=1, agent_id="memecoin_trender_2")
+    agent = SimpleNamespace(
+        slug="memecoin_trender",
+        agent_key="claude-acp:sonnet",
+        instructions="hunt memecoins\n\ntrend playbook",
+    )
+    prompt = build_tick_prompt(
+        agent,
+        {"execution_mode": "loop"},
+        {},
+        "",
+        "",
+        "",
+        {},
+        tick_number=1,
+        agent_id="memecoin_trender_2",
+    )
 
     assert "mcp-hummingbot" not in prompt
     assert "mcp__mcp-hummingbot" not in prompt

@@ -19,6 +19,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
+from condor.accounts.model import AccountRef
 from condor.acp.client import (
     ACPClient,
     PromptDone,
@@ -63,6 +64,7 @@ async def run_agent(
     execution_mode: str = "loop",
     model: str | None = None,
     risk_limits: dict | None = None,
+    account_ref: AccountRef | None = None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     event_sink: Callable[[Any], None] | None = None,
     on_client: Callable[[Any], None] | None = None,
@@ -108,7 +110,10 @@ async def run_agent(
         from condor.executors.capabilities import get_capability_registry
 
         run_capability = get_capability_registry().mint_run_capability(
-            agent.slug, agent_id, risk_limits=risk_limits
+            agent.slug,
+            agent_id,
+            risk_limits=risk_limits,
+            account_ref=account_ref,
         )
 
     result.model = model or agent.agent_key

@@ -21,9 +21,7 @@ def stores(tmp_path):
 
 
 def _perm_events(store, slug, run_id):
-    return [
-        e for e in store.read_events(slug, run_id) if e["type"] == "permission"
-    ]
+    return [e for e in store.read_events(slug, run_id) if e["type"] == "permission"]
 
 
 def test_approve_flow_records_events_and_channel(stores):
@@ -65,9 +63,7 @@ def test_deny_flow(stores):
 
     async def scenario():
         task = asyncio.create_task(
-            mgr.request(
-                run_id=run_id, agent_slug="alpha", summary="s", timeout_s=5
-            )
+            mgr.request(run_id=run_id, agent_slug="alpha", summary="s", timeout_s=5)
         )
         await asyncio.sleep(0.05)
         mgr.resolve(mgr.open_approvals()[0]["approval_id"], "deny", channel="mcp")
@@ -134,14 +130,20 @@ def test_grant_consumed_by_same_run_retry_once(stores):
         # The blocked call times out at 0s BUT is resolved 'approved' after
         # death — simulate by requesting with timeout 0 then resolving.
         await mgr.request(
-            run_id=run_id, agent_slug="alpha", summary="s",
-            executor_id="ex9", timeout_s=0,
+            run_id=run_id,
+            agent_slug="alpha",
+            summary="s",
+            executor_id="ex9",
+            timeout_s=0,
         )
         # timeout_deny already recorded; craft the retry-grant case instead:
         task = asyncio.create_task(
             mgr.request(
-                run_id=run_id, agent_slug="alpha", summary="s",
-                executor_id="exA", timeout_s=5,
+                run_id=run_id,
+                agent_slug="alpha",
+                summary="s",
+                executor_id="exA",
+                timeout_s=5,
             )
         )
         await asyncio.sleep(0.05)
@@ -152,8 +154,11 @@ def test_grant_consumed_by_same_run_retry_once(stores):
         # Retry of the same executor_id: grant already consumed → must NOT
         # short-circuit; it becomes a new pending approval (times out → deny).
         second = await mgr.request(
-            run_id=run_id, agent_slug="alpha", summary="s",
-            executor_id="exA", timeout_s=0,
+            run_id=run_id,
+            agent_slug="alpha",
+            summary="s",
+            executor_id="exA",
+            timeout_s=0,
         )
         return first, second
 
@@ -171,8 +176,11 @@ def test_unconsumed_grant_short_circuits_retry(stores):
     async def scenario():
         task = asyncio.create_task(
             mgr.request(
-                run_id=run_id, agent_slug="alpha", summary="s",
-                executor_id="exB", timeout_s=5,
+                run_id=run_id,
+                agent_slug="alpha",
+                summary="s",
+                executor_id="exB",
+                timeout_s=5,
             )
         )
         await asyncio.sleep(0.05)
@@ -187,13 +195,19 @@ def test_unconsumed_grant_short_circuits_retry(stores):
 
         # Same run + same executor_id retry → consumes the grant, no wait.
         first_retry = await mgr.request(
-            run_id=run_id, agent_slug="alpha", summary="s",
-            executor_id="exB", timeout_s=0,
+            run_id=run_id,
+            agent_slug="alpha",
+            summary="s",
+            executor_id="exB",
+            timeout_s=0,
         )
         # One use only.
         second_retry = await mgr.request(
-            run_id=run_id, agent_slug="alpha", summary="s",
-            executor_id="exB", timeout_s=0,
+            run_id=run_id,
+            agent_slug="alpha",
+            summary="s",
+            executor_id="exB",
+            timeout_s=0,
         )
         return first_retry, second_retry
 
@@ -240,3 +254,59 @@ def test_restart_sweep_voids_pending_approval_of_active_run(tmp_path):
     assert events[-1]["type"] == "run_ended"
     assert events[-1]["payload"]["status"] == "interrupted"
     assert events[-2]["payload"]["decision"] == "interrupted_void"
+
+
+def test_approval_decision_persistence_failure_fails_closed(stores, monkeypatch):
+    store, mgr = stores
+    run_id = store.start_run("alpha", "consult")
+
+    async def scenario():
+        waiter = asyncio.create_task(
+            mgr.request(
+                run_id=run_id,
+                agent_slug="alpha",
+                summary="mutate venue",
+                timeout_s=5,
+            )
+        )
+        await asyncio.sleep(0.05)
+        approval = mgr.open_approvals()[0]
+
+        def disk_full(*args, **kwargs):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(store, "emit", disk_full)
+        with pytest.raises(OSError, match="disk full"):
+            mgr.resolve(approval["approval_id"], "approve", channel="web")
+        assert mgr.open_approvals()[0]["decision"] == ""
+        assert not waiter.done()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+
+    asyncio.run(scenario())
+
+
+def test_approval_notification_failure_denies_without_waiting(stores, monkeypatch):
+    store, mgr = stores
+    run_id = store.start_run("alpha", "consult")
+
+    async def outbox_failed(*args, **kwargs):
+        raise OSError("outbox unavailable")
+
+    monkeypatch.setattr("condor.notifications.notify", outbox_failed)
+    approved = asyncio.run(
+        mgr.request(
+            run_id=run_id,
+            agent_slug="alpha",
+            summary="mutate venue",
+            timeout_s=60,
+        )
+    )
+    assert approved is False
+    decisions = [
+        e["payload"].get("decision")
+        for e in _perm_events(store, "alpha", run_id)
+        if e["payload"].get("decision")
+    ]
+    assert decisions == ["notification_failed_deny"]

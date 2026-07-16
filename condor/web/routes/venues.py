@@ -7,7 +7,7 @@ the default account. Mutations are gated by loopback posture only (§5.5,
 single-operator model) — no per-request role check.
 
 Busy guard: editing/removing an account is rejected (409) while any durable
-nonterminal executor record exists for the venue — after a crash there is no
+nonterminal executor record exists for the exact AccountRef — after a crash there is no
 running Python object, but the record still needs its credentials for
 adoption, so busy is a durable projection, not an in-memory check.
 """
@@ -29,6 +29,7 @@ from condor.accounts import (
 from condor.accounts.registry import UnknownVenueError, default_registry
 from condor.executors import wallets
 from condor.executors.log import ExecutorLog
+from condor.executors.service import peek_executor_runtime, runtime_reconciling
 
 router = APIRouter(tags=["venues"])
 
@@ -54,27 +55,32 @@ class DefaultAccountRequest(BaseModel):
     account: str
 
 
-def _venue_busy(venue_id: str) -> bool:
-    """True while any durable nonterminal executor record targets the venue.
-
-    Transitional per-venue account model: executor configs carry `venue`, not
-    yet a resolved AccountRef — per-ACCOUNT busy matching lands when executor
-    openers carry the bound AccountRef (§6.2b binding invariant).
-    """
-    for rec in ExecutorLog().load_non_terminal():
-        if (rec.config or {}).get("venue") == venue_id:
+def _account_busy(ref) -> bool:
+    """True while recovery, a durable record, or a lease needs this account."""
+    if runtime_reconciling():
+        return True
+    runtime = peek_executor_runtime()
+    if runtime is not None:
+        account_key = str(ref)
+        if any(key[0] == account_key for key in runtime.leases.snapshot()):
+            return True
+        store = runtime.store
+    else:
+        store = ExecutorLog()
+    for rec in store.load_non_terminal():
+        if (rec.config or {}).get("account_ref") == ref.as_dict():
             return True
     return False
 
 
-def _reject_when_busy(venue_id: str) -> None:
-    if _venue_busy(venue_id):
+def _reject_when_busy(ref, _data=None) -> None:
+    if _account_busy(ref):
         raise HTTPException(
             status_code=409,
             detail=(
-                f"venue {venue_id!r} has nonterminal executors — account "
-                "edits/removal are unavailable while it is busy (stop them, "
-                "or let recovery finish, then retry)"
+                f"account {ref} has a durable executor, held lease, or active "
+                "reconciliation — account edits/removal are unavailable while "
+                "it is busy (stop it, or let recovery finish, then retry)"
             ),
         )
 
@@ -120,8 +126,14 @@ async def onboard_venue_account(
     """Onboard an account: custody derived FROM the credentials (a mismatched
     typed address is rejected), read-only probe must pass, secrets sealed."""
     try:
+        # Re-onboarding an existing identity is a credential edit and must use
+        # the same exact-account transaction guard as PUT.
         ref = onboard_account(
-            venue_id, req.credentials or {}, name=req.name, probe=True
+            venue_id,
+            req.credentials or {},
+            name=req.name,
+            probe=True,
+            commit_guard=_reject_when_busy,
         )
     except (OnboardingError, AccountStoreError, UnknownVenueError, ValueError) as e:
         raise HTTPException(status_code=422, detail=str(e))
@@ -147,11 +159,15 @@ async def edit_venue_account(
     onboarding); a rename touches only the display name."""
     canonical = _canonical_address(venue_id, address)
     store = wallets.account_store()
-    data = store.load()
-    entry = data.get(venue_id, {}).get("accounts", {}).get(canonical)
-    if entry is None:
-        raise HTTPException(status_code=404, detail=f"{venue_id}: no account {address!r}")
-    _reject_when_busy(venue_id)
+    ref = default_registry().account_ref(venue_id, canonical)
+    with store.locked_snapshot() as data:
+        entry = data.get(venue_id, {}).get("accounts", {}).get(canonical)
+        if entry is None:
+            raise HTTPException(
+                status_code=404, detail=f"{venue_id}: no account {address!r}"
+            )
+        _reject_when_busy(ref, data)
+        prior_name = entry.get("name", "")
 
     if req.credentials:
         try:
@@ -165,20 +181,35 @@ async def edit_venue_account(
                         "custody identity is a NEW account, not an edit"
                     ),
                 )
-            name = req.name if req.name is not None else entry.get("name", "")
-            onboard_account(venue_id, req.credentials, name=name, probe=True)
+            name = req.name if req.name is not None else prior_name
+            onboard_account(
+                venue_id,
+                req.credentials,
+                name=name,
+                probe=True,
+                commit_guard=_reject_when_busy,
+            )
         except HTTPException:
             raise
         except (OnboardingError, AccountStoreError, ValueError) as e:
             raise HTTPException(status_code=422, detail=str(e))
     elif req.name is not None:
-        entry["name"] = req.name
         try:
-            store.save(data)  # duplicate display names rejected by validate
+            with store.transaction() as data:
+                _reject_when_busy(ref, data)
+                entry = data.get(venue_id, {}).get("accounts", {}).get(canonical)
+                if entry is None:
+                    raise HTTPException(
+                        status_code=404,
+                        detail=f"{venue_id}: no account {address!r}",
+                    )
+                entry["name"] = req.name
         except AccountStoreError as e:
             raise HTTPException(status_code=422, detail=str(e))
     else:
-        raise HTTPException(status_code=422, detail="nothing to edit — pass credentials and/or name")
+        raise HTTPException(
+            status_code=422, detail="nothing to edit — pass credentials and/or name"
+        )
 
     updated = store.load()[venue_id]
     return {
@@ -199,9 +230,20 @@ async def remove_venue_account(
     """Remove an account (cooperative: warns, does not verify venue state).
     Removing the default just leaves the venue with no default."""
     canonical = _canonical_address(venue_id, address)
-    _reject_when_busy(venue_id)
-    if not wallets.account_store().remove_account(venue_id, canonical):
-        raise HTTPException(status_code=404, detail=f"{venue_id}: no account {address!r}")
+    ref = default_registry().account_ref(venue_id, canonical)
+    store = wallets.account_store()
+    with store.transaction() as data:
+        _reject_when_busy(ref, data)
+        entry = data.get(venue_id)
+        if not entry or canonical not in entry.get("accounts", {}):
+            raise HTTPException(
+                status_code=404, detail=f"{venue_id}: no account {address!r}"
+            )
+        del entry["accounts"][canonical]
+        if entry.get("default_account") == canonical:
+            entry.pop("default_account", None)
+        if not entry["accounts"]:
+            del data[venue_id]
     return {"venue_id": venue_id, "removed": canonical, "warning": _REMOVAL_WARNING}
 
 

@@ -24,7 +24,9 @@ def engines_for_slug(slug: str) -> list:
     return [e for e in get_all_engines().values() if e.agent.slug == slug]
 
 
-def select_engines(slug: str, agent_id: Optional[str] = None, running_only: bool = False) -> list:
+def select_engines(
+    slug: str, agent_id: Optional[str] = None, running_only: bool = False
+) -> list:
     from condor.agents.engine import get_engine
 
     if agent_id:
@@ -77,6 +79,37 @@ async def start_session(
         defaults["risk_limits"] = dict(agent.risk_limits)
     config_dict = normalize_config(defaults)
     if config:
+        allowed_overrides = {
+            "trading_context",
+            "max_ticks",  # bounded run duration
+            "dry_run",  # normalized to execution_mode=experiment
+            "execution_mode",  # only experiment or the authored default
+            "risk_limits",  # stricter-only below
+        }
+        forbidden = set(config) - allowed_overrides
+        if forbidden:
+            raise LifecycleError(
+                422,
+                "launch overrides may only set trading_context, max_ticks, "
+                f"dry_run/experiment, and stricter risk_limits; forbidden: {sorted(forbidden)}",
+            )
+        requested_mode = config.get("execution_mode")
+        if requested_mode not in (
+            None,
+            "experiment",
+            config_dict.get("execution_mode"),
+        ):
+            raise LifecycleError(
+                422,
+                "launch execution_mode may only select experiment (dry run) "
+                "or retain the authored default",
+            )
+        if "dry_run" in config and config.get("dry_run") is not True:
+            raise LifecycleError(422, "launch dry_run override may only be true")
+        if config.get("dry_run") is True:
+            config = dict(config)
+            config.pop("dry_run", None)
+            config["execution_mode"] = "experiment"
         # Launch risk overrides are STRICTER-ONLY (§5.3): widening any
         # baseline cap is rejected before the deep merge + validation.
         try:
@@ -118,9 +151,34 @@ async def apply_verb(
     """stop (position-preserving; ``close=True`` liquidates the run scope) |
     shutdown (agent-scoped emergency winddown) | pause | resume."""
     if verb == "stop":
-        for engine in select_engines(slug, agent_id):
+        engines = []
+        if agent_id:
+            from condor.agents.engine import get_engine
+
+            engine = get_engine(agent_id)
+            if engine is not None:
+                engines = [engine]
+        else:
+            engines = engines_for_slug(slug)
+        for engine in engines:
             await engine.stop(close=close)
-        return {"stopped": True, "closed": close}
+        stopped_durable: list[str] = []
+        from condor.executors.service import peek_executor_runtime
+
+        runtime = peek_executor_runtime()
+        if runtime is not None:
+            stopped_durable = (
+                runtime.stop_agent_executors(agent_id, keep_position=not close)
+                if agent_id
+                else runtime.stop_slug_executors(slug, keep_position=not close)
+            )
+        if not engines and not stopped_durable:
+            raise LifecycleError(404, "No run or durable executor scope found")
+        return {
+            "stopped": True,
+            "closed": close,
+            "stopped_executors": stopped_durable,
+        }
     if verb == "shutdown":
         # Agent-SCOPED (§6.2): every live run winds down, and executors
         # surviving from prior runs of the slug stop too — a dead run's

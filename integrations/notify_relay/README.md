@@ -1,12 +1,10 @@
 # Notification relay — deliver Condor notifications into any harness's conversation
 
-**The problem this fixes.** Condor's notifications are hardwired to *Condor's
-own* Telegram bot. But when you drive Condor through **Hermes** or **OpenClaw**,
-you're in *that harness's* conversation (its own bot / channel) — so an async
-ping (session tick, delegation done) lands in a *different* chat than the one
-you're looking at. Synchronous replies ride the MCP tool result back into your
-conversation fine; async notifications have no open request to ride, so they
-need their own delivery path.
+Condor writes asynchronous events to a durable, harness-neutral outbox. This
+relay tails that outbox and forwards each new entry to the conversation or
+notification service selected by the operator. Synchronous replies ride the
+MCP result back to the caller; asynchronous events need this separate delivery
+path.
 
 **The fix (no harness privileged, applied to the output path).** This relay
 tails the outbox (`store/notifications.jsonl`) and delivers each new entry
@@ -18,10 +16,9 @@ like the [Claude Code channel](../claude_channel) does for Claude Code.
               store/notifications.jsonl  (the harness-agnostic spine)
                         │
    ┌────────────────────┼─────────────────────┬────────────────────┐
-   ▼                    ▼                     ▼                    ▼
-Condor TG bot     Claude Code channel     THIS relay            THIS relay
-(Condor chat)     (push into session)   → openclaw message    → Hermes API
-                                          (OpenClaw chat)       (Hermes chat)
+   ▼                    ▼                     ▼
+Dashboard        Claude Code channel     THIS relay
+history          (push into session)   → OpenClaw/Hermes/etc.
 ```
 
 ## Configure
@@ -34,10 +31,10 @@ inject arguments (verified in tests). Available: `{text}` `{agent_id}` `{kind}`
 ### OpenClaw
 
 `openclaw message` sends to a target on a configured channel. Point it at the
-Telegram (or Discord/Slack/…) conversation you use with OpenClaw:
+conversation you use with OpenClaw:
 
 ```bash
-export CONDOR_NOTIFY_CMD='["openclaw","message","send","--channel","telegram","--target","<YOUR_CHAT_ID>","--text","{text}"]'
+export CONDOR_NOTIFY_CMD='["openclaw","message","send","--channel","discord","--target","<YOUR_CHANNEL>","--text","{text}"]'
 python -m integrations.notify_relay.relay
 ```
 
@@ -52,7 +49,7 @@ python -m integrations.notify_relay.relay
 ```
 
 `{json}` delivers the whole entry (`text`, `agent_id`, `kind`, `ts`,
-`chat_id`, …) so a small Hermes-side handler can route it to the right chat.
+and routing metadata) so a small Hermes-side handler can route it correctly.
 
 ### Anything else
 
@@ -68,8 +65,7 @@ entry.
 - **Fail-soft**: a delivery that errors or exits non-zero is logged and
   skipped; the relay never dies on a bad send. Poll interval:
   `CONDOR_NOTIFY_POLL_S` (default 2s).
-- **Runs alongside** the Telegram mirror and any other consumers — the outbox
-  fans out to all of them.
+- **Runs alongside** any other consumers — the outbox fans out to all of them.
 
 ## "Same conversation" — the honest scope
 

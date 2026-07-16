@@ -38,7 +38,7 @@ def snapshot(
     agent_id: Optional[str] = None,
     recent_terminal: int = 10,
 ) -> dict:
-    from condor.executors.ops import _record_exposure
+    from condor.executors.ops import _record_exposure, _scope_exposure
 
     records = (
         runtime.store.load_by_slug(agent_slug)
@@ -48,10 +48,10 @@ def snapshot(
     if agent_id:
         records = [r for r in records if r.agent_id == agent_id]
     if account_ref is not None:
-        # Transitional venue-level account filter (one account per venue until
-        # executor records carry resolved AccountRefs).
         records = [
-            r for r in records if (r.config or {}).get("venue", "solana") == account_ref.venue_id
+            r
+            for r in records
+            if (r.config or {}).get("account_ref") == account_ref.as_dict()
         ]
 
     open_records = [r for r in records if r.status in _OPEN_STATUSES]
@@ -62,14 +62,12 @@ def snapshot(
     )[:recent_terminal]
 
     executors = []
-    exposure = 0.0
+    exposure = _scope_exposure(records)
     live_order_count = 0
     inventory: dict[str, Decimal] = {}
-    for r in open_records:
+    for r in records:
         cfg = r.config or {}
         landed = [LandedOrder(**o) for o in (r.state or {}).get("orders") or []]
-        live = live_orders(landed)
-        live_order_count += len(live)
         inst = _instrument_of(cfg)
         product = (r.type.split("_", 1)[1] if "_" in r.type else "spot") or "spot"
         net = owned_net_base(
@@ -77,8 +75,13 @@ def snapshot(
         )
         if net:
             inventory[inst] = inventory.get(inst, Decimal("0")) + net
+    for r in open_records:
+        cfg = r.config or {}
+        landed = [LandedOrder(**o) for o in (r.state or {}).get("orders") or []]
+        live = live_orders(landed)
+        live_order_count += len(live)
+        inst = _instrument_of(cfg)
         record_exposure = _record_exposure(r)
-        exposure += record_exposure
         executors.append(
             {
                 "id": r.id,

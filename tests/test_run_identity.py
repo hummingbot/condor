@@ -70,9 +70,7 @@ def test_display_seq_increments_across_kinds(tmp_path, monkeypatch):
     from condor.agents.engine import TickEngine
 
     agent = Agent(slug="acme", name="Acme", agent_key="claude-code")
-    e2 = TickEngine(
-        agent=agent, config={"execution_mode": "experiment"}
-    )
+    e2 = TickEngine(agent=agent, config={"execution_mode": "experiment"})
     assert (e1.session_num, e2.session_num) == (1, 2)
     assert e1.agent_id != e2.agent_id
 
@@ -82,7 +80,9 @@ def test_engine_falls_back_to_agent_risk_baseline(tmp_path, monkeypatch):
 
     _patch_roots(monkeypatch, tmp_path)
     agent = Agent(
-        slug="acme", name="Acme", agent_key="claude-code",
+        slug="acme",
+        name="Acme",
+        agent_key="claude-code",
         risk_limits={"max_position_size_quote": 250.0, "max_open_executors": 2},
         denomination="USDC",
     )
@@ -90,6 +90,11 @@ def test_engine_falls_back_to_agent_risk_baseline(tmp_path, monkeypatch):
     engine = TickEngine(agent=agent, config={})
     assert engine.risk.limits.max_position_size_quote == 250.0
     assert engine.risk.limits.max_open_executors == 2
+    assert engine.frozen_spec.account_ref is not None
+    started = _run_store().read_events("acme", engine.agent_id)[0]
+    assert started["payload"]["frozen_spec"]["account_ref"] == (
+        engine.frozen_spec.account_ref.as_dict()
+    )
 
     # An explicit config risk_limits wins over the baseline (stricter-only
     # enforcement happens in lifecycle.start_session, not the engine).
@@ -161,15 +166,13 @@ def test_consult_records_a_run(tmp_path, monkeypatch):
     )
 
     async def fake_run(agent, prompt, **kw):
-        return RunResult(text="the answer", events=[{"type": "text", "text": "the answer"}])
+        return RunResult(
+            text="the answer", events=[{"type": "text", "text": "the answer"}]
+        )
 
     monkeypatch.setattr(run_module, "run_agent", fake_run)
 
-    answer = asyncio.run(
-        consult_module.run_consult(
-            slug="oracle", task="q"
-        )
-    )
+    answer = asyncio.run(consult_module.run_consult(slug="oracle", task="q"))
     assert answer == "the answer"
     runs = _run_store().list_runs("oracle", kind="consult")
     assert len(runs) == 1

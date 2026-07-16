@@ -159,12 +159,9 @@ def _default_store() -> AccountStore:
 
 def _sealed_fields(venue_id: str, credentials: dict, name: str) -> dict:
     from condor.executors.secrets import encrypt_secret, is_encrypted
-
     from condor.venues.registry import venue_spec
 
-    secret_fields = {
-        f.name for f in venue_spec(venue_id).credential_fields if f.sealed
-    }
+    secret_fields = {f.name for f in venue_spec(venue_id).credential_fields if f.sealed}
     fields: dict = {}
     for k, v in credentials.items():
         if k in _DROPPED_FIELDS or v is None:
@@ -187,6 +184,7 @@ def onboard_account(
     prober: Optional[Prober] = None,
     store: Optional[AccountStore] = None,
     make_default: bool = False,
+    commit_guard: Callable[[AccountRef, dict], None] | None = None,
 ) -> AccountRef:
     """The COMPLETE account-creation path (§6.2b onboarding steps 1–3).
 
@@ -202,5 +200,9 @@ def onboard_account(
     fields = _sealed_fields(venue_id, credentials, name)
     store = store or _default_store()
     return store.upsert_account(
-        venue_id, ref.custody_address, fields, make_default=make_default
+        venue_id,
+        ref.custody_address,
+        fields,
+        make_default=make_default,
+        guard=commit_guard,
     )

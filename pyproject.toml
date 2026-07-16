@@ -23,13 +23,14 @@ dependencies = [
     "py-clob-client-v2>=1.0.2",
 ]
 
-[project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
-
 [tool.isort]
 profile = "black"
 
 [dependency-groups]
 dev = [
+    "pytest>=8",
     "pytest-asyncio>=1.3.0",
+    "black>=25",
+    "isort>=6",
+    "pre-commit>=4",
 ]

@@ -80,7 +80,6 @@ export interface RunningInstance {
   open_count: number;
   closed_count: number;
   win_rate: number;
-  server_name: string;
   total_amount_quote: number;
   trading_context: string;
   frequency_sec: number;
@@ -207,10 +206,10 @@ export interface AgentDetail {
   tools: string[];
   when_to_consult: string;
   consultable: boolean;
-  server_required: boolean;
-  server_name: string;
   risk_limits: Record<string, unknown>;
   denomination: string;
+  account: string;
+  account_label: string;
   default_config: Record<string, unknown>;
   default_trading_context: string;
   schedule: Record<string, unknown> | null;

@@ -78,7 +78,9 @@ def approval_gate(run_id: str, agent_slug: str):
                 run_id=run_id,
                 agent_slug=agent_slug,
                 summary=_format_tool_summary(tool_call),
-                tool_call_id=str(tool_call.get("id") or tool_call.get("tool_call_id") or ""),
+                tool_call_id=str(
+                    tool_call.get("id") or tool_call.get("tool_call_id") or ""
+                ),
                 executor_id=str(input_data.get("executor_id") or ""),
             )
             if not approved:
@@ -131,8 +133,7 @@ def scope_gate(policy, allowed_tools):
     """Enforce an agent's declared tool scope for system MUTATIONS, over any
     underlying policy.
 
-    pydantic-ai filters tools to the allowlist at the tool layer, but ACP agents
-    receive the full Condor MCP surface — so agent/routine/skill *mutation* tools
+    ACP agents receive the full Condor MCP surface — so agent/routine/skill *mutation* tools
     are reachable even when never declared, and neither ``risk_gate`` nor ``AUTO``
     classifies them (#8). This wrapper denies a system-mutation call whose tool is
     not in ``allowed_tools``; everything else defers to ``policy`` (or auto-approves
@@ -151,7 +152,9 @@ def scope_gate(policy, allowed_tools):
             if opt.get("kind") in ("allow_once", "allow_always"):
                 return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
         if options:
-            return {"outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}}
+            return {
+                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
+            }
         return {"outcome": {"outcome": "cancelled"}}
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
@@ -159,7 +162,8 @@ def scope_gate(policy, allowed_tools):
         if mutated is not None and mutated not in allowed_short:
             log.warning(
                 "scope_gate denied undeclared system-mutation tool %s (allowed: %s)",
-                mutated, sorted(allowed_short),
+                mutated,
+                sorted(allowed_short),
             )
             return {"outcome": {"outcome": "cancelled"}}
         if policy is None:  # AUTO underlying — approve non-mutations
@@ -182,4 +186,6 @@ def risk_gate(
     """
     if isinstance(limits, dict):
         limits = RiskLimits.from_dict(limits)
-    return _risk_gate_callback(RiskEngine(limits), state or RiskState(), experiment=experiment)
+    return _risk_gate_callback(
+        RiskEngine(limits), state or RiskState(), experiment=experiment
+    )

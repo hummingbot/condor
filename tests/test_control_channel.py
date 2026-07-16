@@ -91,7 +91,7 @@ def test_executor_create_list_stop_over_socket(tmp_path, monkeypatch):
     sock = _sock(tmp_path)
     log = ExecutorLog(tmp_path / "agents")
     runtime = ExecutorRuntime(store=log)
-    runtime._connectors[("solana", "spot")] = FakeGateway(prices=[100.0])
+    runtime._connector_overrides[("solana", "spot")] = FakeGateway(prices=[100.0])
 
     # Point the executor handlers at our test runtime.
     from condor.executors import service
@@ -101,9 +101,16 @@ def test_executor_create_list_stop_over_socket(tmp_path, monkeypatch):
     async def run():
         server = await _serve(build_executor_handlers(), sock)
         try:
+            from condor.accounts.model import AccountRef
             from condor.executors.capabilities import get_capability_registry
 
-            cap = get_capability_registry().mint_run_capability("mm", "mm_1")
+            cap = get_capability_registry().mint_run_capability(
+                "mm",
+                "mm_1",
+                account_ref=AccountRef(
+                    "solana", "7fEsqLYz3Zr7SNoBn9GnCTHU5V2Ta8DFXECfWQEmYVWk"
+                ),
+            )
             cfg = swap_config(agent_slug="mm", agent_id="mm_1")
             created = await call_control(
                 "executor.create",
@@ -126,11 +133,15 @@ def test_executor_create_list_stop_over_socket(tmp_path, monkeypatch):
             # let it run to completion (FakeGateway confirms immediately)
             await runtime.wait_all()
 
-            got = await call_control("executor.get", {"executor_id": eid}, socket_path=sock)
+            got = await call_control(
+                "executor.get", {"executor_id": eid}, socket_path=sock
+            )
             assert got["id"] == eid
             assert got["status"] == "CLOSED"
 
-            listed = await call_control("executor.list", {"agent_id": "mm_1"}, socket_path=sock)
+            listed = await call_control(
+                "executor.list", {"agent_id": "mm_1"}, socket_path=sock
+            )
             assert eid in [e["id"] for e in listed["executors"]]
             return eid
         finally:

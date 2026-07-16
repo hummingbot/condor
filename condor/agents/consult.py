@@ -36,9 +36,9 @@ async def run_consult(
     (:mod:`condor.agents.delegate`), which runs the same primitive under a
     ``risk_gate``/AUTO policy.
     """
+    from condor.agents.context import build_agent_context
     from condor.agents.policies import human_gate
     from condor.agents.run import run_agent
-    from condor.agents.context import build_agent_context
     from condor.agents.runstore import get_run_store
 
     store = AgentStore()
@@ -50,11 +50,21 @@ async def run_consult(
 
     prompt = build_agent_context(agent, task, context)
 
+    account_ref = None
+    if agent.can_trade:
+        from condor.agents.spec import resolve_agent_account
+
+        account_ref = resolve_agent_account(agent, agent.default_config or {})
+
     run_store = get_run_store()
     run_id = run_store.start_run(
         slug,
         "consult",
-        payload={"task": task, "model": agent.agent_key},
+        payload={
+            "task": task,
+            "model": agent.agent_key,
+            **({"account_ref": account_ref.as_dict()} if account_ref else {}),
+        },
     )
 
     def _persist_tool_call(tc: dict) -> None:
@@ -85,6 +95,7 @@ async def run_consult(
             permission_policy=human_gate(0, run_id=run_id, agent_slug=slug),
             timeout_s=CONSULT_TIMEOUT_S,
             agent_id=run_id,
+            account_ref=account_ref,
             on_tool_call=_persist_tool_call,
         )
     except BaseException:

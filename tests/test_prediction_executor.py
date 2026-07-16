@@ -5,12 +5,17 @@ from decimal import Decimal
 
 import pytest
 
+from condor.accounts.model import AccountRef
 from condor.executors.base import ExecutorStatus
 from condor.executors.hyperliquid import OrderAck as HlOrderAck
 from condor.executors.hyperliquid_outcome import Outcome
 from condor.executors.log import ExecutorLog
 from condor.executors.polymarket import OrderAck
-from condor.executors.position import PositionExecutor, PositionPredConfig, PositionStates
+from condor.executors.position import (
+    PositionExecutor,
+    PositionPredConfig,
+    PositionStates,
+)
 from condor.executors.runtime import ExecutorRuntime
 
 
@@ -61,7 +66,13 @@ class FakeOutcome:
         self.opened = False
 
     async def find_outcome(self, market):
-        return Outcome(id=173, name="Argentina", description="", sides=["Yes", "No"], quote_token="USDC")
+        return Outcome(
+            id=173,
+            name="Argentina",
+            description="",
+            sides=["Yes", "No"],
+            quote_token="USDC",
+        )
 
     def side_index(self, outcome, side_name):
         return outcome.sides.index(side_name)
@@ -92,7 +103,7 @@ class FakeOutcome:
 
 def _run_pm(tmp_path, fake, cfg):
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._connectors[("polymarket", "pred")] = fake
+    rt._connector_overrides[("polymarket", "pred")] = fake
 
     async def go():
         eid = rt.create_executor(cfg)
@@ -104,7 +115,7 @@ def _run_pm(tmp_path, fake, cfg):
 
 def _run_outcome(tmp_path, fake, cfg):
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._connectors[("hyperliquid", "pred")] = fake
+    rt._connector_overrides[("hyperliquid", "pred")] = fake
 
     async def go():
         eid = rt.create_executor(cfg)
@@ -115,8 +126,14 @@ def _run_outcome(tmp_path, fake, cfg):
 
 
 def _pm_cfg(**over):
-    kw = dict(venue="polymarket", market="tok123", amount_quote=Decimal("10"),
-              update_interval=0.01, notify_trades=False)
+    kw = dict(
+        venue="polymarket",
+        market="tok123",
+        amount_quote=Decimal("10"),
+        account_ref=AccountRef("polymarket", "0x" + "b" * 40),
+        update_interval=0.01,
+        notify_trades=False,
+    )
     kw.update(over)
     return PositionPredConfig(**kw)
 
@@ -126,7 +143,10 @@ def test_polymarket_take_profit(tmp_path):
     rec = _run_pm(tmp_path, fake, _pm_cfg(take_profit_pct=Decimal("0.2")))
     assert rec.status == ExecutorStatus.CLOSED.value
     assert rec.state["close_type"] == "take_profit"
-    assert ("SELL", pytest.approx(20.0)) in fake.orders  # 10 USDC / 0.5 = 20 shares sold
+    assert (
+        "SELL",
+        pytest.approx(20.0),
+    ) in fake.orders  # 10 USDC / 0.5 = 20 shares sold
 
 
 def test_polymarket_resolve_win(tmp_path):
@@ -168,9 +188,15 @@ def test_polymarket_short_no_token_profits_on_rise(tmp_path):
     must hit take_profit, NOT stop_loss. Regression for the reversed-sign bug
     (#5): with both barriers at 20%, a +20% move on the held token is a win."""
     fake = FakePM(entry="0.5", marks=["0.6"])
-    rec = _run_pm(tmp_path, fake, _pm_cfg(position="SHORT",
-                                          take_profit_pct=Decimal("0.2"),
-                                          stop_loss_pct=Decimal("0.2")))
+    rec = _run_pm(
+        tmp_path,
+        fake,
+        _pm_cfg(
+            position="SHORT",
+            take_profit_pct=Decimal("0.2"),
+            stop_loss_pct=Decimal("0.2"),
+        ),
+    )
     assert rec.status == ExecutorStatus.CLOSED.value
     assert rec.state["close_type"] == "take_profit"
 
@@ -178,9 +204,16 @@ def test_polymarket_short_no_token_profits_on_rise(tmp_path):
 def test_hyperliquid_outcome_take_profit(tmp_path):
     # Yes at 0.5 -> mark 0.6 = +20% -> take_profit
     fake = FakeOutcome(entry="0.5", marks=["0.6"])
-    cfg = PositionPredConfig(venue="hyperliquid", market="Argentina", position="LONG",
-                           amount_quote=Decimal("10"), take_profit_pct=Decimal("0.2"),
-                           update_interval=0.01, notify_trades=False)
+    cfg = PositionPredConfig(
+        venue="hyperliquid",
+        market="Argentina",
+        position="LONG",
+        account_ref=AccountRef("hyperliquid", "0x" + "a" * 40),
+        amount_quote=Decimal("10"),
+        take_profit_pct=Decimal("0.2"),
+        update_interval=0.01,
+        notify_trades=False,
+    )
     rec = _run_outcome(tmp_path, fake, cfg)
     assert rec.status == ExecutorStatus.CLOSED.value
     assert rec.state["close_type"] == "take_profit"
@@ -193,12 +226,18 @@ def test_order_pred_buys_shares(tmp_path):
 
     fake = FakePM(entry="0.5", marks=["0.5"])
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._connectors[("polymarket", "pred")] = fake
+    rt._connector_overrides[("polymarket", "pred")] = fake
 
     async def go():
-        eid = rt.create_executor(OrderPredConfig(
-            market="tok123", amount_quote=Decimal("10"),
-            update_interval=0.01, notify_trades=False))
+        eid = rt.create_executor(
+            OrderPredConfig(
+                market="tok123",
+                amount_quote=Decimal("10"),
+                account_ref=AccountRef("polymarket", "0x" + "b" * 40),
+                update_interval=0.01,
+                notify_trades=False,
+            )
+        )
         await asyncio.wait_for(rt.wait_all(), timeout=5)
         return rt.store.load(eid)
 
@@ -252,12 +291,20 @@ def test_order_pred_limit_rests_then_fills(tmp_path):
 
     fake = FakePMLimit(fill=True, fill_after=1)
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._connectors[("polymarket", "pred")] = fake
+    rt._connector_overrides[("polymarket", "pred")] = fake
 
     async def go():
-        eid = rt.create_executor(OrderPredConfig(
-            market="tok", amount_quote=Decimal("10"), order_type="limit",
-            limit_px=Decimal("0.5"), update_interval=0.01, notify_trades=False))
+        eid = rt.create_executor(
+            OrderPredConfig(
+                market="tok",
+                amount_quote=Decimal("10"),
+                order_type="limit",
+                account_ref=AccountRef("polymarket", "0x" + "b" * 40),
+                limit_px=Decimal("0.5"),
+                update_interval=0.01,
+                notify_trades=False,
+            )
+        )
         await asyncio.wait_for(rt.wait_all(), timeout=5)
         return rt.store.load(eid)
 
@@ -274,12 +321,20 @@ def test_order_pred_limit_cancel_on_stop(tmp_path):
 
     fake = FakePMLimit(fill=False)  # never fills — rests until cancelled
     rt = ExecutorRuntime(store=ExecutorLog(tmp_path))
-    rt._connectors[("polymarket", "pred")] = fake
+    rt._connector_overrides[("polymarket", "pred")] = fake
 
     async def go():
-        eid = rt.create_executor(OrderPredConfig(
-            market="tok", amount_quote=Decimal("10"), order_type="limit",
-            limit_px=Decimal("0.5"), update_interval=0.02, notify_trades=False))
+        eid = rt.create_executor(
+            OrderPredConfig(
+                market="tok",
+                amount_quote=Decimal("10"),
+                order_type="limit",
+                account_ref=AccountRef("polymarket", "0x" + "b" * 40),
+                limit_px=Decimal("0.5"),
+                update_interval=0.02,
+                notify_trades=False,
+            )
+        )
         await asyncio.sleep(0.1)  # let it reach RESTING
         rt.stop_executor(eid, keep_position=False)
         await asyncio.wait_for(rt.wait_all(), timeout=5)
@@ -298,5 +353,5 @@ def test_early_stop_detach():
     ex.state.state = PositionStates.ACTIVE
     ex.state.size = Decimal("20")
     ex.early_stop(keep_position=True)
-    assert ex.state.state == PositionStates.COMPLETE
-    assert ex.state.close_type == "detached"
+    assert ex.state.state == PositionStates.DETACHING
+    assert ex.state.close_type == "detaching"

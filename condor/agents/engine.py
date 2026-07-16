@@ -109,7 +109,7 @@ class TickEngine:
         # the agent spec (denomination/schedule rules) and computes both spec
         # hashes. Launch merging + stricter-only risk enforcement already
         # happened in lifecycle.start_session.
-        from .spec import freeze_spec
+        from .spec import freeze_spec, resolve_agent_account
 
         try:
             from .agent import AgentStore
@@ -117,8 +117,18 @@ class TickEngine:
             source_text = AgentStore().source_text(self.agent.slug)
         except Exception:
             source_text = ""
+        account_ref = None
+        # Saved runnable agents have a risk baseline. Resolve their custody
+        # identity exactly once before the RunStore opener/capability exists.
+        # Lightweight unsaved unit-test Agents without a baseline remain
+        # usable as pure brain/engine fixtures.
+        if self.agent.can_trade and self.agent.risk_limits:
+            account_ref = resolve_agent_account(self.agent, self.config)
         self.frozen_spec = freeze_spec(
-            self.agent, self.config, source_text=source_text
+            self.agent,
+            self.config,
+            source_text=source_text,
+            account_ref=account_ref,
         )
 
         # Open the run stream: run_started carries the frozen spec, both
@@ -157,7 +167,9 @@ class TickEngine:
         try:
             get_run_store().emit(self.agent_id, type_, payload, **corr)
         except Exception:
-            log.exception("TickEngine %s: run event emit failed (%s)", self.agent_id, type_)
+            log.exception(
+                "TickEngine %s: run event emit failed (%s)", self.agent_id, type_
+            )
 
     def _end_run(self, status: str, reason: str = "") -> None:
         if self._ended:
@@ -425,9 +437,7 @@ class TickEngine:
         learnings = read_learnings(self.agent.agent_dir)
         try:
             store = get_run_store()
-            proj = run_projection(
-                store.read_events(self.agent.slug, self.agent_id)
-            )
+            proj = run_projection(store.read_events(self.agent.slug, self.agent_id))
         except Exception:
             log.exception("TickEngine %s: run projection failed", self.agent_id)
             proj = {"state": "", "recent_decisions": ""}
@@ -466,9 +476,7 @@ class TickEngine:
             from .prompts import _build_routines_section
 
             try:
-                self._cached_routines_section = _build_routines_section(
-                    self.agent.slug
-                )
+                self._cached_routines_section = _build_routines_section(self.agent.slug)
             except Exception:
                 self._cached_routines_section = ""
 
@@ -536,10 +544,13 @@ class TickEngine:
         result = await run_agent(
             self.agent,
             prompt,
-            permission_policy=risk_gate(self.risk, risk_state, experiment=self.is_experiment),
+            permission_policy=risk_gate(
+                self.risk, risk_state, experiment=self.is_experiment
+            ),
             execution_mode=mode,
             model=self._agent_key(),
             risk_limits=self.config.get("risk_limits") or None,
+            account_ref=self.frozen_spec.account_ref,
             timeout_s=300,
             on_client=_hold_client,
             agent_id=self.agent_id,

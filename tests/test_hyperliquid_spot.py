@@ -39,11 +39,29 @@ class FakeExchange:
     def __init__(self):
         self.orders = []
 
-    def order(self, name, is_buy, sz, px, order_type, reduce_only=False, cloid=None, builder=None):
+    def order(
+        self,
+        name,
+        is_buy,
+        sz,
+        px,
+        order_type,
+        reduce_only=False,
+        cloid=None,
+        builder=None,
+    ):
         self.orders.append((name, is_buy, sz, px, order_type["limit"]["tif"], builder))
         # fills the full size at the limit price
-        return {"status": "ok", "response": {"data": {"statuses": [
-            {"filled": {"oid": 42, "avgPx": str(px), "totalSz": str(sz)}}]}}}
+        return {
+            "status": "ok",
+            "response": {
+                "data": {
+                    "statuses": [
+                        {"filled": {"oid": 42, "avgPx": str(px), "totalSz": str(sz)}}
+                    ]
+                }
+            },
+        }
 
 
 def _spot(balances=None):
@@ -85,14 +103,16 @@ def test_quote_price_uses_ask_when_buying_bid_when_selling():
     c = _spot()
     buy_px = asyncio.run(c.quote_swap("hl", "USDC", "HYPE", 10, "SELL"))["price"]
     sell_px = asyncio.run(c.quote_swap("hl", "HYPE", "USDC", 0.1, "SELL"))["price"]
-    assert buy_px == pytest.approx(65.624)   # ask
+    assert buy_px == pytest.approx(65.624)  # ask
     assert sell_px == pytest.approx(65.606)  # bid
 
 
 def test_execute_buy_spends_usdc_for_token():
     c = _spot()
     # buy: sell 10 USDC for HYPE. size = 10/ask rounded to 2dp
-    out = asyncio.run(c.execute_swap("hl", "W", "USDC", "HYPE", 10, "SELL", slippage_pct=1))
+    out = asyncio.run(
+        c.execute_swap("hl", "W", "USDC", "HYPE", 10, "SELL", slippage_pct=1)
+    )
     assert out["status"] == 1 and out["signature"] == "42"
     name, is_buy, sz, px, tif, _ = c.exchange.orders[0]
     assert name == "@107" and is_buy is True and tif == "Ioc"
@@ -104,15 +124,19 @@ def test_execute_buy_spends_usdc_for_token():
 
 def test_execute_sell_token_for_usdc():
     c = _spot()
-    out = asyncio.run(c.execute_swap("hl", "W", "HYPE", "USDC", 0.15, "SELL", slippage_pct=1))
+    out = asyncio.run(
+        c.execute_swap("hl", "W", "HYPE", "USDC", 0.15, "SELL", slippage_pct=1)
+    )
     name, is_buy, sz, px, tif, _ = c.exchange.orders[0]
     assert is_buy is False and sz == pytest.approx(0.15)
-    assert out["data"]["amountIn"] == pytest.approx(0.15)          # token sold
-    assert out["data"]["amountOut"] == pytest.approx(0.15 * px)    # USDC received
+    assert out["data"]["amountIn"] == pytest.approx(0.15)  # token sold
+    assert out["data"]["amountOut"] == pytest.approx(0.15 * px)  # USDC received
 
 
 def test_get_balances_from_spot_state():
-    c = _spot(balances=[{"coin": "HYPE", "total": "1.5"}, {"coin": "USDC", "total": "35.5"}])
+    c = _spot(
+        balances=[{"coin": "HYPE", "total": "1.5"}, {"coin": "USDC", "total": "35.5"}]
+    )
     bals = asyncio.run(c.get_balances("hl", "mainnet", "0x", ["HYPE", "USDC"]))
     assert bals == {"HYPE": 1.5, "USDC": 35.5}
 
@@ -125,7 +149,7 @@ def test_runtime_routes_type_and_venue():
     from condor.executors.runtime import ExecutorRuntime
 
     rt = ExecutorRuntime.__new__(ExecutorRuntime)
-    rt._connectors = {
+    rt._connector_overrides = {
         ("solana", "spot"): "JUP",
         ("polymarket", "pred"): "PM",
         ("hyperliquid", "perp"): "PERP",

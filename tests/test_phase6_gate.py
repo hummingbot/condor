@@ -4,6 +4,7 @@ freezes, and renders a tick prompt against the post-Phase-6 tool surface
 references left in live code, with an explicit allowlist for the files the
 pending auth-deletion pass owns."""
 
+import asyncio
 import re
 import subprocess
 from pathlib import Path
@@ -20,11 +21,26 @@ SHIPPED = sorted(
 
 # Tool surface after Phase 5 (§8) — what a spec may declare.
 POST_PHASE6_TOOLS = {
-    "create_agent", "update_agent", "delete_agent", "run_agent", "get_run",
-    "get_agent", "list_agents", "list_runs", "control_run", "shutdown_agent",
-    "consult", "delegate", "resolve_approval", "list_approvals",
-    "get_notifications", "manage_executors", "manage_memory", "manage_skill",
-    "manage_routines", "send_notification",
+    "create_agent",
+    "update_agent",
+    "delete_agent",
+    "run_agent",
+    "get_run",
+    "get_agent",
+    "list_agents",
+    "list_runs",
+    "control_run",
+    "shutdown_agent",
+    "consult",
+    "delegate",
+    "resolve_approval",
+    "list_approvals",
+    "get_notifications",
+    "manage_executors",
+    "manage_memory",
+    "manage_skill",
+    "manage_routines",
+    "send_notification",
 }
 
 
@@ -45,9 +61,9 @@ def test_shipped_spec_parses_validates_and_freezes(slug):
     # Declared tools must exist on the post-Phase-6 surface.
     for tool in agent.tools or []:
         short = tool.rsplit("__", 1)[-1]
-        assert short in POST_PHASE6_TOOLS, (
-            f"{slug} declares retired/unknown tool {tool!r}"
-        )
+        assert (
+            short in POST_PHASE6_TOOLS
+        ), f"{slug} declares retired/unknown tool {tool!r}"
 
     # The launch path freezes without error (schema defaults + baseline).
     defaults = dict(agent.default_config or {})
@@ -80,9 +96,76 @@ def test_shipped_spec_renders_tick_prompt(slug):
         tick_number=1,
         agent_id="01JZX5B7Q2K4N8P1T3V5W7Y9ZB",
     )
-    for dead in ("perp_requote", "trading_agent_journal_write", "manage_bots",
-                 "manage_trading_agent", "hummingbot"):
+    for dead in (
+        "perp_requote",
+        "trading_agent_journal_write",
+        "manage_bots",
+        "manage_trading_agent",
+        "hummingbot",
+    ):
         assert dead not in prompt, f"{slug} tick prompt references {dead!r}"
+
+
+def test_real_experiment_tick_completes_without_venue_calls(tmp_path, monkeypatch):
+    """The acceptance dry run is an actual engine tick, not prompt rendering.
+
+    The model boundary is stubbed, while the real lifecycle, spec freeze,
+    provider pass, risk gate, and durable RunStore transitions execute.
+    """
+    from condor.agents import agent as agent_module
+    from condor.agents import engine as engine_module
+    from condor.agents.lifecycle import start_session
+    from condor.agents.run import RunResult
+    from condor.agents.runstore import get_run_store
+    from condor.executors.runtime import ExecutorRuntime
+
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    agent_dir = agent_module._DATA_ROOT / "dry_watcher"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "AGENT.md").write_text(
+        "---\n"
+        "name: Dry Watcher\n"
+        "agent_key: claude-code\n"
+        "tools: [manage_executors]\n"
+        "risk_limits:\n"
+        "  max_position_size_quote: 10\n"
+        "  max_open_executors: 1\n"
+        "denomination: USDC\n"
+        "default_config:\n"
+        "  venue: solana\n"
+        "  execution_mode: loop\n"
+        "---\n\nObserve once and report without trading.\n"
+    )
+
+    venue_calls = 0
+
+    def forbidden_connector(*args, **kwargs):
+        nonlocal venue_calls
+        venue_calls += 1
+        raise AssertionError("experiment tick reached a venue connector")
+
+    monkeypatch.setattr(ExecutorRuntime, "connector_for_spec", forbidden_connector)
+
+    async def fake_model(*args, **kwargs):
+        assert kwargs["execution_mode"] == "experiment"
+        return RunResult(text="No action.", events=[], tool_calls=[])
+
+    monkeypatch.setattr(engine_module, "run_agent", fake_model)
+
+    async def scenario():
+        started = await start_session(
+            "dry_watcher", config={"execution_mode": "experiment", "max_ticks": 1}
+        )
+        engine = engine_module.get_engine(started["agent_id"])
+        assert engine is not None and engine._task is not None
+        await engine._task
+        return started["agent_id"]
+
+    run_id = asyncio.run(scenario())
+    meta = get_run_store().run_meta("dry_watcher", run_id)
+    assert meta["kind"] == "experiment"
+    assert meta["status"] == "completed"
+    assert venue_calls == 0
 
 
 # ---------------------------------------------------------------------------
@@ -95,10 +178,23 @@ def test_shipped_spec_renders_tick_prompt(slug):
 _AUTH_PASS_ALLOWLIST: set[str] = set()
 
 _GATE_PATTERNS = (
-    "telegram", "hummingbot_api", "get_bots_client", "bot_name",
-    "server_required", "active_server", "config_manager",
-    "ServerDataService", "jose", "whisper", "transcribe",
-    "VoiceSettings", "getVoiceSettings", "created_by",
+    "telegram",
+    "hummingbot_api",
+    "get_bots_client",
+    "bot_name",
+    "server_required",
+    "active_server",
+    "config_manager",
+    "ServerDataService",
+    "jose",
+    "whisper",
+    "transcribe",
+    "VoiceSettings",
+    "getVoiceSettings",
+    "created_by",
+    "pydantic[-_ ]ai",
+    "ADMIN_(USERNAME|PASSWORD|USER_ID)",
+    "HB_(USERNAME|PASSWORD)",
 )
 
 # Word-ish matches that are NOT the dead layers.
@@ -109,10 +205,32 @@ _FALSE_POSITIVES = re.compile(
 
 def test_grep_gate_no_dead_layer_references():
     out = subprocess.run(
-        ["git", "grep", "-n", "-i", "-E", "|".join(_GATE_PATTERNS), "--",
-         "condor", "mcp_servers", "utils", "routines", "agents/*/AGENT.md",
-         ":!*.jsonl"],
-        capture_output=True, text=True, cwd=REPO,
+        [
+            "git",
+            "grep",
+            "-n",
+            "-i",
+            "-E",
+            "|".join(_GATE_PATTERNS),
+            "--",
+            "condor",
+            "mcp_servers",
+            "utils",
+            "routines",
+            "frontend/src",
+            "scripts",
+            "skills",
+            "integrations",
+            "agents/*/AGENT.md",
+            "Makefile",
+            "install.sh",
+            "pyproject.toml",
+            ".env.example",
+            ":!*.jsonl",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=REPO,
     ).stdout.splitlines()
 
     offenders = []

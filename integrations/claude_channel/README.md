@@ -2,14 +2,14 @@
 
 Pushes Condor agent notifications into a running Claude Code session, so when
 you drive Condor from Claude Code, session/delegation/executor pings land in
-the **same** session — no need to watch Telegram.
+the **same** session.
 
 It's a one-way [Claude Code channel](https://code.claude.com/docs/en/channels):
 a small MCP server that tails the notifications outbox
 (`store/notifications.jsonl`, written by `condor/notifications.py`) and emits
-each new entry as a `notifications/claude/channel` event. Every entry is
-already mirrored to Telegram by Condor, so this is a mirror, not a move —
-notifications reach every harness.
+each new entry as a `notifications/claude/channel` event. The outbox supports
+multiple independent consumers, so adding this channel does not move or hide
+events from the dashboard or another relay.
 
 ## Requirements
 
@@ -58,11 +58,11 @@ Memecoin Trender — Tick 3: opened FEBU position, TP +1% / SL -1% / TTL 10m
 agent tick / delegation / executor event
         │  condor.notifications.notify()
         ▼
-store/notifications.jsonl  ──►  Telegram (mirror, all harnesses)
+store/notifications.jsonl  ──► dashboard / other relays
         │
-        └──►  this channel (tail)  ──►  Claude Code session  (<channel> event)
+        └──► this channel (tail) ──► Claude Code session (<channel> event)
 ```
 
-The outbox is the channel-agnostic spine: Telegram is the push default,
-this channel serves Claude Code, and a Hermes/OpenClaw webhook adapter or the
-dashboard's `GET /api/v1/notifications` can consume the same file.
+The outbox is the channel-agnostic spine: this channel serves Claude Code, and
+a Hermes/OpenClaw webhook adapter or the dashboard's notification API can
+consume the same file.

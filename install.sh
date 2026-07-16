@@ -6,8 +6,8 @@
 #
 # Architecture (docs/installing.md, docs/changes-from-main.md §5):
 # Stage A (this script) does bootstrap only — deps, clone-or-update, venv,
-# .env template. Every product question (identity, harness selection,
-# Telegram) lives in `condor init`, which is re-runnable forever without
+# .env template. Every product question (harness and account onboarding)
+# lives in `condor init`, which is re-runnable forever without
 # this script. Prompts work under `curl | bash` because init runs with
 # stdin rebound to /dev/tty.
 #
@@ -15,9 +15,8 @@
 #   --dir <path>        install directory      (default: ~/condor)
 #   --branch <name>     git branch to install  (default: main)
 #   --harness <list>    preseed init's harness selection (comma-separated)
-#   --user-id <int>     preseed init's identity (enables non-interactive init)
 #   --no-init           bootstrap only; print the init command and exit
-#   --non-interactive   never prompt; requires --user-id unless --no-init
+#   --non-interactive   never prompt; use detected/default harnesses
 #   --stage-json        emit one {"ok":...,"stage":...} JSON line per stage,
 #                       so an agent harness can drive this installer
 set -euo pipefail
@@ -26,7 +25,6 @@ REPO_URL="https://github.com/hummingbot/condor.git"
 INSTALL_DIR="${CONDOR_DIR:-$HOME/condor}"
 BRANCH="main"
 HARNESS=""
-USER_ID=""
 RUN_INIT=true
 NON_INTERACTIVE=false
 STAGE_JSON=false
@@ -36,7 +34,6 @@ while [ $# -gt 0 ]; do
         --dir) INSTALL_DIR="$2"; shift 2 ;;
         --branch) BRANCH="$2"; shift 2 ;;
         --harness) HARNESS="$2"; shift 2 ;;
-        --user-id) USER_ID="$2"; shift 2 ;;
         --no-init) RUN_INIT=false; shift ;;
         --non-interactive) NON_INTERACTIVE=true; shift ;;
         --stage-json) STAGE_JSON=true; shift ;;
@@ -106,8 +103,8 @@ stage clone true
 
 # ── Stage: python ────────────────────────────────────────────────────
 
-log "Installing Python dependencies (uv sync)"
-uv sync
+log "Installing Python dependencies (uv sync --dev)"
+uv sync --dev
 stage python true
 
 # ── Stage: env ───────────────────────────────────────────────────────
@@ -119,27 +116,11 @@ if [ ! -f .env ]; then
 fi
 stage env true
 
-# ── Stage: hummingbot-api ────────────────────────────────────────────
-# Probe only. The execution layer has its own installer (Docker stack);
-# pointing at it beats half-reimplementing it here.
-
-if curl -fsS -o /dev/null --max-time 5 http://localhost:8000 2>/dev/null \
-   || [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://localhost:8000 2>/dev/null)" != "000" ]; then
-    log "hummingbot-api answering on localhost:8000"
-    stage hummingbot-api true
-else
-    log "hummingbot-api NOT running on localhost:8000 — nothing can trade until it is."
-    log "Install it with:"
-    log "  curl -fsSL https://raw.githubusercontent.com/hummingbot/deploy/main/setup.sh | bash -s -- --hummingbot-api"
-    stage hummingbot-api false "not reachable on localhost:8000"
-fi
-
 # ── Stage: init (handoff) ────────────────────────────────────────────
 # Everything from here is a product question and belongs to `condor init`.
 
 INIT_CMD=(uv run python -m condor.cli init)
 [ -n "$HARNESS" ] && INIT_CMD+=(--harness "$HARNESS")
-[ -n "$USER_ID" ] && INIT_CMD+=(--user-id "$USER_ID")
 
 if [ "$RUN_INIT" = false ]; then
     stage init true "skipped (--no-init)"

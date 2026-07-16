@@ -23,6 +23,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from pydantic import BaseModel, ConfigDict
 
+from condor.accounts.model import AccountRef
+
 if TYPE_CHECKING:
     from condor.executors.log import ExecutorLog
 
@@ -81,6 +83,11 @@ class ExecutorConfig(BaseModel):
     # the connector: solana→Jupiter; hyperliquid→perp/spot/outcome by instrument;
     # polymarket→Polymarket CLOB. Per-type configs narrow the default.
     venue: str = "solana"
+    # Resolved by ExecutionService from the server-side run capability (agent)
+    # or structured account store (condor-direct). Callers may select an
+    # account, but this canonical identity is injected and persisted by the
+    # platform before any executor starts.
+    account_ref: AccountRef | None = None
     chain_network: str  # e.g. "solana-mainnet-beta"; unused for non-chain venues
     wallet_address: str
     # Attribution (tracking keys, NOT permission boundaries):
@@ -96,6 +103,9 @@ class ExecutorConfig(BaseModel):
     # Derived by ops.create from the server-side capability entry — NEVER from
     # caller-supplied fields. Empty only on legacy records.
     origin: str = ""
+    # Immutable server-side authority owner used to scope idempotent replay:
+    # agent run id or condor-direct control connection id.
+    capability_owner: str = ""
     # Canonical create-request hash (§6.2): the executor_id is bound to this
     # at create; a replay with the same id + same hash returns the original
     # result, a different hash is rejected.
@@ -297,25 +307,34 @@ class ExecutorBase:
                 # open on-chain and is re-adopted by reconcile() later.
                 self.persist()
                 logger.warning(
-                    "executor %s cancelled mid-flight; state persisted for reconcile", self.id
+                    "executor %s cancelled mid-flight; state persisted for reconcile",
+                    self.id,
                 )
                 raise
             except Exception as e:
                 self._retries += 1
                 logger.error(
                     "executor %s control_task error (%d/%d): %s",
-                    self.id, self._retries, self.config.max_retries, e,
+                    self.id,
+                    self._retries,
+                    self.config.max_retries,
+                    e,
                 )
                 if self._retries >= self.config.max_retries:
                     self.fail(f"max retries reached: {e}")
             self.persist()
-            self._last_tick_at = time.time()  # completed an iteration (watchdog liveness)
+            self._last_tick_at = (
+                time.time()
+            )  # completed an iteration (watchdog liveness)
             if self.status.is_terminal:
                 break
             await asyncio.sleep(self.config.update_interval)
 
         logger.info(
-            "executor %s finished: %s (%s)", self.id, self.status.value, self.close_reason or "-"
+            "executor %s finished: %s (%s)",
+            self.id,
+            self.status.value,
+            self.close_reason or "-",
         )
         self.persist()
 
