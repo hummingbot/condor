@@ -14,14 +14,19 @@ from mcp_servers.condor.tools import skills as skills_tool
 @pytest.fixture
 def agents(tmp_path, monkeypatch):
     import condor.agents.agent as agent_mod
+    import condor.memory.paths as memory_paths
 
-    monkeypatch.setattr(agent_mod, "_DATA_ROOT", tmp_path)
-    # SkillStore roots under agents/{slug}/skills — follow the patched root.
+    # SkillStore resolves agents/{slug}/skills from paths._PROJECT_ROOT, not
+    # the agent store root — patch BOTH or the test writes into the real
+    # agents/ tree.
+    agents_root = tmp_path / "agents"
+    monkeypatch.setattr(agent_mod, "_DATA_ROOT", agents_root)
+    monkeypatch.setattr(memory_paths, "_PROJECT_ROOT", tmp_path)
     for slug in ("owner_agent", "victim_agent"):
-        d = tmp_path / slug
+        d = agents_root / slug
         d.mkdir(parents=True)
         (d / "AGENT.md").write_text(f"---\nname: {slug}\n---\n\nBody.\n")
-    return tmp_path
+    return agents_root
 
 
 def _create(agent_slug=None):
