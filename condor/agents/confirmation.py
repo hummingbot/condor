@@ -63,8 +63,10 @@ def resolve_confirmation(request_id: str, approved: bool) -> bool:
 
 def _format_tool_summary(tool_call: dict[str, Any]) -> str:
     """Format a tool call into a human-readable summary for the confirmation message."""
-    tool_name = tool_call.get("tool", "") or tool_call.get("title", "Unknown")
-    input_data = tool_call.get("input", {})
+    from condor.agents.gating import tool_call_input, tool_call_name
+
+    tool_name = tool_call_name(tool_call) or "Unknown"
+    input_data = tool_call_input(tool_call) or {}
 
     if tool_name == "manage_executors":
         action = input_data.get("action", "?")

@@ -38,13 +38,13 @@ def deny_gate(reason: str):
     client AUTO-APPROVES everything (that is exactly how AUTO works), so a
     failed gate must deny, loudly, never downgrade.
     """
-    from condor.agents.gating import is_dangerous_tool_call
+    from condor.agents.gating import is_dangerous_tool_call, tool_call_name
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
             log.warning(
                 "deny_gate cancelled %s: %s",
-                tool_call.get("tool") or tool_call.get("title") or "tool call",
+                tool_call_name(tool_call) or "tool call",
                 reason,
             )
             return {"outcome": {"outcome": "cancelled"}}
@@ -67,13 +67,13 @@ def approval_gate(run_id: str, agent_slug: str):
     on timeout; a one-use grant keyed by executor_id survives for a same-run
     retry of the same create."""
     from condor.agents.confirmation import _format_tool_summary
-    from condor.agents.gating import is_dangerous_tool_call
+    from condor.agents.gating import is_dangerous_tool_call, tool_call_input
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
             from condor.agents.approvals import get_approval_manager
 
-            input_data = tool_call.get("input", {}) or {}
+            input_data = tool_call_input(tool_call) or {}
             approved = await get_approval_manager().request(
                 run_id=run_id,
                 agent_slug=agent_slug,

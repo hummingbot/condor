@@ -337,6 +337,27 @@ class ExecutorBase:
             self.close_reason or "-",
         )
         self.persist()
+        if self.status == ExecutorStatus.FAILED:
+            # An executor failure is an operator alert, not a trade ping — it
+            # fires even with notify_trades off, and regardless of whether the
+            # owning run is still alive (§9.5.3: the post-shutdown failures
+            # landed after run_ended and were invisible everywhere but the
+            # executor log). Fail-soft like notify_trade.
+            try:
+                from condor.notifications import notify
+
+                await notify(
+                    f"🚨 Executor {self.id} FAILED: "
+                    f"{self.close_reason or 'unknown reason'} — verify the "
+                    f"position on the venue manually",
+                    agent_id=self.config.agent_id,
+                    kind="error",
+                    origin=self.config.type,
+                )
+            except Exception:
+                logger.warning(
+                    "failure notify failed for %s", self.id, exc_info=True
+                )
 
     def fail(self, reason: str) -> None:
         self.status = ExecutorStatus.FAILED

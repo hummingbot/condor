@@ -182,19 +182,23 @@ async def apply_verb(
     if verb == "shutdown":
         # Agent-SCOPED (§6.2): every live run winds down, and executors
         # surviving from prior runs of the slug stop too — a dead run's
-        # financial scope must not escape the emergency stop.
+        # financial scope must not escape the emergency stop. Both paths are
+        # POLICY-scoped: run_shutdown's winddown is already slug-wide, and
+        # the engine-less floor resolves the same shutdown.md policy — never
+        # a blanket keep_position=False sweep, which resurrected detached
+        # (kept) positions and sold them against the policy (§9.5.3).
         engines = select_engines(slug, agent_id) if agent_id else engines_for_slug(slug)
         for engine in engines:
             await engine._run_shutdown(reason="manual emergency stop")
         stopped_leftovers: list[str] = []
-        if slug:
-            from condor.executors.service import peek_executor_runtime
+        if slug and not engines:
+            from condor.agents.shutdown import winddown_slug
 
-            runtime = peek_executor_runtime()
-            if runtime is not None:
-                stopped_leftovers = runtime.stop_slug_executors(
-                    slug, keep_position=False
-                )
+            try:
+                result = await winddown_slug(slug)
+            except ValueError as e:
+                raise LifecycleError(404, str(e))
+            stopped_leftovers = result["stopped"]
         if not engines and not stopped_leftovers and not agent_id:
             raise LifecycleError(404, f"nothing to shut down for '{slug}'")
         return {"shutdown": True, "stopped_executors": stopped_leftovers}

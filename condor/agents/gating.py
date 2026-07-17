@@ -22,20 +22,45 @@ BLOCKED_TOOLS: set[str] = set()
 DANGEROUS_EXECUTOR_ACTIONS = {"create", "stop"}
 
 
+def tool_call_name(tool_call: dict[str, Any]) -> str:
+    """The normalized tool name, across every producer shape in the pipeline:
+    the web chat's ``tool``, the raw ACP permission payload's ``title``, and
+    the engine's folded stream dict's ``name`` (§9.5.4: reading only one
+    shape made the risk gate a no-op for MCP-named executor calls and pinned
+    the audit ``mutating`` flag to False)."""
+    raw_name = (
+        tool_call.get("tool", "")
+        or tool_call.get("title", "")
+        or tool_call.get("name", "")
+    )
+    # Normalize MCP-prefixed names (e.g. mcp__condor__manage_executors → manage_executors)
+    return raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+
+
+def tool_call_input(tool_call: dict[str, Any]) -> dict[str, Any] | None:
+    """The call's arguments dict, or None when unavailable. ACP permission
+    payloads carry arguments as ``rawInput``; folded stream dicts use
+    ``input``. Callers gating a mutation must treat None as fail-closed."""
+    input_data = tool_call.get("rawInput") or tool_call.get("input")
+    return input_data if isinstance(input_data, dict) else None
+
+
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     """Check if a tool call requires user confirmation."""
-    raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
-    # Normalize MCP-prefixed names (e.g. mcp__condor__manage_executors → manage_executors)
-    tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+    tool_name = tool_call_name(tool_call)
 
     if tool_name in DANGEROUS_TOOLS:
         return True
 
     # manage_executors with create/stop actions — the one trading mutation path
     if tool_name == "manage_executors":
-        input_data = tool_call.get("input", {})
-        action = input_data.get("action", "")
-        return action in DANGEROUS_EXECUTOR_ACTIONS
+        input_data = tool_call_input(tool_call)
+        if input_data is None:
+            # Arguments unavailable (still streaming, or an unknown shape):
+            # treat the call as dangerous — the gate must fail toward
+            # checking, never toward auto-approving a trade mutation.
+            return True
+        return input_data.get("action", "") in DANGEROUS_EXECUTOR_ACTIONS
 
     return False
 

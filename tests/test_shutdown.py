@@ -336,6 +336,82 @@ def test_winddown_no_runtime_alerts_loudly(tmp_path, monkeypatch):
     assert ("shutdown_failed", "no executor runtime") in engine.decisions
 
 
+# ── engine-less slug winddown (the shutdown verb's floor, §9.5.3) ──
+
+
+def _fake_slug_winddown(records, monkeypatch, tmp_path, strand_ids=()):
+    """winddown_slug fixture: fake runtime/ops/notify + a resolvable agent
+    with no shutdown.md (built-in default keep_spot_close_perp applies)."""
+    agent = _make_agent(tmp_path, monkeypatch)
+    runtime = _FakeRuntime(records)
+    fake_ops = _FakeOps(runtime, strand_ids=strand_ids)
+    monkeypatch.setattr(shutdown_module, "peek_executor_runtime", lambda: runtime)
+    monkeypatch.setattr(shutdown_module, "ops", fake_ops)
+    monkeypatch.setattr(shutdown_module, "_SETTLE_DELAY_S", 0)
+    monkeypatch.setattr(
+        agent_module.AgentStore, "get", lambda self, slug: agent, raising=True
+    )
+
+    sent = []
+
+    async def _fake_notify(text, **kw):
+        sent.append(text)
+        return {}
+
+    import condor.notifications as notifications_module
+
+    monkeypatch.setattr(notifications_module, "notify", _fake_notify)
+    return fake_ops, sent
+
+
+def test_winddown_slug_honors_policy(tmp_path, monkeypatch):
+    """§9.5.3 regression: the engine-less shutdown floor stops per policy —
+    perp closed, spot KEPT — never a blanket keep_position=False sweep."""
+    records = [
+        _record("e_perp", "position_perp", config={"coin": "ETH"}),
+        _record("e_spot", "position_spot", config={"trading_pair": "BONK-SOL"}),
+    ]
+    fake_ops, sent = _fake_slug_winddown(records, monkeypatch, tmp_path)
+    result = asyncio.run(shutdown_module.winddown_slug("acme"))
+
+    calls = dict(fake_ops.stop_calls)
+    assert calls["e_perp"] is False  # perp closed
+    assert calls["e_spot"] is True  # spot kept — the regression guard
+    assert result["stranded"] == 0
+    assert any("complete" in t for t in sent)
+
+
+def test_winddown_slug_never_resurrects_detached_positions(tmp_path, monkeypatch):
+    """A prior run's detached (kept) spot position is terminal — the
+    engine-less floor must not touch it, let alone re-close it."""
+    records = [
+        _record(
+            "e_detached",
+            "position_spot",
+            status="CLOSED",
+            state={"state": "COMPLETE", "close_type": "detached"},
+        ),
+    ]
+    fake_ops, sent = _fake_slug_winddown(records, monkeypatch, tmp_path)
+    result = asyncio.run(shutdown_module.winddown_slug("acme"))
+
+    assert fake_ops.stop_calls == []
+    assert result["stopped"] == []
+    assert result["stranded"] == 0
+
+
+def test_winddown_slug_unknown_agent_raises(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        agent_module.AgentStore, "get", lambda self, slug: None, raising=True
+    )
+    try:
+        asyncio.run(shutdown_module.winddown_slug("ghost"))
+    except ValueError as e:
+        assert "ghost" in str(e)
+    else:
+        raise AssertionError("expected ValueError for unknown agent")
+
+
 # ── engine wrapper idempotency ──
 
 

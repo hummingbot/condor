@@ -186,9 +186,11 @@ condor.db-wal
 # native venue creds (import-a-wallet MVP) — never commit
 store/venues.json
 
-# Agent runtime state — never committed (transaction logs + session journals)
+# Agent runtime state — never committed (transaction logs + run streams)
 agents/*/executors.jsonl
 agents/*/sessions/
+agents/*/runs/
+agents/*/learnings.md.lock
 
 # Generated report artifacts
 /reports/

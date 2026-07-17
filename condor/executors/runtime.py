@@ -143,6 +143,18 @@ class ExecutorRuntime:
 
     def stop_executor(self, executor_id: str, keep_position: bool = True) -> None:
         executor = self._executors.get(executor_id)
+        if (
+            executor is not None
+            and executor_id in self._tasks
+            and self._tasks[executor_id].done()
+        ):
+            # The prior lifecycle loop ended, so _on_task_done already closed
+            # this object's connector (and its adapter holds the same closed
+            # client). It cannot run another lifecycle — rebuild from the
+            # durable record with a fresh connector below (§9.5.3: reusing it
+            # made the detach-reactivation close fail with "client has been
+            # closed" and corrupted the record to FAILED).
+            executor = None
         if executor is None:
             record = self.store.load(executor_id)
             if record is None:

@@ -184,6 +184,48 @@ def test_experiment_blocks_create_and_stop():
     assert stop["outcome"]["outcome"] == "cancelled"
 
 
+def test_gate_risk_checks_acp_permission_shape():
+    """§9.5.4 regression: ACP permission payloads use `title`/`rawInput` —
+    the gate must risk-check those, not only the `tool`/`input` shape."""
+    engine = RiskEngine(RiskLimits(max_open_executors=1))
+    state = RiskState(executor_count=1)  # at cap → create must be cancelled
+    callback = risk_gate(engine, state)
+    call = {
+        "title": "mcp__condor__manage_executors",
+        "rawInput": {
+            "action": "create",
+            "executor_type": "position_pred",
+            "config": {"market": "world-cup-winner", "amount_quote": 10.0},
+        },
+    }
+    result = asyncio.run(callback(call, _OPTIONS))
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_gate_fails_closed_without_arguments():
+    """Arguments unavailable → risk cannot be computed → cancelled."""
+    engine = RiskEngine(RiskLimits())
+    callback = risk_gate(engine, RiskState())
+    result = asyncio.run(
+        callback({"title": "mcp__condor__manage_executors"}, _OPTIONS)
+    )
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
+def test_experiment_blocks_acp_shape_create():
+    callback = risk_gate(RiskEngine(RiskLimits()), RiskState(), experiment=True)
+    call = {
+        "title": "mcp__condor__manage_executors",
+        "rawInput": {
+            "action": "create",
+            "executor_type": "position_pred",
+            "config": {"market": "m", "amount_quote": 1.0},
+        },
+    }
+    result = asyncio.run(callback(call, _OPTIONS))
+    assert result["outcome"]["outcome"] == "cancelled"
+
+
 def test_experiment_allows_read_only_executor_actions():
     """Read-only manage_executors actions must not be blocked in an experiment."""
     engine = RiskEngine(RiskLimits())

@@ -47,6 +47,47 @@ def test_swap_runs_to_close_via_log(tmp_path):
     assert 0 < len(_lines(log, "")) <= 4  # "" -> the _manual slug
 
 
+def test_stop_detached_position_reactivates_with_fresh_object(tmp_path):
+    """§9.5.3: explicitly closing a detached position must rebuild the
+    executor from the durable record — the prior loop's connector was closed
+    by _on_task_done, so reusing the stale in-memory object fails the sell
+    ("client has been closed") and corrupts the record to FAILED."""
+    log = _log(tmp_path)
+    runtime = ExecutorRuntime(store=log)
+    runtime._connector_overrides[("solana", "spot")] = FakeGateway()
+
+    async def run():
+        eid = runtime.create_executor(position_config())
+        for _ in range(500):
+            rec = log.load(eid)
+            if rec and rec.state.get("state") == "ACTIVE":
+                break
+            await asyncio.sleep(0.01)
+        else:
+            raise AssertionError("position never became ACTIVE")
+
+        # Position-preserving stop: the loop ends, the record is detached.
+        runtime.stop_executor(eid, keep_position=True)
+        await runtime.wait_all()
+        rec = log.load(eid)
+        assert rec.status == "CLOSED"
+        assert rec.state["close_type"] == "detached"
+        stale = runtime._executors.get(eid)
+
+        # Explicit close of the detached inventory: reactivates and CLOSES
+        # cleanly through a rebuilt executor, never the stale object.
+        runtime.stop_executor(eid, keep_position=False)
+        if stale is not None:
+            assert runtime._executors[eid] is not stale
+        await runtime.wait_all()
+        rec = log.load(eid)
+        assert rec.status == "CLOSED"
+        assert rec.state["state"] == "COMPLETE"
+        assert rec.state["close_type"] != "detached"
+
+    asyncio.run(run())
+
+
 # -- reconcile from the log ----------------------------------------------------
 
 

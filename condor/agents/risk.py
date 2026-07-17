@@ -154,7 +154,12 @@ class RiskEngine:
 
         Returns (allowed, reason).
         """
-        input_data = tool_call.get("input", {})
+        from condor.agents.gating import tool_call_input
+
+        input_data = tool_call_input(tool_call)
+        if input_data is None:
+            # Arguments unavailable: cannot compute risk — fail CLOSED.
+            return False, "manage_executors arguments unavailable — failing closed"
         action = input_data.get("action", "")
 
         # Only gate "create" actions
@@ -221,19 +226,23 @@ def risk_gate(
     ``RiskState()`` at zero for delegations (the caps act as a per-run budget).
     ``experiment=True`` additionally cancels every mutating action (tick-only).
     """
-    from condor.agents.gating import is_dangerous_tool_call
+    from condor.agents.gating import (
+        is_dangerous_tool_call,
+        tool_call_input,
+        tool_call_name,
+    )
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
-            raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
-            tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+            tool_name = tool_call_name(tool_call)
 
             if tool_name == "manage_executors":
-                input_data = tool_call.get("input", {})
-                action = input_data.get("action", "")
+                input_data = tool_call_input(tool_call)
+                action = (input_data or {}).get("action", "")
 
-                # Experiment mode: block ALL mutating actions
-                if experiment and action in ("create", "stop"):
+                # Experiment mode: block ALL mutating actions — including
+                # calls whose arguments are unavailable (fail closed).
+                if experiment and (input_data is None or action in ("create", "stop")):
                     log.info("Experiment mode: blocked manage_executors(%s)", action)
                     return {"outcome": {"outcome": "cancelled"}}
 

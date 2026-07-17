@@ -138,6 +138,38 @@ def test_swap_happy_path(tmp_path):
     assert rec.state["state"] == "DONE"
 
 
+def test_run_loop_failure_notifies_operator(tmp_path, monkeypatch):
+    """§9.5.3: a loop that dies FAILED alerts the operator via the outbox —
+    even with notify_trades off, and independent of any live run (the run-4
+    post-shutdown failures were invisible everywhere but the executor log)."""
+    sent = []
+
+    async def _fake_notify(text, **kw):
+        sent.append(text)
+        return {}
+
+    import condor.notifications as notifications_module
+
+    monkeypatch.setattr(notifications_module, "notify", _fake_notify)
+
+    store = ExecutorLog(tmp_path)
+    ex = OrderExecutor(
+        "order_fail",
+        swap_config(notify_trades=False, max_retries=2),
+        FakeGateway(),
+        store,
+    )
+
+    async def _boom():
+        raise RuntimeError("Cannot send a request, as the client has been closed.")
+
+    monkeypatch.setattr(ex, "control_task", _boom)
+    asyncio.run(ex.run())
+
+    assert store.load("order_fail").status == "FAILED"
+    assert any("order_fail" in t and "FAILED" in t for t in sent)
+
+
 def test_swap_reconcile_orphan_submitting(tmp_path):
     """Crash during submission with no signature -> FAILED with clear reason."""
     gateway = FakeGateway()

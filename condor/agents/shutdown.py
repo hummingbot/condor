@@ -404,3 +404,60 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         "shutdown_done",
         f"stopped={stopped}, failures={len(failures)}, verify={verified}",
     )
+
+
+async def winddown_slug(slug: str) -> dict:
+    """Engine-less deterministic winddown: the shutdown verb's floor when the
+    slug has NO live run.
+
+    A dead run's financial scope must still stop on an emergency shutdown,
+    but per the agent's declared policy — never a blanket
+    ``keep_position=False`` sweep, which resurrects detached (kept) positions
+    and sells them against the policy's keep decision (§9.5.3 of
+    docs/agent-history-comparison.md). Runs the same policy-resolved baseline
+    + verify as :func:`run_shutdown`, minus the engine-bound LLM pass, and
+    notifies through the outbox directly.
+    """
+    from condor.agents.agent import AgentStore
+    from condor.notifications import notify
+
+    agent = AgentStore().get(slug)
+    if agent is None:
+        raise ValueError(f"unknown agent '{slug}' — cannot resolve shutdown policy")
+    policy, _ = load_shutdown_policy(agent)
+
+    runtime = peek_executor_runtime()
+    if runtime is None:
+        msg = (
+            f"🚨 Agent {slug}: emergency shutdown could NOT reach the executor "
+            f"runtime — positions may be OPEN, check manually!"
+        )
+        log.error(msg)
+        await notify(msg, agent_id=slug, kind="shutdown", origin="shutdown")
+        return {"stopped": [], "failures": ["no executor runtime"], "stranded": 0}
+
+    log.warning(
+        "winddown_slug %s: engine-less shutdown (policy=%s)",
+        slug,
+        policy.on_kill_switch,
+    )
+    stopped, failures, attempted = await _deterministic_baseline(runtime, slug, policy)
+    stranded = await _verify_and_retry(runtime, slug, policy, set(attempted))
+
+    if stranded:
+        details = ", ".join(_describe_record(r) for r in stranded) or "unknown"
+        msg = (
+            f"🚨 Agent {slug}: emergency shutdown left {len(stranded)} position(s) "
+            f"OPEN that the '{policy.on_kill_switch}' policy said to close: "
+            f"{details}. Close them manually!"
+        )
+        log.error(msg)
+    else:
+        msg = (
+            f"✅ Agent {slug}: emergency shutdown complete — wound down per "
+            f"'{policy.on_kill_switch}' (stopped {stopped} executor(s), no live run)."
+        )
+    if failures:
+        msg += f"\n⚠️ {len(failures)} winddown error(s): " + "; ".join(failures[:5])
+    await notify(msg, agent_id=slug, kind="shutdown", origin="shutdown")
+    return {"stopped": attempted, "failures": failures, "stranded": len(stranded)}
