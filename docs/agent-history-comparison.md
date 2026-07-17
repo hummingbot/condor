@@ -656,6 +656,21 @@ CLOSED-detached. That matters three ways:
    on-chain truth. (Run by the operator — the harness is not permitted to
    mutate `executors.jsonl` directly.)
 
+**Postscript (2026-07-17): the inventory was subsequently sold.** The
+token-account transaction history settles the full timeline: the sweep's
+23:23:48Z close attempts never reached the chain (the client-closed error
+was pre-broadcast); the inventory sat detached-held for ~2.5 h (balance
+check confirmed both amounts present); then both tokens were sold
+**outside any executor** at 01:49Z (txs `3TtjDo2b…`, `4HvPJAT1…`) — by a
+manual/other-session action, not by Condor's executor path (no executor
+event exists for it) — 14 minutes *before* the v1 repair ran at 02:03Z. A
+v2 correction (`repair_run4_records_v2.py`) replaces `close_type:
+detached` with the inert `external_close` and records the sale txs, so the
+books once again match a verified-flat wallet. A prior cross-session note
+claiming "the close swaps actually landed" was wrong on causality — the
+failed closes and the eventual sale were different transactions two and a
+half hours apart.
+
 #### 9.5.4 Secondary finding: `mutating` is always False, and the ACP risk gate never sees executor creates
 
 Every `tool_call` event in run 4 says `mutating: False` — including the
