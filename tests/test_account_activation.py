@@ -3,7 +3,7 @@
 Onboarding derives custody FROM credentials (typed addresses are verified,
 never trusted), the read-only probe gates enabling, loaders read ONLY the
 structured store (env precedence deleted — not inverted), the flat pre-v1
-file fails with the clear re-onboard error, and `condor account import-env`
+file fails with the clear re-onboard error, and `condor accounts import-env`
 is the explicit, idempotent env→store path. No network: probes are injected.
 """
 
@@ -236,7 +236,7 @@ def test_import_env_creates_accounts_explicitly(store_path, monkeypatch, capsys)
     monkeypatch.setenv("CONDOR_SOLANA_RPC", "https://rpc.example")
     monkeypatch.setenv("CONDOR_JUPITER_API_KEY", "jup_x")
 
-    cli.main(["account", "import-env", "--no-probe"])
+    cli.main(["accounts", "import-env", "--no-probe"])
     out = capsys.readouterr().out
     assert HL_ACCT in out and str(kp.pubkey()) in out
 
@@ -249,7 +249,7 @@ def test_import_env_creates_accounts_explicitly(store_path, monkeypatch, capsys)
     assert raw["_services"]["jupiter"]["api_key"].startswith("enc:v1:")
 
     # idempotent: address-keyed upsert, never a duplicate
-    cli.main(["account", "import-env", "--no-probe"])
+    cli.main(["accounts", "import-env", "--no-probe"])
     raw = json.loads(store_path.read_text())
     assert list(raw["hyperliquid"]["accounts"]) == [HL_ACCT]
     assert list(raw["solana"]["accounts"]) == [str(kp.pubkey())]
@@ -263,12 +263,12 @@ def test_import_env_probe_failure_is_loud(store_path, monkeypatch):
         lambda *a: (_ for _ in ()).throw(RuntimeError("down")),
     )
     with pytest.raises(SystemExit):
-        cli.main(["account", "import-env"])
+        cli.main(["accounts", "import-env"])
     assert not store_path.exists()
 
 
 def test_import_env_nothing_to_import(store_path, capsys):
-    cli.main(["account", "import-env"])
+    cli.main(["accounts", "import-env"])
     assert "nothing to import" in capsys.readouterr().out
 
 
@@ -277,8 +277,26 @@ def test_account_list_redacted(store_path, capsys):
         "hyperliquid", {"agent_private_key": HL_KEY, "account_address": HL_ACCT},
         name="main", prober=_noop_probe,
     )
-    cli.main(["account", "list"])
+    cli.main(["accounts"])
     out = capsys.readouterr().out
     assert f"hyperliquid  {HL_ACCT}  main  (default)" in out
     assert HL_KEY not in out  # never the secret
     assert "enc:v1:" not in out
+
+
+def test_account_list_orders_by_last_modified(store_path, capsys):
+    onboard_account(
+        "hyperliquid", {"agent_private_key": HL_KEY, "account_address": HL_ACCT},
+        name="hl", prober=_noop_probe,
+    )
+    kp = Keypair()
+    sol = onboard_account(
+        "solana", {"secret_key_b58": str(kp)}, name="sol", prober=_noop_probe,
+    )
+    store = wallets.account_store()
+    with store.transaction() as data:
+        data["hyperliquid"]["accounts"][HL_ACCT]["updated_at"] = "2026-01-01T00:00:00+00:00"
+        data["solana"]["accounts"][sol.custody_address]["updated_at"] = "2026-07-01T00:00:00+00:00"
+    cli.main(["accounts"])
+    out = capsys.readouterr().out
+    assert out.index("solana") < out.index("hyperliquid")  # newest first

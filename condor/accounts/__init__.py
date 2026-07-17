@@ -4,7 +4,7 @@ The structured, custody-address-keyed account store, the minimal
 VenueRegistry, selector→AccountRef resolution, and onboarding (custody
 derivation + read-only probe). Since Phase 3 the store is the SOLE credential
 source: the loaders in ``condor/executors/wallets.py`` resolve accounts here,
-env-var credential precedence is deleted (``condor account import-env`` is
+env-var credential precedence is deleted (``condor accounts import-env`` is
 the explicit one-shot path), and a flat pre-v1 ``store/venues.json`` fails
 with ``PreV1FormatError`` (operator cutover, §12).
 """

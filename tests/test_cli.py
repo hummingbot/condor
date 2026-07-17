@@ -76,3 +76,52 @@ def test_select_harnesses_none_means_empty():
 def test_select_harnesses_rejects_unknown():
     with pytest.raises(SystemExit):
         cli._select_harnesses(_args("cursor"))
+
+
+# -- condor stop: the harness-independent escape hatch ------------------------
+
+
+def test_stop_by_run_id_and_by_slug(monkeypatch, capsys):
+    from condor.control import client as control_client
+
+    calls = []
+
+    async def fake_call_control(method, params=None, **kw):
+        calls.append((method, params))
+        if method == "agent.list":
+            return {"agents": [
+                {"agent_id": "01KXPDJDW4ZM87R9QY36BDDXX6", "agent_slug": "mm"},
+                {"agent_id": "01KXPDJDW4ZM87R9QY36BDDXX7", "agent_slug": "other"},
+            ]}
+        return {"stopped": True, "closed": params["close"]}
+
+    monkeypatch.setattr(control_client, "call_control", fake_call_control)
+
+    # A ULID target stops exactly that run — no listing round-trip.
+    cli.main(["stop", "01KXPDJDW4ZM87R9QY36BDDXX6"])
+    assert calls == [("agent.verb", {
+        "slug": "", "verb": "stop",
+        "agent_id": "01KXPDJDW4ZM87R9QY36BDDXX6", "close": False,
+    })]
+    assert "stopped" in capsys.readouterr().out
+
+    # A slug target stops all ITS live runs (and only its).
+    calls.clear()
+    cli.main(["stop", "mm", "--close"])
+    assert calls[0][0] == "agent.list"
+    stops = [p for m, p in calls if m == "agent.verb"]
+    assert stops == [{
+        "slug": "mm", "verb": "stop",
+        "agent_id": "01KXPDJDW4ZM87R9QY36BDDXX6", "close": True,
+    }]
+
+
+def test_stop_reports_no_live_runs(monkeypatch, capsys):
+    from condor.control import client as control_client
+
+    async def fake_call_control(method, params=None, **kw):
+        return {"agents": []}
+
+    monkeypatch.setattr(control_client, "call_control", fake_call_control)
+    cli.main(["stop"])
+    assert "no live runs" in capsys.readouterr().out

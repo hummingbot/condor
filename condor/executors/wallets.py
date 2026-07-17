@@ -7,8 +7,8 @@ The sealed, account-keyed ``store/venues.json`` (see ``condor.accounts``) is
 the ONLY credential source for trading:
 
 - **Environment variables are never read by these loaders** — the old
-  env-over-config precedence is deleted, not inverted. ``condor account
-  import-env`` (``python -m condor.cli account import-env``) is the explicit
+  env-over-config precedence is deleted, not inverted. ``condor accounts
+  import-env`` (``python -m condor.cli accounts import-env``) is the explicit
   one-shot path from env credentials into the store, through the same
   onboarding validation (custody derivation + read-only probe) as the
   dashboard.
@@ -75,7 +75,7 @@ def _account_fields(venue_id: str, account: Optional[str]) -> tuple[AccountRef, 
         ref = store.resolve(venue_id, account)
     except AccountResolutionError as e:
         raise AccountResolutionError(
-            f"{e} — onboard via the dashboard or `python -m condor.cli account "
+            f"{e} — onboard via the dashboard or `python -m condor.cli accounts "
             "import-env` (env credentials alone are no longer read)"
         ) from None
     return ref, _decrypted(store.account_fields(ref))

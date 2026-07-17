@@ -7,15 +7,17 @@ Subcommands:
                  operator, loopback-gated (§5.5) — no login/identity step.
     update       pull the latest Condor from the current branch and
                  sync dependencies (restart `condor serve` after).
-    account      structured account store (§6.2b) management:
+    accounts     structured account store (§6.2b) management. The bare
+                 verb lists accounts (redacted: venue, custody address,
+                 display name, default marker), most recently modified
+                 first — the standard collection-verb grammar
+                 (docs/cli-plan.md, principle 7).
                    import-env  EXPLICIT one-shot onboarding from the legacy
                                CONDOR_* env vars (custody derived from the
                                credentials, read-only probe unless
                                --no-probe, sealed at rest). Idempotent —
                                accounts are keyed by custody address. The
                                loaders themselves never read env vars.
-                   list        redacted listing (venue, custody address,
-                               display name, default marker).
 
 Product questions live here, in Python, re-runnable forever — the bash
 installer (install.sh) only bootstraps and then hands off to `init`.
@@ -283,22 +285,32 @@ def cmd_account_import_env(args) -> None:
         )
 
 
-def cmd_account_list(args) -> None:
-    """Redacted listing: venue, custody address, name, default marker."""
+def cmd_accounts_list(args) -> None:
+    """Redacted listing, most recently modified first (venue, custody
+    address, name, default marker)."""
     from condor.executors.wallets import account_store
 
     data = account_store().load()
     rows = [
-        (venue_id, addr, acct.get("name", ""), addr == entry.get("default_account"))
+        (
+            acct.get("updated_at", ""),
+            venue_id,
+            addr,
+            acct.get("name", ""),
+            addr == entry.get("default_account"),
+        )
         for venue_id, entry in sorted(data.items())
         if not venue_id.startswith("_")
         for addr, acct in entry.get("accounts", {}).items()
     ]
     if not rows:
         print("no accounts configured — onboard via the dashboard or "
-              "`python -m condor.cli account import-env`")
+              "`python -m condor.cli accounts import-env`")
         return
-    for venue_id, addr, name, is_default in rows:
+    # Last modified first; accounts stored before updated_at stamping sort
+    # to the bottom in venue order (stable sort).
+    rows.sort(key=lambda r: r[0], reverse=True)
+    for _, venue_id, addr, name, is_default in rows:
         marker = "  (default)" if is_default else ""
         label = f"  {name}" if name else ""
         print(f"{venue_id}  {addr}{label}{marker}")
@@ -359,6 +371,48 @@ def cmd_serve(args) -> None:
     )
 
 
+def cmd_stop(args) -> None:
+    """Harness-independent stop — talks to the control socket directly.
+
+    The escape hatch for a wedged chat client (docs/agent-history-comparison.md
+    §9.3): when the harness UI hangs, the engine keeps trading; this reaches it
+    from any terminal. Takes a run ULID, an agent slug (stops all its live
+    runs), or nothing (stops every live run)."""
+    import asyncio
+    import json as _json
+
+    from condor.agents.runstore import is_run_id
+    from condor.control.client import ControlError, call_control
+
+    async def _stop() -> None:
+        if args.target and is_run_id(args.target):
+            targets = [(args.target, "")]
+        else:
+            live = await call_control("agent.list")
+            targets = [
+                (i["agent_id"], i.get("agent_slug", ""))
+                for i in live.get("agents", [])
+                if not args.target or i.get("agent_slug") == args.target
+            ]
+            if not targets:
+                scope = f" for {args.target!r}" if args.target else ""
+                print(f"no live runs{scope}")
+                return
+        for run_id, slug in targets:
+            result = await call_control(
+                "agent.verb",
+                {"slug": slug, "verb": "stop", "agent_id": run_id,
+                 "close": args.close},
+                timeout=120,
+            )
+            print(f"{run_id}: {_json.dumps(result)}")
+
+    try:
+        asyncio.run(_stop())
+    except ControlError as e:
+        raise SystemExit(f"control socket: {e} — is `condor serve` running?")
+
+
 def main(argv: list[str] | None = None) -> None:
     # The whole app resolves config.yml, .env and store/ relative to the
     # repo root — anchor there no matter where the CLI is invoked from.
@@ -393,9 +447,29 @@ def main(argv: list[str] | None = None) -> None:
     )
     p_serve.set_defaults(func=cmd_serve)
 
-    p_account = sub.add_parser("account", help="structured account store management (§6.2b)")
-    account_sub = p_account.add_subparsers(dest="account_command", required=True)
-    p_import = account_sub.add_parser(
+    p_stop = sub.add_parser(
+        "stop",
+        help="stop live runs directly over the control socket (works even "
+        "when the chat harness is wedged)",
+    )
+    p_stop.add_argument(
+        "target", nargs="?", default="",
+        help="run ULID or agent slug; omit to stop ALL live runs",
+    )
+    p_stop.add_argument(
+        "--close", action="store_true",
+        help="also close the runs' remaining owned inventory (default: detach)",
+    )
+    p_stop.set_defaults(func=cmd_stop)
+
+    p_accounts = sub.add_parser(
+        "accounts",
+        help="structured account store (§6.2b): bare verb lists accounts "
+        "(last-modified first, redacted)",
+    )
+    p_accounts.set_defaults(func=cmd_accounts_list)
+    accounts_sub = p_accounts.add_subparsers(dest="accounts_command")
+    p_import = accounts_sub.add_parser(
         "import-env",
         help="explicit one-shot onboarding from CONDOR_* env credentials",
     )
@@ -404,8 +478,6 @@ def main(argv: list[str] | None = None) -> None:
         help="skip the read-only venue probe (offline import)",
     )
     p_import.set_defaults(func=cmd_account_import_env)
-    p_list = account_sub.add_parser("list", help="redacted account listing")
-    p_list.set_defaults(func=cmd_account_list)
 
     args = parser.parse_args(argv)
     args.func(args)

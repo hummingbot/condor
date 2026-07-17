@@ -47,6 +47,7 @@ import json
 import os
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Iterator
 
@@ -124,7 +125,7 @@ class AccountStore:
                     f"{venue_id}: unsupported pre-v1 format — flat venue "
                     "entries (credential fields with no 'accounts' map) are "
                     "not readable. Re-onboard the account via the dashboard "
-                    "or `condor account import-env`."
+                    "or `condor accounts import-env`."
                 )
             accounts = entry["accounts"]
             if not isinstance(accounts, dict):
@@ -300,12 +301,16 @@ class AccountStore:
         this AFTER validation; the store itself only enforces schema rules.
         """
         ref = self._registry.account_ref(venue_id, custody_address)
+        stored = dict(fields)
+        stored["updated_at"] = (
+            datetime.now(timezone.utc).isoformat(timespec="seconds")
+        )
         with self.transaction() as data:
             if guard is not None:
                 guard(ref, data)
             entry = data.setdefault(venue_id, {"accounts": {}})
             entry.setdefault("accounts", {})
-            entry["accounts"][ref.custody_address] = dict(fields)
+            entry["accounts"][ref.custody_address] = stored
             if make_default or "default_account" not in entry:
                 entry["default_account"] = ref.custody_address
         return ref
