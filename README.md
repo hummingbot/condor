@@ -99,25 +99,63 @@ Then either:
 
 ## Agents
 
-Autonomous LLM-driven trading agents. Each agent is one `AGENT.md` spec —
-identity + strategy body + `default_config` + `denomination` + optional
-`schedule:` — validated and hashed (source + resolved) at every save and
-launch (§5.3 of docs/simplification-plan.md).
+An **agent** is a trading persona you define once in a plain-markdown file
+(`AGENT.md`): what it trades and how it thinks (its strategy), the venue and
+account it uses, and hard risk limits it can never exceed. You talk to it in
+plain language — from your harness chat or the dashboard — and Condor turns
+that request into the right kind of run.
 
-Four primitives operate an agent:
+### Putting an agent to work
 
-| Primitive | What it does |
-|---|---|
-| `consult` | ask the agent a question inline — no state, no disk |
-| `delegate` | one-off background task, pings you when done |
-| `experiment` | dry-run session — full loop, zero venue calls |
-| `session` | live stateful run on a tick schedule |
+There are four ways to engage an agent, but you never pick one by name — you
+just say what you want and Condor routes it. The only things that matter are
+**whose plan runs** and **whether you're watching**:
 
-**Routines are read-only by role**: they provide data that agents/executors
-consume and generate reports for humans. All execution goes through
-ExecutionService via executors.
+| You want to… | Say something like | Condor runs a… |
+|---|---|---|
+| Let the agent trade its own strategy | *"run the trender"*, *"start the market maker"* | **session** — its live tick loop, under its own risk limits |
+| Try that safely first, no real money | *"test it first"*, *"dry-run it"*, *"what would it do?"* | **experiment** — the full loop, every trade simulated |
+| Ask it something, or have it act while you watch | *"is BONK tradeable right now?"*, *"have it open a small position"* | **consult** — it answers/acts now, and **you approve each trade** |
+| Hand it a job and walk away | *"go build a scanner and ping me"*, *"unwind my ETH in the background, cap the loss at $50"* | **delegate** — it runs detached and notifies you when done |
 
-### Runtime shape
+Two quick tells if you're unsure:
+
+- **Its plan, or your task?** *"Run \<agent\>"* means "be yourself" — a session.
+  *"Have \<agent\> do \<one specific thing\>"* is a one-off task (consult or
+  delegate). Steering words like *"…focused on SOL today"* or *"…for 10 ticks"*
+  just shape the same session; they don't make it a task.
+- **Are you watching?** Present and want to approve each trade → **consult**.
+  Want it to run unattended → **delegate**, and for anything that trades you
+  name a budget up front (the budget *is* the permission).
+
+A **session** and a **delegation** are both just *runs* — ask *"how's it
+doing?"*, *"stop it"*, or *"how did it do?"* the same way for any of them, and
+Condor tracks them all in one run history. The full decision guide is in
+[docs/consult-delegate-merge.md](docs/consult-delegate-merge.md).
+
+### Safety by default
+
+- **Dry-run anything.** An experiment runs the complete strategy and journals
+  every decision without placing a single order — the way to trust an agent
+  before it touches real money.
+- **Risk limits are enforced, not requested.** Max exposure, max open
+  positions, and drawdown caps are checked by the runtime on every trade; the
+  model can't talk its way past them, and launch-time overrides can only make
+  them *stricter*.
+- **You can require approval.** Trades can be gated so each one asks you first
+  (in your harness chat or the dashboard); if no one answers, the default is to
+  decline.
+- **Read-only routines.** Routines (scanners, TA charts, reports) only fetch
+  and summarize data — every real trade goes through an executor.
+
+### Under the hood
+
+The rest of this section is architecture reference — skip it unless you're
+hacking on Condor itself. Each agent is one `AGENT.md` spec (identity +
+strategy body + `default_config` + `denomination` + optional `schedule:`),
+validated and hashed (source + resolved) at every save and launch.
+
+#### Runtime shape
 
 - **AgentService** (`condor/agents/service.py`) — the ONE owner of CRUD +
   lifecycle: create/update/delete (tombstone), run, control
@@ -155,7 +193,7 @@ ExecutionService via executors.
   after an experiment validates it). Agents read the global user-memory
   index but never write memory.
 
-### Attribution
+#### Attribution
 
 Every executor an agent creates carries `agent_slug` (who) + `agent_id`
 (which run — the RunStore ULID). Exposure, PnL, and stop scopes key on
@@ -164,7 +202,7 @@ those. Venue positions are NOT partitioned by attribution on netted venues
 overlapping account/instrument ownership; the lease manager (§6.2b)
 rejects a second Condor actor on the same (account, instrument).
 
-### On-disk layout
+#### On-disk layout
 
 ```
 agents/{slug}/
