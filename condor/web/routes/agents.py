@@ -474,32 +474,33 @@ async def list_agents():
 
 @router.get("/delegations")
 async def list_delegations():
-    """List in-flight and finished delegations (this process).
+    """List delegations from the RunStore (a delegation IS a run — C.1).
 
-    Returns the full record per task (status + result/error) so the dashboard can
-    render an at-a-glance list without a follow-up fetch per row. The registry is
-    in-memory and small (ephemeral, per-process), so the payload stays cheap.
-    Historical delegations live in the RunStore (``/agents/{slug}/runs?kind=delegation``).
+    Reads run metas of ``kind=delegation`` (newest first, live overlay on
+    running ones) rather than a separate in-memory registry, so live and
+    historical delegations come from the one source of truth.
     """
-    from condor.agents.delegate import get_all_delegations
-
-    return {"delegations": [dt.to_dict() for dt in get_all_delegations().values()]}
+    metas = _svc().list_runs(kind="delegation")
+    return {
+        "delegations": [
+            {
+                "task_id": m.get("run_id"),
+                "run_id": m.get("run_id"),
+                "agent": m.get("agent_slug"),
+                "status": m.get("status", ""),
+                "task": m.get("task", ""),
+                "started_at": m.get("started_at"),
+                "ended_at": m.get("ended_at"),
+            }
+            for m in metas
+        ]
+    }
 
 
 @router.get("/delegations/{task_id}")
 async def get_delegation_status(task_id: str):
-    """Get a delegation's status + result/error.
-
-    Live tasks come from the in-process registry; after a restart the
-    RunStore stream (kind=delegation, ``run_id == task_id``) still resolves,
-    so a task_id never goes dark just because the process died.
-    """
-    from condor.agents.delegate import get_delegation
-
-    dt = get_delegation(task_id)
-    if dt is not None:
-        return dt.to_dict()
-
+    """Get a delegation's status + result via the RunStore (``run_id ==
+    task_id``); the stream is the source of truth whether live or finished."""
     store = get_run_store()
     path = store.find_run_path(task_id)
     if path is not None:
@@ -521,13 +522,15 @@ async def get_delegation_status(task_id: str):
 
 @router.post("/delegations/{task_id}/stop")
 async def stop_delegation_route(task_id: str):
-    """Cancel a running delegation (status -> stopped)."""
-    from condor.agents.delegate import get_delegation, stop_delegation
+    """Cancel a running delegation. A delegation is a run, so this routes
+    through the same lifecycle stop as any run (``control_run`` — C.1)."""
+    from condor.agents.lifecycle import LifecycleError
 
-    if get_delegation(task_id) is None:
-        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
-    stopped = await stop_delegation(task_id)
-    return {"stopped": stopped}
+    try:
+        result = await _svc().control("", "stop", agent_id=task_id)
+    except LifecycleError as e:
+        raise _http(e)
+    return {"stopped": bool(result.get("stopped"))}
 
 
 # ── Runs (the one history API) ──
@@ -771,7 +774,8 @@ async def delegate_agent(slug: str, req: DelegateRequest):
         # Loud policy error: trading delegation with neither an AGENT.md
         # baseline nor a per-call override.
         raise HTTPException(status_code=400, detail=str(e))
-    return {"task_id": d["task_id"], "status": d["status"]}
+    # task_id is retained as an alias of run_id for the current dashboard.
+    return {"task_id": d["run_id"], "run_id": d["run_id"], "status": d["status"]}
 
 
 # ── Performance ──

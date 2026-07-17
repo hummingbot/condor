@@ -201,8 +201,9 @@ def fold_tool_call_event(
 ) -> dict | None:
     """Fold a streamed tool-call event into ``tc_map``, keyed by tool_call_id.
 
-    Shared reduction used by ``TickEngine._tick`` and ``delegate._make_event_sink``
-    so the create/patch semantics can't drift (ARCH-063). A :class:`ToolCallEvent`
+    Shared reduction used by ``TickEngine._tick`` (and any other streamed
+    tool-call folder) so the create/patch semantics can't drift (ARCH-063). A
+    :class:`ToolCallEvent`
     creates an entry (returned so the caller can append it to its own list) or
     patches ``status``/``name``/``input`` in place; a :class:`ToolCallUpdate`
     patches ``status``/``name``/``output``/``input``. Returns the newly created

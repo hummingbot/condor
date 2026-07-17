@@ -290,16 +290,27 @@ def freeze_spec(
     return frozen
 
 
-def resolve_agent_account(agent, launch_config: dict[str, Any]) -> AccountRef:
+def agent_venue(agent) -> str:
+    """The venue an agent trades on — fixed AGENT identity, not a per-launch
+    override (``venue`` is not a launch-overridable key, §5.3), so every path
+    (session, consult, delegation) reads it the same way. Declared in
+    ``default_config.venue``; ``solana`` is the default."""
+    return str((getattr(agent, "default_config", None) or {}).get("venue") or "solana")
+
+
+def resolve_agent_account(agent) -> AccountRef:
     """Resolve the exact custody identity for a trading run.
 
     An authored ``agent.account`` is already a canonical custody address.
     Empty means the venue default is intentionally late-bound once, here, at
     run freeze time. The returned AccountRef is then carried by the frozen
     spec and capability; executor requests never re-resolve a default.
+
+    Venue comes from the agent's identity (:func:`agent_venue`), NOT a launch
+    config — a consult/delegate task never reaches into ``default_config`` for
+    it (Q2.1).
     """
     from condor.executors.wallets import account_store
 
-    venue_id = str(launch_config.get("venue") or "solana")
     selector = (getattr(agent, "account", "") or "").strip() or None
-    return account_store().resolve(venue_id, selector)
+    return account_store().resolve(agent_venue(agent), selector)

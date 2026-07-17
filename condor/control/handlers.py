@@ -79,31 +79,16 @@ def build_agent_handlers() -> dict[str, Handler]:
         return {"agent": agent, "answer": answer}
 
     async def _delegate_start(agent, task, risk_limits=None, timeout_s=None):
-        dt = await dg.start_delegation(
+        # A delegation is a run: start returns its run_id, and the caller
+        # tracks/stops it through run.get / agent.verb like any other run
+        # (there is no separate delegate get/list/stop surface — C.1).
+        run_id = await dg.start_delegation(
             agent_slug=agent,
             task=task,
             timeout_s=timeout_s,
             risk_limits=risk_limits,
         )
-        return {"task_id": dt.task_id, "status": dt.status}
-
-    def _delegate_get(task_id):
-        dt = dg.get_delegation(task_id)
-        if dt is not None:
-            return dt.to_dict()
-        # After a restart the live registry is empty; the RunStore stream
-        # still resolves so a task_id never goes dark.
-        try:
-            meta = svc.get_run(task_id)
-            meta["transcript"] = svc.export_run(task_id)
-            return meta
-        except LifecycleError:
-            raise LifecycleError(404, f"Delegation '{task_id}' not found")
-
-    async def _delegate_stop(task_id):
-        if dg.get_delegation(task_id) is None:
-            raise LifecycleError(404, f"Delegation '{task_id}' not found")
-        return {"stopped": await dg.stop_delegation(task_id)}
+        return {"run_id": run_id, "status": "running"}
 
     async def _notify_emit(text, agent_id="", kind="agent", origin="mcp"):
         from condor.notifications import notify
@@ -182,13 +167,9 @@ def build_agent_handlers() -> dict[str, Handler]:
         },
         "agent.delete": lambda slug, reason="": svc.delete(slug, reason=reason),
         "agent.directive": lambda **kw: svc.inject_directive(**kw),
-        # delegations
+        # delegations: start only — a delegation is a run, so status/history
+        # go through run.get/run.list and stop through agent.verb (C.1).
         "delegate.start": lambda **kw: _delegate_start(**kw),
-        "delegate.list": lambda: {
-            "delegations": [d.to_dict() for d in dg.get_all_delegations().values()]
-        },
-        "delegate.get": lambda task_id: _delegate_get(task_id),
-        "delegate.stop": lambda task_id: _delegate_stop(task_id),
     }
 
 

@@ -39,15 +39,18 @@ def _build_instructions() -> str:
         'and follow its steps. When it links a routine (shown as "→ routine: X"), '
         'run that routine via `manage_routines(action="run", name="X", config={})` '
         "instead of reimplementing it by hand.\n"
-        "- If a domain AGENT matches, delegate with "
-        '`consult(agent="<slug>", task="...", context="...")` and summarize its answer. '
-        "For a long, one-off task you want run in the background until done (it pings "
-        'the user when finished), use `delegate(action="start", agent="<slug>", '
-        'task="...")` instead and poll with `delegate(action="get", task_id="...")`.\n'
+        "- If a domain AGENT matches, route to it with "
+        '`consult(agent="<slug>", task="...", context="...")` and summarize its answer '
+        "(consult = attended, blocking, each trade goes to the user to approve). "
+        'ONLY when the user explicitly detaches ("in the background", "ping me '
+        'when done") use `delegate(agent="<slug>", task="...", risk_limits={…})` '
+        "— unattended, budget-gated (pass caps for a trading agent); it returns a "
+        "run_id you track with `get_run`/`control_run`, NOT a delegate poll. See "
+        "the EXECUTION VERBS block below for run vs consult vs delegate.\n"
         "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
         "design a routine MUST go through the `routine_builder` agent "
         '(`consult(agent="routine_builder", ...)` for inline work, '
-        '`delegate(action="start", agent="routine_builder", ...)` for background). '
+        '`delegate(agent="routine_builder", ...)` for background). '
         "It is the single entry point for routine authoring — do NOT write routine "
         "code yourself and do NOT hand-roll it with raw `manage_routines` "
         "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
@@ -59,7 +62,56 @@ def _build_instructions() -> str:
         'Discover more anytime with `manage_skill(action="list")`.'
     )
 
-    sections = [base]
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[2]
+    cli = (
+        "[OPS CLI — `condor`, for hosts with shell access]\n"
+        "Operational/diagnostic work has NO MCP tool — it belongs to the `condor` "
+        f"CLI (on PATH via ~/.local/bin/condor, else `uv run --directory {repo_root} "
+        "condor …`). Run it via your shell for:\n"
+        "- `condor doctor [--fix]` — health checks (socket, clock skew, stale MCP "
+        'clients, venue probes, spec validation); ANY health/setup/"why is X '
+        'failing" question starts here\n'
+        "- `condor status` / `condor logs [-f]` / `condor runs [export <id>]` — "
+        "server, live runs, server log, run history (file-backed; work with the "
+        "server down)\n"
+        "- `condor stop [run|slug] [--close]` — the escape hatch when MCP calls "
+        "hang or the server is wedged\n"
+        "- `condor accounts add/remove/default` — venue credential lifecycle "
+        "(keys via stdin, never argv); `condor serve` — start the server\n"
+        "Contract: compact Markdown out, `--json` for raw values, stable exit "
+        "codes (0 ok · 2 not found · 3 server not running · 4 config error). "
+        "Prefer the typed MCP tools for trading/agent domain work; prefer the CLI "
+        "for ops, diagnostics, and anything that must survive a wedged server."
+    )
+
+    verbs = (
+        "[EXECUTION VERBS — run vs consult vs delegate vs experiment]\n"
+        "When the user wants an agent to DO something, pick the verb in order:\n"
+        '1. WHOSE GOAL? The agent\'s own strategy — "run/start/launch <agent>", '
+        '"let it trade", "on its schedule" → run_agent(slug): a SESSION running '
+        "the agent's default_config loop under journal-seeded risk. Steering "
+        '("focused on SOL", "10 ticks", "tighter stops") is trading_context/'
+        "max_ticks/config on the SAME run_agent call, not a task. A one-off goal "
+        "you specify → a TASK (step 3). Boundary: finishes by itself = task; runs "
+        "until stopped / N ticks = the mandate = run_agent.\n"
+        '2. REHEARSAL? "test/try it/dry run/simulate/paper/without real money" → '
+        "run_agent(slug, dry_run=true): one simulated tick, all mutations blocked. "
+        'Ambiguous "try it" → ASK before going live.\n'
+        "3. TASK — attended → consult (blocks; each trade goes to the user to "
+        'approve; DEFAULT for "have <agent> do X"). Detached (explicit "in the '
+        'background"/"ping me when done") → delegate + risk_limits budget for a '
+        "trading agent. Never delegate just to avoid waiting when the user could "
+        "approve.\n"
+        "MULTI-STAGE: status/stop/history of ANY run (session, experiment, consult, "
+        "delegation — all share one run_id) go through get_run / list_runs / "
+        "control_run(run_id, verb, close?) / search_history / "
+        "manage_executors(performance). Don't invent delegate.get/stop — a "
+        "delegation is a run; track it like one."
+    )
+
+    sections = [base, cli, verbs]
     try:
         from condor.memory import SkillStore
         from mcp_servers.condor.settings import settings
@@ -112,55 +164,45 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
 @mcp.tool()
 @handle_errors("delegate task")
 async def delegate(
-    action: str,
     agent: str = "",
     task: str = "",
-    task_id: str = "",
     risk_limits: dict | None = None,
 ) -> dict:
-    """Delegate a one-off task to a background agent instance.
+    """Start a DETACHED background task and return its run_id immediately.
 
     DELEGATE is the async, unattended sibling of CONSULT. Where ``consult`` blocks
-    and returns an answer now (mutations human-gated), ``delegate`` hands a
-    goal-oriented task to a DETACHED agent that works autonomously until done, then
-    notifies the user with the result — while you stay free to do other things. Use
-    it for "go build/scan/produce X and ping me when finished" (e.g. "create a
-    routine that scans SOL pools").
+    and returns an answer now (each trade human-gated), ``delegate`` hands a
+    goal-oriented task to a detached agent that works autonomously until done, then
+    notifies the user — while you stay free. Use it ONLY when the user explicitly
+    detaches ("in the background", "ping me when done", "while I'm out") — e.g.
+    "go build a routine that scans SOL pools and ping me". If the user is present
+    and would approve trades, use ``consult`` instead.
+
+    A delegation IS a run: this returns ``{"run_id", "status": "running",
+    "next_steps"}`` — track it with ``get_run(run_id)`` and stop it with
+    ``control_run(run_id, "stop")``. There is NO delegate get/list/stop.
 
     Authorization: a delegation to a TRADING agent (one that has an AGENT.md
     risk_limits baseline, is given caps here, or can reach manage_executors —
     declaring it, or declaring no tool scope at all) runs under a zero-seeded
-    risk gate — tool calls auto-approve within caps. The caps come from the
-    optional risk_limits arg when given (it REPLACES the agent's AGENT.md
-    baseline for this one run — what you pass is exactly what governs), else
-    the baseline. A trading delegation with neither errors at start;
-    "unbounded" is expressed by passing explicitly large caps. Non-trading
-    specialists (e.g. routine_builder) run with full auto-approve.
-
-    The user tracks a delegation from the dashboard and is pinged automatically
-    (a notification outbox entry) when it finishes. Never invent a status
-    command; "start" returns a next_steps hint with the correct wording.
-
-    Actions:
-    - "start": Begin a delegation (requires agent, task). Returns immediately with
-      {"task_id", "status": "running", "next_steps"} — does NOT wait for completion.
-    - "list": List in-flight/finished delegations (task_id, agent, status).
-    - "get": Get a delegation's status + result/error (requires task_id).
-    - "stop": Cancel a running delegation (requires task_id).
+    risk gate — tool calls auto-approve within caps, and the caps ARE the
+    authorization (nobody approves each trade). The caps come from the optional
+    risk_limits arg when given (it REPLACES the agent's AGENT.md baseline for
+    this one run), else the baseline. A trading delegation with neither errors
+    at start; "unbounded" is expressed by passing explicitly large caps.
+    Non-trading specialists (e.g. routine_builder) run with full auto-approve.
 
     Args:
-        action: start | list | get | stop.
-        agent: Agent slug to delegate to (for start).
-        task: The one-off task, in plain language (for start).
-        task_id: Delegation id returned by start (for get/stop).
-        risk_limits: Per-delegation risk caps override (for start; trading agents
-            only). Keys: max_position_size_quote, max_open_executors,
+        agent: Agent slug to delegate to.
+        task: The one-off task, in plain language.
+        risk_limits: Per-delegation risk caps override (trading agents only).
+            Keys: max_position_size_quote, max_open_executors,
             max_drawdown_pct, shutdown_drawdown_pct. Replaces the agent baseline.
 
     Returns:
-        Action-specific result dict.
+        {"run_id", "status": "running", "next_steps"} or {"error": "..."}.
     """
-    return await delegate_tool.delegate(action, agent, task, task_id, risk_limits)
+    return await delegate_tool.delegate(agent, task, risk_limits)
 
 
 @mcp.tool()

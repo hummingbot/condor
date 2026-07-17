@@ -54,7 +54,7 @@ async def run_consult(
     if agent.can_trade:
         from condor.agents.spec import resolve_agent_account
 
-        account_ref = resolve_agent_account(agent, agent.default_config or {})
+        account_ref = resolve_agent_account(agent)
 
     run_store = get_run_store()
     run_id = run_store.start_run(

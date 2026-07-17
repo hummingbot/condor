@@ -332,13 +332,14 @@ class AgentService:
         from condor.agents.delegate import DEFAULT_TIMEOUT_S, start_delegation
 
         self._reject_tombstoned(slug, "delegate")
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug=slug,
             task=task,
             risk_limits=risk_limits,
             timeout_s=timeout_s if timeout_s is not None else DEFAULT_TIMEOUT_S,
         )
-        return dt.to_dict() if hasattr(dt, "to_dict") else dt
+        # A delegation is a run; the caller tracks it via get_run/control_run.
+        return {"run_id": run_id, "status": "running"}
 
     # ------------------------------------------------------------------
     # Serialization helper shared by the adapters

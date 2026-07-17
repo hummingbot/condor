@@ -172,7 +172,15 @@ async def apply_verb(
                 if agent_id
                 else runtime.stop_slug_executors(slug, keep_position=not close)
             )
-        if not engines and not stopped_durable:
+        # A delegation is a run, not a TickEngine: stopping it means cancelling
+        # its background task here (its executors were just stopped above by
+        # run attribution). This is the wire-in for `control_run(run_id, stop)`.
+        cancelled_delegation = False
+        if agent_id:
+            from condor.agents.delegate import cancel_delegation
+
+            cancelled_delegation = cancel_delegation(agent_id)
+        if not engines and not stopped_durable and not cancelled_delegation:
             raise LifecycleError(404, "No run or durable executor scope found")
         return {
             "stopped": True,

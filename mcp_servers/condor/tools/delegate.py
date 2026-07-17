@@ -2,58 +2,35 @@
 
 DELEGATE is the async, unattended sibling of CONSULT: instead of blocking for an
 answer, it hands a goal-oriented task to a detached Agent that runs until done,
-then notifies the user. This tool just calls back into the main process (where the
-agent runtime lives) via the web API and returns a ``task_id`` to poll/stop.
+then notifies the user. It just calls back into the main process (where the
+agent runtime lives) over the control socket and returns a ``run_id``.
+
+A delegation IS a run: there is no delegate get/list/stop — track it with
+``get_run(run_id)`` and stop it with ``control_run(run_id, "stop")``, like any
+run (C.1).
 """
 
 from mcp_servers.condor.condor_client import call_control
 
 
 async def delegate(
-    action: str,
     agent: str = "",
     task: str = "",
-    task_id: str = "",
     risk_limits: dict | None = None,
 ) -> dict:
-    """Dispatch a delegate action (start | list | get | stop)."""
-    action = (action or "").lower()
-
-    if action == "start":
-        if not agent or not task:
-            return {"error": "agent and task are required to start a delegation"}
-        result = await call_control(
-            "delegate.start",
-            {
-                "agent": agent,
-                "task": task,
-                "risk_limits": risk_limits,
-            },
+    """Start a detached background delegation; returns its ``run_id``."""
+    if not agent or not task:
+        return {"error": "agent and task are required to start a delegation"}
+    result = await call_control(
+        "delegate.start",
+        {"agent": agent, "task": task, "risk_limits": risk_limits},
+    )
+    if isinstance(result, dict) and not result.get("error"):
+        result["next_steps"] = (
+            "Running in the background — the user is notified automatically when "
+            "it finishes. A delegation IS a run: check progress with "
+            'get_run(run_id="<id>") and stop it with '
+            'control_run(run_id="<id>", verb="stop"). Do NOT invent a delegate '
+            "get/list/stop command — there is none."
         )
-        # Spell out how the user tracks this so the model never INVENTS a status
-        # command. There is no "/task" command — the user-facing one is
-        # "/delegations"; the user is also pinged automatically on completion.
-        if isinstance(result, dict) and not result.get("error"):
-            result["next_steps"] = (
-                "Running in the background — the user is notified automatically "
-                "when it finishes. Tell them they can check progress anytime with "
-                "the dashboard. You can poll it yourself "
-                'with delegate(action="get", task_id="<id>"). Do NOT invent any '
-                "other status command (e.g. there is no /task command)."
-            )
-        return result
-
-    if action == "list":
-        return await call_control("delegate.list")
-
-    if action == "get":
-        if not task_id:
-            return {"error": "task_id is required for get"}
-        return await call_control("delegate.get", {"task_id": task_id})
-
-    if action == "stop":
-        if not task_id:
-            return {"error": "task_id is required for stop"}
-        return await call_control("delegate.stop", {"task_id": task_id})
-
-    return {"error": f"Unknown action '{action}'. Use start | list | get | stop."}
+    return result

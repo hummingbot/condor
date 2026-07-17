@@ -24,8 +24,8 @@ from condor.accounts import (
     PreV1FormatError,
     ProbeError,
     onboard_account,
+    onboarding,
 )
-from condor.accounts import onboarding
 
 _KEY = base64.b64encode(b"t" * 32).decode()
 HL_KEY = "0x" + "11" * 32
@@ -35,14 +35,23 @@ PM_KEY = "0x" + "22" * 32
 PM_SIGNER = Account.from_key(PM_KEY).address.lower()
 
 _ENV_VARS = (
-    "CONDOR_HL_AGENT_KEY", "CONDOR_HL_ACCOUNT_ADDRESS", "CONDOR_HL_NETWORK",
-    "CONDOR_SOLANA_SECRET_KEY", "CONDOR_SOLANA_KEYSTORE",
-    "CONDOR_SOLANA_PASSPHRASE", "CONDOR_SOLANA_RPC",
-    "CONDOR_POLYMARKET_KEY", "CONDOR_POLYMARKET_FUNDER",
-    "CONDOR_POLYMARKET_SIG_TYPE", "CONDOR_POLYMARKET_HOST",
-    "CONDOR_POLYMARKET_API_KEY", "CONDOR_POLYMARKET_API_SECRET",
-    "CONDOR_POLYMARKET_API_PASSPHRASE", "CONDOR_POLYMARKET_RELAYER_API_KEY",
-    "CONDOR_POLYMARKET_RELAYER_ADDRESS", "CONDOR_JUPITER_API_KEY",
+    "CONDOR_HL_AGENT_KEY",
+    "CONDOR_HL_ACCOUNT_ADDRESS",
+    "CONDOR_HL_NETWORK",
+    "CONDOR_SOLANA_SECRET_KEY",
+    "CONDOR_SOLANA_KEYSTORE",
+    "CONDOR_SOLANA_PASSPHRASE",
+    "CONDOR_SOLANA_RPC",
+    "CONDOR_POLYMARKET_KEY",
+    "CONDOR_POLYMARKET_FUNDER",
+    "CONDOR_POLYMARKET_SIG_TYPE",
+    "CONDOR_POLYMARKET_HOST",
+    "CONDOR_POLYMARKET_API_KEY",
+    "CONDOR_POLYMARKET_API_SECRET",
+    "CONDOR_POLYMARKET_API_PASSPHRASE",
+    "CONDOR_POLYMARKET_RELAYER_API_KEY",
+    "CONDOR_POLYMARKET_RELAYER_ADDRESS",
+    "CONDOR_JUPITER_API_KEY",
 )
 
 
@@ -91,7 +100,10 @@ def test_onboard_rejects_mismatched_typed_address(store_path):
 def test_onboard_hyperliquid_normalizes_and_validates(store_path):
     ref = onboard_account(
         "hyperliquid",
-        {"agent_private_key": HL_KEY, "account_address": HL_ACCT.upper().replace("0X", "0x")},
+        {
+            "agent_private_key": HL_KEY,
+            "account_address": HL_ACCT.upper().replace("0X", "0x"),
+        },
         name="main",
         prober=_noop_probe,
     )
@@ -133,9 +145,7 @@ def test_onboard_polymarket_custody_signer_vs_funder(store_path):
             prober=_noop_probe,
         )
     wallets.account_store().remove_account("polymarket", funder)
-    ref = onboard_account(
-        "polymarket", {"private_key": PM_KEY}, prober=_noop_probe
-    )
+    ref = onboard_account("polymarket", {"private_key": PM_KEY}, prober=_noop_probe)
     assert ref.custody_address == PM_SIGNER
     creds = wallets.load_polymarket_creds()
     assert creds["private_key"] == PM_KEY and creds["signature_type"] == 0
@@ -190,12 +200,16 @@ def test_duplicate_display_name_rejected(store_path):
 
 def test_account_selector_picks_named_account(store_path):
     onboard_account(
-        "hyperliquid", {"agent_private_key": HL_KEY, "account_address": HL_ACCT},
-        name="main", prober=_noop_probe,
+        "hyperliquid",
+        {"agent_private_key": HL_KEY, "account_address": HL_ACCT},
+        name="main",
+        prober=_noop_probe,
     )
     onboard_account(
-        "hyperliquid", {"agent_private_key": HL_KEY, "account_address": HL_ACCT_2},
-        name="alt", prober=_noop_probe,
+        "hyperliquid",
+        {"agent_private_key": HL_KEY, "account_address": HL_ACCT_2},
+        name="alt",
+        prober=_noop_probe,
     )
     assert wallets.load_hyperliquid_creds("alt")["account_address"] == HL_ACCT_2
     assert wallets.load_hyperliquid_creds(HL_ACCT_2)["account_address"] == HL_ACCT_2
@@ -216,9 +230,16 @@ def test_env_vars_alone_no_longer_trade(store_path, monkeypatch):
 
 
 def test_flat_pre_v1_store_raises_from_loader(store_path):
-    store_path.write_text(json.dumps({
-        "hyperliquid": {"agent_private_key": "enc:v1:X", "account_address": HL_ACCT}
-    }))
+    store_path.write_text(
+        json.dumps(
+            {
+                "hyperliquid": {
+                    "agent_private_key": "enc:v1:X",
+                    "account_address": HL_ACCT,
+                }
+            }
+        )
+    )
     with pytest.raises(PreV1FormatError, match="unsupported pre-v1 format"):
         wallets.load_hyperliquid_creds()
     with pytest.raises(PreV1FormatError):
@@ -259,7 +280,8 @@ def test_import_env_probe_failure_is_loud(store_path, monkeypatch):
     monkeypatch.setenv("CONDOR_HL_AGENT_KEY", HL_KEY)
     monkeypatch.setenv("CONDOR_HL_ACCOUNT_ADDRESS", HL_ACCT)
     monkeypatch.setitem(
-        onboarding._PROBERS, "hyperliquid",
+        onboarding._PROBERS,
+        "hyperliquid",
         lambda *a: (_ for _ in ()).throw(RuntimeError("down")),
     )
     with pytest.raises(SystemExit):
@@ -274,29 +296,41 @@ def test_import_env_nothing_to_import(store_path, capsys):
 
 def test_account_list_redacted(store_path, capsys):
     onboard_account(
-        "hyperliquid", {"agent_private_key": HL_KEY, "account_address": HL_ACCT},
-        name="main", prober=_noop_probe,
+        "hyperliquid",
+        {"agent_private_key": HL_KEY, "account_address": HL_ACCT},
+        name="main",
+        prober=_noop_probe,
     )
     cli.main(["accounts"])
     out = capsys.readouterr().out
-    assert f"hyperliquid  {HL_ACCT}  main  (default)" in out
+    line = next(ln for ln in out.splitlines() if HL_ACCT in ln)
+    assert "hyperliquid" in line and "main" in line and "yes" in line  # default marker
     assert HL_KEY not in out  # never the secret
     assert "enc:v1:" not in out
 
 
 def test_account_list_orders_by_last_modified(store_path, capsys):
     onboard_account(
-        "hyperliquid", {"agent_private_key": HL_KEY, "account_address": HL_ACCT},
-        name="hl", prober=_noop_probe,
+        "hyperliquid",
+        {"agent_private_key": HL_KEY, "account_address": HL_ACCT},
+        name="hl",
+        prober=_noop_probe,
     )
     kp = Keypair()
     sol = onboard_account(
-        "solana", {"secret_key_b58": str(kp)}, name="sol", prober=_noop_probe,
+        "solana",
+        {"secret_key_b58": str(kp)},
+        name="sol",
+        prober=_noop_probe,
     )
     store = wallets.account_store()
     with store.transaction() as data:
-        data["hyperliquid"]["accounts"][HL_ACCT]["updated_at"] = "2026-01-01T00:00:00+00:00"
-        data["solana"]["accounts"][sol.custody_address]["updated_at"] = "2026-07-01T00:00:00+00:00"
+        data["hyperliquid"]["accounts"][HL_ACCT][
+            "updated_at"
+        ] = "2026-01-01T00:00:00+00:00"
+        data["solana"]["accounts"][sol.custody_address][
+            "updated_at"
+        ] = "2026-07-01T00:00:00+00:00"
     cli.main(["accounts"])
     out = capsys.readouterr().out
     assert out.index("solana") < out.index("hyperliquid")  # newest first

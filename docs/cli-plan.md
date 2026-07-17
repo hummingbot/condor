@@ -100,16 +100,29 @@ do:
 
 ## Today (2026-07-16)
 
+**IMPLEMENTED 2026-07-16**: the contract (exit codes, markdown/`--json`,
+`[project.scripts]` entry point), all of Tier 1, and Tier 2 shipped as
+the `condor/cli/` package (typer, mirroring `~/hummingbot/hummingbot/cli`:
+`main.py` + `output.py` + one module per command under `commands/`) — an
+owner-approved deviation from principle 4's argparse. `serve` now logs to
+`store/logs/condor.log` (rotating) as well as stdout. Owner cuts 2026-07-17:
+`approvals` and `learnings` REMOVED from the surface (approvals resolve via
+chat/dashboard; learnings curation is editing `agents/<slug>/learnings.md`
+directly). Still open: the per-row dashboard route stripping (migration map
+above) and Tier 3.
+
 | Command | Does |
 |---|---|
 | `init` | harness onboarding (idempotent, multi-select) |
 | `update` | git pull current branch + `uv sync` (`--check-only`) |
 | `serve` | THE process: control socket + scheduler + runtime + web |
 | `stop [run\|slug] [--close]` | stop live runs over the socket (shipped during incident 3) |
-| `accounts [import-env]` | bare verb lists accounts (last-modified first, redacted); `import-env` = sealed store onboarding |
+| `accounts [add\|remove\|default\|import-env]` | bare verb lists (last-modified first, redacted); full lifecycle from the terminal |
+| `status` / `doctor [--fix]` / `runs [export]` / `logs [-f]` | Tier 1 |
+| `start` / `performance` / `reports` / `routines` / `agents` / `memory` | Tier 2 (`performance` reads the executor logs directly — works with the server down) |
 
-Also planned as step 0: a `[project.scripts] condor = "condor.cli:main"`
-entry point so `condor …` works without `uv run python -m condor.cli …`.
+Step 0 landed as `[project.scripts] condor = "condor.cli.main:main"`, so
+`condor …` works without `uv run python -m condor.cli …` (which still works).
 
 ## Surfaces: is the dashboard just another client — and do we need three?
 

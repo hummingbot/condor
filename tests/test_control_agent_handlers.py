@@ -41,7 +41,9 @@ def test_agent_list_dispatches(tmp_path, monkeypatch):
             await server.stop()
 
     out = asyncio.run(run())
-    assert out == {"agents": [{"agent_id": "mm_1", "status": "running", "tick_count": 3}]}
+    assert out == {
+        "agents": [{"agent_id": "mm_1", "status": "running", "tick_count": 3}]
+    }
 
 
 def test_agent_verb_unknown_errors(tmp_path):
@@ -51,7 +53,8 @@ def test_agent_verb_unknown_errors(tmp_path):
         server = await _serve(sock)
         try:
             await call_control(
-                "agent.verb", {"slug": "mm", "agent_id": "mm_1", "verb": "bogus"},
+                "agent.verb",
+                {"slug": "mm", "agent_id": "mm_1", "verb": "bogus"},
                 socket_path=sock,
             )
         finally:
@@ -62,36 +65,47 @@ def test_agent_verb_unknown_errors(tmp_path):
     assert ei.value.status == 400
 
 
-def test_delegate_list_dispatches(tmp_path, monkeypatch):
+def test_delegate_start_returns_run_id(tmp_path, monkeypatch):
+    """delegate.start dispatches to start_delegation and returns its run_id
+    (a delegation is a run — C.1)."""
     from condor.agents import delegate as dg
 
-    monkeypatch.setattr(dg, "get_all_delegations", lambda: {})
+    async def fake_start(*, agent_slug, task, timeout_s=None, risk_limits=None):
+        return "01RUNDELEGATE0000000000000"
+
+    monkeypatch.setattr(dg, "start_delegation", fake_start)
     sock = _sock()
 
     async def run():
         server = await _serve(sock)
         try:
-            return await call_control("delegate.list", socket_path=sock)
+            return await call_control(
+                "delegate.start", {"agent": "scout", "task": "scan"}, socket_path=sock
+            )
         finally:
             await server.stop()
 
-    assert asyncio.run(run()) == {"delegations": []}
+    assert asyncio.run(run()) == {
+        "run_id": "01RUNDELEGATE0000000000000",
+        "status": "running",
+    }
 
 
-def test_delegate_get_missing_errors(tmp_path, monkeypatch):
-    from condor.agents import delegate as dg
-
-    monkeypatch.setattr(dg, "get_delegation", lambda _tid: None)
+def test_delegate_get_and_stop_are_removed(tmp_path):
+    """The delegation status/stop surface is gone (C.1) — a delegation is a
+    run, tracked via run.get / agent.verb. The old methods now 404."""
     sock = _sock()
 
-    async def run():
+    async def run(method, params):
         server = await _serve(sock)
         try:
-            # a task_id that won't match the "<slug>-dN" transcript-file fallback
-            await call_control("delegate.get", {"task_id": "nomatch"}, socket_path=sock)
+            await call_control(method, params, socket_path=sock)
         finally:
             await server.stop()
 
-    with pytest.raises(ControlError) as ei:
-        asyncio.run(run())
-    assert ei.value.status == 404
+    for method in ("delegate.list", "delegate.get", "delegate.stop"):
+        with pytest.raises(ControlError) as ei:
+            asyncio.run(
+                run(method, {"task_id": "x"} if method != "delegate.list" else None)
+            )
+        assert ei.value.status == 404  # unknown method

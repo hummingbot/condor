@@ -20,69 +20,33 @@ primitive under an unattended policy (refactor-02 §4.1):
 - **Specialists that cannot trade and carry no baseline** (e.g.
   ``routine_builder``) keep full auto-approve.
 
-The in-memory registry dies with the process, like a running ``TickEngine`` in
-``_engines``. Each delegation is persisted as a ``kind: delegation`` RunStore
-stream (§7.1): ``run_started`` lands before the run (a crash leaves an
-inspectable stream that the startup sweep closes as interrupted), tool calls
-stream in as they land, and ``run_ended`` carries the terminal status. The
-markdown transcript is a generated export, never parsed back.
+**A delegation IS a run (§7.1).** Its durable record is the
+``kind: delegation`` RunStore stream — ``run_started`` before the run (a crash
+leaves an inspectable husk the startup sweep closes as interrupted), tool calls
+as they land, ``run_ended`` at the terminal status, and the result as a
+``state_snapshot``. So status/history come from ``get_run``/``list_runs`` and
+stopping from ``control_run`` — exactly like any run; there is no separate
+delegation status/stop surface. The ONLY process-local state is the asyncio
+task handle, kept SOLELY so a live delegation can be cancelled (mirrors a live
+``TickEngine`` in ``_engines``); it dies with the process, and the RunStore
+stream is the source of truth.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-
-from condor.accounts.model import AccountRef
 
 log = logging.getLogger(__name__)
 
-# Module-level registry of live delegations (mirrors engine._engines).
-_delegations: dict[str, "DelegateTask"] = {}
+# run_id -> the background asyncio task, kept ONLY so `control_run(run_id,
+# "stop")` (lifecycle.apply_verb → cancel_delegation) can cancel a live
+# delegation, like _engines holds live TickEngines. NOT a status store —
+# status/result/transcript all live in the RunStore stream.
+_delegations: dict[str, asyncio.Task] = {}
 
 # Default per-task wall-clock budget; a hung subprocess is cancelled after this.
 DEFAULT_TIMEOUT_S = 900
-
-
-@dataclass
-class DelegateTask:
-    task_id: str  # the RunStore run_id (opaque ULID)
-    agent_slug: str
-    task: str
-    started_at: str = ""
-    ended_at: str = ""
-    risk_limits: dict | None = None  # per-call override; None → agent baseline
-    account_ref: AccountRef | None = None
-    status: str = "running"  # running | done | error | stopped
-    result: str = ""  # final answer text once done
-    error: str = ""
-    # Chronological session transcript: thoughts, tool calls, and text chunks as
-    # they streamed from the agent. Populated live by the runner's event sink.
-    events: list[dict] = field(default_factory=list, repr=False)
-    _task: asyncio.Task | None = field(default=None, repr=False)
-
-    def to_dict(self) -> dict:
-        return {
-            "task_id": self.task_id,
-            "run_id": self.task_id,
-            "agent": self.agent_slug,
-            "task": self.task,
-            "status": self.status,
-            "result": self.result,
-            "error": self.error,
-            "started_at": self.started_at,
-            "ended_at": self.ended_at,
-        }
-
-
-def get_delegation(task_id: str) -> DelegateTask | None:
-    return _delegations.get(task_id)
-
-
-def get_all_delegations() -> dict[str, DelegateTask]:
-    return dict(_delegations)
 
 
 def _resolve_delegation_limits(agent, risk_limits: dict | None) -> dict | None:
@@ -116,13 +80,14 @@ async def start_delegation(
     *,
     agent_slug: str,
     task: str,
-    timeout_s: int = DEFAULT_TIMEOUT_S,
+    timeout_s: int | None = DEFAULT_TIMEOUT_S,
     risk_limits: dict | None = None,
-) -> DelegateTask:
-    """Create a DelegateTask, spawn the detached runner, register it, return now.
+) -> str:
+    """Spawn the detached runner and return its ``run_id`` immediately.
 
-    Returns immediately -- the caller gets a ``task_id`` (the run id) to
-    poll/stop while the agent works in the background.
+    Track it afterward like any run: ``get_run(run_id)`` for status/result,
+    ``control_run(run_id, "stop")`` to cancel. The user is also notified
+    automatically when it finishes.
 
     Raises:
         ValueError: unknown agent, or a trading delegation with neither an
@@ -142,9 +107,10 @@ async def start_delegation(
     if agent.can_trade:
         from condor.agents.spec import resolve_agent_account
 
-        account_ref = resolve_agent_account(agent, agent.default_config or {})
+        # Q2.1: venue comes from the agent's identity, not the loop config —
+        # a task never reaches into default_config.
+        account_ref = resolve_agent_account(agent)
 
-    started_at = datetime.now(timezone.utc).isoformat()
     # run_started persists BEFORE the run: a crash mid-delegation leaves a
     # stream the startup sweep closes as interrupted — the inspectable husk.
     run_id = get_run_store().start_run(
@@ -157,59 +123,40 @@ async def start_delegation(
             **({"account_ref": account_ref.as_dict()} if account_ref else {}),
         },
     )
-    dt = DelegateTask(
-        task_id=run_id,
-        agent_slug=agent_slug,
-        task=task,
-        started_at=started_at,
-        risk_limits=effective_limits,
-        account_ref=account_ref,
+    _delegations[run_id] = asyncio.create_task(
+        _run(
+            run_id,
+            agent,
+            task,
+            effective_limits,
+            account_ref,
+            timeout_s or DEFAULT_TIMEOUT_S,
+        )
     )
-    _delegations[dt.task_id] = dt
-    dt._task = asyncio.create_task(_run(dt, agent, timeout_s))
-    return dt
+    return run_id
 
 
-def _make_event_sink(dt: DelegateTask):
-    """Build a callback that folds streamed events into ``dt.events`` live.
+def cancel_delegation(run_id: str) -> bool:
+    """Cancel a live delegation's background task. False if unknown/finished.
 
-    ``run_agent`` folds the same stream into ``RunResult.events`` for the
-    persisted record; this sink keeps the in-memory task record streaming
-    for pollers (``delegate(action="get")``) while the run is in flight.
+    The wire-in for ``control_run(run_id, "stop")`` (lifecycle.apply_verb):
+    a delegation isn't a TickEngine, so stopping it means cancelling its task
+    here (its executors are stopped by the same apply_verb via run attribution).
     """
-    from condor.acp.client import (
-        TextChunk,
-        ThoughtChunk,
-        ToolCallEvent,
-        ToolCallUpdate,
-        fold_tool_call_event,
-    )
-
-    tl = dt.events
-    tc_map: dict[str, dict] = {}
-
-    def sink(event) -> None:
-        if isinstance(event, ThoughtChunk):
-            if tl and tl[-1]["type"] == "thought":
-                tl[-1]["text"] += event.text
-            else:
-                tl.append({"type": "thought", "text": event.text})
-        elif isinstance(event, TextChunk):
-            if tl and tl[-1]["type"] == "text":
-                tl[-1]["text"] += event.text
-            else:
-                tl.append({"type": "text", "text": event.text})
-        elif isinstance(event, (ToolCallEvent, ToolCallUpdate)):
-            tc = fold_tool_call_event(tc_map, event)
-            if tc is not None:
-                tc["type"] = "tool"
-                tl.append(tc)
-
-    return sink
+    task = _delegations.get(run_id)
+    if task is None or task.done():
+        return False
+    task.cancel()
+    return True
 
 
-async def _run(dt: DelegateTask, agent, timeout_s: int) -> None:
-    """Background runner: drive the agent to completion, persist, notify."""
+async def _run(run_id, agent, task, risk_limits, account_ref, timeout_s: int) -> None:
+    """Background runner: drive the agent to completion, persist, notify.
+
+    Persistence matches CONSULT: tool calls stream to the RunStore via
+    ``on_tool_call``, the result lands as a ``state_snapshot``, and
+    ``run_ended`` carries the terminal status — no in-memory transcript.
+    """
     from condor.agents.context import build_agent_context
     from condor.agents.gating import is_dangerous_tool_call
     from condor.agents.policies import AUTO, risk_gate
@@ -217,18 +164,14 @@ async def _run(dt: DelegateTask, agent, timeout_s: int) -> None:
     from condor.agents.runstore import get_run_store
 
     run_store = get_run_store()
-
-    if dt.risk_limits is not None:
-        policy = risk_gate(dt.risk_limits)  # zero-seeded: caps = per-run budget
-    else:
-        policy = AUTO  # non-trading specialist — full auto-approve
-
-    prompt = build_agent_context(agent, dt.task)
+    # zero-seeded: caps = per-run budget; AUTO for non-trading specialists.
+    policy = risk_gate(risk_limits) if risk_limits is not None else AUTO
+    prompt = build_agent_context(agent, task)
 
     def _persist_tool_call(tc: dict) -> None:
         try:
             run_store.emit(
-                dt.task_id,
+                run_id,
                 "tool_call",
                 {
                     "name": tc.get("name") or tc.get("title", ""),
@@ -240,78 +183,64 @@ async def _run(dt: DelegateTask, agent, timeout_s: int) -> None:
                 tool_call_id=str(tc.get("id") or "") or None,
             )
         except Exception:
-            log.exception("delegation %s: tool_call emit failed", dt.task_id)
+            log.exception("delegation %s: tool_call emit failed", run_id)
 
     end_status, end_reason = "completed", ""
+    result_text, error_text = "", ""
+    stopped = False
     try:
         result = await run_agent(
             agent,
             prompt,
             permission_policy=policy,
-            risk_limits=dt.risk_limits,
-            account_ref=dt.account_ref,
+            risk_limits=risk_limits,
+            account_ref=account_ref,
             timeout_s=timeout_s,
-            event_sink=_make_event_sink(dt),
             # Executor attribution: the run id is the one execution key.
-            agent_id=dt.task_id,
+            agent_id=run_id,
             on_tool_call=_persist_tool_call,
         )
         if result.timed_out:
-            dt.status = "error"
-            dt.error = result.error
+            error_text = result.error
             end_status, end_reason = "error", result.error
-            log.warning("Delegation %s timed out after %ss", dt.task_id, timeout_s)
+            log.warning("Delegation %s timed out after %ss", run_id, timeout_s)
         else:
-            dt.result = result.text or "(the agent returned no answer)"
-            dt.status = "done"
+            result_text = result.text or "(the agent returned no answer)"
     except asyncio.CancelledError:
-        dt.status = "stopped"
         end_status, end_reason = "stopped", "cancelled by operator"
+        stopped = True
         raise
     except Exception as e:  # noqa: BLE001 -- surface any runtime failure as task error
-        dt.status = "error"
-        dt.error = str(e)
+        error_text = str(e)
         end_status, end_reason = "error", str(e)
-        log.exception("Delegation %s failed", dt.task_id)
+        log.exception("Delegation %s failed", run_id)
     finally:
-        dt.ended_at = datetime.now(timezone.utc).isoformat()
         try:
-            if dt.result:
-                run_store.emit(dt.task_id, "state_snapshot", {"result": dt.result})
-            run_store.end_run(dt.task_id, end_status, end_reason)
+            if result_text:
+                run_store.emit(run_id, "state_snapshot", {"result": result_text})
+            run_store.end_run(run_id, end_status, end_reason)
         except Exception:
-            log.exception("Failed to close delegation run %s", dt.task_id)
-        if dt.status != "stopped":
+            log.exception("Failed to close delegation run %s", run_id)
+        _delegations.pop(run_id, None)
+        if not stopped:
             try:
-                await _notify_done(dt)
+                await _notify_done(run_id, end_status, result_text, error_text)
             except Exception:
-                log.exception("Failed to notify delegation %s done", dt.task_id)
+                log.exception("Failed to notify delegation %s done", run_id)
 
 
-async def stop_delegation(task_id: str) -> bool:
-    """Cancel a running delegation. Returns False if unknown/already finished."""
-    dt = _delegations.get(task_id)
-    if dt is None or dt._task is None or dt._task.done():
-        return False
-    dt._task.cancel()
-    dt.status = "stopped"
-    return True
-
-
-async def _notify_done(dt: DelegateTask) -> None:
+async def _notify_done(
+    run_id: str, status: str, result_text: str, error_text: str
+) -> None:
     """Notify the user the delegation finished (outbox chokepoint)."""
-    if dt.status == "error":
-        text = f"❌ Delegated task {dt.task_id} failed: {dt.error}"
+    if status == "error":
+        text = f"❌ Delegated task {run_id} failed: {error_text}"
     else:
-        snippet = (dt.result or "").strip()
+        snippet = (result_text or "").strip()
         if len(snippet) > 1500:
             snippet = snippet[:1500] + "…"
-        text = f"✅ Delegated task {dt.task_id} done\n\n{snippet}".rstrip()
+        text = f"✅ Delegated task {run_id} done\n\n{snippet}".rstrip()
 
     from condor.notifications import notify
 
-    await notify(
-        text,
-        agent_id=dt.task_id,
-        kind="delegation",
-    )
+    await notify(text, agent_id=run_id, kind="delegation")

@@ -116,6 +116,19 @@ if [ ! -f .env ]; then
 fi
 stage env true
 
+# ── Stage: PATH ──────────────────────────────────────────────────────
+# Put the `condor` console script on PATH (hbot rule 7: a short real
+# binary, symlinked by the installer). ~/.local/bin only — never sudo.
+
+if [ -x "$INSTALL_DIR/.venv/bin/condor" ]; then
+    mkdir -p "$HOME/.local/bin"
+    ln -sf "$INSTALL_DIR/.venv/bin/condor" "$HOME/.local/bin/condor"
+    case ":$PATH:" in
+        *":$HOME/.local/bin:"*) log "Linked ~/.local/bin/condor" ;;
+        *) log "Linked ~/.local/bin/condor — add ~/.local/bin to your PATH to use it" ;;
+    esac
+fi
+
 # ── Stage: init (handoff) ────────────────────────────────────────────
 # Everything from here is a product question and belongs to `condor init`.
 

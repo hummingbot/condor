@@ -55,18 +55,29 @@ class AgentConfig(BaseModel):
         default=100.0,
         description="Total capital budget for this session in quote currency",
     )
-    frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
-    trading_context: str = Field(
-        default="",
-        description="Natural language session context that guides the agent's trading decisions",
+    # ── run-only cadence (the "loop" sub-block) ──────────────────────────
+    # These three keys govern the SESSION LOOP and are the only part of an
+    # agent's config a task ignores: a consult/delegate is a single invocation,
+    # never a tick loop, so it never reads frequency_sec/execution_mode/
+    # max_ticks. Everything else here (account/venue, guardrails, executor
+    # tactic defaults) is shared by any verb that trades (docs/
+    # consult-delegate-merge.md, Q2.2).
+    frequency_sec: int = Field(
+        default=60, description="[cadence] Tick frequency in seconds (run-only)"
     )
     execution_mode: Literal["experiment", "run_once", "loop"] = Field(
         default="loop",
-        description="Execution mode: experiment (simulate — a.k.a. dry run), "
-        "run_once (single live tick), loop (continuous)",
+        description="[cadence] Execution mode (run-only): experiment (simulate "
+        "— a.k.a. dry run), run_once (single live tick), loop (continuous)",
     )
     max_ticks: int = Field(
-        default=0, description="Max ticks before auto-stop; 0 = unlimited"
+        default=0,
+        description="[cadence] Max ticks before auto-stop; 0 = unlimited (run-only)",
+    )
+    # ── shared (used by any trading verb) ────────────────────────────────
+    trading_context: str = Field(
+        default="",
+        description="Natural language session context that guides the agent's trading decisions",
     )
     keep_position_on_stop: bool = Field(
         default=True,
@@ -158,4 +169,3 @@ def merge_launch_config(
     # (extra="forbid" + range constraints). Raises pydantic.ValidationError.
     AgentConfig.from_dict(result)
     return result
-

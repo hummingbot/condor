@@ -136,7 +136,7 @@ class TickEngine:
         # Lightweight unsaved unit-test Agents without a baseline remain
         # usable as pure brain/engine fixtures.
         if self.agent.can_trade and self.agent.risk_limits:
-            account_ref = resolve_agent_account(self.agent, self.config)
+            account_ref = resolve_agent_account(self.agent)
         self.frozen_spec = freeze_spec(
             self.agent,
             self.config,

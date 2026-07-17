@@ -93,8 +93,11 @@ class Agent:
     # resolve the venue's default account at run freeze time.
     account: str = ""
     account_label: str = ""
-    # Launch defaults (the former strategy default_config): AgentConfig keys —
-    # frequency_sec, total_amount_quote, execution_mode, max_ticks, …
+    # Launch defaults (the former strategy default_config): AgentConfig keys.
+    # The run-only "cadence" sub-block — frequency_sec/execution_mode/max_ticks
+    # — is what only a session (run_agent) uses; the rest (venue, guardrails,
+    # executor tactic defaults) is shared by any trading verb (see AgentConfig
+    # and docs/consult-delegate-merge.md, Q2.2).
     default_config: dict = field(default_factory=dict)
     # Default trading context injected when a launch passes none.
     default_trading_context: str = ""

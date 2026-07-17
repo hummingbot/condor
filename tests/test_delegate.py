@@ -1,11 +1,15 @@
 """Unit tests for DELEGATE -- fire-and-forget background agent tasks.
 
-Covers the lifecycle (running -> done/error/stopped), result capture, the flat
-transcript persistence (delegations/{date}-dN.md: husk at start, full rewrite
-in finally — refactor-07), the completion notification, and the refactor-02
-authorization flip: trading agents run under a zero-seeded risk_gate (AGENT.md
-baseline or per-call override, loud error with neither), non-trading
-specialists keep full auto-approve.
+Covers the lifecycle (running -> done/error/stopped), result capture, the
+RunStore persistence (a delegation IS a run: run_started husk at start,
+tool_call events + result state_snapshot + run_ended at close), the completion
+notification, and the refactor-02 authorization flip: trading agents run under
+a zero-seeded risk_gate (AGENT.md baseline or per-call override, loud error
+with neither), non-trading specialists keep full auto-approve.
+
+Post-C.1/C.2: ``start_delegation`` returns a ``run_id`` (str); there is no
+in-memory status record — status/result come from the RunStore stream, and
+cancellation is ``cancel_delegation`` (the wire-in for ``control_run stop``).
 """
 
 import asyncio
@@ -15,12 +19,7 @@ import pytest
 from condor.agents import agent as agent_module
 from condor.agents import delegate as delegate_module
 from condor.agents import run as run_module
-from condor.agents.delegate import (
-    get_all_delegations,
-    get_delegation,
-    start_delegation,
-    stop_delegation,
-)
+from condor.agents.delegate import cancel_delegation, start_delegation
 from condor.agents.run import RunResult
 
 
@@ -56,11 +55,15 @@ def _clean_registry():
     delegate_module._delegations.clear()
 
 
-async def _drain(dt):
-    """Await the background task to completion (ignoring cancellation)."""
-    if dt._task is not None:
+async def _drain(run_id):
+    """Await the background task to completion (ignoring cancellation).
+
+    The task is popped from the registry in its finally block, so capture the
+    handle right after start (before it runs) to await it here."""
+    task = delegate_module._delegations.get(run_id)
+    if task is not None:
         try:
-            await dt._task
+            await task
         except asyncio.CancelledError:
             pass
 
@@ -84,6 +87,12 @@ def _run_status(slug, run_id):
     return get_run_store().run_meta(slug, run_id)["status"]
 
 
+def _run_result(slug, run_id):
+    """The captured result text from the run's last state_snapshot, or ''."""
+    snaps = [e for e in _run_events(slug, run_id) if e["type"] == "state_snapshot"]
+    return snaps[-1]["payload"]["result"] if snaps else ""
+
+
 def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(tmp_path, "scout")
@@ -100,38 +109,35 @@ def test_delegation_runs_to_done_and_persists(tmp_path, monkeypatch):
     monkeypatch.setattr(run_module, "run_agent", fake_run)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="scout",
             task="scan SOL pools",
         )
-        # Returns immediately, still running before we await it.
-        assert dt.status == "running"
-        assert get_delegation(dt.task_id) is dt
+        # Returns immediately with a run_id; still running before we await it.
+        assert run_id in delegate_module._delegations
         # run_started persisted from the start (crash-inspectable stream).
-        events = _run_events("scout", dt.task_id)
+        events = _run_events("scout", run_id)
         assert events[0]["type"] == "run_started"
         assert events[0]["payload"]["kind"] == "delegation"
-        await _drain(dt)
-        return dt
+        await _drain(run_id)
+        return run_id
 
-    dt = asyncio.run(scenario())
+    run_id = asyncio.run(scenario())
 
-    # The task id IS the run id — an opaque ULID, no "-dN" grammar.
+    # The delegation id IS a run id — an opaque ULID, no "-dN" grammar.
     from condor.agents.runstore import is_run_id
 
-    assert is_run_id(dt.task_id)
-    # Lifecycle + result capture.
-    assert dt.status == "done"
-    assert dt.result == "scan complete: 3 pools"
+    assert is_run_id(run_id)
+    # Lifecycle + result capture (from the RunStore stream).
+    assert _run_status("scout", run_id) == "completed"
+    assert _run_result("scout", run_id) == "scan complete: 3 pools"
     # Serverless agent → AUTO policy (no permission callback).
     assert seen["permission_policy"] is None
     assert "scan SOL pools" in seen["prompt"]
     # The stream records the result and terminal status; no session dir.
-    events = _run_events("scout", dt.task_id)
+    events = _run_events("scout", run_id)
     assert events[-1]["type"] == "run_ended"
     assert events[-1]["payload"]["status"] == "completed"
-    snapshots = [e for e in events if e["type"] == "state_snapshot"]
-    assert snapshots and snapshots[-1]["payload"]["result"] == "scan complete: 3 pools"
     assert not (tmp_path / "scout" / "sessions").exists()
     # Notification delivered.
     assert any("done" in m for m in _outbox_texts())
@@ -147,20 +153,18 @@ def test_delegation_captures_error(tmp_path, monkeypatch):
     monkeypatch.setattr(run_module, "run_agent", boom)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="scout",
             task="do thing",
         )
-        await _drain(dt)
-        return dt
+        await _drain(run_id)
+        return run_id
 
-    dt = asyncio.run(scenario())
+    run_id = asyncio.run(scenario())
 
-    assert dt.status == "error"
-    assert "model exploded" in dt.error
-    assert any("failed" in m for m in _outbox_texts())
-    assert _run_status("scout", dt.task_id) == "error"
-    events = _run_events("scout", dt.task_id)
+    assert _run_status("scout", run_id) == "error"
+    assert any("failed" in m and "model exploded" in m for m in _outbox_texts())
+    events = _run_events("scout", run_id)
     assert "model exploded" in events[-1]["payload"]["reason"]
 
 
@@ -175,28 +179,27 @@ def test_stop_cancels_running_delegation(tmp_path, monkeypatch):
     monkeypatch.setattr(run_module, "run_agent", slow)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="scout",
             task="long task",
         )
         await asyncio.sleep(0)  # let the runner start
-        assert dt.task_id in get_all_delegations()
-        stopped = await stop_delegation(dt.task_id)
-        await _drain(dt)
-        return dt, stopped
+        assert run_id in delegate_module._delegations
+        stopped = cancel_delegation(run_id)
+        await _drain(run_id)
+        return run_id, stopped
 
-    dt, stopped = asyncio.run(scenario())
+    run_id, stopped = asyncio.run(scenario())
 
     assert stopped is True
-    assert dt.status == "stopped"
     # A stopped task does not spam a completion notification.
     assert _outbox_texts() == []
     # But its stream records the terminal state.
-    assert _run_status("scout", dt.task_id) == "stopped"
+    assert _run_status("scout", run_id) == "stopped"
 
 
 def test_stop_unknown_returns_false():
-    assert asyncio.run(stop_delegation("nope_99")) is False
+    assert cancel_delegation("nope_99") is False
 
 
 def test_unknown_agent_errors_at_start(tmp_path, monkeypatch):
@@ -226,8 +229,8 @@ def test_trading_delegation_without_limits_errors_loudly(tmp_path, monkeypatch):
             )
         )
     # No husk left behind for a rejected start.
-    assert not (tmp_path / "trader" / "delegations").exists() or not list(
-        (tmp_path / "trader" / "delegations").iterdir()
+    assert not (tmp_path / "trader" / "runs").exists() or not list(
+        (tmp_path / "trader" / "runs").iterdir()
     )
 
 
@@ -236,8 +239,9 @@ def test_executor_owning_agent_without_baseline_errors(tmp_path, monkeypatch):
     condor-native executors, so it must carry a baseline — a delegation with
     none must error loudly, not silently auto-approve."""
     _patch_roots(monkeypatch, tmp_path)
-    _write_agent(tmp_path, "native_trader",
-                 tools=["manage_executors"])  # trades, but no baseline
+    _write_agent(
+        tmp_path, "native_trader", tools=["manage_executors"]
+    )  # trades, but no baseline
 
     with pytest.raises(ValueError, match="risk baseline"):
         asyncio.run(
@@ -261,21 +265,31 @@ def test_trading_delegation_uses_agent_baseline(tmp_path, monkeypatch):
 
     async def fake_run(agent, prompt, *, permission_policy, **kw):
         seen["permission_policy"] = permission_policy
+        seen["risk_limits"] = kw.get("risk_limits")
         return RunResult(text="ok")
 
     monkeypatch.setattr(run_module, "run_agent", fake_run)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="trader",
             task="deploy",
         )
-        await _drain(dt)
-        return dt
+        await _drain(run_id)
+        return run_id
 
-    dt = asyncio.run(scenario())
-    assert dt.status == "done"
-    assert dt.risk_limits == {"max_position_size_quote": 500, "max_open_executors": 5}
+    run_id = asyncio.run(scenario())
+    assert _run_status("trader", run_id) == "completed"
+    # The baseline governs the run and is recorded in the run_started payload.
+    assert seen["risk_limits"] == {
+        "max_position_size_quote": 500,
+        "max_open_executors": 5,
+    }
+    started = _run_events("trader", run_id)[0]
+    assert started["payload"]["risk_limits"] == {
+        "max_position_size_quote": 500,
+        "max_open_executors": 5,
+    }
     # Trading agent → a real risk_gate callback, never AUTO.
     assert seen["permission_policy"] is not None
 
@@ -296,20 +310,24 @@ def test_agent_with_baseline_is_risk_gated_even_without_executor_tool(
 
     async def fake_run(agent, prompt, *, permission_policy, **kw):
         seen["permission_policy"] = permission_policy
+        seen["risk_limits"] = kw.get("risk_limits")
         return RunResult(text="ok")
 
     monkeypatch.setattr(run_module, "run_agent", fake_run)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="lp_agent",
             task="open an LP position",
         )
-        await _drain(dt)
-        return dt
+        await _drain(run_id)
+        return run_id
 
-    dt = asyncio.run(scenario())
-    assert dt.risk_limits == {"max_position_size_quote": 50, "max_open_executors": 2}
+    run_id = asyncio.run(scenario())
+    assert seen["risk_limits"] == {
+        "max_position_size_quote": 50,
+        "max_open_executors": 2,
+    }
     assert seen["permission_policy"] is not None  # gated, never AUTO
 
 
@@ -323,21 +341,22 @@ def test_explicit_caps_not_discarded(tmp_path, monkeypatch):
 
     async def fake_run(agent, prompt, *, permission_policy, **kw):
         seen["permission_policy"] = permission_policy
+        seen["risk_limits"] = kw.get("risk_limits")
         return RunResult(text="ok")
 
     monkeypatch.setattr(run_module, "run_agent", fake_run)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="lp_agent",
             task="open an LP position",
             risk_limits={"max_position_size_quote": 5},
         )
-        await _drain(dt)
-        return dt
+        await _drain(run_id)
+        return run_id
 
-    dt = asyncio.run(scenario())
-    assert dt.risk_limits == {"max_position_size_quote": 5}
+    run_id = asyncio.run(scenario())
+    assert seen["risk_limits"] == {"max_position_size_quote": 5}
     assert seen["permission_policy"] is not None
 
 
@@ -351,20 +370,21 @@ def test_non_trading_specialist_without_baseline_stays_auto(tmp_path, monkeypatc
 
     async def fake_run(agent, prompt, *, permission_policy, **kw):
         seen["permission_policy"] = permission_policy
+        seen["risk_limits"] = kw.get("risk_limits")
         return RunResult(text="ok")
 
     monkeypatch.setattr(run_module, "run_agent", fake_run)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="builder",
             task="build a routine",
         )
-        await _drain(dt)
-        return dt
+        await _drain(run_id)
+        return run_id
 
-    dt = asyncio.run(scenario())
-    assert dt.risk_limits is None
+    run_id = asyncio.run(scenario())
+    assert seen["risk_limits"] is None
     assert seen["permission_policy"] is None  # AUTO
 
 
@@ -383,20 +403,19 @@ def test_per_call_override_replaces_baseline(tmp_path, monkeypatch):
     monkeypatch.setattr(run_module, "run_agent", fake_run)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="trader",
             task="deploy with more room",
             risk_limits={"max_position_size_quote": 2000},
         )
-        await _drain(dt)
-        return dt
+        await _drain(run_id)
+        return run_id
 
-    dt = asyncio.run(scenario())
+    run_id = asyncio.run(scenario())
     # REPLACE, not merge: exactly what was passed governs the run — and the
     # run_started payload records exactly those numbers.
-    assert dt.risk_limits == {"max_position_size_quote": 2000}
-    started = _run_events("scout", dt.task_id)[0]
-    assert started["payload"]["risk_limits"]["max_position_size_quote"] == 2000
+    started = _run_events("trader", run_id)[0]
+    assert started["payload"]["risk_limits"] == {"max_position_size_quote": 2000}
 
 
 def test_zero_seeded_gate_bounds_native_creates(tmp_path, monkeypatch):
@@ -432,11 +451,11 @@ def test_zero_seeded_gate_bounds_native_creates(tmp_path, monkeypatch):
         }
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="trader",
             task="deploy",
         )
-        await _drain(dt)
+        await _drain(run_id)
         policy = captured["policy"]
 
         over_cap = await policy(
@@ -460,60 +479,50 @@ def test_zero_seeded_gate_bounds_native_creates(tmp_path, monkeypatch):
     assert unknown["outcome"]["outcome"] == "cancelled"  # fail closed
 
 
-def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
-    """The runner feeds streamed events to an event_sink and the transcript
-    captures reasoning, tool calls (input/output), and the final result."""
+def test_delegation_persists_tool_calls_and_result(tmp_path, monkeypatch):
+    """Persistence matches CONSULT: tool calls stream to the RunStore via
+    on_tool_call and the result lands as a state_snapshot — the generated
+    export renders both."""
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(tmp_path, "scout")
 
-    from condor.acp.client import TextChunk, ThoughtChunk, ToolCallEvent, ToolCallUpdate
-
-    async def fake_run(agent, prompt, *, event_sink, **kw):
-        # Simulate the agent streaming reasoning, a tool call, and a final answer.
-        event_sink(ThoughtChunk(text="I should scan the pools first."))
-        event_sink(
-            ToolCallEvent(
-                tool_call_id="t1",
-                title="get_market_data",
-                status="in_progress",
-                kind="other",
-                input={"connector": "binance", "pair": "SOL-USDC"},
-            )
+    async def fake_run(agent, prompt, *, on_tool_call, **kw):
+        # The runtime hands folded tool-call dicts to on_tool_call; simulate one.
+        on_tool_call(
+            {
+                "id": "t1",
+                "name": "get_market_data",
+                "status": "completed",
+                "input": {"connector": "binance", "pair": "SOL-USDC"},
+                "output": "3 pools found",
+            }
         )
-        event_sink(
-            ToolCallUpdate(
-                tool_call_id="t1", status="completed", output="3 pools found"
-            )
-        )
-        event_sink(TextChunk(text="Done: 3 pools."))
         return RunResult(text="Done: 3 pools.")
 
     monkeypatch.setattr(run_module, "run_agent", fake_run)
 
     async def scenario():
-        dt = await start_delegation(
+        run_id = await start_delegation(
             agent_slug="scout",
             task="scan SOL pools",
         )
-        await _drain(dt)
-        return dt
+        await _drain(run_id)
+        return run_id
 
-    dt = asyncio.run(scenario())
+    run_id = asyncio.run(scenario())
 
-    assert dt.status == "done"
-    # Events captured in order on the task.
-    assert [e["type"] for e in dt.events] == ["thought", "tool", "text"]
-    tool_ev = dt.events[1]
-    assert tool_ev["name"] == "get_market_data"
-    assert tool_ev["status"] == "completed"  # patched by the ToolCallUpdate
-    assert tool_ev["output"] == "3 pools found"
+    assert _run_status("scout", run_id) == "completed"
+    events = _run_events("scout", run_id)
+    tool_evs = [e for e in events if e["type"] == "tool_call"]
+    assert tool_evs and tool_evs[0]["payload"]["name"] == "get_market_data"
+    assert tool_evs[0]["payload"]["output"] == "3 pools found"
+    assert _run_result("scout", run_id) == "Done: 3 pools."
 
     # The generated markdown export renders the run, not just the result.
     from condor.agents.exports import render_run_markdown
     from condor.agents.runstore import get_run_store
 
     store = get_run_store()
-    events = store.read_events("scout", dt.task_id)
-    text = render_run_markdown(store.run_meta("scout", dt.task_id), events)
+    text = render_run_markdown(store.run_meta("scout", run_id), events)
     assert "Done: 3 pools." in text
     assert "Run ended — completed" in text
