@@ -1,9 +1,10 @@
 """CLI for driving executors directly — the M0 live-validation harness.
 
-NB: this runs its own ExecutorRuntime against condor.db. Do not use
-`run`/`stop` while the main Condor server is up — both processes would
-adopt the same executors. With the server running, drive executors via
-the /executors REST routes or the condor MCP `manage_executors` tool.
+NB: this runs its own ExecutorRuntime against the append-only ExecutorLog
+(agents/<slug>/executors.jsonl). Do not use `run`/`stop` while the main
+Condor server is up — both processes would adopt the same executors. With
+the server running, drive executors via the /executors REST routes or the
+condor MCP `manage_executors` tool.
 
     python -m condor.executors swap --base SOL --quote USDC --amount 0.01 --side SELL --wallet <addr>
     python -m condor.executors run          # reconcile + resume open executors, then serve
