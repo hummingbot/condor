@@ -1,7 +1,7 @@
 """Phase 5 (§8): the MCP surface is explicit, narrowly typed tools — the
 mega-dispatcher and its satellites are gone, and the tool list matches the
-plan's enumeration (honesty about the count: the 18 plus the two listing
-verbs the run/approval flows need)."""
+plan's enumeration (honesty about the count: the ~18 plus the two listing
+verbs the run/approval flows need and the §7.1 learnings append)."""
 
 import asyncio
 
@@ -25,6 +25,7 @@ EXPECTED_TOOLS = {
     "get_notifications",
     "manage_executors",
     "manage_memory",
+    "record_learning",
     "manage_skill",
     "manage_routines",
     "send_notification",

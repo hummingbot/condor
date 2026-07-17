@@ -87,9 +87,11 @@ async def run_agent(
         on_client: Optional hook called with the live client after creation
             and with ``None`` after reaping — lets TickEngine.stop() keep its
             cancellation backstop on the in-flight subprocess.
-        on_tool_call: Optional hook fired with each FOLDED tool call the
-            moment it completes (RunStore streaming persistence) — the same
-            dicts that land on ``result.tool_calls``, delivered live.
+        on_tool_call: Optional hook fired once per FOLDED tool call when it
+            reaches a terminal status (completed/failed), so streamed
+            arguments/output are present; calls still open at stream end are
+            flushed as-is (RunStore streaming persistence) — the same dicts
+            that land on ``result.tool_calls``.
     """
     import asyncio
 
@@ -149,6 +151,24 @@ async def run_agent(
     # -- drive the stream, folding both views once --
     chunks: list[str] = []
     tc_map: dict[str, dict] = {}
+    persisted_tool_ids: set[str] = set()
+
+    def _persist(tc: dict) -> None:
+        # Fire the audit hook once per call, when it reaches a terminal
+        # status — arguments/output stream in on updates AFTER the create
+        # event, so firing at create recorded `input: {}` for MCP calls.
+        # Calls still open at stream end are flushed by _persist_remaining.
+        if on_tool_call is None or tc.get("id") in persisted_tool_ids:
+            return
+        persisted_tool_ids.add(tc.get("id"))
+        try:
+            on_tool_call(tc)
+        except Exception:
+            log.exception("on_tool_call hook failed")
+
+    def _persist_remaining() -> None:
+        for tc in tc_map.values():
+            _persist(tc)
 
     def _fold(event: Any) -> None:
         if event_sink is not None:
@@ -172,13 +192,15 @@ async def run_agent(
                 tc["type"] = "tool"
                 result.tool_calls.append(tc)
                 result.events.append(tc)
-                if on_tool_call is not None:
-                    try:
-                        on_tool_call(tc)
-                    except Exception:
-                        log.exception("on_tool_call hook failed")
+            live = tc_map.get(event.tool_call_id)
+            if live is not None and live.get("status") in ("completed", "failed"):
+                _persist(live)
 
     await client.start()
+    # The id the ACP bridge actually runs (session/set_model resolution) —
+    # more truthful than the requested alias, and it makes bridge-side model
+    # switches visible per tick on the run stream.
+    result.model = getattr(client, "active_model_id", None) or result.model
     try:
         async with asyncio.timeout(timeout_s):
             async for event in client.prompt_stream(prompt):
@@ -191,6 +213,7 @@ async def run_agent(
         result.timed_out = True
         result.error = f"Timed out after {timeout_s}s"
     finally:
+        _persist_remaining()
         try:
             await client.stop()
         finally:

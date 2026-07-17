@@ -175,6 +175,10 @@ class ToolCallUpdate:
     status: str | None = None
     title: str | None = None
     output: str | None = None
+    # Claude Code streams MCP tool arguments: the create event often carries
+    # no rawInput yet; it arrives on a later update. Dropping it here is why
+    # audit streams used to record `input: {}` for MCP-routed calls.
+    input: dict | None = None
 
 
 @dataclass
@@ -201,8 +205,8 @@ def fold_tool_call_event(
     so the create/patch semantics can't drift (ARCH-063). A :class:`ToolCallEvent`
     creates an entry (returned so the caller can append it to its own list) or
     patches ``status``/``name``/``input`` in place; a :class:`ToolCallUpdate`
-    patches ``status``/``name``/``output``. Returns the newly created entry, or
-    ``None`` when the event patched an existing (or unknown) one.
+    patches ``status``/``name``/``output``/``input``. Returns the newly created
+    entry, or ``None`` when the event patched an existing (or unknown) one.
     """
     if isinstance(event, ToolCallEvent):
         tc = tc_map.get(event.tool_call_id)
@@ -231,6 +235,8 @@ def fold_tool_call_event(
                 tc["name"] = event.title
             if event.output:
                 tc["output"] = event.output
+            if event.input:
+                tc["input"] = event.input
     return None
 
 
@@ -681,6 +687,7 @@ class ACPClient:
                     status=update.get("status"),
                     title=update.get("title"),
                     output=_extract_tool_output(update),
+                    input=update.get("rawInput") or update.get("input"),
                 )
             )
 

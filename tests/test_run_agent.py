@@ -108,6 +108,46 @@ def test_run_agent_folds_both_views_and_reaps():
     assert client.started and client.stopped
 
 
+def test_on_tool_call_fires_at_terminal_status_with_streamed_input():
+    """MCP arguments stream in on tool_call_update AFTER the create event —
+    the audit hook must fire once, at terminal status, with input+output
+    present (firing at create recorded `input: {}`)."""
+    _FakeClient._script = [
+        ToolCallEvent(
+            tool_call_id="t1",
+            title="mcp__condor__record_learning",
+            status="pending",
+            kind="other",
+            input=None,  # not yet streamed
+        ),
+        ToolCallUpdate(tool_call_id="t1", input={"text": "JTO thins after 22:00"}),
+        ToolCallUpdate(tool_call_id="t1", status="completed", output="ok"),
+        # a second call that never reaches terminal status → flushed at end
+        ToolCallEvent(
+            tool_call_id="t2", title="slow_tool", status="in_progress", kind="other"
+        ),
+        PromptDone(stop_reason="end_turn"),
+    ]
+
+    persisted: list[dict] = []
+    asyncio.run(
+        run_agent(
+            _agent(),
+            "tick",
+            permission_policy=None,
+            on_tool_call=lambda tc: persisted.append(dict(tc)),
+        )
+    )
+
+    assert [tc["id"] for tc in persisted] == ["t1", "t2"]
+    t1 = persisted[0]
+    assert t1["status"] == "completed"
+    assert t1["input"] == {"text": "JTO thins after 22:00"}
+    assert t1["output"] == "ok"
+    t2 = persisted[1]  # flushed as-is, exactly once
+    assert t2["status"] == "in_progress"
+
+
 def test_run_agent_timeout_marks_result_and_reaps():
     _FakeClient._script = [TextChunk(text="partial "), "hang"]
 

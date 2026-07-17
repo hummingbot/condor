@@ -98,6 +98,25 @@ and risk state. An experiment must not place or cancel venue orders.
 For a live run, call `run_agent` without `dry_run`, preferably with a small authored or
 launch-time `max_ticks` for the first session. Never widen risk at launch.
 
+## How agents learn (the promotion ladder)
+
+Agent knowledge climbs three rungs, each an explicit judgment
+(docs/insight-flow-simplification.md §7):
+
+1. **Run stream** (`agents/{slug}/runs/*.jsonl`) — everything, recorded
+   automatically every tick. Nothing to manage.
+2. **`learnings.md`** — the agent itself promotes a durable operational fact at the
+   moment of insight via `record_learning`; capped at 40, and when full the tool
+   errors so the agent consolidates (`replaces=`) instead of losing old knowledge.
+3. **AGENT.md** — when a learning proves out across runs, fold it into the spec
+   body with `update_agent`, validated FIRST by a `dry_run=true` experiment. The
+   spec is hashed on every save, so this evolution is auditable. A learning in the
+   spec *is* the agent; a learning in the list must be re-read and re-believed
+   every tick.
+
+Agents never write user memory — `[USER MEMORY]` is read-only advisory context from
+the global chat-curated store; user facts are saved from chat with `manage_memory`.
+
 ## Monitor and control
 
 - `list_agents()` lists definitions and live summaries.

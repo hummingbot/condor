@@ -390,7 +390,9 @@ def test_directives_survive_failed_tick_and_clear_on_success(tmp_path, monkeypat
 
     async def ok(agent, prompt, **kw):
         seen["prompt"] = prompt
-        return SimpleNamespace(text="done", tool_calls=[], timed_out=False)
+        from condor.agents.run import RunResult
+
+        return RunResult(text="done")
 
     monkeypatch.setattr(engine_mod, "run_agent", ok)
     asyncio.run(engine._tick())

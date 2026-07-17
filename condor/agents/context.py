@@ -304,12 +304,12 @@ def build_agent_context(
     try:
         from condor.memory import MemoryStore
 
-        memory_index = MemoryStore(agent.slug).list_index()
+        # Global chat-curated tier, read-only for agents — durable domain
+        # facts belong in learnings (record_learning), not memory.
+        memory_index = MemoryStore(None).list_index()
         if memory_index:
             sections.append(
-                "[DOMAIN MEMORY — what you remember in this domain]\n"
-                'Read a full memory with manage_memory(action="read", name="..."). '
-                'Save new, stable domain facts with manage_memory(action="write", ...).\n\n'
+                "[USER MEMORY — what is known about the owner; advisory, read-only]\n\n"
                 f"{memory_index}"
             )
     except Exception:

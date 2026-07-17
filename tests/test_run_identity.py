@@ -132,7 +132,11 @@ def test_directives_are_durable_events(tmp_path, monkeypatch):
 # ── learnings: flat agent-level curated list ──
 
 
-def test_learnings_flat_append_and_cap(tmp_path):
+def test_learnings_append_replace_and_full_error(tmp_path):
+    """The Hermes-style lifecycle (§7 of insight-flow-simplification): a full
+    list ERRORS instead of silently evicting, and replaces= consolidates."""
+    from condor.agents.learnings import MAX_LEARNINGS
+
     agent_dir = tmp_path / "acme"
     agent_dir.mkdir()
     append_learning(agent_dir, "JTO book is thin after 22:00 UTC")
@@ -141,13 +145,146 @@ def test_learnings_flat_append_and_cap(tmp_path):
     assert "JTO book is thin after 22:00 UTC" in text
     assert "grid fills lag on OKX" in text
 
-    from condor.agents.learnings import MAX_LEARNINGS
+    # Consolidation rewrites exactly one matching entry in place.
+    append_learning(agent_dir, "JTO book thin 21:00-24:00 UTC", replaces="JTO book")
+    text = read_learnings(agent_dir)
+    assert "JTO book thin 21:00-24:00 UTC" in text
+    assert "after 22:00" not in text
+    assert len(text.splitlines()) == 2
 
-    for i in range(MAX_LEARNINGS + 5):
+    # Zero or ambiguous matches are loud errors, not guesses.
+    with pytest.raises(ValueError, match="matches no learning"):
+        append_learning(agent_dir, "x", replaces="no such entry")
+    append_learning(agent_dir, "JTO spreads widen on weekends")
+    with pytest.raises(ValueError, match="matches 2 learnings"):
+        append_learning(agent_dir, "x", replaces="JTO")
+
+    # At the cap, plain appends error — knowledge is never silently evicted.
+    for i in range(MAX_LEARNINGS - 3):
         append_learning(agent_dir, f"note {i}")
+    with pytest.raises(ValueError, match="learnings full"):
+        append_learning(agent_dir, "one too many")
     lines = read_learnings(agent_dir).splitlines()
     assert len(lines) == MAX_LEARNINGS
-    assert "JTO book" not in read_learnings(agent_dir)  # oldest evicted
+    assert "JTO book thin 21:00-24:00 UTC" in read_learnings(agent_dir)  # kept
+
+    # replaces= still works at the cap — that IS the consolidation path.
+    append_learning(agent_dir, "note 0 superseded by venue fix", replaces="note 0")
+    assert "superseded by venue fix" in read_learnings(agent_dir)
+    assert len(read_learnings(agent_dir).splitlines()) == MAX_LEARNINGS
+
+
+def test_record_learning_tool_is_agent_scoped(tmp_path, monkeypatch):
+    from mcp_servers.condor.settings import settings
+    from mcp_servers.condor.tools import memory as memory_tool
+
+    _patch_roots(monkeypatch, tmp_path)
+    (tmp_path / "acme").mkdir()
+
+    monkeypatch.setattr(settings, "agent_slug", "acme")
+    result = asyncio.run(memory_tool.record_learning("JTO book thins after 22:00 UTC"))
+    assert result["recorded"] == "JTO book thins after 22:00 UTC"
+    assert result["total"] == 1
+    assert "JTO book thins" in read_learnings(tmp_path / "acme")
+
+    # Chat tier (no agent) gets a loud error, not a silent global write.
+    monkeypatch.setattr(settings, "agent_slug", "")
+    assert "error" in asyncio.run(memory_tool.record_learning("orphan fact"))
+
+
+# ── tick continuity: decision/state snapshots + prompt persistence ──
+
+
+def test_tick_emits_decision_state_and_prompt(tmp_path, monkeypatch):
+    import hashlib
+
+    from condor.agents import engine as engine_module
+    from condor.agents.projections import run_projection
+    from condor.agents.run import RunResult
+
+    engine = _make_engine(tmp_path, monkeypatch, {})
+    engine.agent.denomination = "SOL"
+
+    async def fake_run_agent(*args, **kwargs):
+        return RunResult(text="ENTER FLEA 0.05 SOL — m5/h1 both positive\n\ndetail…")
+
+    async def no_providers():
+        return {}
+
+    monkeypatch.setattr(engine_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(engine, "_collect_provider_state", no_providers)
+    asyncio.run(engine._tick())
+
+    events = _run_store().read_events("acme", engine.agent_id)
+    run_path = _run_store().find_run_path(engine.agent_id)
+    artifacts = next(d for d in run_path.parent.iterdir() if d.is_dir())
+
+    # Frozen prefix persisted once as prompt.md; the tick event carries the
+    # per-tick suffix + a sha256 of the full assembled prompt — and the two
+    # halves verifiably reconstruct it (no directives in this test).
+    started = [e for e in events if e["type"] == "tick_started"][-1]
+    suffix = started["payload"]["prompt_suffix"]
+    assert "[TICK INFO]" in suffix
+    prefix = (artifacts / "prompt.md").read_text()
+    assert "[CURRENT CONFIG]" in prefix
+    full = f"{prefix}\n\n{suffix}"
+    assert started["payload"]["prompt_sha256"] == (
+        hashlib.sha256(full.encode()).hexdigest()
+    )
+
+    # Mutable context inputs get a baseline context_changed on tick 1.
+    ctx = [e for e in events if e["type"] == "context_changed"]
+    assert len(ctx) == 1 and set(ctx[0]["payload"]) == {
+        "learnings",
+        "user_memory",
+        "skills",
+    }
+
+    snap = [e for e in events if e["type"] == "state_snapshot"][-1]
+    assert snap["payload"]["decision"] == "ENTER FLEA 0.05 SOL — m5/h1 both positive"
+    assert snap["payload"]["state"].startswith("Last tick: #1 | ")
+    assert "SOL" in snap["payload"]["state"]
+
+    # journal.md: the generated one-line-per-tick view.
+    journal = (artifacts / "journal.md").read_text()
+    assert "tick #1" in journal and "ENTER FLEA" in journal
+
+    # The projection feeds these back into the next tick's prompt sections.
+    proj = run_projection(events)
+    assert "ENTER FLEA" in proj["recent_decisions"]
+    assert proj["state"].startswith("Last tick: #1")
+
+    # A second tick with unchanged context emits NO new context event.
+    asyncio.run(engine._tick())
+    events = _run_store().read_events("acme", engine.agent_id)
+    assert len([e for e in events if e["type"] == "context_changed"]) == 1
+
+
+def test_bridge_model_notice_never_becomes_a_decision(tmp_path, monkeypatch):
+    """A degenerate tick whose whole response is the ACP bridge's model-switch
+    notice must not feed [RECENT DECISIONS] (observed in run
+    01KXNZZGWN2FM3X7N66VBAMWKH tick 31)."""
+    from condor.agents import engine as engine_module
+    from condor.agents.projections import run_projection
+    from condor.agents.run import RunResult
+
+    engine = _make_engine(tmp_path, monkeypatch, {})
+
+    async def fake_run_agent(*args, **kwargs):
+        return RunResult(text="Model switched to claude-sonnet-4-6.")
+
+    async def no_providers():
+        return {}
+
+    monkeypatch.setattr(engine_module, "run_agent", fake_run_agent)
+    monkeypatch.setattr(engine, "_collect_provider_state", no_providers)
+    asyncio.run(engine._tick())
+
+    events = _run_store().read_events("acme", engine.agent_id)
+    snap = [e for e in events if e["type"] == "state_snapshot"][-1]
+    assert snap["payload"]["decision"] == ""
+    assert "Model switched" in snap["payload"]["response"]  # still on record
+    assert run_projection(events)["recent_decisions"] == ""
 
 
 # ── consult: records a kind=consult run, answer returns inline ──

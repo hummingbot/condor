@@ -83,18 +83,17 @@ async def manage_executors(
                 "error": f"unknown executor_type '{executor_type}'; "
                 f"expected one of {sorted(_EXECUTOR_TYPES)}"
             }
-        # Code-enforced post-stop cooldown: refuse to re-enter a spot token this
-        # agent was just stopped out of (the LLM does not hold the blacklist
-        # reliably — it re-bought falling knives). This is the only create path,
-        # so the block cannot be bypassed.
-        if executor_type == "position_spot":
-            from condor.agents.token_blacklist import stopped_out_reason
+        # Spec-declared entry guards (condor/executors/guards.py): per-agent
+        # hard trading rules — e.g. memecoin_trender's post-stop-loss cooldown
+        # — enforced in code on this, the only create path, because the model
+        # does not hold such rules reliably across ticks.
+        from condor.executors.guards import entry_guard_reason
 
-            reason = stopped_out_reason(
-                settings.agent_slug or "", (config or {}).get("base_token", "")
-            )
-            if reason:
-                return {"error": f"entry blocked — {reason}"}
+        reason = entry_guard_reason(
+            settings.agent_slug or "", executor_type, config or {}
+        )
+        if reason:
+            return {"error": f"entry blocked — {reason}"}
         try:
             cap = await _resolve_capability()
         except Exception as e:

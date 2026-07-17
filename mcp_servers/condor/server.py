@@ -629,6 +629,34 @@ async def manage_memory(
 
 
 @mcp.tool()
+@handle_errors("record learning")
+async def record_learning(text: str, replaces: str | None = None) -> dict:
+    """Record ONE durable operational learning for this agent (§7.1).
+
+    Learnings are the agent's own operational memory — market behavior,
+    execution quirks, venue timing — kept in ``agents/{slug}/learnings.md``
+    and injected into every tick's prompt as [LEARNINGS]. Only record
+    something genuinely NEW; to update or merge into an existing entry, pass
+    ``replaces``.
+
+    The list is capped at 40: when full, a plain append returns an error
+    instead of silently evicting old knowledge — consolidate with
+    ``replaces`` instead. This is distinct from user memory, which agents
+    read but never write.
+
+    Args:
+        text: The learning — one factual sentence, no speculation.
+        replaces: Case-insensitive substring identifying exactly ONE existing
+            entry to rewrite (consolidation). Errors if it matches zero or
+            several entries.
+
+    Returns:
+        {"recorded": <normalized text>, "replaced": bool, "total": <count>}
+    """
+    return await memory.record_learning(text, replaces=replaces)
+
+
+@mcp.tool()
 @handle_errors("manage skill")
 async def manage_skill(
     action: str,

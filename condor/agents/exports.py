@@ -96,6 +96,11 @@ def render_run_markdown(meta: dict, events: list[dict]) -> str:
                 parts.append(f"## Result\n\n{payload['result']}")
             if payload.get("response"):
                 parts.append(f"💬 {payload['response']}")
+        elif etype == "context_changed":
+            parts.append(
+                "🧠 **Context updated** (learnings / user memory / skills "
+                "as injected from this tick on)"
+            )
         elif etype == "directive":
             mark = "acked" if payload.get("acked") else "queued"
             parts.append(f"🧾 **Directive** ({mark}): {payload.get('text', '')}")

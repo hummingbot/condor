@@ -8,8 +8,11 @@ per-tick event emission, and the shutdown escalation hook.
 
 All operational history is RunStore events (§7.1) — the engine emits
 ``run_started``/``tick_started``/``tool_call``/``tick_completed``/
-``state_snapshot``/``directive``/``error``/``run_ended`` on the run's
-append-only stream; markdown views are generated exports.
+``state_snapshot``/``context_changed``/``directive``/``error``/``run_ended``
+on the run's append-only stream; markdown views are generated (the run's
+``prompt.md`` once + ``journal.md`` per tick + on-demand exports — never
+parsed back). ``tick_started`` carries the per-tick prompt suffix + a sha256
+of the full assembled prompt; the frozen prefix lives in ``prompt.md``.
 
 Each tick:
 1. Pre-compute core data providers (active executors)
@@ -23,21 +26,30 @@ Each tick:
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 
 from .agent import Agent
 from .learnings import read_learnings
 from .projections import RunMetricsTracker, run_projection
-from .prompts import build_tick_prompt
+from .prompts import build_run_prompt_prefix, build_tick_prompt_suffix
 from .providers import ProviderRegistry
 from .risk import RiskEngine, RiskLimits, risk_gate
 from .run import run_agent
 from .runstore import get_run_store
 
 log = logging.getLogger(__name__)
+
+# ACP-bridge session notices that can arrive as the whole "response" of a
+# degenerate tick (observed: "Model switched to claude-sonnet-4-6." on a
+# 12s, zero-tool tick).
+_BRIDGE_NOTICE_RE = re.compile(r"^Model switched to \S+\.?$")
 
 # Module-level registry of running engines, keyed by run_id.
 _engines: dict[str, "TickEngine"] = {}
@@ -82,7 +94,8 @@ class TickEngine:
     _last_error: str = field(default="", init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
-    _cached_routines_section: str | None = field(default=None, init=False, repr=False)
+    _prompt_prefix: str | None = field(default=None, init=False, repr=False)
+    _last_context_hash: str = field(default="", init=False, repr=False)
     # The live per-tick client (set via run_agent's on_client hook), held so
     # stop() can reap it if the tick's own finally is skipped (e.g. cancelled
     # mid-await). None between ticks.
@@ -470,34 +483,55 @@ class TickEngine:
             )
             return
 
-        # 4. Build prompt.
-        # Cache routine discovery on first tick — routines rarely change mid-run.
-        if self._cached_routines_section is None:
+        # 4. Build prompt: frozen prefix (once per run, persisted as the run's
+        # prompt.md companion) + per-tick suffix.
+        if self._prompt_prefix is None:
             from .prompts import _build_routines_section
 
             try:
-                self._cached_routines_section = _build_routines_section(self.agent.slug)
+                routines_section = _build_routines_section(self.agent.slug)
             except Exception:
-                self._cached_routines_section = ""
+                routines_section = ""
+            self._prompt_prefix = build_run_prompt_prefix(
+                self.agent, self.config, cached_routines_section=routines_section
+            )
+            try:
+                get_run_store().write_companion(
+                    self.agent_id, "prompt.md", self._prompt_prefix
+                )
+            except Exception:
+                log.exception("TickEngine %s: prompt.md write failed", self.agent_id)
 
-        # Agent memory index (advisory) — read fresh each tick so memory written
-        # by the chat or by the agent itself shows up promptly. It's a small file
-        # read; failure never blocks a tick.
+        # User-memory index (advisory, read-only) — the GLOBAL chat-curated
+        # tier; agents consume it but never write memory (operational
+        # knowledge goes to learnings). Read fresh each tick; a failure never
+        # blocks a tick.
         user_memory = ""
         skills_index = ""
         try:
             from condor.memory import MemoryStore, SkillStore
 
-            slug = self.agent.slug
-            user_memory = MemoryStore(slug).list_index()
-            skills_index = SkillStore(slug).list_index()
+            user_memory = MemoryStore(None).list_index()
+            skills_index = SkillStore(self.agent.slug).list_index()
         except Exception:
             pass
 
         next_tick = self._tick_count + 1
-        prompt = build_tick_prompt(
-            agent=self.agent,
-            config=self.config,
+
+        # Mutable context inputs (learnings / memory / skills) are external
+        # files with out-of-band writers and no per-tick history of their own
+        # — record them on the stream when (and only when) they change, so
+        # any tick's injected context is reconstructible.
+        context = {"learnings": learnings, "user_memory": user_memory,
+                   "skills": skills_index}
+        context_hash = hashlib.sha256(
+            json.dumps(context, sort_keys=True).encode()
+        ).hexdigest()
+        if context_hash != self._last_context_hash:
+            self._last_context_hash = context_hash
+            self._emit("context_changed", context, tick=next_tick)
+
+        suffix = build_tick_prompt_suffix(
             core_data=core_data_summaries,
             learnings=learnings,
             summary=summary,
@@ -505,10 +539,10 @@ class TickEngine:
             risk_state=risk_state.to_dict(),
             tick_number=next_tick,
             agent_id=self.agent_id,
-            cached_routines_section=self._cached_routines_section or None,
             user_memory=user_memory,
             skills_index=skills_index,
         )
+        prompt = f"{self._prompt_prefix}\n\n{suffix}"
 
         # Inject pending user directives. Acknowledged (dequeued) only AFTER the
         # tick's run completes — a timeout/crash mid-run must not lose them.
@@ -517,7 +551,18 @@ class TickEngine:
             listing = "\n".join(f"- {d}" for d in directives)
             prompt += f"\n\nUSER DIRECTIVES (apply these on this tick):\n{listing}"
 
-        self._emit("tick_started", {}, tick=next_tick)
+        # Slim, reconstructible prompt record: the exact prompt for this tick
+        # is prompt.md + the last context_changed ≤ this tick + this suffix +
+        # the acked directive events, verifiable against prompt_sha256 (the
+        # hash of the full assembled prompt as sent).
+        self._emit(
+            "tick_started",
+            {
+                "prompt_suffix": suffix,
+                "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+            },
+            tick=next_tick,
+        )
 
         # 5. One run_agent call per tick (fresh client, clean context window).
         # risk_state was computed once above and threads into the gate so the
@@ -593,15 +638,49 @@ class TickEngine:
             open_count=metrics["open_count"],
             total_pnl=metrics["total_pnl"],
         )
+        # decision/state feed run_projection → the next tick's
+        # [RECENT DECISIONS] / [CURRENT STATUS] prompt sections; the tick
+        # prompt asks the agent to open its response with a one-line decision.
+        decision = next(
+            (line.strip() for line in response_text.splitlines() if line.strip()),
+            "",
+        )
+        if _BRIDGE_NOTICE_RE.match(decision):
+            # Claude Code emits e.g. "Model switched to claude-sonnet-4-6."
+            # as session text; it is not an agent decision and must not feed
+            # the working-memory loop (it stays visible in `response`).
+            decision = ""
+        denom = f" {self.agent.denomination}" if self.agent.denomination else ""
+        state_line = (
+            f"pnl={metrics['total_pnl']:+g}{denom} | "
+            f"open={metrics['open_count']} | "
+            f"exposure={metrics['total_exposure']:g}{denom}"
+        )
         self._emit(
             "state_snapshot",
             {
                 "response": response_text[:2000],
+                "decision": decision[:240],
+                "state": f"Last tick: #{next_tick} | {state_line}",
                 "metrics": metrics,
                 "duration": tick_duration,
             },
             tick=next_tick,
         )
+        # journal.md: the run's story, one line per tick — a generated view of
+        # the events just emitted (never parsed back; humans read it in place
+        # of 30 near-identical prompt artifacts).
+        try:
+            now = datetime.now(timezone.utc).strftime("%H:%M:%S")
+            entry = f"- {now}Z tick #{next_tick} | {state_line}"
+            if decision:
+                entry += f" — {decision[:240]}"
+            header = f"# {self.agent.slug} — run {self.agent_id}\n\n" if next_tick == 1 else ""
+            get_run_store().write_companion(
+                self.agent_id, "journal.md", header + entry + "\n", append=True
+            )
+        except Exception:
+            log.exception("TickEngine %s: journal.md append failed", self.agent_id)
         self._emit(
             "tick_completed",
             {
@@ -609,6 +688,7 @@ class TickEngine:
                 "metrics": metrics,
                 "duration": tick_duration,
                 "timed_out": result.timed_out,
+                "model": result.model,
             },
             tick=next_tick,
         )

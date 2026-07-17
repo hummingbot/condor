@@ -1,6 +1,5 @@
 # Learnings
 
-## Market Observations
 - [2026-07-15 05:21] [trend_position] FLEA (9NzyoJ...z7r4) tick #7 re-entry closed — h1=+74%/m5 strong at close; likely TP again, confirming FLEA with h1>70% reliably hits 3% TP within 600s across multiple entries.
 - [2026-07-15 05:26] [trend_position] FLEA (9NzyoJ...z7r4) hitting TP a 3rd consecutive time (tick #10 entry, uPnL +0.0009 at CLOSING) — every entry with h1>70% has resulted in TP within 600s across this session.
 - [2026-07-15 05:42] [trend_position] FLEA (9NzyoJ...z7r4) closed between tick #18 and #19 — 4th consecutive TP on h1>70% momentum, uPnL was +$0.0008 at tick #18 close to TP trigger.
@@ -21,11 +20,15 @@
 - [2026-07-15 11:29] [trend_position] FEBU (4ko5tSr5...pump) tick #119 entry closed within ~4 min (by tick #121) — was -$0.0002 at tick #120, likely TP given h1 surged from +5.835% to +8.461% by tick #121; confirms fast TP on FEBU with h1>5% and rising momentum.
 - [2026-07-15 11:40] [trend_position] FEBU closed between tick #126 and #127 at ~-$0.0013 (time-limit) — m5 was persistently negative (-1.1% → -0.06% → -0.24%) across 3 ticks despite h1=+11.4%; confirms that negative m5 at entry/hold predicts time-limit loss even with strong h1.
 - [2026-07-15 11:59] [trend_position] BULLCAT (G9j8WW...pump) tick #133 entry closed SL (~-$0.0016) — h1=+61.6%/m5=+2.44% at entry, briefly +$0.0005 at tick #134, then reversed hard; high h1 alone does not guarantee TP when m5 is weak at entry (only +2.44%), unlike FLEA which had strong m5 throughout.
-
-## Execution Notes
 - [2026-07-13 23:35] [trend_position] Gateway NOW ROUTES pump.fun / Token-2022 mints via jupiter/router. The earlier "Token not found" (HTTP 400) was a Gateway bug: solana.getToken() called getMint() with the legacy TOKEN_PROGRAM_ID, which throws on Token-2022 mints (most modern pump.fun launches), so the mint resolved to null before Jupiter was ever called. Fixed by making getToken program-aware (reads the mint owner, passes TOKEN_2022_PROGRAM_ID when needed). Verified: SOL→ANSEM (9cRCn...pump) quotes fine. Enter pump.fun candidates normally — base_token = the mint address, connector omitted (default is jupiter/router).
 - [2026-07-15 12:30] [trend_position] Current executor schema (kind×instrument): type="position_spot", config={chain_network, base_token (mint), quote_token, amount_quote, take_profit_pct, stop_loss_pct, time_limit_s, slippage_pct}. The wallet comes from the runtime's own creds — do not hardcode addresses in memory.
-
-## Retired Insights
 - (schema, superseded 2026-07-15) executor_type="position" with wallet_address in config — replaced by the kind×instrument schema above.
 - (transient incident, expired) 2026-07-14 Gateway offline caused one OPENING failure; 2026-07-15 control-socket outage blocked creates. Both were process/infra outages, not durable trading knowledge.
+- [2026-07-16 17:42] [trend_position] 4h SL cooldown persists CROSS-SESSION/RUN — MENSA (CFPkPq1) and TRUMPCOIN (F4GpAFr6) were both blocked in this new run (01KXNZZGWN2FM3X7N66VBAMWKH) due to stop-outs in prior run (01KXNP3DFJSDYSDZCGW2TZF21V); the cooldown blacklist is global to the runtime, not per-run.
+- [2026-07-16 17:48] [trend_position] pumpCmXqMfrs-SOL (run 01KXNZZGWN2FM3X7N66VBAMWKH, tick #11) closed time_limit at -0.0002 SOL; second appearance of this token (prior run closed +0.0001), suggesting inconsistent momentum that doesn't reliably hit 3% TP within 600s.
+- [2026-07-16 17:55] [2026-07-16] [trend_position] JOTCHUA (BcHEaaTCvycP-SOL) closed time_limit at +0.0001 SOL in run 01KXNZZGWN2FM3X7N66VBAMWKH (tick #17); prior run closed -0.0001 — marginal time-limit outcome in both directions, suggesting this token doesn't reliably reach 3% TP within 600s.
+- [2026-07-16 18:11] [2026-07-16] [trend_position] MENSA (CFPkPq1eYPR8) still blocked by runtime 4h cooldown at tick #28 — ~2.5h into session, confirming cooldown from prior-run SL lasts well past run-boundary and into mid-session.
+- [2026-07-16 21:37] [trend_position] FEBU (4ko5tSr5o3H4...pump) hit TP +0.0007 SOL in run 01KXPDJDW4ZM87R9QY36BDDXX6 (closed between tick #2 and #3) — third cross-session TP confirmation; FEBU with h1>5% and rising m5 reliably yields TP within 600s, but m5 near-zero (+0.023%) is insufficient momentum confirmation for re-entry even with strong h1.
+- [2026-07-16 21:43] [2026-07-16 22:xx] [trend_position] 7QjNfL5JQFhL-SOL closed take_profit at +0.0006 SOL in run 01KXPDJDW4ZM87R9QY36BDDXX6 (ticks #6–#9, held ~3 ticks with uPnL rising steadily from +0.0003 → +0.0005 → TP); confirms steady uPnL climb into TP is a reliable signal of strong momentum in current session.
+- [2026-07-16 21:46] [2026-07-16] [trend_position] 7QjNfL5JQFhL-SOL re-entry (tick #9, run 01KXPDJDW4ZM87R9QY36BDDXX6) closed stop_loss at -0.0138 SOL on 0.02 position (~-69%, ~14x the 5% SL floor) — severe slippage on exit; pushed session drawdown to 13.8% (limit 15%). Prior entry on same token hit TP +0.0006; this re-entry shows liquidity can vanish between ticks on the same token, making same-session re-entries on prior-TP tokens hazardous.
+- [2026-07-16 23:16] [2026-07-16] [trend_position] F4GpAFr6vrxU-SOL closed stop_loss at -0.0011 SOL in run 01KXPK6N7TZZ7QVC31ZQCDNJKK (tick #5); 4h cooldown applied. First SL close this run; no stand-down yet but token excluded until cooldown clears.

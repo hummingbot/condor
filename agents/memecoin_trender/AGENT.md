@@ -7,7 +7,6 @@ agent_key: claude-acp:sonnet
 tools:
 - manage_executors
 - manage_routines
-- manage_memory
 - manage_skill
 - send_notification
 when_to_consult: When the user asks what memecoins are trending on Solana, whether
@@ -28,6 +27,9 @@ default_config:
   stop_loss_pct: 0.05
   time_limit_s: 600
   min_liquidity_usd: 100000
+  entry_guards:
+    stop_loss_cooldown:
+      hours: 4
   min_volume_24h_usd: 500000
   keep_position_on_stop: false
   risk_limits:

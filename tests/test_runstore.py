@@ -166,17 +166,35 @@ def test_secret_redaction(store):
     assert evm_key not in raw
 
 
-def test_oversized_payload_spills_to_artifact(store):
+def test_oversized_payload_spills_to_markdown_artifact(store):
+    import hashlib
+    import re
+
+    from condor.agents.runstore import ulid_datetime
+
     run_id = store.start_run("alpha", "session")
     big = "x" * (MAX_EVENT_BYTES + 1000)
-    ev = store.emit(run_id, "tool_call", {"output": big})
+    ev = store.emit(run_id, "tool_call", {"output": big, "meta": {"tick": 3}})
     store.end_run(run_id, "stopped")
     payload = ev["payload"]
     assert "artifact" in payload
     assert payload["bytes"] > MAX_EVENT_BYTES
+
+    # Human-oriented naming: dir = run start time (from the ULID), file =
+    # event time + type, both UTC-stamped markdown.
+    dir_name, file_name = payload["artifact"].split("/")
+    started = ulid_datetime(run_id)
+    assert dir_name == started.strftime("%Y-%m-%d_%H-%M-%S") + "Z.artifacts"
+    assert re.fullmatch(r"\d{2}-\d{2}-\d{2}Z-tool_call\.md", file_name)
+
     artifact_path = store.runs_dir("alpha") / payload["artifact"]
-    assert artifact_path.exists()
-    assert json.loads(artifact_path.read_text())["output"] == big
+    text = artifact_path.read_text()
+    assert text.startswith("# tool_call — ")
+    assert big in text  # string values verbatim
+    assert '"tick": 3' in text  # non-strings as fenced JSON
+    # Integrity hash covers the markdown exactly as written.
+    assert payload["sha256"] == hashlib.sha256(text.encode()).hexdigest()
+
     # The stream line itself stays under the cap + envelope overhead.
     raw_last = [
         l

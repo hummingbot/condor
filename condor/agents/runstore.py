@@ -16,8 +16,15 @@
   ``tool_call``) additionally fsync. A partial final line is ignored on read
   and truncated before the next append.
 - **Redaction + size caps:** payloads pass a secret redactor; an event over
-  ~16KB spills to ``runs/{run_id}.artifacts/`` and the event keeps a
-  path+hash reference.
+  ~16KB spills as a human-readable MARKDOWN file to the run's artifacts dir
+  — named for the run's start time (``runs/{YYYY-MM-DD_HH-MM-SS}Z.artifacts/``,
+  decoded from the ULID) with per-event ``{HH-MM-SS}Z-{type}.md`` files — and
+  the event keeps a path+hash reference (hash over the markdown as written).
+  All artifact timestamps are UTC (the trailing ``Z``).
+- **Companions:** the engine also writes two human-facing files into the same
+  dir via :meth:`RunStore.write_companion` — ``prompt.md`` (the run's frozen
+  prompt prefix, once) and ``journal.md`` (one line per tick, appended).
+  Generated views only: nothing parses them back.
 """
 
 from __future__ import annotations
@@ -30,6 +37,7 @@ import re
 import secrets
 import threading
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +52,7 @@ EVENT_TYPES = {
     "tool_call",
     "permission",
     "state_snapshot",
+    "context_changed",
     "directive",
     "notification",
     "error",
@@ -80,6 +89,16 @@ _ULID_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{26}$")
 
 def is_run_id(value: str) -> bool:
     return bool(_ULID_RE.match(value or ""))
+
+
+def ulid_datetime(run_id: str) -> datetime:
+    """Start time encoded in a ULID (first 10 chars = 48-bit ms timestamp, UTC)."""
+    if not is_run_id(run_id):
+        raise ValueError(f"not a ULID run id: {run_id!r}")
+    ms = 0
+    for ch in run_id[:10]:
+        ms = (ms << 5) | _B32.index(ch)
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -181,6 +200,38 @@ class UnknownRunError(KeyError):
 
 
 # ---------------------------------------------------------------------------
+# Artifact rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_artifact_md(
+    type_: str, ts: float, run_id: str, seq: int, payload: dict
+) -> str:
+    """One spilled payload as a human-readable markdown document.
+
+    Artifacts are forensic — nothing parses them back (the same one-way rule
+    as ``exports.py``); the stream event keeps the sha256 of this exact text.
+    String values (e.g. a tick's prompt) are written verbatim; everything
+    else as fenced JSON.
+    """
+    when = datetime.fromtimestamp(ts, tz=timezone.utc).strftime(
+        "%Y-%m-%d %H:%M:%S UTC"
+    )
+    lines = [f"# {type_} — {when}", "", f"- **run:** {run_id}", f"- **seq:** {seq}", ""]
+    for key, value in payload.items():
+        lines.append(f"## {key}")
+        lines.append("")
+        if isinstance(value, str):
+            lines.append(value)
+        else:
+            lines.append("```json")
+            lines.append(json.dumps(value, indent=2, ensure_ascii=False, default=str))
+            lines.append("```")
+        lines.append("")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Per-run writer
 # ---------------------------------------------------------------------------
 
@@ -210,22 +261,31 @@ class _RunWriter:
         self._f = open(path, "a", encoding="utf-8")
 
     def _artifacts_dir(self) -> Path:
-        d = self.path.with_name(f"{self.run_id}.artifacts")
+        # Named for the run's start time (decoded from the ULID) so a human
+        # can find a run's artifacts by when it ran, not by opaque id.
+        started = ulid_datetime(self.run_id)
+        d = self.path.with_name(
+            started.strftime("%Y-%m-%d_%H-%M-%S") + "Z.artifacts"
+        )
         d.mkdir(mode=0o700, exist_ok=True)
         return d
 
-    def _spill_artifact(self, seq: int, type_: str, payload: dict) -> dict:
-        raw = json.dumps(payload, ensure_ascii=False, default=str)
-        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
-        name = f"{seq:06d}-{type_}.json"
-        apath = self._artifacts_dir() / name
-        apath.write_text(raw)
+    def _spill_artifact(self, seq: int, type_: str, payload: dict, ts: float) -> dict:
+        text = _render_artifact_md(type_, ts, self.run_id, seq, payload)
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        adir = self._artifacts_dir()
+        stamp = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H-%M-%S")
+        name = f"{stamp}Z-{type_}.md"
+        if (adir / name).exists():  # two same-type spills in one second
+            name = f"{stamp}Z-{type_}-{seq}.md"
+        apath = adir / name
+        apath.write_text(text)
         os.chmod(apath, 0o600)
         return {
-            "artifact": f"{self.run_id}.artifacts/{name}",
+            "artifact": f"{adir.name}/{name}",
             "sha256": digest,
-            "bytes": len(raw.encode("utf-8")),
-            "preview": raw[:_ARTIFACT_PREVIEW_CHARS],
+            "bytes": len(text.encode("utf-8")),
+            "preview": text[:_ARTIFACT_PREVIEW_CHARS],
         }
 
     def emit(
@@ -260,7 +320,9 @@ class _RunWriter:
             event["payload"] = payload
             line = json.dumps(event, ensure_ascii=False, default=str)
             if len(line.encode("utf-8")) > MAX_EVENT_BYTES:
-                event["payload"] = self._spill_artifact(self._seq, type_, payload)
+                event["payload"] = self._spill_artifact(
+                    self._seq, type_, payload, event["ts"]
+                )
                 line = json.dumps(event, ensure_ascii=False, default=str)
             self._f.write(line + "\n")
             self._f.flush()
@@ -269,6 +331,17 @@ class _RunWriter:
             ):
                 os.fsync(self._f.fileno())
             return event
+
+    def write_companion(self, name: str, text: str, *, append: bool = False) -> Path:
+        """Write a human-facing companion file (``prompt.md``, ``journal.md``)
+        into the run's artifacts dir. One-way: nothing parses these back.
+        Text passes the same value redactor as event payloads."""
+        path = self._artifacts_dir() / name
+        with self._lock:
+            with open(path, "a" if append else "w", encoding="utf-8") as f:
+                f.write(_redact_text(text))
+        os.chmod(path, 0o600)
+        return path
 
     def close(self) -> None:
         with self._lock:
@@ -376,6 +449,15 @@ class RunStore:
             tool_call_id=tool_call_id,
             executor_id=executor_id,
         )
+
+    def write_companion(
+        self, run_id: str, name: str, text: str, *, append: bool = False
+    ) -> Path:
+        """Write/append a companion file into an OPEN run's artifacts dir."""
+        writer = self._writers.get(run_id)
+        if writer is None:
+            raise UnknownRunError(f"no open writer for run {run_id}")
+        return writer.write_companion(name, text, append=append)
 
     def end_run(self, run_id: str, status: str, reason: str = "") -> None:
         """Persist ``run_ended`` (fsynced) and close the writer. Idempotent

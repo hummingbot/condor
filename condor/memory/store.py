@@ -49,6 +49,11 @@ def _slugify(name: str) -> str:
     return s.strip("_") or "memory"
 
 
+def _significant_words(text: str) -> set[str]:
+    """Normalized word set for the near-duplicate heuristic."""
+    return set(re.sub(r"[^\w\s]", " ", text.lower()).split())
+
+
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
     """Parse YAML frontmatter and markdown body (mirrors strategy.py)."""
     text = text.strip()
@@ -214,16 +219,45 @@ class MemoryStore:
             "created": created,
             "source": source,
         }
+        similar = None if existed else self._most_similar(slug, content, description)
+
         _atomic_write(path, _render(meta, content.strip()))
         self._reindex()
         action = "update" if existed else "create"
         self._append_audit(action, f"memory:{slug}", meta["description"], source)
-        return {
+        saved: dict = {
             "saved": True,
             "name": slug,
             "type": type,
             "description": meta["description"],
         }
+        if similar:
+            saved["warning"] = (
+                f"very similar to existing memory '{similar}' — one fact, one "
+                f"memory: consider updating '{similar}' instead of accumulating "
+                "near-duplicates (each one inflates every future prompt)"
+            )
+        return saved
+
+    def _most_similar(self, slug: str, content: str, description: str) -> str | None:
+        """Name of an existing memory whose text mostly overlaps the new one.
+
+        Advisory only — the write always proceeds. >50% word overlap relative
+        to the shorter text (the old learnings-dedupe heuristic).
+        """
+        new_words = _significant_words(f"{description} {content}")
+        if not new_words:
+            return None
+        for meta, body in self._iter_memories():
+            if meta.get("name") == slug:
+                continue
+            old_words = _significant_words(f"{meta.get('description', '')} {body}")
+            if not old_words:
+                continue
+            overlap = len(new_words & old_words) / min(len(new_words), len(old_words))
+            if overlap > 0.5:
+                return meta.get("name")
+        return None
 
     def read(self, name: str) -> str | None:
         """Return the full body of a memory, or ``None`` if absent."""

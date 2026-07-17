@@ -764,7 +764,7 @@ not only RunStore events.
 for trading. Environment variables never override a configured account, and
 **startup never reads env credentials implicitly** — the current
 `load_hyperliquid_creds` env-over-config precedence is deleted, not
-inverted. `condor account import-env` exists as an **explicit** one-shot
+inverted. `condor accounts import-env` exists as an **explicit** one-shot
 command that creates an account from env credentials (going through the
 same onboarding validation below); there is no implicit seeding and thus no
 startup-ordering question.
@@ -1115,7 +1115,7 @@ validation** with a clear "unsupported pre-v1 format" error — there is no
 compatibility reader, no automatic conversion, and no startup ordering
 between conversion and env import (neither exists). Accounts are created
 exclusively through dashboard onboarding, the CLI, or the explicit
-`condor account import-env` command.
+`condor accounts import-env` command.
 
 **Onboarding (via the web dashboard) — the COMPLETE account setup path
 ships in Phase 3, one phase, not spread across three:** structured
@@ -1196,13 +1196,22 @@ agents/{slug}/runs/{run_id}.jsonl
   `0600` — same posture as the sealed store and control socket.
 - **Redaction + size caps:** tool payloads pass a redactor (known secret
   patterns, sealed-field names) and a size cap (~16KB/event); oversized
-  outputs become artifact files under `runs/{run_id}.artifacts/` referenced
+  outputs become markdown artifact files under
+  `runs/{YYYY-MM-DD_HH-MM-SS}Z.artifacts/` (dir named for the run's start
+  time, decoded from the ULID; files `{HH-MM-SS}Z-{type}.md`, UTC) referenced
   by path+hash. Full ACP payload capture ≠ verbatim credential persistence.
 
-Event types: `run_started, tick_started, tick_completed{actions}, tool_call,
+Event types: `run_started, tick_started{prompt_suffix, prompt_sha256},
+tick_completed{actions}, tool_call,
 permission{pending|approved|denied|timeout_deny|interrupted_void, channel},
-state_snapshot,
+state_snapshot, context_changed{learnings, user_memory, skills — baseline at
+tick 1, then only on content change},
 directive{text, acked}, notification, error, run_ended{status, reason}`.
+The frozen prompt prefix is persisted once per run as the `prompt.md`
+companion (with a per-tick `journal.md` line as the generated human view);
+the exact prompt at tick N reconstructs from prompt.md + last
+context_changed ≤ N + the tick's suffix + acked directives, verified by
+`prompt_sha256`.
 
 Markdown (`journal.md`, snapshots, experiment/delegation files) becomes a
 **generated export** (`condor/agents/exports.py`); nothing parses markdown
@@ -1302,7 +1311,8 @@ so Phases 3/4 consume an existing frozen spec.)
   requirement — the tool list must not silently omit verbs the other
   surfaces have (+ `consult`, `delegate`,
   `resolve_approval`, `get_notifications`, `manage_executors`,
-  `manage_memory`, `manage_skill`, `manage_routines`, and
+  `manage_memory`, `record_learning` (the §7.1 explicit learnings append),
+  `manage_skill`, `manage_routines`, and
   `send_notification` — every shipped AgentSpec declares it, so it stays;
   it **enqueues through the main process over the control socket** (the
   outbox lock is process-local, so subprocess writes would race)). That
@@ -1470,7 +1480,7 @@ menu defaults, `python-telegram-bot`, `condor_bot_data.pickle`.
   with the appropriate warning, and re-adding the same address restores
   management (address-keyed attribution); env credentials present at startup are NOT read implicitly —
   trading with only env vars set and no configured account fails with a
-  clear error, and `condor account import-env` creates the account
+  clear error, and `condor accounts import-env` creates the account
   explicitly (through onboarding validation); onboarding rejects a typed
   address that does not match the submitted credentials, refuses to enable
   an account whose read-only venue probe fails, and rejects a duplicate

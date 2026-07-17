@@ -1,8 +1,10 @@
 """Memory tool — thin MCP wrapper over condor.memory.MemoryStore.
 
-Resolves the store by ``settings.agent_slug`` alone (§4.3 — global tier when
-empty) and derives the audit ``source`` from it so the LLM never has to
-report who is writing.
+ONE memory tier (insight-flow-simplification §7/§8): the global chat-curated
+store at repo-root ``store/memory/``. Agent-scoped sessions may read/search
+it but writes are rejected — an agent's own durable knowledge goes to
+``record_learning``. The audit ``source`` still derives from
+``settings.agent_slug`` so provenance is never self-reported.
 """
 
 from condor.memory import MemoryStore
@@ -14,8 +16,9 @@ def _source() -> str:
 
 
 def _store() -> MemoryStore:
-    # agent_slug selects this assistant's store (FEAT-003); empty -> global tier.
-    return MemoryStore(settings.agent_slug or None)
+    # ONE memory tier: the global, chat-curated store. Agents read it (their
+    # prompts inject its index) but never write — see the write gate below.
+    return MemoryStore(None)
 
 
 async def manage_memory(
@@ -28,6 +31,12 @@ async def manage_memory(
     max_entries: int = 30,
 ) -> dict:
     store = _store()
+
+    if settings.agent_slug and action in ("write", "delete"):
+        return {
+            "error": "agents do not write user memory — record durable "
+            "operational knowledge with record_learning instead"
+        }
 
     if action == "write":
         if not name or not content or not description:
@@ -62,3 +71,30 @@ async def manage_memory(
         return {"entries": store.audit(limit=max_entries)}
 
     return {"error": f"Unknown action: {action}"}
+
+
+async def record_learning(text: str, replaces: str | None = None) -> dict:
+    """Append or consolidate one learning in this agent's ``learnings.md``."""
+    if not settings.agent_slug:
+        return {
+            "error": "record_learning is agent-scoped — no agent in this context"
+        }
+    from condor.agents.agent import agents_data_root
+    from condor.agents.learnings import append_learning, read_learnings
+
+    agent_dir = agents_data_root() / settings.agent_slug
+    if not agent_dir.is_dir():
+        return {"error": f"unknown agent directory: {agent_dir}"}
+    text = " ".join(str(text or "").split())
+    if not text:
+        return {"error": "text is required"}
+    try:
+        append_learning(agent_dir, text, replaces=replaces or None)
+    except ValueError as e:
+        # Full list / bad replaces target — the agent must consolidate.
+        return {"error": str(e)}
+    return {
+        "recorded": text,
+        "replaced": bool(replaces),
+        "total": len(read_learnings(agent_dir).splitlines()),
+    }

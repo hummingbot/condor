@@ -41,6 +41,39 @@ def test_write_list_read_roundtrip(memory_root):
     assert "thousands separators" in body
 
 
+def test_write_warns_on_near_duplicate_but_still_saves(memory_root):
+    """Per-trade ephemera pile-up (e.g. ansem_takeprofit_tick92 vs
+    ansem_takeprofit_tick30_run2) gets an advisory warning — never a block."""
+    s = MemoryStore()
+    s.write(
+        name="ansem_takeprofit_tick92",
+        content="ANSEM (9cRCn9rGT8V2) closed take_profit +0.0006 SOL before tick #92",
+        description="ANSEM closed take_profit +0.0006 SOL (run 1)",
+    )
+    res = s.write(
+        name="ansem_takeprofit_tick30_run2",
+        content="ANSEM (9cRCn9rGT8V2) closed take_profit +0.0007 SOL at tick #30",
+        description="ANSEM closed take_profit +0.0007 SOL (run 2)",
+    )
+    assert res["saved"] is True  # advisory, not a gate
+    assert "ansem_takeprofit_tick92" in res.get("warning", "")
+
+    # Unrelated content: no warning. Overwriting a memory by its own name is
+    # the RIGHT move and must not warn either.
+    clean = s.write(
+        name="default_exchange",
+        content="The user trades primarily on Hyperliquid.",
+        description="Default exchange is Hyperliquid",
+    )
+    assert "warning" not in clean
+    update = s.write(
+        name="ansem_takeprofit_tick92",
+        content="ANSEM (9cRCn9rGT8V2) closed take_profit +0.0006 SOL before tick #92 (confirmed)",
+        description="ANSEM closed take_profit +0.0006 SOL (run 1)",
+    )
+    assert "warning" not in update
+
+
 def test_read_missing_returns_none(memory_root):
     s = MemoryStore()
     assert s.read("does_not_exist") is None

@@ -52,16 +52,13 @@ SKILLS & ROUTINES:
   manage_routines(action="run", name="...", config={...}). manage_routines(action="list")
   to discover routines; routines tagged "agent" are local to your strategy.
 - Skills are read-only playbooks shipped with this agent — follow them, you can't
-  create or edit them. Operational facts you learn go to agent memory.
+  create or edit them. Operational facts you learn go to record_learning.
 
-MEMORY (about the user, NOT operational learnings):
-- [USER MEMORY] below is what is known about the OWNER (preferences, profile).
-  This is distinct from operational/market learnings (agent memory).
-- Read detail with manage_memory(action="read", name="...").
-- If you learn something new and stable about the USER (a standing preference,
-  a profile fact, a correction), save it with manage_memory(action="write",
-  name="short-name", description="one line", content="...", type="preference|fact").
-  Operational/market learnings go to agent memory (see RECORDING above), NOT here.
+MEMORY (about the user):
+- [USER MEMORY] below is advisory, READ-ONLY context about the OWNER
+  (preferences, profile), maintained by the chat. You cannot write it —
+  anything durable YOU discover is operational and goes to record_learning
+  (see RECORDING above).
 
 NOTIFICATIONS:
 - Use send_notification(text="...") to message the user.
@@ -69,14 +66,19 @@ NOTIFICATIONS:
 
 # Recording guidance (§7.1): the run's event stream is the one history — the
 # engine records the tick (your response, tool calls, metrics) automatically.
-# Durable operational learnings go to agent memory (an explicit tool call).
+# Durable operational learnings go to learnings.md via record_learning.
 JOURNAL_SECTION_LIVE = """\
 RECORDING:
 - Your response and tool calls are recorded on the run automatically —
   state your decision and reasoning in ONE short line at the top of your
   response; no tool call needed for that.
 - A genuinely NEW durable fact (market behavior, execution quirk) goes to
-  agent memory: manage_memory(action="write", ...) — factual, one line.
+  learnings: record_learning(text="...") — factual, one line. [LEARNINGS]
+  below is this list; do not re-record what is already there.
+- To UPDATE or MERGE an existing learning (or when learnings are full),
+  consolidate: record_learning(text="...", replaces="<distinctive substring
+  of the entry to replace>"). Appends error when the list is full — never
+  silently evict knowledge; consolidate instead.
 """
 
 JOURNAL_SECTION_EXPERIMENT = """\
@@ -85,6 +87,8 @@ RECORDING:
   whole tick is recorded automatically on the run's event stream.
 - Put all observations, reasoning, and what you WOULD do straight into your
   response.
+- A genuinely NEW durable fact discovered while testing still goes to
+  learnings: record_learning(text="...") — factual, one line.
 """
 
 
@@ -98,7 +102,7 @@ def _build_tool_preload(*, is_experiment: bool) -> str:
         tools.append("mcp__condor__manage_executors")
     tools += [
         "mcp__condor__send_notification",
-        "mcp__condor__manage_memory",
+        "mcp__condor__record_learning",
         "mcp__condor__manage_skill",
         "mcp__condor__manage_routines",
     ]
@@ -136,24 +140,17 @@ def _build_routines_section(agent_slug: str) -> str:
     return "\n".join(lines)
 
 
-def build_tick_prompt(
+def build_run_prompt_prefix(
     agent: Agent,
     config: dict[str, Any],
-    core_data: dict[str, str],
-    learnings: str,
-    summary: str,
-    recent_decisions: str,
-    risk_state: dict[str, Any],
-    tick_number: int = 1,
-    agent_id: str = "",
     cached_routines_section: str | None = None,
-    user_memory: str = "",
-    skills_index: str = "",
 ) -> str:
-    """Build the full prompt for one agent tick.
+    """The FROZEN part of the tick prompt — constant for the whole run.
 
-    The AGENT.md body IS the spec (§5.3 collapse): domain identity + the
-    strategy tactic in one document (``agent.instructions``).
+    Everything here derives from the frozen spec/config (§5.3), so the engine
+    builds it once per run and persists it as the run's ``prompt.md``
+    companion file. Anything that can change mid-run belongs in
+    :func:`build_tick_prompt_suffix` instead.
     """
     execution_mode = config.get("execution_mode", "loop")
     is_experiment = execution_mode == "experiment"
@@ -168,13 +165,6 @@ def build_tick_prompt(
     # Tool preload is ACP-specific (ToolSearch)
     sections.append(_build_tool_preload(is_experiment=is_experiment))
 
-    # Tick identity. Condor-native executors are attributed automatically
-    # (agent_slug/agent_id) — no attribution arg needed in tool calls.
-    tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in notifications."
-    if agent_id:
-        tick_info += f"\nAgent ID: {agent_id}"
-    sections.append(tick_info)
-
     # Single-tick session note (run_once maps to max_ticks=1)
     if not is_experiment and config.get("max_ticks") == 1:
         sections.append(
@@ -188,26 +178,17 @@ def build_tick_prompt(
     if agent.instructions.strip():
         sections.append(f"[AGENT — identity, knowledge & strategy]\n{agent.instructions}")
 
-    # Available skills (playbooks) + routines, unified under one header. Skills
-    # are read fresh each tick (the agent may create its own mid-session), so
-    # they arrive via skills_index; routine discovery is cached (it's expensive).
+    # Routine discovery is expensive and routines rarely change mid-run —
+    # cached at run start, so it is part of the frozen prefix. Skills are
+    # read fresh each tick and live in the suffix.
     routines_section = cached_routines_section
     if routines_section is None:
         try:
             routines_section = _build_routines_section(agent.slug)
         except Exception:
             routines_section = ""  # Don't fail the tick if discovery fails
-    skills_routines = ["[AVAILABLE SKILLS & ROUTINES]"]
-    if skills_index:
-        skills_routines.append(
-            "\nSKILLS — playbooks (read before a known flow with "
-            'manage_skill(action="read", name="..."); "→ routine:" links to an '
-            "executable routine):\n"
-            f"{skills_index}"
-        )
     if routines_section:
-        skills_routines.append(f"\n{routines_section}")
-    sections.append("\n".join(skills_routines))
+        sections.append(f"[AVAILABLE ROUTINES]\n{routines_section}")
 
     # Session trading context (natural language directives for this session)
     trading_context = config.get("trading_context", "")
@@ -237,6 +218,46 @@ def build_tick_prompt(
         config_lines.append(f"{k}: {v}")
     sections.append("\n".join(config_lines))
 
+    return "\n\n".join(sections)
+
+
+def build_tick_prompt_suffix(
+    core_data: dict[str, str],
+    learnings: str,
+    summary: str,
+    recent_decisions: str,
+    risk_state: dict[str, Any],
+    tick_number: int = 1,
+    agent_id: str = "",
+    user_memory: str = "",
+    skills_index: str = "",
+) -> str:
+    """The PER-TICK part of the tick prompt.
+
+    Everything here can differ between ticks. The engine records it inline on
+    the tick's ``tick_started`` event (``prompt_suffix``) — the mutable
+    context inputs (learnings / user memory / skills) additionally get
+    ``context_changed`` events so their state at any tick is on the stream.
+    """
+    sections: list[str] = []
+
+    # Tick identity. Condor-native executors are attributed automatically
+    # (agent_slug/agent_id) — no attribution arg needed in tool calls.
+    tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in notifications."
+    if agent_id:
+        tick_info += f"\nAgent ID: {agent_id}"
+    sections.append(tick_info)
+
+    # Skills are read fresh each tick (the agent may gain skills mid-session).
+    if skills_index:
+        sections.append(
+            "[AVAILABLE SKILLS]\n"
+            "SKILLS — playbooks (read before a known flow with "
+            'manage_skill(action="read", name="..."); "→ routine:" links to an '
+            "executable routine):\n"
+            f"{skills_index}"
+        )
+
     # Risk state
     rs = risk_state
     max_dd = rs.get("max_drawdown_pct", -1)
@@ -261,11 +282,11 @@ def build_tick_prompt(
     for name, data_summary in core_data.items():
         sections.append(f"[CORE DATA - {name}]\n{data_summary}")
 
-    # User memory -- what is known about the owner (preferences/profile)
+    # User memory -- what is known about the owner (read-only advisory
+    # context from the global chat-curated store).
     if user_memory:
         sections.append(
-            "[USER MEMORY — what is known about the owner; advisory]\n"
-            'Read detail with manage_memory(action="read", name="...").\n\n'
+            "[USER MEMORY — what is known about the owner; advisory, read-only]\n\n"
             f"{user_memory}"
         )
 
@@ -280,3 +301,41 @@ def build_tick_prompt(
         sections.append(f"[RECENT DECISIONS — last 3 snapshots]\n{recent_decisions}")
 
     return "\n\n".join(sections)
+
+
+def build_tick_prompt(
+    agent: Agent,
+    config: dict[str, Any],
+    core_data: dict[str, str],
+    learnings: str,
+    summary: str,
+    recent_decisions: str,
+    risk_state: dict[str, Any],
+    tick_number: int = 1,
+    agent_id: str = "",
+    cached_routines_section: str | None = None,
+    user_memory: str = "",
+    skills_index: str = "",
+) -> str:
+    """Full prompt for one agent tick: frozen prefix + per-tick suffix.
+
+    The AGENT.md body IS the spec (§5.3 collapse): domain identity + the
+    strategy tactic in one document (``agent.instructions``). The engine uses
+    the two parts separately (prompt.md persistence / slim tick events); this
+    joined form is the same text the model receives.
+    """
+    prefix = build_run_prompt_prefix(
+        agent, config, cached_routines_section=cached_routines_section
+    )
+    suffix = build_tick_prompt_suffix(
+        core_data,
+        learnings,
+        summary,
+        recent_decisions,
+        risk_state,
+        tick_number=tick_number,
+        agent_id=agent_id,
+        user_memory=user_memory,
+        skills_index=skills_index,
+    )
+    return f"{prefix}\n\n{suffix}"

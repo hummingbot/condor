@@ -109,6 +109,11 @@ their trading agents. Its index is injected as `[USER MEMORY]` when present.
   details. One memory = one fact; keep `description` to a single line.
 - The user can review and delete memories via `/memory`; every write/delete is
   audited (`manage_memory(action="audit")`).
+- This store is the ONLY memory tier: trading agents read its index
+  (`[USER MEMORY]`) but never write memory. An agent's own knowledge lives in
+  its `learnings.md` (agent-promoted via `record_learning`) and graduates into
+  its AGENT.md spec when proven — see the promotion ladder in the
+  agent-builder skill.
 
 ## Skills
 
