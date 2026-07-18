@@ -1,4 +1,4 @@
-"""``condor start`` — start a session or experiment from the terminal.
+"""``condor start`` — start a session (or run an experiment) from the terminal.
 
 Parity with the ``run_agent`` MCP tool; completes the hbot-style start/stop
 pair. One-shot verb (hbot rule 5): agents and scripts don't need the
@@ -18,7 +18,8 @@ def start(
     dry_run: bool = typer.Option(
         False,
         "--dry-run",
-        help="Run as an experiment (no real orders; user synonym: dry run).",
+        help="Experiment: simulate ONE tick in memory (no orders, nothing "
+        "recorded) and print the agent's would-have-done report.",
     ),
     max_ticks: Optional[int] = typer.Option(
         None, "--max-ticks", help="Bound the run to N ticks."
@@ -28,12 +29,22 @@ def start(
     ),
     as_json: bool = json_option(),
 ) -> None:
-    """Start an agent session (--dry-run for an experiment)."""
+    """Start an agent session (--dry-run simulates one tick and reports)."""
     config: dict = {}
-    if dry_run:
-        config["dry_run"] = True
     if max_ticks is not None:
         config["max_ticks"] = max_ticks
+
+    if dry_run:
+        # Blocks for the simulated tick (same budget as a live tick), then
+        # prints the human-readable report — an experiment leaves no run.
+        result = control(
+            "agent.experiment",
+            {"slug": slug, "config": config, "trading_context": context},
+            timeout=330,
+        )
+        report = (result or {}).get("report", "")
+        emit({"agent": slug, "report": report}, report, as_json)
+        return
 
     result = control(
         "agent.start",

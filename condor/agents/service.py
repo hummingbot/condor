@@ -2,7 +2,7 @@
 
 Web routes, MCP tools, and control-socket handlers are thin adapters over
 this service. It composes what already existed — ``AgentStore`` (CRUD),
-``lifecycle`` (run/pause/resume/stop/shutdown), ``consult``/``delegate`` —
+``lifecycle`` (run/pause/resume/stop/shutdown), ``consult``/``experiment`` —
 and owns the guard logic that used to be duplicated per surface.
 
 Errors are :class:`condor.agents.lifecycle.LifecycleError` (HTTP-ish status)
@@ -118,6 +118,7 @@ class AgentService:
             "agent_key",
             "tools",
             "when_to_consult",
+            "goal",
             "risk_limits",
             "denomination",
             "account",
@@ -239,8 +240,8 @@ class AgentService:
         kind: str = "",
         scheduled_for: str = "",
     ) -> dict:
-        """Start a session/experiment run (execution_mode comes from config).
-        The scheduler passes ``kind="scheduled"`` + the fire time (§5.4)."""
+        """Start a session run. The scheduler passes ``kind="scheduled"`` +
+        the fire time (§5.4). Dry runs are :meth:`experiment`, not a session."""
         self._reject_tombstoned(slug, "launching")
         return await start_session(
             slug,
@@ -249,6 +250,22 @@ class AgentService:
             kind=kind,
             scheduled_for=scheduled_for,
         )
+
+    async def experiment(
+        self,
+        slug: str,
+        config: Optional[dict] = None,
+        trading_context: str = "",
+    ) -> dict:
+        """One simulated tick, fully in memory: mutations cancelled, nothing
+        recorded. Returns {"report": <human-readable markdown>}."""
+        from condor.agents.experiment import run_experiment
+
+        self._reject_tombstoned(slug, "experimenting with")
+        report = await run_experiment(
+            slug, config=config, trading_context=trading_context
+        )
+        return {"report": report}
 
     async def control(
         self,
@@ -259,6 +276,23 @@ class AgentService:
     ) -> dict:
         """pause | resume | stop [--close] | shutdown (§5.2/§6.2 verbs)."""
         return await apply_verb(slug, agent_id, verb, close=close)
+
+    def complete_run(self, run_id: str, summary: str = "") -> dict:
+        """The brain's "task finished" signal (the ``complete_run`` MCP tool):
+        flags the live engine so the run ends gracefully after the current
+        tick. Only a live session run can complete itself."""
+        from condor.agents.engine import get_engine
+        from condor.agents.lifecycle import LifecycleError
+
+        engine = get_engine(run_id)
+        if engine is None:
+            raise LifecycleError(
+                404,
+                f"no live run '{run_id}' — complete_run only works from "
+                "inside a session run",
+            )
+        engine.declare_complete(summary)
+        return {"completing": True, "run_id": run_id}
 
     def list_runs(
         self,
@@ -314,10 +348,12 @@ class AgentService:
     def export_run(self, run_id: str) -> str:
         """Markdown export of one run (generated view, §7.1)."""
         from condor.agents.exports import render_run_markdown
+        from condor.agents.runstore import get_run_store
 
         meta = self.get_run(run_id, include_events=True)
         events = meta.pop("events")
-        return render_run_markdown(meta, events)
+        ticks = get_run_store().tick_files(meta["agent_slug"], run_id)
+        return render_run_markdown(meta, events, [text for _, text in ticks])
 
     def inject_directive(
         self, slug: str, text: str, agent_id: Optional[str] = None
@@ -328,7 +364,7 @@ class AgentService:
         return {"queued": True, "runs": [e.agent_id for e in engines]}
 
     # ------------------------------------------------------------------
-    # Consult / delegate
+    # Consult
     # ------------------------------------------------------------------
 
     async def consult(
@@ -337,6 +373,8 @@ class AgentService:
         task: str,
         context: str = "",
     ) -> str:
+        """Run the agent's brain on a question and return the answer inline.
+        A consult persists nothing — the answer is all there is."""
         from condor.agents.consult import run_consult
 
         self._reject_tombstoned(slug, "consult")
@@ -345,25 +383,6 @@ class AgentService:
             task=task,
             context=context,
         )
-
-    async def delegate(
-        self,
-        slug: str,
-        task: str,
-        risk_limits: Optional[dict] = None,
-        timeout_s: Optional[int] = None,
-    ) -> dict:
-        from condor.agents.delegate import DEFAULT_TIMEOUT_S, start_delegation
-
-        self._reject_tombstoned(slug, "delegate")
-        run_id = await start_delegation(
-            agent_slug=slug,
-            task=task,
-            risk_limits=risk_limits,
-            timeout_s=timeout_s if timeout_s is not None else DEFAULT_TIMEOUT_S,
-        )
-        # A delegation is a run; the caller tracks it via get_run/control_run.
-        return {"run_id": run_id, "status": "running"}
 
     # ------------------------------------------------------------------
     # Serialization helper shared by the adapters

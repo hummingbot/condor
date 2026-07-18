@@ -99,6 +99,7 @@ def test_tick_prompt_has_no_hummingbot_refs():
         slug="memecoin_trender",
         agent_key="claude-acp:sonnet",
         instructions="hunt memecoins\n\ntrend playbook",
+        goal="",
     )
     prompt = build_tick_prompt(
         agent,

@@ -2,7 +2,7 @@
 name: agent-builder
 description: "Create, consult, test, launch, monitor, update, and safely delete Condor agents using the current typed MCP tools."
 compatibility: "Requires the Condor MCP server (mcp__condor__* tools)"
-metadata: {"condor-source": "builtin", "condor-created": "2026-06-18"}
+metadata: {"condor-source": "builtin", "condor-created": "2026-06-18", "condor-updated-by": "2026-07-18 chat", "condor-changelog": "[2026-07-18 chat] Document the goal field: explicit stop condition wired to complete_run self-stop | [2026-07-18 chat] Point at routine-builder's identity/endpoint rule so agent-authored routines never hardcode wallets or RPC URLs"}
 ---
 
 # Agent builder
@@ -32,6 +32,13 @@ the safety or usefulness of the agent.
 
 Call `create_agent` with the role in `name`, a concise `description`, a precise
 `when_to_consult`, and a short system prompt in `instructions`.
+
+Give goal-oriented agents an explicit `goal`: the stop condition, stated so the agent
+can judge it every tick (e.g. "wallet allocation within 1 point of the session's
+targets, verified after fills settle"). A run self-stops the moment the goal is met —
+the agent calls `complete_run(summary=...)` and the user gets its final report — with
+`max_ticks` remaining the hard budget backstop. Leave `goal` empty for open-ended
+mandates (market making, monitoring) that run until stopped or out of budget.
 
 Tool scope is enforced by the platform. An empty `tools` list is unrestricted and can
 therefore reach execution. A trading-capable agent must have `risk_limits` and a
@@ -64,6 +71,12 @@ Use `manage_routines` for agent-scoped data processing:
 manage_routines(action="create", agent_slug="<slug>", name="regime_inputs", code="...")
 manage_routines(action="run", agent_slug="<slug>", name="regime_inputs", config={...})
 ```
+
+Routines must pull identity and endpoints from the platform, never hardcode them: the
+wallet defaults to the venue's account in the accounts store, and endpoints/data keys
+come from the environment (see the routine-builder skill's "never hardcode identity or
+endpoints" rule — the routine worker scrubs all other env vars, so only the allowlisted
+data keys exist there).
 
 Inspect the result, refine the routine, then update the agent instructions so they name
 the routine and explain how to interpret its output. Keep exchange access and secrets in

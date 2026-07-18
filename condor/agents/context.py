@@ -290,6 +290,16 @@ def build_agent_context(
     """
     sections: list[str] = [agent.instructions]
 
+    # The agent's authored goal is identity context on a consult too — but a
+    # consult is a question, not a run: nothing to complete.
+    if agent.goal.strip():
+        sections.append(
+            "[GOAL — this agent's mandate when it runs]\n"
+            f"{agent.goal.strip()}\n\n"
+            "You are being CONSULTED, not run: answer the request below; do "
+            "not pursue the goal beyond what it asks."
+        )
+
     try:
         from condor.memory import MemoryStore
 

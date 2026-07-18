@@ -1,9 +1,8 @@
 """Route-order regression tests for the agents API router (CORR-061).
 
 Starlette matches routes in registration order, so literal paths like
-``/agents/delegations`` and ``/agents/runs/...`` must be registered before
-the ``/agents/{slug}`` catch-all or they become unreachable (matched as
-``slug="delegations"`` / ``slug="runs"``).
+``/agents/runs/...`` must be registered before the ``/agents/{slug}``
+catch-all or they become unreachable (matched as ``slug="runs"``).
 """
 
 from starlette.routing import Match
@@ -21,16 +20,10 @@ def _first_full_match(method: str, path: str) -> str | None:
     return None
 
 
-def test_delegations_list_not_shadowed_by_slug_catch_all():
-    assert _first_full_match("GET", "/agents/delegations") == "list_delegations"
-
-
-def test_delegation_detail_and_stop_not_shadowed():
-    assert _first_full_match("GET", "/agents/delegations/t1") == "get_delegation_status"
-    assert (
-        _first_full_match("POST", "/agents/delegations/t1/stop")
-        == "stop_delegation_route"
-    )
+def test_delegation_routes_are_gone():
+    """Delegations were removed from the product — no route may resurrect
+    the path (a match would be the /{slug} catch-all misfiring)."""
+    assert _first_full_match("GET", "/agents/delegations") == "get_agent"
 
 
 def test_run_routes_not_shadowed():

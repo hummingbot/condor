@@ -61,7 +61,7 @@ def _isolate_notifications_outbox(tmp_path_factory, monkeypatch):
 def _isolate_run_store(tmp_path_factory, monkeypatch):
     """Give every test a fresh RunStore rooted in a tmp dir.
 
-    Engines/delegations/consults open run streams via get_run_store();
+    Engines open run streams via get_run_store();
     without this, a test that constructs one would write into the real
     agents/ tree — and the singleton would pin whatever root the first
     test happened to resolve. Tests that need a specific root call

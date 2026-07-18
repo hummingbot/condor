@@ -64,7 +64,7 @@ class ControlServer:
         self._server = await asyncio.start_unix_server(
             self._handle_conn, path=self._socket_path
         )
-        # Owner-only: the handlers include executor create/lifecycle/delegation
+        # Owner-only: the handlers include executor create/lifecycle
         # — any local user who can connect can trade. 0600 restricts connect()
         # to this uid (enforced on both Linux and macOS).
         os.chmod(self._socket_path, 0o600)

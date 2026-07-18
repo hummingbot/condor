@@ -268,8 +268,9 @@ class NativeExecutorsProvider(BaseProvider):
         try:
             runtime = get_executor_runtime()
             # Slug-wide read: open executors surviving from a PRIOR run (or
-            # a delegation) of this agent must stay visible to the current one,
-            # or a restart resets apparent exposure and enables duplication.
+            # an approved consult) of this agent must stay visible to the
+            # current one, or a restart resets apparent exposure and enables
+            # duplication.
             slug = agent_slug
             slug_records = [
                 _overlay_live_record(r, runtime)

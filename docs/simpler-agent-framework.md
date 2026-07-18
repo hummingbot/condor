@@ -1,5 +1,23 @@
 # Condor agent framework — the simplified architecture
 
+> **UPDATE 2026-07-18 — the verb model was simplified after this doc was
+> written.** DELEGATE is removed from the product entirely. EXPERIMENT and
+> CONSULT are now run-less: an experiment simulates one tick fully in memory
+> and returns a human-readable report (`condor/agents/experiment.py`); a
+> consult returns its answer inline with nothing persisted
+> (`condor/agents/consult.py`, in-memory approvals). The ONLY thing an agent
+> saves to disk is actual runs — sessions and scheduled fires in
+> `agents/{slug}/runs/` (`condor/agents/runstore.py`). Runs can also end
+> themselves: the `complete_run(summary)` tool lets the agent declare its
+> task complete (graceful early exit under the `max_ticks` budget), and
+> every run end posts a final summary report to chat. A run's folder now
+> holds a lifecycle jsonl (run start/end, permissions) plus one organized
+> markdown file per tick (`1.md`, `2.md`, … — tick started, tool calls in
+> full, state snapshot, tick completion); see the README's on-disk layout.
+> Sections below that mention delegations, `experiments/`, `consults/`, or
+> flat transcript files are historical. The operative behavior spec is
+> `skills/condor/SKILL.md`.
+
 Architectural reference for the Condor agent system as of 2026-07-12 —
 the single description of how the system works today. How it got here
 from `main` (the harness-validation spike and the refactor series that

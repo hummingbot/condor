@@ -38,7 +38,7 @@ from typing import Any
 
 from .agent import Agent
 from .learnings import read_learnings
-from .projections import RunMetricsTracker, run_projection
+from .projections import RunMetricsTracker
 from .prompts import build_run_prompt_prefix, build_tick_prompt_suffix
 from .providers import ProviderRegistry
 from .risk import RiskEngine, RiskLimits, risk_gate
@@ -76,7 +76,6 @@ class TickEngine:
     # Derived identity (set in __post_init__)
     agent_id: str = field(init=False)  # the RunStore run_id (opaque ULID)
     session_num: int = field(init=False)  # display seq from run_started
-    is_experiment: bool = field(default=False, init=False)
 
     # Components (created in __post_init__)
     frozen_spec: Any = field(default=None, init=False)
@@ -93,6 +92,21 @@ class TickEngine:
     _tick_count: int = field(default=0, init=False)
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
+    # Set via declare_complete (the complete_run tool): the brain's own
+    # "job finished" signal, honored AFTER the current tick completes.
+    _complete_declared: bool = field(default=False, init=False)
+    _complete_summary: str = field(default="", init=False)
+    # Last tick's one-line decision — feeds the end-of-run report when the
+    # agent didn't declare its own summary.
+    _last_decision: str = field(default="", init=False)
+    # In-memory working context (§4.2 — engines are memory-only; runs don't
+    # survive the process, so the next tick's [CURRENT STATUS] / [RECENT
+    # DECISIONS] fold lives here, never re-read from disk).
+    _state_text: str = field(default="", init=False)
+    _decisions: list[str] = field(default_factory=list, init=False)
+    # The tick currently executing (set at _tick entry) — attributes an
+    # error thrown mid-tick to the tick that actually failed.
+    _tick_in_flight: int = field(default=0, init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _prompt_prefix: str | None = field(default=None, init=False, repr=False)
@@ -110,11 +124,9 @@ class TickEngine:
             self.config["max_ticks"] = 1
 
         mode = self.config.get("execution_mode", "loop")
-        self.is_experiment = mode == "experiment"
 
         # Tick runs whose config declares no risk_limits fall back to the
-        # agent-level baseline (AGENT.md `risk_limits:`), the same numbers
-        # that govern this agent's delegations.
+        # agent-level baseline (AGENT.md `risk_limits:`).
         if not self.config.get("risk_limits") and self.agent.risk_limits:
             self.config["risk_limits"] = dict(self.agent.risk_limits)
 
@@ -149,7 +161,7 @@ class TickEngine:
         # content hashes (§5.3), and the venue in play. The run id is an
         # opaque ULID — the legacy "{slug}_{N}" grammar is gone.
         store = get_run_store()
-        kind = self.kind_override or ("experiment" if self.is_experiment else "session")
+        kind = self.kind_override or "session"
         payload: dict[str, Any] = {
             "model": self._agent_key(),
             "frozen_spec": self.frozen_spec.to_public_dict(),
@@ -205,6 +217,7 @@ class TickEngine:
     def record_decision(self, action: str, note: str = "") -> None:
         """Durable one-line decision entry (shutdown journal replacement)."""
         text = action if not note else f"{action} — {note}"
+        self._decisions.append(text[:240])
         self._emit("state_snapshot", {"decision": text}, tick=self._tick_count or None)
 
     # ------------------------------------------------------------------
@@ -274,6 +287,7 @@ class TickEngine:
                 )
         if _engines.pop(self.agent_id, None) is not None:
             self._end_run("stopped", "manual stop")
+            await self._report_run_ended("stopped by operator")
         log.info("TickEngine %s stopped", self.agent_id)
 
     async def _run_shutdown(self, reason: str) -> None:
@@ -332,6 +346,7 @@ class TickEngine:
         finally:
             _engines.pop(self.agent_id, None)
             self._end_run("stopped", f"shutdown: {reason}")
+            await self._report_run_ended(f"emergency shutdown: {reason}")
             log.info("TickEngine %s shut down (%s)", self.agent_id, reason)
 
     def pause(self) -> None:
@@ -345,6 +360,22 @@ class TickEngine:
         self._pending_directives.append(text)
         self._emit("directive", {"text": text, "acked": False})
         log.info("TickEngine %s: directive queued: %s", self.agent_id, text[:80])
+
+    def declare_complete(self, summary: str = "") -> None:
+        """The brain's "task finished" signal (the ``complete_run`` tool).
+
+        Sets the flag the loop honors AFTER the in-flight tick completes —
+        the third stop axis next to risk (something went wrong) and
+        max_ticks (budget exhausted). An agent may only ever SHORTEN its
+        run this way; nothing lets it extend one.
+        """
+        self._complete_summary = (summary or "").strip()
+        self._complete_declared = True
+        log.info(
+            "TickEngine %s: task completion declared: %s",
+            self.agent_id,
+            self._complete_summary or "(no summary)",
+        )
 
     @property
     def is_running(self) -> bool:
@@ -389,19 +420,30 @@ class TickEngine:
                 except Exception as e:
                     self._last_error = str(e)
                     log.exception("TickEngine %s tick error", self.agent_id)
-                    self._emit("error", {"message": str(e)}, tick=self._tick_count)
+                    self._emit(
+                        "error",
+                        {"message": str(e)},
+                        tick=self._tick_in_flight or None,
+                    )
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
 
-                # Experiments: single tick, then self-stop
-                if mode == "experiment":
+                # Agent declared its task complete (complete_run tool):
+                # graceful position-preserving early exit — max_ticks below
+                # remains the hard budget backstop.
+                if self._complete_declared:
+                    summary = self._complete_summary
                     log.info(
-                        "TickEngine %s: experiment complete, self-stopping",
+                        "TickEngine %s: task complete, self-stopping (%s)",
                         self.agent_id,
+                        summary or "no summary",
                     )
-                    await self._notify(f"Agent {self.agent_id}: Experiment complete.")
                     self._running = False
                     _engines.pop(self.agent_id, None)
-                    self._end_run("completed", "experiment complete")
+                    reason = "agent declared task complete"
+                    if summary:
+                        reason += f": {summary}"
+                    self._end_run("completed", reason)
+                    await self._report_run_ended("task complete")
                     return
 
                 # max_ticks limit (covers run_once via max_ticks=1)
@@ -412,12 +454,12 @@ class TickEngine:
                         self.agent_id,
                         max_ticks,
                     )
-                    await self._notify(
-                        f"Agent {self.agent_id}: completed {max_ticks} ticks (max_ticks limit)."
-                    )
                     self._running = False
                     _engines.pop(self.agent_id, None)
                     self._end_run("completed", f"max_ticks={max_ticks}")
+                    await self._report_run_ended(
+                        f"tick budget exhausted (max_ticks={max_ticks})"
+                    )
                     return
 
             # Fixed-rate scheduling: frequency_sec is the interval between tick
@@ -440,6 +482,7 @@ class TickEngine:
 
     async def _tick(self) -> None:
         self._last_tick_at = time.time()
+        self._tick_in_flight = self._tick_count + 1
         mode = self.config.get("execution_mode", "loop")
 
         # 1. Run core data providers (native executors only — the agent uses
@@ -447,28 +490,23 @@ class TickEngine:
         #    store directly.
         core_data_summaries = await self._collect_provider_state()
 
-        # 2. Fold run context from the event stream (state + recent decisions)
+        # 2. Working context (state + recent decisions) is in-engine memory —
+        #    the tick markdown files are a write-only record.
         learnings = read_learnings(self.agent.agent_dir)
-        try:
-            store = get_run_store()
-            proj = run_projection(store.read_events(self.agent.slug, self.agent_id))
-        except Exception:
-            log.exception("TickEngine %s: run projection failed", self.agent_id)
-            proj = {"state": "", "recent_decisions": ""}
-        summary = proj.get("state", "")
-        recent_decisions = proj.get("recent_decisions", "")
+        summary = self._state_text
+        recent_decisions = "\n".join(f"- {d}" for d in self._decisions[-3:])
 
         # 3. Get risk state — exposure/count are venue-record truth via the
         #    provider fold; the pnl series is this run's in-memory history.
         risk_state = self.risk.get_state(self.metrics)
 
         # Hard kill-switch: escalate to an emergency winddown before the soft
-        # pause below. Experiments never trade for real, so they never shut down.
-        if risk_state.should_shutdown and not self.is_experiment:
+        # pause below.
+        if risk_state.should_shutdown:
             await self._run_shutdown(reason=risk_state.shutdown_reason)
             return
 
-        if risk_state.is_blocked and not self.is_experiment:
+        if risk_state.is_blocked:
             self._tick_count += 1
             self._emit(
                 "tick_completed",
@@ -586,9 +624,7 @@ class TickEngine:
         result = await run_agent(
             self.agent,
             prompt,
-            permission_policy=risk_gate(
-                self.risk, risk_state, experiment=self.is_experiment
-            ),
+            permission_policy=risk_gate(self.risk, risk_state),
             execution_mode=mode,
             model=self._agent_key(),
             risk_limits=self.config.get("risk_limits") or None,
@@ -636,7 +672,7 @@ class TickEngine:
             open_count=metrics["open_count"],
             total_pnl=metrics["total_pnl"],
         )
-        # decision/state feed run_projection → the next tick's
+        # decision/state feed the in-memory working context → the next tick's
         # [RECENT DECISIONS] / [CURRENT STATUS] prompt sections; the tick
         # prompt asks the agent to open its response with a one-line decision.
         decision = next(
@@ -648,12 +684,16 @@ class TickEngine:
             # as session text; it is not an agent decision and must not feed
             # the working-memory loop (it stays visible in `response`).
             decision = ""
+        self._last_decision = decision[:240]
+        if decision:
+            self._decisions.append(decision[:240])
         denom = f" {self.agent.denomination}" if self.agent.denomination else ""
         state_line = (
             f"pnl={metrics['total_pnl']:+g}{denom} | "
             f"open={metrics['open_count']} | "
             f"exposure={metrics['total_exposure']:g}{denom}"
         )
+        self._state_text = f"Last tick: #{next_tick} | {state_line}"
         self._emit(
             "state_snapshot",
             {
@@ -752,6 +792,37 @@ class TickEngine:
         except Exception:
             log.exception("Failed to send notification for %s", self.agent_id)
 
+    async def _report_run_ended(self, why: str) -> None:
+        """Final report to the user — every run ends with a chat summary,
+        the session sibling of a consult's answer / an experiment's report.
+
+        The agent's own words lead (its complete_run summary, else its last
+        tick decision), followed by the closing financial state. Emitted
+        AFTER run_ended, so a notify failure never blocks run closure (and
+        the report is not persisted on the already-closed stream).
+        """
+        sd = self._last_skill_data
+        denom = f" {self.agent.denomination}" if self.agent.denomination else ""
+        state_line = (
+            f"pnl={sd.get('total_pnl', 0.0):+g}{denom} | "
+            f"open={len(sd.get('executors', []))} | "
+            f"exposure={sd.get('total_exposure', 0.0):g}{denom}"
+        )
+        lines = [
+            f"🏁 {self.agent.slug} run {self.agent_id} ended after "
+            f"{self._tick_count} tick(s) — {why}"
+        ]
+        summary = self._complete_summary or self._last_decision
+        if summary:
+            lines.append(summary)
+        lines.append(state_line)
+        from condor.notifications import notify
+
+        try:
+            await notify("\n".join(lines), agent_id=self.agent_id, kind="session")
+        except Exception:
+            log.exception("Failed to send end-of-run report for %s", self.agent_id)
+
     def get_info(self) -> dict[str, Any]:
         """Return a summary dict for display."""
         sd = self._last_skill_data
@@ -786,5 +857,4 @@ class TickEngine:
             "max_ticks": self.config.get("max_ticks", 0),
             "last_tick_at": self._last_tick_at,
             "last_error": self._last_error,
-            "is_experiment": self.is_experiment,
         }

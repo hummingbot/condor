@@ -7,8 +7,8 @@ mutations* (refactor-02 §4.1). Instead of three hardwired callbacks::
                              for Approve/Reject (consult)
     risk_gate(limits, state) ONE shared policy — auto-approve within caps, block
                              breaches. The caller picks the state seed:
-                             journal-derived for ticks, zero for delegations
-                             (caps become a per-run budget)
+                             journal-derived for ticks, zero when the caps
+                             act as a fresh per-run budget
     AUTO                     loosest — permission_callback=None, the client
                              auto-approves everything (serverless specialists)
 
@@ -60,12 +60,13 @@ def deny_gate(reason: str):
     return callback
 
 
-def approval_gate(run_id: str, agent_slug: str):
-    """Durable human gate (§4.2): dangerous tool calls become pending
-    ``permission`` events + a ``kind=approval`` outbox entry, resolved via
+def approval_gate(run_id: str, agent_slug: str, *, durable: bool = True):
+    """Human gate through the approval queue (§4.2): dangerous tool calls
+    become pending approvals + a ``kind=approval`` outbox entry, resolved via
     ``resolve_approval`` (any channel) or a dashboard button. Default deny
     on timeout; a one-use grant keyed by executor_id survives for a same-run
-    retry of the same create."""
+    retry of the same create. ``durable=False`` (run-less consults) keeps the
+    whole flow in memory — no permission events are written anywhere."""
     from condor.agents.confirmation import _format_tool_summary
     from condor.agents.gating import is_dangerous_tool_call, tool_call_input
 
@@ -82,6 +83,7 @@ def approval_gate(run_id: str, agent_slug: str):
                     tool_call.get("id") or tool_call.get("tool_call_id") or ""
                 ),
                 executor_id=str(input_data.get("executor_id") or ""),
+                durable=durable,
             )
             if not approved:
                 return {"outcome": {"outcome": "cancelled"}}
@@ -97,12 +99,16 @@ def approval_gate(run_id: str, agent_slug: str):
     return callback
 
 
-def human_gate(chat_id: int, *, run_id: str = "", agent_slug: str = ""):
+def human_gate(
+    chat_id: int, *, run_id: str = "", agent_slug: str = "", durable: bool = True
+):
     """Route dangerous-tool confirmations to a human.
 
-    With a ``run_id`` (consults are runs, §7.1) the gate is the DURABLE
-    approval queue (§4.2): pending permission events + outbox surfacing +
-    ``resolve_approval``/dashboard resolution, default deny on timeout.
+    With a ``run_id`` the gate is the approval queue (§4.2): outbox
+    surfacing + ``resolve_approval``/dashboard resolution, default deny on
+    timeout. ``durable=True`` (runs) additionally persists the permission
+    events on the run stream; consults pass their ephemeral id with
+    ``durable=False`` — same flow, memory only.
 
     Without one (plain chat sessions), it falls back to the interactive
     confirmation transport the UI layer registered at startup; with no
@@ -111,7 +117,7 @@ def human_gate(chat_id: int, *, run_id: str = "", agent_slug: str = ""):
     auto-approve).
     """
     if run_id:
-        return approval_gate(run_id, agent_slug)
+        return approval_gate(run_id, agent_slug, durable=durable)
     if not chat_id:
         return deny_gate(
             "consult has no chat to confirm in (chat_id=0); "
@@ -181,8 +187,8 @@ def risk_gate(
     """Auto-approve within risk caps; block breaches (the shared trading policy).
 
     ``limits`` may be a ``RiskLimits`` or a raw dict (per-call overrides, AGENT.md
-    baselines). ``state`` defaults to a zero seed — the delegation case, where the
-    caps act as a per-run budget; ticks pass their journal-derived state.
+    baselines). ``state`` defaults to a zero seed — a fresh per-run budget;
+    ticks pass their journal-derived state.
     """
     if isinstance(limits, dict):
         limits = RiskLimits.from_dict(limits)

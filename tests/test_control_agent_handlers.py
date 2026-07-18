@@ -1,5 +1,5 @@
 """Control-socket agent handlers: dispatch + error mapping for the lifecycle /
-consult / delegate surface (full-headless). Underlying agent machinery is
+consult surface (full-headless). Underlying agent machinery is
 stubbed so nothing spawns a real LLM run.
 """
 
@@ -65,35 +65,9 @@ def test_agent_verb_unknown_errors(tmp_path):
     assert ei.value.status == 400
 
 
-def test_delegate_start_returns_run_id(tmp_path, monkeypatch):
-    """delegate.start dispatches to start_delegation and returns its run_id
-    (a delegation is a run — C.1)."""
-    from condor.agents import delegate as dg
-
-    async def fake_start(*, agent_slug, task, timeout_s=None, risk_limits=None):
-        return "01RUNDELEGATE0000000000000"
-
-    monkeypatch.setattr(dg, "start_delegation", fake_start)
-    sock = _sock()
-
-    async def run():
-        server = await _serve(sock)
-        try:
-            return await call_control(
-                "delegate.start", {"agent": "scout", "task": "scan"}, socket_path=sock
-            )
-        finally:
-            await server.stop()
-
-    assert asyncio.run(run()) == {
-        "run_id": "01RUNDELEGATE0000000000000",
-        "status": "running",
-    }
-
-
-def test_delegate_get_and_stop_are_removed(tmp_path):
-    """The delegation status/stop surface is gone (C.1) — a delegation is a
-    run, tracked via run.get / agent.verb. The old methods now 404."""
+def test_delegate_surface_is_removed(tmp_path):
+    """Delegations were removed from the product — every delegate.* control
+    method must 404 as unknown."""
     sock = _sock()
 
     async def run(method, params):
@@ -103,9 +77,7 @@ def test_delegate_get_and_stop_are_removed(tmp_path):
         finally:
             await server.stop()
 
-    for method in ("delegate.list", "delegate.get", "delegate.stop"):
+    for method in ("delegate.start", "delegate.list", "delegate.get", "delegate.stop"):
         with pytest.raises(ControlError) as ei:
-            asyncio.run(
-                run(method, {"task_id": "x"} if method != "delegate.list" else None)
-            )
+            asyncio.run(run(method, {"agent": "scout", "task": "scan"}))
         assert ei.value.status == 404  # unknown method

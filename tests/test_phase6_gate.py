@@ -30,9 +30,10 @@ POST_PHASE6_TOOLS = {
     "list_agents",
     "list_runs",
     "control_run",
+    "complete_run",
     "shutdown_agent",
     "consult",
-    "delegate",
+    "record_learning",
     "resolve_approval",
     "list_approvals",
     "get_notifications",
@@ -107,19 +108,22 @@ def test_shipped_spec_renders_tick_prompt(slug):
 
 
 def test_real_experiment_tick_completes_without_venue_calls(tmp_path, monkeypatch):
-    """The acceptance dry run is an actual engine tick, not prompt rendering.
+    """The acceptance dry run is the real in-memory experiment path, not
+    prompt rendering.
 
-    The model boundary is stubbed, while the real lifecycle, spec freeze,
-    provider pass, risk gate, and durable RunStore transitions execute.
+    The model boundary is stubbed, while the real launch-config resolution,
+    provider pass, and experiment risk gate execute. An experiment must
+    return its report and leave NOTHING on disk — no run, no folder.
     """
     from condor.agents import agent as agent_module
-    from condor.agents import engine as engine_module
-    from condor.agents.lifecycle import start_session
+    from condor.agents import run as run_module
+    from condor.agents.experiment import run_experiment
     from condor.agents.run import RunResult
-    from condor.agents.runstore import get_run_store
+    from condor.agents.runstore import RunStore, set_run_store
     from condor.executors.runtime import ExecutorRuntime
 
     monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    set_run_store(RunStore(root=tmp_path / "agents"))
     agent_dir = agent_module._DATA_ROOT / "dry_watcher"
     agent_dir.mkdir(parents=True)
     (agent_dir / "AGENT.md").write_text(
@@ -146,26 +150,35 @@ def test_real_experiment_tick_completes_without_venue_calls(tmp_path, monkeypatc
 
     monkeypatch.setattr(ExecutorRuntime, "connector_for_spec", forbidden_connector)
 
-    async def fake_model(*args, **kwargs):
+    async def fake_model(agent, prompt, **kwargs):
         assert kwargs["execution_mode"] == "experiment"
-        return RunResult(text="No action.", events=[], tool_calls=[])
-
-    monkeypatch.setattr(engine_module, "run_agent", fake_model)
-
-    async def scenario():
-        started = await start_session(
-            "dry_watcher", config={"execution_mode": "experiment", "max_ticks": 1}
+        assert "EXPERIMENT mode" in prompt
+        # A mutating attempt (cancelled by the gate in a live run) plus one
+        # read-only call — both must land in the report.
+        kwargs["on_tool_call"](
+            {
+                "name": "manage_executors",
+                "status": "failed",
+                "input": {"action": "create", "executor_type": "order_spot"},
+            }
         )
-        engine = engine_module.get_engine(started["agent_id"])
-        assert engine is not None and engine._task is not None
-        await engine._task
-        return started["agent_id"]
+        kwargs["on_tool_call"](
+            {"name": "manage_skill", "status": "completed", "input": {"action": "read"}}
+        )
+        return RunResult(text="🧪 Would place a 10 USDC order.", model="claude-code")
 
-    run_id = asyncio.run(scenario())
-    meta = get_run_store().run_meta("dry_watcher", run_id)
-    assert meta["kind"] == "experiment"
-    assert meta["status"] == "completed"
+    monkeypatch.setattr(run_module, "run_agent", fake_model)
+
+    report = asyncio.run(run_experiment("dry_watcher"))
+
+    assert "Would place a 10 USDC order" in report
+    assert "manage_executors" in report  # the cancelled would-be action
+    assert "manage_skill" in report  # read-only activity is summarized
     assert venue_calls == 0
+    # Nothing persisted: no run stream, no kind dir, no companion files.
+    agent_entries = {p.name for p in agent_dir.iterdir()}
+    assert agent_entries == {"AGENT.md"}
+    assert list((tmp_path / "agents").glob("**/*.jsonl")) == []
 
 
 # ---------------------------------------------------------------------------

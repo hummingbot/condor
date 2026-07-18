@@ -1,64 +1,11 @@
-"""Projections over RunStore events (§7.1).
+"""Run metrics tracking for the risk engine.
 
-The event stream is the one operational history; everything that used to be
-parsed back out of ``journal.md`` markdown is a fold over events now. These
-are read-side helpers only — nothing here writes.
+The engine's working context (state line, recent decisions) is plain
+in-engine memory now — runs don't survive the process (§4.2), so nothing
+folds it back out of the run record.
 """
 
 from __future__ import annotations
-
-from typing import Any
-
-
-def run_projection(events: list[dict]) -> dict[str, Any]:
-    """Fold one run's events into the working-context view the engine and
-    tools consume: last state text, recent decisions, tick count, per-tick
-    metric series."""
-    state_text = ""
-    decisions: list[str] = []
-    tick_count = 0
-    metrics_series: list[dict] = []
-    directives_pending: list[str] = []
-    errors: list[str] = []
-    tool_calls = 0
-
-    for ev in events:
-        etype = ev.get("type")
-        payload = ev.get("payload", {}) or {}
-        if etype == "tick_completed":
-            tick_count = max(tick_count, int(ev.get("tick", 0) or 0))
-            if "metrics" in payload:
-                metrics_series.append(payload["metrics"])
-        elif etype == "state_snapshot":
-            if payload.get("state"):
-                state_text = str(payload["state"])
-            if payload.get("decision"):
-                decisions.append(str(payload["decision"]))
-        elif etype == "tool_call":
-            tool_calls += 1
-        elif etype == "directive":
-            text = str(payload.get("text", ""))
-            if payload.get("acked"):
-                if text in directives_pending:
-                    directives_pending.remove(text)
-            else:
-                directives_pending.append(text)
-        elif etype == "error":
-            errors.append(str(payload.get("message", "")))
-
-    return {
-        "tick_count": tick_count,
-        "state": state_text,
-        "decisions": decisions,
-        "recent_decisions": "\n".join(f"- {d}" for d in decisions[-3:]),
-        "metrics_series": metrics_series,
-        "pnl_series": [
-            {"pnl": m.get("total_pnl", 0.0)} for m in metrics_series
-        ],
-        "directives_pending": directives_pending,
-        "errors": errors,
-        "tool_calls": tool_calls,
-    }
 
 
 class RunMetricsTracker:

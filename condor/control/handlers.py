@@ -65,10 +65,9 @@ def _snapshot(agent_slug=None, agent_id=None, venue_id=None, account=None):
 
 
 def build_agent_handlers() -> dict[str, Handler]:
-    """AgentService verbs over the socket — CRUD + lifecycle + consult +
-    delegate — so the MCP subprocess runs entirely over the socket (no web
-    app) and every surface goes through the ONE service (§5.2)."""
-    from condor.agents import delegate as dg
+    """AgentService verbs over the socket — CRUD + lifecycle + consult — so
+    the MCP subprocess runs entirely over the socket (no web app) and every
+    surface goes through the ONE service (§5.2)."""
     from condor.agents.lifecycle import LifecycleError
     from condor.agents.service import AgentService
 
@@ -77,18 +76,6 @@ def build_agent_handlers() -> dict[str, Handler]:
     async def _consult(agent, task, context=""):
         answer = await svc.consult(agent, task, context=context)
         return {"agent": agent, "answer": answer}
-
-    async def _delegate_start(agent, task, risk_limits=None, timeout_s=None):
-        # A delegation is a run: start returns its run_id, and the caller
-        # tracks/stops it through run.get / agent.verb like any other run
-        # (there is no separate delegate get/list/stop surface — C.1).
-        run_id = await dg.start_delegation(
-            agent_slug=agent,
-            task=task,
-            timeout_s=timeout_s,
-            risk_limits=risk_limits,
-        )
-        return {"run_id": run_id, "status": "running"}
 
     async def _notify_emit(text, agent_id="", kind="agent", origin="mcp"):
         from condor.notifications import notify
@@ -152,8 +139,16 @@ def build_agent_handlers() -> dict[str, Handler]:
         # serialized main-process outbox writer — never by writing the file.
         "notify.emit": _notify_emit,
         "agent.start": lambda **kw: svc.run(**kw),
+        # experiment: one simulated tick in memory, returns {"report": md} —
+        # nothing recorded, so it is a verb here, never a run.
+        "agent.experiment": lambda **kw: svc.experiment(**kw),
         "agent.verb": lambda slug, verb, agent_id=None, close=False: svc.control(
             slug, verb, agent_id=agent_id, close=close
+        ),
+        # The brain's own "job finished" signal — ends its run after the
+        # current tick (may only shorten a run, never extend one).
+        "run.complete": lambda run_id, summary="": svc.complete_run(
+            run_id, summary=summary
         ),
         "agent.consult": lambda **kw: _consult(**kw),
         # CRUD (the service owns guards — tombstone semantics, spec validation)
@@ -167,13 +162,10 @@ def build_agent_handlers() -> dict[str, Handler]:
         },
         "agent.delete": lambda slug, reason="": svc.delete(slug, reason=reason),
         "agent.directive": lambda **kw: svc.inject_directive(**kw),
-        # delegations: start only — a delegation is a run, so status/history
-        # go through run.get/run.list and stop through agent.verb (C.1).
-        "delegate.start": lambda **kw: _delegate_start(**kw),
     }
 
 
 def build_all_handlers() -> dict[str, Handler]:
-    """Every control method — executors + agent lifecycle/consult/delegate.
+    """Every control method — executors + agent lifecycle/consult.
     Used by the web-app host (`condor serve`)."""
     return {**build_executor_handlers(), **build_agent_handlers()}

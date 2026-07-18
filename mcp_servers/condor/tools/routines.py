@@ -13,7 +13,7 @@ def _authoring_target(agent_slug: str | None) -> tuple[str | None, dict | None]:
     """Resolve the IMMUTABLE authoring target for routine mutations (§7.2).
 
     An agent-scoped session (``settings.agent_slug`` set at spawn by the main
-    process — consult, delegation, tick) may author ONLY its own routines: the
+    process — consult, tick) may author ONLY its own routines: the
     target is the session's agent, and a caller-supplied ``agent_slug`` naming
     a DIFFERENT agent is denied and recorded. The chat coordinator (no session
     agent) acts for the human and may target any existing agent explicitly.

@@ -1,6 +1,6 @@
 ---
 name: condor
-description: "Operate Condor — the local trading assistant backend (trading agents, routines, portfolio, Hummingbot execution) — via its MCP tools and CLI. Use when the user invokes /condor or asks to trade, quote, or analyze markets; run, consult, test, or delegate to a trading agent; check a run, position, portfolio, or PnL; run or author a Condor routine; or diagnose/operate the Condor stack (doctor, logs, accounts). Triggers — \"ask condor\", \"run the agent\", \"dry run\", \"how is the run doing\", \"stop the agent\", \"check my portfolio\", \"is condor healthy\"."
+description: "Operate Condor — the local trading assistant backend (trading agents, routines, portfolio, Hummingbot execution) — via its MCP tools and CLI. Use when the user invokes /condor or asks to trade, quote, or analyze markets; run, consult, or test a trading agent; check a run, position, portfolio, or PnL; run or author a Condor routine; or diagnose/operate the Condor stack (doctor, logs, accounts). Triggers — \"ask condor\", \"run the agent\", \"dry run\", \"how is the run doing\", \"stop the agent\", \"check my portfolio\", \"is condor healthy\"."
 compatibility: "Requires the Condor MCP server connected to the host (tools may appear as mcp__condor__* or bare names) and/or the condor CLI on PATH"
 metadata: {"condor-source": "builtin", "condor-created": "2026-07-18", "condor-agent-key": "claude-acp:sonnet"}
 ---
@@ -17,9 +17,6 @@ Condor operates. It is loaded two ways — same rules either way:
   as the user's request. Invoked with no request → run `condor status`, give a
   one-screen summary, and list what you can do.
 
-(The `condor-agent-key` metadata above configures the chat surface's default
-model — preserve it when editing this skill.)
-
 ## Operating rules
 
 1. **Direct answers** — lead with the answer, details after.
@@ -34,24 +31,12 @@ model — preserve it when editing this skill.)
 6. **Route before you reach** — check skills/agents (below) before any raw
    tool; fall back to raw tools only when nothing matches.
 7. **Tool names vary by host.** Bare names below; hosts may prefix them
-   (`mcp__condor__consult`, `condor.consult`). Two servers: `condor` and
-   `mcp-hummingbot`.
+   (`mcp__condor__consult`, `condor.consult`). One server: `condor`.
 8. **No Condor MCP server connected?** Ops/health questions still work via
    the CLI. For anything touching agents or trading, stop and point the user
    at `docs/harness-skill-setup.md` in the Condor repo — don't improvise.
 
 ## MCP Tools
-
-**mcp-hummingbot** — Trading API (pre-configured, call directly):
-- `get_market_data` — prices, candles, funding rates, order book
-- `get_portfolio_overview` — balances, positions, orders
-- `manage_executors` — deploy/manage trading executors
-- `place_order` — single market/limit orders
-- `manage_bots` — start/stop/monitor bots
-- `manage_controllers` — controller configs
-- `explore_dex_pools` / `explore_geckoterminal` — DEX discovery
-- `search_history` — historical trades and executor data
-- `set_account_position_mode_and_leverage` — futures config
 
 _Connecting/removing exchange API keys is not available to the assistant —
 the user manages keys themselves with `condor accounts add/remove/default` in
@@ -62,19 +47,26 @@ a terminal. Key values come from the user via stdin, never pasted into chat._
 - `manage_routines` — run/list/schedule analysis scripts
 - `list_agents` / `get_agent` / `create_agent` / `update_agent` / `delete_agent`
   — the AGENT.md specs (delete is a tombstone: history preserved, slug reserved)
-- `run_agent` — launch a run; `dry_run: true` is a single simulated tick with
-  every mutation blocked — users often call this a **"dry run"** or
-  **"experiment"**; treat the terms as the same thing
-- `list_runs` / `get_run` — run history and one run's status/events
+- `run_agent` — launch a run; `dry_run: true` is an **experiment** (users
+  also say **"dry run"** — same thing): one simulated tick fully in memory,
+  every mutation blocked, NOTHING recorded. It blocks (up to ~5 min) and
+  returns `{"report": ...}` — relay that report to the user; there is no
+  run_id to track afterward
+- `list_runs` / `get_run` — run history (sessions + scheduled fires — the
+  only persisted runs) and one run's status/events
 - `control_run(run_id, verb, close?)` — pause | resume | stop (close=true also
   closes the run's owned inventory); `shutdown_agent(slug)` — agent-wide
-  emergency winddown
+  emergency winddown. (`complete_run` also appears in the tool list but is
+  for agents INSIDE their own run — never call it from here.) Runs can also
+  end themselves: agents declare task completion, and every run's end posts
+  a final summary to the notification feed
 - `resolve_approval` / `list_approvals` — answer an agent's pending trade
   approval (relay the question to the user first; default deny on timeout)
 - `manage_memory` — persistent memory about the user (see MEMORY below)
 - `manage_skill` — playbooks/skills you can follow (see SKILLS below)
-- `consult` / `delegate` — route domain work to a specialized agent, attended
-  or detached (see "Picking the execution verb" below)
+- `consult` — route domain work to a specialized agent (attended, blocking;
+  the answer returns inline and nothing is recorded — see "Picking the
+  execution verb" below)
 
 ## Ops CLI (shell)
 
@@ -132,7 +124,7 @@ tool calls. Example — DON'T answer "deploy a grid executor" with five raw
 `manage_executors`/`manage_controllers` calls; that's `executor_manager`'s
 domain → consult it.
 
-## Picking the execution verb: run vs consult vs delegate vs experiment
+## Picking the execution verb: run vs consult vs experiment
 
 When the user wants an agent to *do* something (not just answer), pick the
 verb with these questions IN ORDER. Each is answerable from how the user
@@ -153,39 +145,57 @@ phrased it.
 
 **2. REHEARSAL? Any "test / try it / dry run / simulate / paper / without real
 money / see what it would do" → `run_agent(slug, dry_run=true)`** — an
-**experiment**: one simulated tick, every real mutation blocked. When unsure
-whether the user means live, ASK — never assume live on an ambiguous "try it".
+**experiment**: one simulated tick, every real mutation blocked, nothing
+recorded. The call blocks and returns a human-readable report of what the
+agent would have done — show it to the user. When unsure whether the user
+means live, ASK — never assume live on an ambiguous "try it".
 
-**3. Attended TASK → `consult`. Detached TASK → `delegate`.**
-- **`consult(agent, task, context)`** — DEFAULT for "have \<agent\> do X". You
-  block, relay the answer; every trade the agent attempts goes to the USER to
-  approve. Use when the user is present and will supervise: questions, quick
-  analysis, single mutations, "open a small position" they're watching.
-- **`delegate(agent, task, risk_limits={…})`** — returns a `run_id`; ONLY with an
-  explicit detachment signal: "in the background", "ping me when done", "while
-  I'm out", "don't wait". Runs unattended; the agent notifies the user when it
-  finishes. For a **trading** agent you MUST pass a budget (`risk_limits`) — the
-  caps ARE the authorization (nobody approves each trade). No budget nameable
-  and the agent has no baseline → fall back to `consult`.
-- NEVER `delegate` just to avoid waiting when the user is present to approve —
-  that silently drops the human trade-approval you'd get from `consult`.
+**3. TASK → `consult(agent, task, context)`.** The verb for "have \<agent\>
+do X". You block, relay the answer; every trade the agent attempts goes to
+the USER to approve. A consult is a question, not a run: the answer is all
+there is — nothing is recorded, there is no run_id. There is NO detached
+verb: if the user asks for unattended background work ("in the background",
+"ping me when done"), explain that tasks are attended — trades need their
+approval — and offer a session (`run_agent`) or a scheduled run instead.
 
 **The multi-stage game.** A real request is a conversation, not one call.
-Status / stop / history of ANY run — session, experiment, consult, or
-delegation — go through the SAME tools (they all share one `run_id`):
+Status / stop / history apply to RUNS (sessions + scheduled fires — the only
+things with a `run_id`; experiment reports and consult answers are all there
+is of those verbs):
 - "how's it doing / what's it up to" → `get_run(run_id)` (or `list_runs` to
-  find it); `search_history` / `manage_executors(performance)` for PnL.
+  find it); `manage_executors(action="performance")` for PnL.
 - "stop it / pause it" → `control_run(run_id, "stop"|"pause")`; `close=true`
   also unwinds inventory; `shutdown_agent(slug)` for an agent-wide halt.
 - "change / retune it" → `update_agent(slug, …)` for the spec, or restart with
   new overrides; routine authoring → read the `routine-builder` skill, then
   `manage_routines(create_routine/edit_routine)`.
-- "analyze how it went" → `get_run`/`search_history`, or consult the domain
-  agent for interpretation.
-Don't invent `delegate.get`/`delegate.stop` — a delegation is a run; track it
-like any run.
+- "analyze how it went" → `get_run` / `manage_executors(action="performance")`,
+  or consult the domain agent for interpretation.
 
-## Memory
+## Notifications — turning on push into this chat
+
+Synchronous answers ride tool results, but ASYNC events (trade entries/exits,
+🏁 end-of-run reports, approval requests) land in Condor's outbox and reach a
+chat only through a delivery path:
+
+- **Pull (always works):** `get_notifications(since_ts=<last seen ts>)` —
+  catch up when the user asks "any news from the agents?", and after starting
+  a session.
+- **Push (when the user asks to "turn on notifications"):** start the outbox
+  relay with YOUR harness's send primitive, from the Condor repo, detached:
+
+      # Hermes (delivers to the home chat; -t 'telegram:<chat_id>' to aim):
+      cd <condor repo> && CONDOR_NOTIFY_CMD='["hermes","send","-q","{text}"]' \
+        nohup uv run python -m integrations.notify_relay.relay \
+        > store/notify-relay.log 2>&1 &
+
+      # OpenClaw:
+      CONDOR_NOTIFY_CMD='["openclaw","message","send","--channel","<ch>","--target","<chat>","--text","{text}"]'
+
+  ONE relay per box (check `pgrep -f notify_relay` first — if alive, it's
+  already on); the cursor file dedups across restarts, so a restart never
+  re-spams. After starting it, send a test via `send_notification` and
+  confirm the ping arrived in the chat.
 
 You keep a persistent memory **about the user**, shared across sessions and
 with their trading agents.

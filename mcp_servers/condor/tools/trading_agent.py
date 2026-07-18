@@ -57,6 +57,7 @@ async def create_agent(
     agent_key: str = "",
     tools: list[str] | None = None,
     when_to_consult: str = "",
+    goal: str = "",
     risk_limits: dict | None = None,
     denomination: str = "",
     account: str = "",
@@ -76,6 +77,7 @@ async def create_agent(
             "agent_key": agent_key,
             "tools": tools or [],
             "when_to_consult": when_to_consult,
+            "goal": goal,
             "risk_limits": risk_limits or {},
             "denomination": denomination,
             "account": account,
@@ -122,15 +124,22 @@ async def delete_agent(agent_slug: str) -> dict:
 # ---------------------------------------------------------------------------
 
 
+# An experiment blocks for its one simulated tick (same budget as a live
+# tick) — the control call must outlive it.
+_EXPERIMENT_TIMEOUT = 330.0
+
+
 async def run_agent(
     agent_slug: str,
     config: dict | None = None,
     dry_run: bool = False,
     trading_context: str = "",
 ) -> dict:
-    """Launch a run of ``agent_slug``. ``dry_run`` = one experiment tick
-    (plans + records, mutations cancelled). Launch overrides are limited and
-    risk overrides are stricter-only (§5.3) — the service enforces both."""
+    """Launch a run of ``agent_slug``. ``dry_run`` = an EXPERIMENT: one
+    simulated tick fully in memory — mutations cancelled, nothing recorded —
+    that blocks and returns {"report": <markdown>} instead of a run id.
+    Launch overrides are limited and risk overrides are stricter-only (§5.3)
+    — the service enforces both."""
     if not agent_slug:
         return {"error": "agent_slug is required"}
 
@@ -139,10 +148,23 @@ async def run_agent(
     await call_control("agent.get", {"slug": agent_slug})
 
     config_dict = dict(config or {})
-    if dry_run or config_dict.pop("dry_run", False):
-        config_dict["execution_mode"] = "experiment"
-
+    experiment = (
+        dry_run
+        or config_dict.pop("dry_run", False)
+        or config_dict.get("execution_mode") == "experiment"
+    )
     trading_context = trading_context or config_dict.pop("trading_context", "")
+
+    if experiment:
+        return await call_control(
+            "agent.experiment",
+            {
+                "slug": agent_slug,
+                "config": config_dict,
+                "trading_context": trading_context,
+            },
+            timeout=_EXPERIMENT_TIMEOUT,
+        )
 
     return await call_control(
         "agent.start",
@@ -199,3 +221,18 @@ async def shutdown_agent(agent_slug: str) -> dict:
     if not agent_slug:
         return {"error": "agent_slug is required"}
     return await call_control("agent.verb", {"slug": agent_slug, "verb": "shutdown"})
+
+
+async def complete_run(summary: str = "") -> dict:
+    """Declare THIS run's task complete (agent tick sessions only).
+
+    ``settings.agent_id`` scopes the signal to the calling run — a chat
+    session (no run identity) cannot complete anything."""
+    if not settings.agent_id:
+        return {
+            "error": "complete_run only works from inside an agent run "
+            "session — chat/consult surfaces have no run to complete"
+        }
+    return await call_control(
+        "run.complete", {"run_id": settings.agent_id, "summary": summary}
+    )

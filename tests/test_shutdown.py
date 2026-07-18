@@ -428,6 +428,9 @@ def test_run_shutdown_idempotent(monkeypatch):
     async def _notify(msg):
         notifications.append(msg)
 
+    async def _report_run_ended(why):
+        notifications.append(why)
+
     stub = SimpleNamespace(
         _shutting_down=False,
         _running=True,
@@ -436,6 +439,7 @@ def test_run_shutdown_idempotent(monkeypatch):
         _active_client=None,
         agent_id="01JZX5B7Q2K4N8P1T3V5W7Y9ZB",
         _notify=_notify,
+        _report_run_ended=_report_run_ended,
         _end_run=lambda status, reason="": None,
     )
 

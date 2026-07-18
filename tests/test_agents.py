@@ -122,6 +122,39 @@ def test_agent_crud_roundtrip(tmp_path, monkeypatch):
     assert store.get("river_maker") is None
 
 
+def test_goal_roundtrips_and_wires_the_stop_condition(tmp_path, monkeypatch):
+    """`goal:` is the explicit stop condition: it survives the AGENT.md
+    round-trip and the run prompt wires it to complete_run (live) or to a
+    met/not-met assessment (experiment); consults see it as mandate only."""
+    from condor.agents.context import build_agent_context
+    from condor.agents.prompts import build_run_prompt_prefix
+
+    _patch_roots(monkeypatch, tmp_path)
+    store = AgentStore()
+    store.create(
+        name="Goal Bot",
+        instructions="identity body",
+        agent_key="ollama:x",
+        when_to_consult="ask me",
+        goal="Wallet within 1 point of target allocation, verified after fills.",
+        risk_limits={"max_position_size_quote": 50, "max_open_executors": 1},
+        denomination="USD",
+    )
+    reloaded = store.get("goal_bot")
+    assert reloaded.goal.startswith("Wallet within 1 point")
+
+    live = build_run_prompt_prefix(reloaded, {"execution_mode": "loop"})
+    assert "[GOAL — when this is met, you are done]" in live
+    assert 'complete_run(summary="...")' in live
+
+    exp = build_run_prompt_prefix(reloaded, {"execution_mode": "experiment"})
+    assert "[GOAL — when this is met, you are done]" in exp
+    assert "ALREADY MET" in exp and "complete_run(summary=" not in exp
+
+    consult_prompt = build_agent_context(reloaded, "how far off is the wallet?")
+    assert "mandate" in consult_prompt and "CONSULTED, not run" in consult_prompt
+
+
 def test_trading_agent_requires_risk_baseline(tmp_path, monkeypatch):
     """The AGENT.md defines what the agent does — an agent that can trade
     (declares manage_executors, or no tool scope at all) without a risk

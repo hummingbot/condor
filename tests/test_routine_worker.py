@@ -1,8 +1,8 @@
 """Routine containment (§7.2 / §11): a hostile routine (infinite sync loop,
 os._exit) is killed at the timeout and the host survives; validation of a
-blocking-import module cannot hang the parent; the worker environment
-carries no CONDOR_* secrets; the RunContext carries no capability or
-execution surface."""
+blocking-import module cannot hang the parent; the worker environment is the
+full operator environment (process env + repo .env — fault containment, not
+secrecy); the RunContext carries no capability or execution surface."""
 
 import asyncio
 import os
@@ -12,8 +12,8 @@ import pytest
 from condor.routines_worker import (
     RunContext,
     run_routine_in_worker,
-    scrubbed_env,
     validate_routine_in_worker,
+    worker_env,
 )
 
 
@@ -75,30 +75,39 @@ def test_validate_reports_contract_violations(tmp_path):
     assert "missing async run" in out["error"]
 
 
-def test_worker_env_carries_no_condor_secrets(monkeypatch):
-    monkeypatch.setenv("CONDOR_RUN_CAPABILITY", "cap-123")
-    monkeypatch.setenv("CONDOR_HL_PRIVATE_KEY", "0x" + "ab" * 32)
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "tok")
-    monkeypatch.setenv("MY_API_KEY", "k")
+def test_worker_env_is_process_env_plus_repo_dotenv(tmp_path, monkeypatch):
+    """Routines see everything the operator configured: full process env,
+    with repo .env keys merged UNDER it (a live env var wins)."""
+    import condor.routines_worker as rw
+
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "# comment\n"
+        "CONDOR_SOLANA_RPC=https://rpc.example/abc\n"
+        "FROM_FILE_ONLY='quoted'\n"
+        "OVERRIDDEN=file-value\n"
+    )
+    monkeypatch.setattr(rw, "_repo_env_file", lambda: _parse_env(env_file))
+    monkeypatch.setenv("OVERRIDDEN", "live-value")
     monkeypatch.setenv("SOME_HARMLESS", "yes")
-    env = scrubbed_env()
-    assert "CONDOR_RUN_CAPABILITY" not in env
-    assert "CONDOR_HL_PRIVATE_KEY" not in env
-    assert "TELEGRAM_BOT_TOKEN" not in env
-    assert "MY_API_KEY" not in env
+
+    env = worker_env()
+    assert env.get("CONDOR_SOLANA_RPC") == "https://rpc.example/abc"
+    assert env.get("FROM_FILE_ONLY") == "quoted"
+    assert env.get("OVERRIDDEN") == "live-value"  # process env wins
     assert env.get("SOME_HARMLESS") == "yes"
     assert "PATH" in env
 
 
-def test_readonly_data_key_allowlisted_but_only_exact(monkeypatch):
-    # COINGECKO_API_KEY is a read-only market-data key routines need; it is the
-    # one narrow exception to the API_KEY denylist — matched exactly, so a
-    # lookalike name is still scrubbed.
-    monkeypatch.setenv("COINGECKO_API_KEY", "cg-demo-123")
-    monkeypatch.setenv("COINGECKO_API_KEY_BACKUP", "should-not-pass")
-    env = scrubbed_env()
-    assert env.get("COINGECKO_API_KEY") == "cg-demo-123"
-    assert "COINGECKO_API_KEY_BACKUP" not in env
+def _parse_env(path):
+    out = {}
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip().strip("'\"")
+    return out
 
 
 def test_run_context_has_no_capability_or_execution_surface():

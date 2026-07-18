@@ -5,10 +5,11 @@ One aggregation core; the REST route, the MCP manage_executors
 performance action, and the pnl CLI all delegate here. Grouping keys map
 onto the attribution trio every executor row carries:
 
-    agent    -> agent_slug   (WHO — across all its sessions/delegations)
-    run      -> agent_id     (WHICH RUN — one session or delegation)
+    agent    -> agent_slug   (WHO — across all its runs)
+    run      -> agent_id     (WHICH RUN — one session; consult-created rows
+                              carry the consult's ephemeral id)
     strategy -> strategy     (WHICH PLAYBOOK — session-created only;
-                              delegation/chat rows group under "(none)")
+                              consult/chat rows group under "(none)")
     venue    -> config connector (jupiter default for swaps/positions)
     type     -> executor type
 """

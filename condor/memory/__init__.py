@@ -6,7 +6,7 @@ co-located with its definition. See ``paths.store_root`` and
 ``store.MemoryStore``.
 """
 
-from .paths import iter_stores, migrate_memory_tiers, store_root
+from .paths import iter_stores, store_root
 from .skills import SkillStore
 from .store import MemoryStore
 
@@ -15,5 +15,4 @@ __all__ = [
     "SkillStore",
     "store_root",
     "iter_stores",
-    "migrate_memory_tiers",
 ]

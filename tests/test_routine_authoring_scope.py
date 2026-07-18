@@ -1,6 +1,6 @@
 import asyncio
 """Phase 2 acceptance: routine authoring is target-scoped by the session's
-immutable agent capability (§7.2) — a consult/delegation session can never
+immutable agent capability (§7.2) — a consult/tick session can never
 write another agent's routine directory."""
 
 import mcp_servers.condor.tools.routines as routines_tool

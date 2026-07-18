@@ -42,7 +42,8 @@ def _export(run_id: Optional[str]) -> None:
     slug = store.slug_from_path(path)
     meta = store.run_meta(slug, run_id)
     events = store.read_events(slug, run_id)
-    echo(render_run_markdown(meta, events))
+    ticks = store.tick_files(slug, run_id)
+    echo(render_run_markdown(meta, events, [text for _, text in ticks]))
 
 
 def _list(slug: Optional[str], kind: Optional[str], limit: int, as_json: bool) -> None:
@@ -57,7 +58,7 @@ def _list(slug: Optional[str], kind: Optional[str], limit: int, as_json: bool) -
     entries = []
     for s in slugs:
         for path in store.all_run_paths(s):
-            entries.append((path.stat().st_mtime, s, path.stem))
+            entries.append((path.stat().st_mtime, s, path.parent.name))
     entries.sort(reverse=True)
 
     metas = []
@@ -93,7 +94,7 @@ def runs(
     kind: Optional[str] = typer.Option(
         None,
         "--kind",
-        help="Filter: session | experiment | delegation | consult | scheduled.",
+        help="Filter: session | scheduled.",
     ),
     limit: int = typer.Option(20, "--limit", "-n", help="Rows to show."),
     as_json: bool = json_option(),

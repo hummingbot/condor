@@ -16,10 +16,10 @@ EXPECTED_TOOLS = {
     "list_agents",
     "list_runs",
     "control_run",
+    "complete_run",
     "shutdown_agent",
     # retained verbs the other surfaces have
     "consult",
-    "delegate",
     "resolve_approval",
     "list_approvals",
     "get_notifications",
@@ -32,6 +32,7 @@ EXPECTED_TOOLS = {
 }
 
 RETIRED_TOOLS = {
+    "delegate",  # delegations removed from the product
     "manage_trading_agent",
     "trading_agent_journal_read",
     "trading_agent_journal_write",

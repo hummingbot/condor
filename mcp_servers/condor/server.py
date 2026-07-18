@@ -8,7 +8,6 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import consult as consult_tool
-from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import executors as executors_tool
 from mcp_servers.condor.tools import (
     memory,
@@ -37,7 +36,7 @@ def _build_instructions() -> str:
         "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
         "routine) and consultable **domain agents** on top of these tools.\n\n"
         "OPERATING GUIDE — the `condor` skill is the single source for how to "
-        "drive Condor (routing priority, run vs consult vs delegate vs dry-run, "
+        "drive Condor (routing priority, run vs consult vs dry-run, "
         "run tracking, ops CLI). If your host loaded it (e.g. as /condor), follow "
         "it. Otherwise, BEFORE any multi-step or trading flow, read it once with "
         '`manage_skill(action="read", name="condor")` and follow it.\n'
@@ -84,10 +83,12 @@ mcp = FastMCP("condor", instructions=_build_instructions())
 async def consult(agent: str, task: str, context: str = "") -> dict:
     """Consult a specialized domain agent and get its answer.
 
-    Use this to delegate domain work instead of doing it yourself: the agent runs
-    with its own focused tools and domain memory, then returns an answer you can
-    summarize for the user. Available agents are listed in your [AGENTS] section.
-    The agent may execute actions (gated by the user's confirmation).
+    Use this to hand domain work to the expert instead of doing it yourself:
+    the agent runs with its own focused tools and domain memory, then returns
+    an answer you can summarize for the user. Available agents are listed in
+    your [AGENTS] section. The agent may execute actions (gated by the user's
+    confirmation). A consult is a question, not a run — the answer you get
+    back is all there is (nothing is recorded, there is no run_id).
 
     Args:
         agent: Agent slug (e.g. "executor_manager").
@@ -98,51 +99,6 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
         {"agent": "...", "answer": "..."} or {"error": "..."}.
     """
     return await consult_tool.consult(agent, task, context)
-
-
-@mcp.tool()
-@handle_errors("delegate task")
-async def delegate(
-    agent: str = "",
-    task: str = "",
-    risk_limits: dict | None = None,
-) -> dict:
-    """Start a DETACHED background task and return its run_id immediately.
-
-    DELEGATE is the async, unattended sibling of CONSULT. Where ``consult`` blocks
-    and returns an answer now (each trade human-gated), ``delegate`` hands a
-    goal-oriented task to a detached agent that works autonomously until done, then
-    notifies the user — while you stay free. Use it ONLY when the user explicitly
-    detaches ("in the background", "ping me when done", "while I'm out") — e.g.
-    "go build a routine that scans SOL pools and ping me". If the user is present
-    and would approve trades, use ``consult`` instead.
-
-    A delegation IS a run: this returns ``{"run_id", "status": "running",
-    "next_steps"}`` — track it with ``get_run(run_id)`` and stop it with
-    ``control_run(run_id, "stop")``. There is NO delegate get/list/stop.
-
-    Authorization: a delegation to a TRADING agent (one that has an AGENT.md
-    risk_limits baseline, is given caps here, or can reach manage_executors —
-    declaring it, or declaring no tool scope at all) runs under a zero-seeded
-    risk gate — tool calls auto-approve within caps, and the caps ARE the
-    authorization (nobody approves each trade). The caps come from the optional
-    risk_limits arg when given (it REPLACES the agent's AGENT.md baseline for
-    this one run), else the baseline. A trading delegation with neither errors
-    at start; "unbounded" is expressed by passing explicitly large caps.
-    Non-trading specialists (agents that declare no `manage_executors` and
-    carry no baseline) run with full auto-approve.
-
-    Args:
-        agent: Agent slug to delegate to.
-        task: The one-off task, in plain language.
-        risk_limits: Per-delegation risk caps override (trading agents only).
-            Keys: max_position_size_quote, max_open_executors,
-            max_drawdown_pct, shutdown_drawdown_pct. Replaces the agent baseline.
-
-    Returns:
-        {"run_id", "status": "running", "next_steps"} or {"error": "..."}.
-    """
-    return await delegate_tool.delegate(agent, task, risk_limits)
 
 
 @mcp.tool()
@@ -170,16 +126,15 @@ async def get_notifications(
 ) -> dict:
     """Read recent Condor notifications from the outbox (oldest first).
 
-    Every user-facing notification (session ticks, delegation results,
+    Every user-facing notification (session ticks, approval requests,
     agent pings) is recorded in the outbox. Use this to catch up on what
-    agents reported — e.g. after
-    starting a session or delegation from this harness — or to poll for
-    new entries by passing the last seen ``ts`` as ``since_ts``.
+    agents reported — e.g. after starting a session from this harness — or
+    to poll for new entries by passing the last seen ``ts`` as ``since_ts``.
 
     Args:
         limit: Max entries returned.
         since_ts: Only entries with ts strictly greater than this.
-        agent_id: Filter to one run (session or delegation id).
+        agent_id: Filter to one run id.
 
     Returns:
         {"notifications": [{ts, agent_id, kind, text, ...}]}
@@ -299,7 +254,7 @@ async def manage_executors(
 
     These run in the persistent Condor process against Hummingbot Gateway
     (keys never leave Gateway). Creates and stops are risk- and
-    human-gated; experiments cancel them automatically.
+    human-gated; experiments (dry runs) cancel them at the gate.
 
     executor_type is a composite {kind}_{instrument}: kind ∈ {order (single
     leg, place-and-track), position (round-trip with a SL/trailing/TP/time
@@ -331,7 +286,7 @@ async def manage_executors(
     - "performance": rolled-up scorecard — open/closed/failed counts,
       realized PnL, costs, win rate, close-type breakdown — grouped by
       group_by: "agent" (per agent, all its runs), "run" (per
-      session/delegation), "strategy" (legacy records only — new executors
+      session), "strategy" (legacy records only — new executors
       carry no strategy), "venue", or "type". Use this to answer
       "how is agent X doing" in one call.
 
@@ -382,6 +337,7 @@ async def create_agent(
     agent_key: str = "",
     tools: list[str] | None = None,
     when_to_consult: str = "",
+    goal: str = "",
     risk_limits: dict | None = None,
     denomination: str = "",
     account: str = "",
@@ -405,6 +361,9 @@ async def create_agent(
         tools: Declared tool scope; empty = unrestricted (and therefore
             trading — an agent that can trade must declare risk_limits).
         when_to_consult: When the chat brain should consult this agent.
+        goal: The EXPLICIT stop condition — what "done" means, stated so the
+            agent can judge it each tick. When met, a run self-stops
+            (complete_run) and reports back. Empty = open-ended mandate.
         risk_limits: {max_position_size_quote, max_open_executors,
             max_drawdown_pct?, shutdown_drawdown_pct?}.
         denomination: Numeraire for risk limits (e.g. "USDC", "SOL").
@@ -421,6 +380,7 @@ async def create_agent(
         agent_key=agent_key,
         tools=tools,
         when_to_consult=when_to_consult,
+        goal=goal,
         risk_limits=risk_limits,
         denomination=denomination,
         account=account,
@@ -441,6 +401,7 @@ async def update_agent(
     agent_key: str | None = None,
     tools: list[str] | None = None,
     when_to_consult: str | None = None,
+    goal: str | None = None,
     risk_limits: dict | None = None,
     denomination: str | None = None,
     account: str | None = None,
@@ -461,6 +422,7 @@ async def update_agent(
         agent_key=agent_key,
         tools=tools,
         when_to_consult=when_to_consult,
+        goal=goal,
         risk_limits=risk_limits,
         denomination=denomination,
         account=account,
@@ -493,16 +455,19 @@ async def run_agent(
 ) -> dict:
     """Launch a run of an agent. Returns {"agent_id": <run_id>} immediately.
 
-    dry_run=True runs ONE experiment tick: the agent plans and records but
-    every mutating action is cancelled — use it to preview behavior.
-    Launch config overrides are limited (trading_context, duration knobs,
-    dry-run) and risk overrides are STRICTER-ONLY — widening a baseline cap
-    is rejected (§5.3).
+    dry_run=True is an EXPERIMENT: one simulated tick fully in memory — every
+    mutating action is cancelled and NOTHING is recorded (no run id, no
+    history). It blocks for the tick (up to ~5 min) and returns
+    {"report": <human-readable markdown>} describing what the agent would
+    have done — relay that report to the user.
+    Launch config overrides are limited (trading_context, max_ticks) and risk
+    overrides are STRICTER-ONLY — widening a baseline cap is rejected (§5.3).
 
     Args:
         agent_slug: Which agent to run.
         config: Launch overrides (max_ticks and stricter risk_limits only).
-        dry_run: One read-only experiment tick instead of a live loop.
+        dry_run: Simulate one tick in memory and return a report instead of
+            starting a live loop.
         trading_context: Context string for this run.
     """
     return await trading_agent.run_agent(
@@ -513,13 +478,14 @@ async def run_agent(
 @mcp.tool()
 @handle_errors("list runs")
 async def list_runs(agent_slug: str = "", kind: str = "", limit: int = 20) -> dict:
-    """Run history (newest first): sessions, experiments, delegations,
-    consults, scheduled fires — with status and display seq. Running runs
-    carry live engine info under "live".
+    """Run history (newest first): sessions and scheduled fires — with
+    status and display seq. Running runs carry live engine info under
+    "live". (Experiments and consults are not runs: they return their
+    report/answer inline and leave no history.)
 
     Args:
         agent_slug: Filter to one agent ("" = all).
-        kind: session | experiment | delegation | consult | scheduled ("" = all).
+        kind: session | scheduled ("" = all).
         limit: Max runs returned.
     """
     return await trading_agent.list_runs(agent_slug, kind=kind, limit=limit)
@@ -529,8 +495,10 @@ async def list_runs(agent_slug: str = "", kind: str = "", limit: int = 20) -> di
 @handle_errors("get run")
 async def get_run(run_id: str, include_events: bool = False) -> dict:
     """One run's status + metadata (live engine info while it runs; the
-    durable RunStore record after). include_events=True returns the full
-    event stream (ticks, tool calls, permissions, directives).
+    durable RunStore record after). include_events=True adds the lifecycle
+    event stream (run start/end, permissions). Per-tick detail (tool calls,
+    state snapshots) lives in the run folder's {tick}.md files — the CLI
+    `condor runs export <id>` renders the whole run including them.
     """
     return await trading_agent.get_run(run_id, include_events=include_events)
 
@@ -547,6 +515,23 @@ async def control_run(run_id: str, verb: str, close: bool = False) -> dict:
     financial scope too. Agent-wide emergency winddown is shutdown_agent.
     """
     return await trading_agent.control_run(run_id, verb, close=close)
+
+
+@mcp.tool()
+@handle_errors("complete run")
+async def complete_run(summary: str = "") -> dict:
+    """Declare YOUR task COMPLETE — agent run sessions only.
+
+    Call this when the completion condition in your strategy/session context
+    is MET: the run ends gracefully (position-preserving) after the current
+    tick, before its max_ticks budget. The summary is your final report to
+    the user — state what you did and the outcome in 1-3 sentences. Never
+    use it for errors, and it cannot extend a run.
+
+    Args:
+        summary: Final report shown to the user (1-3 sentences).
+    """
+    return await trading_agent.complete_run(summary)
 
 
 @mcp.tool()

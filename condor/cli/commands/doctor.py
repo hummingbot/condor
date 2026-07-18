@@ -279,7 +279,7 @@ def _unswept_runs(live_ids: set[str]) -> list[Path]:
     pending = []
     for slug in store.agent_slugs_with_runs():
         for path in store.all_run_paths(slug):
-            if path.stem in live_ids:
+            if path.parent.name in live_ids:
                 continue
             tail = _tail_event(path)
             if tail is not None and tail.get("type") != "run_ended":
@@ -294,7 +294,9 @@ def _interrupted_runs_row(apply_fix: bool) -> dict:
     pending = _unswept_runs(live_ids)
     if not pending:
         return _row("run streams", "ok", "every ended stream has run_ended")
-    names = ", ".join(p.stem for p in pending[:3]) + ("…" if len(pending) > 3 else "")
+    names = ", ".join(p.parent.name for p in pending[:3]) + (
+        "…" if len(pending) > 3 else ""
+    )
     if apply_fix:
         if server_up:
             return _row(

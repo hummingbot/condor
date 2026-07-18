@@ -25,10 +25,7 @@ process (prompt injection) and from the MCP subprocess (the tools) alike.
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
-
-log = logging.getLogger(__name__)
 
 # Anchor to the project root (…/condor) so paths are stable regardless of cwd.
 _PROJECT_ROOT = Path(__file__).parent.parent.parent
@@ -45,51 +42,6 @@ def store_root(agent_slug: str | None = None) -> Path:
     else:
         base = _PROJECT_ROOT
     return base / "store" / "memory"
-
-
-def migrate_memory_tiers() -> list[str]:
-    """One-time rename of legacy ``store/user_*`` dirs to the new tiers.
-
-    A plain ``mv``, not a compat layer (§4.3): for the repo root and each
-    ``agents/{slug}`` home, if ``store/user_*`` dirs exist and ``store/memory``
-    does not, the NEWEST ``user_*`` dir (by mtime) is renamed to ``memory``.
-    Older ``user_*`` dirs are left in place (and logged) for the operator to
-    delete. Idempotent: re-running with ``store/memory`` present is a no-op.
-
-    Returns a list of human-readable descriptions of the moves performed.
-    """
-    moves: list[str] = []
-    homes = [_PROJECT_ROOT]
-    agents_dir = _PROJECT_ROOT / "agents"
-    if agents_dir.exists():
-        homes.extend(
-            d for d in sorted(agents_dir.iterdir())
-            if d.is_dir() and not d.name.startswith("_")
-        )
-    for home in homes:
-        store = home / "store"
-        user_dirs = sorted(
-            (d for d in store.glob("user_*") if d.is_dir()),
-            key=lambda d: d.stat().st_mtime,
-        )
-        if not user_dirs:
-            continue
-        target = store / "memory"
-        if target.exists():
-            log.warning(
-                "memory migration: %s exists; leaving %s untouched",
-                target, [d.name for d in user_dirs],
-            )
-            continue
-        newest = user_dirs[-1]
-        newest.rename(target)
-        desc = f"{newest} -> {target}"
-        if len(user_dirs) > 1:
-            leftovers = [d.name for d in user_dirs[:-1]]
-            desc += f" (older per-user dirs left in place: {leftovers})"
-        log.info("memory migration: %s", desc)
-        moves.append(desc)
-    return moves
 
 
 def builtin_skills_root(agent_slug: str | None = None) -> Path | None:

@@ -58,7 +58,7 @@ cd frontend && npm run build   # build the dashboard
 condor/
 ├── condor/
 │   ├── agents/          # engine (tick loop), runstore, projections, prompts,
-│   │   │                #   learnings, providers, consult/delegate
+│   │   │                #   learnings, providers, consult/experiment
 │   ├── executors/       # kind×instrument matrix, ops (risk-gated create), runtime,
 │   │   │                #   append-only JSONL log, venue adapters
 │   ├── control/         # unix-socket JSON-RPC surface for the MCP subprocess
@@ -107,37 +107,29 @@ that request into the right kind of run.
 
 ### Putting an agent to work
 
-There are four ways to engage an agent, but you never pick one by name — you
-just say what you want and Condor routes it. The only things that matter are
-**whose plan runs** and **whether you're watching**:
+There are three ways to engage an agent, but you never pick one by name — you
+just say what you want and Condor routes it:
 
 | You want to… | Say something like | Condor runs a… |
 |---|---|---|
 | Let the agent trade its own strategy | *"run the trender"*, *"start the market maker"* | **session** — its live tick loop, under its own risk limits |
-| Try that safely first, no real money | *"test it first"*, *"dry-run it"*, *"what would it do?"* | **experiment** — the full loop, every trade simulated |
+| See what it would do, no real money | *"test it first"*, *"dry-run it"*, *"what would it do?"* | **experiment** — one simulated tick, reported back to you; nothing recorded |
 | Ask it something, or have it act while you watch | *"is BONK tradeable right now?"*, *"have it open a small position"* | **consult** — it answers/acts now, and **you approve each trade** |
-| Hand it a job and walk away | *"go build a scanner and ping me"*, *"unwind my ETH in the background, cap the loss at $50"* | **delegate** — it runs detached and notifies you when done |
 
-Two quick tells if you're unsure:
+One quick tell if you're unsure: **its plan, or your task?** *"Run \<agent\>"*
+means "be yourself" — a session. *"Have \<agent\> do \<one specific thing\>"*
+is a one-off task — a consult. Steering words like *"…focused on SOL today"*
+or *"…for 10 ticks"* just shape the same session; they don't make it a task.
 
-- **Its plan, or your task?** *"Run \<agent\>"* means "be yourself" — a session.
-  *"Have \<agent\> do \<one specific thing\>"* is a one-off task (consult or
-  delegate). Steering words like *"…focused on SOL today"* or *"…for 10 ticks"*
-  just shape the same session; they don't make it a task.
-- **Are you watching?** Present and want to approve each trade → **consult**.
-  Want it to run unattended → **delegate**, and for anything that trades you
-  name a budget up front (the budget *is* the permission).
-
-A **session** and a **delegation** are both just *runs* — ask *"how's it
-doing?"*, *"stop it"*, or *"how did it do?"* the same way for any of them, and
-Condor tracks them all in one run history. The full decision guide is in
-[docs/consult-delegate-merge.md](docs/consult-delegate-merge.md).
+Only **sessions** are runs: they're what you track, stop, and review in the
+run history. An experiment's report and a consult's answer arrive in the chat
+and that's the whole product — nothing to clean up afterward.
 
 ### Safety by default
 
-- **Dry-run anything.** An experiment runs the complete strategy and journals
-  every decision without placing a single order — the way to trust an agent
-  before it touches real money.
+- **Dry-run anything.** An experiment runs a full strategy tick and reports
+  every decision it *would* have made without placing a single order — the
+  way to trust an agent before it touches real money.
 - **Risk limits are enforced, not requested.** Max exposure, max open
   positions, and drawdown caps are checked by the runtime on every trade; the
   model can't talk its way past them, and launch-time overrides can only make
@@ -160,22 +152,28 @@ validated and hashed (source + resolved) at every save and launch.
 - **AgentService** (`condor/agents/service.py`) — the ONE owner of CRUD +
   lifecycle: create/update/delete (tombstone), run, control
   (pause/resume/stop [--close]), shutdown (agent-scoped winddown), consult,
-  delegate. Web routes, MCP tools, and control-socket handlers are thin
+  experiment. Web routes, MCP tools, and control-socket handlers are thin
   adapters.
 - **TickEngine** (`engine.py`) — one instance per run: pre-flight risk →
   `run_agent` (a fresh ACP client per tick, clean context window) →
   RunStore write-back. Engines are memory-only; a restart never resumes a
-  run (§4.2) — executors survive independently.
+  run (§4.2) — executors survive independently. A run ends four ways:
+  the agent declares its task complete (`complete_run(summary)` — graceful
+  early exit before the `max_ticks` budget), the budget runs out, the risk
+  kill-switch fires, or you stop it — and every ending posts a final summary
+  report to chat (the session sibling of a consult's answer).
 - **run_agent** (`run.py`) — the single execution primitive under tick /
-  delegation / consult. ACP is the only model runner. Mints the run's
+  consult / experiment. ACP is the only model runner. Mints the run's
   execution capability (§6.2) and revokes it at run end.
-- **RunStore** (`runstore.py`) — one append-only JSONL event stream per run
-  in the run's own folder `agents/{slug}/runs/{run_id}/{run_id}.jsonl` (opaque
-  ULID ids; sessions in `runs/`, with sibling top-level `experiments/`,
-  `consults/`, `delegations/` dirs of the same shape). Markdown views are
-  generated (the run's `prompt.md` + `journal.md` companions and on-demand
-  exports — never parsed back); working context is a projection
-  (`projections.py`).
+- **RunStore** (`runstore.py`) — one self-contained folder per run at
+  `agents/{slug}/runs/{run_id}/` (opaque ULID ids): a lifecycle JSONL
+  (`run_started` / `permission` / `run_ended`) plus **one organized markdown
+  file per tick** (`1.md`, `2.md`, …: tick started with prompt suffix +
+  hash, every tool call in full, state snapshot, tick completion). Actual
+  runs — sessions and scheduled fires — are ALL that persists; experiments
+  and consults return their report/answer inline and leave nothing. All
+  markdown is write-only (never parsed back); the engine's working context
+  is in-memory (§4.2).
 - **Approvals** (`approvals.py`) — durable permission events + one-use
   grants; resolved via `resolve_approval` from any channel; default deny on
   timeout; voided when the run dies.
@@ -209,15 +207,15 @@ rejects a second Condor actor on the same (account, instrument).
 ```
 agents/{slug}/
     AGENT.md           # the one spec (incl. entry_guards, risk baseline)
-    runs/{ulid}/       # one self-contained folder per session/scheduled run;
-                       # experiments/, consults/, delegations/ are sibling
-                       # top-level dirs with the same {ulid}/ shape
-        {ulid}.jsonl   # RunStore event stream (incl. per-tick prompt suffix
-                       #   + sha256 of the full assembled prompt)
-        prompt.md      # the run's prompt, written once by run_agent (any kind)
+    runs/{ulid}/       # one self-contained folder per session/scheduled run —
+                       # the ONLY run history (experiments/consults persist
+                       # nothing)
+        store.jsonl    # lifecycle stream: run_started / permission / run_ended
+        1.md, 2.md, …  # one file per tick: tick started (prompt suffix +
+                       #   sha256 of the full assembled prompt), tool calls
+                       #   in full, state snapshot, tick completion
+        prompt.md      # the run's prompt prefix, written once by run_agent
         journal.md     # one line per tick (generated view — never parsed)
-        {HH-MM-SS}Z-{type}.md  # oversized event payloads (spill, markdown)
-    experiments/{ulid}/  consults/{ulid}/  delegations/{ulid}/  # same shape
     executors.jsonl    # append-only executor lifecycle log. AGENT-scoped,
                        # NOT per-run: executors outlive runs (detach on stop,
                        # keep writing after run_ended), recovery rebuilds the

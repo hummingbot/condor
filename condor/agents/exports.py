@@ -1,7 +1,7 @@
 """Markdown exports of RunStore streams (§7.1).
 
-Markdown is a GENERATED view now — journals, experiment snapshots, and
-delegation transcripts are all renderings of the same event stream, and
+Markdown is a GENERATED view now — journals and run
+transcripts are all renderings of the same event stream, and
 nothing ever parses markdown back.
 """
 
@@ -43,9 +43,14 @@ def _render_tool_call(n: int, payload: dict) -> str:
     return "\n".join(block)
 
 
-def render_run_markdown(meta: dict, events: list[dict]) -> str:
+def render_run_markdown(
+    meta: dict, events: list[dict], tick_docs: list[str] | None = None
+) -> str:
     """One human-readable markdown document for a run — header, then the
-    chronological event narrative."""
+    chronological event narrative. ``tick_docs`` are the run's per-tick
+    markdown files (current format), spliced in before the run-ended
+    section; older runs carry their whole history in ``events``."""
+    pending_tick_docs = list(tick_docs or [])
     parts: list[str] = []
     parts.append(
         f"# {meta.get('agent_slug', '?')} — {meta.get('kind', 'run')} "
@@ -117,8 +122,12 @@ def render_run_markdown(meta: dict, events: list[dict]) -> str:
                 bits.append(f"open={metrics.get('open_count', 0)}")
             parts.append(f"_(tick #{ev.get('tick', '?')} complete — {', '.join(bits)})_")
         elif etype == "run_ended":
+            if pending_tick_docs:
+                parts.extend(pending_tick_docs)
+                pending_tick_docs = []
             parts.append(
                 f"## Run ended — {payload.get('status', '?')} — {ts}"
                 + (f"\n\n{payload['reason']}" if payload.get("reason") else "")
             )
+    parts.extend(pending_tick_docs)  # still-running run: ticks go last
     return "\n\n".join(parts) + "\n"

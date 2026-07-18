@@ -6,9 +6,11 @@ the Agent, build its prompt, and drive :func:`condor.agents.run.run_agent`
 under the ``human_gate`` policy — every mutating tool call needs a human
 approval.
 
-The answer returns inline; the run itself is recorded like every other run —
-a ``kind: consult`` RunStore stream (§7.1) carrying the task, tool calls, and
-the result, so consult-created executors attribute to a real run id.
+A consult is a QUESTION, not a run: the answer returns inline and NOTHING is
+persisted — no run id, no event stream, no folder. The ephemeral ULID minted
+here only keys the in-memory approval queue (``durable=False``) and the run
+capability that attributes any HUMAN-APPROVED executor to this consult; the
+executor store remains the financial authority for anything actually created.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from condor.agents.agent import AgentStore
 log = logging.getLogger(__name__)
 
 # Wall-clock budget for one consult; without it a hung backend blocks the
-# caller forever. Matches the delegation default.
+# caller forever.
 CONSULT_TIMEOUT_S = 900
 
 
@@ -32,14 +34,13 @@ async def run_consult(
     """Consult the Agent ``slug`` with ``task`` and return its answer.
 
     CONSULT is synchronous and human-gated: mutating tools need a human
-    approval. Its async, unattended sibling is DELEGATE
-    (:mod:`condor.agents.delegate`), which runs the same primitive under a
-    ``risk_gate``/AUTO policy.
+    approval (resolved via ``resolve_approval``/dashboard, default deny on
+    timeout).
     """
     from condor.agents.context import build_agent_context
     from condor.agents.policies import human_gate
     from condor.agents.run import run_agent
-    from condor.agents.runstore import get_run_store
+    from condor.agents.runstore import new_ulid
 
     store = AgentStore()
     agent = store.get(slug)
@@ -56,59 +57,30 @@ async def run_consult(
 
         account_ref = resolve_agent_account(agent)
 
-    run_store = get_run_store()
-    run_id = run_store.start_run(
-        slug,
-        "consult",
-        payload={
-            "task": task,
-            "model": agent.agent_key,
-            **({"account_ref": account_ref.as_dict()} if account_ref else {}),
-        },
-    )
-
-    def _persist_tool_call(tc: dict) -> None:
-        from condor.agents.gating import is_dangerous_tool_call
-
-        try:
-            run_store.emit(
-                run_id,
-                "tool_call",
-                {
-                    "name": tc.get("name") or tc.get("title", ""),
-                    "status": tc.get("status", ""),
-                    "input": tc.get("input"),
-                    "output": tc.get("output"),
-                    "mutating": is_dangerous_tool_call(tc),
-                },
-                tool_call_id=str(tc.get("id") or "") or None,
-            )
-        except Exception:
-            log.exception("consult %s: tool_call emit failed", run_id)
+    # Ephemeral identity: keys the in-memory approval queue and the executor
+    # attribution capability. Never lands on disk.
+    consult_id = new_ulid()
 
     try:
         result = await run_agent(
             agent,
             prompt,
-            # Consults are runs (§7.1): the run_id routes approvals through
-            # the durable queue, so no interactive chat transport is needed.
-            permission_policy=human_gate(0, run_id=run_id, agent_slug=slug),
+            # The id routes approvals through the (in-memory) queue, so no
+            # interactive chat transport is needed.
+            permission_policy=human_gate(
+                0, run_id=consult_id, agent_slug=slug, durable=False
+            ),
             timeout_s=CONSULT_TIMEOUT_S,
-            agent_id=run_id,
+            agent_id=consult_id,
             account_ref=account_ref,
-            on_tool_call=_persist_tool_call,
         )
-    except BaseException:
-        run_store.end_run(run_id, "error", "consult crashed/cancelled")
-        raise
-
-    answer = result.text or "(the agent returned no answer)"
-    try:
-        run_store.emit(run_id, "state_snapshot", {"result": answer})
     finally:
-        run_store.end_run(
-            run_id,
-            "error" if result.timed_out else "completed",
-            result.error if result.timed_out else "",
-        )
-    return answer
+        # Pending approvals die with the consult — a grant could never be
+        # consumed by a caller that no longer waits.
+        from condor.agents.approvals import get_approval_manager
+
+        get_approval_manager().void_run(consult_id)
+
+    if result.timed_out:
+        return f"(consult timed out after {CONSULT_TIMEOUT_S}s) {result.text}".strip()
+    return result.text or "(the agent returned no answer)"

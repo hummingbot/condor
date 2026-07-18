@@ -17,7 +17,7 @@ Disk layout::
         AGENT.md                       # the spec (frontmatter + body)
         skills/<slug>/SKILL.md         # shared skills (consult + runs)
         store/                         # learned memory (the shared brain)
-        sessions/  experiments/  delegations/   # history (journal.py)
+        runs/                          # run history (runstore.py)
 
 An Agent may be **authored in the repo** (e.g. ``memecoin_trender``) or
 **created at runtime**; either way ``AgentStore`` can create/update/delete it.
@@ -77,9 +77,14 @@ class Agent:
     # Empty => UNRESTRICTED (all discovered tools) — and therefore trading.
     tools: list[str] = field(default_factory=list)
     when_to_consult: str = ""  # empty => not offered as consultable
-    # Agent-level risk baseline (RiskLimits keys). Governs unattended delegations
-    # (zero-seeded risk_gate) and is the baseline for tick sessions (launch
-    # overrides may only TIGHTEN it, §5.3). The AGENT.md defines what the agent
+    # The EXPLICIT goal: what "done" means, stated so the agent can judge it
+    # each tick. A run self-stops (complete_run) the moment this is met —
+    # the third stop axis next to risk and the max_ticks budget. Empty =
+    # open-ended mandate (runs until budget/stop).
+    goal: str = ""
+    # Agent-level risk baseline (RiskLimits keys). The baseline for tick
+    # sessions (launch overrides may only TIGHTEN it, §5.3) and the caps an
+    # experiment simulates under. The AGENT.md defines what the agent
     # does — an agent that can trade MUST declare a baseline (enforced on save);
     # {max_position_size_quote: 0, max_open_executors: 0} is the explicit
     # "read-only, never trades" statement.
@@ -96,8 +101,7 @@ class Agent:
     # Launch defaults (the former strategy default_config): AgentConfig keys.
     # The run-only "cadence" sub-block — frequency_sec/execution_mode/max_ticks
     # — is what only a session (run_agent) uses; the rest (venue, guardrails,
-    # executor tactic defaults) is shared by any trading verb (see AgentConfig
-    # and docs/consult-delegate-merge.md, Q2.2).
+    # executor tactic defaults) is shared by any trading verb (see AgentConfig).
     default_config: dict = field(default_factory=dict)
     # Default trading context injected when a launch passes none.
     default_trading_context: str = ""
@@ -132,8 +136,7 @@ class Agent:
         """True if this agent can reach the executor tool: it declares
         ``manage_executors``, or declares no tool list at all (empty =
         unrestricted — the full surface includes the executor tool). Such an
-        agent MUST declare a risk baseline — enforced on save and at
-        delegation (#4)."""
+        agent MUST declare a risk baseline — enforced on save (#4)."""
         if not self.tools:
             return True
         return any(
@@ -166,6 +169,7 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
             agent_key=meta.get("agent_key", ""),
             tools=meta.get("tools", []) or [],
             when_to_consult=meta.get("when_to_consult", ""),
+            goal=meta.get("goal", "") or "",
             risk_limits=meta.get("risk_limits", {}) or {},
             denomination=meta.get("denomination", "") or "",
             account=meta.get("account", "") or "",
@@ -228,6 +232,7 @@ class AgentStore:
         agent_key: str = "",
         tools: list[str] | None = None,
         when_to_consult: str = "",
+        goal: str = "",
         risk_limits: dict | None = None,
         denomination: str = "",
         account: str = "",
@@ -244,6 +249,7 @@ class AgentStore:
             agent_key=agent_key,
             tools=tools or [],
             when_to_consult=when_to_consult,
+            goal=goal,
             risk_limits=risk_limits or {},
             denomination=denomination,
             account=account,
@@ -278,7 +284,7 @@ class AgentStore:
     def _save(self, agent: Agent) -> None:
         # The AGENT.md defines what the agent does — for an agent that can
         # trade that includes how much it may do unattended. Refusing to save
-        # an incomplete definition moves the loud error from delegate time to
+        # an incomplete definition moves the loud error from run time to
         # authoring time.
         if agent.can_trade and not agent.risk_limits:
             why = (
@@ -320,6 +326,8 @@ class AgentStore:
             "default_trading_context": agent.default_trading_context,
             "created_at": agent.created_at,
         }
+        if agent.goal:
+            meta["goal"] = agent.goal
         if agent.account:
             meta["account"] = agent.account
         if agent.account_label:

@@ -1,15 +1,14 @@
-"""run_agent — the single execution primitive under tick / delegation / consult.
+"""run_agent — the single execution primitive under tick / consult / experiment.
 
-Refactor-02: the three ways an agent's brain gets invoked used to be two
-independent execution stacks (TickEngine's client/stream code vs the
-consult/delegate shared runner). This module owns the duplicated middle —
-model resolution, MCP-server wiring, event streaming, timeout, and client
-reaping — exactly once. ACP is the only model runner (§9.3). Everything
-kind-specific stays at the call sites:
+Refactor-02: the ways an agent's brain gets invoked used to be independent
+execution stacks. This module owns the duplicated middle — model resolution,
+MCP-server wiring, event streaming, timeout, and client reaping — exactly
+once. ACP is the only model runner (§9.3). Everything kind-specific stays at
+the call sites:
 
-    consult    = run_agent(policy=human_gate(run_id=…))  → return text inline
-    delegation = run_agent(policy=risk_gate(zero) | AUTO) → session + notify
-    tick       = run_agent(policy=risk_gate(journal))     → journal write-back
+    consult    = run_agent(policy=human_gate(run_id=…))       → answer inline
+    experiment = run_agent(policy=risk_gate(experiment=True)) → report inline
+    tick       = run_agent(policy=risk_gate(journal))         → RunStore write-back
 """
 
 from __future__ import annotations
@@ -42,8 +41,8 @@ DEFAULT_TIMEOUT_S = 900
 class RunResult:
     """What one agent run produced, in every view a caller needs.
 
-    ``events`` is the chronological transcript (thoughts + tool calls + text,
-    delegate-style); ``tool_calls`` is the folded tool-call list (tick-style).
+    ``events`` is the chronological transcript (thoughts + tool calls +
+    text); ``tool_calls`` is the folded tool-call list (tick-style).
     Both come from the same stream — no caller re-derives either.
     """
 
@@ -120,9 +119,10 @@ async def run_agent(
     started = time.time()
 
     # Mint the run capability (§6.2): the opaque execution authority injected
-    # into the tool session. Only runs with an identity (tick/delegation/
-    # consult ids) get one — plain chat sessions register condor-direct in
-    # the MCP wrapper instead. Revoked in the finally below (run end).
+    # into the tool session. Any invocation with an identity (tick run ids,
+    # consult/experiment ephemeral ids) gets one — plain chat sessions
+    # register condor-direct in the MCP wrapper instead. Revoked in the
+    # finally below (run end).
     run_capability = None
     if agent_id:
         from condor.executors.capabilities import get_capability_registry
@@ -136,11 +136,12 @@ async def run_agent(
 
     result.model = model or agent.agent_key
 
-    # Persist the run's prompt companion (prompt.md) once, for EVERY kind — the
-    # single owner of that write. The tick engine passes its stable prefix via
-    # ``prompt_companion`` (so the prefix/suffix reconstruction contract holds);
-    # one-shots (consult/delegation/experiment-as-run) let it default to the
-    # full prompt.
+    # Persist the run's prompt companion (prompt.md) once — the single owner
+    # of that write. The tick engine passes its stable prefix via
+    # ``prompt_companion`` (so the prefix/suffix reconstruction contract
+    # holds). Run-less verbs (consult/experiment) pass ephemeral ids with no
+    # RunStore stream behind them, so this lookup no-ops and nothing lands
+    # on disk.
     if agent_id:
         persist_prompt_companion(agent_id, prompt_companion or prompt)
 

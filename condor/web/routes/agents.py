@@ -3,17 +3,16 @@
 An **Agent** is the top-level unit: identity + strategy body + shared brain
 (memory/skills). ALL of its operational history is the RunStore (§7.1): one
 append-only JSONL event stream per run at
-``agents/{slug}/runs/{run_id}/{run_id}.jsonl`` with opaque ULID run ids. Route
+``agents/{slug}/runs/{run_id}/store.jsonl`` with opaque ULID run ids. Route
 shape::
 
     /agents                          -> list Agents (rollups)
-    /agents/delegations              -> live delegation registry
     /agents/runs/{run_id}            -> one run (meta; ?events=true)
     /agents/runs/{run_id}/export     -> generated markdown transcript
     /agents/runs/{run_id}/executors  -> executors + performance for one run
     /agents/{slug}                   -> Agent detail (spec + recent runs)
     /agents/{slug}/runs              -> run history (?kind=&limit=)
-    /agents/{slug}/consult|delegate  -> run the Agent's brain
+    /agents/{slug}/consult           -> run the Agent's brain, answer inline
     /agents/{slug}/start|stop|...    -> session lifecycle
     /agents/{slug}/performance       -> per-run perf + rollup
 
@@ -118,7 +117,6 @@ class AgentSummary(BaseModel):
     # Agent-level rollups (all history lives at the agent).
     status: str = "idle"  # "running" if any session is running
     session_count: int = 0
-    experiment_count: int = 0
     tick_count: int = 0
     daily_pnl: float = 0.0
     total_pnl: float = 0.0
@@ -132,7 +130,7 @@ class AgentPerformanceModel(BaseModel):
     agent_id: str
     run_id: str = ""
     session_num: int = 0  # display_seq from the run stream
-    kind: str = "session"  # session | experiment | scheduled
+    kind: str = "session"  # session | scheduled
     status: str = ""
     realized_pnl: float = 0.0
     unrealized_pnl: float = 0.0
@@ -160,6 +158,7 @@ class AgentDetail(BaseModel):
     agent_key: str = ""
     tools: list[str] = []
     when_to_consult: str = ""
+    goal: str = ""
     consultable: bool = False
     can_trade: bool = False
     risk_limits: dict[str, Any] = {}
@@ -184,6 +183,7 @@ class CreateAgentRequest(BaseModel):
     agent_key: str = ""
     tools: list[str] = []
     when_to_consult: str = ""
+    goal: str = ""
     risk_limits: dict[str, Any] = {}
     denomination: str = ""
     account: str = ""
@@ -207,6 +207,7 @@ class UpdateAgentRequest(BaseModel):
     agent_key: str | None = None
     tools: list[str] | None = None
     when_to_consult: str | None = None
+    goal: str | None = None
     risk_limits: dict[str, Any] | None = None
     denomination: str | None = None
     account: str | None = None
@@ -234,14 +235,6 @@ class StartAgentRequest(BaseModel):
     trading_context: str = ""
 
 
-class DelegateRequest(BaseModel):
-    task: str
-    timeout_s: int = 900
-    # Per-delegation risk caps override — REPLACES the agent's AGENT.md baseline
-    # for this one run (trading agents only).
-    risk_limits: dict[str, Any] | None = None
-
-
 class DirectiveRequest(BaseModel):
     text: str
     agent_id: str | None = None
@@ -251,9 +244,9 @@ class DirectiveRequest(BaseModel):
 # Executors tag ``controller_id == run_id`` (§7.1), so the RunStore metas ARE
 # the enumeration the rollup fetches against.
 
-# Run kinds whose executors are attributed to the agent (delegations/consults
-# never launch the tick engine, so they never tag a controller_id).
-_PERF_KINDS = ("session", "experiment", "scheduled")
+# Run kinds whose executors are attributed to the agent — sessions and their
+# scheduler-fired variant are the only persisted runs.
+_PERF_KINDS = ("session", "scheduled")
 _HISTORY_LIMIT = 200  # max runs enumerated per agent for rollups
 
 
@@ -318,7 +311,7 @@ async def _compute_agent_performance(agent):
     """Return list of AgentPerformanceModel plus rolled-up totals.
 
     Covers every attributed run of the agent (RunStore kinds session /
-    experiment / scheduled), computed from the native executor store.
+    scheduled), computed from the native executor store.
     The assembled rollup is cached ~30s (``_PERF_CACHE``).
     """
     slug = agent.slug
@@ -340,19 +333,16 @@ async def _compute_agent_performance(agent):
             row = rows.get(m["run_id"])
             if row is None:
                 continue
-            if m["kind"] == "experiment" and not row.get("closed_count"):
-                continue
             sessions.append(_perf_model(m, row))
 
-    real_sessions = [s for s in sessions if s.kind != "experiment"]
     totals = {
-        "total_pnl": sum(s.total_pnl for s in real_sessions),
-        "realized_pnl": sum(s.realized_pnl for s in real_sessions),
-        "unrealized_pnl": sum(s.unrealized_pnl for s in real_sessions),
-        "volume": sum(s.volume for s in real_sessions),
-        "fees": sum(s.fees for s in real_sessions),
-        "open_positions": sum(s.open_count for s in real_sessions),
-        "trade_count": float(sum(s.trade_count for s in real_sessions)),
+        "total_pnl": sum(s.total_pnl for s in sessions),
+        "realized_pnl": sum(s.realized_pnl for s in sessions),
+        "unrealized_pnl": sum(s.unrealized_pnl for s in sessions),
+        "volume": sum(s.volume for s in sessions),
+        "fees": sum(s.fees for s in sessions),
+        "open_positions": sum(s.open_count for s in sessions),
+        "trade_count": float(sum(s.trade_count for s in sessions)),
     }
     result = (sessions, totals)
     _cache_set(f"perf:{slug}", result)
@@ -415,11 +405,7 @@ async def _build_agent_summary(agent) -> AgentSummary:
     latest_run_pnl = 0.0
     if sessions_perf:
         latest_perf = next(
-            (
-                perf_by_id[m["run_id"]]
-                for m in metas
-                if m.get("kind") != "experiment" and m["run_id"] in perf_by_id
-            ),
+            (perf_by_id[m["run_id"]] for m in metas if m["run_id"] in perf_by_id),
             None,
         )
         if latest_perf:
@@ -440,7 +426,6 @@ async def _build_agent_summary(agent) -> AgentSummary:
         schedule=agent.schedule or {},
         status=status,
         session_count=sum(1 for m in metas if m.get("kind") == "session"),
-        experiment_count=sum(1 for m in metas if m.get("kind") == "experiment"),
         tick_count=tick_count,
         daily_pnl=latest_run_pnl,
         total_pnl=float(totals.get("total_pnl", 0.0)),
@@ -466,75 +451,10 @@ async def list_agents():
     return [s for s in summaries if isinstance(s, AgentSummary)]
 
 
-# ── Delegation status/list routes ──
-# NOTE: Starlette matches routes in registration order, so these literal
-# /delegations and /runs paths MUST be registered before the /{slug}
-# catch-all below; otherwise GET /agents/delegations would match get_agent
-# with slug="delegations" and 404.
-
-
-@router.get("/delegations")
-async def list_delegations():
-    """List delegations from the RunStore (a delegation IS a run — C.1).
-
-    Reads run metas of ``kind=delegation`` (newest first, live overlay on
-    running ones) rather than a separate in-memory registry, so live and
-    historical delegations come from the one source of truth.
-    """
-    metas = _svc().list_runs(kind="delegation")
-    return {
-        "delegations": [
-            {
-                "task_id": m.get("run_id"),
-                "run_id": m.get("run_id"),
-                "agent": m.get("agent_slug"),
-                "status": m.get("status", ""),
-                "task": m.get("task", ""),
-                "started_at": m.get("started_at"),
-                "ended_at": m.get("ended_at"),
-            }
-            for m in metas
-        ]
-    }
-
-
-@router.get("/delegations/{task_id}")
-async def get_delegation_status(task_id: str):
-    """Get a delegation's status + result via the RunStore (``run_id ==
-    task_id``); the stream is the source of truth whether live or finished."""
-    store = get_run_store()
-    path = store.find_run_path(task_id)
-    if path is not None:
-        slug = store.slug_from_path(path)
-        meta = store.run_meta(slug, task_id)
-        if meta.get("kind") == "delegation":
-            return {
-                "task_id": task_id,
-                "run_id": task_id,
-                "agent": slug,
-                "status": meta.get("status", ""),
-                "task": meta.get("task", ""),
-                "started_at": meta.get("started_at"),
-                "ended_at": meta.get("ended_at"),
-                "transcript": _svc().export_run(task_id),
-            }
-    raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
-
-
-@router.post("/delegations/{task_id}/stop")
-async def stop_delegation_route(task_id: str):
-    """Cancel a running delegation. A delegation is a run, so this routes
-    through the same lifecycle stop as any run (``control_run`` — C.1)."""
-    from condor.agents.lifecycle import LifecycleError
-
-    try:
-        result = await _svc().control("", "stop", agent_id=task_id)
-    except LifecycleError as e:
-        raise _http(e)
-    return {"stopped": bool(result.get("stopped"))}
-
-
 # ── Runs (the one history API) ──
+# NOTE: Starlette matches routes in registration order, so the literal
+# /runs path MUST be registered before the /{slug} catch-all below;
+# otherwise GET /agents/runs/... would match get_agent and 404.
 
 
 @router.get("/runs/{run_id}")
@@ -630,6 +550,7 @@ async def get_agent(slug: str):
         agent_key=agent.agent_key,
         tools=agent.tools,
         when_to_consult=agent.when_to_consult,
+        goal=agent.goal,
         consultable=agent.consultable,
         can_trade=agent.can_trade,
         risk_limits=agent.risk_limits,
@@ -655,7 +576,7 @@ async def list_agent_runs(
 ):
     """Run history for one agent (RunStore metas, newest first, live overlay).
 
-    ``?kind=`` filters (session | experiment | delegation | consult | scheduled).
+    ``?kind=`` filters (session | scheduled).
     """
     _get_agent(slug)
     return {"runs": _svc().list_runs(slug, kind=kind, limit=limit)}
@@ -672,6 +593,7 @@ async def create_agent(req: CreateAgentRequest):
             agent_key=req.agent_key,
             tools=req.tools,
             when_to_consult=req.when_to_consult,
+            goal=req.goal,
             risk_limits=req.risk_limits,
             denomination=req.denomination,
             account=req.account,
@@ -730,7 +652,8 @@ async def delete_agent(slug: str):
 
 @router.post("/{slug}/consult")
 async def consult_agent(slug: str, req: ConsultRequest):
-    """Run an Agent consult (its brain to completion) and return the answer."""
+    """Run an Agent consult (its brain to completion) and return the answer.
+    Nothing is recorded — the answer is the whole product."""
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
 
@@ -743,40 +666,6 @@ async def consult_agent(slug: str, req: ConsultRequest):
     except LifecycleError as e:
         raise _http(e)
     return {"agent": slug, "answer": answer}
-
-
-# ── Delegate (fire-and-forget background tasks) ──
-
-
-@router.post("/{slug}/delegate")
-async def delegate_agent(slug: str, req: DelegateRequest):
-    """Delegate a one-off task to a detached background Agent instance.
-
-    Returns immediately with a ``task_id`` (also the run id); the agent runs
-    unattended until done, then notifies the user. Trading agents run under a
-    zero-seeded risk gate (per-call ``risk_limits`` override replaces the
-    AGENT.md baseline); non-trading agents run with full auto-approve. The
-    async sibling of ``/consult``.
-    """
-    _get_agent(slug)
-    if not req.task:
-        raise HTTPException(status_code=400, detail="task is required")
-
-    try:
-        d = await _svc().delegate(
-            slug,
-            task=req.task,
-            risk_limits=req.risk_limits,
-            timeout_s=req.timeout_s,
-        )
-    except LifecycleError as e:
-        raise _http(e)
-    except ValueError as e:
-        # Loud policy error: trading delegation with neither an AGENT.md
-        # baseline nor a per-call override.
-        raise HTTPException(status_code=400, detail=str(e))
-    # task_id is retained as an alias of run_id for the current dashboard.
-    return {"task_id": d["run_id"], "run_id": d["run_id"], "status": d["status"]}
 
 
 # ── Performance ──
@@ -810,16 +699,26 @@ async def start_session(
     slug: str,
     req: StartAgentRequest,
 ):
-    """Start a session — the stateful unit of capital engagement — or, with
-    ``execution_mode: "experiment"``, one simulated tick.
+    """Start a session — the stateful unit of capital engagement. With
+    ``dry_run: true`` (or ``execution_mode: "experiment"``) in the config it
+    instead simulates ONE tick in memory and returns ``{"report": <markdown>}``
+    — nothing is recorded and no run exists afterward.
 
     The AGENT.md is the one spec (§5.3): launch config merges over its
     ``default_config``; a legacy ``strategy`` field in the request is ignored.
     """
+    cfg = dict(req.config or {})
+    experiment = bool(cfg.get("dry_run")) or cfg.get("execution_mode") == "experiment"
     try:
+        if experiment:
+            return await _svc().experiment(
+                slug,
+                config=cfg,
+                trading_context=req.trading_context,
+            )
         return await _svc().run(
             slug,
-            config=req.config,
+            config=cfg,
             trading_context=req.trading_context,
         )
     except LifecycleError as e:

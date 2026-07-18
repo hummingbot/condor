@@ -294,33 +294,6 @@ def test_resolver_distinct_roots_per_agent(tmp_path, monkeypatch):
     assert store_root("grid_scalper") == grid
 
 
-def test_migrate_memory_tiers_renames_newest_user_dir(tmp_path, monkeypatch):
-    """One-time mv (§4.3): newest store/user_* becomes store/memory; idempotent."""
-    import os
-    import time
-
-    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    old = tmp_path / "store" / "user_1"
-    older = tmp_path / "store" / "user_2"
-    for d in (older, old):
-        (d / "memories").mkdir(parents=True)
-    (old / "MEMORY.md").write_text("# index\n")
-    now = time.time()
-    os.utime(older, (now - 100, now - 100))
-    os.utime(old, (now, now))
-    agent_old = tmp_path / "agents" / "grid" / "store" / "user_1"
-    agent_old.mkdir(parents=True)
-
-    moves = paths_module.migrate_memory_tiers()
-    assert len(moves) == 2
-    assert (tmp_path / "store" / "memory" / "MEMORY.md").exists()
-    assert older.exists()  # older per-user dirs are left in place
-    assert not old.exists()
-    assert (tmp_path / "agents" / "grid" / "store" / "memory").exists()
-    # Idempotent: a second run is a no-op.
-    assert paths_module.migrate_memory_tiers() == []
-
-
 def test_memory_isolated_between_agents(tmp_path, monkeypatch):
     """A memory written by one agent is invisible to another."""
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)

@@ -1,6 +1,7 @@
-"""RunStore (§7.1) acceptance: torn-tail recovery, monotonic seq under
-concurrent emitters, secret redaction, >16KB artifact spill, interrupted
-sweep with pending-permission voiding."""
+"""RunStore (§7.1) acceptance: tick events → one organized ``{tick}.md``
+per tick, lifecycle jsonl with torn-tail recovery, monotonic seq under
+concurrent emitters, secret redaction, the >16KB spill backstop for
+non-tick events, interrupted sweep with pending-permission voiding."""
 
 import json
 import os
@@ -41,18 +42,21 @@ def test_start_emit_end_roundtrip(store):
     store.emit(run_id, "tick_completed", {"actions": 2}, tick=1)
     store.end_run(run_id, "stopped", "max_ticks")
 
+    # The folder carries the run id; the stream inside is plain store.jsonl.
+    assert store.find_run_path(run_id).name == "store.jsonl"
+    # The jsonl is the machine stream — tick events went to 1.md instead.
     events = store.read_events("alpha", run_id)
-    assert [e["type"] for e in events] == [
-        "run_started",
-        "tick_started",
-        "tick_completed",
-        "run_ended",
-    ]
-    assert [e["seq"] for e in events] == [1, 2, 3, 4]
+    assert [e["type"] for e in events] == ["run_started", "run_ended"]
+    # One seq counter across both files.
+    assert [e["seq"] for e in events] == [1, 4]
     assert events[0]["payload"]["agent_slug"] == "alpha"
     assert events[0]["payload"]["kind"] == "session"
     assert events[0]["payload"]["display_seq"] == 1
     assert events[-1]["payload"] == {"status": "stopped", "reason": "max_ticks"}
+
+    tick_md = (store.run_dir("alpha", run_id) / "1.md").read_text()
+    assert "## Tick started" in tick_md
+    assert "## Tick completed" in tick_md
 
     meta = store.run_meta("alpha", run_id)
     assert meta["status"] == "stopped"
@@ -119,7 +123,7 @@ def test_torn_tail_ignored_on_read_and_truncated_on_append(store, tmp_path):
         f.write('{"v": 1, "seq": 99, "type": "tool_ca')
 
     events = store.read_events("alpha", run_id)
-    assert [e["type"] for e in events] == ["run_started", "tick_started", "run_ended"]
+    assert [e["type"] for e in events] == ["run_started", "run_ended"]
 
     # Reopening for append truncates the torn tail; seq resumes correctly.
     from condor.agents.runstore import _RunWriter
@@ -164,6 +168,72 @@ def test_secret_redaction(store):
     raw = store.run_path("alpha", run_id).read_text()
     assert "hunter2" not in raw
     assert evm_key not in raw
+
+
+def test_tick_events_write_one_organized_md_per_tick(store):
+    """Every event carrying a tick number lands as an organized section of
+    that tick's ``{tick}.md`` — tick started, tool calls, state snapshot,
+    tick completion — full fidelity (no 16KB spill), redacted, and off the
+    jsonl machine stream."""
+    run_id = store.start_run("alpha", "session")
+    big = "x" * (MAX_EVENT_BYTES * 2)
+    store.emit(
+        run_id,
+        "tick_started",
+        {"prompt_suffix": "[TICK INFO] tick 1", "prompt_sha256": "abc123"},
+        tick=1,
+    )
+    store.emit(
+        run_id,
+        "tool_call",
+        {
+            "name": "order_spot",
+            "status": "completed",
+            "input": {"private_key": "hunter2", "size": "1.5"},
+            "output": big,
+            "mutating": True,
+        },
+        tick=1,
+        tool_call_id="tc1",
+    )
+    store.emit(
+        run_id,
+        "state_snapshot",
+        {"decision": "ENTER FLEA", "state": "Last tick: #1 | pnl=+0"},
+        tick=1,
+    )
+    store.emit(run_id, "tick_completed", {"actions": 1, "duration": 2.0}, tick=1)
+    store.emit(run_id, "tick_started", {}, tick=2)
+    store.end_run(run_id, "stopped")
+
+    run_dir = store.run_dir("alpha", run_id)
+    md = (run_dir / "1.md").read_text()
+    assert md.startswith(f"# Tick 1 — alpha run {run_id}")
+    for section in (
+        "## Tick started",
+        "## Tool call — order_spot (completed)",
+        "## State snapshot",
+        "## Tick completed",
+    ):
+        assert section in md
+    assert "[TICK INFO] tick 1" in md  # prompt suffix verbatim
+    assert "`abc123`" in md
+    assert "ENTER FLEA" in md
+    # Full fidelity — the oversized output is in the file, with NO
+    # timestamped spill artifact created.
+    assert big in md
+    assert not list(run_dir.glob("*Z-*.md"))
+    # The redactor applies to tick markdown exactly as to jsonl payloads.
+    assert "hunter2" not in md
+    assert REDACTED in md
+
+    # One file per tick, in order, via the reader exports use.
+    assert (run_dir / "2.md").exists()
+    assert [n for n, _ in store.tick_files("alpha", run_id)] == [1, 2]
+
+    # The jsonl kept only the machine stream.
+    events = store.read_events("alpha", run_id)
+    assert [e["type"] for e in events] == ["run_started", "run_ended"]
 
 
 def test_oversized_payload_spills_to_markdown_artifact(store):
@@ -249,17 +319,17 @@ def test_sweep_interrupted_synthesizes_run_ended_and_voids_approvals(tmp_path):
 def test_list_runs_newest_first_with_kind_filter(store):
     r1 = store.start_run("alpha", "session")
     store.end_run(r1, "stopped")
-    r2 = store.start_run("alpha", "delegation", payload={"task": "scan"})
+    r2 = store.start_run("alpha", "scheduled", payload={"task": "scan"})
     store.end_run(r2, "completed")
-    os.utime(store.run_path("alpha", r2, "delegation"))
+    os.utime(store.run_path("alpha", r2, "scheduled"))
 
     runs = store.list_runs("alpha")
     assert {r["run_id"] for r in runs} == {r1, r2}
     assert runs[0]["run_id"] == r2  # newest first
-    only_del = store.list_runs("alpha", kind="delegation")
-    assert [r["run_id"] for r in only_del] == [r2]
-    assert only_del[0]["task"] == "scan"
-    assert only_del[0]["display_seq"] == 2
+    only_sched = store.list_runs("alpha", kind="scheduled")
+    assert [r["run_id"] for r in only_sched] == [r2]
+    assert only_sched[0]["task"] == "scan"
+    assert only_sched[0]["display_seq"] == 2
 
 
 def test_running_status_while_open(store):

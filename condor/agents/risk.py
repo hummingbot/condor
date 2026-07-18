@@ -223,8 +223,9 @@ def risk_gate(
 
     The ONE shared risk policy (refactor-02 §4.1) — the caller chooses the state
     seed: journal-derived for tick sessions (real exposure/count carried over),
-    ``RiskState()`` at zero for delegations (the caps act as a per-run budget).
-    ``experiment=True`` additionally cancels every mutating action (tick-only).
+    ``RiskState()`` at zero when the caps act as a fresh per-run budget.
+    ``experiment=True`` additionally cancels every mutating action — the
+    in-memory dry-run policy (:mod:`condor.agents.experiment`).
     """
     from condor.agents.gating import (
         is_dangerous_tool_call,

@@ -26,7 +26,7 @@ def _perm_events(store, slug, run_id):
 
 def test_approve_flow_records_events_and_channel(stores):
     store, mgr = stores
-    run_id = store.start_run("alpha", "consult")
+    run_id = store.start_run("alpha", "session")
 
     async def scenario():
         task = asyncio.create_task(
@@ -59,7 +59,7 @@ def test_approve_flow_records_events_and_channel(stores):
 
 def test_deny_flow(stores):
     store, mgr = stores
-    run_id = store.start_run("alpha", "consult")
+    run_id = store.start_run("alpha", "session")
 
     async def scenario():
         task = asyncio.create_task(
@@ -75,7 +75,7 @@ def test_deny_flow(stores):
 
 def test_timeout_default_deny(stores):
     store, mgr = stores
-    run_id = store.start_run("alpha", "consult")
+    run_id = store.start_run("alpha", "session")
 
     async def scenario():
         return await mgr.request(
@@ -89,7 +89,7 @@ def test_timeout_default_deny(stores):
 
 def test_double_resolve_is_noop(stores):
     store, mgr = stores
-    run_id = store.start_run("alpha", "consult")
+    run_id = store.start_run("alpha", "session")
 
     async def scenario():
         task = asyncio.create_task(
@@ -124,7 +124,7 @@ def test_grant_consumed_by_same_run_retry_once(stores):
     by (run, executor_id) — the SAME create's retry consumes it, a second
     retry re-requests."""
     store, mgr = stores
-    run_id = store.start_run("alpha", "consult")
+    run_id = store.start_run("alpha", "session")
 
     async def scenario():
         # The blocked call times out at 0s BUT is resolved 'approved' after
@@ -171,7 +171,7 @@ def test_unconsumed_grant_short_circuits_retry(stores):
     """resolve-after-death: nothing awaited the event, so the grant stays
     unconsumed; the same-run same-executor retry consumes it exactly once."""
     store, mgr = stores
-    run_id = store.start_run("alpha", "consult")
+    run_id = store.start_run("alpha", "session")
 
     async def scenario():
         task = asyncio.create_task(
@@ -258,7 +258,7 @@ def test_restart_sweep_voids_pending_approval_of_active_run(tmp_path):
 
 def test_approval_decision_persistence_failure_fails_closed(stores, monkeypatch):
     store, mgr = stores
-    run_id = store.start_run("alpha", "consult")
+    run_id = store.start_run("alpha", "session")
 
     async def scenario():
         waiter = asyncio.create_task(
@@ -289,7 +289,7 @@ def test_approval_decision_persistence_failure_fails_closed(stores, monkeypatch)
 
 def test_approval_notification_failure_denies_without_waiting(stores, monkeypatch):
     store, mgr = stores
-    run_id = store.start_run("alpha", "consult")
+    run_id = store.start_run("alpha", "session")
 
     async def outbox_failed(*args, **kwargs):
         raise OSError("outbox unavailable")
@@ -310,3 +310,35 @@ def test_approval_notification_failure_denies_without_waiting(stores, monkeypatc
         if e["payload"].get("decision")
     ]
     assert decisions == ["notification_failed_deny"]
+
+
+def test_non_durable_approval_flow_writes_nothing(stores):
+    """durable=False (run-less consults): the approve/deny flow works with NO
+    RunStore stream behind the id, and nothing is ever written to disk."""
+    from condor.agents.runstore import new_ulid
+
+    store, mgr = stores
+    consult_id = new_ulid()  # no start_run — there is no stream
+
+    async def scenario():
+        task = asyncio.create_task(
+            mgr.request(
+                run_id=consult_id,
+                agent_slug="alpha",
+                summary="create order_spot 10 USDC",
+                executor_id="ex1",
+                timeout_s=5,
+                durable=False,
+            )
+        )
+        await asyncio.sleep(0.05)
+        open_now = mgr.open_approvals()
+        assert len(open_now) == 1
+        mgr.resolve(open_now[0]["approval_id"], "approve", channel="web")
+        return await task
+
+    assert asyncio.run(scenario()) is True
+    # void_run (consult end) also works without a stream.
+    mgr.void_run(consult_id)
+    assert store.find_run_path(consult_id) is None  # nothing on disk
+    assert store.agent_slugs_with_runs() == []

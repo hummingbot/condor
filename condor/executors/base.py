@@ -92,10 +92,9 @@ class ExecutorConfig(BaseModel):
     wallet_address: str
     # Attribution (tracking keys, NOT permission boundaries):
     #   agent_slug — WHO:      "memecoin_trender";         "" for chat/manual
-    #   agent_id   — WHICH RUN: session "{slug}_{N}" or delegation
-    #                "{slug}-dN";                          "" for chat/manual
+    #   agent_id   — WHICH RUN: a session run_id, or a consult's ephemeral
+    #                id;                                   "" for chat/manual
     #   strategy   — WHICH PLAYBOOK: session-created only; "" otherwise
-    #                (delegations run no playbook — that is the truth)
     agent_slug: str = ""
     agent_id: str = ""
     strategy: str = ""

@@ -1,40 +1,43 @@
-"""RunStore — one append-only JSONL event stream per run (§7.1).
+"""RunStore — one run folder per run: a lifecycle JSONL + one md per tick (§7.1).
 
-    agents/{slug}/runs/{run_id}/{run_id}.jsonl          # session/scheduled
-    agents/{slug}/experiments/{run_id}/{run_id}.jsonl   # experiment (dry-run)
-    agents/{slug}/consults/{run_id}/{run_id}.jsonl      # consult
-    agents/{slug}/delegations/{run_id}/{run_id}.jsonl   # delegation
+    agents/{slug}/runs/{run_id}/
+        store.jsonl         # machine stream: run_started / permission / run_ended
+        1.md, 2.md, ...     # one organized markdown file per tick
+        prompt.md           # the run's frozen prompt prefix (written once)
+        journal.md          # one line per tick (the run's story)
 
-Every run is a folder named by its ULID that holds its own ``{run_id}.jsonl``
-stream plus any companions/spills — so a run's whole footprint is one
-self-contained directory. Each kind lands in its own top-level dir under the
-agent folder (siblings of one another): ``runs/`` is the live session history,
-while ``experiments/`` / ``consults/`` / ``delegations/`` keep dry-runs and
-one-shot tasks out of it.
+Every run is a folder named by its ULID — a run's whole footprint is one
+self-contained directory. ACTUAL RUNS ARE ALL THAT PERSISTS: sessions and
+their scheduler-fired variant. The one-shot verbs deliberately leave no
+record here — an experiment simulates one tick in memory and returns a
+report (:mod:`condor.agents.experiment`); a consult returns its answer
+inline (:mod:`condor.agents.consult`).
 
 - **Run identity:** ``run_id`` is an opaque ULID. The ``run_started`` event
-  carries explicit ``agent_slug``, ``kind`` (session|experiment|delegation|
-  consult|scheduled), a display ``seq``, the frozen spec + both content
-  hashes (§5.3), and the AccountRefs in play (§6.2b). The legacy suffix
-  grammars (``_N``, ``_eN``, ``-dN``, ``-cTS``) are gone — nothing parses a
-  run id.
+  carries explicit ``agent_slug``, ``kind`` (session|scheduled), a display
+  ``seq``, the frozen spec + both content hashes (§5.3), and the AccountRefs
+  in play (§6.2b). The legacy suffix grammars (``_N``, ``_eN``, ``-dN``,
+  ``-cTS``) are gone — nothing parses a run id.
+- **Tick files:** every event emitted with a ``tick`` number is appended to
+  that tick's ``{tick}.md`` as an organized section — tick started (prompt
+  suffix + hash), each tool call (full input/output, no size cap), state
+  snapshot, tick completion — instead of the jsonl. Full fidelity,
+  human-readable, forensic: nothing parses these back.
+- **Machine stream:** the jsonl keeps the events readers and the approval
+  layer depend on — ``run_started``, ``permission``, ``run_ended`` and any
+  event emitted without a tick.
 - **Serialized writer:** one writer per run in the main process (a lock, not
   a parser: all emitters funnel through :meth:`RunStore.emit`; the MCP
   subprocess emits via the control socket, never by writing files).
 - **Durability:** every event is written+flushed immediately; financial
   events (``run_started``/``run_ended``/``permission`` and mutating
-  ``tool_call``) additionally fsync. A partial final line is ignored on read
-  and truncated before the next append.
-- **Redaction + size caps:** payloads pass a secret redactor; an event over
-  ~16KB spills as a human-readable MARKDOWN file alongside the jsonl in the
-  run folder — a per-event ``{HH-MM-SS}Z-{type}.md`` file (timestamps UTC) —
-  and the event keeps a name+hash reference (hash over the markdown as
-  written).
-- **Companions:** two human-facing files sit next to the jsonl in the run
-  folder, written via :meth:`RunStore.write_companion` — ``prompt.md`` (the
-  run's prompt, written once by ``run_agent`` for every kind) and
-  ``journal.md`` (one line per tick, appended by the tick engine). Generated
-  views only: nothing parses them back.
+  ``tool_call``) additionally fsync — the fsync applies to whichever file
+  the event landed in. A partial final jsonl line is ignored on read and
+  truncated before the next append.
+- **Redaction + size caps:** payloads pass a secret redactor before hitting
+  either file. A jsonl-bound event over ~16KB spills as a markdown artifact
+  (``{HH-MM-SS}Z-{type}.md``) with a name+hash reference — a backstop for
+  oversized lifecycle payloads; tick-bound events have no cap.
 """
 
 from __future__ import annotations
@@ -53,21 +56,17 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-RUN_KINDS = {"session", "experiment", "delegation", "consult", "scheduled"}
+RUN_KINDS = {"session", "scheduled"}
 
-# Each run kind lands in its own top-level dir under the agent folder, siblings
-# of one another. Sessions (and their scheduled variant) are the live history in
-# ``runs/``; dry-runs and one-shot tasks get their own dirs so they never
-# clutter it.
+# Both kinds are the live session history in ``runs/`` (scheduled = a
+# scheduler-fired session). One-shot verbs (experiment, consult) persist
+# nothing and so have no dir at all.
 _KIND_DIR = {
     "session": "runs",
     "scheduled": "runs",
-    "experiment": "experiments",
-    "consult": "consults",
-    "delegation": "delegations",
 }
 # All the per-agent dirs that hold run streams (for readers that sweep them all).
-_RUN_DIRS = ("runs", "experiments", "consults", "delegations")
+_RUN_DIRS = ("runs",)
 
 EVENT_TYPES = {
     "run_started",
@@ -256,6 +255,97 @@ def _render_artifact_md(
 
 
 # ---------------------------------------------------------------------------
+# Tick markdown rendering
+# ---------------------------------------------------------------------------
+
+
+def _fmt_clock(ts: float) -> str:
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M:%S UTC")
+
+
+def _fenced(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return "```json\n" + json.dumps(
+        value, indent=2, ensure_ascii=False, default=str
+    ) + "\n```"
+
+
+def _render_tick_section(type_: str, ts: float, payload: dict) -> str:
+    """One tick event as a markdown section of the tick's ``{tick}.md``.
+
+    Forensic, full-fidelity (payloads are already redacted): nothing parses
+    these back.
+    """
+    when = _fmt_clock(ts)
+    lines: list[str]
+    if type_ == "tick_started":
+        lines = [f"## Tick started — {when}", ""]
+        if payload.get("prompt_sha256"):
+            lines += [f"- **prompt sha256:** `{payload['prompt_sha256']}`", ""]
+        if payload.get("prompt_suffix"):
+            lines += [
+                "### Prompt suffix (per-tick; the frozen prefix is prompt.md)",
+                "",
+                payload["prompt_suffix"],
+                "",
+            ]
+    elif type_ == "tool_call":
+        name = payload.get("name") or "unknown"
+        status = payload.get("status") or ""
+        head = f"## Tool call — {name}"
+        if status:
+            head += f" ({status})"
+        head += f" — {when}"
+        if payload.get("mutating"):
+            head += " ⚠️ mutating"
+        lines = [head, ""]
+        if payload.get("input") is not None:
+            lines += ["**Input:**", "", _fenced(payload["input"]), ""]
+        if payload.get("output"):
+            lines += ["**Output:**", "", "```", str(payload["output"]), "```", ""]
+    elif type_ == "state_snapshot":
+        lines = [f"## State snapshot — {when}", ""]
+        if payload.get("decision"):
+            lines += [f"- **Decision:** {payload['decision']}"]
+        if payload.get("state"):
+            lines += [f"- **State:** {payload['state']}"]
+        if payload.get("metrics"):
+            lines += [
+                f"- **Metrics:** `{json.dumps(payload['metrics'], default=str)}`"
+            ]
+        if payload.get("duration") is not None:
+            lines += [f"- **Duration:** {payload['duration']:.1f}s"]
+        if payload.get("response"):
+            lines += ["", "**Response:**", "", str(payload["response"])]
+        lines += [""]
+    elif type_ == "tick_completed":
+        lines = [f"## Tick completed — {when}", ""]
+        bits = [f"actions={payload.get('actions', 0)}"]
+        if payload.get("duration") is not None:
+            bits.append(f"duration={payload['duration']:.1f}s")
+        if payload.get("model"):
+            bits.append(f"model={payload['model']}")
+        if payload.get("timed_out"):
+            bits.append("TIMED OUT")
+        if payload.get("blocked"):
+            bits.append(f"BLOCKED: {payload.get('block_reason', '')}")
+        lines += [" | ".join(bits)]
+        if payload.get("metrics"):
+            lines += [
+                "", f"**Metrics:** `{json.dumps(payload['metrics'], default=str)}`"
+            ]
+        lines += [""]
+    else:
+        # context_changed / directive / error / notification / anything new:
+        # generic section, string values verbatim, the rest as fenced JSON.
+        lines = [f"## {type_} — {when}", ""]
+        for key, value in payload.items():
+            lines += [f"### {key}", "", _fenced(value), ""]
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # Per-run writer
 # ---------------------------------------------------------------------------
 
@@ -337,6 +427,19 @@ class _RunWriter:
             if executor_id:
                 event["executor_id"] = executor_id
             event["payload"] = payload
+            fsync = type_ in _FSYNC_TYPES or (
+                type_ == "tool_call" and payload.get("mutating")
+            )
+            # Tick-scoped events land in the tick's own markdown file — full
+            # fidelity, no size cap. The jsonl stays the machine stream for
+            # lifecycle/permission events and anything emitted without a tick.
+            if tick is not None and tick > 0:
+                self._append_tick_md(
+                    tick,
+                    _render_tick_section(type_, event["ts"], payload),
+                    fsync=fsync,
+                )
+                return event
             line = json.dumps(event, ensure_ascii=False, default=str)
             if len(line.encode("utf-8")) > MAX_EVENT_BYTES:
                 event["payload"] = self._spill_artifact(
@@ -345,11 +448,28 @@ class _RunWriter:
                 line = json.dumps(event, ensure_ascii=False, default=str)
             self._f.write(line + "\n")
             self._f.flush()
-            if type_ in _FSYNC_TYPES or (
-                type_ == "tool_call" and payload.get("mutating")
-            ):
+            if fsync:
                 os.fsync(self._f.fileno())
             return event
+
+    def _append_tick_md(self, tick: int, section: str, *, fsync: bool) -> None:
+        """Append one rendered section to ``{tick}.md``, creating it with the
+        tick header on first write. Crash-safe by construction: a tick that
+        died mid-flight simply leaves a shorter file."""
+        path = self._run_dir() / f"{tick}.md"
+        fresh = not path.exists()
+        with open(path, "a", encoding="utf-8") as f:
+            if fresh:
+                f.write(f"# Tick {tick} — {self.agent_slug} run {self.run_id}\n\n")
+            f.write(section)
+            if not section.endswith("\n"):
+                f.write("\n")
+            f.write("\n")
+            f.flush()
+            if fsync:
+                os.fsync(f.fileno())
+        if fresh:
+            os.chmod(path, 0o600)
 
     def write_companion(self, name: str, text: str, *, append: bool = False) -> Path:
         """Write a human-facing companion file (``prompt.md``, ``journal.md``)
@@ -396,13 +516,11 @@ class RunStore:
     # -- paths ----------------------------------------------------------
 
     def runs_dir(self, agent_slug: str) -> Path:
-        """The sessions dir. Other kinds live in sibling dirs — see
-        :meth:`kind_dir` / :meth:`all_run_paths`."""
+        """The one runs dir (sessions + scheduled fires)."""
         return self._root / agent_slug / "runs"
 
     def kind_dir(self, agent_slug: str, kind: str = "") -> Path:
-        """The top-level dir holding a kind's runs (``runs``/``experiments``/
-        ``consults``/``delegations``); unknown kinds fall back to ``runs``."""
+        """The top-level dir holding a kind's runs (always ``runs`` now)."""
         return self._root / agent_slug / _KIND_DIR.get(kind, "runs")
 
     def run_dir(self, agent_slug: str, run_id: str, kind: str = "") -> Path:
@@ -410,7 +528,8 @@ class RunStore:
         return self.kind_dir(agent_slug, kind) / run_id
 
     def run_path(self, agent_slug: str, run_id: str, kind: str = "") -> Path:
-        return self.run_dir(agent_slug, run_id, kind) / f"{run_id}.jsonl"
+        # The folder already carries the run id.
+        return self.run_dir(agent_slug, run_id, kind) / "store.jsonl"
 
     def all_run_paths(self, agent_slug: str):
         """Every run stream for an agent, across all kind dirs (unordered)."""
@@ -421,23 +540,22 @@ class RunStore:
                 yield from kd.rglob("*.jsonl")
 
     def find_run_path(self, run_id: str) -> Path | None:
-        """Locate a run stream by opaque id (checks live writers first). The
-        stream is always ``.../{kind_dir}/{run_id}/{run_id}.jsonl``; only the
-        kind dir varies, so try each."""
+        """Locate a run stream by opaque id (checks live writers first) —
+        the one jsonl inside ``.../{kind_dir}/{run_id}/``."""
         w = self._writers.get(run_id)
         if w is not None:
             return w.path
         if not self._root.exists():
             return None
         for d in _RUN_DIRS:
-            for candidate in self._root.glob(f"*/{d}/{run_id}/{run_id}.jsonl"):
+            for candidate in self._root.glob(f"*/{d}/{run_id}/*.jsonl"):
                 return candidate
         return None
 
     @staticmethod
     def slug_from_path(path: Path) -> str:
-        """The agent slug that owns a run path — the parent of its kind-dir
-        ancestor (``runs``/``experiments``/``consults``/``delegations``)."""
+        """The agent slug that owns a run path — the parent of its ``runs``
+        ancestor."""
         for p in path.parents:
             if p.name in _RUN_DIRS:
                 return p.parent.name
@@ -557,6 +675,19 @@ class RunStore:
             start = nl + 1
         return events
 
+    def tick_files(self, agent_slug: str, run_id: str) -> list[tuple[int, str]]:
+        """The run's per-tick markdown files as ``(tick, text)``, in tick
+        order."""
+        path = self.find_run_path(run_id)
+        if path is None:
+            raise UnknownRunError(f"unknown run: {run_id}")
+        numbered = [
+            (int(p.stem), p)
+            for p in path.parent.glob("*.md")
+            if p.stem.isdigit()
+        ]
+        return [(n, p.read_text()) for n, p in sorted(numbered)]
+
     @staticmethod
     def _tail_event(path: Path) -> dict | None:
         """Last good event of a stream (cheap: reads a tail window)."""
@@ -596,7 +727,7 @@ class RunStore:
     def _meta_from_path(self, path: Path, agent_slug: str) -> dict:
         head = self._head_event(path)
         tail = self._tail_event(path)
-        run_id = path.stem
+        run_id = path.parent.name  # the run's folder IS its id
         meta: dict[str, Any] = {
             "run_id": run_id,
             "agent_slug": agent_slug,
@@ -680,7 +811,7 @@ class RunStore:
             p for d in _RUN_DIRS for p in self._root.glob(f"*/{d}/**/*.jsonl")
         )
         for path in paths:
-            run_id = path.stem
+            run_id = path.parent.name
             if self.is_open(run_id):
                 continue
             tail = self._tail_event(path)

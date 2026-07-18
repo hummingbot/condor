@@ -20,6 +20,9 @@ Semantics (defined in the plan, tested in §11):
 - **Interrupted runs:** the startup sweep voids pending approvals
   (``interrupted_void`` — see ``RunStore.sweep_interrupted``); a relaunched
   run must re-request approval under its own create.
+- **Run-less verbs (consult):** ``durable=False`` — the approval is keyed by
+  the verb's ephemeral id and never written anywhere; the same surfacing,
+  resolution, timeout-deny and one-use-grant semantics apply in memory.
 """
 
 from __future__ import annotations
@@ -45,6 +48,9 @@ class PendingApproval:
     tool_call_id: str = ""
     executor_id: str = ""
     created_at: float = 0.0
+    # False for run-less verbs (consult): the approval lives only in this
+    # process — no permission events are emitted anywhere.
+    durable: bool = True
     # resolution
     # approved | denied | timeout_deny | interrupted_void |
     # notification_failed_deny
@@ -86,12 +92,20 @@ class ApprovalManager:
         tool_call_id: str = "",
         executor_id: str = "",
         timeout_s: int = DEFAULT_TIMEOUT_S,
+        durable: bool = True,
     ) -> bool:
         """Register a pending approval, surface it, and wait for resolution.
 
         Returns True iff approved. Emits the durable permission events and
         the ``kind=approval`` outbox entry. On timeout records
         ``timeout_deny`` and returns False (§4.2 default-deny).
+
+        ``durable=False`` is for run-less verbs (consult, which persists
+        nothing): the approval is keyed by the verb's ephemeral id, lives
+        only in this process, and its resolution is never written anywhere.
+        The blocking caller dies with the process, so there is nothing a
+        durable record could resume — the executor store remains the
+        financial authority for anything actually approved.
         """
         import time
 
@@ -111,27 +125,29 @@ class ApprovalManager:
             tool_call_id=tool_call_id,
             executor_id=executor_id,
             created_at=time.time(),
+            durable=durable,
         )
         self._approvals[ap.approval_id] = ap
 
-        store = get_run_store()
-        try:
-            store.emit(
-                run_id,
-                "permission",
-                {
-                    "approval_id": ap.approval_id,
-                    "status": "pending",
-                    "summary": summary,
-                },
-                tool_call_id=tool_call_id or None,
-                executor_id=executor_id or None,
-            )
-        except Exception:
-            # No durable record → no approval flow; fail closed.
-            log.exception("approval %s: pending event emit failed", ap.approval_id)
-            self._approvals.pop(ap.approval_id, None)
-            return False
+        if durable:
+            store = get_run_store()
+            try:
+                store.emit(
+                    run_id,
+                    "permission",
+                    {
+                        "approval_id": ap.approval_id,
+                        "status": "pending",
+                        "summary": summary,
+                    },
+                    tool_call_id=tool_call_id or None,
+                    executor_id=executor_id or None,
+                )
+            except Exception:
+                # No durable record → no approval flow; fail closed.
+                log.exception("approval %s: pending event emit failed", ap.approval_id)
+                self._approvals.pop(ap.approval_id, None)
+                return False
 
         # Surface on every notification channel (§4.1).
         try:
@@ -200,23 +216,25 @@ class ApprovalManager:
     def _record_decision(
         self, ap: PendingApproval, decision: str, *, channel: str, note: str = ""
     ) -> None:
-        from condor.agents.runstore import get_run_store
-
         # Permission is financial authority: durable event first, in-memory
         # grant second. If append/fsync fails the exception propagates, the
         # waiter stays blocked/default-deny, and no mutation is authorized.
-        get_run_store().emit(
-            ap.run_id,
-            "permission",
-            {
-                "approval_id": ap.approval_id,
-                "decision": decision,
-                "channel": channel,
-                **({"note": note} if note else {}),
-            },
-            tool_call_id=ap.tool_call_id or None,
-            executor_id=ap.executor_id or None,
-        )
+        # (Non-durable approvals — run-less consults — have no stream at all.)
+        if ap.durable:
+            from condor.agents.runstore import get_run_store
+
+            get_run_store().emit(
+                ap.run_id,
+                "permission",
+                {
+                    "approval_id": ap.approval_id,
+                    "decision": decision,
+                    "channel": channel,
+                    **({"note": note} if note else {}),
+                },
+                tool_call_id=ap.tool_call_id or None,
+                executor_id=ap.executor_id or None,
+            )
         ap.decision = decision
         ap.channel = channel
         ap.note = note

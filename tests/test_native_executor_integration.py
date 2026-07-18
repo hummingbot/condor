@@ -149,7 +149,7 @@ def test_risk_gate_experiment_blocks_native_create():
     assert result["outcome"]["outcome"] == "cancelled"
 
 
-# -- store: agent attribution + migration ----------------------------------------
+# -- store: agent attribution -----------------------------------------------------
 
 
 def test_store_agent_id_filter(tmp_path):

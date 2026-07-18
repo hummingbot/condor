@@ -2,7 +2,7 @@
 
 The `/condor` skill ([`skills/condor/SKILL.md`](../skills/condor/SKILL.md))
 turns a coding harness into a Condor front-end: routing rules, execution verbs
-(run / consult / delegate / dry run), run tracking, and the ops CLI.
+(run / consult / dry run), run tracking, and the ops CLI.
 
 It is the **single place that defines what Condor does**. The same file is
 loaded three ways:

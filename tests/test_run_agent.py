@@ -1,6 +1,6 @@
 """Unit tests for the run_agent primitive (refactor-02).
 
-One execution core under tick / delegation / consult: event folding into both
+One execution core under tick / consult / experiment: event folding into both
 views (transcript events + tool_calls), timeout semantics, and client reaping
 (incl. the on_client cancellation hook). ACP is the only model runner (§9.3).
 """

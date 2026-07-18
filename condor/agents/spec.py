@@ -293,7 +293,7 @@ def freeze_spec(
 def agent_venue(agent) -> str:
     """The venue an agent trades on — fixed AGENT identity, not a per-launch
     override (``venue`` is not a launch-overridable key, §5.3), so every path
-    (session, consult, delegation) reads it the same way. Declared in
+    (session, consult, experiment) reads it the same way. Declared in
     ``default_config.venue``; ``solana`` is the default."""
     return str((getattr(agent, "default_config", None) or {}).get("venue") or "solana")
 
@@ -307,8 +307,8 @@ def resolve_agent_account(agent) -> AccountRef:
     spec and capability; executor requests never re-resolve a default.
 
     Venue comes from the agent's identity (:func:`agent_venue`), NOT a launch
-    config — a consult/delegate task never reaches into ``default_config`` for
-    it (Q2.1).
+    config — a consult task never reaches into ``default_config`` for it
+    (Q2.1).
     """
     from condor.executors.wallets import account_store
 

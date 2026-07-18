@@ -48,68 +48,38 @@ def list_instances() -> list[dict]:
     return [e.get_info() for e in get_all_engines().values()]
 
 
-async def start_session(
-    agent_slug: str,
-    config: Optional[dict] = None,
-    trading_context: str = "",
-    kind: str = "",
-    scheduled_for: str = "",
+# The only launch-config keys a caller may override on top of the AGENT.md
+# default_config (§5.3). Experiments are a separate verb, not a launch mode —
+# see condor.agents.experiment.
+_LAUNCH_OVERRIDES = {"trading_context", "max_ticks", "risk_limits"}
+
+
+def resolve_launch_config(
+    agent, config: Optional[dict] = None, trading_context: str = ""
 ) -> dict:
-    from condor.agents.agent import AgentStore
+    """AGENT.md launch defaults + the limited caller overrides.
+
+    The AGENT.md is the one spec (§5.3): defaults come from its
+    ``default_config`` with the agent risk baseline seeded BEFORE
+    ``normalize_config`` fills schema defaults. Overrides may only set
+    ``trading_context``, ``max_ticks`` and STRICTER-ONLY ``risk_limits``.
+    Shared by session launch and the in-memory experiment verb.
+    """
     from condor.agents.config import merge_launch_config, normalize_config
-    from condor.agents.engine import TickEngine
     from condor.agents.spec import SpecValidationError, merge_risk_stricter
-    from condor.executors.service import runtime_reconciling
 
-    if runtime_reconciling():
-        raise LifecycleError(
-            503,
-            "executor runtime is still reconciling after startup — retry shortly",
-        )
-
-    agent = AgentStore().get(agent_slug)
-    if agent is None:
-        raise LifecycleError(404, f"Agent '{agent_slug}' not found")
-
-    # The AGENT.md is the one spec (§5.3): launch defaults come from its
-    # default_config, with the agent risk baseline seeded BEFORE
-    # normalize_config fills schema defaults.
     defaults = dict(agent.default_config or {})
     if not defaults.get("risk_limits") and agent.risk_limits:
         defaults["risk_limits"] = dict(agent.risk_limits)
     config_dict = normalize_config(defaults)
     if config:
-        allowed_overrides = {
-            "trading_context",
-            "max_ticks",  # bounded run duration
-            "dry_run",  # normalized to execution_mode=experiment
-            "execution_mode",  # only experiment or the authored default
-            "risk_limits",  # stricter-only below
-        }
-        forbidden = set(config) - allowed_overrides
+        forbidden = set(config) - _LAUNCH_OVERRIDES
         if forbidden:
             raise LifecycleError(
                 422,
                 "launch overrides may only set trading_context, max_ticks, "
-                f"dry_run/experiment, and stricter risk_limits; forbidden: {sorted(forbidden)}",
+                f"and stricter risk_limits; forbidden: {sorted(forbidden)}",
             )
-        requested_mode = config.get("execution_mode")
-        if requested_mode not in (
-            None,
-            "experiment",
-            config_dict.get("execution_mode"),
-        ):
-            raise LifecycleError(
-                422,
-                "launch execution_mode may only select experiment (dry run) "
-                "or retain the authored default",
-            )
-        if "dry_run" in config and config.get("dry_run") is not True:
-            raise LifecycleError(422, "launch dry_run override may only be true")
-        if config.get("dry_run") is True:
-            config = dict(config)
-            config.pop("dry_run", None)
-            config["execution_mode"] = "experiment"
         # Launch risk overrides are STRICTER-ONLY (§5.3): widening any
         # baseline cap is rejected before the deep merge + validation.
         try:
@@ -127,6 +97,44 @@ async def start_session(
         config_dict["trading_context"] = trading_context
     elif not config_dict.get("trading_context") and agent.default_trading_context:
         config_dict["trading_context"] = agent.default_trading_context
+    return config_dict
+
+
+async def start_session(
+    agent_slug: str,
+    config: Optional[dict] = None,
+    trading_context: str = "",
+    kind: str = "",
+    scheduled_for: str = "",
+) -> dict:
+    from condor.agents.agent import AgentStore
+    from condor.agents.engine import TickEngine
+    from condor.agents.spec import SpecValidationError
+    from condor.executors.service import runtime_reconciling
+
+    if runtime_reconciling():
+        raise LifecycleError(
+            503,
+            "executor runtime is still reconciling after startup — retry shortly",
+        )
+
+    # Experiments are not sessions: they simulate one tick in memory and
+    # return a report, recording nothing. Point the caller at the right verb.
+    if config and (
+        config.get("dry_run") or config.get("execution_mode") == "experiment"
+    ):
+        raise LifecycleError(
+            422,
+            "experiments don't start sessions — use run_agent(dry_run=true) "
+            "(MCP) or `condor start --dry-run`, which simulates one tick in "
+            "memory and returns a report",
+        )
+
+    agent = AgentStore().get(agent_slug)
+    if agent is None:
+        raise LifecycleError(404, f"Agent '{agent_slug}' not found")
+
+    config_dict = resolve_launch_config(agent, config, trading_context)
 
     try:
         engine = TickEngine(
@@ -172,15 +180,7 @@ async def apply_verb(
                 if agent_id
                 else runtime.stop_slug_executors(slug, keep_position=not close)
             )
-        # A delegation is a run, not a TickEngine: stopping it means cancelling
-        # its background task here (its executors were just stopped above by
-        # run attribution). This is the wire-in for `control_run(run_id, stop)`.
-        cancelled_delegation = False
-        if agent_id:
-            from condor.agents.delegate import cancel_delegation
-
-            cancelled_delegation = cancel_delegation(agent_id)
-        if not engines and not stopped_durable and not cancelled_delegation:
+        if not engines and not stopped_durable:
             raise LifecycleError(404, "No run or durable executor scope found")
         return {
             "stopped": True,

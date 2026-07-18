@@ -85,9 +85,9 @@ current accumulated position. Run `world_cup_odds`, read `[CORE DATA -
 native_executors]` for your open orders and fills, and recommend. Do NOT place
 orders unless explicitly asked.
 
-**Delegated (operate):** run the `accumulate_favorites` strategy end-to-end —
-resolve tokens, rest patient limit buys for the three targets, re-price stale
-quotes, and accumulate toward each target's cap.
+**Running (a session):** execute the Accumulate Favorites playbook below
+end-to-end — resolve tokens, rest patient limit buys for the three targets,
+re-price stale quotes, and accumulate toward each target's cap.
 
 ## Response format
 Lead with the recommendation, key: value lines, not prose. When advising on a

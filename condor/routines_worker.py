@@ -9,11 +9,14 @@ Here import/validate/run each execute in a short-lived worker subprocess the
 parent can SIGKILL on timeout: the timeout is actually hard, and a crash
 takes down only the worker.
 
-Contract (honest, per the plan): the worker passes **no credentials, store
-keys, execution clients, socket paths, or capabilities** — structured inputs
-in, data out — and its environment is scrubbed of ``CONDOR_*``/token-shaped
-variables. It still runs as the same OS user: filesystem/socket isolation is
-explicitly NOT claimed (that would need an OS sandbox).
+Contract (honest, per the plan): the worker passes **no execution clients,
+socket paths, or capabilities** — structured inputs in, data out. Its
+ENVIRONMENT is the full process environment plus the repo ``.env`` (nothing
+else loads that file into the server process), so routines can use whatever
+the operator configured (``CONDOR_SOLANA_RPC``, data API keys, ...). It runs
+as the same OS user: filesystem/socket isolation is explicitly NOT claimed
+(that would need an OS sandbox) — the boundary here is fault containment
+(hard timeout, crash-only-the-worker), not secrecy.
 
 Parent side: :func:`run_routine_in_worker` / :func:`validate_routine_in_worker`.
 Worker side: ``python -m condor.routines_worker`` (JSON on stdin → JSON on
@@ -35,34 +38,32 @@ log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_S = 120
 
-# Environment variables the worker must never see: everything condor- or
-# trading-credential-shaped. Conservative allowlist-of-denylist: prefix +
-# substring. The boundary is TRADING authority, not "all keys" — a read-only
-# data routine may legitimately hold a market-data key (see _ALLOW_EXACT); it
-# must never hold anything that can move funds (wallet/private keys, exchange
-# trading secrets, capabilities, bot tokens).
-_DENY_PREFIXES = ("CONDOR_", "TELEGRAM_", "ANTHROPIC_", "OPENAI_")
-_DENY_SUBSTRINGS = ("TOKEN", "SECRET", "PRIVATE", "API_KEY", "PASSPHRASE", "MNEMONIC")
+def _repo_env_file() -> dict[str, str]:
+    """KEY=VALUE lines from the repo ``.env`` (comments/blank lines skipped).
 
-# Read-only data keys routines ARE allowed to use — matched exactly, so a
-# lookalike (e.g. a `_SECRET` variant) is still scrubbed. These grant data
-# access only: no trading, withdrawal, or account authority.
-_ALLOW_EXACT = {"COINGECKO_API_KEY"}
+    Nothing loads ``.env`` into the server's ``os.environ`` — components read
+    it explicitly. Routines get it merged into their environment so operator
+    configuration (``CONDOR_SOLANA_RPC``, data API keys, ...) is available
+    regardless of how the server was launched.
+    """
+    path = Path(__file__).parent.parent / ".env"
+    out: dict[str, str] = {}
+    try:
+        for line in path.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip().strip("'\"")
+    except FileNotFoundError:
+        pass
+    return out
 
 
-def scrubbed_env() -> dict[str, str]:
-    env: dict[str, str] = {}
-    for k, v in os.environ.items():
-        ku = k.upper()
-        if ku in _ALLOW_EXACT:
-            env[k] = v
-            continue
-        if ku.startswith(_DENY_PREFIXES):
-            continue
-        if any(part in ku for part in _DENY_SUBSTRINGS):
-            continue
-        env[k] = v
-    return env
+def worker_env() -> dict[str, str]:
+    """The routine worker's environment: repo ``.env`` under the live process
+    environment (a real env var wins over the file, standard precedence)."""
+    return {**_repo_env_file(), **os.environ}
 
 
 class RunContext:
@@ -79,7 +80,7 @@ async def _spawn(payload: dict, timeout_s: int) -> dict:
         "-m",
         "condor.routines_worker",
         cwd=str(Path(__file__).parent.parent),
-        env=scrubbed_env(),
+        env=worker_env(),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

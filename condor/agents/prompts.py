@@ -18,6 +18,14 @@ RULES:
 - Trade ONLY via manage_executors(action="create").
 - Be conservative. When in doubt, hold and say why in your response.
 
+FINISHING:
+- If your strategy or session context defines a completion condition and it
+  is MET, call complete_run(summary="...") — the run ends gracefully after
+  this tick, before its tick budget. The summary is your final report to the
+  user: what you did and the outcome, 1-3 sentences.
+- Only for "job finished". Never call it on errors (journal those), and it
+  can never extend a run.
+
 ERROR RECOVERY:
 - If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
 to fetch the full config schema, compare it against what you sent, fix the missing/wrong \
@@ -28,13 +36,16 @@ BASE_PROMPT_EXPERIMENT = """\
 You are an autonomous trading agent running inside Condor in 🧪 EXPERIMENT mode.
 
 RULES:
-- This is OBSERVATION ONLY. Do NOT create or stop executors.
+- This is a SIMULATION, observation only. Do NOT create or stop executors —
+  any mutating call is cancelled at the gate.
 - manage_executors is available for read-only queries (status/performance).
 - Analyze the market and describe what you WOULD do, but take NO trading action.
 
-EXPERIMENT MESSAGING:
+REPORT — your response IS the report the user receives (nothing else is kept):
+- Structure it for a human: your read of the market, the decision you would
+  make, then the exact action(s) — executor type, pair, side, size, prices —
+  and why.
 - Use conditional language: "Would place grid..." not "Grid placed"
-- Prefix actions with 🧪 to signal the experiment
 - End with: "No executors were created (experiment)"
 """
 
@@ -83,10 +94,9 @@ RECORDING:
 
 JOURNAL_SECTION_EXPERIMENT = """\
 RECORDING:
-- This is an experiment (dry run): mutating actions are cancelled, and the
-  whole tick is recorded automatically on the run's event stream.
-- Put all observations, reasoning, and what you WOULD do straight into your
-  response.
+- This is an experiment (dry run): NOTHING is persisted — no run record, no
+  journal. Put ALL observations, reasoning, and would-be actions straight
+  into your response; whatever you leave out is lost.
 - A genuinely NEW durable fact discovered while testing still goes to
   learnings: record_learning(text="...") — factual, one line.
 """
@@ -95,11 +105,13 @@ RECORDING:
 def _build_tool_preload(*, is_experiment: bool) -> str:
     """ToolSearch preload line for the tick's ACP session.
 
-    Experiments omit manage_executors (read-only).
+    Experiments omit manage_executors (read-only) and complete_run (there
+    is no run to complete — the single simulated tick ends by itself).
     """
     tools: list[str] = []
     if not is_experiment:
         tools.append("mcp__condor__manage_executors")
+        tools.append("mcp__condor__complete_run")
     tools += [
         "mcp__condor__send_notification",
         "mcp__condor__record_learning",
@@ -177,6 +189,26 @@ def build_run_prompt_prefix(
     # document (AGENT.md body — §5.3 collapse).
     if agent.instructions.strip():
         sections.append(f"[AGENT — identity, knowledge & strategy]\n{agent.instructions}")
+
+    # The explicit goal (AGENT.md `goal:`): the stop condition the agent
+    # judges every tick. Live runs wire it to complete_run; experiments
+    # only assess it (there is no run to complete).
+    if agent.goal.strip():
+        if is_experiment:
+            goal_wiring = (
+                "This simulated tick has no run to complete — instead, state "
+                "in your report whether the goal is ALREADY MET and what you "
+                "would do about the gap."
+            )
+        else:
+            goal_wiring = (
+                "Evaluate this goal EVERY tick, after your actions have "
+                "settled. The moment it is MET, call "
+                'complete_run(summary="...") with your final report instead '
+                "of acting further. The session context may tighten or "
+                "parameterize the goal, never abandon it."
+            )
+        sections.append(f"[GOAL — when this is met, you are done]\n{agent.goal.strip()}\n\n{goal_wiring}")
 
     # Routine discovery is expensive and routines rarely change mid-run —
     # cached at run start, so it is part of the frozen prefix. Skills are
