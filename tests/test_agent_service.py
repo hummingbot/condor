@@ -25,6 +25,43 @@ def _create(svc, name="Tomb Test"):
     )
 
 
+def test_partial_config_patch_merges_not_replaces(svc):
+    """A partial default_config/risk_limits patch preserves the other keys —
+    editing one param must not silently strip the rest of the strategy block
+    (the corruption a wholesale setattr caused)."""
+    agent = svc.create(
+        name="Merge Test",
+        instructions="body",
+        tools=["manage_executors"],
+        denomination="SOL",
+        risk_limits={"max_position_size_quote": 0.1, "max_open_executors": 3},
+        default_config={
+            "frequency_sec": 60,
+            "take_profit_pct": 0.03,
+            "stop_loss_pct": 0.05,
+            "entry_guards": {"stop_loss_cooldown": {"hours": 4}},
+        },
+    )
+
+    # Change ONE nested key via a partial patch.
+    updated = svc.update(agent.slug, {"default_config": {"take_profit_pct": 0.05}})
+    dc = updated.default_config
+    assert dc["take_profit_pct"] == 0.05  # changed
+    assert dc["frequency_sec"] == 60  # preserved
+    assert dc["stop_loss_pct"] == 0.05  # preserved
+    assert dc["entry_guards"] == {"stop_loss_cooldown": {"hours": 4}}  # preserved
+
+    # Same for the top-level risk baseline.
+    updated = svc.update(agent.slug, {"risk_limits": {"max_open_executors": 5}})
+    assert updated.risk_limits["max_open_executors"] == 5  # changed
+    assert updated.risk_limits["max_position_size_quote"] == 0.1  # preserved
+
+    # Reload from disk to confirm the merge persisted, not just the in-memory obj.
+    reloaded = svc.get(agent.slug)
+    assert reloaded.default_config["frequency_sec"] == 60
+    assert reloaded.risk_limits["max_position_size_quote"] == 0.1
+
+
 def test_delete_tombstones_and_reserves_slug(svc):
     agent = _create(svc)
     slug = agent.slug

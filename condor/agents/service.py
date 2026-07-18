@@ -45,6 +45,26 @@ def _tombstone_path(slug: str):
     return agents_data_root() / slug / _TOMBSTONE_FILE
 
 
+# Spec fields whose value is a nested dict: an update patch merges into the
+# existing value key-by-key rather than replacing it wholesale, so a partial
+# edit ("change take_profit_pct") never silently drops the other keys. Same
+# rationale as merge_launch_config for launches (see config.py).
+_MERGE_PATCH_FIELDS = {"default_config", "risk_limits", "schedule"}
+
+
+def _deep_merge(base: dict, patch: dict) -> dict:
+    """Recursively merge ``patch`` into ``base`` (patch wins per key); nested
+    dicts merge key-by-key so a partial config edit preserves unspecified keys.
+    (To fully replace a nested field, edit AGENT.md directly.)"""
+    out = dict(base)
+    for k, v in patch.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
 class AgentService:
     """Facade over the agent stores + engine lifecycle. Stateless — safe to
     construct per call."""
@@ -110,6 +130,10 @@ class AgentService:
         if unknown:
             raise LifecycleError(422, f"unknown agent fields: {sorted(unknown)}")
         for k, v in patch.items():
+            if k in _MERGE_PATCH_FIELDS and isinstance(v, dict):
+                existing = getattr(agent, k, None)
+                if isinstance(existing, dict) and existing:
+                    v = _deep_merge(existing, v)
             setattr(agent, k, v)
         try:
             self.store.update(agent)
