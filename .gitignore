@@ -190,6 +190,9 @@ store/venues.json
 agents/*/executors.jsonl
 agents/*/sessions/
 agents/*/runs/
+agents/*/experiments/
+agents/*/consults/
+agents/*/delegations/
 agents/*/learnings.md.lock
 
 # Generated report artifacts

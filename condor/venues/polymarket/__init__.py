@@ -60,10 +60,11 @@ def derive_custody(credentials: dict) -> str:
 
 
 def probe(venue_id: str, ref, credentials: dict) -> None:
-    """Verify the client's signer matches the credentials; best-effort USDC
-    balance read (auth derivation may need connectivity)."""
+    """Verify the client's signer matches the credentials, then read the USDC
+    balance. A balance/auth failure raises ProbeWarning (not an error): the
+    credentials are consistent, but the CLOB API is unreachable from this
+    network — Polymarket geo-blocks several regions."""
     import asyncio
-    import logging
 
     from eth_account import Account
 
@@ -85,13 +86,17 @@ def probe(venue_id: str, ref, credentials: dict) -> None:
             f"polymarket client address {got!r} != signer {signer!r} — "
             "credentials are inconsistent"
         )
-    try:  # best-effort balance read; auth derivation may need connectivity
+    try:
         asyncio.run(client.usdc_balance())
-    except Exception:
-        logging.getLogger(__name__).warning(
-            "polymarket probe: usdc_balance read failed (best-effort)",
-            exc_info=True,
-        )
+    except Exception as e:
+        from condor.accounts.onboarding import ProbeWarning
+
+        raise ProbeWarning(
+            f"signer/custody verified, but the CLOB API rejected access "
+            f"({type(e).__name__}: {e}) — likely geo-restriction "
+            "(Polymarket blocks several regions); trading calls will fail "
+            "from this network"
+        ) from e
 
 
 def make_connector(instrument: str, credentials: dict):

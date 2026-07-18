@@ -2,7 +2,7 @@
 
 One command installs Condor and asks a single product question — *how
 will you talk to it?* You pick one or more harnesses: a coding agent
-you already use (Claude Code, OpenClaw, Hermes), Condor's own chat
+you already use (Claude Code, Codex, OpenClaw, Hermes), Condor's own chat
 (Telegram + web, the default), or none at all (backend + monitoring
 dashboard only). Nothing here requires a Telegram bot unless you
 choose the Telegram surface.
@@ -89,16 +89,22 @@ curl -fsSL https://raw.githubusercontent.com/hummingbot/deploy/main/setup.sh | b
 
 ### 3. Harness selection
 
-Init detects what's already on your box (`claude` on PATH, `openclaw`,
-`~/.hermes`, …) and preselects it alongside the default. Selection is
-multi-select — the same backend serves all of them at once.
+Init detects what's already on your box (`claude` on PATH, `codex`,
+`openclaw`, `~/.hermes`, …) and preselects it alongside the default.
+Selection is multi-select — the same backend serves all of them at once.
+
+Coding-agent harnesses are **repo-scoped by design**: Condor's skills and
+MCP servers load only when the harness runs from the repo directory —
+init never installs anything user-wide (see
+[harness-skill-setup.md](harness-skill-setup.md)).
 
 | Choice | What init does | First thing to try |
 |---|---|---|
 | **Condor harness** (Telegram + web — *selected by default*) | Web works immediately, no token needed. Telegram is offered as a skippable walk: paste a [@BotFather](https://t.me/BotFather) token, init validates it before writing. | `make run`, then `make login-token` and open the URL |
-| **Claude Code** | Nothing to write — the repo ships `.mcp.json` and `.claude/skills`. Init verifies them and prints the `claude mcp add` command for use outside the repo. | open the repo in Claude Code, ask "list my agents" |
-| **OpenClaw** | Prints the MCP stdio config to add; skills are found by workspace scan. | ask it to `list_agents` |
-| **Hermes** | Prints the MCP config + `hermes skills tap add <repo>`. If Hermes isn't installed, init prints *their* installer command and stops there — it never installs another project's software. | ask it to `list_agents` |
+| **Claude Code** | Verifies the repo's `.mcp.json` and repairs the `.claude/skills` mirror (one symlink per skill). | run `claude` in the repo, try `/condor status` |
+| **Codex** | Verifies the repo's `.codex/config.toml` and repairs the `.agents/skills` mirror. First `codex` run asks you to trust the directory. | run `codex` in the repo, try `$condor status` |
+| **OpenClaw** | Skills come from the workspace scan of `skills/`; prints the (global, but inert outside the repo) `openclaw mcp add` command. | open the workspace at the repo, `/condor` |
+| **Hermes** | Prints the MCP config + `hermes skills tap add <repo>` (Hermes has no repo scope — its config is global and just points here). If Hermes isn't installed, init prints *their* installer command and stops there — it never installs another project's software. | ask it to `list_agents` |
 | **None** | Backend + monitoring dashboard only, driven entirely from external harnesses. | `make login-token` |
 
 Init is idempotent: re-run `make init` any time to add a harness, add

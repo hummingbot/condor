@@ -98,30 +98,37 @@ def _next_fires(limit: int = 10) -> list[dict]:
 
 def status(as_json: bool = json_option()) -> None:
     """Show server, live runs, next scheduled fires, and pending approvals."""
+    from condor.cli.commands._common import probe_control
+
     t0 = time.monotonic()
-    ping = try_control("ping", timeout=PING_TIMEOUT)
+    state = probe_control(timeout=PING_TIMEOUT)
     ping_ms = round((time.monotonic() - t0) * 1000)
-    up = bool(ping and ping.get("ok"))
+    up = state == "up"
 
     agents = (try_control("agent.list") or {}).get("agents", []) if up else []
     approvals = (try_control("approval.list") or {}).get("approvals", []) if up else []
     fires = _next_fires()
 
+    server_lines = {
+        "up": f"up ({ping_ms}ms socket round-trip)",
+        "down": "down — start with `condor serve`",
+        "blocked": "unknown — this shell is SANDBOXED (unix-socket connect "
+        "denied, e.g. Codex): the server may well be up. Check via the "
+        "Condor MCP tools (they run unsandboxed) or re-run this command "
+        "with sandbox escalation/approval.",
+    }
     summary = {
-        "server": (
-            f"up ({ping_ms}ms socket round-trip)"
-            if up
-            else "down — start with `condor serve`"
-        ),
+        "server": server_lines[state],
         "live_runs": len(agents),
         "pending_approvals": len(approvals),
     }
-    if not up:
+    if state == "down":
         summary["note"] = "scheduler and executors run inside `condor serve`"
 
     run_rows = _live_run_rows(agents)
     payload = {
         "server_up": up,
+        "server_state": state,  # "up" | "down" | "blocked" (sandboxed shell)
         "socket_ms": ping_ms if up else None,
         "live_runs": agents,
         "pending_approvals": approvals,

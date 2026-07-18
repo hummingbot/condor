@@ -46,6 +46,15 @@ class CustodyMismatchError(OnboardingError):
     """A typed address does not match the custody derived from credentials."""
 
 
+class ProbeWarning(Exception):
+    """A probe verified identity/custody but a connectivity-dependent call
+    failed (e.g. a geo-blocked venue API).
+
+    Deliberately NOT an :class:`OnboardingError`: it must never refuse an
+    account or fail ``condor doctor`` — callers surface it as a warning.
+    """
+
+
 class ProbeError(OnboardingError):
     """The read-only venue probe failed — the account is not enabled."""
 
@@ -139,7 +148,7 @@ def default_probe(venue_id: str, ref: AccountRef, credentials: dict) -> None:
         prober = venue_spec(venue_id).probe  # raises UnknownVenueError
     try:
         prober(venue_id, ref, credentials)
-    except OnboardingError:
+    except (OnboardingError, ProbeWarning):
         raise
     except Exception as e:
         raise ProbeError(
@@ -196,7 +205,16 @@ def onboard_account(
     credentials = {k: v for k, v in dict(credentials or {}).items() if v is not None}
     ref = derive_custody(venue_id, credentials)
     if probe:
-        (prober or default_probe)(venue_id, ref, credentials)
+        try:
+            (prober or default_probe)(venue_id, ref, credentials)
+        except ProbeWarning as w:
+            import logging
+
+            # Identity checks passed; only connectivity failed — enable the
+            # account, but leave a loud trace (doctor re-surfaces it).
+            logging.getLogger(__name__).warning(
+                "%s probe warning (account enabled anyway): %s", venue_id, w
+            )
     fields = _sealed_fields(venue_id, credentials, name)
     store = store or _default_store()
     return store.upsert_account(

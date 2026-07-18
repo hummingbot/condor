@@ -36,7 +36,9 @@ async def call_control(
             asyncio.open_unix_connection(socket_path), timeout=timeout
         )
     except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
-        raise ControlError(503, f"control socket unavailable at {socket_path}: {e}")
+        raise ControlError(
+            503, f"control socket unavailable at {socket_path}: {e}"
+        ) from e
     try:
         writer.write((json.dumps(req) + "\n").encode())
         await writer.drain()
@@ -79,7 +81,7 @@ class PersistentControlConnection:
         except (FileNotFoundError, ConnectionRefusedError, OSError) as e:
             raise ControlError(
                 503, f"control socket unavailable at {self._socket_path}: {e}"
-            )
+            ) from e
 
     async def call(self, method: str, params: Optional[dict] = None, timeout: float = 60.0) -> object:
         if not self.connected:

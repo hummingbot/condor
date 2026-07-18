@@ -1,10 +1,14 @@
 ---
 name: executor-mechanics
 description: "How Condor trading agents act through Hummingbot executors — controller_id isolation, the grid limit_price+keep_position risk model (grids have NO stop_loss), position handover, per-type config schemas, and the fee floor every take_profit must clear. Use when creating, sizing, or debugging any executor (grid, position, order), or when a create call fails on schema/validation."
+compatibility: "Requires the Condor MCP server (manage_executors, manage_skill) connected"
 metadata: {"condor-source": "shared", "condor-created": "2026-07-11"}
 ---
 
 # Executor Mechanics
+
+Operating rule: operate Condor only through the connected MCP tools — never
+import its Python modules, edit runtime stores, or call private endpoints.
 
 Agents act on markets ONLY through Hummingbot executors, never `place_order`
 (the risk engine blocks it). Every executor you create is tagged with your

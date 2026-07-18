@@ -51,6 +51,23 @@ def try_control(
         return None
 
 
+def probe_control(timeout: float = 5.0) -> str:
+    """Liveness with sandbox awareness: ``"up"`` | ``"down"`` | ``"blocked"``.
+
+    ``"blocked"`` means this process may not CONNECT to the socket
+    (EPERM/EACCES) — the signature of a sandboxed harness shell (Codex's
+    seatbelt denies unix-socket connect), NOT a down server. Callers must
+    not tell the user to `condor serve` in that state.
+    """
+    try:
+        resp = asyncio.run(_call("ping", None, timeout))
+        return "up" if resp and resp.get("ok") else "down"
+    except Exception as e:
+        if isinstance(e.__cause__, PermissionError):
+            return "blocked"
+        return "down"
+
+
 async def _call(method: str, params: Optional[dict], timeout: float) -> Any:
     # Imported per call so tests can monkeypatch condor.control.client.call_control.
     from condor.control import client as control_client

@@ -206,6 +206,11 @@ def test_tick_emits_decision_state_and_prompt(tmp_path, monkeypatch):
     engine.agent.denomination = "SOL"
 
     async def fake_run_agent(*args, **kwargs):
+        # run_agent owns the prompt.md write (via prompt_companion, the engine's
+        # frozen prefix); the fake stands in for that single owner.
+        from condor.agents.run import persist_prompt_companion
+
+        persist_prompt_companion(kwargs["agent_id"], kwargs["prompt_companion"])
         return RunResult(text="ENTER FLEA 0.05 SOL — m5/h1 both positive\n\ndetail…")
 
     async def no_providers():
@@ -217,7 +222,8 @@ def test_tick_emits_decision_state_and_prompt(tmp_path, monkeypatch):
 
     events = _run_store().read_events("acme", engine.agent_id)
     run_path = _run_store().find_run_path(engine.agent_id)
-    artifacts = next(d for d in run_path.parent.iterdir() if d.is_dir())
+    # Companions live in the run's own folder, next to the jsonl.
+    artifacts = run_path.parent
 
     # Frozen prefix persisted once as prompt.md; the tick event carries the
     # per-tick suffix + a sha256 of the full assembled prompt — and the two

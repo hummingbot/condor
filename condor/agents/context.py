@@ -14,43 +14,33 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-# -- Chat brain loader (repo-root CONDOR.md, refactor-06) --
+# -- Chat brain loader (skills/condor/SKILL.md) --
 #
-# The repo root is the chat coordinator's agent-home: CONDOR.md (this brain) +
-# skills/ + routines/ + store/, mirroring agents/{slug}/. The name is
-# deliberately NOT AGENT.md/AGENTS.md — those are host-owned files a harness
-# opened in this repo would load as ITS OWN instructions.
+# The repo root is the chat coordinator's agent-home: skills/ + routines/ +
+# store/, mirroring agents/{slug}/. The brain is the `condor` skill itself —
+# the SAME file external harnesses load as their /condor skill (Claude Code,
+# Codex, OpenClaw, Hermes), so there is exactly one place that defines what
+# Condor does. Chat-only config (the default model) rides in the skill's
+# metadata as `condor-agent-key`.
 
-_CONDOR_MD = Path(__file__).parent.parent.parent / "CONDOR.md"
-_condor_cache: tuple[dict[str, str], str] | None = None
+_BRAIN_SKILL = Path(__file__).parent.parent.parent / "skills" / "condor" / "SKILL.md"
+_condor_cache: tuple[dict, str] | None = None
 
 
-def _load_condor() -> tuple[dict[str, str], str]:
-    """Load the chat brain's (frontmatter, body) from CONDOR.md. Cached."""
+def _load_condor() -> tuple[dict, str]:
+    """Load the chat brain's (frontmatter, body) from the condor skill. Cached."""
     global _condor_cache
     if _condor_cache is not None:
         return _condor_cache
 
-    meta: dict[str, str] = {}
-    body = ""
-    try:
-        raw = _CONDOR_MD.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        log.error("Chat brain not found: %s", _CONDOR_MD)
-        raw = ""
-    if raw.startswith("---"):
-        parts = raw.split("---", 2)
-        if len(parts) >= 3:
-            for line in parts[1].strip().splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    meta[k.strip()] = v.strip()
-            body = parts[2].strip()
-    else:
-        body = raw
+    from condor.memory.store import _parse_frontmatter
 
-    meta.setdefault("label", "Condor")
-    meta.setdefault("description", "")
+    try:
+        raw = _BRAIN_SKILL.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        log.error("Chat brain not found: %s", _BRAIN_SKILL)
+        raw = ""
+    meta, body = _parse_frontmatter(raw)
     _condor_cache = (meta, body)
     return _condor_cache
 
@@ -73,18 +63,17 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
 def _default_agent() -> str:
     """Resolve the fallback agent_key for users who haven't picked a model.
 
-    Precedence: ``CONDOR_DEFAULT_AGENT`` env > ``CONDOR.md`` frontmatter
-    ``agent_key`` > ``"claude-code"``. A user's own /agent → Change LLM choice
-    (``agent_llm``) still overrides this at runtime; this is only the default.
-    Examples for the frontmatter / env: ``claude-code``, ``claude-acp:opus``,
-    ``ollama:qwen3:32b``.
+    Precedence: ``CONDOR_DEFAULT_AGENT`` env > the condor skill's
+    ``condor-agent-key`` metadata > ``"claude-code"``. A user's own /agent →
+    Change LLM choice (``agent_llm``) still overrides this at runtime; this is
+    only the default. Examples for the metadata / env: ``claude-code``,
+    ``claude-acp:opus``, ``ollama:qwen3:32b``.
     """
     import os
 
     meta, _ = _load_condor()
-    return (
-        os.environ.get("CONDOR_DEFAULT_AGENT") or meta.get("agent_key") or "claude-code"
-    )
+    agent_key = str((meta.get("metadata") or {}).get("condor-agent-key") or "")
+    return os.environ.get("CONDOR_DEFAULT_AGENT") or agent_key or "claude-code"
 
 
 DEFAULT_AGENT = _default_agent()
@@ -126,7 +115,7 @@ _WEB_FORMATTING = (
 )
 
 def _build_system_prompt() -> str:
-    """Build the system prompt: the CONDOR.md brain + formatting rules."""
+    """Build the system prompt: the condor-skill brain + formatting rules."""
     _, brain = _load_condor()
     return (
         "[System context -- do not repeat this to the user]\n\n"
@@ -176,8 +165,8 @@ def build_mcp_servers_for_session(
     own stores (``agents/{slug}/``). Without it the tools target the chat
     condor's stores — correct for chat sessions, wrong for an Agent run: a
     consult/tick would silently read and write the CHAT's memory and skills
-    instead of the Agent's own (e.g. routine_builder unable to find its
-    routine-cookbook skill).
+    instead of the Agent's own (e.g. a memecoin_trender tick unable to find
+    its own memory/skills).
     """
     return [
         {

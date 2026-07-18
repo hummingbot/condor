@@ -44,7 +44,7 @@ def agents(
         live = _live_counts()
         learnings = read_learnings(root / slug)
         n_learnings = sum(1 for line in learnings.splitlines() if line.startswith("- "))
-        n_runs = len(list(get_run_store().runs_dir(slug).glob("*.jsonl")))
+        n_runs = len(list(get_run_store().all_run_paths(slug)))
         record = {
             "slug": agent.slug,
             "model": agent.agent_key,

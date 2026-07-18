@@ -19,7 +19,7 @@ Disk layout::
         store/                         # learned memory (the shared brain)
         sessions/  experiments/  delegations/   # history (journal.py)
 
-An Agent may be **authored in the repo** (e.g. ``routine_builder``) or
+An Agent may be **authored in the repo** (e.g. ``memecoin_trender``) or
 **created at runtime**; either way ``AgentStore`` can create/update/delete it.
 """
 

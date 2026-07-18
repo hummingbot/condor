@@ -301,7 +301,7 @@ class AgentService:
         path = store.find_run_path(run_id)
         if path is None:
             raise LifecycleError(404, f"run '{run_id}' not found")
-        slug = path.parent.parent.name
+        slug = store.slug_from_path(path)
         meta = store.run_meta(slug, run_id)
         engine = get_engine(run_id)
         if engine is not None:

@@ -36,15 +36,27 @@ log = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_S = 120
 
 # Environment variables the worker must never see: everything condor- or
-# credential-shaped. Conservative allowlist-of-denylist: prefix + substring.
+# trading-credential-shaped. Conservative allowlist-of-denylist: prefix +
+# substring. The boundary is TRADING authority, not "all keys" — a read-only
+# data routine may legitimately hold a market-data key (see _ALLOW_EXACT); it
+# must never hold anything that can move funds (wallet/private keys, exchange
+# trading secrets, capabilities, bot tokens).
 _DENY_PREFIXES = ("CONDOR_", "TELEGRAM_", "ANTHROPIC_", "OPENAI_")
 _DENY_SUBSTRINGS = ("TOKEN", "SECRET", "PRIVATE", "API_KEY", "PASSPHRASE", "MNEMONIC")
+
+# Read-only data keys routines ARE allowed to use — matched exactly, so a
+# lookalike (e.g. a `_SECRET` variant) is still scrubbed. These grant data
+# access only: no trading, withdrawal, or account authority.
+_ALLOW_EXACT = {"COINGECKO_API_KEY"}
 
 
 def scrubbed_env() -> dict[str, str]:
     env: dict[str, str] = {}
     for k, v in os.environ.items():
         ku = k.upper()
+        if ku in _ALLOW_EXACT:
+            env[k] = v
+            continue
         if ku.startswith(_DENY_PREFIXES):
             continue
         if any(part in ku for part in _DENY_SUBSTRINGS):

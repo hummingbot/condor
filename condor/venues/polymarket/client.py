@@ -92,7 +92,17 @@ class PolymarketClient:
         """Derive + attach L2 API creds from the signing key (once)."""
         if self._authed:
             return
-        creds = await asyncio.to_thread(self.client.create_or_derive_api_key)
+        # create_or_derive first ATTEMPTS a create, which 400s ("Could not
+        # create api key") whenever the key already exists, then falls back to
+        # derive — silence the lib's spurious error line for that expected
+        # path; a real failure still raises out of create_or_derive.
+        clob_log = logging.getLogger("py_clob_client_v2.http_helpers.helpers")
+        level = clob_log.level
+        clob_log.setLevel(logging.CRITICAL)
+        try:
+            creds = await asyncio.to_thread(self.client.create_or_derive_api_key)
+        finally:
+            clob_log.setLevel(level)
         self.client.set_api_creds(creds)
         self._authed = True
 

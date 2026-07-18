@@ -170,8 +170,6 @@ def test_oversized_payload_spills_to_markdown_artifact(store):
     import hashlib
     import re
 
-    from condor.agents.runstore import ulid_datetime
-
     run_id = store.start_run("alpha", "session")
     big = "x" * (MAX_EVENT_BYTES + 1000)
     ev = store.emit(run_id, "tool_call", {"output": big, "meta": {"tick": 3}})
@@ -180,14 +178,13 @@ def test_oversized_payload_spills_to_markdown_artifact(store):
     assert "artifact" in payload
     assert payload["bytes"] > MAX_EVENT_BYTES
 
-    # Human-oriented naming: dir = run start time (from the ULID), file =
-    # event time + type, both UTC-stamped markdown.
-    dir_name, file_name = payload["artifact"].split("/")
-    started = ulid_datetime(run_id)
-    assert dir_name == started.strftime("%Y-%m-%d_%H-%M-%S") + "Z.artifacts"
+    # The spill is a UTC-stamped markdown file named for the event time + type,
+    # sitting in the run's own folder next to the jsonl (bare filename ref).
+    file_name = payload["artifact"]
+    assert "/" not in file_name
     assert re.fullmatch(r"\d{2}-\d{2}-\d{2}Z-tool_call\.md", file_name)
 
-    artifact_path = store.runs_dir("alpha") / payload["artifact"]
+    artifact_path = store.run_dir("alpha", run_id) / payload["artifact"]
     text = artifact_path.read_text()
     assert text.startswith("# tool_call — ")
     assert big in text  # string values verbatim
@@ -254,7 +251,7 @@ def test_list_runs_newest_first_with_kind_filter(store):
     store.end_run(r1, "stopped")
     r2 = store.start_run("alpha", "delegation", payload={"task": "scan"})
     store.end_run(r2, "completed")
-    os.utime(store.run_path("alpha", r2))
+    os.utime(store.run_path("alpha", r2, "delegation"))
 
     runs = store.list_runs("alpha")
     assert {r["run_id"] for r in runs} == {r1, r2}

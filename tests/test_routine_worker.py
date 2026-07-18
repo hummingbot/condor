@@ -90,6 +90,17 @@ def test_worker_env_carries_no_condor_secrets(monkeypatch):
     assert "PATH" in env
 
 
+def test_readonly_data_key_allowlisted_but_only_exact(monkeypatch):
+    # COINGECKO_API_KEY is a read-only market-data key routines need; it is the
+    # one narrow exception to the API_KEY denylist — matched exactly, so a
+    # lookalike name is still scrubbed.
+    monkeypatch.setenv("COINGECKO_API_KEY", "cg-demo-123")
+    monkeypatch.setenv("COINGECKO_API_KEY_BACKUP", "should-not-pass")
+    env = scrubbed_env()
+    assert env.get("COINGECKO_API_KEY") == "cg-demo-123"
+    assert "COINGECKO_API_KEY_BACKUP" not in env
+
+
 def test_run_context_has_no_capability_or_execution_surface():
     ctx = RunContext(agent_slug="acme")
     assert ctx.agent_slug == "acme"

@@ -170,9 +170,11 @@ validated and hashed (source + resolved) at every save and launch.
   delegation / consult. ACP is the only model runner. Mints the run's
   execution capability (§6.2) and revokes it at run end.
 - **RunStore** (`runstore.py`) — one append-only JSONL event stream per run
-  at `agents/{slug}/runs/{run_id}.jsonl` (opaque ULID ids). Markdown views
-  are generated (the run's `prompt.md` + `journal.md` companions and
-  on-demand exports — never parsed back); working context is a projection
+  in the run's own folder `agents/{slug}/runs/{run_id}/{run_id}.jsonl` (opaque
+  ULID ids; sessions in `runs/`, with sibling top-level `experiments/`,
+  `consults/`, `delegations/` dirs of the same shape). Markdown views are
+  generated (the run's `prompt.md` + `journal.md` companions and on-demand
+  exports — never parsed back); working context is a projection
   (`projections.py`).
 - **Approvals** (`approvals.py`) — durable permission events + one-use
   grants; resolved via `resolve_approval` from any channel; default deny on
@@ -207,12 +209,15 @@ rejects a second Condor actor on the same (account, instrument).
 ```
 agents/{slug}/
     AGENT.md           # the one spec (incl. entry_guards, risk baseline)
-    runs/{ulid}.jsonl  # RunStore event streams (incl. per-tick prompt
-                       # suffix + sha256 of the full assembled prompt)
-    runs/{YYYY-MM-DD_HH-MM-SS}Z.artifacts/  # run companion dir, named for the
-        prompt.md      # frozen prompt prefix, written once at run start
+    runs/{ulid}/       # one self-contained folder per session/scheduled run;
+                       # experiments/, consults/, delegations/ are sibling
+                       # top-level dirs with the same {ulid}/ shape
+        {ulid}.jsonl   # RunStore event stream (incl. per-tick prompt suffix
+                       #   + sha256 of the full assembled prompt)
+        prompt.md      # the run's prompt, written once by run_agent (any kind)
         journal.md     # one line per tick (generated view — never parsed)
         {HH-MM-SS}Z-{type}.md  # oversized event payloads (spill, markdown)
+    experiments/{ulid}/  consults/{ulid}/  delegations/{ulid}/  # same shape
     executors.jsonl    # append-only executor lifecycle log. AGENT-scoped,
                        # NOT per-run: executors outlive runs (detach on stop,
                        # keep writing after run_ended), recovery rebuilds the

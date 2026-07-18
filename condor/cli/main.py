@@ -30,6 +30,7 @@ from condor.cli.commands import serve as serve_cmd
 from condor.cli.commands import start as start_cmd
 from condor.cli.commands import status as status_cmd
 from condor.cli.commands import stop as stop_cmd
+from condor.cli.commands import uninstall as uninstall_cmd
 from condor.cli.commands import update as update_cmd
 from condor.cli.commands._common import REPO_ROOT
 from condor.cli.output import SortedCommandsGroup
@@ -83,6 +84,7 @@ OBSERVE = "observe & maintain"
 # Flat surface, alphabetical in --help (SortedCommandsGroup); grouped into
 # hbot's ontology via help panels. Detail lives in `condor <command> -h`.
 app.command("init", rich_help_panel=SET_UP)(init_cmd.init)
+app.command("uninstall", rich_help_panel=SET_UP)(uninstall_cmd.uninstall)
 app.command("update", rich_help_panel=SET_UP)(update_cmd.update)
 app.command("accounts", rich_help_panel=SET_UP)(accounts_cmd.accounts)
 

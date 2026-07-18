@@ -1,6 +1,16 @@
 """RunStore — one append-only JSONL event stream per run (§7.1).
 
-    agents/{slug}/runs/{run_id}.jsonl
+    agents/{slug}/runs/{run_id}/{run_id}.jsonl          # session/scheduled
+    agents/{slug}/experiments/{run_id}/{run_id}.jsonl   # experiment (dry-run)
+    agents/{slug}/consults/{run_id}/{run_id}.jsonl      # consult
+    agents/{slug}/delegations/{run_id}/{run_id}.jsonl   # delegation
+
+Every run is a folder named by its ULID that holds its own ``{run_id}.jsonl``
+stream plus any companions/spills — so a run's whole footprint is one
+self-contained directory. Each kind lands in its own top-level dir under the
+agent folder (siblings of one another): ``runs/`` is the live session history,
+while ``experiments/`` / ``consults/`` / ``delegations/`` keep dry-runs and
+one-shot tasks out of it.
 
 - **Run identity:** ``run_id`` is an opaque ULID. The ``run_started`` event
   carries explicit ``agent_slug``, ``kind`` (session|experiment|delegation|
@@ -16,15 +26,15 @@
   ``tool_call``) additionally fsync. A partial final line is ignored on read
   and truncated before the next append.
 - **Redaction + size caps:** payloads pass a secret redactor; an event over
-  ~16KB spills as a human-readable MARKDOWN file to the run's artifacts dir
-  — named for the run's start time (``runs/{YYYY-MM-DD_HH-MM-SS}Z.artifacts/``,
-  decoded from the ULID) with per-event ``{HH-MM-SS}Z-{type}.md`` files — and
-  the event keeps a path+hash reference (hash over the markdown as written).
-  All artifact timestamps are UTC (the trailing ``Z``).
-- **Companions:** the engine also writes two human-facing files into the same
-  dir via :meth:`RunStore.write_companion` — ``prompt.md`` (the run's frozen
-  prompt prefix, once) and ``journal.md`` (one line per tick, appended).
-  Generated views only: nothing parses them back.
+  ~16KB spills as a human-readable MARKDOWN file alongside the jsonl in the
+  run folder — a per-event ``{HH-MM-SS}Z-{type}.md`` file (timestamps UTC) —
+  and the event keeps a name+hash reference (hash over the markdown as
+  written).
+- **Companions:** two human-facing files sit next to the jsonl in the run
+  folder, written via :meth:`RunStore.write_companion` — ``prompt.md`` (the
+  run's prompt, written once by ``run_agent`` for every kind) and
+  ``journal.md`` (one line per tick, appended by the tick engine). Generated
+  views only: nothing parses them back.
 """
 
 from __future__ import annotations
@@ -44,6 +54,20 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 RUN_KINDS = {"session", "experiment", "delegation", "consult", "scheduled"}
+
+# Each run kind lands in its own top-level dir under the agent folder, siblings
+# of one another. Sessions (and their scheduled variant) are the live history in
+# ``runs/``; dry-runs and one-shot tasks get their own dirs so they never
+# clutter it.
+_KIND_DIR = {
+    "session": "runs",
+    "scheduled": "runs",
+    "experiment": "experiments",
+    "consult": "consults",
+    "delegation": "delegations",
+}
+# All the per-agent dirs that hold run streams (for readers that sweep them all).
+_RUN_DIRS = ("runs", "experiments", "consults", "delegations")
 
 EVENT_TYPES = {
     "run_started",
@@ -260,20 +284,15 @@ class _RunWriter:
         os.chmod(path, 0o600)
         self._f = open(path, "a", encoding="utf-8")
 
-    def _artifacts_dir(self) -> Path:
-        # Named for the run's start time (decoded from the ULID) so a human
-        # can find a run's artifacts by when it ran, not by opaque id.
-        started = ulid_datetime(self.run_id)
-        d = self.path.with_name(
-            started.strftime("%Y-%m-%d_%H-%M-%S") + "Z.artifacts"
-        )
-        d.mkdir(mode=0o700, exist_ok=True)
-        return d
+    def _run_dir(self) -> Path:
+        # Companions + spills live alongside the jsonl in the run's own folder
+        # (``runs/{run_id}/``), so a run's whole footprint is one directory.
+        return self.path.parent
 
     def _spill_artifact(self, seq: int, type_: str, payload: dict, ts: float) -> dict:
         text = _render_artifact_md(type_, ts, self.run_id, seq, payload)
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        adir = self._artifacts_dir()
+        adir = self._run_dir()
         stamp = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H-%M-%S")
         name = f"{stamp}Z-{type_}.md"
         if (adir / name).exists():  # two same-type spills in one second
@@ -282,7 +301,7 @@ class _RunWriter:
         apath.write_text(text)
         os.chmod(apath, 0o600)
         return {
-            "artifact": f"{adir.name}/{name}",
+            "artifact": name,  # sibling of the jsonl in the run folder
             "sha256": digest,
             "bytes": len(text.encode("utf-8")),
             "preview": text[:_ARTIFACT_PREVIEW_CHARS],
@@ -334,9 +353,9 @@ class _RunWriter:
 
     def write_companion(self, name: str, text: str, *, append: bool = False) -> Path:
         """Write a human-facing companion file (``prompt.md``, ``journal.md``)
-        into the run's artifacts dir. One-way: nothing parses these back.
-        Text passes the same value redactor as event payloads."""
-        path = self._artifacts_dir() / name
+        into the run folder, next to the jsonl. One-way: nothing parses these
+        back. Text passes the same value redactor as event payloads."""
+        path = self._run_dir() / name
         with self._lock:
             with open(path, "a" if append else "w", encoding="utf-8") as f:
                 f.write(_redact_text(text))
@@ -377,21 +396,52 @@ class RunStore:
     # -- paths ----------------------------------------------------------
 
     def runs_dir(self, agent_slug: str) -> Path:
+        """The sessions dir. Other kinds live in sibling dirs — see
+        :meth:`kind_dir` / :meth:`all_run_paths`."""
         return self._root / agent_slug / "runs"
 
-    def run_path(self, agent_slug: str, run_id: str) -> Path:
-        return self.runs_dir(agent_slug) / f"{run_id}.jsonl"
+    def kind_dir(self, agent_slug: str, kind: str = "") -> Path:
+        """The top-level dir holding a kind's runs (``runs``/``experiments``/
+        ``consults``/``delegations``); unknown kinds fall back to ``runs``."""
+        return self._root / agent_slug / _KIND_DIR.get(kind, "runs")
+
+    def run_dir(self, agent_slug: str, run_id: str, kind: str = "") -> Path:
+        """The run's own folder inside its kind dir."""
+        return self.kind_dir(agent_slug, kind) / run_id
+
+    def run_path(self, agent_slug: str, run_id: str, kind: str = "") -> Path:
+        return self.run_dir(agent_slug, run_id, kind) / f"{run_id}.jsonl"
+
+    def all_run_paths(self, agent_slug: str):
+        """Every run stream for an agent, across all kind dirs (unordered)."""
+        base = self._root / agent_slug
+        for d in _RUN_DIRS:
+            kd = base / d
+            if kd.exists():
+                yield from kd.rglob("*.jsonl")
 
     def find_run_path(self, run_id: str) -> Path | None:
-        """Locate a run stream by opaque id (checks live writers first)."""
+        """Locate a run stream by opaque id (checks live writers first). The
+        stream is always ``.../{kind_dir}/{run_id}/{run_id}.jsonl``; only the
+        kind dir varies, so try each."""
         w = self._writers.get(run_id)
         if w is not None:
             return w.path
         if not self._root.exists():
             return None
-        for candidate in self._root.glob(f"*/runs/{run_id}.jsonl"):
-            return candidate
+        for d in _RUN_DIRS:
+            for candidate in self._root.glob(f"*/{d}/{run_id}/{run_id}.jsonl"):
+                return candidate
         return None
+
+    @staticmethod
+    def slug_from_path(path: Path) -> str:
+        """The agent slug that owns a run path — the parent of its kind-dir
+        ancestor (``runs``/``experiments``/``consults``/``delegations``)."""
+        for p in path.parents:
+            if p.name in _RUN_DIRS:
+                return p.parent.name
+        raise ValueError(f"not a run path (no kind-dir ancestor): {path}")
 
     # -- writing ---------------------------------------------------------
 
@@ -412,11 +462,12 @@ class RunStore:
         if kind not in RUN_KINDS:
             raise ValueError(f"unknown run kind: {kind!r} (one of {sorted(RUN_KINDS)})")
         run_id = run_id or new_ulid()
-        runs_dir = self.runs_dir(agent_slug)
-        runs_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(runs_dir, 0o700)
-        display_seq = sum(1 for _ in runs_dir.glob("*.jsonl")) + 1
-        path = self.run_path(agent_slug, run_id)
+        kind_dir = self.kind_dir(agent_slug, kind)
+        kind_dir.mkdir(parents=True, exist_ok=True)
+        os.chmod(kind_dir, 0o700)
+        # display_seq counts every run of the agent, across all kind dirs.
+        display_seq = sum(1 for _ in self.all_run_paths(agent_slug)) + 1
+        path = self.run_path(agent_slug, run_id, kind)
         if path.exists():
             raise ValueError(f"run id collision: {run_id}")
         with self._lock:
@@ -484,12 +535,9 @@ class RunStore:
 
     def read_events(self, agent_slug: str, run_id: str) -> list[dict]:
         """All good events of one run, in order. Torn final line ignored."""
-        path = self.run_path(agent_slug, run_id)
-        if not path.exists():
-            found = self.find_run_path(run_id)
-            if found is None:
-                raise UnknownRunError(f"unknown run: {run_id}")
-            path = found
+        path = self.find_run_path(run_id)
+        if path is None:
+            raise UnknownRunError(f"unknown run: {run_id}")
         events: list[dict] = []
         data = path.read_bytes()
         start, n = 0, len(data)
@@ -540,8 +588,8 @@ class RunStore:
 
     def run_meta(self, agent_slug: str, run_id: str) -> dict:
         """Summary of one run from its first + last events."""
-        path = self.run_path(agent_slug, run_id)
-        if not path.exists():
+        path = self.find_run_path(run_id)
+        if path is None:
             raise UnknownRunError(f"unknown run: {agent_slug}/{run_id}")
         return self._meta_from_path(path, agent_slug)
 
@@ -588,13 +636,14 @@ class RunStore:
     def list_runs(
         self, agent_slug: str, *, kind: str | None = None, limit: int = 50
     ) -> list[dict]:
-        """Run summaries for one agent, newest first."""
-        runs_dir = self.runs_dir(agent_slug)
-        if not runs_dir.exists():
-            return []
-        paths = sorted(
-            runs_dir.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True
-        )
+        """Run summaries for one agent, newest first (across all kind dirs)."""
+        # A kind filter narrows to that one dir; otherwise sweep them all.
+        if kind:
+            kd = self.kind_dir(agent_slug, kind)
+            candidates = kd.rglob("*.jsonl") if kd.exists() else ()
+        else:
+            candidates = self.all_run_paths(agent_slug)
+        paths = sorted(candidates, key=lambda p: p.stat().st_mtime, reverse=True)
         out: list[dict] = []
         for path in paths:
             meta = self._meta_from_path(path, agent_slug)
@@ -608,7 +657,13 @@ class RunStore:
     def agent_slugs_with_runs(self) -> list[str]:
         if not self._root.exists():
             return []
-        return sorted(p.parent.name for p in self._root.glob("*/runs") if p.is_dir())
+        slugs = {
+            p.parent.name
+            for d in _RUN_DIRS
+            for p in self._root.glob(f"*/{d}")
+            if p.is_dir()
+        }
+        return sorted(slugs)
 
     # -- startup recovery --------------------------------------------------
 
@@ -621,14 +676,17 @@ class RunStore:
         voided: list[dict] = []
         if not self._root.exists():
             return voided
-        for path in self._root.glob("*/runs/*.jsonl"):
+        paths = (
+            p for d in _RUN_DIRS for p in self._root.glob(f"*/{d}/**/*.jsonl")
+        )
+        for path in paths:
             run_id = path.stem
             if self.is_open(run_id):
                 continue
             tail = self._tail_event(path)
             if tail is None or tail.get("type") == "run_ended":
                 continue
-            agent_slug = path.parent.parent.name
+            agent_slug = self.slug_from_path(path)
             # Collect pending permissions before appending (state of record).
             pending = self._pending_permissions(agent_slug, run_id)
             writer = _RunWriter(path, run_id, agent_slug)

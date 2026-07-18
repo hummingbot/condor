@@ -9,10 +9,11 @@ per-tick event emission, and the shutdown escalation hook.
 All operational history is RunStore events (§7.1) — the engine emits
 ``run_started``/``tick_started``/``tool_call``/``tick_completed``/
 ``state_snapshot``/``context_changed``/``directive``/``error``/``run_ended``
-on the run's append-only stream; markdown views are generated (the run's
-``prompt.md`` once + ``journal.md`` per tick + on-demand exports — never
-parsed back). ``tick_started`` carries the per-tick prompt suffix + a sha256
-of the full assembled prompt; the frozen prefix lives in ``prompt.md``.
+on the run's append-only stream; markdown views are generated (``journal.md``
+per tick by the engine + the run's ``prompt.md`` once by run_agent + on-demand
+exports — never parsed back). ``tick_started`` carries the per-tick prompt
+suffix + a sha256 of the full assembled prompt; the frozen prefix lives in
+``prompt.md``.
 
 Each tick:
 1. Pre-compute core data providers (active executors)
@@ -483,8 +484,10 @@ class TickEngine:
             )
             return
 
-        # 4. Build prompt: frozen prefix (once per run, persisted as the run's
-        # prompt.md companion) + per-tick suffix.
+        # 4. Build prompt: frozen prefix (built once per run) + per-tick suffix.
+        # The prefix is persisted as the run's prompt.md by run_agent (the one
+        # owner of that write) — passed below via prompt_companion so the
+        # prefix/suffix reconstruction contract holds.
         if self._prompt_prefix is None:
             from .prompts import _build_routines_section
 
@@ -495,12 +498,6 @@ class TickEngine:
             self._prompt_prefix = build_run_prompt_prefix(
                 self.agent, self.config, cached_routines_section=routines_section
             )
-            try:
-                get_run_store().write_companion(
-                    self.agent_id, "prompt.md", self._prompt_prefix
-                )
-            except Exception:
-                log.exception("TickEngine %s: prompt.md write failed", self.agent_id)
 
         # User-memory index (advisory, read-only) — the GLOBAL chat-curated
         # tier; agents consume it but never write memory (operational
@@ -600,6 +597,7 @@ class TickEngine:
             on_client=_hold_client,
             agent_id=self.agent_id,
             on_tool_call=_persist_tool_call,
+            prompt_companion=self._prompt_prefix,
         )
 
         # The attempt completed — acknowledge the directives it carried.

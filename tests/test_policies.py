@@ -92,7 +92,7 @@ def test_scope_gate_allows_reads_runs_and_memory():
 
 
 def test_scope_gate_empty_tools_is_unrestricted():
-    # Empty allowlist (e.g. routine_builder) -> policy returned unwrapped (AUTO).
+    # Empty allowlist -> policy returned unwrapped (AUTO).
     assert policies.scope_gate(policies.AUTO, []) is policies.AUTO
     assert policies.scope_gate(policies.AUTO, None) is policies.AUTO
 

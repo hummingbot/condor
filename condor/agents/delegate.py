@@ -17,8 +17,8 @@ primitive under an unattended policy (refactor-02 §4.1):
   override when given (it REPLACES the baseline — what you pass is exactly
   what governs), else the baseline. A can-trade delegation with NEITHER
   errors loudly at start.
-- **Specialists that cannot trade and carry no baseline** (e.g.
-  ``routine_builder``) keep full auto-approve.
+- **Specialists that cannot trade and carry no baseline** keep full
+  auto-approve.
 
 **A delegation IS a run (§7.1).** Its durable record is the
 ``kind: delegation`` RunStore stream — ``run_started`` before the run (a crash
@@ -57,7 +57,7 @@ def _resolve_delegation_limits(agent, risk_limits: dict | None) -> dict | None:
     ``manage_executors`` — or no tool scope at all, which is unrestricted and
     therefore trading). Returns the caps dict for trading agents, or None only
     for specialists that cannot trade and carry no baseline/override (full
-    auto-approve, e.g. routine_builder). Raises when a can-trade delegation
+    auto-approve). Raises when a can-trade delegation
     has neither a baseline nor an override — unbounded-capital delegations
     must say their numbers out loud.
     """

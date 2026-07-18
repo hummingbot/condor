@@ -303,7 +303,7 @@ class Scheduler:
             store = get_run_store()
             for run_id in holders:
                 path = store.find_run_path(run_id)
-                if path is not None and path.parent.parent.name == slug:
+                if path is not None and store.slug_from_path(path) == slug:
                     return True
         except Exception:
             log.exception("overlap lease check failed for %s", slug)

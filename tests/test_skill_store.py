@@ -371,7 +371,7 @@ def test_concurrent_writers_never_leave_a_torn_file(project_root):
 def _write_shared(root, slug, *, description="shared d", body="Shared steps."):
     import json
 
-    d = root / "agents" / "_shared" / "skills" / slug
+    d = root / "skills" / slug  # the shared tier is the repo-root skills/ library
     d.mkdir(parents=True, exist_ok=True)
     fm = [
         f"name: {slug}",
@@ -392,9 +392,9 @@ def test_agent_reads_shared_tier(project_root):
     assert read is not None
     assert read["tier"] == "shared"
 
-    # The chat's own library does NOT include the shared tier...
-    assert "executor-mechanics" not in SkillStore().list_index()
-    # ...but the scope='shared' management handle does.
+    # The chat's own library now IS the shared tier (same repo-root skills/)...
+    assert "executor-mechanics" in SkillStore().list_index()
+    # ...and the scope='shared' management handle points at that same dir.
     shared = SkillStore(scope="shared")
     assert "executor-mechanics" in shared.list_index()
 

@@ -115,15 +115,25 @@ def _path_row(apply_fix: bool) -> dict:
 
 
 def _socket_row() -> dict:
+    from condor.cli.commands._common import probe_control
+
     if not SOCKET_PATH.exists():
         return _row(
             "control socket", "warn", "server not running — start with `condor serve`"
         )
     t0 = time.monotonic()
-    ping = try_control("ping", timeout=NETWORK_TIMEOUT)
+    state = probe_control(timeout=NETWORK_TIMEOUT)
     ms = round((time.monotonic() - t0) * 1000)
-    if ping and ping.get("ok"):
+    if state == "up":
         return _row("control socket", "ok", f"answers in {ms}ms")
+    if state == "blocked":
+        return _row(
+            "control socket",
+            "warn",
+            "connect DENIED by this shell's sandbox (e.g. Codex) — server "
+            "state unknown, may well be up; re-run unsandboxed or check via "
+            "the MCP tools",
+        )
     return _row(
         "control socket",
         "fail",
@@ -268,7 +278,7 @@ def _unswept_runs(live_ids: set[str]) -> list[Path]:
     store = get_run_store()
     pending = []
     for slug in store.agent_slugs_with_runs():
-        for path in store.runs_dir(slug).glob("*.jsonl"):
+        for path in store.all_run_paths(slug):
             if path.stem in live_ids:
                 continue
             tail = _tail_event(path)
@@ -315,7 +325,7 @@ def _interrupted_runs_row(apply_fix: bool) -> dict:
 
 
 def _account_probe_rows() -> list[dict]:
-    from condor.accounts.onboarding import default_probe
+    from condor.accounts.onboarding import ProbeWarning, default_probe
     from condor.executors.wallets import account_credentials, account_store
 
     store = account_store()
@@ -333,6 +343,8 @@ def _account_probe_rows() -> list[dict]:
                 ref = store.resolve(venue_id, addr)
                 default_probe(venue_id, ref, account_credentials(venue_id, addr))
                 rows.append(_row(check, "ok", "read-only probe passed"))
+            except ProbeWarning as w:
+                rows.append(_row(check, "warn", str(w)[:240]))
             except Exception as e:
                 rows.append(_row(check, "fail", str(e)[:180]))
     if not rows:
@@ -347,10 +359,16 @@ def _dir_size(path: Path) -> int:
 def _disk_row() -> dict:
     from condor.agents.agent import agents_data_root
 
+    from condor.agents.runstore import _RUN_DIRS
+
     usage = shutil.disk_usage(REPO_ROOT)
     free_gb = usage.free / (1 << 30)
+    root = agents_data_root()
     runs_bytes = sum(
-        _dir_size(d) for d in agents_data_root().glob("*/runs*") if d.is_dir()
+        _dir_size(d)
+        for name in _RUN_DIRS
+        for d in root.glob(f"*/{name}")
+        if d.is_dir()
     )
     reports_dir = REPO_ROOT / "condor" / "reports"
     reports_bytes = _dir_size(reports_dir) if reports_dir.is_dir() else 0
@@ -389,6 +407,39 @@ def _learnings_row() -> dict:
             "consolidation pressure (curate agents/<slug>/learnings.md)",
         )
     return _row("learnings", "ok", f"all agents under the {MAX_LEARNINGS} cap")
+
+
+def _harness_wiring_rows(apply_fix: bool) -> list[dict]:
+    """Repo-scoped harness wiring must match the repo canon (skills mirrors
+    for Claude Code/Codex/OpenClaw, .mcp.json, .codex/config.toml) — drift
+    here means a harness silently runs stale skills or no MCP server.
+    Global harness configs (OpenClaw/Hermes) are checked read-only."""
+    from condor.cli.commands import _wiring
+
+    rows = []
+    targets = [
+        (f"skills {d.relative_to(REPO_ROOT)}", lambda fix, d=d: _wiring.mirror_skills(d, fix))
+        for d in _wiring.SKILL_MIRROR_DIRS
+    ] + [
+        ("mcp .mcp.json", _wiring.mcp_json_issues),
+        ("mcp .codex/config.toml", _wiring.codex_toml_issues),
+        ("skills openclaw", _wiring.openclaw_issues),
+        ("mcp+skills hermes", _wiring.hermes_issues),
+    ]
+    for name, fn in targets:
+        issues = fn(apply_fix)
+        if not issues:
+            rows.append(_row(name, "ok", "matches repo canon"))
+            continue
+        detail = "; ".join(issues)
+        unfixed = not apply_fix or any("manually" in i for i in issues)
+        if not apply_fix:
+            detail += " — run `condor doctor --fix`"
+        rows.append(_row(name, "warn" if unfixed else "ok", detail))
+
+    for harness, note in _wiring.external_harness_notes():
+        rows.append(_row(f"mcp {harness}", "warn", note))
+    return rows
 
 
 def _frontend_row() -> dict:
@@ -446,6 +497,7 @@ def doctor(
         _stale_clients_row,
         _clock_row,
         lambda: _interrupted_runs_row(apply_fix),
+        lambda: _harness_wiring_rows(apply_fix),
         _account_probe_rows,
         _disk_row,
         _learnings_row,
@@ -464,7 +516,12 @@ def doctor(
     payload = {"healthy": healthy, "checks": rows}
     emit(
         payload,
-        render_table(rows, columns=["check", "status", "detail"], title="doctor"),
+        render_table(
+            rows,
+            columns=["check", "status", "detail"],
+            title="doctor",
+            max_widths={"detail": 120},
+        ),
         as_json,
     )
     if not healthy:

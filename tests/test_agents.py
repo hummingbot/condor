@@ -6,6 +6,7 @@ per-Agent skill library.
 """
 
 import asyncio
+import os
 
 from condor.agents import agent as agent_module
 from condor.agents.agent import AgentStore
@@ -396,26 +397,33 @@ def test_resolve_model_id_matching():
     assert resolve_model_id("sonnet", []) is None
 
 
-def test_condor_brain_loads_from_repo_root():
-    """The chat brain is repo-root CONDOR.md (refactor-06): frontmatter + body."""
-    from condor.agents.context import _load_condor
+def test_condor_brain_is_the_condor_skill():
+    """The chat brain IS the `condor` skill (skills/condor/SKILL.md) — the one
+    place that defines what Condor does, shared verbatim with external
+    harnesses (/condor). Chat config rides in its metadata."""
+    from condor.agents.context import _default_agent, _load_condor
 
     meta, body = _load_condor()
-    assert meta.get("label") == "Condor"
-    assert "coordinator" in body or "Condor" in body
+    assert meta.get("name") == "condor"
+    assert "You are Condor" in body
+    # The default-model key must survive skill edits (see SkillStore._render_skill).
+    agent_key = (meta.get("metadata") or {}).get("condor-agent-key")
+    assert agent_key
+    if "CONDOR_DEFAULT_AGENT" not in os.environ:
+        assert _default_agent() == agent_key
 
 
 def test_session_mcp_servers_carry_agent_slug():
     """Agent runs must scope the condor MCP tools to the agent's own
-    memory/skills via --agent-slug — without it, routine_builder-style agents
-    silently read/write the CHAT's stores (e.g. 'routine_cookbook not found')."""
+    memory/skills via --agent-slug — without it, agent-scoped runs would
+    silently read/write the CHAT's stores (e.g. 'skill not found')."""
     from condor.agents.context import build_mcp_servers_for_session
 
-    servers = build_mcp_servers_for_session(agent_slug="routine_builder")
+    servers = build_mcp_servers_for_session(agent_slug="memecoin_trender")
     condor = next(s for s in servers if s["name"] == "condor")
     args = condor["args"]
     assert "--agent-slug" in args
-    assert args[args.index("--agent-slug") + 1] == "routine_builder"
+    assert args[args.index("--agent-slug") + 1] == "memecoin_trender"
 
     # Chat sessions (no agent_slug) keep the chat scope: no --agent-slug arg.
     servers = build_mcp_servers_for_session()

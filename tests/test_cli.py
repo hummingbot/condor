@@ -44,7 +44,12 @@ def test_detect_harnesses_by_config_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(init_cmd.shutil, "which", lambda name: None)
     (tmp_path / ".hermes").mkdir()
     detected = init_cmd.detect_harnesses(home=tmp_path)
-    assert detected == {"claude-code": False, "openclaw": False, "hermes": True}
+    assert detected == {
+        "claude-code": False,
+        "codex": False,
+        "openclaw": False,
+        "hermes": True,
+    }
 
 
 def test_detect_harnesses_by_binary(tmp_path, monkeypatch):
@@ -54,6 +59,102 @@ def test_detect_harnesses_by_binary(tmp_path, monkeypatch):
     detected = init_cmd.detect_harnesses(home=tmp_path)
     assert detected["claude-code"] is True
     assert detected["openclaw"] is False
+
+
+def test_mirror_skills_creates_removes_and_is_idempotent(tmp_path):
+    """The host mirror gains a link per skills/* and sheds dangling ones;
+    check mode (apply_fix=False) reports the same drift without mutating."""
+    from condor.cli.commands import _wiring
+
+    host = tmp_path / "host" / "skills"
+    (tmp_path / "host").mkdir()
+    host.mkdir()
+    (host / "gone-skill").symlink_to(tmp_path / "nowhere")
+
+    drift = _wiring.mirror_skills(host, apply_fix=False)
+    assert any("dangling link gone-skill" in c for c in drift)
+    assert (host / "gone-skill").is_symlink()  # check mode never mutates
+
+    changes = _wiring.mirror_skills(host, apply_fix=True)
+    assert any("removed dangling link gone-skill" in c for c in changes)
+    wanted = {
+        p.name
+        for p in _wiring.SKILLS_ROOT.iterdir()
+        if (p / "SKILL.md").exists()
+    }
+    assert {p.name for p in host.iterdir()} == wanted
+    assert all((p / "SKILL.md").exists() for p in host.iterdir())
+    assert _wiring.mirror_skills(host, apply_fix=True) == []  # idempotent
+
+
+def test_probe_control_distinguishes_sandbox_denial(monkeypatch):
+    """EPERM on socket connect (Codex seatbelt) is 'blocked', not 'down' —
+    a blocked probe must never be reported as a down server."""
+    from condor.cli.commands._common import probe_control
+    from condor.control import client as control_client
+    from condor.control.client import ControlError
+
+    async def _denied(method, params=None, *, timeout=10.0):
+        try:
+            raise PermissionError(1, "Operation not permitted")
+        except PermissionError as e:
+            raise ControlError(503, f"control socket unavailable: {e}") from e
+
+    monkeypatch.setattr(control_client, "call_control", _denied)
+    assert probe_control() == "blocked"
+
+    async def _refused(method, params=None, *, timeout=10.0):
+        try:
+            raise ConnectionRefusedError(61, "Connection refused")
+        except ConnectionRefusedError as e:
+            raise ControlError(503, f"control socket unavailable: {e}") from e
+
+    monkeypatch.setattr(control_client, "call_control", _refused)
+    assert probe_control() == "down"
+
+
+def test_render_table_wraps_bounded_columns_and_aligns():
+    from condor.cli.output import render_table
+
+    out = render_table(
+        [{"check": "x", "detail": "word " * 40}, {"check": "y", "detail": "short"}],
+        columns=["check", "detail"],
+        max_widths={"detail": 40},
+    )
+    lines = out.splitlines()
+    assert all(len(line) <= 60 for line in lines)  # bounded, no runaway row
+    assert len(lines) > 4  # long cell wrapped onto continuation lines
+    # continuation lines leave sibling cells blank
+    assert any(line.startswith("|  ") for line in lines)
+    # first column is aligned (padded); last column is ragged (not padded)
+    assert lines[0].startswith("| check |")
+
+
+def test_unlink_if_ours_only_removes_repo_links(tmp_path):
+    """uninstall must drop OUR symlinks and refuse anything else."""
+    from condor.cli.commands._wiring import SKILLS_ROOT, _unlink_if_ours
+
+    ours = tmp_path / "condor"
+    ours.symlink_to(SKILLS_ROOT / "condor")
+    assert "removed" in _unlink_if_ours(ours)
+    assert not ours.exists()
+
+    foreign = tmp_path / "foreign"
+    foreign.symlink_to(tmp_path)
+    assert "left alone" in _unlink_if_ours(foreign)
+    assert foreign.is_symlink()
+
+    real = tmp_path / "real"
+    real.mkdir()
+    assert "left alone" in _unlink_if_ours(real)
+    assert real.is_dir()
+
+    assert _unlink_if_ours(tmp_path / "absent") is None
+
+
+def test_codex_is_a_known_harness():
+    assert "codex" in init_cmd.HARNESSES
+    assert (init_cmd.REPO_ROOT / ".codex" / "config.toml").exists()
 
 
 def test_select_harnesses_flag_parsing():

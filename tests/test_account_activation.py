@@ -86,6 +86,23 @@ def test_onboard_solana_derives_custody_and_seals(store_path):
     assert wallets.load_solana_keypair("hot").pubkey() == kp.pubkey()
 
 
+def test_probe_warning_enables_account_anyway(store_path):
+    """A ProbeWarning (identity OK, venue unreachable — e.g. geo-block) must
+    not refuse the account; only ProbeError refuses."""
+    from condor.accounts.onboarding import ProbeWarning
+
+    kp = Keypair()
+
+    def _warning_probe(venue_id, ref, credentials):
+        raise ProbeWarning("venue API unreachable — likely geo-restriction")
+
+    ref = onboard_account(
+        "solana", {"secret_key_b58": str(kp)}, name="warned", prober=_warning_probe
+    )
+    assert ref.custody_address == str(kp.pubkey())
+    assert str(kp.pubkey()) in json.loads(store_path.read_text())["solana"]["accounts"]
+
+
 def test_onboard_rejects_mismatched_typed_address(store_path):
     kp, other = Keypair(), Keypair()
     with pytest.raises(CustodyMismatchError, match="never typed"):

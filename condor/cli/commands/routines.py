@@ -1,7 +1,7 @@
 """``condor routines`` — list routines, run one, inspect schedules.
 
 The run/schedule mutations the dashboard exposes today, from the terminal.
-Routine AUTHORING stays with the routine_builder agent — this only runs what
+Routine AUTHORING lives in the `routine-builder` skill — this only runs what
 already exists.
 """
 

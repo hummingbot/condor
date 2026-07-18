@@ -134,13 +134,14 @@ class SkillStore:
     Keyed by ``agent_slug`` alone (skills are general to the assistant, not
     per-user). Tiers (refactor-05 Phase 2):
 
-    - chat (``agent_slug`` None): the host-facing repo-root ``skills/`` only.
+    - chat (``agent_slug`` None): the host-facing repo-root ``skills/`` — which
+      is also the shared tier, so the chat's own library IS the shared library.
     - domain agent (``agent_slug`` set): reads **local > shared** —
-      ``agents/{slug}/skills`` first, then ``agents/_shared/skills`` (name
+      ``agents/{slug}/skills`` first, then the repo-root ``skills/`` (name
       clash: local wins). Writes land in the LOCAL tier only; any write
       targeting a shared-resident skill errors loudly.
-    - ``scope="shared"``: the shared tier itself, read/write — the chat's
-      management handle for knowledge every domain agent should get.
+    - ``scope="shared"``: the shared tier itself (repo-root ``skills/``),
+      read/write — the same directory the chat writes by default.
     """
 
     def __init__(self, agent_slug: str | None = None, scope: str | None = None):
@@ -170,8 +171,8 @@ class SkillStore:
     def _shared_readonly_error(self, slug: str) -> dict:
         return {
             "error": f"Skill '{slug}' lives in the SHARED tier "
-            "(agents/_shared/skills), which is read-only for agents. Ask the "
-            "user to change it from the chat (manage_skill scope='shared'), or "
+            "(the repo-root skills/ library), which is read-only for agents. Ask "
+            "the user to change it from the chat (manage_skill scope='shared'), or "
             "create a local skill of the same name to override it for this "
             "agent only."
         }

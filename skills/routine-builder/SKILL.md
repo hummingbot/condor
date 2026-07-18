@@ -1,10 +1,14 @@
 ---
 name: routine-builder
 description: "The single reference for writing Condor routines — public-REST data fetching, parallel calls, reports/charts, and candlestick charts. Routes to a companion file per topic. Use before implementing or debugging ANY routine. Read this first, then pull the specific companion file(s) for what your routine actually does (async, reports, charts). Routines are read-only and one-shot; repetition comes from cron schedules."
+compatibility: "Requires the Condor MCP server (manage_routines, manage_skill) connected"
 metadata: {"condor-source": "shared", "condor-created": "2026-07-18"}
 ---
 
 # Routine Builder
+
+Operating rule: author and run routines only through the connected MCP tools
+(`manage_routines`, `manage_skill`) — never by editing Condor's files directly.
 
 The patterns for building routines, split into **companion files** so you load
 only what your task needs. Read this overview, then fetch the relevant file(s):

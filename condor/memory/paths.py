@@ -6,7 +6,8 @@ This module makes them **per-agent**: each agent gets its own store, co-located
 with its definition, and nothing is shared across agents (FEAT-003).
 
 The repo root IS the chat coordinator's agent-home (refactor-06): its brain is
-``CONDOR.md``, its skills the repo-root ``skills/``, its routines the repo-root
+the ``condor`` skill (``skills/condor/SKILL.md`` — the same file external
+harnesses load as /condor), its skills the repo-root ``skills/``, its routines the repo-root
 ``routines/``, and its store the repo-root ``store/`` — mirroring
 ``agents/{slug}/{AGENT.md, skills/, routines/, store/}`` one-for-one. Two
 stores never resolve to the same root: the chat's lives at the root and
@@ -116,14 +117,15 @@ def builtin_skills_root(agent_slug: str | None = None) -> Path | None:
 
 
 def shared_skills_root() -> Path:
-    """The SHARED skills tier: ``agents/_shared/skills/`` (refactor-05 Phase 2).
+    """The SHARED skills tier: the repo-root ``skills/`` library.
 
-    Read by every domain agent (resolution: local > shared), writable only
-    from the chat via ``manage_skill(scope="shared")`` — agents get a loud
-    error on writes. The ``_``-prefixed dir keeps it out of AgentStore
-    discovery and host skill indexes alike.
+    A single shared library serves everyone: it is the chat's own library AND
+    the shared tier every domain agent reads (resolution: local > shared).
+    Host-visible — any harness opened in the repo (Claude Code, OpenClaw,
+    Hermes) indexes it natively. Agents read it but cannot write it; shared
+    edits happen from the chat, whose default library is this same directory.
     """
-    return _PROJECT_ROOT / "agents" / "_shared" / "skills"
+    return _PROJECT_ROOT / "skills"
 
 
 def iter_stores() -> list[tuple[str, str | None, Path]]:

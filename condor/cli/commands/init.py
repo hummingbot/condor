@@ -17,7 +17,13 @@ from condor.cli.output import ExitCode, echo, fail
 ENV_FILE = REPO_ROOT / ".env"
 ENV_EXAMPLE = REPO_ROOT / ".env.example"
 
-HARNESSES = ("claude-code", "openclaw", "hermes", "condor")
+HARNESSES = ("claude-code", "codex", "openclaw", "hermes", "condor")
+
+# Policy: Condor's skills and MCP servers are REPO-SCOPED — they load only when
+# the harness runs from this directory (Claude Code: .mcp.json + .claude/skills;
+# Codex: .codex/config.toml + .agents/skills; OpenClaw: workspace scan of
+# skills/). init verifies/repairs that wiring; it never installs anything
+# user-wide or into another product's global config.
 
 
 def _interactive() -> bool:
@@ -73,6 +79,7 @@ def detect_harnesses(home=None) -> dict[str, bool]:
     home = home or Path.home()
     return {
         "claude-code": shutil.which("claude") is not None,
+        "codex": shutil.which("codex") is not None or (home / ".codex").exists(),
         "openclaw": shutil.which("openclaw") is not None
         or (home / ".openclaw").exists(),
         "hermes": shutil.which("hermes") is not None or (home / ".hermes").exists(),
@@ -114,54 +121,81 @@ def _select_harnesses(harness: Optional[str]) -> list[str]:
     return [] if selected == ["none"] else selected
 
 
-def _mcp_stdio_snippet() -> str:
-    return (
-        '"condor": {"type": "stdio", "command": "uv", "args": '
-        f'["run", "--directory", "{REPO_ROOT}", "python", "-m", "mcp_servers.condor"]}}'
-    )
+def _repair_wiring(host_dir, mcp_issues_fn) -> None:
+    """Repair one harness's repo-scoped wiring (skills mirror + MCP config)."""
+    from condor.cli.commands import _wiring
+
+    for line in mcp_issues_fn(apply_fix=True):
+        echo(f"  mcp: {line}")
+    for line in _wiring.mirror_skills(host_dir, apply_fix=True):
+        echo(f"  skills: {line}")
 
 
 def _emit_claude_code() -> None:
+    from condor.cli.commands import _wiring
+
     echo("\n── Claude Code ──")
-    mcp_json = REPO_ROOT / ".mcp.json"
-    skills = REPO_ROOT / ".claude" / "skills"
-    if not mcp_json.exists() or not skills.exists():
-        fail(
-            f"repo is missing {mcp_json.name} or .claude/skills — checkout is incomplete",
-            ExitCode.CONFIG_ERROR,
-        )
+    _repair_wiring(REPO_ROOT / ".claude" / "skills", _wiring.mcp_json_issues)
     echo(
-        f"  In-repo: open {REPO_ROOT} in Claude Code — .mcp.json and\n"
-        "  .claude/skills are picked up automatically. Try: 'list my agents'.\n"
-        "  From anywhere, register the server user-wide:\n"
-        f"    claude mcp add --scope user condor -- uv run --directory {REPO_ROOT} python -m mcp_servers.condor"
+        f"  Repo-scoped by design: run `claude` from {REPO_ROOT} —\n"
+        "  .mcp.json (MCP servers) and .claude/skills (/condor and friends)\n"
+        "  load automatically there, and ONLY there. Try: '/condor status'."
+    )
+
+
+def _emit_codex() -> None:
+    from condor.cli.commands import _wiring
+
+    echo("\n── Codex ──")
+    _repair_wiring(REPO_ROOT / ".agents" / "skills", _wiring.codex_toml_issues)
+    echo(
+        f"  Repo-scoped by design: run `codex` from {REPO_ROOT} —\n"
+        "  .codex/config.toml (MCP servers) and .agents/skills load there,\n"
+        "  and ONLY there. Codex asks you to trust the directory on first\n"
+        "  run — project MCP config requires it. Try: '$condor status'."
     )
 
 
 def _emit_openclaw() -> None:
+    from condor.cli.commands import _wiring
+
     echo("\n── OpenClaw ──")
+    issues = _wiring.openclaw_issues(apply_fix=True)
+    for line in issues:
+        echo(f"  skills: {line}")
+    if not issues:
+        echo("  skills: /condor linked in ~/.openclaw/skills.")
     echo(
-        "  Add this MCP server to your OpenClaw config (see their MCP docs\n"
-        "  for the exact file on your version):\n"
-        f"    {_mcp_stdio_snippet()}\n"
-        f"  Skills: OpenClaw discovers {REPO_ROOT / 'skills'} via workspace scan."
+        "  (OpenClaw runs from its own workspace, so the /condor skill is\n"
+        "  linked into ~/.openclaw/skills — condor entry only. A workspace\n"
+        f"  opened at {REPO_ROOT} additionally scans the full skills/ set.)\n"
+        "  MCP has no per-workspace scope in OpenClaw — add the server to\n"
+        "  its config if doctor warns it is missing:\n"
+        f"    openclaw mcp add condor -- uv run --directory {REPO_ROOT} python -m mcp_servers.condor"
     )
 
 
 def _emit_hermes() -> None:
+    from condor.cli.commands import _wiring
+
     echo("\n── Hermes ──")
-    installed = detect_harnesses()["hermes"]
-    if not installed:
+    if not detect_harnesses()["hermes"]:
         echo(
             "  Hermes is not installed. Install it yourself (we never install\n"
             "  another project's software), then re-run init:\n"
             "    curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
         )
+        return
+    issues = _wiring.hermes_issues(apply_fix=True)
+    for line in issues:
+        echo(f"  {line}")
+    if not issues:
+        echo("  condor MCP server registered + /condor skill linked.")
     echo(
-        "  Add this MCP server to your Hermes MCP config:\n"
-        f"    {_mcp_stdio_snippet()}\n"
-        "  Install the skills tap:\n"
-        f"    hermes skills tap add {REPO_ROOT}"
+        "  Hermes has no repo-scoped loading, so both are global: the MCP\n"
+        "  server via `hermes mcp add` (condor entry only) and the skill as\n"
+        f"  a ~/.hermes/skills/condor symlink into {REPO_ROOT}.\n"
+        "  Try: '/skill condor status' (or just ask about your portfolio)."
     )
 
 
@@ -188,6 +222,7 @@ def init(
 
     emitters = {
         "claude-code": _emit_claude_code,
+        "codex": _emit_codex,
         "openclaw": _emit_openclaw,
         "hermes": _emit_hermes,
         "condor": _emit_condor,

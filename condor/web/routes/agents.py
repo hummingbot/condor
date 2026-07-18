@@ -2,8 +2,9 @@
 
 An **Agent** is the top-level unit: identity + strategy body + shared brain
 (memory/skills). ALL of its operational history is the RunStore (§7.1): one
-append-only JSONL event stream per run at ``agents/{slug}/runs/{run_id}.jsonl``
-with opaque ULID run ids. Route shape::
+append-only JSONL event stream per run at
+``agents/{slug}/runs/{run_id}/{run_id}.jsonl`` with opaque ULID run ids. Route
+shape::
 
     /agents                          -> list Agents (rollups)
     /agents/delegations              -> live delegation registry
@@ -504,7 +505,7 @@ async def get_delegation_status(task_id: str):
     store = get_run_store()
     path = store.find_run_path(task_id)
     if path is not None:
-        slug = path.parent.parent.name
+        slug = store.slug_from_path(path)
         meta = store.run_meta(slug, task_id)
         if meta.get("kind") == "delegation":
             return {
@@ -568,7 +569,7 @@ async def get_run_executors(run_id: str):
     path = store.find_run_path(run_id)
     if path is None:
         raise HTTPException(status_code=404, detail=f"run '{run_id}' not found")
-    slug = path.parent.parent.name
+    slug = store.slug_from_path(path)
     meta = store.run_meta(slug, run_id)
     _get_agent(slug)
 

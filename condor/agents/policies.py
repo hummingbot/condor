@@ -137,8 +137,8 @@ def scope_gate(policy, allowed_tools):
     are reachable even when never declared, and neither ``risk_gate`` nor ``AUTO``
     classifies them (#8). This wrapper denies a system-mutation call whose tool is
     not in ``allowed_tools``; everything else defers to ``policy`` (or auto-approves
-    when ``policy`` is AUTO/None). An EMPTY allowlist means UNRESTRICTED (e.g.
-    routine_builder), so the policy is returned unwrapped.
+    when ``policy`` is AUTO/None). An EMPTY allowlist means UNRESTRICTED, so the
+    policy is returned unwrapped.
     """
     if not allowed_tools:
         return policy

@@ -56,6 +56,21 @@ class RunResult:
     model: str = ""
 
 
+def persist_prompt_companion(agent_id: str, prompt: str) -> None:
+    """Write the run's ``prompt.md`` once (guarded on existence, so a per-tick
+    re-entry only writes on tick 1). The single owner of that companion for
+    every run kind — see :func:`run_agent`."""
+    from condor.agents.runstore import get_run_store
+
+    try:
+        store = get_run_store()
+        rp = store.find_run_path(agent_id)
+        if rp is not None and not (rp.parent / "prompt.md").exists():
+            store.write_companion(agent_id, "prompt.md", prompt)
+    except Exception:
+        log.exception("run_agent %s: prompt.md write failed", agent_id)
+
+
 async def run_agent(
     agent: Agent,
     prompt: str,
@@ -70,6 +85,7 @@ async def run_agent(
     on_client: Callable[[Any], None] | None = None,
     agent_id: str = "",
     on_tool_call: Callable[[dict], None] | None = None,
+    prompt_companion: str | None = None,
 ) -> RunResult:
     """Run ``agent``'s brain to completion on ``prompt``; return a RunResult.
 
@@ -119,6 +135,14 @@ async def run_agent(
         )
 
     result.model = model or agent.agent_key
+
+    # Persist the run's prompt companion (prompt.md) once, for EVERY kind — the
+    # single owner of that write. The tick engine passes its stable prefix via
+    # ``prompt_companion`` (so the prefix/suffix reconstruction contract holds);
+    # one-shots (consult/delegation/experiment-as-run) let it default to the
+    # full prompt.
+    if agent_id:
+        persist_prompt_companion(agent_id, prompt_companion or prompt)
 
     # -- MCP toolset wiring (agent_slug scopes memory/skills to this Agent) --
     mcp_servers = build_mcp_servers_for_session(

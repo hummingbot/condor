@@ -22,96 +22,35 @@ from mcp_servers.condor.tools import (
 def _build_instructions() -> str:
     """Server-level instructions surfaced to the MCP host on connect.
 
-    An external MCP client (Claude Code, Cursor, …) only receives a flat list of
-    tool names — it never sees Condor's skills/agents indexes, which are injected
-    only into the in-bot `/agent` brain prompt. Without this, the host reaches for
-    whatever obvious tool is in scope (e.g. a raw `manage_executors`) instead of the
-    matching Condor playbook. We embed the live indexes here so any host can route
-    a request to the right skill/agent. Built once at import; cheap and read-only.
+    Deliberately thin: the single source for HOW to operate Condor is the
+    ``condor`` skill (``skills/condor/SKILL.md``) — the same file that is the
+    chat brain and the /condor skill in external harnesses. These instructions
+    only (a) point the host at that skill and (b) embed the live skills/agents
+    indexes, which are generated data a host can't otherwise see. Duplicating
+    the routing/verb prose here is what this design retired — don't add it
+    back. Built once at import; cheap and read-only.
     """
-    base = (
-        "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
-        "routine) and consultable **domain agents** on top of these tools.\n\n"
-        "ROUTING RULE — before handling a request with raw tools, apply this "
-        "priority: (1) a matching SKILL, (2) a matching AGENT, (3) raw tools only "
-        "if neither matches:\n"
-        '- If a SKILL matches, call `manage_skill(action="read", name="<name>")` '
-        'and follow its steps. When it links a routine (shown as "→ routine: X"), '
-        'run that routine via `manage_routines(action="run", name="X", config={})` '
-        "instead of reimplementing it by hand.\n"
-        "- If a domain AGENT matches, route to it with "
-        '`consult(agent="<slug>", task="...", context="...")` and summarize its answer '
-        "(consult = attended, blocking, each trade goes to the user to approve). "
-        'ONLY when the user explicitly detaches ("in the background", "ping me '
-        'when done") use `delegate(agent="<slug>", task="...", risk_limits={…})` '
-        "— unattended, budget-gated (pass caps for a trading agent); it returns a "
-        "run_id you track with `get_run`/`control_run`, NOT a delegate poll. See "
-        "the EXECUTION VERBS block below for run vs consult vs delegate.\n"
-        "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
-        "design a routine MUST go through the `routine_builder` agent "
-        '(`consult(agent="routine_builder", ...)` for inline work, '
-        '`delegate(agent="routine_builder", ...)` for background). '
-        "It is the single entry point for routine authoring — do NOT write routine "
-        "code yourself and do NOT hand-roll it with raw `manage_routines` "
-        "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
-        '— for that just call `manage_routines(action="run", name="...")`.)\n'
-        "- Only fall back to raw tools when nothing matches.\n"
-        "Anti-pattern: answering a domain request (deploy/tune an executor, analyze "
-        "logs, author a routine) with a chain of raw `manage_*` "
-        "calls when a skill or agent covers it.\n"
-        'Discover more anytime with `manage_skill(action="list")`.'
-    )
-
     from pathlib import Path
 
     repo_root = Path(__file__).resolve().parents[2]
-    cli = (
-        "[OPS CLI — `condor`, for hosts with shell access]\n"
-        "Operational/diagnostic work has NO MCP tool — it belongs to the `condor` "
-        f"CLI (on PATH via ~/.local/bin/condor, else `uv run --directory {repo_root} "
-        "condor …`). Run it via your shell for:\n"
-        "- `condor doctor [--fix]` — health checks (socket, clock skew, stale MCP "
-        'clients, venue probes, spec validation); ANY health/setup/"why is X '
-        'failing" question starts here\n'
-        "- `condor status` / `condor logs [-f]` / `condor runs [export <id>]` — "
-        "server, live runs, server log, run history (file-backed; work with the "
-        "server down)\n"
-        "- `condor stop [run|slug] [--close]` — the escape hatch when MCP calls "
-        "hang or the server is wedged\n"
-        "- `condor accounts add/remove/default` — venue credential lifecycle "
-        "(keys via stdin, never argv); `condor serve` — start the server\n"
-        "Contract: compact Markdown out, `--json` for raw values, stable exit "
-        "codes (0 ok · 2 not found · 3 server not running · 4 config error). "
-        "Prefer the typed MCP tools for trading/agent domain work; prefer the CLI "
-        "for ops, diagnostics, and anything that must survive a wedged server."
+    base = (
+        "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
+        "routine) and consultable **domain agents** on top of these tools.\n\n"
+        "OPERATING GUIDE — the `condor` skill is the single source for how to "
+        "drive Condor (routing priority, run vs consult vs delegate vs dry-run, "
+        "run tracking, ops CLI). If your host loaded it (e.g. as /condor), follow "
+        "it. Otherwise, BEFORE any multi-step or trading flow, read it once with "
+        '`manage_skill(action="read", name="condor")` and follow it.\n'
+        "Minimal routing kernel until then: prefer (1) a matching SKILL "
+        '(`manage_skill(action="read", name="<name>")`, follow its steps) over '
+        '(2) a matching AGENT (`consult(agent="<slug>", task="...")`) over '
+        "(3) raw tools; never hand-author a routine without reading the "
+        "`routine-builder` skill first. Ops/diagnostics have no MCP tool — use "
+        f"the `condor` CLI (on PATH, else `uv run --directory {repo_root} "
+        "condor …`), starting with `condor doctor`."
     )
 
-    verbs = (
-        "[EXECUTION VERBS — run vs consult vs delegate vs experiment]\n"
-        "When the user wants an agent to DO something, pick the verb in order:\n"
-        '1. WHOSE GOAL? The agent\'s own strategy — "run/start/launch <agent>", '
-        '"let it trade", "on its schedule" → run_agent(slug): a SESSION running '
-        "the agent's default_config loop under journal-seeded risk. Steering "
-        '("focused on SOL", "10 ticks", "tighter stops") is trading_context/'
-        "max_ticks/config on the SAME run_agent call, not a task. A one-off goal "
-        "you specify → a TASK (step 3). Boundary: finishes by itself = task; runs "
-        "until stopped / N ticks = the mandate = run_agent.\n"
-        '2. REHEARSAL? "test/try it/dry run/simulate/paper/without real money" → '
-        "run_agent(slug, dry_run=true): one simulated tick, all mutations blocked. "
-        'Ambiguous "try it" → ASK before going live.\n'
-        "3. TASK — attended → consult (blocks; each trade goes to the user to "
-        'approve; DEFAULT for "have <agent> do X"). Detached (explicit "in the '
-        'background"/"ping me when done") → delegate + risk_limits budget for a '
-        "trading agent. Never delegate just to avoid waiting when the user could "
-        "approve.\n"
-        "MULTI-STAGE: status/stop/history of ANY run (session, experiment, consult, "
-        "delegation — all share one run_id) go through get_run / list_runs / "
-        "control_run(run_id, verb, close?) / search_history / "
-        "manage_executors(performance). Don't invent delegate.get/stop — a "
-        "delegation is a run; track it like one."
-    )
-
-    sections = [base, cli, verbs]
+    sections = [base]
     try:
         from condor.memory import SkillStore
         from mcp_servers.condor.settings import settings
@@ -190,7 +129,8 @@ async def delegate(
     risk_limits arg when given (it REPLACES the agent's AGENT.md baseline for
     this one run), else the baseline. A trading delegation with neither errors
     at start; "unbounded" is expressed by passing explicitly large caps.
-    Non-trading specialists (e.g. routine_builder) run with full auto-approve.
+    Non-trading specialists (agents that declare no `manage_executors` and
+    carry no baseline) run with full auto-approve.
 
     Args:
         agent: Agent slug to delegate to.
@@ -745,15 +685,16 @@ async def manage_skill(
     with agent_slug — use this to author or inspect an agent's skills while
     building it. Without agent_slug the current assistant's library is used.
 
-    PLACEMENT RULE (three tiers): the chat's own library is the repo-root
-    skills/ dir, which is HOST-VISIBLE — any harness opened in the Condor repo
-    (Claude Code, OpenClaw, Hermes) indexes it natively. Put only genuinely
-    host-relevant playbooks there. Knowledge meant for ONE agent belongs in
-    that agent's local tier (pass agent_slug). Knowledge EVERY domain agent
-    should get (executor mechanics, venue quirks) belongs in the SHARED tier
-    (pass scope="shared" — agents/_shared/skills): domain agents read it
-    automatically (local overrides shared on a name clash) but can never
-    write it — shared edits happen only here in the chat, with the user.
+    PLACEMENT RULE (two tiers): the repo-root skills/ dir is the single
+    shared, HOST-VISIBLE library — any harness opened in the Condor repo
+    (Claude Code, OpenClaw, Hermes) indexes it natively, AND every domain
+    agent reads it automatically (local overrides it on a name clash). It is
+    the chat's own default library, so knowledge every agent should get
+    (executor mechanics, venue quirks, routine authoring) just goes here (no
+    agent_slug; scope="shared" targets the same dir explicitly). Knowledge
+    meant for ONE agent belongs in that agent's local tier (pass agent_slug).
+    Agents read the shared library but can never write it — shared edits
+    happen only here in the chat, with the user.
     Skills follow the agentskills.io format: hyphenated names, and the
     description states WHAT the skill does and WHEN to use it.
 

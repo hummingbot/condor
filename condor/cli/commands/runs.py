@@ -39,7 +39,7 @@ def _export(run_id: Optional[str]) -> None:
     path = store.find_run_path(run_id)
     if path is None:
         fail(f"run '{run_id}' not found", ExitCode.NOT_FOUND)
-    slug = path.parent.parent.name
+    slug = store.slug_from_path(path)
     meta = store.run_meta(slug, run_id)
     events = store.read_events(slug, run_id)
     echo(render_run_markdown(meta, events))
@@ -56,7 +56,7 @@ def _list(slug: Optional[str], kind: Optional[str], limit: int, as_json: bool) -
     # Latest event first == file mtime order, across all agents.
     entries = []
     for s in slugs:
-        for path in store.runs_dir(s).glob("*.jsonl"):
+        for path in store.all_run_paths(s):
             entries.append((path.stat().st_mtime, s, path.stem))
     entries.sort(reverse=True)
 
