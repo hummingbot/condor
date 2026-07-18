@@ -1,11 +1,9 @@
 # Project-scoped Codex config — loaded only when Codex runs inside this repo
 # (and the directory is trusted). The Codex analog of .mcp.json: Condor's MCP
-# servers stay repo-scoped by design. Skills load from .agents/skills.
+# server stays repo-scoped by design. Skills load from .agents/skills.
+# Managed by `condor init` / `condor doctor --fix` — edits to the condor
+# table will be reverted.
 
 [mcp_servers.condor]
 command = "uv"
 args = ["run", "python", "-m", "mcp_servers.condor"]
-
-[mcp_servers.mcp-hummingbot]
-command = "uv"
-args = ["run", "python", "-m", "mcp_servers.hummingbot_api"]

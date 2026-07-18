@@ -1,27 +1,30 @@
 {
   "mcpServers": {
-    "mcp-hummingbot": {
-      "type": "stdio",
-      "command": "uv",
-      "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
-      "env": {}
-    },
     "condor": {
       "type": "stdio",
       "command": "uv",
-      "args": ["run", "python", "-m", "mcp_servers.condor"],
+      "args": [
+        "run",
+        "python",
+        "-m",
+        "mcp_servers.condor"
+      ],
       "env": {}
     },
     "playwright": {
       "type": "stdio",
       "command": "npx",
-      "args": ["@playwright/mcp@latest"],
+      "args": [
+        "@playwright/mcp@latest"
+      ],
       "env": {}
     },
     "condor-notifications": {
       "type": "stdio",
       "command": "bun",
-      "args": ["integrations/claude_channel/condor-channel.ts"],
+      "args": [
+        "integrations/claude_channel/condor-channel.ts"
+      ],
       "env": {}
     }
   }

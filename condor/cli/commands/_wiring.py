@@ -7,7 +7,7 @@ repo's ``skills/`` library and MCP canon:
 - ``.claude/skills`` and ``.agents/skills`` mirror ``skills/`` one symlink
   per skill (Claude Code / Codex+OpenClaw skill discovery).
 - ``.mcp.json`` (Claude Code) and ``.codex/config.toml`` (Codex) carry the
-  canonical ``condor`` + ``mcp-hummingbot`` stdio server entries.
+  canonical ``condor`` stdio server entry (the one server).
 
 Repo-owned files only — OpenClaw/Hermes global configs are never written
 (doctor checks them read-only and prints the remedy command).
@@ -44,28 +44,18 @@ EXPECTED_MCP = {
         "args": ["run", "python", "-m", "mcp_servers.condor"],
         "env": {},
     },
-    "mcp-hummingbot": {
-        "type": "stdio",
-        "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.hummingbot_api"],
-        "env": {},
-    },
 }
 
 CODEX_CONFIG = """\
 # Project-scoped Codex config — loaded only when Codex runs inside this repo
 # (and the directory is trusted). The Codex analog of .mcp.json: Condor's MCP
-# servers stay repo-scoped by design. Skills load from .agents/skills.
-# Managed by `condor init` / `condor doctor --fix` — edits to the condor and
-# mcp-hummingbot tables will be reverted.
+# server stays repo-scoped by design. Skills load from .agents/skills.
+# Managed by `condor init` / `condor doctor --fix` — edits to the condor
+# table will be reverted.
 
 [mcp_servers.condor]
 command = "uv"
 args = ["run", "python", "-m", "mcp_servers.condor"]
-
-[mcp_servers.mcp-hummingbot]
-command = "uv"
-args = ["run", "python", "-m", "mcp_servers.hummingbot_api"]
 """
 
 
@@ -112,10 +102,10 @@ def _entry_drifted(entry: dict, expected: dict) -> bool:
 
 
 def mcp_json_issues(apply_fix: bool = True) -> list[str]:
-    """Ensure .mcp.json carries the canonical condor/mcp-hummingbot entries.
+    """Ensure .mcp.json carries the canonical condor entry.
 
     Other servers in the file (playwright, notification channels, …) are the
-    user's and are preserved verbatim; only the two canonical entries are
+    user's and are preserved verbatim; only the canonical entry is
     checked/patched. A file that does not parse is never rewritten.
     """
     try:
@@ -144,7 +134,7 @@ def codex_toml_issues(apply_fix: bool = True) -> list[str]:
 
     Python ships no TOML writer, so a fix rewrites the whole file from
     :data:`CODEX_CONFIG` — but ONLY when the file contains nothing beyond the
-    two canonical tables. Custom content (other servers, other settings)
+    canonical condor table. Custom content (other servers, other settings)
     downgrades the fix to a "manually" report; the canonical version is one
     ``git checkout`` away.
     """
@@ -170,8 +160,8 @@ def codex_toml_issues(apply_fix: bool = True) -> list[str]:
     has_custom = set(data) - {"mcp_servers"} or set(servers) - set(EXPECTED_MCP)
     if has_custom:
         return [
-            "drifted but carries custom entries — restore the condor/"
-            "mcp-hummingbot tables manually (canonical version is in git)"
+            "drifted but carries custom entries — restore the condor "
+            "table manually (canonical version is in git)"
         ]
     CODEX_TOML.parent.mkdir(parents=True, exist_ok=True)
     CODEX_TOML.write_text(CODEX_CONFIG)
