@@ -390,7 +390,13 @@ function AgentDropdown({
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
-  const directAgents = agents.filter((a) => !a.key.endsWith(":"));
+  // Direct picks: the CLI/ACP agents plus the local "Default Model" sentinels
+  // (ollama:/lmstudio:), which select a loaded local model directly — same set
+  // the Telegram /agent picker shows. Only "openrouter:" is a real picker (it
+  // needs a specific model chosen), handled by the submenu below.
+  const directAgents = agents.filter(
+    (a) => !a.key.endsWith(":") || a.key === "ollama:" || a.key === "lmstudio:",
+  );
   const hasOpenRouter = agents.some((a) => a.key === "openrouter:");
   const label = agentDisplayLabel(selectedAgent, agents, models);
 
