@@ -33,6 +33,7 @@ from handlers.agents._shared import (
     load_assistant,
 )
 from handlers.agents.confirmation import _format_tool_summary
+from handlers.agents.openrouter_models import fetch_models
 from handlers.agents.session import destroy_session, get_or_create_session, get_session
 
 log = logging.getLogger(__name__)
@@ -486,4 +487,27 @@ async def get_chat_options(user: WebUser = Depends(get_current_user)):
         ],
         "default_agent": DEFAULT_AGENT,
         "default_mode": DEFAULT_MODE,
+    }
+
+
+@router.get("/chat/openrouter/models")
+async def get_openrouter_models(user: WebUser = Depends(get_current_user)):
+    """OpenRouter models that support tool-calling, for the web model picker.
+
+    Mirrors the Telegram OpenRouter picker: the catalog is public/unauthenticated,
+    so this works without OPENROUTER_API_KEY set. Starting a session with one of
+    these models still requires the key, and raises a clear error if it is unset.
+    """
+    models = await fetch_models()
+    return {
+        "models": [
+            {
+                "slug": m.slug,
+                "name": m.name,
+                "context_length": m.context_length,
+                "prompt_price": m.prompt_price,
+                "completion_price": m.completion_price,
+            }
+            for m in models
+        ],
     }

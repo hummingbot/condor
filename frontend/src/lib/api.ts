@@ -664,6 +664,14 @@ export interface ChatOptionsResponse {
   default_mode: string;
 }
 
+export interface OpenRouterModelOption {
+  slug: string;
+  name: string;
+  context_length: number;
+  prompt_price: number;
+  completion_price: number;
+}
+
 // ── Backtesting ──
 
 export interface BacktestTask {
@@ -1371,4 +1379,7 @@ export const api = {
 
   getChatOptions: () =>
     apiFetch<ChatOptionsResponse>("/api/v1/chat/options"),
+
+  getOpenRouterModels: () =>
+    apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
 };
