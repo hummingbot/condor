@@ -1088,25 +1088,71 @@ async def start_strategy(
     }
 
 
+async def _guard_stop_orphaning(engine, force: bool) -> None:
+    """Refuse a plain stop that would orphan positions the policy says to flatten.
+
+    An agent declaring ``on_kill_switch: flatten_all`` is saying its positions are
+    risk to close, not spot to keep. Stopping it with positions still open orphans
+    them: the executor tracking is cleaned up (SYSTEM_CLEANUP) while the on-chain
+    position survives, so the normal ``stop(keep_position=False)`` path can no
+    longer close it. Fail loudly instead of silently stranding funds.
+    """
+    if force:
+        return
+    from condor.agents.shutdown import (
+        POLICY_FLATTEN_ALL,
+        load_shutdown_policy,
+        open_risk,
+    )
+
+    policy, _ = load_shutdown_policy(engine.strategy)
+    if policy.on_kill_switch != POLICY_FLATTEN_ALL:
+        return
+    n_executors, n_positions, descriptions = await open_risk(engine)
+    if not (n_executors or n_positions):
+        return
+    open_list = ", ".join(descriptions[:5]) or "(details unavailable)"
+    raise HTTPException(
+        status_code=409,
+        detail=(
+            f"'{engine.agent_id}' still holds {n_executors} executor(s) / "
+            f"{n_positions} position(s) and declares on_kill_switch: flatten_all. "
+            f"A plain stop would orphan them on-chain (executor tracking is "
+            f"cleaned up, the position is not). Use shutdown to wind down per "
+            f"shutdown.md, or retry with force=true to stop anyway. "
+            f"Open: {open_list}"
+        ),
+    )
+
+
 @router.post("/{slug}/strategies/{sslug}/stop")
 async def stop_strategy(
     slug: str,
     sslug: str,
     agent_id: str | None = None,
+    force: bool = False,
     user: WebUser = Depends(get_current_user),
 ):
-    """Stop a running strategy. If agent_id given, stop that instance; else all."""
+    """Stop a running strategy. If agent_id given, stop that instance; else all.
+
+    Refuses with 409 when the agent still holds open executors/positions and its
+    shutdown policy is ``flatten_all`` (see :func:`_guard_stop_orphaning`); pass
+    ``force=true`` to stop anyway.
+    """
     if agent_id:
         from condor.agents.engine import get_engine
 
         engine = get_engine(agent_id)
         if not engine:
             raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+        await _guard_stop_orphaning(engine, force)
         await engine.stop()
     else:
         engines = _get_engines_for(slug, sslug)
         if not engines:
             raise HTTPException(status_code=404, detail="No running strategy found")
+        for engine in engines:
+            await _guard_stop_orphaning(engine, force)
         for engine in engines:
             await engine.stop()
     return {"stopped": True}

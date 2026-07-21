@@ -195,6 +195,24 @@ async def _fetch_positions(client: Any, agent_id: str) -> list[dict]:
     return [p for p in positions if isinstance(p, dict)]
 
 
+async def open_risk(engine: Any) -> tuple[int, int, list[str]]:
+    """This session's still-open executors/positions: ``(n_executors, n_positions, descriptions)``.
+
+    Used by the plain ``/stop`` path to refuse orphaning risk for agents whose
+    policy says positions must not outlive the session. Reuses the same lookups
+    as the winddown so both agree on what "open" means.
+    """
+    client = await engine._get_client()
+    running = await _get_running_executors(engine, client)
+    positions = await _fetch_positions(client, engine.agent_id)
+    descriptions = [
+        f"{ex.get('type') or 'executor'} {ex.get('trading_pair') or ''}".strip()
+        for ex in running
+    ]
+    descriptions += [d for d in (_describe_position(p) for p in positions) if d]
+    return len(running), len(positions), descriptions
+
+
 async def _deterministic_baseline(
     engine: Any, client: Any, policy: ShutdownPolicy
 ) -> tuple[int, list[str]]:
