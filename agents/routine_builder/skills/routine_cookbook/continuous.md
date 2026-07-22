@@ -54,7 +54,12 @@ Use instead of spamming `send_message` when you want one live-updating report:
 ```python
 from condor.reports import LiveReport
 
-report = LiveReport("Monitor Title", source_name="routine_name", tags=["live", "monitoring"])
+report = LiveReport(
+    "Monitor Title",
+    source_name="routine_name",
+    tags=["live", "monitoring"],
+    auto_refresh_seconds=30,
+)
 
 try:
     while True:
@@ -64,11 +69,12 @@ try:
             # Rebuild report each tick
             report.clear()
             report.builder.manual_order()
+            report.builder.section("01 / LIVE STATUS", "Current monitor state")
             report.builder.kpi("Price", f"${price:,.2f}")
             report.builder.kpi("24h Change", f"{change:+.2f}%")
             report.builder.table(history[-50:], ["Time", "Price", "Volume"])
             report.builder.markdown(f"_Last update: {timestamp}_")
-            report.update()  # Creates on first call, updates in-place thereafter
+            await report.update()  # Creates on first call, updates in-place thereafter
 
         except asyncio.CancelledError:
             raise
@@ -78,16 +84,32 @@ try:
         await asyncio.sleep(config.interval_sec)
 
 except asyncio.CancelledError:
+    if report.report_id is not None:
+        report.clear()
+        report.builder.auto_refresh(None)
+        report.builder.section("MONITOR STOPPED", "Final fixed snapshot")
+        report.builder.table(history[-50:], ["Time", "Price", "Volume"])
+        await report.update()
     return "Stopped"
 ```
 
 ### LiveReport API (only these exist)
 - `clear()` — reset builder for next tick
-- `update()` — save/update the report (sync)
-- `report.builder` — ReportBuilder instance (use `.kpi()`, `.table()`, `.markdown()`, `.plotly()`, `.manual_order()`)
+- `update()` — async save/update of the report
+- `report.builder` — ReportBuilder instance (use `.section()`, `.kpi()`, `.table()`, `.markdown()`, `.plotly()`, `.manual_order()`)
 - `report.report_id` — ID of the live report (available after first `update()`)
+- `auto_refresh_seconds` — optional browser reload interval preserved across `clear()`
 
-Methods that DO NOT exist: `heading()`, `text()`, `section()`, `html()` — use `markdown()`.
+Auto-refresh reports show Live and Pause/Resume controls. User filtering, chart
+selection, table search, sorting, or paging pauses refresh automatically. The
+routine continues updating the file while the open viewer is paused; Resume loads
+the latest version. On cancellation, rebuild once with
+`report.builder.auto_refresh(None)` and call `update()` so the retained report is
+clearly stopped instead of refreshing forever. Downloaded HTML remains a fixed
+offline snapshot.
+
+Methods that DO NOT exist: `heading()`, `text()`, `html()`. Use `section()` for
+major boundaries and `markdown()` for narrative or subsection headings.
 
 ## When to use LiveReport vs send_message
 

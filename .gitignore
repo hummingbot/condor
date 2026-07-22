@@ -180,3 +180,6 @@ agents/*/store/
 node_modules/
 /improvements/
 /features/
+
+# Routine reports
+/reports/

@@ -4,11 +4,12 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import condor.reports as report_storage
 from condor.web.routes import (
     agents,
     archived,
@@ -79,9 +80,24 @@ def create_app() -> FastAPI:
     app.include_router(transcribe.router, prefix="/api/v1")
 
     # ── Serve report HTML files ──
-    reports_dir = Path(__file__).resolve().parent.parent.parent / "reports"
+    reports_dir = Path(report_storage.CHARTS_DIR)
     reports_dir.mkdir(exist_ok=True)
-    app.mount("/reports", StaticFiles(directory=str(reports_dir)), name="reports")
+    reports_root = reports_dir.resolve()
+
+    @app.get("/reports/{filename:path}", include_in_schema=False)
+    async def serve_report(filename: str):
+        path = (reports_root / filename).resolve()
+        try:
+            path.relative_to(reports_root)
+        except ValueError as exc:
+            raise HTTPException(404, "Report not found") from exc
+        if path.suffix.lower() != ".html" or not path.is_file():
+            raise HTTPException(404, "Report not found")
+        return FileResponse(
+            path,
+            media_type="text/html",
+            headers={"Cache-Control": "no-cache"},
+        )
 
     # ── Serve built frontend (production) ──
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
