@@ -299,7 +299,9 @@ def markdown_to_html(text: str) -> str:
         import bleach
         import markdown
 
-        rendered = markdown.markdown(text, extensions=["fenced_code", "tables"])
+        rendered = markdown.markdown(
+            text, extensions=["fenced_code", "tables", "nl2br"]
+        )
         return bleach.clean(
             rendered,
             tags={

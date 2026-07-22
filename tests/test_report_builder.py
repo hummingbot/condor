@@ -36,6 +36,15 @@ def _report_spec(document: str) -> dict:
     return json.loads(match.group(1))
 
 
+def test_markdown_preserves_single_newlines():
+    rendered = rendering.markdown_to_html(
+        "**Market Analysis**\nOverall Regime: ranging\nSpread Recommendation: moderate"
+    )
+
+    assert rendered.count("<br") == 2
+    assert "<strong>Market Analysis</strong>" in rendered
+
+
 def test_interactive_report_embeds_safe_runtime(reports_dir):
     rows = [
         {"timestamp": "2026-01-01T00:00:00Z", "pair": "BTC-USDT", "price": 100},
