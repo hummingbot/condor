@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import os
 import shutil
+import subprocess
+from pathlib import Path
 
 import httpx
 
@@ -40,17 +42,59 @@ _CLOUD_KEY_ENVS = {
 _LOCAL_PREFIXES = ("ollama", "lmstudio")
 
 
+def _npx_packages_installed() -> set[str]:
+    """npm packages resolvable WITHOUT a network install: local, global, npx cache.
+
+    Mirrors how npx resolves a package before falling back to downloading it.
+    ``shutil.which("npx")`` says nothing about the package — npx exists whenever
+    Node does — so probing the launcher would mark every ``npx``-run bridge
+    available on any machine with Node.
+    """
+    roots = [Path.cwd() / "node_modules"]
+    npm = shutil.which("npm")
+    if npm:
+        try:
+            proc = subprocess.run(
+                [npm, "root", "-g"], capture_output=True, text=True, timeout=10
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                roots.append(Path(proc.stdout.strip()))
+        except (OSError, subprocess.SubprocessError):
+            pass  # npm unusable = nothing installed via it; local + cache still count
+    roots.extend((Path.home() / ".npm" / "_npx").glob("*/node_modules"))
+
+    installed: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for entry in root.iterdir():
+            if entry.name.startswith("@"):
+                installed.update(f"{entry.name}/{sub.name}" for sub in entry.iterdir())
+            else:
+                installed.add(entry.name)
+    return installed
+
+
 def _acp_clis() -> list[dict]:
-    """ACP CLI bridges and whether each launcher binary is on PATH."""
-    binary_available: dict[str, bool] = {}
+    """ACP CLI bridges and whether each one is actually installed.
+
+    A bridge launched as ``npx <package> …`` is available only if the PACKAGE is
+    already installed; a bare command is available if it is on PATH. Note that
+    ``available`` means "launchable" — every ACP bridge additionally needs its
+    own interactive login (Claude/Google/GitHub/OpenAI), which cannot be probed
+    from here, so an available bridge is not necessarily a working one.
+    """
+    npx_packages = _npx_packages_installed()
     out: list[dict] = []
     for base, cmd in ACP_COMMANDS.items():
-        binary = cmd.split()[0] if cmd else ""
-        if binary not in binary_available:
-            binary_available[binary] = shutil.which(binary) is not None
-        out.append(
-            {"agent_key": base, "command": cmd, "available": binary_available[binary]}
-        )
+        parts = cmd.split()
+        if not parts:
+            available = False
+        elif parts[0] == "npx":
+            available = parts[1] in npx_packages if len(parts) > 1 else False
+        else:
+            available = shutil.which(parts[0]) is not None
+        out.append({"agent_key": base, "command": cmd, "available": available})
     return out
 
 

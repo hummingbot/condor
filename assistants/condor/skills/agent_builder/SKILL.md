@@ -211,8 +211,11 @@ default; override at launch via `config={"agent_key": "…"}`. **Recommend from 
 operator actually has — call `get_available_models` and pick for the agent's job. Do NOT
 default to a hardcoded model.** The tool reports:
 - `acp_clis` — subscription/CLI bridges (`claude-code`, `gemini`, `copilot`, `codex`) and
-  whether each launcher is installed. No API key or per-token cost (rides the operator's
+  whether each CLI is installed. No API key or per-token cost (rides the operator's
   Claude/ChatGPT subscription); runs unrestricted (does NOT enforce the `tools` allowlist).
+  **`available` means installed, not signed in** — each bridge needs its own interactive
+  login that Condor cannot probe. Never recommend one as if it were ready; name it as an
+  option and ask the user to confirm they use it.
 - `local` — `ollama` / `lmstudio`, each with the models currently **loaded** (empty =
   server not running). Free, private, offline; addressed as `ollama:<model>` /
   `lmstudio:<model>`. Only offer a local model that is actually loaded.
@@ -224,8 +227,10 @@ default to a hardcoded model.** The tool reports:
   model, or an installed ACP CLI) unless the user wants to add a key.
 
 Choose by the agent's job, not by habit:
-- **Correctness-critical / high-capital** (decides real trades) → a strong model: an ACP
-  subscription bridge, or a capable OpenRouter model (e.g. a Claude/GPT/DeepSeek-V3-class,
+- **Correctness-critical / high-capital** (decides real trades) → a strong model. Lead with
+  a credential you can verify: if `openrouter.key_present` (or another `cloud_keys` provider)
+  is true, recommend from there; offer an ACP bridge as the alternative to confirm, not the
+  default. Pick a capable OpenRouter model (e.g. a Claude/GPT/DeepSeek-V3-class,
   not a tiny "flash" model — lightweight models drop instructions, e.g. answering in the
   wrong language). Validate a cheaper pick with a `dry_run` before going live.
 - **Simple report / watch loop, or privacy / offline / zero-cost** → a loaded local model

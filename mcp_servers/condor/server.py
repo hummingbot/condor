@@ -270,7 +270,12 @@ async def get_available_models(
 
     Returns a dict with:
       - acp_clis: subscription/CLI bridges (claude-code, gemini, copilot, …),
-        each with ``agent_key`` and ``available`` (launcher binary on PATH).
+        each with ``agent_key`` and ``available`` — the CLI is installed and
+        launchable. ``available`` does NOT mean signed in: every bridge needs its
+        own interactive login (Claude/Google/GitHub/OpenAI) that cannot be probed
+        from here. Treat a bridge as a candidate to CONFIRM with the user, and
+        prefer a credential you can verify (a set ``cloud_keys`` provider, or a
+        loaded local model) when recommending unprompted.
       - cloud_keys: {provider: bool} — whether OPENROUTER/OPENAI/ANTHROPIC/GROQ/
         GOOGLE keys are set in the environment.
       - local: {ollama, lmstudio} each with ``base_url``, ``reachable``, and the
@@ -282,7 +287,8 @@ async def get_available_models(
         added (Settings) before they can run; recommend a runnable option first.
 
     Guidance for choosing: correctness-critical or high-capital agents → a strong
-    model (a subscription ACP bridge, or a capable OpenRouter model); simple
+    model (a capable OpenRouter model when its key is set, or a subscription ACP
+    bridge the user confirms is signed in); simple
     report/watch loops or privacy/offline needs → a loaded local model or a cheap
     OpenRouter one. Only pydantic-ai keys (openrouter:/ollama:/lmstudio:/openai:/
     groq:) enforce an agent's ``tools`` allowlist; ACP bridges run unrestricted.
