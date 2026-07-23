@@ -304,21 +304,14 @@ async def _handle_openrouter_picker(
     Fetches the model list (cached for 1h), filters to tool-calling models, and
     stores the resolved list in user_data so or_pick:N can resolve the index.
     """
-    import os
-
     from .menu import _openrouter_picker_keyboard
     from .openrouter_models import fetch_models
 
     query = update.callback_query
 
-    # Surface a hint instead of silently presenting an unusable picker
-    if not os.environ.get("OPENROUTER_API_KEY"):
-        await query.message.edit_text(
-            "OPENROUTER_API_KEY is not set. Add it to your .env to use OpenRouter models, "
-            "then restart the bot.\n\nGet a key at https://openrouter.ai/keys"
-        )
-        return
-
+    # The catalog is public, so browse it without a key — same as the web picker
+    # (condor/web/routes/chat_ws.py). The key is only needed to RUN a model; that
+    # is enforced with a clear error at session start (pydantic_ai_client.py).
     if page == 0:
         await query.message.edit_text("Loading OpenRouter models...")
 
