@@ -7,6 +7,7 @@ pre-tick numbers.
 """
 
 import asyncio
+import math
 
 from condor.agents.risk import (
     RiskEngine,
@@ -14,6 +15,7 @@ from condor.agents.risk import (
     RiskState,
     auto_approve_with_risk_check,
 )
+from condor.agents.performance import _executor_row
 
 
 def _create_call(amount: float = 100.0) -> dict:
@@ -24,6 +26,23 @@ def _create_call(amount: float = 100.0) -> dict:
             "executor_config": {
                 "controller_id": "test_controller",
                 "total_amount_quote": amount,
+            },
+        },
+    }
+
+
+def _lp_create_call(*, quote_amount: float = 0.0, base_amount: float = 0.0) -> dict:
+    return {
+        "tool": "manage_executors",
+        "input": {
+            "action": "create",
+            "executor_type": "lp_executor",
+            "controller_id": "test_controller",
+            "executor_config": {
+                "quote_amount": quote_amount,
+                "base_amount": base_amount,
+                "lower_price": 0.002,
+                "upper_price": 0.003,
             },
         },
     }
@@ -86,6 +105,84 @@ def test_non_create_actions_do_not_accumulate():
     assert state.total_exposure == 100.0
 
 
+def test_lp_quote_amount_is_counted_as_quote_exposure():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=2.0))
+    state = RiskState(total_exposure=1.25)
+
+    allowed, reason = engine.check_executor_action(
+        _lp_create_call(quote_amount=1.0), state
+    )
+
+    assert not allowed
+    assert "quote units" in reason
+    assert state.total_exposure == 1.25
+
+
+def test_legacy_lp_amount_quote_is_counted():
+    call = _lp_create_call()
+    call["input"]["executor_config"].pop("quote_amount")
+    call["input"]["executor_config"]["amount_quote"] = 1.5
+    engine = RiskEngine(RiskLimits(max_position_size_quote=2.0))
+    state = RiskState(total_exposure=0.75)
+
+    allowed, _ = engine.check_executor_action(call, state)
+
+    assert not allowed
+
+
+def test_two_sided_lp_values_base_at_range_upper_bound():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=3.0))
+    state = RiskState()
+    call = _lp_create_call(quote_amount=1.0, base_amount=400.0)
+
+    allowed, _ = engine.check_executor_action(call, state)
+
+    expected = 1.0 + 400.0 * 0.003
+    assert allowed
+    assert math.isclose(state.total_exposure, expected)
+
+
+def test_zero_generic_default_does_not_mask_lp_amounts():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=2.0))
+    state = RiskState()
+    call = _lp_create_call(quote_amount=1.0)
+    call["input"]["executor_config"]["total_amount_quote"] = 0
+
+    allowed, _ = engine.check_executor_action(call, state)
+
+    assert allowed
+    assert state.total_exposure == 1.0
+
+
+def test_live_performance_row_preserves_lp_quote_exposure():
+    row = _executor_row(
+        {
+            "id": "lp1",
+            "status": "RUNNING",
+            "config": {
+                "type": "lp_executor",
+                "base_amount": 400.0,
+                "quote_amount": 1.0,
+                "lower_price": 0.002,
+                "upper_price": 0.003,
+            },
+        }
+    )
+
+    assert math.isclose(row["amount"], 1.0 + 400.0 * 0.003)
+
+
+def test_create_without_measurable_exposure_is_blocked():
+    call = _create_call()
+    call["input"]["executor_config"].pop("total_amount_quote")
+    engine = RiskEngine(RiskLimits())
+
+    allowed, reason = engine.check_executor_action(call, RiskState())
+
+    assert not allowed
+    assert "exposure is missing" in reason
+
+
 # ---------------------------------------------------------------------------
 # auto_approve_with_risk_check driven twice with the same RiskState instance
 # ---------------------------------------------------------------------------
@@ -105,6 +202,16 @@ def test_callback_second_create_cancelled_same_tick():
     first, second = asyncio.run(_drive())
     assert first["outcome"]["outcome"] == "selected"
     assert second["outcome"]["outcome"] == "cancelled"
+
+
+def test_callback_accepts_top_level_controller_id_for_lp_create():
+    engine = RiskEngine(RiskLimits(max_position_size_quote=2.0))
+    state = RiskState()
+    callback = auto_approve_with_risk_check(engine, state)
+
+    result = asyncio.run(callback(_lp_create_call(quote_amount=1.0), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
 
 
 # ---------------------------------------------------------------------------

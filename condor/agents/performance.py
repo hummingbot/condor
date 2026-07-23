@@ -87,11 +87,14 @@ def _executor_row(ex: dict) -> dict[str, Any]:
         else (_ci_cur if _ci_cur > 0 else (_ci_close if _ci_close > 0 else 0.0))
     )
 
-    amount = float(cfg.get("total_amount_quote") or cfg.get("amount") or 0)
+    try:
+        from .risk import _executor_quote_exposure
+
+        amount = _executor_quote_exposure({"executor_config": cfg})
+    except ValueError:
+        amount = 0.0
     if amount <= 0:
-        amount = float(
-            custom_info.get("total_value_quote") or 0
-        )
+        amount = float(custom_info.get("total_value_quote") or 0)
 
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),

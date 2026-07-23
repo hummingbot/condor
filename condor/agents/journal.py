@@ -818,14 +818,19 @@ class JournalManager:
     # ------------------------------------------------------------------
 
     def track_executor(self, executor_id: str, ex_type: str, config: dict) -> None:
+        from .risk import _executor_quote_exposure
+
         now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
         connector = config.get("connector_name", "")
         pair = config.get("trading_pair", "")
         side = config.get("side", "")
-        amount = config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
+        try:
+            amount = _executor_quote_exposure({"executor_config": config})
+        except ValueError:
+            amount = 0.0
         entry = (
             f"- executor={executor_id} | type={ex_type} | {connector} {pair} {side} "
-            f"| amount=${float(amount):.2f} | created={now} | status=open | pnl=0 | volume=0"
+            f"| amount={float(amount):.8f} | created={now} | status=open | pnl=0 | volume=0"
         )
         self._append_to_section("Executors", entry)
 
