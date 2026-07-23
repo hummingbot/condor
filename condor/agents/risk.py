@@ -8,93 +8,10 @@ safe tool calls and blocks dangerous ones that violate risk limits.
 from __future__ import annotations
 
 import logging
-import math
 from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger(__name__)
-
-
-def _as_nonnegative_float(value: Any, field_name: str) -> float:
-    """Parse a numeric risk input without allowing NaN, infinity, or negatives."""
-    try:
-        parsed = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(f"invalid {field_name}: {value!r}") from exc
-    if not math.isfinite(parsed) or parsed < 0:
-        raise ValueError(f"invalid {field_name}: {value!r}")
-    return parsed
-
-
-def _executor_controller_id(input_data: dict[str, Any]) -> str:
-    """Accept the controller ID in either supported manage_executors location."""
-    executor_config = input_data.get("executor_config") or {}
-    return str(
-        input_data.get("controller_id") or executor_config.get("controller_id") or ""
-    ).strip()
-
-
-def _executor_quote_exposure(input_data: dict[str, Any]) -> float:
-    """Estimate executor notional in quote-token units.
-
-    Most executors expose ``total_amount_quote``. LP executors instead use
-    ``base_amount`` and ``quote_amount`` (older prompts used the reversed-name
-    aliases). For a two-sided LP, conservatively value base inventory at the
-    upper bound of its configured range.
-    """
-    config = input_data.get("executor_config") or {}
-
-    zero_explicit_amount = False
-    for field_name in ("total_amount_quote", "amount"):
-        if field_name in config and config[field_name] is not None:
-            explicit_amount = _as_nonnegative_float(config[field_name], field_name)
-            if explicit_amount > 0:
-                return explicit_amount
-            zero_explicit_amount = True
-
-    quote_field = next(
-        (
-            name
-            for name in ("quote_amount", "amount_quote")
-            if name in config and config[name] is not None
-        ),
-        None,
-    )
-    base_field = next(
-        (
-            name
-            for name in ("base_amount", "amount_base")
-            if name in config and config[name] is not None
-        ),
-        None,
-    )
-    if quote_field is None and base_field is None:
-        if zero_explicit_amount:
-            raise ValueError("executor exposure must be positive")
-        raise ValueError("executor exposure is missing")
-
-    quote_amount = (
-        _as_nonnegative_float(config[quote_field], quote_field) if quote_field else 0.0
-    )
-    base_amount = (
-        _as_nonnegative_float(config[base_field], base_field) if base_field else 0.0
-    )
-    if base_amount == 0:
-        if quote_amount == 0:
-            raise ValueError("executor exposure must be positive")
-        return quote_amount
-
-    try:
-        lower = _as_nonnegative_float(config.get("lower_price"), "lower_price")
-        upper = _as_nonnegative_float(config.get("upper_price"), "upper_price")
-    except ValueError as exc:
-        raise ValueError(
-            "cannot value LP base_amount without a valid price range"
-        ) from exc
-    if lower <= 0 or upper <= 0 or lower >= upper:
-        raise ValueError("cannot value LP base_amount without a valid price range")
-
-    return quote_amount + base_amount * upper
 
 
 @dataclass
@@ -230,18 +147,16 @@ class RiskEngine:
                 f"Max open executors ({self.limits.max_open_executors}) reached",
             )
 
-        # Check position size. Limits and exposure are denominated in the
-        # executor pair's quote token (SOL for ANSEM-SOL), not necessarily USD.
-        try:
-            amount = _executor_quote_exposure(input_data)
-        except ValueError as exc:
-            return False, f"Cannot determine executor exposure: {exc}"
+        # Check position size
+        config = input_data.get("executor_config", {})
+        amount = float(
+            config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
+        )
 
         if current_state.total_exposure + amount > self.limits.max_position_size_quote:
             return False, (
-                "Would exceed position limit: "
-                f"{current_state.total_exposure + amount:.6f} quote units > "
-                f"{self.limits.max_position_size_quote:.6f} quote units"
+                f"Would exceed position limit: ${current_state.total_exposure + amount:.2f} > "
+                f"${self.limits.max_position_size_quote:.2f}"
             )
 
         # Approved: accumulate into the snapshot so the next create in this
@@ -288,7 +203,8 @@ def auto_approve_with_risk_check(
 
                 # Validate controller_id on create
                 if action == "create":
-                    if not _executor_controller_id(input_data):
+                    executor_config = input_data.get("executor_config", {})
+                    if not executor_config.get("controller_id"):
                         log.warning("Blocked executor create: missing controller_id")
                         return {"outcome": {"outcome": "cancelled"}}
 

@@ -110,6 +110,7 @@ def test_agent_and_strategy_metadata_load_with_stable_identity():
     assert strategy.key == "clmm_manager.auto_rebalance"
     assert strategy.default_config["target_usd"] == 100
     assert strategy.default_config["total_amount_quote"] == 1.5
+    assert strategy.default_config["live_execution_enabled"] is False
 
 
 def test_position_activity_rejects_closed_and_ambiguous_rows():

@@ -86,27 +86,6 @@ def test_own_writes_invalidate_cache(tmp_path):
     assert jm.get_open_executor_count() == 1
 
 
-def test_lp_executor_quote_exposure_is_tracked(tmp_path):
-    jm = JournalManager("lp-agent", session_dir=tmp_path)
-
-    jm.track_executor(
-        "lp1",
-        "lp_executor",
-        {
-            "connector_name": "solana-mainnet-beta",
-            "trading_pair": "ANSEM-SOL",
-            "side": 3,
-            "base_amount": 400,
-            "quote_amount": 0.5,
-            "lower_price": 0.002,
-            "upper_price": 0.003,
-        },
-    )
-
-    assert jm.get_open_executor_count() == 1
-    assert jm.get_total_exposure() == 1.7
-
-
 def test_external_writes_invalidate_cache(tmp_path):
     jm = _make_journal(tmp_path)
     assert jm.get_open_executor_count() == 1

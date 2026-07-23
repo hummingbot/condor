@@ -8,6 +8,7 @@ default_config:
   total_amount_quote: 1.5
   target_usd: 100
   execution_mode: dry_run
+  live_execution_enabled: false
   connector: meteora
   network: solana-mainnet-beta
   pool_address: 6e7V9eegCHw997T72MxgwwJipZ6GJyZF8NvjkzT1rvpN
@@ -44,6 +45,8 @@ created_at: '2026-07-21T00:00:00+00:00'
 - base mint 必须是 `9cRCn9rGT8V2imeM2BaKs13yhMEais3ruM3rPvTGpump`，quote mint 必须是 `So11111111111111111111111111111111111111112`。
 - 禁止按 `ANSEM` 符号搜索后自动选池；地址或 mint 不一致时必须暂停。
 - `target_usd` 是美元预算；`total_amount_quote` 和 `max_position_size_quote` 是 SOL 数量上限。不得把 `$100` 当成 `100 SOL`。
+- agent 不得修改 `condor/**` 框架代码。当前框架风险门不能从 LP 的 `base_amount`/`quote_amount` 可靠计算敞口，因此 `live_execution_enabled` 必须保持 `false`。
+- 即使外部把 `execution_mode` 改成 `loop`，只要 `live_execution_enabled=false`，也禁止调用 executor 的 `create` 或 `stop`；只生成候选方案。
 - 同时最多一个活跃 executor/链上仓位。任何仓位查询失败或状态不明确都视为 `pause`，绝不能视为空仓。
 - routine 给出的范围不得超过 68 bins；不要自行扩大成超过主池容量的名义百分比。
 
@@ -87,40 +90,33 @@ routine 的 `action` 只有四种合法处理：
 
 未知 action 一律按 `pause` 处理。
 
-## 开仓流程
+## 开仓计划（只读）
 
 仅当 routine 返回 `no_position` 且 `ready_to_create=true` 时继续：
 
 1. `manage_executors(action="search", ...)` 与 `get_portfolio_overview(include_lp_positions=true)` 必须同时确认没有活跃或状态不明的同池仓位。两者冲突时暂停。
 2. 从 routine 的 `target_allocation` 读取 `base_amount` 与 `quote_amount`；用 portfolio 确认钱包同时持有足额 ANSEM 和 SOL，并额外保留 SOL 支付手续费。
 3. 如果只有 SOL 或只有 ANSEM，暂停并通知用户补齐双边资产；本策略不自动换币。
-4. 先调用 `manage_executors(executor_type="lp_executor")` 获取实时 schema。schema 与下列字段冲突时暂停，不猜字段。
-5. 创建时只能使用 routine 原样给出的池、范围和数量：
+4. 调用 `manage_executors(executor_type="lp_executor")` 只读获取实时 schema。schema 与下列字段冲突时暂停，不猜字段。
+5. 输出候选参数，供用户检查；不得调用 `manage_executors(action="create")`：
 
 ```text
-manage_executors(
-  action="create",
-  executor_type="lp_executor",
-  controller_id="<agent_id>",
-  executor_config={
-    "connector_name": "solana-mainnet-beta",
-    "lp_provider": "meteora/clmm",
-    "trading_pair": "ANSEM-SOL",
-    "pool_address": "6e7V9eegCHw997T72MxgwwJipZ6GJyZF8NvjkzT1rvpN",
-    "lower_price": <suggested_range.lower>,
-    "upper_price": <suggested_range.upper>,
-    "base_amount": <target_allocation.base_amount>,
-    "quote_amount": <target_allocation.quote_amount>,
-    "side": 3,
-    "keep_position": true,
-    "extra_params": {"strategyType": 0}
-  }
-)
+connector_name: solana-mainnet-beta
+lp_provider: meteora/clmm
+trading_pair: ANSEM-SOL
+pool_address: 6e7V9eegCHw997T72MxgwwJipZ6GJyZF8NvjkzT1rvpN
+lower_price: <suggested_range.lower>
+upper_price: <suggested_range.upper>
+base_amount: <target_allocation.base_amount>
+quote_amount: <target_allocation.quote_amount>
+side: 3
+keep_position: true
+extra_params: {"strategyType": 0}
 ```
 
-必须使用 `base_amount`/`quote_amount`，禁止使用 `amount_quote`。创建返回错误或 executor 未进入有效状态时，只报告失败，不重试创建。
+候选参数必须使用 `base_amount`/`quote_amount`，禁止使用 `amount_quote`。
 
-## 调仓资格与执行
+## 调仓候选评估（只读）
 
 `rebalance_candidate` 必须同时满足以下条件才可关闭旧仓：
 
@@ -131,15 +127,15 @@ manage_executors(
 - 旧 executor ID 唯一且状态可停止；
 - 没有另一个 opening/running LP executor。
 
-执行顺序：
+满足条件后只输出以下建议步骤，不实际执行：
 
-1. `manage_executors(action="stop", executor_id="<唯一旧ID>", keep_position=true)`，移除 LP 但保留两种现货，避免自动卖回 SOL 带来的额外滑点。
-2. 再次查询 executor 与链上 LP，确认旧仓已经关闭。未确认前禁止创建。
-3. 重新读取钱包 ANSEM/SOL 余额。只有两种资产都存在、总 quote 敞口不超过风控上限时，才用实际可用数量创建新仓；不得再次套用固定 `$100` 数量，也不得假称手续费已复投。
-4. 若资产比例不足以建立双边仓位，保持资金在钱包并通知用户；不要自动换币，也不要回滚式重复关仓。
+1. 建议关闭唯一旧 executor，并明确 `keep_position=true`。
+2. 建议关闭后再次确认 executor 与链上 LP 状态。
+3. 建议重新读取实际 ANSEM/SOL 余额后再计算新仓，不套用固定 `$100` 数量。
+4. 资产比例不足时建议保持钱包余额，不自动换币。
 
 ## dry_run 与通知
 
-- `dry_run` 下不调用 create/stop，只输出将使用的精确 pool、mint、bins、价格范围和两种币数量。
-- 成功创建、成功关闭、暂停、数据冲突和部分失败都要通知。
+- 当前版本始终不调用 create/stop，只输出精确 pool、mint、bins、价格范围和两种币数量。
+- 暂停、数据冲突和候选方案都要通知。
 - 不把预估手续费/APR 当成收益保证；报告中同时给出 LP 价值、手续费、调仓次数与失败原因。

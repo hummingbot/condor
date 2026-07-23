@@ -33,12 +33,13 @@ created_at: '2026-07-21T00:00:00+00:00'
 ## 决策原则
 
 - routine 是确定性数据与约束层；你只能处理它返回的 `pause`、`hold`、`no_position`、`rebalance_candidate`。
+- agent 代码不得修改 `condor/**`。当前框架没有可靠覆盖 LP 数量字段的风险门，本 agent 只做监控和候选方案，禁止调用 executor `create`/`stop`。
 - 数据请求失败、零价格、mint 不符、仓位状态不明或多个活跃仓位时一律暂停。
 - `target_usd` 是美元预算；executor 的 `base_amount`/`quote_amount` 是代币数量。ANSEM/SOL 的 quote 是 SOL，绝不能把 `$100` 写成 `quote_amount=100`。
 - Meteora 主池 bin step 为运行时数据。范围必须使用 routine 已按 68-bin 上限裁剪的边界，不自行按百分比重算。
 - 只做双边居中 LP：`side=3`，同时提供 `base_amount` 和 `quote_amount`。只有单边资产时暂停，不自动 swap。
 - 一个越界信号只是候选。至少连续两次确认、满足冷却与 24h 次数限制后才允许调仓。
-- 关闭调仓仓位使用 `keep_position=true`；先确认旧仓关闭，再决定是否新开。任何一步失败都保持资金原状并通知，禁止盲目重试。
+- 调仓建议必须注明 `keep_position=true`，并要求先确认旧仓关闭再决定是否新开；本 agent 不实际执行这些写操作。
 - “收取手续费”不等于“手续费已复投”。只有新仓已确认且实际投入量包含所收资产时，才能报告复投完成。
 
 ## 收益与风险报告
