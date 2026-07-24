@@ -228,6 +228,18 @@ BLOCKED_TOOLS: set[str] = set()
 # Actions within manage_executors that require confirmation
 DANGEROUS_EXECUTOR_ACTIONS = {"create", "stop"}
 
+# Actions within manage_bots that deploy/mutate a live bot (status/logs/get_config
+# are read-only and excluded). manage_controllers itself is excluded entirely — it
+# only writes controller templates/saved configs, never a running bot (see its own
+# tool docstring: "Does NOT affect running bots").
+DANGEROUS_BOT_ACTIONS = {
+    "deploy",
+    "stop_bot",
+    "stop_controllers",
+    "start_controllers",
+    "update_config",
+}
+
 # Actions within manage_gateway_swaps that require confirmation
 DANGEROUS_SWAP_ACTIONS = {"execute"}
 
@@ -262,6 +274,13 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
         input_data = tool_call.get("input", {})
         action = input_data.get("action", "")
         return action in DANGEROUS_EXECUTOR_ACTIONS
+
+    # manage_bots with deploy/stop/update actions (a bot deploy places real
+    # capital via a controller, a different path than manage_executors)
+    if tool_name == "manage_bots":
+        input_data = tool_call.get("input", {})
+        action = input_data.get("action", "")
+        return action in DANGEROUS_BOT_ACTIONS
 
     return False
 
@@ -308,6 +327,7 @@ def build_mcp_servers_for_session(
     user_data: dict | None = None,
     execution_mode: str = "loop",
     server_name: str | None = None,
+    agent_slug: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -315,6 +335,13 @@ def build_mcp_servers_for_session(
     that override the static .mcp.json entries by name.
     Always includes the condor MCP server; hummingbot is added when a valid
     server can be resolved for the user.
+
+    ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
+    own stores (``agents/{slug}/``). Without it the tools target the chat
+    condor's stores — correct for chat sessions, wrong for an Agent run: a
+    serverless consult/tick would silently read and write the CHAT's memory
+    and skills instead of the Agent's own (e.g. routine_builder unable to
+    find its routine_cookbook skill).
     """
     from config_manager import get_config_manager, get_effective_server
 
@@ -333,7 +360,7 @@ def build_mcp_servers_for_session(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, server_name=server_name),
+        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
         "env": [],
     }
 
