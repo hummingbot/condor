@@ -317,6 +317,105 @@ def test_bot_name_round_trips_through_full_config(tmp_path):
     assert cfg2["bot_name"] == ""
 
 
+# ── Per-session history slicing ──
+
+
+def test_resolve_bot_instances_returns_all_matches_sorted():
+    from condor.fetchers.bot_performance import resolve_bot_instances
+
+    def _snap(name, ts):
+        return {
+            "bot_name": name,
+            "controller_id": "c",
+            "timestamp": ts,
+            "performance": {},
+        }
+
+    agg = _aggregate_by_bot(
+        [
+            _snap("dn-mm-20260101-000000", "2026-01-01T00:00:00"),
+            _snap("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
+            _snap("dn-mmx-20260724-000000", "2026-07-24T00:00:00"),
+            _snap("other", "2026-07-24T00:00:00"),
+        ]
+    )
+    got = resolve_bot_instances(agg, "dn-mm")
+    assert got == ["dn-mm-20260101-000000", "dn-mm-20260724-182221"]  # oldest→newest
+    assert resolve_bot_instances(agg, "nope") == []
+
+
+def test_slice_history_tiles_exactly():
+    from condor.fetchers.bot_performance import slice_history
+
+    # one instance, cumulative realized/volume/trades at t=10,20,30
+    hist = [
+        (10.0, 1.0, 100.0, 1.0),
+        (20.0, 3.0, 300.0, 4.0),
+        (30.0, 5.0, 500.0, 9.0),
+    ]
+    # window fully before → 0; fully after start baseline → final delta
+    assert slice_history([hist], 0, 5) == (0.0, 0.0, 0.0)
+    # [0,20] captures rows at 10 and 20 → cum_at(20)-cum_at(0)=3
+    assert slice_history([hist], 0, 20) == (3.0, 300.0, 4.0)
+    # [20,40] → cum_at(40)=final(5) - cum_at(20)=3 → 2
+    assert slice_history([hist], 20, 40) == (2.0, 200.0, 5.0)
+    # tiling: [0,20)+[20,40) sums to the instance's full cumulative
+    a = slice_history([hist], 0, 20)
+    b = slice_history([hist], 20, 40)
+    assert (a[0] + b[0], a[1] + b[1], a[2] + b[2]) == (5.0, 500.0, 9.0)
+
+
+def test_slice_history_sums_multiple_instances():
+    from condor.fetchers.bot_performance import slice_history
+
+    h1 = [(10.0, 2.0, 20.0, 1.0)]  # instance 1: +2 at t=10
+    h2 = [(15.0, 3.0, 30.0, 2.0)]  # instance 2: +3 at t=15
+    # window covering both
+    assert slice_history([h1, h2], 0, 100) == (5.0, 50.0, 3.0)
+    # window covering only instance 1
+    assert slice_history([h1, h2], 0, 12) == (2.0, 20.0, 1.0)
+
+
+def test_fetch_instance_history_sums_controllers_and_filters_trades():
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    class _Client:
+        async def get_controller_performance_history(self, **_kw):
+            return {
+                "data": [
+                    {
+                        "timestamp": "2026-07-24T18:00:00+00:00",
+                        "performance": {
+                            "realized_pnl_quote": 1.0,
+                            "volume_traded": 100.0,
+                            # 2 real trades; EARLY_STOP churn + FAILED excluded
+                            "close_type_counts": {
+                                "CloseType.TAKE_PROFIT": 2,
+                                "CloseType.EARLY_STOP": 500,
+                                "CloseType.FAILED": 9,
+                            },
+                        },
+                    },
+                    {
+                        "timestamp": "2026-07-24T18:00:00+00:00",  # 2nd controller, same ts
+                        "performance": {
+                            "realized_pnl_quote": 0.5,
+                            "volume_traded": 40.0,
+                            "close_type_counts": {"CloseType.STOP_LOSS": 1},
+                        },
+                    },
+                ]
+            }
+
+    client = SimpleNamespace(bot_orchestration=_Client())
+    hist = asyncio.run(fetch_instance_history(client, "bot-1"))
+    assert len(hist) == 1  # both controllers summed into one timestamp
+    ts, realized, volume, trades = hist[0]
+    assert realized == 1.5  # 1.0 + 0.5
+    assert volume == 140.0  # 100 + 40
+    assert trades == 3.0  # TAKE_PROFIT 2 + STOP_LOSS 1; EARLY_STOP/FAILED excluded
+
+
 # ── Provider wiring ──
 
 

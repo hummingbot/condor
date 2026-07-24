@@ -149,6 +149,133 @@ def resolve_bot(all_bot_perf: dict[str, dict], bot_name: str) -> dict | None:
     return max(candidates, key=lambda a: (str(a.get("timestamp", "")), a["bot_name"]))
 
 
+def resolve_bot_instances(all_bot_perf: dict[str, dict], bot_name: str) -> list[str]:
+    """Return every deployed instance name for a base ``bot_name``, newest last.
+
+    Suffix-tolerant like :func:`resolve_bot`, but returns ALL matches (a base that
+    has been re-launched several times) rather than only the freshest — used to
+    time-slice per-session PnL across every instance a strategy has operated.
+    """
+    if not bot_name or not all_bot_perf:
+        return []
+    names = [
+        key for key in all_bot_perf if key == bot_name or key.startswith(f"{bot_name}-")
+    ]
+    return sorted(names, key=lambda k: (str(all_bot_perf[k].get("timestamp", "")), k))
+
+
+# Only genuine round-trip position closes count as "trades". Everything else in
+# close_type_counts is churn or non-trades: EARLY_STOP is pmm order re-quoting
+# (thousands per session), POSITION_HOLD is a fill that built a still-open position,
+# and INSUFFICIENT_BALANCE/FAILED/EXPIRED never executed.
+_TRADE_CLOSE_TYPES = {
+    "CloseType.TAKE_PROFIT",
+    "CloseType.STOP_LOSS",
+    "CloseType.TIME_LIMIT",
+    "CloseType.TRAILING_STOP",
+    "CloseType.COMPLETED",
+}
+
+
+def _iso_to_epoch(ts: Any) -> float | None:
+    from datetime import datetime
+
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts)).timestamp()
+    except ValueError:
+        return None
+
+
+async def fetch_instance_history(
+    client: Any, instance_name: str, interval: str = "5m", limit: int = 500
+) -> list[tuple[float, float, float, float]]:
+    """Return one bot instance's cumulative history as sorted rows.
+
+    Each row is ``(ts_epoch, cum_realized_quote, cum_volume, cum_trades)`` with the
+    per-controller snapshots at each timestamp summed to a bot-instance total, so a
+    single- and multi-controller bot are handled identically. ``cum_trades`` counts
+    real closes (``close_type_counts`` minus retry/abort noise). The controller
+    performance API retains history for archived/stopped instances, so closed
+    sessions can be attributed too. Resilient: returns ``[]`` on API error.
+    """
+    try:
+        result = await client.bot_orchestration.get_controller_performance_history(
+            bot_name=instance_name, interval=interval, limit=limit
+        )
+    except Exception as e:
+        logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
+        return []
+
+    rows = result.get("data", []) if isinstance(result, dict) else result
+    if not isinstance(rows, list):
+        return []
+
+    by_ts: dict[str, list[float]] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        ts = r.get("timestamp")
+        perf = r.get("performance") or {}
+        realized = float(perf.get("realized_pnl_quote", 0) or 0)
+        volume = float(perf.get("volume_traded", 0) or 0)
+        ctc = perf.get("close_type_counts") or {}
+        trades = sum(int(v or 0) for k, v in ctc.items() if k in _TRADE_CLOSE_TYPES)
+        acc = by_ts.setdefault(str(ts), [0.0, 0.0, 0.0])
+        acc[0] += realized
+        acc[1] += volume
+        acc[2] += trades
+
+    out: list[tuple[float, float, float, float]] = []
+    for ts, (realized, volume, trades) in by_ts.items():
+        epoch = _iso_to_epoch(ts)
+        if epoch is not None:
+            out.append((epoch, realized, volume, trades))
+    out.sort()
+    return out
+
+
+def _cum_at(
+    history: list[tuple[float, float, float, float]], t: float
+) -> tuple[float, float, float]:
+    """Cumulative (realized, volume, trades) at time ``t`` for one instance.
+
+    Zero before the instance's first snapshot; its final value at/after the last.
+    """
+    if not history or t < history[0][0]:
+        return (0.0, 0.0, 0.0)
+    chosen = history[0]
+    for row in history:
+        if row[0] <= t:
+            chosen = row
+        else:
+            break
+    return (chosen[1], chosen[2], chosen[3])
+
+
+def slice_history(
+    histories: list[list[tuple[float, float, float, float]]],
+    start: float,
+    end: float,
+) -> tuple[float, float, float]:
+    """Sum (realized, volume, trades) generated in ``[start, end)`` across instances.
+
+    Each instance contributes ``cum_at(end) − cum_at(start)`` — naturally zero for
+    an instance that lies wholly outside the window, and exact for partial overlap.
+    Because session windows tile the timeline, summing every session's slice
+    reproduces each instance's full cumulative with no double counting.
+    """
+    realized = volume = trades = 0.0
+    for h in histories:
+        r_e, v_e, t_e = _cum_at(h, end)
+        r_s, v_s, t_s = _cum_at(h, start)
+        realized += r_e - r_s
+        volume += v_e - v_s
+        trades += t_e - t_s
+    return realized, volume, trades
+
+
 def _clean_side(side: Any) -> str:
     """Normalize a ``TradeType.SELL``-style side into a bare ``SELL``/``BUY``."""
     s = str(side or "").upper()
