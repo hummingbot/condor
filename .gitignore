@@ -183,3 +183,7 @@ node_modules/
 
 # Routine reports
 /reports/
+
+# Agent runtime artifacts: learnings and session journals (not committed)
+agents/**/learnings.md
+agents/**/sessions/
