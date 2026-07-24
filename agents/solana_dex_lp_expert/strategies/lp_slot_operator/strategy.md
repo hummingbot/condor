@@ -4,7 +4,7 @@ description: ''
 agent_key: null
 skills: []
 default_config:
-  frequency_sec: 120
+  frequency_sec: 300
   execution_mode: loop
   total_amount_quote: 1
   quote_asset: SOL
