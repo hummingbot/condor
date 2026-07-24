@@ -1,7 +1,7 @@
 import pytest
 
-from condor.trading_agent.journal import JournalManager
-from condor.trading_agent.performance import _executor_row
+from condor.agents.journal import JournalManager
+from condor.agents.performance import _executor_row
 
 
 def test_drawdown_uses_exposure_not_peak_profit(tmp_path):
