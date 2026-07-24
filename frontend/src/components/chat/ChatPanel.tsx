@@ -3,10 +3,13 @@ import {
   AlertTriangle,
   Brain,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Loader2,
   MessageSquare,
   Minus,
   Plus,
+  Search,
   Server,
   X,
   Zap,
@@ -14,7 +17,12 @@ import {
 import { useChatSocket, type ChatSlot } from "@/hooks/useChatSocket";
 import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
-import { api, type ChatAgentOption, type ChatModeOption } from "@/lib/api";
+import {
+  api,
+  type ChatAgentOption,
+  type ChatModeOption,
+  type OpenRouterModelOption,
+} from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 
@@ -126,9 +134,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const effectiveAgent = selectedAgent || defaultAgent;
   const effectiveMode = selectedMode || defaultMode;
 
-  // Filter out sentinel keys (ending with :) that are pickers, not direct agents
-  const directAgents = agents.filter((a) => !a.key.endsWith(":"));
-
   return (
     <>
       {/* Panel -- slides from right, below navbar */}
@@ -182,7 +187,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               </button>
               {showNewMenu && (
                 <NewSessionMenu
-                  agents={directAgents}
+                  agents={agents}
                   modes={modes}
                   selectedAgent={effectiveAgent}
                   selectedMode={effectiveMode}
@@ -272,7 +277,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             </div>
           ) : !activeSlot ? (
             <EmptyState
-              agents={directAgents}
+              agents={agents}
               modes={modes}
               defaultAgent={defaultAgent}
               defaultMode={defaultMode}
@@ -342,6 +347,196 @@ function shortAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
   return shortMap[full] || (full.length > 12 ? full.slice(0, 12) + "..." : full);
 }
 
+// ── Agent Dropdown (shared) ──
+
+/** Resolve the button label for the current selection, incl. openrouter:<slug>. */
+function agentDisplayLabel(
+  agentKey: string,
+  agents: ChatAgentOption[],
+  orModels: OpenRouterModelOption[] | null,
+): string {
+  const match = agents.find((a) => a.key === agentKey);
+  if (match) return match.label;
+  if (agentKey.startsWith("openrouter:")) {
+    const slug = agentKey.slice("openrouter:".length);
+    const model = orModels?.find((m) => m.slug === slug);
+    return `OpenRouter: ${model?.name || slug}`;
+  }
+  return agentKey;
+}
+
+/**
+ * Model selector used by both the new-session menu and the empty state.
+ *
+ * Direct agents (CLI/ACP) select immediately. The "openrouter:" sentinel from
+ * the backend opens a searchable model list (fetched lazily on first open);
+ * picking a model sets the agent to "openrouter:<slug>".
+ */
+function AgentDropdown({
+  agents,
+  selectedAgent,
+  onSelectAgent,
+  variant,
+}: {
+  agents: ChatAgentOption[];
+  selectedAgent: string;
+  onSelectAgent: (key: string) => void;
+  variant: "block" | "inline";
+}) {
+  const [open, setOpen] = useState(false);
+  const [showModels, setShowModels] = useState(false);
+  const [models, setModels] = useState<OpenRouterModelOption[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+
+  // Direct picks: the CLI/ACP agents plus the local "Default Model" sentinels
+  // (ollama:/lmstudio:), which select a loaded local model directly — same set
+  // the Telegram /agent picker shows. Only "openrouter:" is a real picker (it
+  // needs a specific model chosen), handled by the submenu below.
+  const directAgents = agents.filter(
+    (a) => !a.key.endsWith(":") || a.key === "ollama:" || a.key === "lmstudio:",
+  );
+  const hasOpenRouter = agents.some((a) => a.key === "openrouter:");
+  const label = agentDisplayLabel(selectedAgent, agents, models);
+
+  const loadModels = () => {
+    if (models || loading) return;
+    setLoading(true);
+    setError(null);
+    api
+      .getOpenRouterModels()
+      .then((res) => setModels(res.models))
+      .catch(() => setError("Failed to load OpenRouter models"))
+      .finally(() => setLoading(false));
+  };
+
+  const closeAll = () => {
+    setOpen(false);
+    setShowModels(false);
+    setQuery("");
+  };
+
+  const q = query.trim().toLowerCase();
+  const filtered = (models || []).filter(
+    (m) => !q || m.slug.toLowerCase().includes(q) || m.name.toLowerCase().includes(q),
+  );
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        className={
+          variant === "block"
+            ? "flex w-full items-center justify-between rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-left text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
+            : "flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
+        }
+      >
+        <span className="truncate">{label}</span>
+        <ChevronDown className="ml-1 h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+      </button>
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={closeAll} />
+          <div
+            className={`absolute top-full z-50 mt-1 flex max-h-64 flex-col overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg ${
+              variant === "block" ? "left-0 w-full" : "left-1/2 w-56 -translate-x-1/2"
+            }`}
+          >
+            {!showModels ? (
+              <>
+                {directAgents.map((a) => (
+                  <button
+                    key={a.key}
+                    onClick={() => {
+                      onSelectAgent(a.key);
+                      closeAll();
+                    }}
+                    className={`flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                      a.key === selectedAgent
+                        ? "font-medium text-[var(--color-primary)]"
+                        : "text-[var(--color-text)]"
+                    }`}
+                  >
+                    {a.label}
+                  </button>
+                ))}
+                {hasOpenRouter && (
+                  <button
+                    onClick={() => {
+                      setShowModels(true);
+                      loadModels();
+                    }}
+                    className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                      selectedAgent.startsWith("openrouter:")
+                        ? "font-medium text-[var(--color-primary)]"
+                        : "text-[var(--color-text)]"
+                    }`}
+                  >
+                    <span>OpenRouter — Pick Model</span>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+                  </button>
+                )}
+              </>
+            ) : (
+              <>
+                <button
+                  onClick={() => setShowModels(false)}
+                  className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                >
+                  <ChevronLeft className="h-3 w-3" /> Back
+                </button>
+                <div className="sticky top-0 flex items-center gap-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5">
+                  <Search className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+                  <input
+                    autoFocus
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    placeholder="Search models..."
+                    className="w-full bg-transparent text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
+                  />
+                </div>
+                {loading && (
+                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+                    <Loader2 className="h-3 w-3 animate-spin" /> Loading models…
+                  </div>
+                )}
+                {error && <div className="px-2.5 py-2 text-xs text-red-400">{error}</div>}
+                {!loading && !error && filtered.length === 0 && (
+                  <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+                    No models found
+                  </div>
+                )}
+                {filtered.map((m) => (
+                  <button
+                    key={m.slug}
+                    title={m.slug}
+                    onClick={() => {
+                      onSelectAgent(`openrouter:${m.slug}`);
+                      closeAll();
+                    }}
+                    className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                      selectedAgent === `openrouter:${m.slug}`
+                        ? "font-medium text-[var(--color-primary)]"
+                        : "text-[var(--color-text)]"
+                    }`}
+                  >
+                    <span className="w-full truncate">{m.name}</span>
+                    <span className="w-full truncate text-[10px] text-[var(--color-text-muted)]">
+                      {m.slug}
+                      {m.prompt_price > 0 ? ` · $${m.prompt_price.toFixed(2)}/M in` : " · free"}
+                    </span>
+                  </button>
+                ))}
+              </>
+            )}
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── New Session Menu ──
 
 function NewSessionMenu({
@@ -363,9 +558,6 @@ function NewSessionMenu({
   onStart: (agent: string, mode: string) => void;
   onClose: () => void;
 }) {
-  const [showAgentPicker, setShowAgentPicker] = useState(false);
-
-  const agentLabel = agents.find((a) => a.key === selectedAgent)?.label || selectedAgent;
   const ModeIcon = MODE_ICONS[selectedMode] || Zap;
 
   return (
@@ -377,34 +569,13 @@ function NewSessionMenu({
           <label className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
             Model
           </label>
-          <div className="relative mt-1">
-            <button
-              onClick={() => setShowAgentPicker((v) => !v)}
-              className="flex w-full items-center justify-between rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-left text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
-            >
-              <span className="truncate">{agentLabel}</span>
-              <ChevronDown className="ml-1 h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-            </button>
-            {showAgentPicker && (
-              <div className="absolute left-0 top-full z-10 mt-1 max-h-48 w-full overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
-                {agents.map((a) => (
-                  <button
-                    key={a.key}
-                    onClick={() => {
-                      onSelectAgent(a.key);
-                      setShowAgentPicker(false);
-                    }}
-                    className={`flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      a.key === selectedAgent
-                        ? "text-[var(--color-primary)] font-medium"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    {a.label}
-                  </button>
-                ))}
-              </div>
-            )}
+          <div className="mt-1">
+            <AgentDropdown
+              agents={agents}
+              selectedAgent={selectedAgent}
+              onSelectAgent={onSelectAgent}
+              variant="block"
+            />
           </div>
         </div>
 
@@ -462,9 +633,6 @@ function EmptyState({
   onStart: (agent: string, mode: string) => void;
 }) {
   const [selectedAgent, setSelectedAgent] = useState(defaultAgent);
-  const [showAgentPicker, setShowAgentPicker] = useState(false);
-
-  const agentLabel = agents.find((a) => a.key === selectedAgent)?.label || selectedAgent;
 
   return (
     <div className="flex h-full flex-col items-center justify-center text-center">
@@ -475,37 +643,13 @@ function EmptyState({
 
       {/* Agent picker */}
       {agents.length > 1 && (
-        <div className="relative mt-4 mb-2">
-          <button
-            onClick={() => setShowAgentPicker((v) => !v)}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
-          >
-            <span>{agentLabel}</span>
-            <ChevronDown className="h-3 w-3 text-[var(--color-text-muted)]" />
-          </button>
-          {showAgentPicker && (
-            <>
-              <div className="fixed inset-0 z-40" onClick={() => setShowAgentPicker(false)} />
-              <div className="absolute left-1/2 top-full z-50 mt-1 max-h-48 w-48 -translate-x-1/2 overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
-                {agents.map((a) => (
-                  <button
-                    key={a.key}
-                    onClick={() => {
-                      setSelectedAgent(a.key);
-                      setShowAgentPicker(false);
-                    }}
-                    className={`flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      a.key === selectedAgent
-                        ? "text-[var(--color-primary)] font-medium"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    {a.label}
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
+        <div className="mt-4 mb-2">
+          <AgentDropdown
+            agents={agents}
+            selectedAgent={selectedAgent}
+            onSelectAgent={setSelectedAgent}
+            variant="inline"
+          />
         </div>
       )}
 

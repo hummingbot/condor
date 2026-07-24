@@ -59,15 +59,17 @@ short conversation:
 - **What it's used for** — the kind of question Condor should be able to ask it. This
   becomes `when_to_consult`.
 
-That's enough to create it. Pick a sensible default model (easiest thing to change
-later) and create:
+That's enough to create it. **Pick the model from what the operator actually has** —
+call `get_available_models` once and choose a sensible default for THIS agent's job (see
+**Model selection** below for the heuristic); it's the easiest thing to change later.
+Then create:
 
 ```
 manage_trading_agent(
     action="create_agent",
     name="Executor Manager",
     description="Expert in deploying and tuning Hummingbot executors",
-    agent_key="ollama:qwen3:32b",          # default model; change anytime
+    agent_key="openrouter:anthropic/claude-sonnet-4-5",   # chosen from get_available_models; change anytime
     when_to_consult="When the user wants to deploy, tune, or stop an executor",
     tools=[],                              # leave open unless the user named tools
     instructions="<AGENT.md body — the agent's system prompt>"
@@ -205,12 +207,41 @@ against this string, so vague ones cause misses. Rules:
   controller backtesting"). Same shape applies to a skill's `when_to_use`.
 
 **Model selection:** Set per session, not baked in. The agent/strategy `agent_key` is the
-default; override at launch via `config={"agent_key": "…"}`.
-- ACP (subprocess CLI): `claude-code`, `gemini`, `copilot`
-- Pydantic-AI local: `ollama:llama3.1`, `ollama:qwen3:32b`, `lmstudio:<model>`
-- Pydantic-AI cloud: `openai:gpt-4o`, `groq:llama-3.3-70b-versatile`
-- Custom endpoint: `openai:<model>` + `model_base_url` in config.
-Default URLs: Ollama=localhost:11434, LM Studio=localhost:1234.
+default; override at launch via `config={"agent_key": "…"}`. **Recommend from what the
+operator actually has — call `get_available_models` and pick for the agent's job. Do NOT
+default to a hardcoded model.** The tool reports:
+- `acp_clis` — subscription/CLI bridges (`claude-code`, `gemini`, `copilot`, `codex`) and
+  whether each CLI is installed. No API key or per-token cost (rides the operator's
+  Claude/ChatGPT subscription); runs unrestricted (does NOT enforce the `tools` allowlist).
+  **`available` means installed, not signed in** — each bridge needs its own interactive
+  login that Condor cannot probe. Never recommend one as if it were ready; name it as an
+  option and ask the user to confirm they use it.
+- `local` — `ollama` / `lmstudio`, each with the models currently **loaded** (empty =
+  server not running). Free, private, offline; addressed as `ollama:<model>` /
+  `lmstudio:<model>`. Only offer a local model that is actually loaded.
+- `cloud_keys` — which of openrouter / openai / anthropic / groq / google keys are set.
+- `openrouter` — tool-capable catalog, cheapest first, each with a ready `agent_key`
+  (`openrouter:<slug>`) and in/out $/Mtok. **The catalog is public — recommendations work
+  with no key.** If `openrouter.key_present` is false, those models need `OPENROUTER_API_KEY`
+  (web Settings) before they can run — say so and prefer a runnable option (a loaded local
+  model, or an installed ACP CLI) unless the user wants to add a key.
+
+Choose by the agent's job, not by habit:
+- **Correctness-critical / high-capital** (decides real trades) → a strong model. Lead with
+  a credential you can verify: if `openrouter.key_present` (or another `cloud_keys` provider)
+  is true, recommend from there; offer an ACP bridge as the alternative to confirm, not the
+  default. Pick a capable OpenRouter model (e.g. a Claude/GPT/DeepSeek-V3-class,
+  not a tiny "flash" model — lightweight models drop instructions, e.g. answering in the
+  wrong language). Validate a cheaper pick with a `dry_run` before going live.
+- **Simple report / watch loop, or privacy / offline / zero-cost** → a loaded local model
+  (`ollama:…`/`lmstudio:…`) or a cheap OpenRouter model.
+- **Must be sandboxed to specific `tools`** → a pydantic-ai key
+  (`openrouter:`/`ollama:`/`lmstudio:`/`openai:`/`groq:`); only these enforce the allowlist.
+- Custom OpenAI-compatible endpoint (remote Ollama, vLLM): `openai:<model>` +
+  `model_base_url` in config. Default local URLs: Ollama=localhost:11434, LM Studio=localhost:1234.
+
+Propose one sensible pick with a one-line why; offer the alternatives you saw. Don't turn
+it into a questionnaire — it's the easiest thing to change later.
 
 **Generic vs Specific strategies:**
 - GENERIC (default): pair/connector are NOT in the instructions — passed at launch via

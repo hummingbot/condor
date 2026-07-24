@@ -143,5 +143,6 @@ Y axis, but fails when the Y must be a numeric price axis shared with a candlest
 
 ## 4. Reference implementation
 
-See `market_analyzer` routine in `agents/market_making_expert/routines/market_analyzer.py`
-for a full working example (footprint chart section).
+See the footprint section in
+`agents/market_making_expert/routines/market_analyzer.py` and the shared figure
+helper in `condor/reports/footprint.py` for a complete implementation.

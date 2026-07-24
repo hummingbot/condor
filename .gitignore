@@ -180,3 +180,10 @@ agents/*/store/
 node_modules/
 /improvements/
 /features/
+
+# Routine reports
+/reports/
+
+# Agent runtime artifacts: learnings and session journals (not committed)
+agents/**/learnings.md
+agents/**/sessions/
