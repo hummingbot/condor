@@ -7,9 +7,11 @@ description: 'Delta-neutral market-making + funding harvest on a correlated pair
   delta stays ~0 (long offsets short), and picks the funding-favorable side each launch
   so both legs pay. Earns MM spread on both legs + net funding carry with market risk
   hedged out. Validates the configured pair''s correlation via hip3_pairs_backtest
-  at launch (HOLD if corr < min_corr). NOT stat-arb. Forced net-delta band, correlation-break,
-  and funding-flip guardrails. Configured default: CL/BRENTOIL (corr 0.98, β 1.02,
-  ~+33%/yr net-neutral funding carry).'
+  at launch (HOLD if corr < min_corr). NOT stat-arb. Neutrality is INDUCED through the
+  market-making itself — the agent re-tunes each controller''s spreads, order amounts, and
+  inventory targets to pull the book back to neutral; it NEVER market-hedges. Funding-hysteresis,
+  correlation-break, and funding-flip guardrails. Configured default: CL/BRENTOIL (corr 0.98,
+  β 1.02, ~+33%/yr net-neutral funding carry).'
 agent_key: null
 skills: []
 default_config:
@@ -22,6 +24,7 @@ default_config:
   hedge_beta: 1.02
   min_corr: 0.9
   net_delta_band_pct: 0.04
+  flip_margin_pct_yr: 15
   buy_spread_bps: 5
   sell_spread_bps: 5
   take_profit_bps: 4
@@ -82,19 +85,33 @@ Do NOT fetch positions or compute delta yourself — the routine already did. Fr
 - RECOMMENDATION verb, recommended config (which leg LONG/SHORT), live `hedge_beta` (β), corr gate, net carry.
 - **── ACTUAL POSITIONS ──**: the real per-leg signed notionals + the **actual net factor delta** vs band
   (IN-BAND / BREACH). This ACTUAL delta — not the TARGET/theoretical split — is what you act on and
-  journal. The routine returns **HEDGE** as the top recommendation when the actual delta breaches.
+  journal. The routine returns **HEDGE** as the top recommendation when the actual delta breaches — read
+  that as **REBALANCE**: you respond by re-tuning the two controllers' MM params (Step 3 / the induction
+  block below), **never** by sending a market/hedge order.
 
 ### Step 3: Determine action (follow the routine's RECOMMENDATION verbatim)
 - **RUN config A/B** → DEPLOY the two controllers if none running, else UPDATE them to match the
-  recommended config + notionals.
+  recommended config + notionals. **Apply funding hysteresis (below) before any A/B flip** — the routine
+  re-picks the higher-carry side every tick, but flipping on marginal carry churns the book.
 - **RESIZE** → live beta drifted; UPDATE both controllers' `total_amount_quote` to the routine's new
   per-leg notionals (keep them running).
-- **HEDGE** → the routine's ACTUAL net delta breached the band; restore neutrality per the enforcement
-  block below (skew quotes toward the offsetting leg and/or market-hedge the residual). Keep both running.
+- **REBALANCE** (routine says **HEDGE**) → the ACTUAL net factor delta breached the band; restore
+  neutrality by re-tuning the two controllers' MM parameters per the **Delta-neutral INDUCTION** block
+  below — throttle the over-accumulated leg, accelerate the laggard. Keep both running. **Never send a
+  market/hedge order.**
 - **REDUCE/ROTATE** → net carry ≤ 0 (funding flipped); reduce/close and alert — the configured pair
   no longer pays. Do NOT keep paying to hold.
 - **HOLD/FLATTEN** → corr < `min_corr`; **FLATTEN BOTH legs, STOP, alert** — the hedge broke, an
   un-paired leg is a naked directional bet.
+
+**Funding hysteresis (gate every A/B flip):** read Config A vs Config B `%/yr` from the routine's
+`── CONFIG COMPARISON ──` and your **current orientation** from `── ACTUAL POSITIONS ──` (leg_a LONG ⇒
+currently Config A; leg_a SHORT ⇒ Config B). **MAINTAIN the current orientation unless the *other*
+config's net carry beats it by ≥ `flip_margin_pct_yr` (default 15%/yr).** Treat `|A − B carry| <
+flip_margin_pct_yr` as "no edge → MAINTAIN" (this is the "dual-paying compression" regime that caused the
+tick-to-tick flip-flop). Never flip twice within 3 ticks. A flip strands residual positions from the old
+orientation and fights the new quotes — only flip when the carry edge clearly justifies the churn. When
+flat (no position), pick the routine's recommended side freely.
 
 ### Step 4: Execute — TWO controllers in ONE bot (shared account)
 Derive names at runtime: `long_leg`/`short_leg` from the recommended config;
@@ -107,15 +124,38 @@ Derive names at runtime: `long_leg`/`short_leg` from the recommended config;
    config_data={...full...}, confirm_override=true)` — per controller.
 4. Stop/flatten: `manage_bots(action="stop_bot", bot_name=<bot_name>)`.
 
-### Delta-neutral enforcement — FORCED, DETERMINISTIC
-Use the routine's **── ACTUAL POSITIONS ── actual net factor delta** (measured from real positions —
-NOT the theoretical target). If the routine flags **BREACH / HEDGE** (`|actual_net| >
-net_delta_band_pct × total_amount_quote`, default ±$20) → skew the two legs' quotes toward the
-offsetting side and/or **market-hedge the residual** (`order_executor`, `account_name="master_account"`,
-side INT 1/2, `position_action="CLOSE"`) to restore neutrality. The legs fill at different rates (the
-thinner leg — usually BRENTOIL — lags), so the book runs transiently directional while accumulating;
-hedge only a **persistent** breach (band-breach that holds across ticks), not one tick of fill lag.
-Long MUST offset short — never drift net directional.
+### Delta-neutral INDUCTION — re-tune the controllers, NEVER market orders
+Neutrality is induced through the market-making itself. **Market/hedge orders are banned for delta
+management** — do NOT call `order_executor` / `position_action=CLOSE` to correct delta (those are only
+for a full risk exit under HOLD-FLATTEN / REDUCE-ROTATE). Instead, when the routine's
+**── ACTUAL POSITIONS ── actual net factor delta** breaches the band (`|actual_net| >
+net_delta_band_pct × total_amount_quote`, default ±$20), re-tune the two `pmm_mister` controllers and
+push the changes via `manage_bots(action="update_config", ...)`. Keep BOTH controllers running.
+
+**Diagnose from the routine, not by eye.** Read each leg's signed notional and its **fill gap** (how far
+it sits from its target notional). The book drifts directional because the **leader** (leg over its
+target — over-accumulated) outfills the **laggard** (leg under target — under-filled). Pull it back by
+**throttling the leader and accelerating the laggard.** Adjust one or both — use the agent brain to pick
+which controller(s) and how hard, scaled to the breach size and fill gaps:
+
+- **Throttle the over-accumulated leg** (shrink its exposure via fills):
+  - **Widen its entry spreads** — `buy_spreads` on a LONG leg / `sell_spreads` on a SHORT leg — so it adds inventory slower.
+  - **Cut its entry-side amounts** — `buy_amounts_pct` (LONG) / `sell_amounts_pct` (SHORT).
+  - **Lower its `take_profit`** so it sheds accumulated inventory sooner.
+  - **Shift its inventory band toward flat** — lower `target_base_pct` (and `max_base_pct` on a LONG leg / `min_base_pct` on a SHORT leg).
+  - **Lower its `total_amount_quote`** to cap the leg outright.
+- **Accelerate the under-filled leg** (grow its offsetting exposure via fills):
+  - **Tighten its entry spreads** so it fills closer to the touch.
+  - **Raise its entry-side amounts** (`buy_amounts_pct` LONG / `sell_amounts_pct` SHORT).
+  - **Lengthen its `take_profit`** so it isn't flattened as fast.
+  - **Shift its inventory band toward its lean** (raise the LONG leg's / deepen the SHORT leg's target).
+  - **Raise its `total_amount_quote`** to give it room to catch up.
+
+**Lever order:** reach for **spreads and `take_profit` first** — they change fill rate immediately and are
+cheap to reverse — and use `total_amount_quote`/inventory-band shifts for a larger or persistent breach.
+This is gradual by design: the book re-neutralizes over the next few ticks as fills rebalance. **Re-read
+the actual delta every tick and unwind the skew as it returns toward the band** so you don't overshoot to
+the opposite sign. Respect the caps below. Long MUST offset short — never let the book run net directional.
 
 ### Guardrails — FORCED
 - **Correlation-break / funding-flip:** already surfaced by the routine (HOLD-FLATTEN / REDUCE-ROTATE)
@@ -131,11 +171,13 @@ leg's notional from the routine), `portfolio_allocation` 0.2, `position_mode="ON
 **`position_side="BUY"` (LONG leg) or `"SELL"` (SHORT leg)** — this is how the leg holds its
 funding-favorable directional lean while MMing, `leverage` ≤ `leverage_cap` & ≤ market max,
 `buy_spreads`/`sell_spreads` (from `buy_spread_bps`/`sell_spread_bps`, e.g. `"0.0005,0.001"`),
-`take_profit` (`take_profit_bps`/1e4, ≥0.0004), `target_base_pct`/`min`/`max` leaned toward the
-lean side (e.g. long leg 0.7/0.5/0.9, short leg 0.3/0.1/0.5), `max_active_executors_by_level` 2,
+`buy_amounts_pct`/`sell_amounts_pct` (per-level size distribution, e.g. `"1,1"`),
+`take_profit` (`take_profit_bps`/1e4, ≥0.0004), `target_base_pct`/`min_base_pct`/`max_base_pct` leaned
+toward the lean side (e.g. long leg 0.7/0.5/0.9, short leg 0.3/0.1/0.5), `max_active_executors_by_level` 2,
 `open_order_type`=3, `take_profit_order_type`=3, `global_sl_enabled`=true, `global_stop_loss`=0.02.
-The DETERMINISTIC net-delta enforcement above is the real neutrality control (pmm bands don't reliably
-cap at leverage). On error: journal → `manage_controllers(action="describe",
+These same knobs — `buy_spreads`/`sell_spreads`, `*_amounts_pct`, `take_profit`, `target/min/max_base_pct`,
+`total_amount_quote` — are exactly the levers the **Delta-neutral INDUCTION** block re-tunes to steer the
+book back to neutral (there is no market-order hedge). On error: journal → `manage_controllers(action="describe",
 controller_name="pmm_mister")` → fix → retry once → else HOLD.
 
 ## HIP-3 essentials
@@ -151,4 +193,5 @@ Mandatory, every tick (these go in the snapshot so the delta is trackable tick-o
   labelled **IN-BAND** or **BREACH**.
 - **Fill gap**: how far each leg sits from its target notional (explains any off-neutral drift).
 - live corr + hedge_beta (β), funding each leg + net carry (/yr), spread P&L, fees, funding accrued,
-  total_net, the routine's RECOMMENDATION, and the action you took (HOLD / RESIZE / hedge residual).
+  total_net, the routine's RECOMMENDATION, and the action you took (HOLD / RESIZE / A-B flip /
+  REBALANCE — which controller(s) re-tuned and which levers moved; NEVER a market hedge).
