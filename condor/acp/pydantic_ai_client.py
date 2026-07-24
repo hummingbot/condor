@@ -486,7 +486,12 @@ class PydanticAIClient:
             command = srv_config["command"]
             args = srv_config.get("args", [])
 
-            env = dict(self.extra_env or {})
+            # Inherit the parent process env (same as ACPClient) so cloud keys
+            # loaded via dotenv — e.g. OPENROUTER_API_KEY — reach MCP tools like
+            # get_available_models. extra_env / per-server env overlay on top.
+            env = dict(os.environ)
+            if self.extra_env:
+                env.update(self.extra_env)
             for env_entry in srv_config.get("env", []):
                 if isinstance(env_entry, dict):
                     env[env_entry["name"]] = env_entry["value"]
@@ -494,7 +499,7 @@ class PydanticAIClient:
             mcp_server = MCPServerStdio(
                 command,
                 args=args,
-                env=env if env else None,
+                env=env,
                 timeout=30,
             )
 

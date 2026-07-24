@@ -110,7 +110,17 @@ def create_app() -> FastAPI:
 
         @app.get("/{full_path:path}")
         async def serve_spa(request: Request, full_path: str):
-            """SPA fallback: serve index.html for all non-API routes."""
+            """SPA fallback: serve index.html for all non-API routes.
+
+            An unknown ``/api/`` path is a real 404, never index.html: a frontend
+            running ahead of the backend would otherwise get 200 HTML where it
+            expects JSON, and surface the version skew as an opaque parse error
+            instead of a missing route.
+            """
+            if full_path.startswith("api/"):
+                raise HTTPException(
+                    status_code=404, detail=f"No such API route: /{full_path}"
+                )
             if full_path:
                 try:
                     candidate = (dist / full_path).resolve()
