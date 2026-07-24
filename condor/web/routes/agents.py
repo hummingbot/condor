@@ -18,6 +18,7 @@ stays shared at ``agents/{slug}/``.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from pathlib import Path
@@ -344,6 +345,135 @@ async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | No
     return client, server_name
 
 
+def _session_bot_base(strategy_dir: Path, default_config: dict | None, num: int) -> str:
+    """Bot base name a session operates: per-session config, else strategy default.
+
+    A non-empty per-session ``bot_name`` wins (so runtime-named bots that record
+    their deployed name resolve), but an empty/absent one falls back to the
+    strategy default — early sessions predating the config's ``bot_name`` saved it
+    as ``''`` and must still map to the shared bot they operated. Empty string when
+    neither is set (direct-executor strategies). Shared by the per-session PnL
+    distribution and the operator's live-executor view so both resolve identically.
+    """
+    from condor.agents.config import load_full_config
+    from condor.agents.sessions_index import find_session_dir
+
+    default_base = (default_config or {}).get("bot_name", "") or ""
+    sd = find_session_dir(strategy_dir, num)
+    if not sd:
+        return default_base
+    return load_full_config(sd, default_config).get("bot_name", "") or default_base
+
+
+def _session_start_epoch(strategy_dir: Path, num: int) -> float:
+    """Session start time: config.yml is written once at start, so its mtime is stable."""
+    from condor.agents.sessions_index import find_session_dir
+
+    sd = find_session_dir(strategy_dir, num)
+    if not sd:
+        return 0.0
+    cfg = sd / "config.yml"
+    target = cfg if cfg.exists() else sd
+    try:
+        return os.path.getmtime(target)
+    except OSError:
+        return 0.0
+
+
+async def _apply_bot_mode_pnl(
+    real_sessions: list, strategy_dir: Path, default_config: dict | None, client: Any
+) -> None:
+    """Distribute each operated bot's PnL across session windows (bot-mode only).
+
+    Realized PnL, volume and trade counts are attributed to whichever session was
+    operating during each slice of the bot's cumulative history; live unrealized
+    PnL and open positions go to the current operator (the latest session per bot
+    base). Session windows tile the timeline ``[start_N, start_{N+1})`` (last → now)
+    so every slice sums back to the bot's cumulative with no double counting.
+
+    Works uniformly for single- and multi-controller bots (history sums controllers
+    per instance) and for a strategy re-launched under several instances. Strategies
+    whose sessions resolve NO bot_name (direct-executor agents) are left untouched —
+    their per-session executor attribution already stands.
+    """
+    from condor.fetchers.bot_performance import (
+        bot_executor_rows,
+        fetch_all_bot_performance,
+        fetch_instance_history,
+        resolve_bot,
+        resolve_bot_instances,
+        slice_history,
+    )
+
+    if not client or not real_sessions:
+        return
+    session_base = {
+        s.session_num: _session_bot_base(strategy_dir, default_config, s.session_num)
+        for s in real_sessions
+    }
+    bases = {b for b in session_base.values() if b}
+    if not bases:
+        return  # direct-executor strategy — nothing to attribute
+
+    try:
+        all_perf = await fetch_all_bot_performance(client)
+    except Exception as e:
+        log.warning("bot perf fetch for %s failed: %s", strategy_dir.name, e)
+        return
+
+    instances_by_base = {b: resolve_bot_instances(all_perf, b) for b in bases}
+    all_instances = sorted({i for lst in instances_by_base.values() for i in lst})
+    MAX_INSTANCES = 24
+    if len(all_instances) > MAX_INSTANCES:
+        log.warning(
+            "bot history for %s: %d instances, capping at %d newest "
+            "(older sessions may under-report)",
+            strategy_dir.name,
+            len(all_instances),
+            MAX_INSTANCES,
+        )
+        all_instances = all_instances[-MAX_INSTANCES:]
+    history = {
+        inst: await fetch_instance_history(client, inst) for inst in all_instances
+    }
+
+    # Distribute realized/volume/trades per session window.
+    ordered = sorted(real_sessions, key=lambda s: s.session_num)
+    now = time.time()
+    for i, s in enumerate(ordered):
+        base = session_base[s.session_num]
+        if not base:
+            continue
+        start = _session_start_epoch(strategy_dir, s.session_num)
+        end = (
+            _session_start_epoch(strategy_dir, ordered[i + 1].session_num)
+            if i + 1 < len(ordered)
+            else now
+        )
+        insts = [history[k] for k in instances_by_base[base] if k in history]
+        realized, volume, trades = slice_history(insts, start, end)
+        s.realized_pnl += realized
+        s.volume += volume
+        s.trade_count += int(round(trades))
+        s.total_pnl = s.realized_pnl + s.unrealized_pnl
+
+    # Live unrealized + open positions → the current operator per base.
+    for base in bases:
+        bot = resolve_bot(all_perf, base)
+        if not bot:
+            continue
+        ops = [s for s in real_sessions if session_base[s.session_num] == base]
+        if not ops:
+            continue
+        operator = max(ops, key=lambda s: s.session_num)
+        b_rows = bot_executor_rows(bot)
+        operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
+        operator.fees += float(bot.get("cum_fees_quote", 0) or 0)
+        operator.open_count += sum(1 for r in b_rows if r["status"] == "RUNNING")
+        operator.executors = list(operator.executors) + b_rows
+        operator.total_pnl = operator.realized_pnl + operator.unrealized_pnl
+
+
 async def _compute_strategy_performance(
     run_key: str, strategy_dir: Path, default_config: dict | None
 ):
@@ -353,7 +483,6 @@ async def _compute_strategy_performance(
     sessions/experiments are served from ``_CLOSED_PERF_CACHE`` so only active
     ids hit the backend after the TTL expires.
     """
-    from condor.agents.config import load_full_config
     from condor.agents.performance import fetch_agent_performance_batch
 
     cached = _cache_get(f"perf:{run_key}")
@@ -363,12 +492,10 @@ async def _compute_strategy_performance(
     ids = enumerate_agent_ids(run_key, strategy_dir)
     client, _server = await _get_client_for_strategy(strategy_dir, default_config)
 
-    # Controller mode: a strategy with a configured bot_name attributes that bot's
-    # PnL to every one of its agent sessions. The bot is persistent infrastructure
-    # tied to the stable run_key, so the name is shared across sessions.
-    bot_name = load_full_config(strategy_dir, default_config).get("bot_name", "")
-    bot_names = {aid: bot_name for aid, _, _ in ids} if bot_name else None
-
+    # Per-session executor fetches stay bot-free (bot_names=None below) so closed
+    # sessions can be frozen; bot-mode PnL is distributed per session afterward by
+    # _apply_bot_mode_pnl from the controller history, which handles both fixed and
+    # runtime-named (per-session config) bots.
     sessions: list[AgentPerformanceModel] = []
     if client and ids:
         from condor.agents.engine import get_all_engines
@@ -389,23 +516,18 @@ async def _compute_strategy_performance(
         for aid in active_ids:
             _CLOSED_PERF_CACHE.pop(aid, None)
 
-        if bot_name:
-            # Controller mode attributes the bot's live aggregate to every
-            # session, so no per-session result is immutable — fetch all.
-            fetch_ids = [aid for aid, _, _ in ids]
-        else:
-            fetch_ids = [
-                aid
-                for aid, _, _ in ids
-                if aid in active_ids or aid not in _CLOSED_PERF_CACHE
-            ]
+        fetch_ids = [
+            aid
+            for aid, _, _ in ids
+            if aid in active_ids or aid not in _CLOSED_PERF_CACHE
+        ]
 
         perf_map: dict[str, Any] = {}
         failed_ids: set[str] = set()
         if fetch_ids:
             try:
                 perf_map = await fetch_agent_performance_batch(
-                    client, fetch_ids, bot_names, failed_ids=failed_ids
+                    client, fetch_ids, None, failed_ids=failed_ids
                 )
             except Exception as e:
                 log.warning("fetch_agent_performance_batch(%s) failed: %s", run_key, e)
@@ -420,9 +542,10 @@ async def _compute_strategy_performance(
                 continue
             # Freeze immutable results: fetched fine, no engine, not the newest
             # session, and nothing still open whose unrealized PnL could move.
+            # Per-session perf is bot-free (the shared bot is merged once below),
+            # so it is immutable for a closed session even in controller mode.
             if (
-                not bot_name
-                and agent_id in perf_map
+                agent_id in perf_map
                 and agent_id not in active_ids
                 and agent_id not in failed_ids
                 and perf.open_count == 0
@@ -449,6 +572,15 @@ async def _compute_strategy_performance(
             )
 
     real_sessions = [s for s in sessions if s.kind == "session"]
+
+    # Bot-mode: distribute each operated bot's PnL across the session windows that
+    # produced it (realized/volume/trades per window; live unrealized/open on the
+    # current operator). Direct-executor strategies are left untouched. Because the
+    # bot is DISTRIBUTED — not duplicated — the totals below are a plain additive
+    # sum of the rows and stay correct for both modes with no double counting.
+    if client and real_sessions:
+        await _apply_bot_mode_pnl(real_sessions, strategy_dir, default_config, client)
+
     totals = {
         "total_pnl": sum(s.total_pnl for s in real_sessions),
         "realized_pnl": sum(s.realized_pnl for s in real_sessions),
@@ -458,6 +590,7 @@ async def _compute_strategy_performance(
         "open_positions": sum(s.open_count for s in real_sessions),
         "trade_count": float(sum(s.trade_count for s in real_sessions)),
     }
+
     result = (sessions, totals)
     _cache_set(f"perf:{run_key}", result)
     return result
@@ -1026,7 +1159,27 @@ async def get_session_executors(
                 agent_id=agent_id, session_num=session_num
             ).model_dump(),
         }
-    perf = await fetch_agent_performance(client, agent_id)
+    # Bot-mode: the session operates a named bot whose executors live in the bot
+    # container, not the agent_id-keyed table. Resolve the bot_name (per-session
+    # config wins, so runtime-named bots that record their name are picked up)
+    # and let fetch_agent_performance merge its live positions — but ONLY for the
+    # current operator (the latest session that deployed the live bot instance).
+    # A closed session shows only its own direct executors, never the live bot's
+    # open positions, which belong to whoever is running the shared bot now.
+    from condor.agents.sessions_index import enumerate_agent_ids
+
+    session_nums = [
+        n
+        for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.dir)
+        if k == "session"
+    ]
+    is_operator = bool(session_nums) and session_num == max(session_nums)
+    bot_name = (
+        _session_bot_base(strategy.dir, strategy.default_config, session_num)
+        if is_operator
+        else ""
+    )
+    perf = await fetch_agent_performance(client, agent_id, bot_name=bot_name)
     model = AgentPerformanceModel(
         agent_id=agent_id,
         session_num=session_num,
