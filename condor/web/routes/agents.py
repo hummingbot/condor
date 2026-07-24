@@ -344,6 +344,22 @@ async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | No
     return client, server_name
 
 
+def _bot_name_for_session(strategy, session_num: int) -> str:
+    """Resolve the bot_name a session operates in, per-session config first.
+
+    A session that records its actual deployed bot name in its own ``config.yml``
+    (e.g. a strategy that derives the name at runtime) takes precedence; otherwise
+    the strategy-level configured ``bot_name`` is used. Empty string when neither
+    is set (direct-executor strategies).
+    """
+    from condor.agents.config import load_full_config
+    from condor.agents.sessions_index import find_session_dir
+
+    session_dir = find_session_dir(strategy.dir, session_num)
+    cfg_dir = session_dir if session_dir else strategy.dir
+    return load_full_config(cfg_dir, strategy.default_config).get("bot_name", "") or ""
+
+
 async def _compute_strategy_performance(
     run_key: str, strategy_dir: Path, default_config: dict | None
 ):
@@ -363,11 +379,12 @@ async def _compute_strategy_performance(
     ids = enumerate_agent_ids(run_key, strategy_dir)
     client, _server = await _get_client_for_strategy(strategy_dir, default_config)
 
-    # Controller mode: a strategy with a configured bot_name attributes that bot's
-    # PnL to every one of its agent sessions. The bot is persistent infrastructure
-    # tied to the stable run_key, so the name is shared across sessions.
+    # Controller mode: a strategy with a configured bot_name operates ONE shared
+    # bot (persistent infrastructure tied to the stable run_key). Its aggregate is
+    # merged in ONCE below — into the totals and surfaced on each session row —
+    # rather than per-session (which would multiply the shared PnL by session
+    # count). Per-session fetches stay bot-free so closed sessions can be frozen.
     bot_name = load_full_config(strategy_dir, default_config).get("bot_name", "")
-    bot_names = {aid: bot_name for aid, _, _ in ids} if bot_name else None
 
     sessions: list[AgentPerformanceModel] = []
     if client and ids:
@@ -389,23 +406,18 @@ async def _compute_strategy_performance(
         for aid in active_ids:
             _CLOSED_PERF_CACHE.pop(aid, None)
 
-        if bot_name:
-            # Controller mode attributes the bot's live aggregate to every
-            # session, so no per-session result is immutable — fetch all.
-            fetch_ids = [aid for aid, _, _ in ids]
-        else:
-            fetch_ids = [
-                aid
-                for aid, _, _ in ids
-                if aid in active_ids or aid not in _CLOSED_PERF_CACHE
-            ]
+        fetch_ids = [
+            aid
+            for aid, _, _ in ids
+            if aid in active_ids or aid not in _CLOSED_PERF_CACHE
+        ]
 
         perf_map: dict[str, Any] = {}
         failed_ids: set[str] = set()
         if fetch_ids:
             try:
                 perf_map = await fetch_agent_performance_batch(
-                    client, fetch_ids, bot_names, failed_ids=failed_ids
+                    client, fetch_ids, None, failed_ids=failed_ids
                 )
             except Exception as e:
                 log.warning("fetch_agent_performance_batch(%s) failed: %s", run_key, e)
@@ -420,9 +432,10 @@ async def _compute_strategy_performance(
                 continue
             # Freeze immutable results: fetched fine, no engine, not the newest
             # session, and nothing still open whose unrealized PnL could move.
+            # Per-session perf is bot-free (the shared bot is merged once below),
+            # so it is immutable for a closed session even in controller mode.
             if (
-                not bot_name
-                and agent_id in perf_map
+                agent_id in perf_map
                 and agent_id not in active_ids
                 and agent_id not in failed_ids
                 and perf.open_count == 0
@@ -458,6 +471,48 @@ async def _compute_strategy_performance(
         "open_positions": sum(s.open_count for s in real_sessions),
         "trade_count": float(sum(s.trade_count for s in real_sessions)),
     }
+
+    # Controller mode: fold the ONE shared bot in exactly once — into the totals,
+    # and surfaced on each session row so the UI shows the live positions the
+    # agent operates. Session rows are display-only; totals are not re-summed from
+    # them, so counting the bot once here does not multiply by session count.
+    if bot_name and client and real_sessions:
+        from condor.fetchers.bot_performance import (
+            bot_executor_rows,
+            fetch_all_bot_performance,
+            resolve_bot,
+        )
+
+        try:
+            bot = resolve_bot(await fetch_all_bot_performance(client), bot_name)
+        except Exception as e:
+            log.warning("bot perf resolve for %s failed: %s", run_key, e)
+            bot = None
+        if bot:
+            b_real = float(bot.get("realized_pnl_quote", 0) or 0)
+            b_unreal = float(bot.get("unrealized_pnl_quote", 0) or 0)
+            b_vol = float(bot.get("volume_traded", 0) or 0)
+            b_fees = float(bot.get("cum_fees_quote", 0) or 0)
+            b_rows = bot_executor_rows(bot)
+            b_open = sum(1 for r in b_rows if r["status"] == "RUNNING")
+
+            totals["realized_pnl"] += b_real
+            totals["unrealized_pnl"] += b_unreal
+            totals["total_pnl"] += b_real + b_unreal
+            totals["volume"] += b_vol
+            totals["fees"] += b_fees
+            totals["open_positions"] += b_open
+            totals["trade_count"] += float(len(b_rows))
+
+            for s in sessions:
+                s.realized_pnl += b_real
+                s.unrealized_pnl += b_unreal
+                s.total_pnl = s.realized_pnl + s.unrealized_pnl
+                s.volume += b_vol
+                s.fees += b_fees
+                s.open_count += b_open
+                s.executors = list(s.executors) + b_rows
+
     result = (sessions, totals)
     _cache_set(f"perf:{run_key}", result)
     return result
@@ -1026,7 +1081,12 @@ async def get_session_executors(
                 agent_id=agent_id, session_num=session_num
             ).model_dump(),
         }
-    perf = await fetch_agent_performance(client, agent_id)
+    # Bot-mode: the session operates a named bot whose executors live in the bot
+    # container, not the agent_id-keyed table. Resolve the bot_name (per-session
+    # config wins, so runtime-named bots that record their name are picked up)
+    # and let fetch_agent_performance merge its live positions.
+    bot_name = _bot_name_for_session(strategy, session_num)
+    perf = await fetch_agent_performance(client, agent_id, bot_name=bot_name)
     model = AgentPerformanceModel(
         agent_id=agent_id,
         session_num=session_num,

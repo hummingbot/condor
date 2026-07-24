@@ -16,9 +16,11 @@ from condor.agents.performance import (
 )
 from condor.fetchers.bot_performance import (
     _aggregate_by_bot,
+    bot_executor_rows,
     extract_snapshots,
     fetch_all_bot_performance,
     fetch_bot_performance,
+    resolve_bot,
 )
 
 # ── Sample payloads ──
@@ -110,6 +112,96 @@ def test_fetch_bot_performance_resilient_to_errors():
     assert asyncio.run(fetch_bot_performance(client, "river")) is None
 
 
+# ── Suffix-tolerant resolution ──
+
+
+def _snap_with_positions(
+    bot_name, controller_id, timestamp, positions, status="running"
+):
+    return {
+        "bot_name": bot_name,
+        "controller_id": controller_id,
+        "status": status,
+        "timestamp": timestamp,
+        "performance": {
+            "realized_pnl_quote": 1.0,
+            "unrealized_pnl_quote": 2.0,
+            "volume_traded": 100.0,
+            "positions_summary": positions,
+        },
+    }
+
+
+def test_resolve_bot_exact_and_suffix():
+    agg = _aggregate_by_bot(
+        [
+            _snap_with_positions(
+                "dn-mm-20260101-000000", "c", "2026-01-01T00:00:00+00:00", []
+            ),
+            _snap_with_positions(
+                "dn-mm-20260724-182221", "c", "2026-07-24T18:22:21+00:00", []
+            ),
+            _snap_with_positions(
+                "dn-mmx-20260724-000000", "c", "2026-07-24T00:00:00+00:00", []
+            ),
+            _snap_with_positions("other", "c", "2026-07-24T00:00:00+00:00", []),
+        ]
+    )
+    # exact match wins outright
+    assert resolve_bot(agg, "other")["bot_name"] == "other"
+    # base name resolves to the freshest timestamped deploy
+    assert resolve_bot(agg, "dn-mm")["bot_name"] == "dn-mm-20260724-182221"
+    # the hyphen boundary keeps a sibling base (dn-mmx) from matching dn-mm
+    assert resolve_bot(agg, "dn-mm")["bot_name"] != "dn-mmx-20260724-000000"
+    # no match → None; empty inputs → None
+    assert resolve_bot(agg, "ghost") is None
+    assert resolve_bot(agg, "") is None
+    assert resolve_bot({}, "dn-mm") is None
+
+
+# ── Executor rows from positions_summary ──
+
+
+def test_bot_executor_rows_from_positions():
+    pos = {
+        "connector_name": "hyperliquid",
+        "trading_pair": "XYZ:CL-USD",
+        "volume_traded_quote": 250.0,
+        "side": "TradeType.SELL",
+        "amount": 2.0,
+        "breakeven_price": 60.0,
+        "unrealized_pnl_quote": -1.5,
+        "realized_pnl_quote": 0.4,
+        "cum_fees_quote": 0.3,
+    }
+    agg = _aggregate_by_bot(
+        [_snap_with_positions("bot", "dn_CL_mm", "2026-07-24T18:00:00+00:00", [pos])]
+    )
+    rows = bot_executor_rows(agg["bot"])
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["controller_id"] == "dn_CL_mm"
+    assert r["pair"] == "XYZ:CL-USD"
+    assert r["side"] == "SELL"  # TradeType. prefix stripped
+    assert r["status"] == "RUNNING"
+    assert r["pnl"] == -1.5  # unrealized mark
+    assert r["volume"] == 250.0
+    assert r["fees"] == 0.3
+    assert r["entry_price"] == 60.0
+    assert r["amount"] == 120.0  # abs(2.0) * 60.0 quote notional
+    assert r["timestamp"] > 0  # ISO parsed to epoch
+
+
+def test_flat_controller_yields_no_rows_but_counts_pnl():
+    agg = _aggregate_by_bot(
+        [_snap_with_positions("bot", "c", "2026-07-24T18:00:00+00:00", [])]
+    )
+    assert bot_executor_rows(agg["bot"]) == []
+    # realized/unrealized still aggregate even with no open positions
+    assert agg["bot"]["realized_pnl_quote"] == 1.0
+    assert agg["bot"]["unrealized_pnl_quote"] == 2.0
+
+
 # ── Merge into AgentPerformance ──
 
 
@@ -143,6 +235,38 @@ def test_merge_is_disjoint_addition():
     assert len(merged.controllers) == 2
     # The bot's controller executors never appear in the executor list.
     assert all(r["id"] == "e1" for r in merged.executors)
+
+
+def test_merge_appends_bot_positions_as_rows():
+    # Bot-mode agent: its own agent_id table is empty; the bot holds one open
+    # position that must surface as an executor row with open_count bumped.
+    agent_id = "dn.sess_1"
+    pos = {
+        "connector_name": "hyperliquid",
+        "trading_pair": "XYZ:CL-USD",
+        "volume_traded_quote": 250.0,
+        "side": "TradeType.BUY",
+        "amount": 1.0,
+        "breakeven_price": 60.0,
+        "unrealized_pnl_quote": -0.5,
+        "realized_pnl_quote": 0.4,
+        "cum_fees_quote": 0.3,
+    }
+    snaps = [
+        _snap_with_positions(
+            "dn-mm-20260724-1", "dn_CL_mm", "2026-07-24T18:00:00+00:00", [pos]
+        ),
+    ]
+    client = _FakeClient(rows_by_id={}, snapshots=snaps)
+    # base name resolves suffix-tolerantly to the deployed instance
+    merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_name="dn-mm"))
+    # bot_name reflects the resolved deployed instance, not just the base
+    assert merged.bot_name == "dn-mm-20260724-1"
+    assert len(merged.executors) == 1
+    assert merged.executors[0]["pair"] == "XYZ:CL-USD"
+    assert merged.open_count == 1
+    assert merged.fees == 0.3
+    assert merged.unrealized_pnl == 2.0  # controller-level aggregate
 
 
 def test_no_snapshot_leaves_executor_totals_unchanged():

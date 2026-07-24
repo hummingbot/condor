@@ -89,9 +89,7 @@ def _executor_row(ex: dict) -> dict[str, Any]:
 
     amount = float(cfg.get("total_amount_quote") or cfg.get("amount") or 0)
     if amount <= 0:
-        amount = float(
-            custom_info.get("total_value_quote") or 0
-        )
+        amount = float(custom_info.get("total_value_quote") or 0)
 
     return {
         "id": str(ex.get("id") or ex.get("executor_id") or ""),
@@ -138,14 +136,25 @@ def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
 
     The two sources are disjoint (bot controllers tag executors with their own
     config ids, never the ``agent_id``), so the merge is plain addition — no
-    de-duplication. Fees are left untouched: the bot snapshot carries no fee field.
+    de-duplication. The bot's open positions are surfaced as executor-like rows so
+    bot-mode agents show live positions in both the executors tab and the agent's
+    own core-data view, which otherwise only see the (empty) ``agent_id`` table.
     """
+    from condor.fetchers.bot_performance import bot_executor_rows
+
     perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
     perf.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
     perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
     perf.volume += float(bot.get("volume_traded", 0) or 0)
+    perf.fees += float(bot.get("cum_fees_quote", 0) or 0)
     perf.bot_name = bot.get("bot_name", perf.bot_name)
     perf.controllers = bot.get("controllers", [])
+
+    rows = bot_executor_rows(bot)
+    perf.executors = perf.executors + rows
+    open_rows = [r for r in rows if r["status"] == "RUNNING"]
+    perf.open_count += len(open_rows)
+    perf.trade_count += len(rows)
 
 
 def _build_perf_from_rows(
@@ -256,7 +265,10 @@ async def fetch_agent_performance_batch(
     # shared across the whole batch since the API returns all bots at once.
     wanted = {bn for bn in (bot_names or {}).values() if bn}
     if wanted:
-        from condor.fetchers.bot_performance import fetch_all_bot_performance
+        from condor.fetchers.bot_performance import (
+            fetch_all_bot_performance,
+            resolve_bot,
+        )
 
         try:
             all_bot_perf = await fetch_all_bot_performance(client)
@@ -267,7 +279,7 @@ async def fetch_agent_performance_batch(
             if not bn or aid not in out:
                 continue
             out[aid].bot_name = bn
-            bot = all_bot_perf.get(bn)
+            bot = resolve_bot(all_bot_perf, bn)
             if bot:
                 _merge_bot_perf(out[aid], bot)
     return out
