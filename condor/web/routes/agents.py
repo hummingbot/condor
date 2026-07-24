@@ -345,29 +345,15 @@ async def _get_client_for_strategy(strategy_dir: Path, default_config: dict | No
     return client, server_name
 
 
-def _bot_name_for_session(strategy, session_num: int) -> str:
-    """Resolve the bot_name a session operates in, per-session config first.
-
-    A session that records its actual deployed bot name in its own ``config.yml``
-    (e.g. a strategy that derives the name at runtime) takes precedence; otherwise
-    the strategy-level configured ``bot_name`` is used. Empty string when neither
-    is set (direct-executor strategies).
-    """
-    from condor.agents.config import load_full_config
-    from condor.agents.sessions_index import find_session_dir
-
-    session_dir = find_session_dir(strategy.dir, session_num)
-    cfg_dir = session_dir if session_dir else strategy.dir
-    return load_full_config(cfg_dir, strategy.default_config).get("bot_name", "") or ""
-
-
 def _session_bot_base(strategy_dir: Path, default_config: dict | None, num: int) -> str:
     """Bot base name a session operates: per-session config, else strategy default.
 
     A non-empty per-session ``bot_name`` wins (so runtime-named bots that record
     their deployed name resolve), but an empty/absent one falls back to the
     strategy default — early sessions predating the config's ``bot_name`` saved it
-    as ``''`` and must still map to the shared bot they operated.
+    as ``''`` and must still map to the shared bot they operated. Empty string when
+    neither is set (direct-executor strategies). Shared by the per-session PnL
+    distribution and the operator's live-executor view so both resolve identically.
     """
     from condor.agents.config import load_full_config
     from condor.agents.sessions_index import find_session_dir
@@ -1188,7 +1174,11 @@ async def get_session_executors(
         if k == "session"
     ]
     is_operator = bool(session_nums) and session_num == max(session_nums)
-    bot_name = _bot_name_for_session(strategy, session_num) if is_operator else ""
+    bot_name = (
+        _session_bot_base(strategy.dir, strategy.default_config, session_num)
+        if is_operator
+        else ""
+    )
     perf = await fetch_agent_performance(client, agent_id, bot_name=bot_name)
     model = AgentPerformanceModel(
         agent_id=agent_id,
