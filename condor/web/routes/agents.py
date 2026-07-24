@@ -473,9 +473,12 @@ async def _compute_strategy_performance(
     }
 
     # Controller mode: fold the ONE shared bot in exactly once — into the totals,
-    # and surfaced on each session row so the UI shows the live positions the
-    # agent operates. Session rows are display-only; totals are not re-summed from
-    # them, so counting the bot once here does not multiply by session count.
+    # and onto the CURRENT operator row only (the latest session, which deployed
+    # the resolved bot instance). Surfacing it on every session would duplicate
+    # the shared PnL across rows and, worse, show closed sessions as holding the
+    # live bot's open positions — a closed session cannot have open positions.
+    # Session rows are display-only; totals are not re-summed from them, so the
+    # single fold here does not multiply by session count.
     if bot_name and client and real_sessions:
         from condor.fetchers.bot_performance import (
             bot_executor_rows,
@@ -504,14 +507,14 @@ async def _compute_strategy_performance(
             totals["open_positions"] += b_open
             totals["trade_count"] += float(len(b_rows))
 
-            for s in sessions:
-                s.realized_pnl += b_real
-                s.unrealized_pnl += b_unreal
-                s.total_pnl = s.realized_pnl + s.unrealized_pnl
-                s.volume += b_vol
-                s.fees += b_fees
-                s.open_count += b_open
-                s.executors = list(s.executors) + b_rows
+            operator = max(real_sessions, key=lambda s: s.session_num)
+            operator.realized_pnl += b_real
+            operator.unrealized_pnl += b_unreal
+            operator.total_pnl = operator.realized_pnl + operator.unrealized_pnl
+            operator.volume += b_vol
+            operator.fees += b_fees
+            operator.open_count += b_open
+            operator.executors = list(operator.executors) + b_rows
 
     result = (sessions, totals)
     _cache_set(f"perf:{run_key}", result)
@@ -1084,8 +1087,18 @@ async def get_session_executors(
     # Bot-mode: the session operates a named bot whose executors live in the bot
     # container, not the agent_id-keyed table. Resolve the bot_name (per-session
     # config wins, so runtime-named bots that record their name are picked up)
-    # and let fetch_agent_performance merge its live positions.
-    bot_name = _bot_name_for_session(strategy, session_num)
+    # and let fetch_agent_performance merge its live positions — but ONLY for the
+    # current operator (the latest session that deployed the live bot instance).
+    # A closed session shows only its own direct executors, never the live bot's
+    # open positions, which belong to whoever is running the shared bot now.
+    from condor.agents.sessions_index import enumerate_agent_ids
+
+    session_nums = [
+        n for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.dir)
+        if k == "session"
+    ]
+    is_operator = bool(session_nums) and session_num == max(session_nums)
+    bot_name = _bot_name_for_session(strategy, session_num) if is_operator else ""
     perf = await fetch_agent_performance(client, agent_id, bot_name=bot_name)
     model = AgentPerformanceModel(
         agent_id=agent_id,
