@@ -54,7 +54,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
     # Cloud providers always get full access (they're powerful enough)
     if any(
         provider in model_lower
-        for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:"]
+        for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:", "deepseek:"]
     ):
         log.info("Auto-detected cloud provider → tool_filter_mode=full")
         return "full"
@@ -98,7 +98,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
 PYDANTIC_AI_PREFIXES = frozenset(
-    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"}
+    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter", "deepseek"}
 )
 
 # Default base URLs for local model providers and OpenRouter
@@ -106,6 +106,7 @@ DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    "deepseek": "https://api.deepseek.com/v1",
 }
 
 
