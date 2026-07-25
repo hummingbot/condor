@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 
+import { PairLabel } from "@/components/executor/PairLabel";
 import { api, type CandleData, type ExecutorInfo, type PnlPoint } from "@/lib/api";
 import {
   computeMultiOverlays,
@@ -586,7 +587,7 @@ export function ArchivedPerformanceCharts({
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--color-bg)]">
         <p className="text-[10px] text-[var(--color-text-muted)]">
-          {tradingPair} &middot; {interval} &middot; {executors.length} executors{overlayNote}
+          <PairLabel tradingPair={tradingPair} connector={connector} /> &middot; {interval} &middot; {executors.length} executors{overlayNote}
         </p>
         <div className="flex items-center gap-4 text-[10px]">
           {isManyExecutors && (

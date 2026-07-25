@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 
+import { PairLabel } from "@/components/executor/PairLabel";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import type { ExecutorInfo } from "@/lib/api";
 
@@ -30,9 +31,11 @@ export function AgentMarketStrip({ serverName, executors }: AgentMarketStripProp
       {pairs.map(({ connector, pair }) => (
         <div key={`${connector}:${pair}`} className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
-            <span className="rounded-md bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-[var(--color-primary)]">
-              {pair}
-            </span>
+            <PairLabel
+              tradingPair={pair}
+              connector={connector}
+              className="rounded-md bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-bold uppercase text-[var(--color-primary)]"
+            />
             <span className="rounded-md bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-text-muted)]">
               {connector}
             </span>

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 
+import { PairLabel } from "@/components/executor/PairLabel";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type ExecutorInfo } from "@/lib/api";
 import {
@@ -93,9 +94,24 @@ export function ExecutorChart({
   const startTime = Math.floor(timeRange.start - paddingSeconds);
   const endTime = Math.ceil(timeRange.end + paddingSeconds);
 
+  // DEX/LP executors carry their pool address (in config or custom_info). When
+  // present, the backend fetches candles from GeckoTerminal by pool instead of the
+  // CEX candle feed the DEX connector doesn't have (which surfaced as "Failed to
+  // load candles"). CEX executors have no pool_address → normal candle path.
+  const poolAddress = useMemo(() => {
+    for (const ex of executors) {
+      const pa =
+        (ex.config?.pool_address as string | undefined) ??
+        (ex.custom_info?.pool_address as string | undefined);
+      if (pa) return pa;
+    }
+    return undefined;
+  }, [executors]);
+
   const { data: candles, isLoading, isError } = useQuery({
-    queryKey: ["candles", server, connector, tradingPair, interval],
-    queryFn: () => api.getCandles(server, connector, tradingPair, interval, 5000, startTime, endTime),
+    queryKey: ["candles", server, connector, tradingPair, interval, poolAddress],
+    queryFn: () =>
+      api.getCandles(server, connector, tradingPair, interval, 5000, startTime, endTime, poolAddress),
     enabled: !!server && !!connector && !!tradingPair,
     retry: 1,
   });
@@ -642,7 +658,7 @@ export function ExecutorChart({
       {/* Header bar */}
       <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
         <p className="text-[10px] text-[var(--color-text-muted)]">
-          {tradingPair} &middot; {interval}
+          <PairLabel tradingPair={tradingPair} connector={connector} /> &middot; {interval}
           {hasActive && (
             <span className="ml-2 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
           )}

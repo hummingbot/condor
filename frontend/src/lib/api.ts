@@ -956,12 +956,23 @@ export const api = {
     limit = 1000,
     startTime?: number,
     endTime?: number,
+    poolAddress?: string,
   ) => {
     let url = `/api/v1/servers/${encodeURIComponent(server)}/market/candles?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
     if (startTime) url += `&start_time=${startTime}`;
     if (endTime) url += `&end_time=${endTime}`;
+    // DEX/LP executors: pass the pool address so the backend fetches candles from
+    // GeckoTerminal (by pool) instead of the CEX candle feed the connector lacks.
+    if (poolAddress) url += `&pool_address=${encodeURIComponent(poolAddress)}`;
     return apiFetch<CandleData[]>(url);
   },
+
+  // Resolve a base-token mint → ticker (GeckoTerminal). Server-independent; used to
+  // display LP/DEX executor pairs (stored as `<mint>-SOL`) with a readable symbol.
+  getTokenSymbol: (mint: string, network?: string) =>
+    apiFetch<{ mint: string; symbol: string }>(
+      `/api/v1/market/token-symbol?mint=${encodeURIComponent(mint)}${network ? `&network=${encodeURIComponent(network)}` : ""}`,
+    ),
 
   // ── Agents (identity + brain) ──
 

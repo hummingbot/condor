@@ -11,6 +11,7 @@ import { memo, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
+import { PairLabel } from "@/components/executor/PairLabel";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { type ExecutorInfo } from "@/lib/api";
 import {
@@ -174,7 +175,9 @@ const ExecutorRow = memo(function ExecutorRow({
       <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
         {ex.connector}
       </td>
-      <td className="px-4 py-2.5 text-sm font-medium">{ex.trading_pair}</td>
+      <td className="px-4 py-2.5 text-sm font-medium">
+        <PairLabel tradingPair={ex.trading_pair} connector={ex.connector} />
+      </td>
       <td className="px-4 py-2.5">
         <span
           className="text-xs font-semibold uppercase"
@@ -470,7 +473,7 @@ export function DetailPanel({
               {executor.type}
             </span>
             <span className="text-[var(--color-text-muted)]">{executor.connector}</span>
-            <span>{executor.trading_pair}</span>
+            <PairLabel tradingPair={executor.trading_pair} connector={executor.connector} />
             <span
               className="rounded px-1.5 py-0.5 text-xs font-semibold uppercase"
               style={{ color: sideColor, background: sideBg }}
