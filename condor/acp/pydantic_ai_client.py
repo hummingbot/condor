@@ -368,6 +368,28 @@ class PydanticAIClient:
                 model_id, OpenAIProvider(openai_client=openai_client)
             )
 
+        # DeepSeek: OpenAI-compatible cloud provider, requires DEEPSEEK_API_KEY.
+        # Handled before the local-providers branch (which uses api_key="not-needed").
+        if prefix == "deepseek":
+            if not model_id:
+                raise RuntimeError(
+                    "DeepSeek requires an explicit model id, e.g. "
+                    "'deepseek:deepseek-v4-pro' or 'deepseek:deepseek-v4-flash'."
+                )
+            api_key = os.environ.get("DEEPSEEK_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "DEEPSEEK_API_KEY is not set. Add it to your .env to use deepseek:* models."
+                )
+            openai_client = AsyncOpenAI(
+                base_url=base_url or DEFAULT_BASE_URLS["deepseek"],
+                api_key=api_key,
+                timeout=_local_timeout,
+            )
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
+            )
+
         # Local providers: always use OpenAI-compatible endpoint with default URL
         if prefix in DEFAULT_BASE_URLS:
             base_url = base_url or DEFAULT_BASE_URLS[prefix]
