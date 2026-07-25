@@ -256,9 +256,22 @@ export function ArchivedPerformanceCharts({
 
   const isManyExecutors = executors.length > 15;
 
+  // DEX/LP executors carry their pool address (config or custom_info). Passing it
+  // lets the backend chart the exact pool this position traded in, rather than
+  // resolving the token's current top pool. CEX executors have none → normal path.
+  const poolAddress = useMemo(() => {
+    for (const ex of executors) {
+      const pa =
+        (ex.config?.pool_address as string | undefined) ??
+        (ex.custom_info?.pool_address as string | undefined);
+      if (pa) return pa;
+    }
+    return undefined;
+  }, [executors]);
+
   const { data: candles } = useQuery({
-    queryKey: ["archived-candles", server, connector, tradingPair, fetchStart, fetchEnd, interval],
-    queryFn: () => api.getCandles(server, connector, tradingPair, interval, limit, fetchStart, fetchEnd),
+    queryKey: ["archived-candles", server, connector, tradingPair, fetchStart, fetchEnd, interval, poolAddress],
+    queryFn: () => api.getCandles(server, connector, tradingPair, interval, limit, fetchStart, fetchEnd, poolAddress),
     enabled: !!server && !!connector && !!tradingPair && timeRange.start > 0,
     staleTime: Infinity,
     retry: 1,

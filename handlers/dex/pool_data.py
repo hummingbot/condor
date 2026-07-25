@@ -123,6 +123,8 @@ async def fetch_ohlcv(
     timeframe: str = "1h",
     currency: str = "usd",
     user_data: dict = None,
+    limit: int = 100,
+    before_timestamp: Optional[int] = None,
 ) -> Tuple[Optional[List], Optional[str]]:
     """Fetch OHLCV data for any pool via GeckoTerminal
 
@@ -132,6 +134,11 @@ async def fetch_ohlcv(
         timeframe: OHLCV timeframe ("1m", "5m", "15m", "1h", "4h", "1d")
         currency: Price currency - "usd" or "token" (quote token)
         user_data: Optional user_data dict for caching
+        limit: Number of candles to fetch (GeckoTerminal caps at 1000)
+        before_timestamp: Fetch candles ending at this unix-seconds timestamp
+            (walks history back from here); None = latest candles. Needed so an
+            archived executor charts against the price window it actually traded
+            in, not the latest candles.
 
     Returns:
         Tuple of (ohlcv_list, error_message)
@@ -140,10 +147,16 @@ async def fetch_ohlcv(
     """
     try:
         gecko_network = get_gecko_network(network)
+        # GeckoTerminal's OHLCV endpoint caps limit at 1000.
+        limit = max(1, min(int(limit), 1000))
 
-        # Check cache
+        # Check cache. before_timestamp/limit are part of the key so a historical
+        # window and the live window for the same pool don't collide.
         if user_data is not None:
-            cache_key = f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
+            cache_key = (
+                f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
+                f"_{limit}_{before_timestamp or 0}"
+            )
             cached = get_cached(user_data, cache_key, ttl=OHLCV_CACHE_TTL)
             if cached is not None:
                 return cached, None
@@ -152,14 +165,14 @@ async def fetch_ohlcv(
         # Pass all parameters explicitly:
         # - currency="token" means price in quote token (not USD)
         # - token="base" means OHLCV for the base token
-        # - limit=100 for reasonable data size
         result = await client.get_ohlcv(
             gecko_network,
             pool_address,
             timeframe,
+            before_timestamp=before_timestamp,
             currency=currency,
             token="base",
-            limit=100,
+            limit=limit,
         )
 
         # Parse response - handle different formats

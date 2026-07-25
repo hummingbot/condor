@@ -52,13 +52,19 @@ _MINT_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 
 
 async def _fetch_pool_candles_raw(
-    pool_address: str, network: str, interval: str
+    pool_address: str,
+    network: str,
+    interval: str,
+    limit: int = 100,
+    before_timestamp: int | None = None,
 ) -> list[CandleData]:
     """OHLCV rows for one pool from GeckoTerminal (reuses handlers.dex fetch+cache).
 
     ``currency="token"`` prices the base token in the quote token (e.g. SOL), matching
-    the executor's own entry/range price scale drawn on the same chart. Returns [] on
-    any miss/error (never raises) so DEX pairs don't fall to the CEX 502 path.
+    the executor's own entry/range price scale drawn on the same chart. ``limit`` and
+    ``before_timestamp`` carry the chart's requested window so an archived executor
+    charts against the candles it actually traded in, not the latest ones. Returns []
+    on any miss/error (never raises) so DEX pairs don't fall to the CEX 502 path.
     """
     from handlers.dex.pool_data import fetch_ohlcv
 
@@ -69,6 +75,8 @@ async def _fetch_pool_candles_raw(
             timeframe=interval,
             currency="token",
             user_data=_gecko_ohlcv_user_data,
+            limit=limit,
+            before_timestamp=before_timestamp,
         )
     except Exception as e:
         logger.warning(
@@ -142,12 +150,14 @@ async def _resolve_token_top_pool(mint: str, gnet: str, quote: str = "SOL") -> s
         if chosen:
             attrs = chosen.get("attributes") or {}
             addr = str(attrs.get("address") or str(chosen.get("id") or "").split("_")[-1] or "")
+        # Only cache on a successful API response — addr "" here means the token
+        # genuinely has no pool, which is worth caching. A transient error (below)
+        # must not poison the cache for an hour, so it returns without caching.
+        _token_pool_cache[key] = (now, addr)
+        return addr
     except Exception as e:
         logger.info("top-pool resolve failed mint=%s net=%s: %s", mint, gnet, e)
-        addr = ""
-
-    _token_pool_cache[key] = (now, addr)
-    return addr
+        return ""
 
 
 async def _get_pool_candles(
@@ -157,6 +167,8 @@ async def _get_pool_candles(
     interval: str,
     cache_key: tuple,
     now: float,
+    limit: int = 100,
+    before_timestamp: int | None = None,
 ) -> list[CandleData]:
     """Candles for a DEX/LP pair from GeckoTerminal.
 
@@ -165,13 +177,17 @@ async def _get_pool_candles(
     sits on a dead pool — falls back to the base token's top live pool resolved from
     the mint in ``trading_pair``. So a live token always charts even when the passed
     pool is wrong. ``connector`` is the network id (e.g. solana-mainnet-beta).
+    ``limit``/``before_timestamp`` carry the chart's requested window (see
+    :func:`_fetch_pool_candles_raw`).
     """
     from handlers.dex.pool_data import get_gecko_network
 
     gnet = get_gecko_network(connector)
     candles: list[CandleData] = []
     if pool_address:
-        candles = await _fetch_pool_candles_raw(pool_address, connector, interval)
+        candles = await _fetch_pool_candles_raw(
+            pool_address, connector, interval, limit, before_timestamp
+        )
 
     if not candles:
         dash = trading_pair.rfind("-")
@@ -180,7 +196,9 @@ async def _get_pool_candles(
         if _MINT_RE.match(base):
             top = await _resolve_token_top_pool(base, gnet, quote)
             if top and top != pool_address:
-                candles = await _fetch_pool_candles_raw(top, connector, interval)
+                candles = await _fetch_pool_candles_raw(
+                    top, connector, interval, limit, before_timestamp
+                )
 
     _candle_cache_put(cache_key, candles, now)
     return candles
@@ -423,8 +441,18 @@ async def get_candles(
     from handlers.dex.pool_data import NETWORK_TO_GECKO
 
     if pool_address or connector in NETWORK_TO_GECKO:
+        # Pass the chart's window through so archived executors chart against the
+        # candles they actually traded in. before_timestamp = end of window (candles
+        # walk back from there); None = latest. GeckoTerminal caps limit at 1000.
         return await _get_pool_candles(
-            connector, pool_address, trading_pair, interval, cache_key, now
+            connector,
+            pool_address,
+            trading_pair,
+            interval,
+            cache_key,
+            now,
+            limit=limit,
+            before_timestamp=bucketed_end,
         )
 
     client = await cm.get_client(name)
@@ -559,8 +587,11 @@ async def get_token_symbol(
             (((data or {}).get("data") or {}).get("attributes") or {}).get("symbol") or ""
         )
     except Exception as e:
+        # Don't cache a transient failure — a single blip must not blank this pair's
+        # ticker for 24h. Only successful responses (below) are cached, empty included
+        # (a genuinely unknown mint is worth remembering).
         logger.info("token-symbol resolve failed for mint=%s network=%s: %s", mint, gnet, e)
-        symbol = ""
+        return {"mint": mint, "symbol": ""}
 
     _token_symbol_cache[key] = (now, symbol)
     return {"mint": mint, "symbol": symbol}
