@@ -151,6 +151,9 @@ async def agent_callback_handler(
         # OpenRouter sentinel -> open the model picker instead of setting directly
         if llm_key == "openrouter:":
             await _handle_openrouter_picker(update, context, page=0)
+        # DeepSeek sentinel -> prompt user to type full model key
+        elif llm_key == "deepseek:":
+            await _handle_deepseek_type_prompt(update, context)
         else:
             await _handle_set_llm(update, context, llm_key)
     elif action.startswith("or_page:"):
@@ -390,6 +393,45 @@ async def _handle_openrouter_type_prompt(
         "Send the OpenRouter model slug as a message.\n"
         "Example: anthropic/claude-sonnet-4.5\n\n"
         "Send /cancel to abort."
+    )
+
+
+async def _handle_deepseek_type_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Arm model-input mode: next text message is parsed as a deepseek model key."""
+    query = update.callback_query
+    context.user_data["_deepseek_typing"] = True
+    await query.message.edit_text(
+        "Send the full DeepSeek model key as a message.\n"
+        "Example: deepseek:deepseek-v4-flash\n"
+        "Example: deepseek:deepseek-v4-pro\n\n"
+        "Send /cancel to abort."
+    )
+
+
+async def _resolve_deepseek_typed_key(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
+    """Validate and set the typed DeepSeek model key."""
+    model_key = text.strip()
+    if model_key.lower() in ("/cancel", "cancel"):
+        await update.message.reply_text("Cancelled. Use /agent to continue.")
+        return
+
+    if not model_key.startswith("deepseek:"):
+        await update.message.reply_text(
+            "DeepSeek model keys must start with 'deepseek:'.\n"
+            "Example: deepseek:deepseek-v4-flash\n\n"
+            "Use /agent to try again."
+        )
+        return
+
+    context.user_data["agent_llm"] = model_key
+    context.user_data.pop("agent_llm_auto", None)  # explicit choice
+    await update.message.reply_text(
+        f"LLM set to {model_key}. New sessions will use this model.\n"
+        "Use /agent to continue."
     )
 
 
@@ -812,6 +854,11 @@ async def agent_message_handler(
     # Handle typed OpenRouter slug input
     if context.user_data.pop("_openrouter_typing_slug", None):
         await _resolve_openrouter_typed_slug(update, context, text)
+        return
+
+    # Handle typed DeepSeek model key input
+    if context.user_data.pop("_deepseek_typing", None):
+        await _resolve_deepseek_typed_key(update, context, text)
         return
 
     mode = normalize_mode(context.user_data.get("agent_mode"))
