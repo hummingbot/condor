@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -466,6 +467,8 @@ class TickEngine:
         response_text = "".join(response_chunks)
         tick_duration = time.time() - self._last_tick_at
 
+        self._capture_bot_name(tool_calls)
+
         from datetime import datetime, timezone
 
         timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -550,6 +553,62 @@ class TickEngine:
             yield event
             if isinstance(event, PromptDone):
                 break
+
+    def _capture_bot_name(self, tool_calls: list[dict[str, Any]]) -> None:
+        """Persist the bot a session operates, observed from its own tool calls.
+
+        Bot-mode strategies that derive the name at runtime (e.g. ``{base}-mm``
+        from the traded pair) never had it in config, so every consumer keyed on
+        the session's ``bot_name`` — CORE DATA totals, the dashboard's per-session
+        executors/PnL, the metrics timeline — saw an empty session while the bot
+        traded. Watching ``manage_bots(action="deploy")`` here fixes that for
+        every strategy at once; the deployed name is written straight into the
+        session's ``config.yml`` (the same place the delta-neutral strategy keeps
+        its static name), so the merge applies from the next tick and across
+        restarts. Latest deploy wins — matches the framework's single
+        ``bot_name``-per-session model.
+        """
+        if self.is_experiment or not self.session_dir:
+            return
+        for tc in tool_calls:
+            name = str(tc.get("name") or "")
+            if name.rsplit("__", 1)[-1] != "manage_bots":
+                continue
+            inp = tc.get("input")
+            if not isinstance(inp, dict) or inp.get("action") != "deploy":
+                continue
+            # A deploy the risk engine blocked (or that errored) never created a
+            # bot — don't attribute the session to a name that isn't running.
+            if str(tc.get("status") or "") == "failed":
+                continue
+            bot_name = str(inp.get("bot_name") or "").strip()
+            if not bot_name or bot_name == self.config.get("bot_name"):
+                continue
+            from .config import save_full_config
+
+            self.config["bot_name"] = bot_name
+            try:
+                # config.yml's mtime doubles as the session start epoch for
+                # bot-history window tiling (_session_start_epoch) — preserve it
+                # across this mid-session rewrite or the session's PnL window
+                # would silently shift to the deploy tick.
+                cfg_path = self.session_dir / "config.yml"
+                stat = cfg_path.stat() if cfg_path.exists() else None
+                save_full_config(self.session_dir, self.config)
+                if stat is not None:
+                    os.utime(cfg_path, (stat.st_atime, stat.st_mtime))
+            except Exception:
+                log.exception(
+                    "TickEngine %s: failed to persist bot_name=%s",
+                    self.agent_id,
+                    bot_name,
+                )
+                continue
+            log.info(
+                "TickEngine %s: captured deployed bot_name=%s into session config",
+                self.agent_id,
+                bot_name,
+            )
 
     # ------------------------------------------------------------------
     # Client factory

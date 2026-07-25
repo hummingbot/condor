@@ -408,6 +408,9 @@ export interface AgentPerformance {
   open_count: number;
   closed_count: number;
   executors: AgentExecutorRow[];
+  // Bot-mode sessions: resolved bot instance name + per-controller breakdown
+  bot_name?: string;
+  controllers?: Record<string, unknown>[];
 }
 
 export interface AgentPerformanceResponse {
