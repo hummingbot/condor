@@ -689,3 +689,34 @@ def test_session_mcp_servers_carry_agent_slug(monkeypatch):
     servers = build_mcp_servers_for_session(42, 42)
     condor = next(s for s in servers if s["name"] == "condor")
     assert "--agent-slug" not in condor["args"]
+
+
+def test_hummingbot_mcp_args_stringify_numeric_credentials(monkeypatch):
+    """YAML ``password: 123`` loads as int; StdioServerParameters requires str."""
+    import config_manager
+
+    from handlers.agents._shared import build_mcp_servers_for_session
+
+    class _NumericPasswordServer:
+        def get_accessible_servers(self, user_id):
+            return ["local"]
+
+        def get_server(self, name):
+            return {
+                "host": "localhost",
+                "port": 8000,
+                "username": 999,
+                "password": 123,
+            }
+
+    monkeypatch.setattr(
+        config_manager, "get_config_manager", lambda: _NumericPasswordServer()
+    )
+    monkeypatch.setattr(config_manager, "get_effective_server", lambda *a, **k: "local")
+
+    servers = build_mcp_servers_for_session(42, 42)
+    hb = next(s for s in servers if s["name"] == "mcp-hummingbot")
+    args = hb["args"]
+    assert all(isinstance(a, str) for a in args)
+    assert args[args.index("--password") + 1] == "123"
+    assert args[args.index("--username") + 1] == "999"
