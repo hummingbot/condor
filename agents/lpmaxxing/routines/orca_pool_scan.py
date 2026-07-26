@@ -1,14 +1,18 @@
 import asyncio
 import json
 import math
+import re
+import time
 from collections import Counter
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import yaml
 from pydantic import BaseModel, Field, field_validator
 
 try:
@@ -21,204 +25,117 @@ except ModuleNotFoundError:
 
 
 CATEGORY = "Orca LP Agent"
-
-DEFAULT_SCAN_SORT_FIELDS = ["tvl", "volume24h", "fees24h", "yieldovertvl24h"]
-DEFAULT_ALLOWED_QUOTE_SYMBOLS = ["USDC", "SOL", "mSOL", "JitoSOL"]
-DEFAULT_PREFERRED_QUOTE_SYMBOLS = ["USDC", "SOL"]
-VALID_EXECUTION_MODES = {"dry_run", "run_once", "loop"}
-VALID_CATEGORIES = {"memecoin", "utility", "governance", "liquid_staking_token", "security", "stablecoin"}
-VALID_STATS_WINDOWS = {"24h", "7d", "30d"}
-VALID_SCAN_SORT_FIELDS = {
-    "tvl",
-    "volume24h",
-    "fees24h",
+CANONICAL_USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+DISCOVERY_LENSES = (
     "yieldovertvl24h",
-    "volume7d",
-    "fees7d",
     "yieldovertvl7d",
-    "volume30d",
-    "fees30d",
-    "yieldovertvl30d",
+    "volume24h",
+    "volume7d",
+)
+LIVE_STATS = ("1h", "4h", "24h", "7d")
+LIVE_PROFILES = {
+    "yield_focused",
+    "yield_high_risk",
+    "yield_extreme_risk",
+    "yield_no_limit",
 }
-STATS_WINDOW_ALIASES = {
-    "day": "24h",
-    "daily": "24h",
-    "1d": "24h",
-    "week": "7d",
-    "weekly": "7d",
-    "1w": "7d",
-    "month": "30d",
-    "monthly": "30d",
-    "1m": "30d",
+DRY_RUN_ONLY_PROFILES = {"category_scout", "meme_scout"}
+VALID_RISK_PROFILES = LIVE_PROFILES | DRY_RUN_ONLY_PROFILES
+VALID_EXECUTION_MODES = {"dry_run", "loop"}
+REPORT_QUALIFICATION = (
+    "Orca categories are qualified pool classification from Orca's API.\n"
+    "They are not independent token-security verification."
+)
+RANGE_SAFETY_FACTOR = 1.5
+MCDA_WEIGHTS = {
+    "fee_productivity": 0.40,
+    "recent_activity": 0.25,
+    "net_change_stability": 0.15,
+    "liquidity_depth": 0.10,
+    "execution_simplicity": 0.10,
 }
-SCAN_SORT_FIELD_ALIASES = {
-    "tvl_usd": "tvl",
-    "volume_24h": "volume24h",
-    "volume_24h_usd": "volume24h",
-    "24h_volume": "volume24h",
-    "fees_24h": "fees24h",
-    "fees_24h_usd": "fees24h",
-    "24h_fees": "fees24h",
-    "yield_24h": "yieldovertvl24h",
-    "yieldovertvl_24h": "yieldovertvl24h",
-    "volume_7d": "volume7d",
-    "volume_7d_usd": "volume7d",
-    "7d_volume": "volume7d",
-    "fees_7d": "fees7d",
-    "fees_7d_usd": "fees7d",
-    "7d_fees": "fees7d",
-    "yield_7d": "yieldovertvl7d",
-    "yieldovertvl_7d": "yieldovertvl7d",
-    "volume_30d": "volume30d",
-    "volume_30d_usd": "volume30d",
-    "30d_volume": "volume30d",
-    "monthly_volume": "volume30d",
-    "fees_30d": "fees30d",
-    "fees_30d_usd": "fees30d",
-    "30d_fees": "fees30d",
-    "monthly_fees": "fees30d",
-    "yield_30d": "yieldovertvl30d",
-    "yieldovertvl_30d": "yieldovertvl30d",
-    "monthly_yield": "yieldovertvl30d",
-}
-VALID_RISK_PROFILES = {
-    "default_cautious",
-    "balanced_fee_capture",
-    "risk_on_volatile",
-    "meme_scout",
-    "meme_tiny_live",
-    "safe_conservative",
-    "category_scout",
-}
-RISK_PROFILE_DEFAULTS: dict[str, dict[str, Any]] = {
-    "default_cautious": {},
+
+# Live profile fields are policy, not caller-overridable routine settings.
+PROFILE_POLICY: dict[str, dict[str, Any]] = {
+    "yield_focused": {
+        "categories": [
+            "stablecoin",
+            "liquid_staking_token",
+            "utility",
+            "governance",
+        ],
+        "min_tvl_usd": 300_000.0,
+        "min_volume_24h_usd": 200_000.0,
+        "min_volume_7d_usd": 1_000_000.0,
+        "max_abs_net_price_change_24h": 0.03,
+        "min_fee_productivity": 0.0002,
+        "stability_reference": 0.03,
+    },
+    "yield_high_risk": {
+        "categories": [
+            "stablecoin",
+            "liquid_staking_token",
+            "utility",
+            "governance",
+            "memecoin",
+        ],
+        "min_tvl_usd": 100_000.0,
+        "min_volume_24h_usd": 150_000.0,
+        "min_volume_7d_usd": 500_000.0,
+        "max_abs_net_price_change_24h": 0.05,
+        "min_fee_productivity": 0.0002,
+        "stability_reference": 0.05,
+    },
+    "yield_extreme_risk": {
+        "categories": [
+            "stablecoin",
+            "liquid_staking_token",
+            "utility",
+            "governance",
+            "memecoin",
+        ],
+        "min_tvl_usd": 100_000.0,
+        "min_volume_24h_usd": 150_000.0,
+        "min_volume_7d_usd": 500_000.0,
+        "max_abs_net_price_change_24h": 0.50,
+        "min_fee_productivity": 0.0002,
+        "stability_reference": 0.50,
+    },
+    "yield_no_limit": {
+        "categories": [
+            "stablecoin",
+            "liquid_staking_token",
+            "utility",
+            "governance",
+            "memecoin",
+        ],
+        "min_tvl_usd": 100_000.0,
+        "min_volume_24h_usd": 150_000.0,
+        "min_volume_7d_usd": 500_000.0,
+        "max_abs_net_price_change_24h": None,
+        "min_fee_productivity": 0.0002,
+        "stability_reference": 0.50,
+    },
+    # Scouts are retained only for analysis. Their permissive gates are not live policy.
     "category_scout": {
         "categories": ["utility", "governance", "liquid_staking_token", "security"],
-        "min_tvl_query_usd": 50_000,
-        "min_tvl_usd": 100_000,
-        "min_volume_24h_usd": 50_000,
-        "min_volume_7d_usd": 250_000,
-        "max_abs_price_delta_24h": 0.25,
-        "weight_liquidity_depth": 0.15,
-        "weight_recent_activity": 0.30,
-        "weight_fee_productivity": 0.30,
-        "weight_range_stability": 0.10,
-        "weight_execution_simplicity": 0.10,
-        "weight_sponsor_fit": 0.05,
-    },
-    "safe_conservative": {
-        "categories": ["stablecoin", "liquid_staking_token"],
-        "min_tvl_query_usd": 1_000_000,
-        "min_tvl_usd": 2_000_000,
-        "min_volume_24h_usd": 500_000,
-        "min_volume_7d_usd": 3_000_000,
-        "max_abs_price_delta_24h": 0.08,
-        "allowed_quote_symbols": ["USDC", "SOL"],
-        "preferred_quote_symbols": ["USDC"],
-        "weight_liquidity_depth": 0.35,
-        "weight_recent_activity": 0.15,
-        "weight_fee_productivity": 0.10,
-        "weight_range_stability": 0.25,
-        "weight_execution_simplicity": 0.10,
-        "weight_sponsor_fit": 0.05,
-        "allow_wide_preset": False,
-    },
-    "balanced_fee_capture": {
-        "categories": ["utility", "governance", "liquid_staking_token"],
-        "min_tvl_usd": 300_000,
-        "min_volume_24h_usd": 200_000,
-        "min_volume_7d_usd": 1_000_000,
-        "max_abs_price_delta_24h": 0.18,
-        "weight_liquidity_depth": 0.20,
-        "weight_recent_activity": 0.25,
-        "weight_fee_productivity": 0.30,
-        "weight_range_stability": 0.10,
-        "weight_execution_simplicity": 0.10,
-        "weight_sponsor_fit": 0.05,
-    },
-    "risk_on_volatile": {
-        "categories": ["utility", "governance", "memecoin"],
-        "min_tvl_query_usd": 50_000,
-        "min_tvl_usd": 200_000,
-        "min_volume_24h_usd": 150_000,
-        "min_volume_7d_usd": 500_000,
-        "max_abs_price_delta_24h": 0.35,
-        "weight_liquidity_depth": 0.15,
-        "weight_recent_activity": 0.30,
-        "weight_fee_productivity": 0.30,
-        "weight_range_stability": 0.05,
-        "weight_execution_simplicity": 0.10,
-        "weight_sponsor_fit": 0.10,
-        "wide_min_half_width": 0.08,
-        "wide_max_half_width": 0.30,
+        "min_tvl_usd": 100_000.0,
+        "min_volume_24h_usd": 50_000.0,
+        "min_volume_7d_usd": 250_000.0,
+        "max_abs_net_price_change_24h": 0.25,
+        "min_fee_productivity": 0.0,
+        "stability_reference": 0.25,
     },
     "meme_scout": {
         "categories": ["memecoin"],
-        "min_tvl_query_usd": 10_000,
-        "min_tvl_usd": 25_000,
-        "min_volume_24h_usd": 25_000,
-        "min_volume_7d_usd": 50_000,
-        "max_abs_price_delta_24h": 0.75,
-        "weight_liquidity_depth": 0.10,
-        "weight_recent_activity": 0.30,
-        "weight_fee_productivity": 0.35,
-        "weight_range_stability": 0.05,
-        "weight_execution_simplicity": 0.10,
-        "weight_sponsor_fit": 0.10,
-        "wide_min_half_width": 0.10,
-        "wide_max_half_width": 0.50,
-        "limit_price_buffer_pct": 0.05,
-    },
-    "meme_tiny_live": {
-        "categories": ["memecoin"],
-        "min_tvl_query_usd": 10_000,
-        "min_tvl_usd": 50_000,
-        "min_volume_24h_usd": 50_000,
-        "min_volume_7d_usd": 100_000,
-        "max_abs_price_delta_24h": 0.50,
-        "weight_liquidity_depth": 0.10,
-        "weight_recent_activity": 0.30,
-        "weight_fee_productivity": 0.35,
-        "weight_range_stability": 0.05,
-        "weight_execution_simplicity": 0.10,
-        "weight_sponsor_fit": 0.10,
-        "wide_min_half_width": 0.08,
-        "wide_max_half_width": 0.35,
-        "limit_price_buffer_pct": 0.03,
+        "min_tvl_usd": 25_000.0,
+        "min_volume_24h_usd": 25_000.0,
+        "min_volume_7d_usd": 50_000.0,
+        "max_abs_net_price_change_24h": 0.75,
+        "min_fee_productivity": 0.0,
+        "stability_reference": 0.50,
     },
 }
-BASELINE_PROFILE_FIELDS: dict[str, Any] = {
-    "categories": [],
-    "min_tvl_query_usd": 100_000,
-    "min_tvl_usd": 500_000,
-    "min_volume_24h_usd": 100_000,
-    "min_volume_7d_usd": 500_000,
-    "max_abs_price_delta_24h": 0.20,
-    "allowed_quote_symbols": DEFAULT_ALLOWED_QUOTE_SYMBOLS,
-    "preferred_quote_symbols": DEFAULT_PREFERRED_QUOTE_SYMBOLS,
-    "weight_liquidity_depth": 0.25,
-    "weight_recent_activity": 0.20,
-    "weight_fee_productivity": 0.20,
-    "weight_range_stability": 0.15,
-    "weight_execution_simplicity": 0.10,
-    "weight_sponsor_fit": 0.10,
-    "wide_min_half_width": 0.05,
-    "wide_max_half_width": 0.20,
-    "limit_price_buffer_pct": 0.02,
-    "allow_wide_preset": True,
-}
-
-
-def _list_or_default(value: Any, default: list[str]) -> list[str]:
-    """Accept Condor UI nulls and comma-separated values for list fields."""
-    if value is None:
-        return list(default)
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return list(default)
-        return [item.strip() for item in stripped.split(",") if item.strip()]
-    return value
 
 
 def _normalized_name(value: Any, default: str = "") -> str:
@@ -226,135 +143,61 @@ def _normalized_name(value: Any, default: str = "") -> str:
     return text or default
 
 
-def _normalize_stats_window(value: Any) -> str:
-    normalized = str(value or "").strip().lower().replace("-", "").replace("_", "")
-    return STATS_WINDOW_ALIASES.get(normalized, normalized)
-
-
-def _normalize_sort_field(value: Any) -> str:
-    raw = str(value or "").strip()
-    normalized = raw.lower().replace("-", "_").replace(" ", "_")
-    if normalized in SCAN_SORT_FIELD_ALIASES:
-        return SCAN_SORT_FIELD_ALIASES[normalized]
-    compact = normalized.replace("_", "")
-    if compact == "yieldovertvl":
-        return "yieldovertvl24h"
-    return compact
-
-
-def _normalized_categories(value: Any) -> list[str]:
-    raw_items = _list_or_default(value, [])
-    if not isinstance(raw_items, list):
-        raw_items = [raw_items]
-    categories: list[str] = []
-    for item in raw_items:
-        normalized = _normalized_name(item)
-        if normalized:
-            categories.append(normalized)
-    return categories
+def _list_value(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+    return [str(item).strip() for item in value if str(item).strip()]
 
 
 class Config(BaseModel):
     """Scan public Orca Whirlpool pools and return one gated LP candidate."""
 
-    execution_mode: str = Field(default="dry_run", description="dry_run, run_once, or loop")
-    risk_profile: str = Field(default="default_cautious", description="Named gate/weight/range default profile")
-    orca_api_base_url: str = Field(default="https://api.orca.so/v2/solana", description="Public Orca API base URL")
-    pool_endpoint: str = Field(default="/pools", description="Pool list endpoint")
-    request_timeout_seconds: int = Field(default=15, description="HTTP timeout in seconds")
-    request_user_agent: str = Field(
-        default="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/126.0 Safari/537.36 CondorOrcaLPAgent/1.0",
-        description="Browser-style User-Agent",
+    execution_mode: str = Field(default="dry_run", description="dry_run or loop")
+    controller_id: str = Field(
+        default="", description="Dynamic controller id from the current loop tick"
     )
-    page_size: int = Field(default=25, description="Records per ranked lens")
-    page: int = Field(default=1, description="API page to request")
-    stats_windows: str = Field(default="24h,7d", description="Orca stats windows")
-    scan_sort_fields: list[str] = Field(
-        default_factory=lambda: list(DEFAULT_SCAN_SORT_FIELDS),
-        description="Ranked scan lenses",
+    risk_profile: str = Field(
+        default="yield_focused", description="Structured Orca risk profile"
     )
-    categories: list[str] = Field(default_factory=list, description="Orca API categories filters; empty means all pools")
-    min_tvl_query_usd: float = Field(default=100000, description="API-side minimum TVL hint")
-    include_pool_addresses: list[str] = Field(default_factory=list, description="Manual pool addresses to include")
-    exclude_pool_addresses: list[str] = Field(default_factory=list, description="Pool addresses to reject")
-
-    min_tvl_usd: float = Field(default=500000, description="Minimum pool TVL")
-    min_volume_24h_usd: float = Field(default=100000, description="Minimum 24h volume")
-    min_volume_7d_usd: float = Field(default=500000, description="Minimum 7d volume")
-    max_abs_price_delta_24h: float = Field(default=0.20, description="Maximum absolute 24h price move")
-    allowed_quote_symbols: list[str] = Field(
-        default_factory=lambda: list(DEFAULT_ALLOWED_QUOTE_SYMBOLS),
-        description="Allowed quote symbols",
+    orca_api_base_url: str = "https://api.orca.so/v2/solana"
+    pool_endpoint: str = "/pools"
+    request_timeout_seconds: int = Field(default=15, gt=0)
+    request_user_agent: str = "Mozilla/5.0 CondorOrcaLPAgent/2.0"
+    min_tvl_query_usd: float = Field(default=0, ge=0)
+    include_pool_addresses: list[str] = Field(default_factory=list)
+    exclude_pool_addresses: list[str] = Field(default_factory=list)
+    stats_windows: str = Field(
+        default="1h,4h,24h,7d",
+        description="Dry-run may append 30d; live requests are fixed",
     )
-    preferred_quote_symbols: list[str] = Field(default_factory=lambda: list(DEFAULT_PREFERRED_QUOTE_SYMBOLS), description="Preferred quote symbols")
-    reject_has_warning: bool = Field(default=True, description="Deprecated: Orca warning pools are always rejected")
-    require_token_metadata: bool = Field(default=True, description="Require symbols, decimals, and mints")
-    require_price_delta: bool = Field(default=False, description="Require price delta even in dry-run mode")
-    require_price_delta_in_live: bool = Field(default=True, description="Require price delta for run_once/loop")
-    require_gateway_pool_info: bool = Field(default=True, description="Agent must preflight selected pool through Gateway")
+    total_amount_quote: float = Field(default=10, gt=0)
+    top_n: int = Field(default=3, gt=0)
 
-    weight_liquidity_depth: float = Field(default=0.25, description="MCDA weight")
-    weight_recent_activity: float = Field(default=0.20, description="MCDA weight")
-    weight_fee_productivity: float = Field(default=0.20, description="MCDA weight")
-    weight_range_stability: float = Field(default=0.15, description="MCDA weight")
-    weight_execution_simplicity: float = Field(default=0.10, description="MCDA weight")
-    weight_sponsor_fit: float = Field(default=0.10, description="MCDA weight")
-
-    conservative_min_half_width: float = Field(default=0.03, description="Conservative preset floor")
-    conservative_max_half_width: float = Field(default=0.12, description="Conservative preset cap")
-    balanced_min_half_width: float = Field(default=0.02, description="Balanced preset floor")
-    balanced_max_half_width: float = Field(default=0.08, description="Balanced preset cap")
-    wide_min_half_width: float = Field(default=0.05, description="Wide preset floor")
-    wide_max_half_width: float = Field(default=0.20, description="Wide preset cap")
-    limit_price_buffer_pct: float = Field(default=0.02, description="Buffer outside LP range for hard limit prices")
-    default_observed_move: float = Field(default=0.02, description="Fallback volatility proxy for dry-run missing delta")
-    allow_wide_preset: bool = Field(default=True, description="Allow wide preset within risk caps")
-
-    total_amount_quote: float = Field(default=10, description="Configured quote budget")
-    max_capital_allocation_quote: float = Field(default=10, description="Maximum capital allocation")
-    top_n: int = Field(default=3, description="Number of top candidates to return")
-
-    @field_validator("scan_sort_fields", mode="before")
+    @field_validator("execution_mode", "risk_profile", mode="before")
     @classmethod
-    def _coerce_scan_sort_fields(cls, value: Any) -> list[str]:
-        return [_normalize_sort_field(item) for item in _list_or_default(value, DEFAULT_SCAN_SORT_FIELDS)]
+    def _names(cls, value: Any) -> str:
+        return _normalized_name(value)
 
-    @field_validator("execution_mode", mode="before")
+    @field_validator("controller_id", mode="before")
     @classmethod
-    def _coerce_execution_mode(cls, value: Any) -> str:
-        return _normalized_name(value, "dry_run")
-
-    @field_validator("stats_windows", mode="before")
-    @classmethod
-    def _coerce_stats_windows(cls, value: Any) -> str:
-        windows = [_normalize_stats_window(item) for item in _list_or_default(value, ["24h", "7d"])]
-        return ",".join(dict.fromkeys(windows))
-
-    @field_validator("risk_profile", mode="before")
-    @classmethod
-    def _coerce_risk_profile(cls, value: Any) -> str:
-        return _normalized_name(value, "default_cautious")
-
-    @field_validator("categories", mode="before")
-    @classmethod
-    def _coerce_categories(cls, value: Any) -> list[str]:
-        return _normalized_categories(value)
+    def _controller(cls, value: Any) -> str:
+        return str(value or "").strip()
 
     @field_validator("include_pool_addresses", "exclude_pool_addresses", mode="before")
     @classmethod
-    def _coerce_optional_pool_lists(cls, value: Any) -> list[str]:
-        return _list_or_default(value, [])
+    def _pool_lists(cls, value: Any) -> list[str]:
+        return _list_value(value)
 
-    @field_validator("allowed_quote_symbols", mode="before")
+    @field_validator("stats_windows", mode="before")
     @classmethod
-    def _coerce_allowed_quote_symbols(cls, value: Any) -> list[str]:
-        return _list_or_default(value, DEFAULT_ALLOWED_QUOTE_SYMBOLS)
-
-    @field_validator("preferred_quote_symbols", mode="before")
-    @classmethod
-    def _coerce_preferred_quote_symbols(cls, value: Any) -> list[str]:
-        return _list_or_default(value, DEFAULT_PREFERRED_QUOTE_SYMBOLS)
+    def _windows(cls, value: Any) -> str:
+        aliases = {"1d": "24h", "day": "24h", "1w": "7d", "week": "7d", "month": "30d"}
+        windows = [
+            aliases.get(item.lower(), item.lower()) for item in _list_value(value)
+        ]
+        return ",".join(dict.fromkeys(windows or LIVE_STATS))
 
 
 def _utc_now() -> str:
@@ -365,145 +208,311 @@ def _compact(data: dict[str, Any]) -> str:
     return json.dumps(data, separators=(",", ":"), sort_keys=True)
 
 
-def _failure_payload(
-    status: str,
-    timestamp: str,
-    warnings: list[str],
-    rejection_summary: dict[str, int] | None = None,
-) -> dict[str, Any]:
-    return {
-        "scan_status": status,
-        "timestamp": timestamp,
-        "config_summary": {},
-        "selected_candidate": None,
-        "top_candidates": [],
-        "rejection_summary": rejection_summary or {},
-        "warnings": warnings,
-        "agent_prompt_summary": "No trade: Orca pool scan failed closed before candidate selection.",
-    }
+def _session_config(controller_id: str) -> dict[str, Any]:
+    from condor.agents.journal import resolve_agent_dirs
+
+    session_dir, _ = resolve_agent_dirs(controller_id)
+    if session_dir is None or not session_dir.is_dir():
+        raise ValueError(f"no loop session found for controller_id '{controller_id}'")
+    path = session_dir / "config.yml"
+    value = yaml.safe_load(path.read_text()) or {}
+    if not isinstance(value, dict):
+        raise ValueError("current session config must be a YAML object")
+    return value
 
 
-def _fail(status: str, timestamp: str, warnings: list[str], rejection_summary: dict[str, int] | None = None) -> str:
-    """Backward-compatible compact JSON failure result."""
-    return _compact(_failure_payload(status, timestamp, warnings, rejection_summary))
+def _session_lifecycle_status(controller_id: str) -> str:
+    from condor.agents.journal import resolve_agent_dirs
+
+    session_dir, _ = resolve_agent_dirs(controller_id)
+    if session_dir is None or not session_dir.is_dir():
+        raise ValueError(f"no loop session found for controller_id '{controller_id}'")
+    path = session_dir / "orca_lifecycle.json"
+    if not path.exists():
+        return "running"
+    value = json.loads(path.read_text())
+    if not isinstance(value, dict) or value.get("schema_version") != 2:
+        raise ValueError("legacy Orca lifecycle state cannot be resumed")
+    if value.get("controller_id") != controller_id:
+        raise ValueError("Orca session-state controller mismatch")
+    if value.get("active_position"):
+        raise ValueError("Orca pool scan is blocked while an active position exists")
+    return str(value.get("session_status") or "").strip().lower()
 
 
-def _is_baseline_value(field: str, value: Any) -> bool:
-    baseline = BASELINE_PROFILE_FIELDS.get(field)
-    if isinstance(baseline, list):
-        return list(value or []) == baseline
-    return value == baseline
-
-
-def _stats_window_items(value: str) -> list[str]:
-    return [_normalize_stats_window(item) for item in str(value or "").split(",") if item.strip()]
-
-
-def _stats_windows_with_required_gates(config: Config) -> str:
-    windows = _stats_window_items(config.stats_windows)
-    if config.min_volume_24h_usd > 0 and "24h" not in windows:
-        windows.append("24h")
-    if config.min_volume_7d_usd > 0 and "7d" not in windows:
-        windows.append("7d")
-    return ",".join(windows) if windows else config.stats_windows
-
-
-def _apply_risk_profile(config: Config) -> Config:
-    profile = _normalized_name(config.risk_profile, "default_cautious")
-    overrides = RISK_PROFILE_DEFAULTS.get(profile, {})
-    updates: dict[str, Any] = {"risk_profile": profile}
-    for field, value in overrides.items():
-        if field == "categories" and "categories" in config.model_fields_set:
-            continue
-        if _is_baseline_value(field, getattr(config, field)):
-            updates[field] = list(value) if isinstance(value, list) else value
-    config = config.model_copy(update=updates)
-    return config.model_copy(update={"stats_windows": _stats_windows_with_required_gates(config)})
-
-
-def _config_errors(config: Config) -> list[str]:
+def _resolve_policy(config: Config) -> tuple[Config, dict[str, Any], list[str]]:
     errors: list[str] = []
     if config.execution_mode not in VALID_EXECUTION_MODES:
-        errors.append(f"invalid execution_mode '{config.execution_mode}'; valid values: {', '.join(sorted(VALID_EXECUTION_MODES))}")
-    if config.risk_profile not in VALID_RISK_PROFILES:
-        errors.append(f"invalid risk_profile '{config.risk_profile}'; valid values: {', '.join(sorted(VALID_RISK_PROFILES))}")
-    invalid_windows = [window for window in _stats_window_items(config.stats_windows) if window not in VALID_STATS_WINDOWS]
-    if invalid_windows:
-        errors.append(f"invalid stats_windows {invalid_windows}; valid values: {', '.join(sorted(VALID_STATS_WINDOWS))}")
-    invalid_sort_fields = [field for field in config.scan_sort_fields if field not in VALID_SCAN_SORT_FIELDS]
-    if invalid_sort_fields:
-        errors.append(f"invalid scan_sort_fields {invalid_sort_fields}; valid values: {', '.join(sorted(VALID_SCAN_SORT_FIELDS))}")
-    invalid_categories = [category for category in config.categories if category not in VALID_CATEGORIES]
-    if invalid_categories:
-        errors.append(
-            "invalid categories "
-            f"{invalid_categories}; valid values: {', '.join(sorted(VALID_CATEGORIES))}"
+        errors.append("execution_mode must be dry_run or loop")
+        return config, {}, errors
+
+    requested_profile = config.risk_profile or "yield_focused"
+    if config.execution_mode == "loop":
+        if not config.controller_id:
+            errors.append("controller_id is required in loop mode")
+            return config, {}, errors
+        try:
+            session = _session_config(config.controller_id)
+        except Exception as exc:
+            errors.append(str(exc))
+            return config, {}, errors
+        runtime_mode = str(session.get("execution_mode") or "").strip().lower()
+        mode_match = re.search(
+            r"^\s*SESSION_MODE:\s*(dry_run|loop|run_once)\s*$",
+            str(session.get("trading_context") or ""),
+            re.MULTILINE | re.IGNORECASE,
         )
-    return errors
+        requested_mode = mode_match.group(1).lower() if mode_match else ""
+        if runtime_mode != "loop" or requested_mode != "loop":
+            errors.append(
+                "loop scan requires matching runtime execution_mode and SESSION_MODE"
+            )
+            return config, {}, errors
+        session_profile = _normalized_name(session.get("risk_profile"))
+        if not session_profile:
+            errors.append("risk_profile is missing from the current session config")
+            return config, {}, errors
+        if (
+            "risk_profile" in config.model_fields_set
+            and requested_profile != session_profile
+        ):
+            errors.append(
+                f"routine risk_profile '{requested_profile}' conflicts with current session risk_profile '{session_profile}'"
+            )
+        config = config.model_copy(update={"risk_profile": session_profile})
+        try:
+            lifecycle_status = _session_lifecycle_status(config.controller_id)
+        except Exception as exc:
+            errors.append(str(exc))
+            return config, {}, errors
+        if lifecycle_status != "running":
+            errors.append(
+                f"Orca session is '{lifecycle_status or 'unknown'}'; pool scan is blocked"
+            )
+        session_budget = _number(session.get("total_amount_quote"))
+        if session_budget is not None and session_budget > 0:
+            config = config.model_copy(update={"total_amount_quote": session_budget})
 
+    if config.risk_profile not in VALID_RISK_PROFILES:
+        errors.append(
+            f"invalid risk_profile '{config.risk_profile}'; valid values: {', '.join(sorted(VALID_RISK_PROFILES))}"
+        )
+        return config, {}, errors
+    if config.execution_mode == "loop" and config.risk_profile in DRY_RUN_ONLY_PROFILES:
+        errors.append(f"risk_profile '{config.risk_profile}' is dry-run-only")
+    if config.execution_mode == "loop" and config.include_pool_addresses:
+        errors.append("manual pool inclusion is dry-run-only")
 
-def _category_lenses(config: Config) -> list[str | None]:
-    return config.categories or [None]
+    windows = [item for item in config.stats_windows.split(",") if item]
+    invalid_windows = sorted(set(windows) - {*LIVE_STATS, "30d"})
+    if invalid_windows:
+        errors.append(f"invalid stats windows: {', '.join(invalid_windows)}")
+    return config, PROFILE_POLICY.get(config.risk_profile, {}), errors
 
 
 def _url(config: Config, params: dict[str, Any]) -> str:
-    base = config.orca_api_base_url.rstrip("/")
-    endpoint = config.pool_endpoint if config.pool_endpoint.startswith("/") else f"/{config.pool_endpoint}"
-    clean_params = {k: v for k, v in params.items() if v is not None and v != ""}
-    return f"{base}{endpoint}?{urlencode(clean_params)}"
+    endpoint = config.pool_endpoint
+    if not endpoint.startswith("/"):
+        endpoint = f"/{endpoint}"
+    clean = {key: value for key, value in params.items() if value not in (None, "")}
+    return f"{config.orca_api_base_url.rstrip('/')}{endpoint}?{urlencode(clean)}"
 
 
-def _fetch_json(url: str, user_agent: str, timeout: int) -> dict[str, Any]:
-    request = Request(url, headers={"User-Agent": user_agent, "Accept": "application/json"})
-    with urlopen(request, timeout=timeout) as response:
-        raw = response.read()
-    parsed = json.loads(raw.decode("utf-8"))
-    if not isinstance(parsed, dict) or not isinstance(parsed.get("data"), list):
-        raise ValueError("Orca response missing top-level data list")
-    return parsed
-
-
-def _request_specs(config: Config) -> list[tuple[str, str, str | None, str]]:
+def _request_specs(
+    config: Config, policy: dict[str, Any]
+) -> list[tuple[str, str, str | None, str]]:
+    stats = list(LIVE_STATS)
+    if (
+        config.execution_mode == "dry_run"
+        and config.risk_profile in DRY_RUN_ONLY_PROFILES
+        and "30d" in config.stats_windows.split(",")
+    ):
+        stats.append("30d")
     specs: list[tuple[str, str, str | None, str]] = []
-    for category in _category_lenses(config):
-        for field in config.scan_sort_fields:
+    for category in policy["categories"]:
+        for lens in DISCOVERY_LENSES:
             params = {
-                "sortBy": field,
+                "sortBy": lens,
                 "sortDirection": "desc",
-                "stats": config.stats_windows,
-                "limit": config.page_size,
-                "pageSize": config.page_size,
-                "page": config.page,
+                "stats": ",".join(stats),
+                "size": 100,
                 "minTvl": config.min_tvl_query_usd,
                 "categories": category,
             }
-            request_name = f"{category}:{field}" if category else field
-            specs.append((request_name, field, category, _url(config, params)))
-    if config.include_pool_addresses:
+            name = f"{category}:{lens}"
+            specs.append((name, lens, category, _url(config, params)))
+    if config.execution_mode == "dry_run" and config.include_pool_addresses:
         params = {
             "addresses": ",".join(config.include_pool_addresses),
-            "stats": config.stats_windows,
-            "limit": max(config.page_size, len(config.include_pool_addresses)),
-            "pageSize": max(config.page_size, len(config.include_pool_addresses)),
+            "stats": ",".join(stats),
+            "size": 100,
         }
         specs.append(("include", "include", None, _url(config, params)))
     return specs
 
 
-async def _fetch_all(config: Config) -> tuple[list[dict[str, Any]] | None, list[str], dict[str, Any]]:
-    specs = _request_specs(config)
-    tasks = [asyncio.to_thread(_fetch_json, url, config.request_user_agent, config.request_timeout_seconds) for _, _, _, url in specs]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
+def _retry_delay(error: HTTPError) -> float:
+    value = error.headers.get("Retry-After") if error.headers else None
+    if value:
+        try:
+            return max(0.0, float(value))
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(value)
+                if retry_at.tzinfo is None:
+                    retry_at = retry_at.replace(tzinfo=timezone.utc)
+                return max(0.0, (retry_at - datetime.now(timezone.utc)).total_seconds())
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 0.5
+
+
+def _fetch_json(url: str, user_agent: str, timeout: int) -> dict[str, Any]:
+    request = Request(
+        url, headers={"User-Agent": user_agent, "Accept": "application/json"}
+    )
+    for attempt in range(2):
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                parsed = json.loads(response.read().decode("utf-8"))
+            if not isinstance(parsed, dict) or not isinstance(parsed.get("data"), list):
+                raise ValueError("Orca response missing top-level data list")
+            return parsed
+        except HTTPError as exc:
+            retryable = exc.code == 429 or 500 <= exc.code <= 599
+            if attempt == 0 and retryable:
+                time.sleep(_retry_delay(exc))
+                continue
+            raise
+        except (TimeoutError, URLError):
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            raise
+    raise RuntimeError("unreachable request retry state")
+
+
+def _first(obj: Any, paths: list[str]) -> Any:
+    for path in paths:
+        current = obj
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                break
+            current = current[part]
+        else:
+            if current is not None:
+                return current
+    return None
+
+
+def _text(value: Any) -> str | None:
+    if value is None:
+        return None
+    result = str(value).strip()
+    return result or None
+
+
+def _number(value: Any) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(str(value).replace(",", "").replace("$", ""))
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _integer(value: Any) -> int | None:
+    number = _number(value)
+    if number is None or not number.is_integer():
+        return None
+    return int(number)
+
+
+def _decimal_ratio(value: Any) -> float | None:
+    """Accept Orca's bare decimal ratio, but never infer or convert units."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        parsed = float(value)
+    elif isinstance(value, str) and re.fullmatch(
+        r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?", value.strip()
+    ):
+        parsed = float(value)
+    else:
+        return None
+    return parsed if math.isfinite(parsed) else None
+
+
+def _optional_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes"}:
+            return True
+        if normalized in {"false", "0", "no"}:
+            return False
+    return None
+
+
+def _updated_at(record: Any) -> datetime | None:
+    if not isinstance(record, dict):
+        return None
+    value = _first(record, ["updatedAt", "updated_at"])
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+async def _fetch_all(
+    config: Config, policy: dict[str, Any]
+) -> tuple[list[Any] | None, list[str], dict[str, Any]]:
+    specs = _request_specs(config, policy)
+    results = await asyncio.gather(
+        *[
+            asyncio.to_thread(
+                _fetch_json,
+                url,
+                config.request_user_agent,
+                config.request_timeout_seconds,
+            )
+            for _, _, _, url in specs
+        ],
+        return_exceptions=True,
+    )
     errors: list[str] = []
-    records_by_address: dict[str, dict[str, Any]] = {}
+    records: dict[str, Any] = {}
+    evidence: dict[str, tuple[set[str], set[str]]] = {}
     diagnostics: dict[str, Any] = {
-        "categories": config.categories,
-        "lenses": sorted({lens for _, lens, _, _ in specs}),
-        "requests": [{"name": name, "lens": lens, "category": category} for name, lens, category, _ in specs],
+        "scope": "union of the first 100 Orca results per configured category and discovery lens",
+        "request_size": 100,
+        "stats": list(LIVE_STATS),
+        "categories": list(policy["categories"]),
+        "discovery_lenses": list(DISCOVERY_LENSES),
+        "requests": [],
         "record_counts": {},
     }
+    if (
+        config.execution_mode == "dry_run"
+        and config.risk_profile in DRY_RUN_ONLY_PROFILES
+        and "30d" in config.stats_windows.split(",")
+    ):
+        diagnostics["stats"].append("30d")
 
-    for (name, lens, category, _), result in zip(specs, results, strict=False):
+    malformed_index = 0
+    for (name, lens, category, _), result in zip(specs, results, strict=True):
+        diagnostics["requests"].append(
+            {"name": name, "category": category, "discovery_lens": lens}
+        )
         if isinstance(result, Exception):
             if isinstance(result, HTTPError):
                 errors.append(f"{name}: HTTP {result.code}")
@@ -515,140 +524,111 @@ async def _fetch_all(config: Config) -> tuple[list[dict[str, Any]] | None, list[
         data = result["data"]
         diagnostics["record_counts"][name] = len(data)
         for record in data:
-            address = _as_str(_first(record, ["address", "id", "pubkey", "poolAddress", "pool_address"]))
-            dedupe_key = address or f"missing:{len(records_by_address)}:{name}"
-            if dedupe_key not in records_by_address:
-                records_by_address[dedupe_key] = record
-            target = records_by_address[dedupe_key]
-            target.setdefault("_scan_lenses", [])
-            target.setdefault("_scan_categories", [])
-            if lens not in target["_scan_lenses"]:
-                target["_scan_lenses"].append(lens)
-            if category and category not in target["_scan_categories"]:
-                target["_scan_categories"].append(category)
+            address = (
+                _text(
+                    _first(
+                        record,
+                        ["address", "id", "pubkey", "poolAddress", "pool_address"],
+                    )
+                )
+                if isinstance(record, dict)
+                else None
+            )
+            if address:
+                key = address
+            else:
+                malformed_index += 1
+                key = f"malformed:{malformed_index}"
+            categories, lenses = evidence.setdefault(key, (set(), set()))
+            if category:
+                categories.add(category)
+            lenses.add(lens)
+            if key not in records:
+                records[key] = record
+                continue
+            existing_time = _updated_at(records[key])
+            incoming_time = _updated_at(record)
+            if incoming_time is not None and (
+                existing_time is None or incoming_time > existing_time
+            ):
+                records[key] = record
 
+    diagnostics["raw_records"] = sum(diagnostics["record_counts"].values())
+    diagnostics["deduplicated_records"] = len(records)
     if errors:
         return None, errors, diagnostics
-    return list(records_by_address.values()), [], diagnostics
-
-
-def _first(obj: Any, paths: list[str]) -> Any:
-    for path in paths:
-        current = obj
-        found = True
-        for part in path.split("."):
-            if isinstance(current, dict) and part in current:
-                current = current[part]
-            else:
-                found = False
-                break
-        if found and current is not None:
-            return current
-    return None
-
-
-def _as_str(value: Any) -> str | None:
-    if value is None:
-        return None
-    text = str(value).strip()
-    return text or None
-
-
-def _to_float(value: Any) -> float | None:
-    if value is None or value == "":
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        if math.isfinite(float(value)):
-            return float(value)
-        return None
-    if isinstance(value, str):
-        text = value.strip().replace(",", "").replace("$", "")
-        if not text:
-            return None
-        if text.endswith("%"):
-            text = text[:-1]
-            try:
-                return float(text) / 100.0
-            except ValueError:
-                return None
-        try:
-            parsed = float(text)
-        except ValueError:
-            return None
-        if math.isfinite(parsed):
-            return parsed
-    return None
-
-
-def _to_int(value: Any) -> int | None:
-    number = _to_float(value)
-    return int(number) if number is not None else None
-
-
-def _to_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "warning", "warn"}
-    return bool(value)
-
-
-def _pct_decimal(value: Any) -> float | None:
-    parsed = _to_float(value)
-    if parsed is None:
-        return None
-    if abs(parsed) > 1:
-        return parsed / 100.0
-    return parsed
+    merged: list[Any] = []
+    for key, record in records.items():
+        if isinstance(record, dict):
+            record = dict(record)
+            record["_scan_categories"] = sorted(evidence[key][0])
+            record["_scan_lenses"] = sorted(evidence[key][1])
+        merged.append(record)
+    return merged, [], diagnostics
 
 
 def _token(record: dict[str, Any], side: str) -> dict[str, Any]:
     upper = side.upper()
     lower = side.lower()
-    token_obj = record.get(f"token{upper}") if isinstance(record.get(f"token{upper}"), dict) else {}
-    mint_obj = record.get(f"tokenMint{upper}") if isinstance(record.get(f"tokenMint{upper}"), dict) else {}
-    merged = {**mint_obj, **token_obj}
+    token = record.get(f"token{upper}")
+    mint = record.get(f"tokenMint{upper}")
+    merged = {
+        **(mint if isinstance(mint, dict) else {}),
+        **(token if isinstance(token, dict) else {}),
+    }
+    wrapped = {"merged": merged, "record": record}
     return {
-        "symbol": _as_str(
+        "symbol": _text(
             _first(
-                {"merged": merged, "record": record},
+                wrapped,
                 [
                     "merged.symbol",
-                    f"record.token{upper}.symbol",
-                    f"record.token_{lower}.symbol",
                     f"record.token{upper}Symbol",
                     f"record.token_{lower}_symbol",
                 ],
             )
         ),
-        "mint": _as_str(
+        "mint": _text(
             _first(
-                {"merged": merged, "record": record},
+                wrapped,
                 [
                     "merged.mint",
                     "merged.address",
                     "merged.pubkey",
                     f"record.tokenMint{upper}",
                     f"record.token_mint_{lower}",
-                    f"record.token{upper}.mint",
-                    f"record.token{upper}.address",
                 ],
             )
         ),
-        "decimals": _to_int(
+        "decimals": _integer(
             _first(
-                {"merged": merged, "record": record},
+                wrapped,
                 [
                     "merged.decimals",
-                    f"record.token{upper}.decimals",
-                    f"record.token_{lower}.decimals",
                     f"record.token{upper}Decimals",
+                    f"record.token_{lower}.decimals",
                 ],
             )
         ),
     }
+
+
+def _window_value(record: dict[str, Any], window: str, field: str) -> float | None:
+    compact = window.replace("h", "h").replace("d", "d")
+    aliases = {
+        "volume": ["volume", "volumeUsd", "volumeUsdc"],
+        "fees": ["fees", "feesUsd", "feesUsdc"],
+    }
+    paths = [f"stats.{window}.{name}" for name in aliases[field]]
+    paths.extend(
+        [
+            f"record.{field}{compact}",
+            f"record.{field}{compact}Usd",
+            f"record.{field}_{compact}",
+            f"record.{field}_{compact}_usd",
+        ]
+    )
+    return _number(_first({"stats": record.get("stats", {}), "record": record}, paths))
 
 
 def _normalize(record: Any) -> dict[str, Any]:
@@ -656,717 +636,585 @@ def _normalize(record: Any) -> dict[str, Any]:
         return {"malformed": True, "raw": record}
     stats = record.get("stats") if isinstance(record.get("stats"), dict) else {}
     wrapped = {"record": record, "stats": stats}
-    candidate = {
+    candidate: dict[str, Any] = {
         "malformed": False,
-        "address": _as_str(_first(record, ["address", "id", "pubkey", "poolAddress", "pool_address"])),
+        "address": _text(
+            _first(record, ["address", "id", "pubkey", "poolAddress", "pool_address"])
+        ),
+        "updated_at": _text(_first(record, ["updatedAt", "updated_at"])),
         "token_a": _token(record, "a"),
         "token_b": _token(record, "b"),
-        "price_raw": _to_float(_first(record, ["price", "currentPrice", "current_price", "sqrtPrice", "tokenPrice"])),
-        "tvl_usd": _to_float(_first(record, ["tvlUsdc", "tvlUsd", "tvlUSD", "tvl", "totalValueLockedUsd", "total_value_locked_usd"])),
-        "volume_24h_usd": _to_float(
+        "scanner_price": _number(
+            _first(record, ["price", "currentPrice", "current_price", "tokenPrice"])
+        ),
+        "tvl_usd": _number(
+            _first(
+                record, ["tvlUsdc", "tvlUsd", "tvlUSD", "tvl", "totalValueLockedUsd"]
+            )
+        ),
+        "net_price_change_24h": _decimal_ratio(
             _first(
                 wrapped,
                 [
-                    "stats.24h.volume",
-                    "stats.24h.volumeUsd",
-                    "stats.24h.volumeUsdc",
-                    "record.volume24h",
-                    "record.volume24hUsd",
-                    "record.volume24hUsdc",
-                    "record.volume_24h",
-                    "record.volume_24h_usd",
+                    "stats.24h.priceDelta",
+                    "stats.24h.price_delta",
+                    "record.priceDelta24h",
+                    "record.price_delta_24h",
                 ],
             )
         ),
-        "volume_7d_usd": _to_float(
-            _first(
-                wrapped,
-                [
-                    "stats.7d.volume",
-                    "stats.7d.volumeUsd",
-                    "stats.7d.volumeUsdc",
-                    "record.volume7d",
-                    "record.volume7dUsd",
-                    "record.volume7dUsdc",
-                    "record.volume_7d",
-                    "record.volume_7d_usd",
-                ],
-            )
+        "price_delta_24h_raw": _first(
+            wrapped,
+            [
+                "stats.24h.priceDelta",
+                "stats.24h.price_delta",
+                "record.priceDelta24h",
+                "record.price_delta_24h",
+            ],
         ),
-        "volume_30d_usd": _to_float(
-            _first(
-                wrapped,
-                [
-                    "stats.30d.volume",
-                    "stats.30d.volumeUsd",
-                    "stats.30d.volumeUsdc",
-                    "record.volume30d",
-                    "record.volume30dUsd",
-                    "record.volume30dUsdc",
-                    "record.volume_30d",
-                    "record.volume_30d_usd",
-                ],
-            )
+        "fee_rate_raw": _number(_first(record, ["feeRate", "fee_rate"])),
+        "adaptive_fee_enabled": _optional_bool(
+            _first(record, ["adaptiveFeeEnabled", "adaptive_fee_enabled"])
         ),
-        "fees_24h_usd": _to_float(
-            _first(
-                wrapped,
-                [
-                    "stats.24h.fees",
-                    "stats.24h.feesUsd",
-                    "stats.24h.feesUsdc",
-                    "record.fees24h",
-                    "record.fees24hUsd",
-                    "record.fees_24h",
-                    "record.fees_24h_usd",
-                ],
-            )
+        "fee_tier_index": _integer(
+            _first(record, ["feeTierIndex", "fee_tier_index", "feeTier", "fee_tier"])
         ),
-        "fees_7d_usd": _to_float(
-            _first(
-                wrapped,
-                [
-                    "stats.7d.fees",
-                    "stats.7d.feesUsd",
-                    "stats.7d.feesUsdc",
-                    "record.fees7d",
-                    "record.fees7dUsd",
-                    "record.fees_7d",
-                    "record.fees_7d_usd",
-                ],
-            )
+        "tick_spacing": _integer(_first(record, ["tickSpacing", "tick_spacing"])),
+        "has_warning": _optional_bool(
+            _first(record, ["hasWarning", "has_warning", "warning", "isWarning"])
         ),
-        "fees_30d_usd": _to_float(
-            _first(
-                wrapped,
-                [
-                    "stats.30d.fees",
-                    "stats.30d.feesUsd",
-                    "stats.30d.feesUsdc",
-                    "record.fees30d",
-                    "record.fees30dUsd",
-                    "record.fees_30d",
-                    "record.fees_30d_usd",
-                ],
-            )
-        ),
-        "yield_24h": _pct_decimal(_first(wrapped, ["stats.24h.yieldOverTvl", "stats.24h.yield_over_tvl", "record.yieldOverTvl24h", "record.yieldovertvl24h", "record.yield_over_tvl_24h"])),
-        "yield_7d": _pct_decimal(_first(wrapped, ["stats.7d.yieldOverTvl", "stats.7d.yield_over_tvl", "record.yieldOverTvl7d", "record.yieldovertvl7d", "record.yield_over_tvl_7d"])),
-        "yield_30d": _pct_decimal(_first(wrapped, ["stats.30d.yieldOverTvl", "stats.30d.yield_over_tvl", "record.yieldOverTvl30d", "record.yieldovertvl30d", "record.yield_over_tvl_30d"])),
-        "price_delta_24h": _pct_decimal(_first(wrapped, ["stats.24h.priceDelta", "stats.24h.price_delta", "record.priceDelta24h", "record.price_delta_24h", "record.priceChange24h"])),
-        "price_delta_30d": _pct_decimal(_first(wrapped, ["stats.30d.priceDelta", "stats.30d.price_delta", "record.priceDelta30d", "record.price_delta_30d", "record.priceChange30d"])),
-        "fee_rate": _to_float(_first(record, ["feeRate", "fee_rate", "feeTier", "fee_tier"])),
-        "tick_spacing": _to_int(_first(record, ["tickSpacing", "tick_spacing"])),
-        "has_warning": _to_bool(_first(record, ["hasWarning", "has_warning", "warning", "isWarning"])),
-        "adaptive_fee_enabled": _to_bool(_first(record, ["adaptiveFeeEnabled", "adaptive_fee_enabled"])),
-        "source_lenses": record.get("_scan_lenses", []),
-        "source_categories": record.get("_scan_categories", []),
+        "source_categories": sorted(set(record.get("_scan_categories", []))),
+        "source_lenses": sorted(set(record.get("_scan_lenses", []))),
     }
+    for window in (*LIVE_STATS, "30d"):
+        candidate[f"volume_{window}_usd"] = _window_value(record, window, "volume")
+        candidate[f"fees_{window}_usd"] = _window_value(record, window, "fees")
     return candidate
 
 
+def _derive(candidate: dict[str, Any], budget: float) -> None:
+    tvl = candidate.get("tvl_usd")
+    if tvl is None or tvl <= 0:
+        return
+    factors = {"1h": 24.0, "4h": 6.0, "24h": 1.0, "7d": 1.0 / 7.0}
+    for window, factor in factors.items():
+        fees = candidate.get(f"fees_{window}_usd")
+        candidate[f"fee_productivity_{window}"] = (
+            fees / tvl * factor if fees is not None and fees >= 0 else None
+        )
+    fee_24h = candidate.get("fee_productivity_24h")
+    fee_7d = candidate.get("fee_productivity_7d")
+    candidate["fee_tvl_24h"] = fee_24h
+    candidate["fee_tvl_7d_daily"] = fee_7d
+    candidate["sustained_fee_productivity"] = (
+        min(fee_24h, fee_7d) if fee_24h is not None and fee_7d is not None else None
+    )
+    denominator = candidate.get("fee_productivity_7d")
+    candidate["fee_momentum_1h_x"] = (
+        candidate.get("fee_productivity_1h") / denominator
+        if candidate.get("fee_productivity_1h") is not None and denominator
+        else None
+    )
+    candidate["fee_momentum_4h_x"] = (
+        candidate.get("fee_productivity_4h") / denominator
+        if candidate.get("fee_productivity_4h") is not None and denominator
+        else None
+    )
+    candidate["volume_tvl_24h"] = (
+        candidate["volume_24h_usd"] / tvl
+        if candidate.get("volume_24h_usd") is not None
+        else None
+    )
+    candidate["volume_tvl_7d_daily"] = (
+        candidate["volume_7d_usd"] / 7.0 / tvl
+        if candidate.get("volume_7d_usd") is not None
+        else None
+    )
+    sustained = candidate.get("sustained_fee_productivity")
+    candidate["gross_fee_estimate_quote_per_day"] = (
+        budget * sustained if sustained is not None else None
+    )
+
+
 def _metadata_ok(candidate: dict[str, Any]) -> bool:
-    for token_key in ("token_a", "token_b"):
-        token = candidate[token_key]
-        if not token.get("symbol") or not token.get("mint") or token.get("decimals") is None:
-            return False
-    return True
+    return all(
+        token.get("symbol")
+        and token.get("mint")
+        and isinstance(token.get("decimals"), int)
+        and token["decimals"] >= 0
+        for token in (candidate.get("token_a", {}), candidate.get("token_b", {}))
+    )
 
 
-def _choose_pair(candidate: dict[str, Any], config: Config, warnings: list[str]) -> bool:
-    a = candidate["token_a"].get("symbol")
-    b = candidate["token_b"].get("symbol")
-    if not a or not b:
-        return False
-    allowed = {symbol.upper() for symbol in config.allowed_quote_symbols}
-    preferred = [symbol.upper() for symbol in config.preferred_quote_symbols]
-    a_upper = a.upper()
-    b_upper = b.upper()
-
-    quote_side: str | None = None
-    if a_upper in allowed and b_upper in allowed:
-        if b_upper in preferred:
-            quote_side = "b"
-        elif a_upper in preferred:
-            quote_side = "a"
-        else:
-            quote_side = "b"
-    elif b_upper in allowed:
-        quote_side = "b"
-    elif a_upper in allowed:
-        quote_side = "a"
-
-    if quote_side is None:
-        return False
-
-    raw_price = candidate.get("price_raw")
-    if quote_side == "b":
-        base, quote, current_price = a, b, raw_price
-        orientation = "tokenA-tokenB"
-    else:
-        base, quote = b, a
-        current_price = 1.0 / raw_price if raw_price and raw_price > 0 else None
-        orientation = "inverted-tokenB-tokenA"
-        warnings.append("price inverted because tokenA was selected as quote; Gateway must confirm before live open")
-
-    candidate["base_symbol"] = base
-    candidate["quote_symbol"] = quote
-    candidate["trading_pair"] = f"{base}-{quote}"
-    candidate["current_price"] = current_price
-    candidate["price_orientation"] = orientation
-    return True
-
-
-def _gate(candidate: dict[str, Any], config: Config) -> tuple[bool, str | None, list[str]]:
-    warnings: list[str] = []
+def _gate(
+    candidate: dict[str, Any],
+    policy: dict[str, Any],
+    live_profile: bool,
+    excluded: set[str],
+) -> str | None:
     if candidate.get("malformed"):
-        return False, "malformed_record", warnings
+        return "malformed_record"
     if not candidate.get("address"):
-        return False, "missing_pool_address", warnings
-    if config.require_token_metadata and not _metadata_ok(candidate):
-        return False, "missing_token_metadata", warnings
-    if candidate.get("has_warning"):
-        return False, "has_warning", warnings
-    if candidate.get("tvl_usd") is None or candidate["tvl_usd"] < config.min_tvl_usd:
-        return False, "tvl_below_minimum", warnings
-    if candidate.get("volume_24h_usd") is None or candidate["volume_24h_usd"] < config.min_volume_24h_usd:
-        return False, "volume_24h_below_minimum", warnings
-    if candidate.get("volume_7d_usd") is None or candidate["volume_7d_usd"] < config.min_volume_7d_usd:
-        return False, "volume_7d_below_minimum", warnings
-    if not _choose_pair(candidate, config, warnings):
-        return False, "disallowed_quote_symbol", warnings
+        return "missing_pool_address"
+    if candidate["address"] in excluded:
+        return "explicitly_excluded"
+    if not _metadata_ok(candidate):
+        return "missing_token_metadata"
+    if candidate.get("has_warning") is None:
+        return "missing_warning_state"
+    if candidate["has_warning"]:
+        return "has_warning"
+    if live_profile:
+        token_a = candidate["token_a"]
+        token_b = candidate["token_b"]
+        if (
+            token_b.get("mint") != CANONICAL_USDC_MINT
+            or str(token_b.get("symbol") or "").upper() != "USDC"
+            or token_b.get("decimals") != 6
+            or token_a.get("mint") == token_b.get("mint")
+        ):
+            return "invalid_canonical_usdc_token_b"
+    candidate["base_symbol"] = candidate["token_a"]["symbol"]
+    candidate["quote_symbol"] = candidate["token_b"]["symbol"]
+    candidate["trading_pair"] = (
+        f"{candidate['base_symbol']}-{candidate['quote_symbol']}"
+    )
+    candidate["price_orientation"] = "token_b_per_token_a"
 
-    live_mode = config.execution_mode in {"run_once", "loop"}
-    require_delta = config.require_price_delta or (live_mode and config.require_price_delta_in_live)
-    if candidate.get("current_price") is None or candidate.get("current_price") <= 0:
-        return False, "missing_price", warnings
-    if require_delta and candidate.get("price_delta_24h") is None:
-        return False, "missing_price_delta", warnings
-    if candidate.get("price_delta_24h") is None:
-        warnings.append("missing price_delta_24h; dry-run fallback volatility used")
-    elif abs(candidate["price_delta_24h"]) > config.max_abs_price_delta_24h:
-        return False, "price_delta_above_maximum", warnings
-    if candidate["address"] in set(config.exclude_pool_addresses):
-        return False, "explicitly_excluded", warnings
-    if config.require_gateway_pool_info:
-        warnings.append("Gateway pool_info not checked inside routine; agent preflight required before live open")
-    return True, None, warnings
+    required = [
+        "tvl_usd",
+        "volume_24h_usd",
+        "volume_7d_usd",
+        "fees_24h_usd",
+        "fees_7d_usd",
+    ]
+    if live_profile:
+        required.extend(
+            [
+                "scanner_price",
+                "volume_1h_usd",
+                "volume_4h_usd",
+                "fees_1h_usd",
+                "fees_4h_usd",
+                "fee_rate_raw",
+                "adaptive_fee_enabled",
+                "fee_tier_index",
+                "tick_spacing",
+            ]
+        )
+    for field in required:
+        value = candidate.get(field)
+        if value is None:
+            return f"missing_{field}"
+        if isinstance(value, (int, float)) and value < 0:
+            return f"negative_{field}"
+    if candidate.get("scanner_price") is not None and candidate["scanner_price"] <= 0:
+        return "invalid_scanner_price"
+    if candidate.get("net_price_change_24h") is None:
+        raw = candidate.get("price_delta_24h_raw")
+        return (
+            "ambiguous_price_delta_24h"
+            if raw is not None
+            else "missing_price_delta_24h"
+        )
+    if candidate.get("tick_spacing") is None or candidate["tick_spacing"] <= 0:
+        return "invalid_tick_spacing"
+    if candidate["tvl_usd"] < policy["min_tvl_usd"]:
+        return "tvl_below_minimum"
+    if candidate["volume_24h_usd"] < policy["min_volume_24h_usd"]:
+        return "volume_24h_below_minimum"
+    if candidate["volume_7d_usd"] < policy["min_volume_7d_usd"]:
+        return "volume_7d_below_minimum"
+    maximum = policy["max_abs_net_price_change_24h"]
+    if maximum is not None and abs(candidate["net_price_change_24h"]) > maximum:
+        return "net_price_change_24h_above_maximum"
+    if candidate.get("fee_productivity_24h") is None:
+        return "missing_fee_productivity_24h"
+    if candidate["fee_productivity_24h"] < policy["min_fee_productivity"]:
+        return "fee_productivity_24h_below_minimum"
+    if candidate.get("fee_productivity_7d") is None:
+        return "missing_fee_productivity_7d_daily"
+    if candidate["fee_productivity_7d"] < policy["min_fee_productivity"]:
+        return "fee_productivity_7d_daily_below_minimum"
+    return None
 
 
-def _multiple_score(value: float | None, minimum: float) -> float:
-    if value is None or minimum <= 0:
-        return 0.0
+def _multiple_score(value: float, minimum: float) -> float:
+    if minimum <= 0:
+        return 5.0 if value > 0 else 1.0
     multiple = value / minimum
-    points = [(1.0, 1.0), (2.0, 2.0), (5.0, 3.0), (10.0, 4.0), (20.0, 5.0)]
-    if multiple < 1:
+    if multiple <= 0:
         return 0.0
-    previous_m, previous_s = points[0]
-    for m, s in points[1:]:
-        if multiple <= m:
-            span = m - previous_m
-            return previous_s + ((multiple - previous_m) / span) * (s - previous_s)
-        previous_m, previous_s = m, s
+    points = ((1.0, 1.0), (2.0, 2.0), (5.0, 3.0), (10.0, 4.0), (20.0, 5.0))
+    if multiple < 1.0:
+        return multiple
+    for (left_x, left_y), (right_x, right_y) in zip(points, points[1:]):
+        if multiple <= right_x:
+            return left_y + (multiple - left_x) / (right_x - left_x) * (
+                right_y - left_y
+            )
     return 5.0
 
 
-def _fee_score(candidate: dict[str, Any], warnings: list[str]) -> float:
-    tvl = candidate.get("tvl_usd") or 0
-    ratios: list[float] = []
-    if tvl > 0:
-        if candidate.get("fees_24h_usd") is not None:
-            ratios.append(candidate["fees_24h_usd"] / tvl)
-        if candidate.get("fees_7d_usd") is not None:
-            ratios.append((candidate["fees_7d_usd"] / 7.0) / tvl)
-    for key in ("yield_24h", "yield_7d"):
-        if candidate.get(key) is not None:
-            value = candidate[key]
-            ratios.append(value / 7.0 if key == "yield_7d" else value)
-    if not ratios:
-        if candidate.get("fees_24h_usd") is not None or candidate.get("fees_7d_usd") is not None:
-            return 1.0
-        return 0.0
-    proxy = max(ratios)
-    if proxy >= 0.002:
-        warnings.append("high-yield-risk: fee productivity proxy is above 0.20% daily")
-        return 5.0
-    if proxy >= 0.001:
-        return 4.0 + (proxy - 0.001) / 0.001
-    if proxy >= 0.0005:
-        return 3.0 + (proxy - 0.0005) / 0.0005
-    if proxy >= 0.0002:
-        return 1.0 + ((proxy - 0.0002) / 0.0003) * 2.0
-    if proxy > 0:
-        return proxy / 0.0002
-    return 0.0
+def _score(candidate: dict[str, Any], policy: dict[str, Any]) -> None:
+    stability_reference = policy["stability_reference"]
+    scores = {
+        "fee_productivity": _multiple_score(
+            candidate["sustained_fee_productivity"], policy["min_fee_productivity"]
+        ),
+        "recent_activity": 0.6
+        * _multiple_score(candidate["volume_24h_usd"], policy["min_volume_24h_usd"])
+        + 0.4
+        * _multiple_score(candidate["volume_7d_usd"], policy["min_volume_7d_usd"]),
+        "net_change_stability": 5.0
+        * (
+            1.0
+            - min(abs(candidate["net_price_change_24h"]), stability_reference)
+            / stability_reference
+        ),
+        "liquidity_depth": _multiple_score(candidate["tvl_usd"], policy["min_tvl_usd"]),
+        "execution_simplicity": 4.0 if candidate["adaptive_fee_enabled"] else 5.0,
+    }
+    candidate["criteria_raw"] = {
+        "sustained_fee_productivity": candidate["sustained_fee_productivity"],
+        "volume_24h_usd": candidate["volume_24h_usd"],
+        "volume_7d_usd": candidate["volume_7d_usd"],
+        "abs_net_price_change_24h": abs(candidate["net_price_change_24h"]),
+        "tvl_usd": candidate["tvl_usd"],
+        "adaptive_fee_enabled": candidate["adaptive_fee_enabled"],
+    }
+    candidate["criteria_scores"] = {
+        key: round(max(0.0, min(5.0, value)), 6) for key, value in scores.items()
+    }
+    candidate["weighted_score"] = round(
+        sum(
+            candidate["criteria_scores"][key] * MCDA_WEIGHTS[key]
+            for key in MCDA_WEIGHTS
+        ),
+        6,
+    )
 
 
-def _range_stability_score(price_delta: float | None) -> float:
-    if price_delta is None:
-        return 2.0
-    move = abs(price_delta)
-    if move <= 0.02:
-        return 5.0
-    if move <= 0.05:
-        return 4.0
-    if move <= 0.10:
-        return 3.0
-    if move <= 0.15:
-        return 2.0
-    if move <= 0.20:
-        return 1.0
-    return 0.0
-
-
-def _execution_simplicity_score(candidate: dict[str, Any], config: Config) -> float:
-    score = 5.0
-    symbols = {candidate["base_symbol"].upper(), candidate["quote_symbol"].upper()}
-    if not symbols.intersection({"USDC", "SOL"}):
-        score -= 2.0
-    if candidate["quote_symbol"].upper() not in {symbol.upper() for symbol in config.preferred_quote_symbols}:
-        score -= 1.0
+def _range_plan(
+    candidate: dict[str, Any], risk_profile: str
+) -> tuple[dict[str, Any], str | None]:
     tick_spacing = candidate.get("tick_spacing")
-    if tick_spacing is None or tick_spacing <= 0 or tick_spacing > 1024:
-        score -= 1.0
-    if candidate.get("adaptive_fee_enabled"):
-        score -= 0.5
-    for symbol in symbols:
-        if "UNKNOWN" in symbol or len(symbol) > 16:
-            score -= 1.0
-            break
-    if config.execution_mode in {"run_once", "loop"} and config.require_gateway_pool_info:
-        score -= 1.0
-    return max(0.0, min(5.0, score))
-
-
-def _sponsor_fit_score(candidate: dict[str, Any], config: Config) -> float:
-    score = 2.0
-    if (candidate.get("tvl_usd") or 0) >= config.min_tvl_usd * 5 and (candidate.get("volume_24h_usd") or 0) >= config.min_volume_24h_usd * 5:
-        score += 1.0
-    if candidate.get("price_delta_24h") is None or abs(candidate["price_delta_24h"]) <= config.max_abs_price_delta_24h * 0.75:
-        score += 1.0
-    if candidate["quote_symbol"].upper() in {"USDC", "SOL"} or candidate["base_symbol"].upper() in {"USDC", "SOL"}:
-        score += 1.0
-    return max(0.0, min(5.0, score))
-
-
-def _weights(config: Config) -> tuple[dict[str, float], list[str]]:
-    weights = {
-        "liquidity_depth": config.weight_liquidity_depth,
-        "recent_activity": config.weight_recent_activity,
-        "fee_productivity": config.weight_fee_productivity,
-        "range_stability": config.weight_range_stability,
-        "execution_simplicity": config.weight_execution_simplicity,
-        "sponsor_fit": config.weight_sponsor_fit,
+    if not isinstance(tick_spacing, int) or tick_spacing <= 0:
+        return {"status": "infeasible"}, "invalid_tick_spacing"
+    try:
+        tick_floor = 1.0001 ** (tick_spacing * 2) - 1.0
+    except OverflowError:
+        return {"status": "infeasible"}, "invalid_tick_spacing"
+    if not math.isfinite(tick_floor) or tick_floor <= 0:
+        return {"status": "infeasible"}, "invalid_tick_spacing"
+    change_width = abs(candidate["net_price_change_24h"]) * RANGE_SAFETY_FACTOR
+    required = max(tick_floor, change_width)
+    sustained = candidate["sustained_fee_productivity"]
+    preset: str | None = None
+    width: float | None = None
+    capped = False
+    maximum: float | None = None
+    if required <= 0.015 and sustained >= 0.0005:
+        preset, width, maximum = "concentrated", min(0.015, max(0.005, required)), 0.015
+    elif required <= 0.03:
+        preset, width, maximum = "balanced", min(0.03, max(0.01, required)), 0.03
+    elif required <= 0.08 and sustained >= 0.0004:
+        preset, width, maximum = "defensive", min(0.08, max(0.02, required)), 0.08
+    elif risk_profile == "yield_extreme_risk" and required <= 0.95:
+        preset, width, maximum = "extreme", min(0.95, max(0.08, required)), 0.95
+    elif risk_profile == "yield_no_limit":
+        preset, width, maximum = "extreme", min(0.95, max(0.08, required)), 0.95
+        capped = required > 0.95
+    if risk_profile == "yield_no_limit":
+        maximum = 0.95
+    plan = {
+        "status": "feasible" if preset else "infeasible",
+        "range_safety_factor": RANGE_SAFETY_FACTOR,
+        "tick_spacing_floor": tick_floor,
+        "tick_spacing_floor_pct": tick_floor * 100.0,
+        "change_based_half_width": change_width,
+        "change_based_half_width_pct": change_width * 100.0,
+        "uncapped_required_half_width": required,
+        "uncapped_required_half_width_pct": required * 100.0,
+        "maximum_executable_half_width": maximum,
+        "maximum_executable_half_width_pct": (
+            maximum * 100.0 if maximum is not None else None
+        ),
+        "width_capped": capped,
+        "preset": preset,
+        "provisional_half_width": width,
+        "provisional_half_width_pct": width * 100.0 if width is not None else None,
     }
-    total = sum(weights.values())
-    warnings: list[str] = []
-    if total <= 0:
-        return weights, ["invalid scoring weights: sum must be positive"]
-    if abs(total - 1.0) > 0.000001:
-        warnings.append(f"scoring weights sum to {total:.6f}; normalized for this scan")
-        weights = {key: value / total for key, value in weights.items()}
-    return weights, warnings
+    return plan, None if preset else "range_infeasible_for_profile"
 
 
-def _score(candidate: dict[str, Any], config: Config) -> tuple[dict[str, float], float, list[str]]:
-    warnings: list[str] = []
-    liquidity_depth = _multiple_score(candidate.get("tvl_usd"), config.min_tvl_usd)
-    volume_7d_daily = (candidate.get("volume_7d_usd") or 0.0) / 7.0
-    recent_activity = 0.6 * _multiple_score(candidate.get("volume_24h_usd"), config.min_volume_24h_usd) + 0.4 * _multiple_score(volume_7d_daily, config.min_volume_24h_usd)
-    fee_productivity = _fee_score(candidate, warnings)
-    range_stability = _range_stability_score(candidate.get("price_delta_24h"))
-    execution_simplicity = _execution_simplicity_score(candidate, config)
-    sponsor_fit = _sponsor_fit_score(candidate, config)
-    criteria = {
-        "liquidity_depth": round(liquidity_depth, 4),
-        "recent_activity": round(recent_activity, 4),
-        "fee_productivity": round(fee_productivity, 4),
-        "range_stability": round(range_stability, 4),
-        "execution_simplicity": round(execution_simplicity, 4),
-        "sponsor_fit": round(sponsor_fit, 4),
-    }
-    weights, weight_warnings = _weights(config)
-    warnings.extend(weight_warnings)
-    weighted_score = sum(criteria[key] * weights[key] for key in criteria)
-    return criteria, round(weighted_score, 4), warnings
+def _rank_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    return (
+        -candidate["weighted_score"],
+        -candidate["sustained_fee_productivity"],
+        -candidate["criteria_scores"]["recent_activity"],
+        abs(candidate["net_price_change_24h"]),
+        -candidate["tvl_usd"],
+        candidate["address"],
+    )
 
 
-def _preset(candidate: dict[str, Any], config: Config) -> str:
-    score = candidate["weighted_score"]
-    if score < 3.0:
-        return "no-trade"
-    if score < 3.5:
-        return "conservative"
-    if score < 4.25:
-        return "balanced" if (candidate.get("price_delta_24h") or 0) <= 0.08 else "conservative"
-    move = abs(candidate.get("price_delta_24h") or 0)
-    strong_fees = candidate["criteria_scores"]["fee_productivity"] >= 4.0
-    strong_activity = candidate["criteria_scores"]["recent_activity"] >= 4.0
-    if config.allow_wide_preset and 0.05 <= move <= config.max_abs_price_delta_24h * 0.9 and strong_fees and strong_activity:
-        return "wide"
-    return "balanced"
+def _bps(value: float | None) -> float | None:
+    return value * 10_000.0 if value is not None else None
 
 
-def _range(candidate: dict[str, Any], config: Config, preset: str) -> dict[str, float] | None:
-    if preset == "no-trade":
-        return None
-    price = candidate.get("current_price")
-    if price is None or price <= 0:
-        return None
-    move = abs(candidate.get("price_delta_24h") if candidate.get("price_delta_24h") is not None else config.default_observed_move)
-    rules = {
-        "conservative": (config.conservative_min_half_width, config.conservative_max_half_width, 2.5),
-        "balanced": (config.balanced_min_half_width, config.balanced_max_half_width, 1.75),
-        "wide": (config.wide_min_half_width, config.wide_max_half_width, 3.5),
-    }
-    floor, cap, multiplier = rules[preset]
-    half_width = min(cap, max(floor, move * multiplier))
-    lower = price * (1.0 - half_width)
-    upper = price * (1.0 + half_width)
-    return {
-        "center_price": round(price, 12),
-        "half_width_pct": round(half_width, 6),
-        "lower_price": round(lower, 12),
-        "upper_price": round(upper, 12),
-        "lower_limit_price": round(lower * (1.0 - config.limit_price_buffer_pct), 12),
-        "upper_limit_price": round(upper * (1.0 + config.limit_price_buffer_pct), 12),
-    }
-
-
-def _candidate_row(candidate: dict[str, Any], include_range: bool = False) -> dict[str, Any]:
+def _candidate_row(
+    candidate: dict[str, Any], observed_at: str, risk_profile: str, budget: float
+) -> dict[str, Any]:
+    fee_rate = candidate.get("fee_rate_raw")
+    maximum = PROFILE_POLICY[risk_profile]["max_abs_net_price_change_24h"]
     row = {
+        "observed_at": observed_at,
+        "risk_profile": risk_profile,
         "pool_address": candidate["address"],
         "trading_pair": candidate["trading_pair"],
-        "quote_symbol": candidate["quote_symbol"],
-        "score": candidate["weighted_score"],
-        "preset_suggestion": candidate["preset_suggestion"],
-        "tvl_usd": round(candidate.get("tvl_usd") or 0, 2),
-        "volume_24h_usd": round(candidate.get("volume_24h_usd") or 0, 2),
-        "volume_7d_usd": round(candidate.get("volume_7d_usd") or 0, 2),
-        "volume_30d_usd": round(candidate.get("volume_30d_usd") or 0, 2),
-        "fees_24h_usd": round(candidate.get("fees_24h_usd") or 0, 2),
-        "fees_7d_usd": round(candidate.get("fees_7d_usd") or 0, 2),
-        "fees_30d_usd": round(candidate.get("fees_30d_usd") or 0, 2),
-        "yield_30d": candidate.get("yield_30d"),
-        "price_delta_24h": candidate.get("price_delta_24h"),
-        "price_delta_30d": candidate.get("price_delta_30d"),
+        "token_a": candidate["token_a"],
+        "token_b": candidate["token_b"],
+        "price_orientation": "token_b_per_token_a",
+        "scanner_price": candidate.get("scanner_price"),
+        "tvl_usd": candidate.get("tvl_usd"),
+        "volume_1h_usd": candidate.get("volume_1h_usd"),
+        "volume_4h_usd": candidate.get("volume_4h_usd"),
+        "volume_24h_usd": candidate.get("volume_24h_usd"),
+        "volume_7d_usd": candidate.get("volume_7d_usd"),
+        "fees_1h_usd": candidate.get("fees_1h_usd"),
+        "fees_4h_usd": candidate.get("fees_4h_usd"),
+        "fees_24h_usd": candidate.get("fees_24h_usd"),
+        "fees_7d_usd": candidate.get("fees_7d_usd"),
+        "fee_tvl_24h": candidate.get("fee_tvl_24h"),
+        "fee_tvl_7d_daily": candidate.get("fee_tvl_7d_daily"),
+        "fee_productivity_1h_dailyized_bps": _bps(candidate.get("fee_productivity_1h")),
+        "fee_productivity_4h_dailyized_bps": _bps(candidate.get("fee_productivity_4h")),
+        "fee_productivity_24h_bps_per_day": _bps(candidate.get("fee_productivity_24h")),
+        "fee_productivity_7d_daily_bps": _bps(candidate.get("fee_productivity_7d")),
+        "sustained_fee_productivity": candidate.get("sustained_fee_productivity"),
+        "sustained_fee_productivity_bps_per_day": _bps(
+            candidate.get("sustained_fee_productivity")
+        ),
+        "fee_momentum_1h_x": candidate.get("fee_momentum_1h_x"),
+        "fee_momentum_4h_x": candidate.get("fee_momentum_4h_x"),
+        "volume_tvl_24h": candidate.get("volume_tvl_24h"),
+        "volume_tvl_7d_daily": candidate.get("volume_tvl_7d_daily"),
+        "net_price_change_24h": candidate.get("net_price_change_24h"),
+        "net_price_change_24h_pct": candidate.get("net_price_change_24h") * 100.0,
+        "profile_net_change_limit_pct": (
+            maximum * 100.0 if maximum is not None else None
+        ),
+        "profile_net_change_limit_enabled": maximum is not None,
+        "fee_rate_raw": fee_rate,
+        "fee_rate_fraction": fee_rate / 1_000_000.0 if fee_rate is not None else None,
+        "fee_rate_bps": fee_rate / 100.0 if fee_rate is not None else None,
+        "adaptive_fee_enabled": candidate.get("adaptive_fee_enabled"),
+        "fee_tier_index": candidate.get("fee_tier_index"),
+        "tick_spacing": candidate.get("tick_spacing"),
+        "has_warning": candidate.get("has_warning"),
+        "criteria_raw": candidate["criteria_raw"],
         "criteria_scores": candidate["criteria_scores"],
-        "source_lenses": candidate.get("source_lenses", []),
+        "mcda_weights": dict(MCDA_WEIGHTS),
+        "weighted_score": candidate["weighted_score"],
+        "score": candidate["weighted_score"],
         "source_categories": candidate.get("source_categories", []),
+        "source_lenses": candidate.get("source_lenses", []),
+        "session_budget_quote": budget,
+        "total_amount_quote": budget,
+        "gross_fee_estimate_quote_per_day": candidate.get(
+            "gross_fee_estimate_quote_per_day"
+        ),
+        "gross_fee_estimate_qualification": (
+            "Pool-average quote per day before concentration, competing liquidity, inventory loss, "
+            "swaps, transaction fees, rent, and close costs; not a position-yield forecast."
+        ),
+        "range_plan": candidate["range_plan"],
+        "preset_suggestion": candidate["range_plan"].get("preset"),
+        "analysis_only": True,
+        "live_ready": False,
     }
-    if include_range:
-        row["range_suggestion"] = candidate.get("range_suggestion")
+    if (
+        candidate.get("volume_30d_usd") is not None
+        or candidate.get("fees_30d_usd") is not None
+    ):
+        row["dry_run_30d_consult"] = {
+            "volume_30d_usd": candidate.get("volume_30d_usd"),
+            "fees_30d_usd": candidate.get("fees_30d_usd"),
+        }
     return row
 
 
-def _round_optional(value: Any, digits: int = 2) -> float | None:
-    parsed = _to_float(value)
-    return None if parsed is None else round(parsed, digits)
-
-
-def _near_miss_row(
-    candidate: dict[str, Any],
-    reason: str,
-    score: float | None = None,
-    criteria: dict[str, float] | None = None,
-) -> dict[str, Any]:
-    token_a = candidate.get("token_a") or {}
-    token_b = candidate.get("token_b") or {}
+def _near_miss(candidate: dict[str, Any], reason: str) -> dict[str, Any]:
+    token_a = candidate.get("token_a", {})
+    token_b = candidate.get("token_b", {})
     return {
         "reason": reason,
         "pool_address": candidate.get("address"),
-        "pair": candidate.get("trading_pair") or f"{token_a.get('symbol', 'n/a')}-{token_b.get('symbol', 'n/a')}",
-        "quote_symbol": candidate.get("quote_symbol"),
-        "score": score,
-        "tvl_usd": _round_optional(candidate.get("tvl_usd")),
-        "volume_24h_usd": _round_optional(candidate.get("volume_24h_usd")),
-        "volume_7d_usd": _round_optional(candidate.get("volume_7d_usd")),
-        "volume_30d_usd": _round_optional(candidate.get("volume_30d_usd")),
-        "fees_24h_usd": _round_optional(candidate.get("fees_24h_usd")),
-        "fees_7d_usd": _round_optional(candidate.get("fees_7d_usd")),
-        "fees_30d_usd": _round_optional(candidate.get("fees_30d_usd")),
-        "price_delta_24h": candidate.get("price_delta_24h"),
+        "pair": candidate.get("trading_pair")
+        or f"{token_a.get('symbol', 'n/a')}-{token_b.get('symbol', 'n/a')}",
+        "tvl_usd": candidate.get("tvl_usd"),
+        "volume_24h_usd": candidate.get("volume_24h_usd"),
+        "volume_7d_usd": candidate.get("volume_7d_usd"),
+        "fees_24h_usd": candidate.get("fees_24h_usd"),
+        "fees_7d_usd": candidate.get("fees_7d_usd"),
+        "fee_productivity_24h_bps_per_day": _bps(candidate.get("fee_productivity_24h")),
+        "fee_productivity_7d_daily_bps": _bps(candidate.get("fee_productivity_7d")),
+        "net_price_change_24h_pct": (
+            candidate.get("net_price_change_24h") * 100.0
+            if candidate.get("net_price_change_24h") is not None
+            else None
+        ),
         "source_categories": candidate.get("source_categories", []),
         "source_lenses": candidate.get("source_lenses", []),
-        "criteria_scores": criteria,
+        "range_plan": candidate.get("range_plan"),
     }
 
 
-def _append_near_miss(
-    near_misses: dict[str, list[dict[str, Any]]],
-    reason: str,
-    candidate: dict[str, Any],
-    score: float | None = None,
-    criteria: dict[str, float] | None = None,
-    limit_per_reason: int = 5,
-) -> None:
-    rows = near_misses.setdefault(reason, [])
-    if len(rows) < limit_per_reason:
-        rows.append(_near_miss_row(candidate, reason, score, criteria))
+def _failure_payload(
+    status: str,
+    timestamp: str,
+    errors: list[str],
+    warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "scan_status": status,
+        "decision": (
+            "blocked" if status in {"config-invalid", "api-failed"} else "no-trade"
+        ),
+        "analysis_only": True,
+        "live_ready": False,
+        "timestamp": timestamp,
+        "selected_candidate": None,
+        "top_candidates": [],
+        "rejection_summary": {},
+        "near_miss_candidates": {},
+        "warnings": warnings or [],
+        "errors": errors,
+        "qualification": REPORT_QUALIFICATION,
+        "agent_prompt_summary": "No trade: Orca pool scan failed closed before candidate selection.",
+    }
+
+
+def _fail(
+    status: str,
+    timestamp: str,
+    warnings: list[str],
+    rejection_summary: dict[str, int] | None = None,
+) -> str:
+    payload = _failure_payload(status, timestamp, [], warnings)
+    payload["rejection_summary"] = rejection_summary or {}
+    return _compact(payload)
 
 
 def _format_money(value: Any) -> str:
-    parsed = _to_float(value)
+    parsed = _number(value)
     return "n/a" if parsed is None else f"${parsed:,.2f}"
-
-
-def _format_number(value: Any, digits: int = 4) -> str:
-    parsed = _to_float(value)
-    return "n/a" if parsed is None else f"{parsed:,.{digits}f}"
-
-
-def _format_pct(value: Any) -> str:
-    parsed = _to_float(value)
-    return "n/a" if parsed is None else f"{parsed * 100:+.2f}%"
-
-
-def _compact_pool(address: Any) -> str:
-    text = str(address or "n/a")
-    return text if len(text) <= 12 else f"{text[:6]}...{text[-4:]}"
-
-
-def _candidate_text_line(rank: int, candidate: dict[str, Any]) -> str:
-    return (
-        f"{rank}. {candidate.get('trading_pair', 'n/a')} "
-        f"({_compact_pool(candidate.get('pool_address'))}) "
-        f"score {_format_number(candidate.get('score'), 4)}, "
-        f"preset {candidate.get('preset_suggestion', 'n/a')}, "
-        f"TVL {_format_money(candidate.get('tvl_usd'))}, "
-        f"24h vol {_format_money(candidate.get('volume_24h_usd'))}, "
-        f"7d vol {_format_money(candidate.get('volume_7d_usd'))}, "
-        f"30d vol {_format_money(candidate.get('volume_30d_usd'))}, "
-        f"24h fees {_format_money(candidate.get('fees_24h_usd'))}, "
-        f"7d fees {_format_money(candidate.get('fees_7d_usd'))}, "
-        f"30d fees {_format_money(candidate.get('fees_30d_usd'))}, "
-        f"24h move {_format_pct(candidate.get('price_delta_24h'))}"
-    )
-
-
-def _monthly_ranking(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows = [candidate for candidate in candidates if (candidate.get("fees_30d_usd") or candidate.get("volume_30d_usd"))]
-    return sorted(
-        rows,
-        key=lambda item: (item.get("fees_30d_usd") or 0, item.get("volume_30d_usd") or 0),
-        reverse=True,
-    )
 
 
 def _format_scan_text(payload: dict[str, Any]) -> str:
     selected = payload.get("selected_candidate") or {}
-    warnings = payload.get("warnings") or []
-    rejections = payload.get("rejection_summary") or {}
-    config_summary = payload.get("config_summary") or {}
-    stats_windows = _stats_window_items(config_summary.get("stats_windows", ""))
     lines = [f"Orca Pool Scan: {payload.get('scan_status', 'unknown')}"]
     if selected:
-        range_suggestion = selected.get("range_suggestion") or {}
+        plan = selected["range_plan"]
         lines.extend(
             [
-                f"Selected: {selected.get('trading_pair', 'n/a')}",
-                f"Pool: {selected.get('pool_address', 'n/a')}",
-                f"Score: {_format_number(selected.get('score'), 4)}",
-                f"Preset: {selected.get('preset_suggestion', 'n/a')}",
-                f"TVL: {_format_money(selected.get('tvl_usd'))}",
-                f"24h volume: {_format_money(selected.get('volume_24h_usd'))}",
-                f"7d volume: {_format_money(selected.get('volume_7d_usd'))}",
-                f"30d volume: {_format_money(selected.get('volume_30d_usd'))}",
-                f"24h fees: {_format_money(selected.get('fees_24h_usd'))}",
-                f"7d fees: {_format_money(selected.get('fees_7d_usd'))}",
-                f"30d fees: {_format_money(selected.get('fees_30d_usd'))}",
+                f"Selected: {selected['trading_pair']} ({selected['pool_address']})",
+                f"Profile: {selected['risk_profile']}",
+                f"Score: {selected['weighted_score']:.4f}",
+                f"Sustained fees: {selected['sustained_fee_productivity_bps_per_day']:.4f} bp/day",
+                f"TVL: {_format_money(selected['tvl_usd'])}",
+                f"Range plan: {plan['preset']} at +/-{plan['provisional_half_width_pct']:.4f}%",
             ]
         )
-        if range_suggestion:
-            lines.append(
-                "Range: "
-                f"{_format_number(range_suggestion.get('lower_price'), 6)} - "
-                f"{_format_number(range_suggestion.get('upper_price'), 6)}"
-            )
     else:
         lines.append("Selected: none")
-    top_candidates = payload.get("top_candidates") or []
-    if top_candidates:
-        lines.extend(["", "Top candidates:"])
-        lines.extend(_candidate_text_line(rank, candidate) for rank, candidate in enumerate(top_candidates, 1))
-        if "30d" in stats_windows:
-            monthly_rows = _monthly_ranking(top_candidates)
-            lines.extend(["", "30d ranking:"])
-            if monthly_rows:
-                lines.extend(_candidate_text_line(rank, candidate) for rank, candidate in enumerate(monthly_rows, 1))
-            else:
-                lines.append("30d ranking unavailable: Orca API response did not expose monthly volume/fees for returned records.")
-    if rejections:
-        lines.append(f"Rejected pools: {sum(rejections.values())}")
-    near_misses = payload.get("near_miss_candidates") or {}
-    if near_misses:
-        lines.append(f"Near-miss samples: {sum(len(rows) for rows in near_misses.values())}")
-    if warnings:
-        lines.append(f"Warnings: {len(warnings)}")
-    summary = payload.get("agent_prompt_summary")
-    if summary:
-        lines.extend(["", summary])
+    if payload.get("rejection_summary"):
+        lines.append(f"Rejected records: {sum(payload['rejection_summary'].values())}")
+    if payload.get("errors"):
+        lines.append("Errors: " + "; ".join(payload["errors"]))
+    lines.extend(
+        ["", REPORT_QUALIFICATION, "", payload.get("agent_prompt_summary", "")]
+    )
     return "\n".join(lines)
 
 
 def _candidate_table_rows(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    selected = payload.get("selected_candidate") or {}
-    selected_address = selected.get("pool_address")
-    rows: list[dict[str, Any]] = []
-    for rank, candidate in enumerate(payload.get("top_candidates") or [], 1):
-        rows.append(
-            {
-                "Rank": rank,
-                "Selected": "yes" if candidate.get("pool_address") == selected_address else "no",
-                "Pair": candidate.get("trading_pair"),
-                "Pool": candidate.get("pool_address"),
-                "Score": _format_number(candidate.get("score"), 4),
-                "Preset": candidate.get("preset_suggestion"),
-                "Quote": candidate.get("quote_symbol"),
-                "TVL": _format_money(candidate.get("tvl_usd")),
-                "24h Volume": _format_money(candidate.get("volume_24h_usd")),
-                "7d Volume": _format_money(candidate.get("volume_7d_usd")),
-                "30d Volume": _format_money(candidate.get("volume_30d_usd")),
-                "24h Fees": _format_money(candidate.get("fees_24h_usd")),
-                "7d Fees": _format_money(candidate.get("fees_7d_usd")),
-                "30d Fees": _format_money(candidate.get("fees_30d_usd")),
-                "24h Move": _format_pct(candidate.get("price_delta_24h")),
-            }
-        )
-    if selected and not any(row["Pool"] == selected_address for row in rows):
-        rows.insert(
-            0,
-            {
-                "Rank": "selected",
-                "Selected": "yes",
-                "Pair": selected.get("trading_pair"),
-                "Pool": selected_address,
-                "Score": _format_number(selected.get("score"), 4),
-                "Preset": selected.get("preset_suggestion"),
-                "Quote": selected.get("quote_symbol"),
-                "TVL": _format_money(selected.get("tvl_usd")),
-                "24h Volume": _format_money(selected.get("volume_24h_usd")),
-                "7d Volume": _format_money(selected.get("volume_7d_usd")),
-                "30d Volume": _format_money(selected.get("volume_30d_usd")),
-                "24h Fees": _format_money(selected.get("fees_24h_usd")),
-                "7d Fees": _format_money(selected.get("fees_7d_usd")),
-                "30d Fees": _format_money(selected.get("fees_30d_usd")),
-                "24h Move": _format_pct(selected.get("price_delta_24h")),
-            },
-        )
-    return rows
+    selected = (payload.get("selected_candidate") or {}).get("pool_address")
+    return [
+        {
+            "Rank": rank,
+            "Selected": "yes" if candidate.get("pool_address") == selected else "no",
+            "Pair": candidate.get("trading_pair"),
+            "Pool": candidate.get("pool_address"),
+            "Score": candidate.get("weighted_score"),
+            "Preset": (candidate.get("range_plan") or {}).get("preset"),
+            "TVL": _format_money(candidate.get("tvl_usd")),
+            "24h Fees bp/day": candidate.get("fee_productivity_24h_bps_per_day"),
+            "7d Fees bp/day": candidate.get("fee_productivity_7d_daily_bps"),
+            "24h Net Change %": candidate.get("net_price_change_24h_pct"),
+        }
+        for rank, candidate in enumerate(payload.get("top_candidates") or [], 1)
+    ]
 
 
 def _routine_result(payload: dict[str, Any]) -> RoutineResult:
+    preflight_input = {
+        "scan_status": payload.get("scan_status"),
+        "decision": payload.get("decision"),
+        "selected_candidate": payload.get("selected_candidate"),
+    }
     return RoutineResult(
-        text=_format_scan_text(payload),
+        text=(
+            _format_scan_text(payload)
+            + "\n\nPreflight input:\n```json\n"
+            + json.dumps(preflight_input, indent=2, sort_keys=True, default=str)
+            + "\n```"
+        ),
         table_data=_candidate_table_rows(payload),
     )
 
 
-def _config_summary(config: Config, diagnostics: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "risk_profile": config.risk_profile,
-        "categories": config.categories,
-        "stats_windows": config.stats_windows,
-        "min_tvl_query_usd": config.min_tvl_query_usd,
-        "min_tvl_usd": config.min_tvl_usd,
-        "min_volume_24h_usd": config.min_volume_24h_usd,
-        "min_volume_7d_usd": config.min_volume_7d_usd,
-        "max_abs_price_delta_24h": config.max_abs_price_delta_24h,
-        "allowed_quote_symbols": config.allowed_quote_symbols,
-        "weights_sum": round(
-            config.weight_liquidity_depth
-            + config.weight_recent_activity
-            + config.weight_fee_productivity
-            + config.weight_range_stability
-            + config.weight_execution_simplicity
-            + config.weight_sponsor_fit,
-            6,
-        ),
-        "diagnostics": diagnostics,
-    }
-
-
 async def _save_scan_report(payload: dict[str, Any]) -> None:
-    """Create a standard Condor dashboard report; report failures must not fail the routine."""
     try:
         from condor.reports import ReportBuilder
 
         selected = payload.get("selected_candidate") or {}
-        warnings = payload.get("warnings") or []
-        rejections = payload.get("rejection_summary") or {}
-        status = payload.get("scan_status", "unknown")
-
         builder = ReportBuilder("Orca Pool Scan")
-        builder.source("routine", "orca_pool_scan").tags(["orca", "lp", "scanner", "agent"]).manual_order()
-        builder.kpi("Status", str(status), trend="up" if status == "success" else "down")
+        builder.source("routine", "orca_pool_scan").tags(
+            ["orca", "lp", "scanner", "agent"]
+        ).manual_order()
+        builder.kpi("Status", payload.get("scan_status", "unknown"))
+        builder.kpi("Decision", payload.get("decision", "unknown"))
         builder.kpi("Selected Pair", selected.get("trading_pair") or "none")
-        builder.kpi("Score", _format_number(selected.get("score"), 4))
-        builder.kpi("Preset", selected.get("preset_suggestion") or "n/a")
-        builder.kpi("TVL", _format_money(selected.get("tvl_usd")))
-        builder.kpi("24h Volume", _format_money(selected.get("volume_24h_usd")))
-        builder.kpi("7d Volume", _format_money(selected.get("volume_7d_usd")))
-        builder.kpi("30d Volume", _format_money(selected.get("volume_30d_usd")))
+        builder.kpi("Score", selected.get("weighted_score") or "n/a")
+        builder.kpi("Preset", (selected.get("range_plan") or {}).get("preset") or "n/a")
+        builder.markdown("## Qualification\n" + REPORT_QUALIFICATION)
         builder.markdown(
-            "## Agent Summary\n"
-            f"{payload.get('agent_prompt_summary', 'No summary available.')}\n\n"
-            "No live LP executor was created by this scan. Gateway pool-info, quote orientation, "
-            "portfolio balance, and risk-cap preflight are still required before any live open."
+            "## Discovery Universe\n```json\n"
+            + json.dumps(
+                (payload.get("config_summary") or {}).get("discovery_universe", {}),
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n```"
         )
-
-        candidate_rows = _candidate_table_rows(payload)
-        if candidate_rows:
-            builder.markdown("## Ranked Candidates")
-            builder.table(candidate_rows)
-        if selected.get("range_suggestion"):
-            range_suggestion = selected["range_suggestion"]
-            builder.markdown("## Selected Range Suggestion")
+        rows = _candidate_table_rows(payload)
+        if rows:
+            builder.markdown("## Ranked Gate-Passing Candidates")
+            builder.table(rows)
+        if payload.get("rejection_summary"):
+            builder.markdown("## Rejection Summary")
             builder.table(
                 [
-                    {
-                        "Center Price": _format_number(range_suggestion.get("center_price"), 6),
-                        "Lower Price": _format_number(range_suggestion.get("lower_price"), 6),
-                        "Upper Price": _format_number(range_suggestion.get("upper_price"), 6),
-                        "Lower Limit": _format_number(range_suggestion.get("lower_limit_price"), 6),
-                        "Upper Limit": _format_number(range_suggestion.get("upper_limit_price"), 6),
-                        "Half Width": _format_pct(range_suggestion.get("half_width_pct")),
-                    }
+                    {"Reason": reason, "Count": count}
+                    for reason, count in sorted(payload["rejection_summary"].items())
                 ]
             )
-        if rejections:
-            builder.markdown("## Rejection Summary")
-            builder.table([{"Reason": reason, "Count": count} for reason, count in sorted(rejections.items())])
-        near_misses = payload.get("near_miss_candidates") or {}
-        if near_misses:
-            rows = []
-            for reason, candidates in sorted(near_misses.items()):
-                for candidate in candidates:
-                    rows.append(
-                        {
-                            "Reason": reason,
-                            "Pair": candidate.get("pair"),
-                            "Pool": candidate.get("pool_address"),
-                            "Score": _format_number(candidate.get("score"), 4),
-                            "TVL": _format_money(candidate.get("tvl_usd")),
-                            "24h Volume": _format_money(candidate.get("volume_24h_usd")),
-                            "7d Volume": _format_money(candidate.get("volume_7d_usd")),
-                            "30d Volume": _format_money(candidate.get("volume_30d_usd")),
-                            "24h Fees": _format_money(candidate.get("fees_24h_usd")),
-                            "7d Fees": _format_money(candidate.get("fees_7d_usd")),
-                            "30d Fees": _format_money(candidate.get("fees_30d_usd")),
-                            "24h Move": _format_pct(candidate.get("price_delta_24h")),
-                            "Categories": ",".join(candidate.get("source_categories") or []),
-                        }
-                    )
-            if rows:
-                builder.markdown("## Near-Miss Rejections")
-                builder.table(rows)
-        if warnings:
-            builder.markdown("## Warnings\n" + "\n".join(f"- {warning}" for warning in warnings))
         builder.markdown(
-            "## Debug JSON Payload\n"
-            "```json\n"
-            f"{json.dumps(payload, indent=2, sort_keys=True)}\n"
-            "```"
+            "## Debug JSON Payload\n```json\n"
+            + json.dumps(payload, indent=2, sort_keys=True, default=str)
+            + "\n```"
         )
         await builder.save()
     except Exception:
@@ -1375,163 +1223,245 @@ async def _save_scan_report(payload: dict[str, Any]) -> None:
 
 async def run(config: Config, context: Any) -> RoutineResult:
     timestamp = _utc_now()
+    input_config = config.model_dump(
+        mode="json",
+        exclude={"orca_api_base_url", "pool_endpoint", "request_user_agent"},
+    )
     try:
-        config = _apply_risk_profile(config)
-        config_errors = _config_errors(config)
+        config, policy, config_errors = _resolve_policy(config)
         if config_errors:
-            payload = _failure_payload("config-invalid", timestamp, config_errors, {"config_invalid": len(config_errors)})
-            payload["config_summary"] = {"risk_profile": config.risk_profile, "categories": config.categories, "stats_windows": config.stats_windows}
+            payload = _failure_payload("config-invalid", timestamp, config_errors)
+            payload["input_config"] = input_config
+            payload["config_summary"] = {"risk_profile": config.risk_profile}
             await _save_scan_report(payload)
             return _routine_result(payload)
 
-        records, api_errors, diagnostics = await _fetch_all(config)
-        config_summary = _config_summary(config, diagnostics)
+        records, api_errors, diagnostics = await _fetch_all(config, policy)
+        config_summary = {
+            "risk_profile": config.risk_profile,
+            "controller_id": config.controller_id or None,
+            "categories": policy["categories"],
+            "minimums": {
+                "tvl_usd": policy["min_tvl_usd"],
+                "volume_24h_usd": policy["min_volume_24h_usd"],
+                "volume_7d_usd": policy["min_volume_7d_usd"],
+                "fee_productivity_bps_per_day": policy["min_fee_productivity"]
+                * 10_000.0,
+            },
+            "stability_reference": policy["stability_reference"],
+            "max_abs_net_price_change_24h": policy["max_abs_net_price_change_24h"],
+            "mcda_weights": MCDA_WEIGHTS,
+            "discovery_universe": diagnostics,
+        }
         if api_errors or records is None:
-            payload = _failure_payload("api-failed", timestamp, ["; ".join(api_errors)], {})
-            payload["config_summary"] = config_summary
-            await _save_scan_report(payload)
-            return _routine_result(payload)
-        if not records:
-            payload = _failure_payload("no-trade", timestamp, ["Orca API returned no pool records"], {})
-            payload["config_summary"] = config_summary
+            payload = _failure_payload("api-failed", timestamp, api_errors)
+            payload.update(
+                {"input_config": input_config, "config_summary": config_summary}
+            )
             await _save_scan_report(payload)
             return _routine_result(payload)
 
-        rejection_counts: Counter[str] = Counter()
-        warnings: list[str] = []
-        candidates: list[dict[str, Any]] = []
+        rejections: Counter[str] = Counter()
         near_misses: dict[str, list[dict[str, Any]]] = {}
+        eligible: list[dict[str, Any]] = []
+        live_profile = config.risk_profile in LIVE_PROFILES
+        excluded = set(config.exclude_pool_addresses)
         for record in records:
             candidate = _normalize(record)
-            accepted, reason, gate_warnings = _gate(candidate, config)
-            warnings.extend(gate_warnings)
-            if not accepted:
-                rejection_reason = reason or "rejected"
-                rejection_counts[rejection_reason] += 1
-                _append_near_miss(near_misses, rejection_reason, candidate)
+            _derive(candidate, config.total_amount_quote)
+            reason = _gate(candidate, policy, live_profile, excluded)
+            if reason:
+                rejections[reason] += 1
+                rows = near_misses.setdefault(reason, [])
+                if len(rows) < 5:
+                    rows.append(_near_miss(candidate, reason))
                 continue
-            criteria, weighted_score, score_warnings = _score(candidate, config)
-            warnings.extend(score_warnings)
-            candidate["criteria_scores"] = criteria
-            candidate["weighted_score"] = weighted_score
-            candidate["preset_suggestion"] = _preset(candidate, config)
-            candidate["range_suggestion"] = _range(candidate, config, candidate["preset_suggestion"])
-            if candidate["preset_suggestion"] == "no-trade":
-                rejection_counts["score_below_trade_threshold"] += 1
-                _append_near_miss(near_misses, "score_below_trade_threshold", candidate, weighted_score, criteria)
+            _score(candidate, policy)
+            eligible.append(candidate)
+
+        eligible.sort(key=_rank_key)
+        selected: dict[str, Any] | None = None
+        for candidate in eligible:
+            candidate["range_plan"], reason = _range_plan(
+                candidate, config.risk_profile
+            )
+            if reason:
+                rejections[reason] += 1
+                rows = near_misses.setdefault(reason, [])
+                if len(rows) < 5:
+                    rows.append(_near_miss(candidate, reason))
                 continue
-            candidates.append(candidate)
+            if selected is None:
+                selected = candidate
 
-        candidates.sort(
-            key=lambda item: (
-                item["weighted_score"],
-                item["criteria_scores"]["execution_simplicity"],
-                item.get("tvl_usd") or 0,
-                item.get("volume_7d_usd") or 0,
-                item.get("fees_7d_usd") or 0,
-                item.get("quote_symbol", "").upper() in {symbol.upper() for symbol in config.preferred_quote_symbols},
-                -(abs(item.get("price_delta_24h") or 0)),
-            ),
-            reverse=True,
-        )
-
-        selected = candidates[0] if candidates else None
-        if not selected:
-            payload = {
-                "scan_status": "no-trade",
-                "timestamp": timestamp,
-                "config_summary": config_summary,
-                "selected_candidate": None,
-                "top_candidates": [],
-                "rejection_summary": dict(rejection_counts),
-                "near_miss_candidates": near_misses,
-                "warnings": sorted(set(warnings)),
-                "agent_prompt_summary": "No trade: no Orca pool survived hard gates and scoring thresholds.",
-            }
+        feasible = [
+            candidate
+            for candidate in eligible
+            if candidate["range_plan"]["status"] == "feasible"
+        ]
+        candidate_rows = [
+            _candidate_row(
+                candidate, timestamp, config.risk_profile, config.total_amount_quote
+            )
+            for candidate in feasible[: config.top_n]
+        ]
+        if selected is None:
+            payload = _failure_payload("no-trade", timestamp, [])
+            payload.update(
+                {
+                    "input_config": input_config,
+                    "config_summary": config_summary,
+                    "rejection_summary": dict(rejections),
+                    "near_miss_candidates": near_misses,
+                    "agent_prompt_summary": (
+                        "No trade: no pool in the fetched Orca discovery universe passed every hard gate "
+                        "and range-feasibility check."
+                    ),
+                }
+            )
             await _save_scan_report(payload)
             return _routine_result(payload)
 
-        summary = (
-            f"Selected {selected['trading_pair']} pool {selected['address']} with score "
-            f"{selected['weighted_score']} and preset {selected['preset_suggestion']}; "
-            "Gateway and portfolio preflight are still required before any live LP executor."
+        selected_row = _candidate_row(
+            selected, timestamp, config.risk_profile, config.total_amount_quote
         )
         payload = {
             "scan_status": "success",
+            "decision": "analysis-only",
+            "analysis_only": True,
+            "live_ready": False,
             "timestamp": timestamp,
+            "input_config": input_config,
             "config_summary": config_summary,
-            "selected_candidate": _candidate_row(selected, include_range=True),
-            "top_candidates": [_candidate_row(candidate) for candidate in candidates[: max(config.top_n, 1)]],
-            "rejection_summary": dict(rejection_counts),
-            "warnings": sorted(set(warnings)),
-            "agent_prompt_summary": summary,
+            "selected_candidate": selected_row,
+            "top_candidates": candidate_rows,
+            "rejection_summary": dict(rejections),
+            "near_miss_candidates": near_misses,
+            "warnings": [
+                "Gateway pool identity, fresh price, wallet, executor, and risk preflight remain required."
+            ],
+            "errors": [],
+            "qualification": REPORT_QUALIFICATION,
+            "agent_prompt_summary": (
+                f"Selected {selected_row['trading_pair']} pool {selected_row['pool_address']} with "
+                f"score {selected_row['weighted_score']} and provisional "
+                f"{selected_row['range_plan']['preset']} half-width "
+                f"{selected_row['range_plan']['provisional_half_width_pct']:.4f}%. "
+                "The scanner produced no executable prices."
+            ),
         }
         await _save_scan_report(payload)
         return _routine_result(payload)
     except Exception as exc:
-        payload = _failure_payload("api-failed", timestamp, [f"unexpected scan failure: {type(exc).__name__}: {exc}"], {})
+        payload = _failure_payload(
+            "api-failed",
+            timestamp,
+            [f"unexpected scan failure: {type(exc).__name__}: {exc}"],
+        )
+        payload["input_config"] = input_config
         await _save_scan_report(payload)
         return _routine_result(payload)
 
 
+def _fixture_candidate(
+    change: float, sustained_bps: float, tick_spacing: int = 64
+) -> dict[str, Any]:
+    tvl = 1_000_000.0
+    fee_ratio = sustained_bps / 10_000.0
+    return {
+        "net_price_change_24h": change,
+        "tick_spacing": tick_spacing,
+        "sustained_fee_productivity": fee_ratio,
+    }
+
+
 def _self_check() -> None:
-    assert _apply_risk_profile(Config(risk_profile="meme_scout", stats_windows="24h")).stats_windows == "24h,7d"
-    assert Config(stats_windows="24h,7d,monthly").stats_windows == "24h,7d,30d"
-    assert Config(scan_sort_fields="volume_24h,fees_7d,monthly_fees").scan_sort_fields == ["volume24h", "fees7d", "fees30d"]
-    assert _config_errors(Config(execution_mode="analysis_only"))[0].startswith("invalid execution_mode")
-    assert _apply_risk_profile(Config(risk_profile="category_scout")).categories == [
+    assert PROFILE_POLICY["yield_focused"]["categories"] == [
+        "stablecoin",
+        "liquid_staking_token",
         "utility",
         "governance",
-        "liquid_staking_token",
-        "security",
     ]
+    assert PROFILE_POLICY["yield_no_limit"]["max_abs_net_price_change_24h"] is None
+    assert sum(MCDA_WEIGHTS.values()) == 1.0
+    assert _decimal_ratio(0.02) == 0.02
+    assert _decimal_ratio(1.01) == 1.01
+    assert _decimal_ratio("0.02") == 0.02
+    assert _decimal_ratio("2%") is None
+    assert _multiple_score(2.0, 1.0) == 2.0
+    assert _multiple_score(5.0, 1.0) == 3.0
 
-    warned_candidate = {
+    focused = _fixture_candidate(0.005, 5.0, 1)
+    plan, reason = _range_plan(focused, "yield_focused")
+    assert reason is None and plan["preset"] == "concentrated"
+    balanced = _fixture_candidate(-0.02, 2.0, 1)
+    plan, reason = _range_plan(balanced, "yield_focused")
+    assert reason is None and plan["preset"] == "balanced"
+    defensive = _fixture_candidate(0.04, 4.0, 1)
+    plan, reason = _range_plan(defensive, "yield_high_risk")
+    assert reason is None and plan["preset"] == "defensive"
+    extreme = _fixture_candidate(0.50, 8.0, 1)
+    plan, reason = _range_plan(extreme, "yield_extreme_risk")
+    assert reason is None and plan["preset"] == "extreme"
+    assert math.isclose(plan["provisional_half_width"], 0.75)
+    no_limit = _fixture_candidate(0.64, 12.0, 1)
+    plan, reason = _range_plan(no_limit, "yield_no_limit")
+    assert reason is None and plan["width_capped"] is True
+    assert plan["provisional_half_width"] == 0.95
+    _, reason = _range_plan(
+        _fixture_candidate(0.01, 12.0, 10_000_000), "yield_no_limit"
+    )
+    assert reason == "invalid_tick_spacing"
+
+    policy = PROFILE_POLICY["yield_focused"]
+    specs = _request_specs(Config(), policy)
+    assert len(specs) == len(policy["categories"]) * 4
+    assert all("stats=1h%2C4h%2C24h%2C7d" in spec[3] for spec in specs)
+    assert all("size=100" in spec[3] for spec in specs)
+    assert _resolve_policy(Config(execution_mode="loop", risk_profile="meme_scout"))[2]
+
+    candidate = {
         "address": "pool",
         "token_a": {"symbol": "SOL", "mint": "sol", "decimals": 9},
-        "token_b": {"symbol": "USDC", "mint": "usdc", "decimals": 6},
-        "has_warning": True,
+        "token_b": {"symbol": "USDC", "mint": CANONICAL_USDC_MINT, "decimals": 6},
+        "trading_pair": "SOL-USDC",
+        "scanner_price": 150.0,
+        "tvl_usd": 1_000_000.0,
+        "volume_1h_usd": 10_000.0,
+        "volume_4h_usd": 40_000.0,
+        "volume_24h_usd": 300_000.0,
+        "volume_7d_usd": 2_000_000.0,
+        "fees_1h_usd": 25.0,
+        "fees_4h_usd": 100.0,
+        "fees_24h_usd": 500.0,
+        "fees_7d_usd": 3_500.0,
+        "fee_productivity_1h": 0.0006,
+        "fee_productivity_4h": 0.0006,
+        "fee_productivity_24h": 0.0005,
+        "fee_productivity_7d": 0.0005,
+        "sustained_fee_productivity": 0.0005,
+        "fee_momentum_1h_x": 1.2,
+        "fee_momentum_4h_x": 1.2,
+        "volume_tvl_24h": 0.3,
+        "volume_tvl_7d_daily": 2.0 / 7.0,
+        "net_price_change_24h": 0.005,
+        "fee_rate_raw": 400.0,
+        "adaptive_fee_enabled": False,
+        "fee_tier_index": 1,
+        "tick_spacing": 1,
+        "criteria_raw": {},
+        "criteria_scores": {key: 5.0 for key in MCDA_WEIGHTS},
+        "weighted_score": 5.0,
+        "source_categories": ["utility"],
+        "source_lenses": list(DISCOVERY_LENSES),
+        "gross_fee_estimate_quote_per_day": 0.005,
+        "range_plan": _range_plan(focused, "yield_focused")[0],
     }
-    assert _gate(warned_candidate, Config(reject_has_warning=False))[0:2] == (
-        False,
-        "has_warning",
-    )
-
-    sol_quote_candidate = {
-        "address": "pool",
-        "token_a": {"symbol": "FARTCOIN", "mint": "fart", "decimals": 6},
-        "token_b": {"symbol": "SOL", "mint": "sol", "decimals": 9},
-        "price_raw": 0.001,
-        "tvl_usd": 600000,
-        "volume_24h_usd": 100000,
-        "volume_7d_usd": 500000,
-        "volume_30d_usd": 2000000,
-        "fees_24h_usd": 250,
-        "fees_7d_usd": 1500,
-        "fees_30d_usd": 6000,
-        "has_warning": False,
-    }
-    usdc_only = Config(
-        allowed_quote_symbols=["USDC"],
-        preferred_quote_symbols=["USDC"],
-        require_gateway_pool_info=False,
-    )
-    assert _gate(sol_quote_candidate, usdc_only)[0:2] == (
-        False,
-        "disallowed_quote_symbol",
-    )
-    row = _candidate_row(
-        {
-            **sol_quote_candidate,
-            "trading_pair": "FARTCOIN-SOL",
-            "quote_symbol": "SOL",
-            "weighted_score": 5.0,
-            "preset_suggestion": "balanced",
-            "criteria_scores": {},
-        }
-    )
-    assert row["volume_30d_usd"] == 2000000
-    assert row["fees_30d_usd"] == 6000
+    row = _candidate_row(candidate, "2026-07-24T00:00:00+00:00", "yield_focused", 10)
+    forbidden = {"lower_price", "upper_price", "lower_limit_price", "upper_limit_price"}
+    assert forbidden.isdisjoint(row)
+    assert row["price_orientation"] == "token_b_per_token_a"
+    assert row["token_b"]["mint"] == CANONICAL_USDC_MINT
 
 
 if __name__ == "__main__":

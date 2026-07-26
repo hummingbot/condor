@@ -1,10 +1,30 @@
+import asyncio
+import importlib
 import json
 import math
+import sys
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.append(str(PROJECT_ROOT))
+
+from agents.lpmaxxing.routines import orca_live_preflight as _orca_live_preflight
+
+_orca_live_preflight = importlib.reload(_orca_live_preflight)
+load_lifecycle_state = _orca_live_preflight.load_lifecycle_state
+load_session_state = _orca_live_preflight.load_session_state
+save_lifecycle_state = _orca_live_preflight.save_lifecycle_state
+lifecycle_lock = _orca_live_preflight.lifecycle_lock
+mark_session_stop = _orca_live_preflight.mark_session_stop
+resume_session_cycle = _orca_live_preflight.resume_session_cycle
+session_execution_mode = _orca_live_preflight.session_execution_mode
+session_exit_policy = _orca_live_preflight.session_exit_policy
+session_stop_trigger = _orca_live_preflight.session_stop_trigger
 
 CATEGORY = "Orca LP Agent"
 
@@ -19,6 +39,17 @@ INACTIVE_STATES = {
 }
 FAILED_STATES = {"FAILED"}
 COMPLETE_STATES = {"COMPLETE", "COMPLETED", "TERMINATED"}
+TERMINAL_STATES = INACTIVE_STATES
+ACTIVE_STATES = {"RUNNING", "OPENING", "CLOSING", "SHUTTING_DOWN"}
+REDACTED_KEYS = {
+    "privatekey",
+    "secret",
+    "password",
+    "apikey",
+    "accesstoken",
+    "walletaddress",
+    "owneraddress",
+}
 
 
 class Config(BaseModel):
@@ -27,8 +58,11 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     controller_id: str = Field(
-        default="lpmaxxing_orca",
-        description="Executor controller id used when executor_id is not supplied",
+        default="",
+        description="Dynamic executor controller id from the current Condor tick",
+    )
+    execution_mode: Literal["dry_run", "loop"] = Field(
+        default="dry_run", description="dry_run or loop lifecycle mode"
     )
     executor_id: str | None = Field(
         default=None,
@@ -36,16 +70,20 @@ class Config(BaseModel):
     )
     now_timestamp: Any = Field(default=None, description="Current timestamp override")
 
-    max_position_age_minutes: float = Field(
+    position_max_age_minutes: float = Field(
         default=480, ge=0, description="Time-limit exit threshold"
     )
-    take_profit_pct_after_costs: float | None = Field(
+    position_take_profit_net_pnl_ratio: float | None = Field(
         default=0.005,
-        description="Close when net_pnl_pct reaches this ratio after costs",
+        description="Close when reconciled net PnL ratio reaches this threshold",
     )
-    stop_loss_pct_after_costs: float | None = Field(
+    position_stop_loss_net_pnl_ratio: float | None = Field(
         default=0.01,
-        description="Close when net_pnl_pct reaches this negative ratio after costs",
+        description="Close when reconciled net PnL ratio reaches this negative threshold",
+    )
+    archived_executor_ids: list[str] = Field(
+        default_factory=list,
+        description="Terminal executor ids already committed to position archives",
     )
     soft_out_of_range_grace_minutes: float = Field(
         default=10, ge=0, description="Minutes tolerated out of LP range"
@@ -62,10 +100,7 @@ class Config(BaseModel):
     @field_validator("controller_id", mode="before")
     @classmethod
     def _coerce_controller_id(cls, value: Any) -> str:
-        if value is None:
-            return "lpmaxxing_orca"
-        text = str(value).strip()
-        return text or "lpmaxxing_orca"
+        return str(value or "").strip()
 
     @field_validator("executor_id", mode="before")
     @classmethod
@@ -82,7 +117,17 @@ def _json_safe(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     if isinstance(value, dict):
-        return {str(key): _json_safe(val) for key, val in value.items()}
+        return {
+            str(key): (
+                "[redacted]"
+                if "".join(
+                    character for character in str(key).lower() if character.isalnum()
+                )
+                in REDACTED_KEYS
+                else _json_safe(val)
+            )
+            for key, val in value.items()
+        }
     if isinstance(value, (list, tuple, set)):
         return [_json_safe(item) for item in value]
     return str(value)
@@ -152,6 +197,12 @@ def _executor_id(executor: dict[str, Any]) -> str | None:
     return executor.get("executor_id") or executor.get("id") or config.get("id")
 
 
+def _executor_controller_id(executor: dict[str, Any]) -> str | None:
+    config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
+    value = executor.get("controller_id") or config.get("controller_id")
+    return str(value).strip() if value not in (None, "") else None
+
+
 def _looks_like_executor(value: dict[str, Any]) -> bool:
     if not isinstance(value, dict):
         return False
@@ -197,6 +248,19 @@ def _as_executor_list(value: Any) -> list[dict[str, Any]]:
     return []
 
 
+def _recognized_executor_list(value: Any) -> tuple[list[dict[str, Any]], bool]:
+    if isinstance(value, list):
+        executors = _as_executor_list(value)
+        return executors, len(executors) == len(value)
+    if isinstance(value, dict):
+        for key in ("executors", "data", "results", "items"):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                executors = _as_executor_list(value)
+                return executors, len(executors) == len(nested)
+    return [], False
+
+
 def _executor_matches_id(executor: dict[str, Any], executor_id: str) -> bool:
     actual = _executor_id(executor)
     if actual is None:
@@ -209,13 +273,93 @@ def _executor_matches_id(executor: dict[str, Any], executor_id: str) -> bool:
 def _is_active_executor(executor: dict[str, Any], controller_id: str) -> bool:
     if not isinstance(executor, dict):
         return False
-    owner = executor.get("controller_id")
-    if owner and str(owner) != controller_id:
+    owner = _executor_controller_id(executor)
+    if owner != controller_id:
         return False
     if executor.get("is_active") is False:
         return False
     state = _as_state(executor.get("status"))
-    return state not in INACTIVE_STATES
+    return state in ACTIVE_STATES
+
+
+def _lp_side_value(value: Any) -> float | None:
+    parsed = _to_float(value)
+    if parsed is not None:
+        return parsed
+    return 3.0 if _as_state(value) == "RANGE" else None
+
+
+def _executor_plan_mismatches(
+    executor: dict[str, Any], lifecycle_state: dict[str, Any]
+) -> list[str]:
+    actual = executor.get("config") if isinstance(executor.get("config"), dict) else {}
+    plan = lifecycle_state.get("executor_plan") or {}
+    expected = (
+        plan.get("executor_config")
+        if isinstance(plan.get("executor_config"), dict)
+        else plan
+    )
+    if not isinstance(expected, dict) or not expected:
+        return ["executor_plan"]
+
+    mismatches: list[str] = []
+    identity_values = {
+        "controller_id": _executor_controller_id(executor),
+        "connector_name": executor.get("connector_name")
+        or actual.get("connector_name"),
+        "lp_provider": executor.get("lp_provider") or actual.get("lp_provider"),
+        "pool_address": executor.get("pool_address") or actual.get("pool_address"),
+        "trading_pair": executor.get("trading_pair") or actual.get("trading_pair"),
+    }
+    for key, actual_value in identity_values.items():
+        if str(actual_value or "").strip() != str(expected.get(key) or "").strip():
+            mismatches.append(key)
+    for key in (
+        "lower_price",
+        "upper_price",
+        "lower_limit_price",
+        "upper_limit_price",
+        "base_amount",
+        "quote_amount",
+    ):
+        actual_value = _to_float(actual.get(key))
+        expected_value = _to_float(expected.get(key))
+        if (
+            actual_value is None
+            or expected_value is None
+            or not math.isclose(
+                actual_value, expected_value, rel_tol=1e-9, abs_tol=1e-12
+            )
+        ):
+            mismatches.append(key)
+
+    actual_side = _lp_side_value(actual.get("side"))
+    expected_side = _lp_side_value(expected.get("side"))
+    if (
+        actual_side is None
+        or expected_side is None
+        or not math.isclose(actual_side, expected_side, rel_tol=0.0, abs_tol=0.0)
+    ):
+        mismatches.append("side")
+
+    actual_total_raw = actual.get("total_amount_quote")
+    if actual_total_raw not in (None, ""):
+        actual_total = _to_float(actual_total_raw)
+        expected_total = _to_float(expected.get("total_amount_quote"))
+        if (
+            actual_total is None
+            or expected_total is None
+            or not math.isclose(
+                actual_total, expected_total, rel_tol=1e-9, abs_tol=1e-12
+            )
+        ):
+            mismatches.append("total_amount_quote")
+
+    if not (
+        actual.get("keep_position") is False and expected.get("keep_position") is False
+    ):
+        mismatches.append("keep_position")
+    return mismatches
 
 
 async def _fetch_executor_from_api(
@@ -226,6 +370,7 @@ async def _fetch_executor_from_api(
         "executor_id": config.executor_id,
         "lookup_mode": "executor_id" if config.executor_id else "controller_id",
         "requests": [],
+        "outcome": "failed",
     }
     warnings: list[str] = []
 
@@ -235,7 +380,11 @@ async def _fetch_executor_from_api(
         debug["error"] = f"executor lookup unavailable: {type(exc).__name__}: {exc}"
         return None, [debug["error"]], debug
 
-    client = await get_client(_context_chat_id(context), context=context)
+    try:
+        client = await get_client(_context_chat_id(context), context=context)
+    except Exception as exc:
+        debug["error"] = f"executor client unavailable: {type(exc).__name__}: {exc}"
+        return None, [debug["error"]], debug
     if not client:
         debug["client_available"] = False
         return (
@@ -252,7 +401,7 @@ async def _fetch_executor_from_api(
         return executor, warnings + lookup_warnings, debug
 
     executor, lookup_warnings = await _fetch_active_executor_by_controller(
-        client, config.controller_id, debug
+        client, config.controller_id, set(config.archived_executor_ids), debug
     )
     return executor, warnings + lookup_warnings, debug
 
@@ -269,52 +418,63 @@ async def _fetch_executor_by_id(
         raw_response = await client.executors.get_executor(executor_id)
         request_debug["response"] = _json_safe(raw_response)
         executor = _as_executor_dict(raw_response)
-        if executor:
+        owner = _executor_controller_id(executor) if executor else None
+        if (
+            executor
+            and _executor_matches_id(executor, executor_id)
+            and owner == controller_id
+        ):
             request_debug["selected"] = True
             debug["selected_source"] = "get_executor"
+            debug["outcome"] = "found"
             debug["requests"].append(request_debug)
             return executor, warnings
+        if executor and owner and owner != controller_id:
+            warnings.append(
+                f"executor_id '{executor_id}' belongs to controller_id '{owner}', not '{controller_id}'"
+            )
         request_debug["selected"] = False
-        warnings.append(f"executor_id '{executor_id}' lookup returned no executor")
+        warnings.append(
+            f"executor_id '{executor_id}' direct lookup did not prove controller ownership"
+        )
     except Exception as exc:
         error = f"executor_id '{executor_id}' direct lookup failed: {type(exc).__name__}: {exc}"
         request_debug["error"] = error
         warnings.append(error)
     debug["requests"].append(request_debug)
 
-    for scope, params in (
-        (
-            "controller_executor_id_fallback",
-            {"controller_ids": [controller_id], "limit": 100},
-        ),
-        ("unfiltered_executor_id_fallback", {"limit": 100}),
-    ):
+    for scope in ("controller_executor_id_fallback",):
         request_debug = {
             "method": "search_executors",
             "scope": scope,
-            "params": _json_safe(params),
+            "params": {"controller_ids": [controller_id], "paginated": True},
         }
         try:
-            raw_response = await client.executors.search_executors(**params)
-            request_debug["response"] = _json_safe(raw_response)
-            executors = _as_executor_list(raw_response)
+            executors, pages = await _search_controller_executors(client, controller_id)
+            request_debug["responses"] = pages
             matches = [
                 executor
                 for executor in executors
                 if _executor_matches_id(executor, executor_id)
+                and _executor_controller_id(executor) == controller_id
             ]
             request_debug["candidate_count"] = len(executors)
             request_debug["match_count"] = len(matches)
             if matches:
                 if len(matches) > 1:
-                    warning = f"executor_id prefix '{executor_id}' matched {len(matches)} executors in {scope}; using first match"
+                    warning = f"executor_id prefix '{executor_id}' matched {len(matches)} executors in {scope}"
                     warnings.append(warning)
-                    request_debug["selected_warning"] = warning
+                    request_debug["error"] = warning
+                    debug["outcome"] = "ambiguous"
+                    debug["requests"].append(request_debug)
+                    return None, warnings
                 request_debug["selected"] = True
                 debug["selected_source"] = scope
+                debug["outcome"] = "found"
                 debug["requests"].append(request_debug)
                 return matches[0], warnings
             request_debug["selected"] = False
+            debug["outcome"] = "failed"
             warnings.append(f"executor_id '{executor_id}' was not found in {scope}")
         except Exception as exc:
             error = f"executor_id '{executor_id}' {scope} failed: {type(exc).__name__}: {exc}"
@@ -326,18 +486,43 @@ async def _fetch_executor_by_id(
 
 
 async def _fetch_active_executor_by_controller(
-    client: Any, controller_id: str, debug: dict[str, Any]
+    client: Any,
+    controller_id: str,
+    archived_executor_ids: set[str],
+    debug: dict[str, Any],
 ) -> tuple[dict[str, Any] | None, list[str]]:
     warnings: list[str] = []
-    params = {"controller_ids": [controller_id], "limit": 100}
     request_debug: dict[str, Any] = {
         "method": "search_executors",
-        "params": _json_safe(params),
+        "params": {"controller_ids": [controller_id], "paginated": True},
     }
     try:
-        raw_response = await client.executors.search_executors(**params)
-        request_debug["response"] = _json_safe(raw_response)
-        executors = _as_executor_list(raw_response)
+        executors, pages = await _search_controller_executors(client, controller_id)
+        request_debug["responses"] = pages
+        unknown_states = [
+            _as_state(executor.get("status"))
+            for executor in executors
+            if _as_state(executor.get("status")) not in ACTIVE_STATES | TERMINAL_STATES
+        ]
+        if unknown_states:
+            warning = f"controller executor search returned unknown states: {sorted(set(unknown_states))}"
+            request_debug["error"] = warning
+            debug["outcome"] = "failed"
+            warnings.append(warning)
+            debug["requests"].append(request_debug)
+            return None, warnings
+        unowned = [
+            _executor_id(executor)
+            for executor in executors
+            if _executor_controller_id(executor) != controller_id
+        ]
+        if unowned:
+            warning = f"controller executor search returned records without proven ownership: {unowned}"
+            request_debug["error"] = warning
+            debug["outcome"] = "failed"
+            warnings.append(warning)
+            debug["requests"].append(request_debug)
+            return None, warnings
         active_executors = [
             executor
             for executor in executors
@@ -348,14 +533,51 @@ async def _fetch_active_executor_by_controller(
         request_debug["active_count"] = len(active_executors)
         if active_executors:
             if len(active_executors) > 1:
-                warning = f"controller_id '{controller_id}' has {len(active_executors)} active executors; using first match"
+                warning = f"controller_id '{controller_id}' has {len(active_executors)} active executors"
                 warnings.append(warning)
-                request_debug["selected_warning"] = warning
+                request_debug["error"] = warning
+                debug["outcome"] = "ambiguous"
+                debug["requests"].append(request_debug)
+                return None, warnings
             request_debug["selected"] = True
             debug["selected_source"] = "search_executors"
+            debug["outcome"] = "found"
             debug["requests"].append(request_debug)
             return active_executors[0], warnings
+        terminal_executors = [
+            executor
+            for executor in executors
+            if _as_state(executor.get("status")) in TERMINAL_STATES
+            and _executor_controller_id(executor) in {None, controller_id}
+        ]
+        request_debug["terminal_count"] = len(terminal_executors)
+        unarchived = [
+            executor
+            for executor in terminal_executors
+            if str(_executor_id(executor) or "").strip() not in archived_executor_ids
+        ]
+        request_debug["archived_terminal_count"] = len(terminal_executors) - len(
+            unarchived
+        )
+        request_debug["unarchived_terminal_count"] = len(unarchived)
+        if len(unarchived) > 1:
+            warning = (
+                f"controller_id '{controller_id}' has {len(unarchived)} "
+                "terminal executor(s) without a position archive"
+            )
+            warnings.append(warning)
+            request_debug["error"] = warning
+            debug["outcome"] = "unarchived_terminal"
+            debug["requests"].append(request_debug)
+            return None, warnings
+        if unarchived:
+            request_debug["selected"] = True
+            debug["selected_source"] = "search_executors_unarchived_terminal"
+            debug["outcome"] = "found"
+            debug["requests"].append(request_debug)
+            return unarchived[0], warnings
         request_debug["selected"] = False
+        debug["outcome"] = "empty"
     except Exception as exc:
         error = f"active executor lookup failed for controller_id '{controller_id}': {type(exc).__name__}: {exc}"
         request_debug["error"] = error
@@ -366,6 +588,172 @@ async def _fetch_active_executor_by_controller(
     ]
 
 
+async def _search_controller_executors(
+    client: Any, controller_id: str
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    rows: list[dict[str, Any]] = []
+    pages: list[Any] = []
+    cursor: str | None = None
+    seen_cursors: set[str] = set()
+    for _ in range(200):
+        params: dict[str, Any] = {
+            "controller_ids": [controller_id],
+            "limit": 100,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        response = await client.executors.search_executors(**params)
+        pages.append(_json_safe(response))
+        page, recognized = _recognized_executor_list(response)
+        if not recognized:
+            raise ValueError("unrecognized executor search response")
+        rows.extend(page)
+        next_cursor = None
+        if isinstance(response, dict):
+            next_cursor = response.get("next_cursor") or response.get("cursor")
+            pagination = response.get("pagination")
+            if not next_cursor and isinstance(pagination, dict):
+                next_cursor = pagination.get("next_cursor") or pagination.get("cursor")
+        if not next_cursor:
+            return rows, pages
+        next_cursor = str(next_cursor)
+        if next_cursor in seen_cursors:
+            raise ValueError("executor pagination cursor repeated")
+        seen_cursors.add(next_cursor)
+        cursor = next_cursor
+    raise ValueError("executor pagination exceeded safety limit")
+
+
+def _reconcile_pnl(
+    net_pnl_quote: Any, filled_amount_quote: Any, raw_net_pnl_pct: Any
+) -> dict[str, Any]:
+    net_quote = _to_float(net_pnl_quote)
+    filled_quote = _to_float(filled_amount_quote)
+    raw_numeric = _to_float(raw_net_pnl_pct)
+    derived = (
+        net_quote / filled_quote
+        if net_quote is not None and filled_quote is not None and filled_quote > 0
+        else None
+    )
+    result = {
+        "estimated_net_pnl_quote": net_quote,
+        "filled_amount_quote": filled_quote,
+        "raw_net_pnl_pct": raw_net_pnl_pct,
+        "pnl_ratio_from_quote": derived,
+        "estimated_net_pnl_pct": None,
+        "pnl_pct_interpretation": None,
+        "pnl_reconciliation_status": "unavailable",
+    }
+    if derived is None:
+        return result
+    if raw_numeric is None:
+        result.update(
+            estimated_net_pnl_pct=derived,
+            pnl_pct_interpretation="derived-from-quote",
+            pnl_reconciliation_status="derived-only",
+        )
+        return result
+
+    explicit_percent = isinstance(
+        raw_net_pnl_pct, str
+    ) and raw_net_pnl_pct.strip().endswith("%")
+    candidates = [(raw_numeric, "ratio")]
+    if not explicit_percent:
+        candidates.append((raw_numeric / 100.0, "percentage-points"))
+    else:
+        candidates = [(raw_numeric, "percentage-points-string")]
+    ratio, interpretation = min(candidates, key=lambda item: abs(item[0] - derived))
+    tolerance = max(1e-6, abs(derived) * 0.05)
+    if abs(ratio - derived) <= tolerance:
+        result.update(
+            estimated_net_pnl_pct=derived,
+            pnl_pct_interpretation=interpretation,
+            pnl_reconciliation_status="reconciled",
+        )
+    else:
+        result.update(
+            pnl_pct_interpretation="mismatch",
+            pnl_reconciliation_status="mismatch",
+        )
+    return result
+
+
+def _find_number(value: Any, keys: set[str]) -> float | None:
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if str(key).lower() in keys:
+                parsed = _to_float(item)
+                if parsed is not None:
+                    return parsed
+        for item in value.values():
+            found = _find_number(item, keys)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for item in value:
+            found = _find_number(item, keys)
+            if found is not None:
+                return found
+    return None
+
+
+def _rebalance_cost_quote(lifecycle_state: dict[str, Any]) -> float | None:
+    rebalance = lifecycle_state.get("rebalance") or {}
+    status = _as_state(rebalance.get("status") or "NOT_REQUIRED")
+    if status == "NOT_REQUIRED" or not rebalance:
+        return 0.0
+    if status != "CONFIRMED":
+        return None
+    settlement = rebalance.get("settlement") or {}
+    plan = lifecycle_state.get("rebalance_plan") or {}
+    inventory = rebalance.get("post_swap_inventory") or {}
+    amount_in = _find_number(
+        settlement,
+        {
+            "amount_in",
+            "amountin",
+            "input_amount",
+            "inputamount",
+            "in_amount",
+            "inamount",
+        },
+    )
+    amount_out = _find_number(
+        settlement,
+        {
+            "amount_out",
+            "amountout",
+            "output_amount",
+            "outputamount",
+            "out_amount",
+            "outamount",
+        },
+    )
+    if amount_in is None:
+        before = _to_float(plan.get("available_quote"))
+        after = _to_float(inventory.get("quote"))
+        if before is not None and after is not None:
+            amount_in = max(0.0, before - after)
+    if amount_out is None:
+        before = _to_float(plan.get("available_base"))
+        after = _to_float(inventory.get("base"))
+        if before is not None and after is not None:
+            amount_out = max(0.0, after - before)
+    price = _to_float(plan.get("current_price"))
+    if amount_in is None or amount_out is None or price is None:
+        return None
+    gas = _find_number(
+        settlement,
+        {
+            "gas_fee_quote",
+            "gasfeequote",
+            "transaction_cost_quote",
+            "transactioncostquote",
+        },
+    )
+    return max(0.0, amount_in - amount_out * price) + (gas or 0.0)
+
+
 def _extract_api_executor(executor: dict[str, Any]) -> dict[str, Any]:
     config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
     custom_info = (
@@ -374,16 +762,45 @@ def _extract_api_executor(executor: dict[str, Any]) -> dict[str, Any]:
         else {}
     )
     out_of_range_seconds = _to_float(custom_info.get("out_of_range_seconds"))
+    pnl = _reconcile_pnl(
+        executor.get("net_pnl_quote"),
+        executor.get("filled_amount_quote"),
+        executor.get("net_pnl_pct"),
+    )
+    position_address = custom_info.get("position_address")
+    realized_lower = _to_float(custom_info.get("lower_price"))
+    realized_upper = _to_float(custom_info.get("upper_price"))
+    requested_lower = _to_float(config.get("lower_price"))
+    requested_upper = _to_float(config.get("upper_price"))
     return {
         "executor_id": _executor_id(executor),
         "executor_state": _as_state(executor.get("status")),
         "lp_state": _as_state(custom_info.get("state")),
         "pool_address": config.get("pool_address"),
         "trading_pair": executor.get("trading_pair") or config.get("trading_pair"),
-        "position_address": custom_info.get("position_address"),
+        "position_address": position_address,
         "current_price": _to_float(custom_info.get("current_price")),
-        "lower_price": _to_float(config.get("lower_price")),
-        "upper_price": _to_float(config.get("upper_price")),
+        "lower_price": (
+            realized_lower
+            if realized_lower is not None
+            else requested_lower if not position_address else None
+        ),
+        "upper_price": (
+            realized_upper
+            if realized_upper is not None
+            else requested_upper if not position_address else None
+        ),
+        "requested_lower_price": requested_lower,
+        "requested_upper_price": requested_upper,
+        "range_bound_source": (
+            "custom_info_on_chain"
+            if realized_lower is not None and realized_upper is not None
+            else (
+                "requested_config_before_position"
+                if not position_address
+                else "on_chain_bounds_unavailable"
+            )
+        ),
         "lower_limit_price": _to_float(config.get("lower_limit_price")),
         "upper_limit_price": _to_float(config.get("upper_limit_price")),
         "base_amount_current": _to_float(custom_info.get("base_amount")),
@@ -394,8 +811,7 @@ def _extract_api_executor(executor: dict[str, Any]) -> dict[str, Any]:
         "tx_fees_paid": _to_float(custom_info.get("tx_fee")),
         "position_rent": _to_float(custom_info.get("position_rent")),
         "rent_refunded": _to_float(custom_info.get("position_rent_refunded")),
-        "estimated_net_pnl_quote": _to_float(executor.get("net_pnl_quote")),
-        "estimated_net_pnl_pct": _to_float(executor.get("net_pnl_pct")),
+        **pnl,
         "opened_at": executor.get("created_at") or executor.get("timestamp"),
         "position_age_minutes": None,
         "time_out_of_range_minutes": (
@@ -440,26 +856,45 @@ def _recommend(
     state = fields["executor_state"]
     if state in FAILED_STATES:
         return (
-            "manual-review",
+            "write-audit",
             "executor_failed",
-            ["executor state is FAILED; stop new opens"],
+            ["executor state is FAILED; audit before any new open"],
         )
-    if state in COMPLETE_STATES:
+    if state in TERMINAL_STATES:
         return "write-audit", "executor_complete", warnings
+    if state == "CLOSING":
+        return "continue", "executor_closing", warnings
+    if state == "SHUTTING_DOWN":
+        return "continue", "executor_closing", warnings
+    if state == "OPENING":
+        return "continue", "executor_opening", warnings
+    if state not in ACTIVE_STATES:
+        return (
+            "manual-review",
+            "unknown_executor_state",
+            [f"unknown executor state: {state}"],
+        )
+
+    lp_state = fields.get("lp_state")
+    if lp_state in {"CLOSING", "SWAPPING"}:
+        return "continue", f"lp_{lp_state.lower()}", warnings
+    if lp_state in {"NOT_ACTIVE", "OPENING"}:
+        return "continue", f"lp_{lp_state.lower()}", warnings
+    if lp_state not in {"IN_RANGE", "OUT_OF_RANGE"}:
+        return "manual-review", "unknown_lp_state", [f"unknown LP state: {lp_state}"]
 
     active_count = fields.get("active_executor_count")
     if isinstance(active_count, (int, float)) and active_count > 1:
         warnings.append(
-            f"controller has {int(active_count)} active executors; V1 expects one"
+            f"controller has {int(active_count)} active executors; Orca expects one"
         )
         return "manual-review", "multiple_active_executors", warnings
 
     if not fields.get("position_address"):
         warnings.append("position address missing from executor API response")
-        missing_ticks = max(1, config.missing_position_ticks)
-        if missing_ticks >= config.missing_position_grace_ticks:
-            return "manual-review", "missing_position_grace_exceeded", warnings
-        return "continue", "missing_position_within_grace", warnings
+        if config.missing_position_ticks + 1 < config.missing_position_grace_ticks:
+            return "continue", "missing_position_within_grace", warnings
+        return "manual-review", "missing_position", warnings
 
     price = fields.get("current_price")
     lower = fields.get("lower_price")
@@ -471,12 +906,23 @@ def _recommend(
     if price is not None and upper_limit is not None and price >= upper_limit:
         return "close", "upper_limit_crossed", warnings
 
+    age_minutes = _age_minutes(fields, now)
+    if age_minutes is None:
+        warnings.append("position age could not be established from executor evidence")
+        return "manual-review", "position_age_unknown", warnings
+    if age_minutes >= config.position_max_age_minutes:
+        return "close", "time_limit_reached", warnings
+
     pnl_pct = fields.get("estimated_net_pnl_pct")
-    if config.take_profit_pct_after_costs is not None and pnl_pct is not None:
-        if pnl_pct >= config.take_profit_pct_after_costs:
+    pnl_status = fields.get("pnl_reconciliation_status")
+    if pnl_status not in {"reconciled", "derived-only"}:
+        warnings.append("PnL percentage could not be reconciled against quote PnL")
+        return "manual-review", "pnl_unreconciled", warnings
+    if config.position_take_profit_net_pnl_ratio is not None and pnl_pct is not None:
+        if pnl_pct >= config.position_take_profit_net_pnl_ratio:
             return "close", "take_profit_reached", warnings
-    if config.stop_loss_pct_after_costs is not None and pnl_pct is not None:
-        if pnl_pct <= -abs(config.stop_loss_pct_after_costs):
+    if config.position_stop_loss_net_pnl_ratio is not None and pnl_pct is not None:
+        if pnl_pct <= -abs(config.position_stop_loss_net_pnl_ratio):
             return "close", "stop_loss_reached", warnings
 
     out_of_range = fields.get("lp_state") == "OUT_OF_RANGE"
@@ -493,14 +939,10 @@ def _recommend(
             return "close", "soft_out_of_range_grace_exceeded", warnings
         if out_of_range_minutes is None:
             warnings.append("out-of-range duration missing from executor API response")
-            return "continue", "out_of_range_duration_unknown", warnings
+            return "manual-review", "out_of_range_duration_unknown", warnings
         if out_of_range_minutes >= config.soft_out_of_range_grace_minutes:
             return "close", "soft_out_of_range_grace_exceeded", warnings
         return "continue", "out_of_range_within_grace", warnings
-
-    age_minutes = _age_minutes(fields, now)
-    if age_minutes is not None and age_minutes >= config.max_position_age_minutes:
-        return "close", "time_limit_reached", warnings
 
     return "continue", "normal_supervision", warnings
 
@@ -519,37 +961,99 @@ def _self_check() -> None:
             "lower_limit_price": 80.0,
             "upper_limit_price": 120.0,
             "estimated_net_pnl_pct": 0.0,
+            "pnl_reconciliation_status": "reconciled",
             "opened_at": now,
             "time_out_of_range_minutes": 0.0,
         }
         data.update(overrides)
         return data
 
-    assert _recommend(fields(estimated_net_pnl_pct=0.005), Config(), now)[:2] == (
+    config = Config(controller_id="lpmaxxing.orca_1")
+    assert _recommend(fields(estimated_net_pnl_pct=0.005), config, now)[:2] == (
         "close",
         "take_profit_reached",
     )
-    assert _recommend(fields(estimated_net_pnl_pct=-0.01), Config(), now)[:2] == (
+    assert _recommend(fields(estimated_net_pnl_pct=-0.01), config, now)[:2] == (
         "close",
         "stop_loss_reached",
     )
-    assert _recommend(fields(opened_at=now - timedelta(minutes=481)), Config(), now)[
+    assert _recommend(fields(opened_at=now - timedelta(minutes=481)), config, now)[
         :2
     ] == ("close", "time_limit_reached")
-    assert _recommend(fields(position_address=None), Config(), now)[:2] == (
+    assert _recommend(fields(position_address=None), config, now)[:2] == (
         "continue",
         "missing_position_within_grace",
     )
     assert _recommend(
-        fields(position_address=None), Config(missing_position_ticks=2), now
-    )[:2] == ("manual-review", "missing_position_grace_exceeded")
+        fields(position_address=None),
+        config.model_copy(update={"missing_position_ticks": 1}),
+        now,
+    )[:2] == (
+        "manual-review",
+        "missing_position",
+    )
     assert _recommend(
-        fields(lp_state="OUT_OF_RANGE", time_out_of_range_minutes=11), Config(), now
+        fields(lp_state="OUT_OF_RANGE", time_out_of_range_minutes=11), config, now
     )[:2] == ("close", "soft_out_of_range_grace_exceeded")
-    assert _recommend(fields(active_executor_count=2), Config(), now)[:2] == (
+    assert _recommend(fields(active_executor_count=2), config, now)[:2] == (
         "manual-review",
         "multiple_active_executors",
     )
+    assert _recommend(fields(lp_state="CLOSING"), config, now)[:2] == (
+        "continue",
+        "lp_closing",
+    )
+    assert _recommend(fields(lp_state="SWAPPING"), config, now)[:2] == (
+        "continue",
+        "lp_swapping",
+    )
+    assert _recommend(fields(executor_state="SHUTTING_DOWN"), config, now)[:2] == (
+        "continue",
+        "executor_closing",
+    )
+    pnl = _reconcile_pnl(0.0264518, 9.9395858, 0.2661259)
+    assert pnl["pnl_reconciliation_status"] == "reconciled", pnl
+    assert pnl["pnl_pct_interpretation"] == "percentage-points", pnl
+    assert abs(pnl["estimated_net_pnl_pct"] - 0.002661259) < 0.000001, pnl
+    extracted = _extract_api_executor(
+        {
+            "id": "executor-1",
+            "status": "RUNNING",
+            "config": {"lower_price": 90, "upper_price": 110},
+            "custom_info": {
+                "position_address": "position-1",
+                "lower_price": 90.5,
+                "upper_price": 109.5,
+            },
+        }
+    )
+    assert extracted["lower_price"] == 90.5, extracted
+    assert extracted["upper_price"] == 109.5, extracted
+    assert extracted["range_bound_source"] == "custom_info_on_chain", extracted
+
+    class Executors:
+        async def search_executors(self, **kwargs: Any) -> list[dict[str, Any]]:
+            return [
+                {
+                    "id": "executor-1",
+                    "controller_id": "lpmaxxing.orca_1",
+                    "status": "COMPLETE",
+                }
+            ]
+
+    debug = {"requests": []}
+    executor, _ = asyncio.run(
+        _fetch_active_executor_by_controller(
+            type("Client", (), {"executors": Executors()})(),
+            "lpmaxxing.orca_1",
+            {"executor-1"},
+            debug,
+        )
+    )
+    assert executor is None, debug
+    assert debug["outcome"] == "empty", debug
+    assert _recognized_executor_list([]) == ([], True)
+    assert _recognized_executor_list([{"unexpected": "record"}]) == ([], False)
 
 
 def _format_money(value: Any) -> str:
@@ -630,6 +1134,11 @@ def _position_rows(position: dict[str, Any]) -> list[dict[str, Any]]:
         "position_rent",
         "rent_refunded",
         "estimated_net_pnl_quote",
+        "filled_amount_quote",
+        "raw_net_pnl_pct",
+        "pnl_ratio_from_quote",
+        "pnl_pct_interpretation",
+        "pnl_reconciliation_status",
         "estimated_net_pnl_pct",
         "position_age_minutes",
         "time_out_of_range_minutes",
@@ -639,7 +1148,9 @@ def _position_rows(position: dict[str, Any]) -> list[dict[str, Any]]:
         value = position.get(key)
         if value is None:
             continue
-        if key.endswith("_pct"):
+        if key == "raw_net_pnl_pct":
+            display = value
+        elif key.endswith("_pct"):
             display = _format_pct(value)
         elif "quote" in key and isinstance(value, (int, float)):
             display = _format_money(value)
@@ -684,8 +1195,10 @@ async def _save_position_report(payload: dict[str, Any]) -> None:
                 payload.get("executor_state") or position.get("executor_state") or "n/a"
             ),
         )
+        active = payload.get("has_active_position")
         builder.kpi(
-            "Active Position", "yes" if payload.get("has_active_position") else "no"
+            "Active Position",
+            "unknown" if active is None else ("yes" if active else "no"),
         )
         builder.kpi("PnL", _format_pct(position.get("estimated_net_pnl_pct")))
         builder.kpi("Age", _format_number(position.get("position_age_minutes"), 2))
@@ -703,10 +1216,14 @@ async def _save_position_report(payload: dict[str, Any]) -> None:
         if distance_rows:
             builder.markdown("## Distance Metrics")
             builder.table(distance_rows)
-        if warnings:
-            builder.markdown(
-                "## Warnings\n" + "\n".join(f"- {warning}" for warning in warnings)
+        builder.markdown(
+            "## Warnings\n"
+            + (
+                "\n".join(f"- {warning}" for warning in warnings)
+                if warnings
+                else "- None."
             )
+        )
         input_config = payload.get("input_config")
         if input_config:
             builder.markdown(
@@ -716,12 +1233,6 @@ async def _save_position_report(payload: dict[str, Any]) -> None:
                 f"{json.dumps(input_config, indent=2, sort_keys=True, default=str)}\n"
                 "```"
             )
-        builder.markdown(
-            "## Debug JSON Payload\n"
-            "```json\n"
-            f"{json.dumps(payload, indent=2, sort_keys=True, default=str)}\n"
-            "```"
-        )
         executor_api_debug = payload.get("executor_api_debug")
         if executor_api_debug:
             builder.markdown(
@@ -731,6 +1242,12 @@ async def _save_position_report(payload: dict[str, Any]) -> None:
                 f"{json.dumps(executor_api_debug, indent=2, sort_keys=True, default=str)}\n"
                 "```"
             )
+        builder.markdown(
+            "## Debug JSON Payload\n"
+            "```json\n"
+            f"{json.dumps(payload, indent=2, sort_keys=True, default=str)}\n"
+            "```"
+        )
         await builder.save()
     except Exception:
         return
@@ -738,28 +1255,280 @@ async def _save_position_report(payload: dict[str, Any]) -> None:
 
 async def run(config: Config, context: Any) -> str:
     input_config = _json_safe(config.model_dump())
+    executor_api_debug: dict[str, Any] = {}
+    lifecycle_state: dict[str, Any] = {}
+    session_state: dict[str, Any] = {}
     try:
-        now = _to_datetime(config.now_timestamp) or _utc_now()
+        now = (
+            _utc_now()
+            if config.execution_mode == "loop"
+            else (_to_datetime(config.now_timestamp) or _utc_now())
+        )
+        if not config.controller_id:
+            raise ValueError(
+                "controller_id is required and must come from the current Condor tick"
+            )
+        if session_execution_mode(config.controller_id) != config.execution_mode:
+            raise ValueError("execution_mode does not match the current SESSION_MODE")
+        if config.execution_mode == "loop":
+            session_state = load_session_state(config.controller_id)
+            lifecycle_state = session_state.get("active_position") or {}
+            exit_policy = session_exit_policy(config.controller_id)
+            config = config.model_copy(
+                update={
+                    "executor_id": lifecycle_state.get("executor_id"),
+                    "archived_executor_ids": list(
+                        (session_state.get("completed") or {}).get("executor_ids") or []
+                    ),
+                    **exit_policy,
+                }
+            )
+            input_config = _json_safe(config.model_dump())
+        session_status = str(session_state.get("session_status") or "running")
+        if session_status == "cycle_complete":
+            with lifecycle_lock(config.controller_id):
+                session_state = resume_session_cycle(config.controller_id, now)
+            session_status = str(session_state.get("session_status") or "")
+            if session_status == "cycle_complete":
+                payload = {
+                    "report_status": "success",
+                    "timestamp": now.isoformat(),
+                    "has_active_position": False,
+                    "recommended_supervision_action": "wait-next-cycle",
+                    "reason": "cycle_resume_not_due",
+                    "warnings": [],
+                    "input_config": input_config,
+                    "executor_api_debug": {},
+                    "position": None,
+                    "distances": {},
+                    "session_state": _json_safe(session_state),
+                    "agent_prompt_summary": "The completed position is archived; wait until the next scheduled cycle before scanning.",
+                }
+                await _save_position_report(payload)
+                return _format_position_text(payload)
+        if session_status == "stop_pending":
+            if lifecycle_state:
+                raise ValueError(
+                    "stop-pending Orca session still has an active-position record"
+                )
+            payload = {
+                "report_status": "success",
+                "timestamp": now.isoformat(),
+                "has_active_position": False,
+                "recommended_supervision_action": "stop-agent",
+                "reason": "session_stop_pending",
+                "warnings": [],
+                "input_config": input_config,
+                "executor_api_debug": {},
+                "position": None,
+                "distances": {},
+                "session_state": _json_safe(session_state),
+                "agent_prompt_summary": "The Orca session is fully audited and stop-pending. Call manage_trading_agent(stop_agent) for this controller and do nothing else.",
+            }
+            await _save_position_report(payload)
+            return _format_position_text(payload)
+        if session_status == "manual_review":
+            payload = {
+                "report_status": "failed-closed",
+                "timestamp": now.isoformat(),
+                "has_active_position": None,
+                "recommended_supervision_action": "manual-review",
+                "reason": "session_manual_review",
+                "warnings": [str(session_state.get("manual_review") or "")],
+                "input_config": input_config,
+                "executor_api_debug": {},
+                "position": None,
+                "distances": {},
+                "session_state": _json_safe(session_state),
+                "agent_prompt_summary": "The Orca session is blocked for manual review; do not scan or re-enter.",
+            }
+            await _save_position_report(payload)
+            return _format_position_text(payload)
         executor, lookup_warnings, executor_api_debug = await _fetch_executor_from_api(
             config, context
         )
 
         if not executor:
+            outcome = executor_api_debug.get("outcome")
+            if outcome != "empty":
+                payload = {
+                    "report_status": "failed-closed",
+                    "timestamp": now.isoformat(),
+                    "has_active_position": None,
+                    "recommended_supervision_action": "manual-review",
+                    "reason": f"executor_lookup_{outcome or 'failed'}",
+                    "warnings": lookup_warnings,
+                    "input_config": input_config,
+                    "executor_api_debug": executor_api_debug,
+                    "position": None,
+                    "distances": {},
+                    "agent_prompt_summary": "Manual review: executor state could not be established; do not scan or open.",
+                }
+                await _save_position_report(payload)
+                return _format_position_text(payload)
+            phase = str(lifecycle_state.get("phase") or "")
+            if phase in {
+                "rebalance_required",
+                "rebalance_submitted",
+                "rebalance_confirmed_waiting_balance",
+            }:
+                payload = {
+                    "report_status": "success",
+                    "timestamp": now.isoformat(),
+                    "has_active_position": False,
+                    "recommended_supervision_action": "resume-rebalance",
+                    "reason": phase,
+                    "warnings": lookup_warnings,
+                    "input_config": input_config,
+                    "executor_api_debug": executor_api_debug,
+                    "position": None,
+                    "distances": {},
+                    "lifecycle_resume": _json_safe(lifecycle_state),
+                    "agent_prompt_summary": "Resume the persisted rebalance; do not rescan or submit a second swap.",
+                }
+                await _save_position_report(payload)
+                return _format_position_text(payload) + (
+                    "\n\nLifecycle resume:\n```json\n"
+                    + json.dumps(
+                        _json_safe(lifecycle_state),
+                        indent=2,
+                        sort_keys=True,
+                        default=str,
+                    )
+                    + "\n```"
+                )
+            if phase == "rebalance_confirmed":
+                payload = {
+                    "report_status": "success",
+                    "timestamp": now.isoformat(),
+                    "has_active_position": False,
+                    "recommended_supervision_action": "resume-preflight",
+                    "reason": phase,
+                    "warnings": lookup_warnings,
+                    "input_config": input_config,
+                    "executor_api_debug": executor_api_debug,
+                    "position": None,
+                    "distances": {},
+                    "lifecycle_resume": _json_safe(lifecycle_state),
+                    "agent_prompt_summary": "The rebalance is confirmed; refresh Gateway evidence and rerun preflight for the persisted candidate without rescanning.",
+                }
+                await _save_position_report(payload)
+                return _format_position_text(payload) + (
+                    "\n\nLifecycle resume:\n```json\n"
+                    + json.dumps(
+                        _json_safe(lifecycle_state),
+                        indent=2,
+                        sort_keys=True,
+                        default=str,
+                    )
+                    + "\n```"
+                )
+            unfinished = lifecycle_state.get("phase") in {
+                "rebalance_submission_intent",
+                "rebalance_submission_uncertain",
+                "rebalance_failed",
+                "rebalance_blocked",
+                "preflight_ready",
+                "opened",
+                "supervising",
+                "closing",
+                "terminal",
+            }
+            session_trigger = None
+            if not unfinished:
+                session_trigger = session_stop_trigger(session_state, now)
+                if session_trigger:
+                    with lifecycle_lock(config.controller_id):
+                        session_state = mark_session_stop(
+                            config.controller_id,
+                            session_trigger,
+                            active_position=False,
+                        )
             payload = {
                 "report_status": "success",
                 "timestamp": now.isoformat(),
                 "has_active_position": False,
-                "recommended_supervision_action": "no-active-position",
-                "reason": "no executor found in API",
+                "recommended_supervision_action": (
+                    "manual-review"
+                    if unfinished
+                    else (
+                        "session-stop-recorded"
+                        if session_trigger
+                        else "no-active-position"
+                    )
+                ),
+                "reason": (
+                    "unfinished_lifecycle_without_executor"
+                    if unfinished
+                    else (
+                        session_trigger["reason"]
+                        if session_trigger
+                        else "no executor found in API"
+                    )
+                ),
                 "warnings": lookup_warnings,
                 "input_config": input_config,
                 "executor_api_debug": executor_api_debug,
                 "position": None,
                 "distances": {},
-                "agent_prompt_summary": "No active Orca LP executor was found in the executor API; agent may run pool scan if risk limits allow.",
+                "session_state": _json_safe(session_state),
+                "agent_prompt_summary": (
+                    "Manual review: lifecycle state exists but no executor was found; do not scan or re-enter."
+                    if unfinished
+                    else (
+                        "A session stop was durably recorded while flat. Do not scan; the next tick must stop the agent."
+                        if session_trigger
+                        else "No active Orca LP executor was found in the executor API; agent may run pool scan if risk limits allow."
+                    )
+                ),
             }
             await _save_position_report(payload)
             return _format_position_text(payload)
+
+        if not lifecycle_state:
+            payload = {
+                "report_status": "failed-closed",
+                "timestamp": now.isoformat(),
+                "has_active_position": True,
+                "recommended_supervision_action": "manual-review",
+                "reason": "active_executor_without_lifecycle",
+                "warnings": lookup_warnings
+                + ["an active executor exists without an active Orca position record"],
+                "input_config": input_config,
+                "executor_api_debug": executor_api_debug,
+                "position": None,
+                "distances": {},
+                "agent_prompt_summary": "Manual review: an untracked active executor blocks scanning and re-entry.",
+            }
+            await _save_position_report(payload)
+            return _format_position_text(payload)
+        if not lifecycle_state.get("executor_id"):
+            plan_mismatches = (
+                ["lifecycle_phase"]
+                if lifecycle_state.get("phase") != "preflight_ready"
+                else _executor_plan_mismatches(executor, lifecycle_state)
+            )
+            if plan_mismatches:
+                payload = {
+                    "report_status": "failed-closed",
+                    "timestamp": now.isoformat(),
+                    "has_active_position": True,
+                    "recommended_supervision_action": "manual-review",
+                    "reason": "unmatched_executor_after_create",
+                    "warnings": lookup_warnings
+                    + [
+                        "active executor does not match the persisted preflight plan: "
+                        + ", ".join(plan_mismatches)
+                    ],
+                    "executor_plan_mismatches": plan_mismatches,
+                    "input_config": input_config,
+                    "executor_api_debug": executor_api_debug,
+                    "position": None,
+                    "distances": {},
+                    "agent_prompt_summary": "Manual review: executor creation could not be reconciled with the persisted plan.",
+                }
+                await _save_position_report(payload)
+                return _format_position_text(payload)
 
         executor_api_debug["executor_source_used"] = "api"
         fields = _extract_api_executor(executor)
@@ -770,12 +1539,142 @@ async def run(config: Config, context: Any) -> str:
         if age_minutes is not None:
             fields["position_age_minutes"] = round(age_minutes, 4)
         distances = _distances(fields)
+        persisted_missing_ticks = int(
+            lifecycle_state.get("missing_position_ticks") or 0
+        )
+        missing_position_observed = (
+            not fields.get("position_address")
+            and fields.get("executor_state") == "RUNNING"
+            and fields.get("lp_state") in {"IN_RANGE", "OUT_OF_RANGE"}
+        )
+        config = config.model_copy(
+            update={
+                "missing_position_ticks": (
+                    max(config.missing_position_ticks, persisted_missing_ticks)
+                    if missing_position_observed
+                    else 0
+                )
+            }
+        )
         action, reason, warnings = _recommend(fields, config, now)
         warnings = lookup_warnings + warnings
-        has_active = (
-            action not in {"no-active-position", "write-audit"}
-            and fields["executor_state"] not in COMPLETE_STATES | FAILED_STATES
+        rebalance_cost = _rebalance_cost_quote(lifecycle_state)
+        active_net_pnl = fields.get("estimated_net_pnl_quote")
+        if (
+            active_net_pnl is None
+            or rebalance_cost is None
+            or fields.get("pnl_reconciliation_status")
+            not in {"reconciled", "derived-only"}
+        ):
+            active_session_pnl = None
+        else:
+            active_session_pnl = active_net_pnl - rebalance_cost
+        session_trigger = session_state.get("global_stop") or session_stop_trigger(
+            session_state, now, active_session_pnl
         )
+        if session_trigger and action != "write-audit":
+            if config.execution_mode == "loop":
+                with lifecycle_lock(config.controller_id):
+                    session_state = mark_session_stop(
+                        config.controller_id,
+                        session_trigger,
+                        active_position=True,
+                    )
+            action = "close"
+            reason = str(session_trigger.get("reason") or "session_stop_reached")
+            warnings.append(
+                "session-level stop reached; close and audit before stopping the agent"
+            )
+        if action == "close" and config.execution_mode != "loop":
+            action = "manual-review"
+            reason = "dry_run_close_blocked"
+            warnings.append(
+                "dry-run supervision may recommend review but cannot stop an executor"
+            )
+        if lifecycle_state.get("phase") == "closing" and action in {
+            "continue",
+            "close",
+        }:
+            if fields["executor_state"] == "RUNNING":
+                action = "manual-review"
+                reason = "close_not_confirmed"
+                warnings.append(
+                    "close was requested but the executor is still RUNNING; verify the stop result before retrying"
+                )
+            else:
+                action = "continue"
+                reason = "close_in_progress"
+                warnings.append(
+                    "persisted lifecycle state is closing; wait for terminal executor evidence"
+                )
+        state_controller = str(lifecycle_state.get("controller_id") or "")
+        if state_controller and state_controller != config.controller_id:
+            action = "manual-review"
+            reason = "lifecycle_state_controller_mismatch"
+            warnings.append(
+                f"persisted lifecycle controller '{state_controller}' does not match '{config.controller_id}'"
+            )
+        has_active = fields["executor_state"] in ACTIVE_STATES
+        lifecycle_state_update = {
+            **lifecycle_state,
+            "controller_id": config.controller_id,
+            "executor_id": fields.get("executor_id"),
+            "missing_position_ticks": (
+                config.missing_position_ticks + 1 if missing_position_observed else 0
+            ),
+        }
+        if action == "close":
+            lifecycle_state_update["phase"] = "closing"
+            lifecycle_state_update["close_reason"] = reason
+        elif action == "write-audit":
+            lifecycle_state_update["phase"] = "terminal"
+            lifecycle_state_update["terminal_executor"] = _json_safe(executor)
+        elif action == "continue":
+            lifecycle_state_update["phase"] = (
+                "closing"
+                if reason
+                in {
+                    "close_in_progress",
+                    "executor_closing",
+                    "lp_closing",
+                    "lp_swapping",
+                }
+                else "supervising"
+            )
+        if config.execution_mode == "loop" and action != "manual-review":
+            try:
+                with lifecycle_lock(config.controller_id):
+                    current = load_lifecycle_state(config.controller_id)
+                    current_executor_id = current.get("executor_id")
+                    next_executor_id = lifecycle_state_update.get("executor_id")
+                    if current_executor_id and current_executor_id != next_executor_id:
+                        raise ValueError("active executor changed during supervision")
+                    if action == "close" and current.get("phase") == "closing":
+                        action = "continue"
+                        reason = "close_in_progress"
+                        warnings.append(
+                            "another report already claimed the close transition; do not issue a duplicate stop"
+                        )
+                        lifecycle_state_update = current
+                    else:
+                        if action == "close" and current.get("phase") not in {
+                            "preflight_ready",
+                            "opened",
+                            "supervising",
+                        }:
+                            raise ValueError(
+                                "active position is not eligible for a close transition"
+                            )
+                        save_lifecycle_state(
+                            config.controller_id,
+                            {**current, **lifecycle_state_update},
+                        )
+            except Exception as exc:
+                action = "manual-review"
+                reason = "lifecycle_state_persistence_failed"
+                warnings.append(
+                    f"lifecycle state persistence failed: {type(exc).__name__}: {exc}"
+                )
         summary = f"LP executor {fields.get('executor_id') or 'unknown'} state {fields['executor_state']} recommends {action} ({reason})."
         payload = {
             "report_status": "success",
@@ -792,17 +1691,50 @@ async def run(config: Config, context: Any) -> str:
             "distances": distances,
             "recommended_supervision_action": action,
             "reason": reason,
+            "lifecycle_state_update": lifecycle_state_update,
+            "session_state": _json_safe(session_state),
+            "session_stop_trigger": _json_safe(session_trigger),
+            "active_session_net_pnl_quote": active_session_pnl,
+            "rebalance_cost_quote": rebalance_cost,
             "warnings": warnings,
             "agent_prompt_summary": summary,
         }
         await _save_position_report(payload)
-        return _format_position_text(payload)
+        text = _format_position_text(payload)
+        text += (
+            "\n\nLifecycle state update:\n```json\n"
+            + json.dumps(lifecycle_state_update, indent=2, sort_keys=True, default=str)
+            + "\n```"
+        )
+        if action == "write-audit":
+            audit_input = {
+                "controller_id": config.controller_id,
+                "execution_mode": config.execution_mode,
+                "executor_plan": lifecycle_state.get("executor_plan") or {},
+                "preset": lifecycle_state.get("preset") or "",
+                "final_executor": _json_safe(executor),
+                "close_reason": lifecycle_state.get("close_reason")
+                or executor.get("close_type")
+                or (
+                    executor.get("custom_info", {}).get("close_type")
+                    if isinstance(executor.get("custom_info"), dict)
+                    else None
+                )
+                or "",
+            }
+            text += (
+                "\n\nClose audit input:\n```json\n"
+                + json.dumps(audit_input, indent=2, sort_keys=True, default=str)
+                + "\n```"
+            )
+        return text
     except Exception as exc:
         now = _utc_now().isoformat()
         payload = {
             "report_status": "failed-closed",
             "timestamp": now,
-            "has_active_position": False,
+            "has_active_position": None,
+            "executor_api_debug": executor_api_debug,
             "recommended_supervision_action": "manual-review",
             "reason": "routine_exception",
             "warnings": [f"unexpected report failure: {type(exc).__name__}: {exc}"],
@@ -816,7 +1748,6 @@ async def run(config: Config, context: Any) -> str:
 
 
 if __name__ == "__main__":
-    import asyncio
     import sys
 
     if "--self-check" in sys.argv:

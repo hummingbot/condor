@@ -1,88 +1,65 @@
 ---
 name: orca
-description: Cautious Orca Whirlpool CLMM LP strategy with public-data scanning, hard gates, one LP executor, and audit-first supervision.
+description: Yield-focused Orca Whirlpool CLMM LP strategy with sustainable-fee gates, evidence-based ranges, one LP executor, serial position lifecycle, and audit-first supervision.
 agent_key: null
 skills: []
 default_config:
   execution_mode: dry_run
-  risk_profile: default_cautious
+  risk_profile: yield_focused
   frequency_sec: 300
   total_amount_quote: 10
-  agent_id: lpmaxxing_orca
-  controller_id: lpmaxxing_orca
   max_open_executors: 1
   connector_name: solana-mainnet-beta
   lp_provider: orca/clmm
   side: 3
   keep_position: false
   allowed_live_presets:
-  - conservative
+  - concentrated
   - balanced
-  - wide
+  - defensive
+  - extreme
   orca_api:
     base_url: https://api.orca.so/v2/solana
     pool_endpoint: /pools
     request_timeout_seconds: 15
-    page_size: 25
+    page_size: 100
     stats_windows:
+    - 1h
+    - 4h
     - 24h
     - 7d
-    - 30d
-    categories: []
-  gates:
-    min_tvl_usd: 500000
-    min_volume_24h_usd: 100000
-    min_volume_7d_usd: 500000
-    max_abs_price_delta_24h: 0.20
-    allowed_quote_symbols:
-    - USDC
-    - SOL
-    - mSOL
-    - JitoSOL
-    preferred_quote_symbols:
-    - USDC
-    - SOL
-    reject_has_warning: true
-    require_token_metadata: true
-    require_gateway_pool_info: true
   risk_limits:
-    max_total_exposure_quote: 10
     max_position_size_quote: 10
-    max_drawdown_pct: 2
     max_open_executors: 1
+    max_drawdown_pct: -1
+    shutdown_drawdown_pct: 3
   lp_risk:
-    max_capital_allocation_quote: 10
-    max_capital_pct_of_account: 0.25
-    max_pool_tvl_share: 0.001
-    max_pool_24h_volume_share: 0.001
-    take_profit_pct_after_costs: 0.005
-    stop_loss_pct_after_costs: 0.01
-    max_tx_fee_quote: 0.25
     min_sol_fee_buffer: 0.05
-    max_consecutive_api_failures: 2
-    max_consecutive_gateway_failures: 1
+    max_price_deviation_ratio: 0.01
   v2:
     enable_multi_pool: false
     max_active_pools: 1
 default_trading_context: |
   # SESSION INPUT GUIDE
-  SESSION_MODE options: dry_run, run_once, loop.
-  SCAN_PROFILE options: safe_conservative, default_cautious, balanced_fee_capture, risk_on_volatile, category_scout, meme_scout, meme_tiny_live.
-  OPTIONAL_CATEGORIES options: blank, memecoin, utility, governance, liquid_staking_token, security, stablecoin.
-  MAX_POSITION_AGE_MINUTES is the time limit; 1440 = 1 day.
-  TAKE_PROFIT_PCT_AFTER_COSTS and STOP_LOSS_PCT_AFTER_COSTS are percentages, e.g. 5 = 5%.
-  ALLOW_PRE_LP_REBALANCE allows a Gateway swap to fund centered LP ranges.
-  NOTES examples: only USDC quote pools; avoid SOL quote; avoid wide preset; inspect pool <address>.
-  Use exact option names. Do not put numeric limits in NOTES.
+  SESSION_MODE options: dry_run or loop.
+  The structured session risk_profile is the sole live profile authority. Default: yield_focused.
+  Explicit live alternatives: yield_high_risk, yield_extreme_risk, yield_no_limit.
+  category_scout and meme_scout are analysis-only and invalid in loop mode.
+  POSITION_MAX_AGE_MINUTES is the per-position time limit; 480 = 8 hours.
+  POSITION_TAKE_PROFIT_NET_PNL_RATIO and POSITION_STOP_LOSS_NET_PNL_RATIO are per-position net-PnL ratios, e.g. 0.005 = 0.5%.
+  SESSION_MAX_AGE_MINUTES is the total controller-session time limit; 1440 = 1 day.
+  SESSION_TAKE_PROFIT_NET_PNL_RATIO and SESSION_STOP_LOSS_NET_PNL_RATIO are session net-PnL ratios. They accumulate audited positions plus active marked PnL using the fixed `total_amount_quote` denominator.
+  Missing base inventory is quoted in dry-run and automatically prepared in an explicit live loop.
+  Live pools require canonical Solana USDC as token B. Notes cannot change profiles, categories, gates, presets, ranges, or quote identity.
 
   # SESSION INPUT
   SESSION_MODE: dry_run
-  SCAN_PROFILE: safe_conservative
-  OPTIONAL_CATEGORIES:
-  MAX_POSITION_AGE_MINUTES: 480
-  TAKE_PROFIT_PCT_AFTER_COSTS: 0.5
-  STOP_LOSS_PCT_AFTER_COSTS: 1
-  ALLOW_PRE_LP_REBALANCE: true
+  POSITION_MAX_AGE_MINUTES: 480
+  POSITION_TAKE_PROFIT_NET_PNL_RATIO: 0.005
+  POSITION_STOP_LOSS_NET_PNL_RATIO: 0.01
+  SESSION_MAX_AGE_MINUTES: 1440
+  SESSION_TAKE_PROFIT_NET_PNL_RATIO: 0.02
+  SESSION_STOP_LOSS_NET_PNL_RATIO: 0.02
   NOTES:
 created_by: 0
 created_at: '2026-06-15T00:00:00Z'
@@ -90,13 +67,13 @@ created_at: '2026-06-15T00:00:00Z'
 
 # Orca LP Agent Strategy
 
-Orca LP Agent is a Condor trading agent for the Orca hackathon track. V1 demonstrates transparent, cautious liquidity provision on a single Orca Whirlpool CLMM pool. It is not a hidden-alpha system; it is a public-data agent that shows how Condor can select, open, supervise, close, and audit an Orca LP position.
+Orca LP Agent is a Condor trading agent for the Orca hackathon track. It provides transparent, yield-focused liquidity provision on one Orca Whirlpool CLMM position at a time. It is not a hidden-alpha system; it is a public-data agent that repeatedly selects, opens, supervises, closes, and audits serial Orca LP positions under one controller.
 
 ## What It Does
 
-The agent scans public Orca pool data using an explicit session scan profile and optional Orca category filters, rejects unsuitable pools with hard gates, scores the remaining pools with a simple MCDA model, chooses one named preset, and then uses the Hummingbot LP executor path to manage one Orca CLMM position.
+The agent scans a profile-defined Orca discovery universe, applies sustainable-fee and market hard gates before profile-relative MCDA ranking, and chooses the narrowest evidence-supported range preset. The scanner emits a provisional range plan only; live preflight constructs executable prices around a fresh Gateway price before the Hummingbot LP executor manages one Orca CLMM position.
 
-Default execution mode is `dry_run`. Live execution requires the session context to explicitly set `SESSION_MODE: run_once` or `SESSION_MODE: loop` and a valid `SCAN_PROFILE`.
+Default execution mode is `dry_run`. Live execution requires `SESSION_MODE: loop` and a structured live `risk_profile`. `yield_focused` is the only default. `yield_high_risk`, `yield_extreme_risk`, and `yield_no_limit` require explicit structured selection and must never be inferred from notes, categories, or user tone. `category_scout` and `meme_scout` are analysis-only and must be rejected in loop mode.
 
 ## Public Data
 
@@ -104,40 +81,48 @@ The selection path uses Orca public pool data only:
 
 - pool address;
 - token symbols, mints, and decimals;
-- current price;
+- current token-B-per-token-A price;
 - TVL;
-- 24h, 7d, and rolling 30d volume;
-- 24h, 7d, and rolling 30d fees;
-- yield-over-TVL where available;
-- 24h price delta;
-- warning flags, fee tier, and tick spacing when exposed.
+- rolling 1h, 4h, 24h, and 7d volume and fees;
+- 24h net price change from Orca `priceDelta`;
+- base fee rate, adaptive-fee state, fee-tier index, token metadata, warning state, Orca category evidence, and tick spacing.
 
-The live path must additionally verify the selected pool through Gateway and portfolio/balance checks before opening.
+This evidence does not provide OHLCV, realized volatility, historical excursion, liquidity by tick, exact position fee share, guaranteed yield, or independent token-security verification. Missing required live values remain missing and block; do not substitute zero, yield-over-TVL, a fallback estimate, or a percent-unit guess. A numeric `priceDelta` of `0.02` means 2%; reject percent-suffixed or otherwise ambiguous values.
 
-Scan profiles can narrow discovery by Orca category and adjust TVL, volume, volatility, and scoring gates. The chosen scan profile is the TVL hard floor; do not apply a second live TVL floor from default config or model judgment after a scan succeeds. `safe_conservative` avoids memecoin focus, `balanced_fee_capture` targets non-meme fee pools, `risk_on_volatile` allows memecoin exposure, `category_scout` is a looser consult/dry-run discovery profile for utility, governance, liquid-staking-token, and security categories, and `meme_scout` / `meme_tiny_live` default to memecoin category scans. Manual `include_pool_addresses` should be used only for debug or forced inspection of known pools.
+Every live request uses `stats=1h,4h,24h,7d` and `size=100`. For every profile category, fetch the first 100 results for each `yieldovertvl24h`, `yieldovertvl7d`, `volume24h`, and `volume7d` discovery lens; deduplicate by address, retaining the newest parseable record and unioning category/lens evidence. Retry rate limits, server errors, timeouts, and URL errors once; fail the scan if any required request still fails. API-side TVL is only a discovery hint, and reports must describe this fetched universe rather than claim to rank every Orca pool. Manual pool inclusion is dry-run-only; explicit exclusion is allowed in both modes.
+
+Orca categories are qualified pool classification from Orca's API. They are not independent token-security verification.
 
 ## Hard Gates
 
-Hard gates run before scoring. A weighted score can never rescue a pool that fails a gate.
+Hard gates run before scoring. Every live pool must have complete finite evidence, no Orca warning, valid token metadata and tick spacing, and canonical USDC as token B:
 
-V1 always rejects malformed records, missing pool addresses, missing token metadata, Orca API warning pools, profile-low TVL, low 24h or 7d volume, disallowed quote assets, missing required price data, extreme 24h price movement, explicit exclude-list pools, and any pool that cannot pass Gateway preflight before live execution. Routine notes like missing Gateway preflight or high fee/TVL productivity are cautions unless a selected-pool gate or live preflight fails.
+```text
+token_b.mint == EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+token_b.symbol.upper() == USDC
+token_b.decimals == 6
+token_a.mint != token_b.mint
+price_orientation == token_b_per_token_a
+```
 
-Allowed quote symbols are configurable and are not limited to SOL-USDC. The default major quote set is `USDC`, `SOL`, `mSOL`, and `JitoSOL`, with `USDC` and `SOL` preferred for simpler accounting.
+USDC-as-token-A pools are out of scope and must not be inverted. Profile policy is fixed:
+
+| Profile | Categories | Min TVL | Min 24h / 7d volume | Max abs 24h net change | Min 24h and dailyized 7d fee productivity |
+| --- | --- | ---: | ---: | ---: | ---: |
+| `yield_focused` | stablecoin, liquid_staking_token, utility, governance | $300k | $200k / $1m | 3% | 2 bp/day |
+| `yield_high_risk` | stablecoin, liquid_staking_token, utility, governance, memecoin | $100k | $150k / $500k | 5% | 2 bp/day |
+| `yield_extreme_risk` | stablecoin, liquid_staking_token, utility, governance, memecoin | $100k | $150k / $500k | 50% | 2 bp/day |
+| `yield_no_limit` | stablecoin, liquid_staking_token, utility, governance, memecoin | $100k | $150k / $500k | none | 2 bp/day |
+
+The live profiles form a monotonic eligibility ladder: every pool eligible for a lower-risk profile remains eligible for each higher-risk profile before ranking. `yield_high_risk` adds memecoin discovery and relaxes liquidity, volume, and volatility gates. Extreme and no-limit preserve that broad universe while progressively relaxing volatility and range constraints. All retain the common 2 bp/day sustainable-fee floor.
+
+Calculate `fee_tvl_24h = fees_24h / current_tvl`, `fee_tvl_7d_daily = fees_7d / 7 / current_tvl`, and `sustained_fee_productivity = min(fee_tvl_24h, fee_tvl_7d_daily)`. Both windows must independently pass the profile minimum. Short-window productivity and momentum are diagnostics only. A weighted score can never rescue a failed gate, and there is no score cutoff after all gates pass.
 
 ## MCDA Scoring
 
-Surviving pools are scored from 0 to 5 across six criteria:
+Score gate-passing pools from 0 to 5 using 40% sustained fee productivity, 25% recent activity, 15% 24h net-price-change stability, 10% liquidity depth, and 10% execution simplicity. For fee productivity, volume, and TVL, score profile-relative multiples by linearly interpolating `1x=1`, `2x=2`, `5x=3`, `10x=4`, and `20x=5`, clamped to 0 through 5.
 
-- liquidity depth;
-- recent activity;
-- fee productivity;
-- range stability;
-- execution simplicity;
-- Orca sponsor fit.
-
-The default weights sum to 1.0: 25% liquidity depth, 20% recent activity, 20% fee productivity, 15% range stability, 10% execution simplicity, and 10% sponsor fit.
-
-The scoring model is intentionally simple and reviewable. It is designed to produce an auditable choice, not to claim proprietary prediction power.
+Recent activity is `0.6 * 24h volume score + 0.4 * 7d volume score`. Stability is `5 * (1 - min(abs(net change), reference) / reference)`, with references 3%, 5%, 50%, and 50% for the four live profiles in order. Fixed-fee execution simplicity is 5; adaptive-fee is 4. Rank by weighted score descending, sustained fee productivity descending, recent activity descending, absolute 24h net price change ascending, TVL descending, then pool address ascending. If a ranked pool has no feasible range, record why and continue to the next eligible pool.
 
 ## Consult-Mode Pool Discovery
 
@@ -147,31 +132,20 @@ Use routine config that matches the user's intent:
 
 - `execution_mode: dry_run`;
 - `risk_profile: meme_scout` for meme-pool screening;
-- `risk_profile: safe_conservative` or `default_cautious` for conservative broad screening;
-- `stats_windows: "24h,7d,30d"` when the user asks for monthly data; monthly means rolling 30d, not a calendar month;
-- `scan_sort_fields` should use Orca-style names such as `fees30d`, `volume30d`, `fees7d`, `volume7d`, `fees24h`, and `volume24h`;
-- explicit category, quote, or exclude filters only when the user asks for them; category filters must use exact valid category values.
+- `risk_profile: category_scout` for broad category exploration;
+- `risk_profile: yield_focused` for production-policy fee screening without memecoins;
+- `risk_profile: yield_high_risk`, `yield_extreme_risk`, or `yield_no_limit` only when the user explicitly requests that named policy in dry-run analysis;
+- `stats_windows: "1h,4h,24h,7d,30d"` only with an analysis-only scout when the user asks for monthly data; monthly means rolling 30d, not a calendar month;
+- `include_pool_addresses` only for explicit dry-run inspection and `exclude_pool_addresses` only for explicit exclusions.
 
-Valid Orca category values are exact strings only:
-
-- `memecoin`;
-- `utility`;
-- `governance`;
-- `liquid_staking_token`;
-- `security`;
-- `stablecoin`.
-
-Do not invent aliases. Use `memecoin`, not `meme`; use `liquid_staking_token`, not `lst`.
+Do not pass category, quote, profile-threshold, scoring-weight, range-bound, or preset overrides. Named profiles own those policies.
 
 Preferred consult-mode profile mapping:
 
-- meme pools, meme coins, or highest meme fees -> `risk_profile: meme_scout`; do not also pass `categories` unless the user explicitly asks for a category override;
-- tiny-live meme dry analysis -> `risk_profile: meme_tiny_live`;
-- stablecoin or liquid-staking conservative pools -> `risk_profile: safe_conservative`;
-- broad conservative Orca screening -> `risk_profile: default_cautious`;
-- fee-focused non-meme pools -> `risk_profile: balanced_fee_capture`;
-- early category discovery for utility, governance, liquid-staking-token, or security pools -> `risk_profile: category_scout`;
-- higher-volatility fee capture across utility, governance, and memecoin pools -> `risk_profile: risk_on_volatile`.
+- meme pools, meme coins, or highest meme fees -> `risk_profile: meme_scout`;
+- stablecoin, liquid-staking, or fee-focused non-meme pools -> `risk_profile: yield_focused`;
+- broad utility, governance, liquid-staking-token, or security exploration -> `risk_profile: category_scout`;
+- explicitly requested broader risk tolerance -> the matching named live profile in dry-run mode.
 
 Consult-mode discovery stops at routine-backed analysis. It must not create executors, perform swaps, open LP positions, or imply that a candidate is live-actionable without Gateway, balance, executor, and risk-limit preflight.
 
@@ -179,50 +153,55 @@ Report only fields present in routine output, such as:
 
 - pool/pair;
 - pool address;
-- TVL/liquidity;
-- 24h volume;
-- 7d and rolling 30d volume if returned;
-- 24h fees or fee proxy if returned;
-- 7d and rolling 30d fees if returned;
-- fee APR/APY proxy if returned;
-- warnings, hard gates, and rejection reasons;
-- preset suggestion;
+- TVL and raw rolling volume and fees;
+- 24h and dailyized 7d fee productivity plus sustained fee productivity;
+- 1h/4h dailyized productivity and momentum when available, clearly labeled diagnostic;
+- 24h net price change, fee rate, adaptive-fee state, fee-tier index, and tick spacing;
+- source categories and discovery lenses returned as evidence;
+- hard gates, warnings, rejection reasons, criteria scores, and weighted score;
+- provisional range plan and preset suggestion, never executable bounds;
 - reason for inclusion or exclusion.
 
-## Named Presets
+## Named Presets And Range Policy
 
-The routine may recommend only four outcomes: `no-trade`, `conservative`, `balanced`, or `wide`.
+Calculate `tick_spacing_floor = 1.0001 ** (tick_spacing * 2) - 1`, `change_based_half_width = abs(net_price_change_24h) * 1.5`, and `required_half_width` as their maximum. The floor is a two-tick-interval-per-side heuristic, not tick snapping; Gateway performs authoritative price-to-initializable-tick conversion.
 
-- `conservative` uses wider safety posture for lower-confidence candidates.
-- `balanced` is used when liquidity, activity, fees, and volatility are all acceptable.
-- `wide` is available in live mode within risk caps when volatility is high but still allowed and fee/activity evidence is strong.
-- `no-trade` is mandatory when gates, confidence, Gateway preflight, or risk checks fail.
+- `concentrated`: required width at most 1.5% and sustained fees at least 5 bp/day; clamp to 0.5%-1.5%.
+- `balanced`: required width at most 3%; clamp to 1%-3%.
+- `defensive`: required width at most 8% and sustained fees at least 4 bp/day; clamp to 2%-8%.
+- `extreme`: only `yield_extreme_risk` and `yield_no_limit`; clamp to 8%-95%. Extreme-risk rejects requirements above 95%. No-limit records the uncapped requirement and sets `width_capped: true` when clamping above 95%.
+- `no-trade`: mandatory when gates, range feasibility, preflight, or risk checks fail.
 
-The agent can downgrade only for a concrete failed gate, preflight failure, missing required data, or explicit session constraint. It should not invent custom presets, free-form ranges, or extra live-entry thresholds.
+Choose the narrowest valid preset. Do not invent a custom range, override policy bounds, or widen the selected half-width. The scanner candidate contains a provisional `range_plan` with status, safety factor, tick-spacing floor, change-derived half-width, uncapped required half-width, maximum executable half-width, `width_capped`, preset, and provisional half-width. It must contain no `lower_price`, `upper_price`, `lower_limit_price`, or `upper_limit_price`.
 
 ## LP Executor Rails
 
 The executor is the hands of the strategy. The agent selects policy-level knobs; the LP executor opens, monitors, and closes the on-chain CLMM position.
 
-V1 uses one `lp_executor` with:
+The strategy uses one `lp_executor` with:
 
 - `connector_name: solana-mainnet-beta` unless runtime config overrides;
 - `lp_provider: orca/clmm`;
 - `side: 3` for double-sided range LP;
 - `pool_address` from the selected candidate;
-- `lower_price` and `upper_price` from the preset range;
+- `lower_price` and `upper_price` recentered by preflight on the fresh Gateway price;
 - `lower_limit_price` and `upper_limit_price` outside the LP range;
 - `keep_position: false` so post-close handling targets clean quote inventory;
 - `controller_id` supplied as Condor requires.
 
-If the centered LP range needs base inventory and the wallet only has quote, the agent may run the agent-local `pre_lp_rebalance` routine through `manage_routines` to perform one Gateway Jupiter quote-to-base swap before creating the executor, but only when `ALLOW_PRE_LP_REBALANCE: true`, the swap quote succeeds, the swap confirms, the SOL fee buffer remains intact, and the total LP spend stays inside the session budget and pool-share caps.
+If a centered range lacks base inventory but has enough quote inventory and SOL reserve, `pre_lp_rebalance` prepares only the base shortfall. It is quote-only in `dry_run` and automatically submits one Jupiter swap in explicit `loop` mode. Live preflight registers and verifies the exact selected pool tokens before checking inventory, so refreshed balances include newly acquired assets. Rebalance persists submission intent before execution, never retries an uncertain submission, and polls confirmed settlement for refreshed balances before preflight can pass.
 
-The tiny live-test budget is capped at 10 quote units by default. The agent must also respect pool TVL share, pool volume share, account-cap, fee-buffer, and max-open-executor limits.
+Scanner evidence is fresh only from 30 seconds in the future through 600 seconds old. Preflight revalidates candidate identity, structured profile, source evidence and arithmetic, then checks fresh Gateway pool identity, canonical token orientation, scanner-to-Gateway deviation, executor state, wallet state, and risk limits. It constructs `lower_price = gateway_price * (1 - provisional_half_width)` and `upper_price = gateway_price * (1 + provisional_half_width)`. It then uses `limit_buffer = min(1.5%, max(0.3%, provisional_half_width * 0.5))`, `lower_limit_price = lower_price * (1 - limit_buffer)`, and `upper_limit_price = upper_price * (1 + limit_buffer)`. After a confirmed swap, refresh Gateway price and wallet balances and rerun preflight while the original candidate remains fresh. If freshness, deviation, or inventory fails, stop for manual review; never submit a second swap, select a second market, or create from stale evidence.
 
-## Exits
+The active session's `total_amount_quote` is the canonical LP budget. Its default is 10 quote units, but a user-selected value replaces that default throughout scanning, rebalance sizing, preflight, and executor creation. The agent must also preserve the SOL fee buffer and respect the one-executor limit.
+
+## Exits And Session Limits
 
 The active LP position is supervised by `lp_position_report`.
 The routine fetches executor and LP position facts from the Hummingbot API; its inputs should be limited to exit-policy knobs such as max age, take-profit, stop-loss, out-of-range grace, and missing-position grace.
+`POSITION_MAX_AGE_MINUTES`, `POSITION_TAKE_PROFIT_NET_PNL_RATIO`, and `POSITION_STOP_LOSS_NET_PNL_RATIO` from the current session input are canonical for each position and reset when that position is audited and archived.
+
+`SESSION_MAX_AGE_MINUTES`, `SESSION_TAKE_PROFIT_NET_PNL_RATIO`, and `SESSION_STOP_LOSS_NET_PNL_RATIO` apply to the controller session. Session PnL is the cumulative net PnL of audited positions plus active marked net PnL, always divided by the fixed session `total_amount_quote`; do not compound, resize the denominator, or maintain a separate local session-drawdown calculation.
 
 Exit or escalation conditions include:
 
@@ -235,18 +214,56 @@ Exit or escalation conditions include:
 - repeated missing position info;
 - operator stop or manual-review trigger.
 
-After close or failure, the agent writes a post-close audit before considering a new position.
+`risk_limits.max_position_size_quote: 10` and `max_open_executors: 1` are hard rails. Generic `max_drawdown_pct` is disabled at `-1`. The generic hard drawdown backstop is delayed through `shutdown_drawdown_pct: 3`: it is measured in percentage points, bypasses normal audit work, and requests session shutdown rather than a position-level exit. It is not a local session-drawdown limit.
 
-## V1 And V2
+## Tick Lifecycle
 
-V1 is deliberately single-pool. It keeps behavior easy to inspect and prevents hidden portfolio complexity during early validation.
+Follow this order on every tick:
 
-V2 is feature-flagged with `v2.enable_multi_pool: false` by default. When enabled after V1 validation, V2 should reuse the same scan, gates, scoring, preflight, executor rails, and audit pattern, but add a capped basket allocation layer across two or three pools. It must keep one executor per selected pool and enforce aggregate budget, token concentration, drawdown, and executor-count limits.
+1. Use the dynamic controller ID from `[TICK INFO]`; never use a static fallback.
+2. Run `lp_position_report` with the dynamic controller ID and `execution_mode` before any scan. The routine loads agent-local lifecycle state and performs the authoritative API lookup; `[CORE DATA]` is only orientation.
+3. If position reporting returns `stop-agent`, load `manage_trading_agent` if necessary, call `manage_trading_agent(action="stop_agent", agent_id=<dynamic controller ID>)`, and do nothing else. This final dispatch tick may be discarded because the prior tick already persisted the complete audit and `stop_pending` state.
+4. If executor lookup fails, is ambiguous, or cannot prove controller ownership, stop with manual review.
+5. If a session limit is reached while a position is active, close and audit that position normally. The audit persists `stop_pending`; the following scheduled tick performs the `stop_agent` call. If a session limit is reached while flat, position reporting records `stop_pending` and the following tick stops the agent. The generic hard drawdown path is separate: Condor immediately runs emergency shutdown, bypasses normal audit work, and terminates the loop.
+6. If one executor is active or closing, do not scan. The routine persists executor ID, phase, and close reason before returning. Only in effective `loop` mode, if it recommends `close`, call `manage_executors(action="stop", executor_id=<exact id>, keep_position=false)` once. Dry-run supervision never stops an executor. If it is already closing or swapping, wait.
+7. If the executor is terminal, run `lp_close_audit` with `execution_mode: loop` and the emitted final executor evidence. The audit loads the exact plan and rebalance evidence, updates session PnL, then archives and resets the completed position lifecycle. On the next scheduled tick, scan for the next position unless it set `stop_pending` for a session limit.
+8. If position reporting returns `resume-rebalance`, call `pre_lp_rebalance` with the dynamic controller, active session amount, and `execution_mode: loop`. Do not scan. A submitted or confirmed transaction is resumed by hash and never submitted again. If it returns `next_action: rerun-preflight`, immediately refresh Gateway pool info for the persisted candidate, rerun `orca_live_preflight`, and create its exact ready plan in the same tick.
+9. If position reporting returns `resume-preflight`, refresh Gateway pool info for the persisted candidate, then rerun `orca_live_preflight` with that exact candidate and active session amount. Do not scan.
+10. Any other unfinished, failed, or uncertain lifecycle state requires manual review; do not scan or swap.
+11. Only when no executor and no lifecycle state exist, run `orca_pool_scan` with the dynamic controller ID and `total_amount_quote` from `[CURRENT CONFIG]`. In loop mode the routine loads `risk_profile` from that controller's structured session config and rejects conflicting routine input.
+12. If the scan selects a candidate, gather current Gateway pool info and run `orca_live_preflight`. It fetches exact refreshed balances directly from the Hummingbot API; do not parse the rounded portfolio table.
+13. If preflight returns `rebalance_plan`, call `pre_lp_rebalance` with that exact plan, candidate, Gateway evidence, dynamic controller, active session amount, and current execution mode. In `dry_run` it returns a quote and stops. In `loop` it may execute exactly one swap and persists the transaction lifecycle. Never call a swap tool directly. After confirmation, fetch fresh Gateway pool info and fresh wallet balances, then rerun `orca_live_preflight` with the exact persisted candidate. If it does not return `ready`, stop for manual review; do not swap again, change market, or select a different pool.
+14. If preflight returns `ready`, show the exact executor plan in `dry_run`. In explicit `loop` mode, create exactly that plan. Never retry an Orca executor create after any error or uncertain result. Ignore generic instructions to pass `controller_id` at top level: for this strategy, `controller_id` and `total_amount_quote` remain inside `executor_config`.
+
+Every routine writes a standard Condor report containing sanitized input, decision evidence, warnings/errors, and the full debug JSON payload.
+
+Legacy sessions created under former profile, preset, candidate, range, or lifecycle contracts are historical evidence only. Do not resume them or add compatibility aliases, migration, version dispatch, or legacy-state handling. New looping behavior starts with a newly created session.
+
+Pass normalized preflight evidence in this shape:
+
+```yaml
+execution_mode: dry_run | loop
+controller_id: <dynamic id from TICK INFO>
+selected_candidate: <exact orca_pool_scan selected_candidate>
+gateway_pool_info: {pool_address, base_mint, quote_mint, current_price}
+executor_lookup_succeeded: true | false
+active_executors: [{controller_id, status}]
+fetch_wallet_balances: true
+wallet_account_name: master_account
+wallet_connector_name: solana-mainnet-beta
+api_errors: []
+total_amount_quote: <session budget>
+min_sol_fee_buffer: <required SOL reserve>
+```
+
+For rebalance, pass `execution_mode`, `controller_id`, `selected_candidate`, `gateway_pool_info`, `rebalance_plan`, `total_amount_quote`, `wallet_account_name`, and `wallet_connector_name`. `total_amount_quote` must exactly match `[CURRENT CONFIG]`. In loop resume states, the routine loads the persisted candidate and transaction identity and rejects mismatches.
+
+For the audit, pass `controller_id`, `execution_mode: loop`, and the final executor API response as `final_executor`; the routine loads the exact persisted plan, preset, and policy close reason from the agent-local lifecycle file.
 
 ## Evidence Status
 
-This V1 implementation starts with dry-run readiness. No live executor should be created by the files alone. Explicit session mode, scan profile, Gateway health, wallet balances, and user intent are required for live tests.
+This implementation starts with dry-run readiness. No live executor should be created by the files alone. Explicit session mode, structured risk profile, Gateway health, wallet balances, and user intent are required for live tests.
 
 ## Outside Scope
 
-V1 does not author raw Solana transactions, depend on paid APIs, manage private credentials, optimize a secret portfolio model, or continue scanning new pools while a position is already active.
+The strategy does not author raw Solana transactions, depend on paid APIs, manage private credentials, optimize a secret portfolio model, or scan new pools while a position is active or closing.
