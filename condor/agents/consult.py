@@ -27,6 +27,7 @@ from condor.acp.pydantic_ai_client import (
     is_pydantic_ai_model,
 )
 from condor.agents.agent import AgentStore
+from condor.preferences import resolve_custom_endpoint
 
 log = logging.getLogger(__name__)
 
@@ -113,8 +114,14 @@ async def _run_agent_to_completion(
     # Override the fallback with CONSULT_FALLBACK_MODEL, or set it to "" to disable.
     model_key = agent.agent_key
     fallback_note = ""
+    # A custom endpoint's URL/key live in the user's saved endpoints, not in the
+    # agent record — resolve them here so consult can reach the same provider
+    # the user's chat is using. Returns (None, None) for every other key type.
+    base_url, api_key = resolve_custom_endpoint(model_key, user_id=user_id)
     if is_pydantic_ai_model(model_key):
-        backend_err = await healthcheck_local_backend(model_key)
+        backend_err = await healthcheck_local_backend(
+            model_key, base_url=base_url, api_key=api_key
+        )
         if backend_err:
             fallback = os.environ.get("CONSULT_FALLBACK_MODEL", "claude-code").strip()
             if fallback and fallback != model_key:
@@ -125,6 +132,11 @@ async def _run_agent_to_completion(
                     fallback,
                 )
                 model_key = fallback
+                # The fallback is a different model — re-resolve, or a custom
+                # endpoint's credentials would leak into an unrelated backend.
+                base_url, api_key = resolve_custom_endpoint(
+                    model_key, user_id=user_id
+                )
                 fallback_note = (
                     f"_(note: {agent.name}'s configured model was unavailable — "
                     f"{backend_err} Answered with fallback `{fallback}`.)_\n\n"
@@ -173,6 +185,8 @@ async def _run_agent_to_completion(
             mcp_servers=mcp_servers,
             permission_callback=permission_cb,
             allowed_tools=agent.tools or None,
+            base_url=base_url,
+            api_key=api_key,
         )
     else:
         from condor.acp.client import ACPClient, resolve_acp

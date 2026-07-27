@@ -19,8 +19,10 @@ so the web dashboard can also read them.
 """
 
 import logging
+import re
 from copy import deepcopy
 from typing import Any, Dict, List, Optional, TypedDict
+from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -232,10 +234,28 @@ class TradingAgentPrefs(TypedDict, total=False):
     default_risk_limits: Dict[str, Any]  # Default risk limits
 
 
+class CustomProviderPrefs(TypedDict, total=False):
+    """A saved OpenAI-compatible endpoint (Venice AI, Together, vLLM, ...).
+
+    ``name`` is a user-facing nickname and the stable identifier used in agent
+    keys (``custom@<name>:<model-id>``), so it is restricted to characters that
+    can't collide with the key separators — see :func:`sanitize_provider_name`.
+    """
+
+    name: str
+    base_url: str
+    api_key: str
+
+
 class AgentPrefs(TypedDict, total=False):
     default_agent: str  # "claude-code", "gemini", "codex", "copilot"
     show_tool_calls: bool  # Show tool call indicators (default True)
     tool_filter_mode: str  # "essential", "moderate", or "full" for PydanticAI models
+    custom_providers: List[CustomProviderPrefs]  # OpenAI-compatible endpoints
+    # Mirror of the live chat selection (user_data["agent_llm"]). Kept here so
+    # code outside a PTB context — the MCP subprocess, web, background agent
+    # runs — can see which model the user is actually on.
+    active_agent_key: str
 
 
 class VoicePrefs(TypedDict, total=False):
@@ -336,6 +356,7 @@ def _get_default_preferences() -> UserPreferences:
         "agent": {
             "default_agent": "claude-code",
             "show_tool_calls": True,
+            "custom_providers": [],
         },
         "voice": {
             "whisper_model": "small",
@@ -1009,6 +1030,294 @@ def set_default_agent(user_data: Dict, agent_key: str) -> None:
     prefs["agent"]["default_agent"] = agent_key
     _sync_section_to_cm(user_data, "agent")
     logger.info(f"Set default agent to {agent_key}")
+
+
+# ============================================
+# PUBLIC API - CUSTOM OPENAI-COMPATIBLE PROVIDERS
+# ============================================
+
+# Agent keys for a saved endpoint look like "custom@venice:llama-3.3-70b".
+# The "@<name>" segment is what lets a bare model id keep colons and slashes
+# (e.g. "custom@together:meta-llama/Llama-3.3-70B") while still parsing
+# unambiguously with a single partition on ":".
+CUSTOM_KEY_PREFIX = "custom"
+_PROVIDER_NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
+MAX_CUSTOM_PROVIDERS = 10
+
+
+def sanitize_provider_name(name: str) -> str:
+    """Coerce a nickname into an identifier safe for use inside an agent key.
+
+    Collapses anything outside ``[A-Za-z0-9_-]`` to a single dash, since ``:``
+    and ``@`` are structural in ``custom@<name>:<model-id>``.
+    """
+    cleaned = _PROVIDER_NAME_RE.sub("-", name.strip()).strip("-")
+    return cleaned[:32] or "custom"
+
+
+def build_custom_agent_key(provider_name: str, model_id: str) -> str:
+    """Compose the agent key for a model served by a saved endpoint."""
+    return f"{CUSTOM_KEY_PREFIX}@{sanitize_provider_name(provider_name)}:{model_id}"
+
+
+def parse_custom_agent_key(agent_key: str) -> tuple[Optional[str], str]:
+    """Split a custom agent key into ``(provider_name, model_id)``.
+
+    Returns ``(None, model_id)`` for the legacy ``custom:<model-id>`` form,
+    which predates named endpoints and resolves against the first saved
+    provider (or the ``CUSTOM_LLM_*`` env vars). Returns ``(None, "")`` for
+    keys that aren't custom-provider keys at all.
+    """
+    prefix, _, model_id = agent_key.partition(":")
+    head, _, provider = prefix.partition("@")
+    if head != CUSTOM_KEY_PREFIX:
+        return None, ""
+    return (provider or None), model_id
+
+
+def get_custom_providers(user_data: Dict) -> List[CustomProviderPrefs]:
+    """All saved OpenAI-compatible endpoints for this user."""
+    _migrate_legacy_data(user_data)
+    prefs = _ensure_preferences(user_data)
+    _migrate_legacy_custom_llm(user_data, prefs)
+    return deepcopy(prefs.get("agent", {}).get("custom_providers", []) or [])
+
+
+def find_custom_provider(
+    user_data: Dict, name: Optional[str]
+) -> Optional[CustomProviderPrefs]:
+    """Look up one endpoint by nickname.
+
+    With ``name=None`` (a legacy ``custom:<model>`` key) falls back to the only
+    saved endpoint, so users who configured one before named endpoints existed
+    keep working without reconfiguring.
+    """
+    providers = get_custom_providers(user_data)
+    if not providers:
+        return None
+    if name is None:
+        return providers[0] if len(providers) == 1 else None
+    target = sanitize_provider_name(name)
+    for provider in providers:
+        if sanitize_provider_name(provider.get("name", "")) == target:
+            return provider
+    return None
+
+
+def save_custom_provider(
+    user_data: Dict, name: str, base_url: str, api_key: str = ""
+) -> CustomProviderPrefs:
+    """Insert or update an endpoint, keyed by its sanitized nickname.
+
+    Returns the stored record (with the sanitized name), so callers can build
+    agent keys from a value that round-trips.
+    """
+    prefs = _ensure_preferences(user_data)
+    agent = prefs.setdefault("agent", {})
+    providers: List[CustomProviderPrefs] = agent.setdefault("custom_providers", [])
+
+    safe_name = sanitize_provider_name(name)
+    record: CustomProviderPrefs = {
+        "name": safe_name,
+        "base_url": base_url,
+        "api_key": api_key,
+    }
+    for i, existing in enumerate(providers):
+        if sanitize_provider_name(existing.get("name", "")) == safe_name:
+            providers[i] = record
+            break
+    else:
+        if len(providers) >= MAX_CUSTOM_PROVIDERS:
+            raise ValueError(
+                f"You already have {MAX_CUSTOM_PROVIDERS} saved endpoints. "
+                "Remove one before adding another."
+            )
+        providers.append(record)
+
+    _sync_section_to_cm(user_data, "agent")
+    logger.info("Saved custom provider '%s' (%s)", safe_name, base_url)
+    return deepcopy(record)
+
+
+def remove_custom_provider(user_data: Dict, name: str) -> bool:
+    """Forget an endpoint. Returns True if one was removed."""
+    prefs = _ensure_preferences(user_data)
+    agent = prefs.setdefault("agent", {})
+    providers: List[CustomProviderPrefs] = agent.setdefault("custom_providers", [])
+
+    target = sanitize_provider_name(name)
+    remaining = [
+        p for p in providers if sanitize_provider_name(p.get("name", "")) != target
+    ]
+    if len(remaining) == len(providers):
+        return False
+
+    agent["custom_providers"] = remaining
+    _sync_section_to_cm(user_data, "agent")
+    logger.info("Removed custom provider '%s'", target)
+    return True
+
+
+def unique_provider_name(user_data: Dict, suggested: str) -> str:
+    """Return ``suggested`` (sanitized), suffixed with -2, -3, ... if taken."""
+    existing = {
+        sanitize_provider_name(p.get("name", "")) for p in get_custom_providers(user_data)
+    }
+    base = sanitize_provider_name(suggested)
+    if base not in existing:
+        return base
+    for n in range(2, MAX_CUSTOM_PROVIDERS + 2):
+        candidate = f"{base}-{n}"
+        if candidate not in existing:
+            return candidate
+    return base
+
+
+def resolve_custom_endpoint(
+    agent_key: str,
+    user_data: Optional[Dict] = None,
+    user_id: Optional[int] = None,
+) -> tuple[Optional[str], Optional[str]]:
+    """Resolve ``(base_url, api_key)`` for a ``custom@<endpoint>:<model>`` key.
+
+    Returns ``(None, None)`` for any key that isn't a custom-endpoint key, so
+    callers can pass this through unconditionally.
+
+    Every surface that builds a model — chat sessions, consult, delegate, the
+    trading-agent engine — needs this. Without it a custom key resolves to
+    nothing and dies with "No base URL configured", which is exactly what
+    happens when only the chat path knows how to look endpoints up.
+
+    Pass ``user_data`` when you have it (Telegram handlers) or ``user_id`` when
+    you don't (MCP subprocess, web, background agent runs).
+    """
+    provider_name, model_id = parse_custom_agent_key(agent_key)
+    if not model_id:
+        return None, None
+
+    if user_data is None and user_id is not None:
+        try:
+            user_data = load_user_data_for(user_id)
+        except Exception:
+            logger.debug("Could not load preferences for user %s", user_id)
+
+    provider = find_custom_provider(user_data, provider_name) if user_data else None
+    if provider is None and provider_name:
+        logger.warning(
+            "Agent key '%s' names endpoint '%s', which is not saved for this user",
+            agent_key,
+            provider_name,
+        )
+
+    provider = provider or {}
+    import os
+
+    base_url = provider.get("base_url") or os.environ.get("CUSTOM_LLM_BASE_URL")
+    api_key = provider.get("api_key") or os.environ.get("CUSTOM_LLM_API_KEY")
+    return base_url or None, api_key or None
+
+
+def get_active_agent_key(user_id: int) -> Optional[str]:
+    """The model this user last selected, readable outside a PTB context.
+
+    Mirrors ``user_data["agent_llm"]`` into config.yml (see
+    :func:`set_active_agent_key`) so the MCP subprocess and the web dashboard
+    can answer "what model is this user actually on?" — which is what lets a
+    newly created agent inherit it instead of guessing.
+    """
+    try:
+        prefs = load_user_data_for(user_id)
+    except Exception:
+        return None
+    key = prefs.get(USER_PREFERENCES_KEY, {}).get("agent", {}).get("active_agent_key")
+    return key or None
+
+
+def set_active_agent_key(user_data: Dict, agent_key: str) -> None:
+    """Record the user's current model selection in the shared preference store."""
+    prefs = _ensure_preferences(user_data)
+    agent = prefs.setdefault("agent", {})
+    if agent.get("active_agent_key") == agent_key:
+        return
+    agent["active_agent_key"] = agent_key
+    _sync_section_to_cm(user_data, "agent")
+
+
+def _migrate_legacy_custom_llm(user_data: Dict, prefs: Dict) -> None:
+    """Fold the old single-slot ``user_data["custom_llm"]`` into the list.
+
+    The first iteration of custom-endpoint support stored one endpoint in raw
+    user_data, outside the preference system (and so invisible to the web
+    dashboard). Move it across once, then drop the legacy key.
+    """
+    legacy = user_data.get("custom_llm")
+    if not isinstance(legacy, dict) or not legacy.get("base_url"):
+        user_data.pop("custom_llm", None)
+        return
+
+    agent = prefs.setdefault("agent", {})
+    providers: List[CustomProviderPrefs] = agent.setdefault("custom_providers", [])
+    base_url = legacy["base_url"]
+    if not any(p.get("base_url") == base_url for p in providers):
+        name = sanitize_provider_name(suggest_provider_name(base_url))
+        taken = {sanitize_provider_name(p.get("name", "")) for p in providers}
+        while name in taken:
+            name = f"{name}-2"
+        providers.append(
+            {
+                "name": name,
+                "base_url": base_url,
+                "api_key": legacy.get("api_key", ""),
+            }
+        )
+        _sync_section_to_cm(user_data, "agent")
+        logger.info("Migrated legacy custom_llm endpoint %s → '%s'", base_url, name)
+
+    user_data.pop("custom_llm", None)
+
+
+def suggest_provider_name(base_url: str) -> str:
+    """Derive a readable nickname from an endpoint URL.
+
+    ``https://api.venice.ai/api/v1`` → ``Venice``; ``http://localhost:8000/v1``
+    → ``localhost``. Falls back to ``custom`` for anything unparseable.
+    """
+    try:
+        host = urlparse(base_url).hostname or ""
+    except ValueError:
+        return "custom"
+    if not host:
+        return "custom"
+
+    # IP literals have no meaningful label to extract
+    if all(part.isdigit() for part in host.split(".")) or ":" in host:
+        return host
+
+    labels = [label for label in host.split(".") if label not in ("api", "www")]
+    if not labels:
+        return host
+    name = labels[0]
+    return name.capitalize() if name.isalpha() and name != "localhost" else name
+
+
+# ============================================
+# PUBLIC API - CROSS-PLATFORM PREFERENCE ACCESS
+# ============================================
+
+
+def load_user_data_for(user_id: int) -> Dict:
+    """Build a preferences-bearing ``user_data`` dict outside a PTB context.
+
+    The web dashboard has no ``context.user_data``, so it can't reach anything
+    stored through this module. This hydrates an equivalent dict from
+    config.yml and tags it with ``_user_id``, which means writes through the
+    normal setters sync straight back — giving Telegram and web a single
+    shared view of preferences.
+    """
+    user_data: Dict = {"_user_id": user_id}
+    _load_from_cm(user_data)
+    _ensure_preferences(user_data)
+    return user_data
 
 
 # ============================================

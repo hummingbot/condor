@@ -59,20 +59,27 @@ short conversation:
 - **What it's used for** — the kind of question Condor should be able to ask it. This
   becomes `when_to_consult`.
 
-That's enough to create it. Pick a sensible default model (easiest thing to change
-later) and create:
+That's enough to create it. **Omit `agent_key`** — it defaults to the model the user is
+currently running, which is the one model you know is configured and reachable:
 
 ```
 manage_trading_agent(
     action="create_agent",
     name="Executor Manager",
     description="Expert in deploying and tuning Hummingbot executors",
-    agent_key="ollama:qwen3:32b",          # default model; change anytime
+    # agent_key omitted → inherits the user's active model
     when_to_consult="When the user wants to deploy, tune, or stop an executor",
     tools=[],                              # leave open unless the user named tools
     instructions="<AGENT.md body — the agent's system prompt>"
 )
 ```
+
+> **Never invent an `agent_key`.** You cannot tell which backends are installed,
+> running, or authenticated — a guessed key names a model that may not exist, and it
+> only fails on the first consult, long after creation "succeeded". Pass one *only*
+> when the user named a specific model. `get_user_context()` reports the user's
+> `active_agent_key` and their saved `custom_llm_endpoints` if you need to show or
+> confirm the choice.
 
 The **AGENT.md body (`instructions`)** is the brain — write it as the agent's own system
 prompt, kept tight: **who it is** (its domain + what it explicitly does NOT handle),
@@ -150,7 +157,7 @@ manage_trading_agent(
     name="BRL MM",
     description="…",
     instructions="<tick system prompt>",
-    agent_key="ollama:qwen3:32b",          # default model; overridable at launch
+    # agent_key omitted → inherits the owning agent's model; overridable at launch
     config={"connector_name": "binance", "frequency_sec": 60,
             "total_amount_quote": 100, "execution_mode": "loop"}
 )
@@ -204,12 +211,16 @@ against this string, so vague ones cause misses. Rules:
 - **State the boundary** when two agents are close ("…executor deployment — NOT
   controller backtesting"). Same shape applies to a skill's `when_to_use`.
 
-**Model selection:** Set per session, not baked in. The agent/strategy `agent_key` is the
-default; override at launch via `config={"agent_key": "…"}`.
+**Model selection:** Set per session, not baked in. An omitted `agent_key` inherits the
+user's active model — prefer that. The agent/strategy `agent_key` is the default;
+override at launch via `config={"agent_key": "…"}`.
 - ACP (subprocess CLI): `claude-code`, `gemini`, `copilot`
 - Pydantic-AI local: `ollama:llama3.1`, `ollama:qwen3:32b`, `lmstudio:<model>`
 - Pydantic-AI cloud: `openai:gpt-4o`, `groq:llama-3.3-70b-versatile`
-- Custom endpoint: `openai:<model>` + `model_base_url` in config.
+- Custom OpenAI-compatible endpoint: `custom@<endpoint>:<model-id>`, e.g.
+  `custom@Venice:claude-sonnet-4-6`. The URL and API key are resolved from the user's
+  saved endpoints — do NOT set `model_base_url` for these. List the endpoint names
+  with `get_user_context()`.
 Default URLs: Ollama=localhost:11434, LM Studio=localhost:1234.
 
 **Generic vs Specific strategies:**

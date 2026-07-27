@@ -1,8 +1,11 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Brain,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Loader2,
   MessageSquare,
   Minus,
@@ -14,7 +17,14 @@ import {
 import { useChatSocket, type ChatSlot } from "@/hooks/useChatSocket";
 import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
-import { api, type ChatAgentOption, type ChatModeOption } from "@/lib/api";
+import {
+  api,
+  customAgentKey,
+  parseCustomAgentKey,
+  type ChatAgentOption,
+  type ChatModeOption,
+  type CustomProvider,
+} from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 
@@ -44,6 +54,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
   // Chat options from backend
   const [agents, setAgents] = useState<ChatAgentOption[]>([]);
+  const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
   const [modes, setModes] = useState<ChatModeOption[]>([]);
   const [defaultAgent, setDefaultAgent] = useState("claude-code");
   const [defaultMode, setDefaultMode] = useState("condor");
@@ -57,6 +68,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
       optionsFetched.current = true;
       api.getChatOptions().then((opts) => {
         setAgents(opts.agents);
+        setCustomProviders(opts.custom_providers ?? []);
         setModes(opts.modes);
         setDefaultAgent(opts.default_agent);
         setDefaultMode(opts.default_mode);
@@ -126,8 +138,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const effectiveAgent = selectedAgent || defaultAgent;
   const effectiveMode = selectedMode || defaultMode;
 
-  // Filter out sentinel keys (ending with :) that are pickers, not direct agents
-  const directAgents = agents.filter((a) => !a.key.endsWith(":"));
+  // /chat/options already excludes the picker sentinels, so everything here is
+  // a startable key. (It is not the same as "doesn't end in ':'" — "ollama:"
+  // and "lmstudio:" are real keys meaning "that backend's default model".)
+  const directAgents = agents;
 
   return (
     <>
@@ -183,6 +197,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               {showNewMenu && (
                 <NewSessionMenu
                   agents={directAgents}
+                  customProviders={customProviders}
                   modes={modes}
                   selectedAgent={effectiveAgent}
                   selectedMode={effectiveMode}
@@ -273,6 +288,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           ) : !activeSlot ? (
             <EmptyState
               agents={directAgents}
+              customProviders={customProviders}
               modes={modes}
               defaultAgent={defaultAgent}
               defaultMode={defaultMode}
@@ -321,6 +337,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
   const match = agents.find((a) => a.key === agentKey);
   if (match) return match.label;
+  // Custom endpoints name the endpoint, so show which one is in play
+  const custom = parseCustomAgentKey(agentKey);
+  if (custom) return `${custom.provider} — ${custom.model}`;
   // Handle dynamic keys like "openrouter:anthropic/claude-3.5-sonnet"
   if (agentKey.includes(":")) {
     const [provider, model] = agentKey.split(":", 2);
@@ -342,10 +361,139 @@ function shortAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
   return shortMap[full] || (full.length > 12 ? full.slice(0, 12) + "..." : full);
 }
 
+// ── Agent / model picker ──
+
+/**
+ * Two-level model picker: built-in agents at the top level, and one row per
+ * saved custom endpoint that drills into that endpoint's models.
+ *
+ * The model list is fetched only when an endpoint is opened — /models is a
+ * live call against the provider, so doing it for every saved endpoint on
+ * panel open would put several network round trips in front of a dropdown.
+ */
+function AgentPicker({
+  agents,
+  customProviders,
+  selectedAgent,
+  onSelect,
+}: {
+  agents: ChatAgentOption[];
+  customProviders: CustomProvider[];
+  selectedAgent: string;
+  onSelect: (key: string) => void;
+}) {
+  const [openProvider, setOpenProvider] = useState<string | null>(null);
+  const activeCustom = parseCustomAgentKey(selectedAgent);
+
+  const models = useQuery({
+    queryKey: ["custom-provider-models", openProvider],
+    queryFn: () => api.getCustomProviderModels(openProvider as string),
+    enabled: !!openProvider,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const rowClass = (isSelected: boolean) =>
+    `flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+      isSelected ? "text-[var(--color-primary)] font-medium" : "text-[var(--color-text)]"
+    }`;
+
+  if (openProvider) {
+    return (
+      <div className="absolute left-0 top-full z-10 mt-1 max-h-48 w-full overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
+        <button
+          onClick={() => setOpenProvider(null)}
+          className="flex w-full items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+        >
+          <ChevronLeft className="h-3 w-3" />
+          {openProvider}
+        </button>
+
+        {models.isLoading && (
+          <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Loading models
+          </div>
+        )}
+
+        {models.isError && (
+          <div className="px-2.5 py-2 text-xs text-[var(--color-red)]">
+            {(models.error as Error).message}
+          </div>
+        )}
+
+        {models.data?.models.map((model) => {
+          const key = customAgentKey(openProvider, model);
+          return (
+            <button
+              key={model}
+              onClick={() => onSelect(key)}
+              className={rowClass(key === selectedAgent)}
+              title={model}
+            >
+              <span className="truncate">{model}</span>
+            </button>
+          );
+        })}
+
+        {models.data?.models.length === 0 && (
+          <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+            No chat models available.
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="absolute left-0 top-full z-10 mt-1 max-h-48 w-full overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
+      {agents.map((a) => (
+        <button
+          key={a.key}
+          onClick={() => onSelect(a.key)}
+          className={rowClass(a.key === selectedAgent)}
+        >
+          {a.label}
+        </button>
+      ))}
+
+      {customProviders.length > 0 && (
+        <>
+          <div className="mt-0.5 border-t border-[var(--color-border)] px-2.5 pt-1.5 pb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+            Custom endpoints
+          </div>
+          {customProviders.map((p) => (
+            <button
+              key={p.name}
+              onClick={() => setOpenProvider(p.name)}
+              className={`flex w-full items-center justify-between gap-1 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                activeCustom?.provider === p.name
+                  ? "text-[var(--color-primary)] font-medium"
+                  : "text-[var(--color-text)]"
+              }`}
+            >
+              <span className="truncate">
+                {p.name}
+                {activeCustom?.provider === p.name && (
+                  <span className="text-[var(--color-text-muted)]">
+                    {" "}
+                    — {activeCustom.model}
+                  </span>
+                )}
+              </span>
+              <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+            </button>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── New Session Menu ──
 
 function NewSessionMenu({
   agents,
+  customProviders = [],
   modes,
   selectedAgent,
   selectedMode,
@@ -355,6 +503,7 @@ function NewSessionMenu({
   onClose,
 }: {
   agents: ChatAgentOption[];
+  customProviders?: CustomProvider[];
   modes: ChatModeOption[];
   selectedAgent: string;
   selectedMode: string;
@@ -365,7 +514,7 @@ function NewSessionMenu({
 }) {
   const [showAgentPicker, setShowAgentPicker] = useState(false);
 
-  const agentLabel = agents.find((a) => a.key === selectedAgent)?.label || selectedAgent;
+  const agentLabel = resolveAgentLabel(selectedAgent, agents);
   const ModeIcon = MODE_ICONS[selectedMode] || Zap;
 
   return (
@@ -386,24 +535,15 @@ function NewSessionMenu({
               <ChevronDown className="ml-1 h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
             </button>
             {showAgentPicker && (
-              <div className="absolute left-0 top-full z-10 mt-1 max-h-48 w-full overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
-                {agents.map((a) => (
-                  <button
-                    key={a.key}
-                    onClick={() => {
-                      onSelectAgent(a.key);
-                      setShowAgentPicker(false);
-                    }}
-                    className={`flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      a.key === selectedAgent
-                        ? "text-[var(--color-primary)] font-medium"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    {a.label}
-                  </button>
-                ))}
-              </div>
+              <AgentPicker
+                agents={agents}
+                customProviders={customProviders}
+                selectedAgent={selectedAgent}
+                onSelect={(key) => {
+                  onSelectAgent(key);
+                  setShowAgentPicker(false);
+                }}
+              />
             )}
           </div>
         </div>
@@ -451,11 +591,13 @@ function NewSessionMenu({
 
 function EmptyState({
   agents,
+  customProviders = [],
   modes,
   defaultAgent,
   onStart,
 }: {
   agents: ChatAgentOption[];
+  customProviders?: CustomProvider[];
   modes: ChatModeOption[];
   defaultAgent: string;
   defaultMode?: string;
@@ -464,7 +606,7 @@ function EmptyState({
   const [selectedAgent, setSelectedAgent] = useState(defaultAgent);
   const [showAgentPicker, setShowAgentPicker] = useState(false);
 
-  const agentLabel = agents.find((a) => a.key === selectedAgent)?.label || selectedAgent;
+  const agentLabel = resolveAgentLabel(selectedAgent, agents);
 
   return (
     <div className="flex h-full flex-col items-center justify-center text-center">
@@ -474,35 +616,28 @@ function EmptyState({
       </p>
 
       {/* Agent picker */}
-      {agents.length > 1 && (
+      {(agents.length > 1 || customProviders.length > 0) && (
         <div className="relative mt-4 mb-2">
           <button
             onClick={() => setShowAgentPicker((v) => !v)}
             className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
           >
-            <span>{agentLabel}</span>
-            <ChevronDown className="h-3 w-3 text-[var(--color-text-muted)]" />
+            <span className="max-w-[220px] truncate">{agentLabel}</span>
+            <ChevronDown className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
           </button>
           {showAgentPicker && (
             <>
               <div className="fixed inset-0 z-40" onClick={() => setShowAgentPicker(false)} />
-              <div className="absolute left-1/2 top-full z-50 mt-1 max-h-48 w-48 -translate-x-1/2 overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
-                {agents.map((a) => (
-                  <button
-                    key={a.key}
-                    onClick={() => {
-                      setSelectedAgent(a.key);
-                      setShowAgentPicker(false);
-                    }}
-                    className={`flex w-full items-center px-3 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      a.key === selectedAgent
-                        ? "text-[var(--color-primary)] font-medium"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    {a.label}
-                  </button>
-                ))}
+              <div className="absolute left-1/2 z-50 w-48 -translate-x-1/2">
+                <AgentPicker
+                  agents={agents}
+                  customProviders={customProviders}
+                  selectedAgent={selectedAgent}
+                  onSelect={(key) => {
+                    setSelectedAgent(key);
+                    setShowAgentPicker(false);
+                  }}
+                />
               </div>
             </>
           )}

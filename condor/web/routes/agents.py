@@ -698,11 +698,15 @@ async def create_agent(
     req: CreateAgentRequest, user: WebUser = Depends(get_current_user)
 ):
     """Create a new Agent (identity + brain; strategies are added separately)."""
+    from condor.preferences import get_active_agent_key
+
+    # Same rule as the Telegram/MCP path: an unspecified model inherits the
+    # creator's active one rather than defaulting to a guess.
     agent = _agent_store().create(
         name=req.name,
         description=req.description,
         instructions=req.instructions,
-        agent_key=req.agent_key,
+        agent_key=req.agent_key or get_active_agent_key(user.id) or "",
         tools=req.tools,
         when_to_consult=req.when_to_consult,
         server_required=req.server_required,

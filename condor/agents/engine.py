@@ -597,7 +597,14 @@ class TickEngine:
         if use_pydantic_ai:
             import os
 
-            base_url = self.config.get("model_base_url") or None
+            from condor.preferences import resolve_custom_endpoint
+
+            # A custom endpoint's URL/key come from the owner's saved endpoints;
+            # an explicit model_base_url in the run config still wins.
+            custom_url, api_key = resolve_custom_endpoint(
+                agent_key, user_id=self.user_id
+            )
+            base_url = self.config.get("model_base_url") or custom_url or None
             tool_filter_mode = (
                 self.config.get("tool_filter_mode")
                 or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
@@ -608,6 +615,7 @@ class TickEngine:
                 mcp_servers=mcp_servers,
                 permission_callback=permission_cb,
                 base_url=base_url,
+                api_key=api_key,
                 tool_filter_mode=tool_filter_mode,
                 # Same allowlist the agent gets on consult; empty => unrestricted.
                 allowed_tools=self.agent.tools or None,

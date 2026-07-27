@@ -171,6 +171,20 @@ def _list_agent_definitions() -> dict:
 # ---------------------------------------------------------------------------
 
 
+def _creator_agent_key() -> str:
+    """The model the calling user is currently running, or "" if unknown.
+
+    Mirrored into config.yml by handlers.agents.set_active_llm, since the live
+    value lives in the bot's PTB pickle which this subprocess can't read.
+    """
+    try:
+        from condor.preferences import get_active_agent_key
+
+        return get_active_agent_key(settings.user_id) or ""
+    except Exception:
+        return ""
+
+
 def _manage_agent(
     action: str,
     agent_slug: str | None,
@@ -190,11 +204,16 @@ def _manage_agent(
     if action == "create_agent":
         if not name:
             return {"error": "name is required to create an agent"}
+        # Default to the model the creator is actually running. Guessing here
+        # produces agents pinned to a backend the user never configured — the
+        # coordinator has no way to know which models are reachable, so an
+        # invented agent_key is a coin flip that only surfaces on first consult.
+        resolved_key = agent_key or _creator_agent_key()
         agent = store.create(
             name=name,
             description=description or "",
             instructions=instructions or "",
-            agent_key=agent_key or "",
+            agent_key=resolved_key,
             tools=tools,
             when_to_consult=when_to_consult or "",
             server_required=True if server_required is None else server_required,
@@ -205,6 +224,8 @@ def _manage_agent(
             "created": True,
             "agent_slug": agent.slug,
             "name": agent.name,
+            "agent_key": agent.agent_key,
+            "agent_key_inherited": not agent_key and bool(resolved_key),
             "consultable": agent.consultable,
         }
 

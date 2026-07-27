@@ -26,11 +26,11 @@ from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import (
     AGENT_MODES,
-    AGENT_OPTIONS,
     DEFAULT_AGENT,
     DEFAULT_MODE,
     is_dangerous_tool_call,
     load_assistant,
+    selectable_agent_options,
 )
 from handlers.agents.confirmation import _format_tool_summary
 from handlers.agents.session import destroy_session, get_or_create_session, get_session
@@ -246,12 +246,18 @@ async def _handle_start_session(
     async def perm_cb(tool_call: dict, options: list[dict]) -> dict:
         return await _web_permission_callback(ws, user_id, tool_call, options)
 
+    # Hydrate the user's stored preferences so web sessions resolve the same
+    # things a Telegram session would — notably the saved custom endpoint
+    # behind a "custom@<endpoint>:<model>" agent key.
+    from condor.preferences import load_user_data_for
+
     try:
         session = await get_or_create_session(
             chat_id=session_key,
             agent_key=agent_key,
             permission_callback=perm_cb,
             user_id=user_id,
+            user_data=load_user_data_for(user_id),
             mode=mode,
             platform="web",
             lazy_context=True,  # Don't block — inject context on first message
@@ -477,9 +483,30 @@ def _handle_resolve_permission(user_id: int, msg: dict) -> None:
 
 @router.get("/chat/options")
 async def get_chat_options(user: WebUser = Depends(get_current_user)):
-    """Return available agent models and modes."""
+    """Return available agent models and modes.
+
+    Picker sentinels ("openrouter:", "custom:") are filtered out — they open a
+    model picker in Telegram rather than naming a model, so offering them here
+    would hand the user a key that fails at session start. The user's saved
+    custom endpoints are returned separately, with their models resolved
+    on demand via /chat/custom-providers/{name}/models.
+    """
+    from condor.preferences import get_custom_providers, load_user_data_for
+
+    providers = get_custom_providers(load_user_data_for(user.id))
     return {
-        "agents": [{"key": k, "label": v["label"]} for k, v in AGENT_OPTIONS.items()],
+        "agents": [
+            {"key": k, "label": v["label"]}
+            for k, v in selectable_agent_options().items()
+        ],
+        "custom_providers": [
+            {
+                "name": p["name"],
+                "base_url": p["base_url"],
+                "has_key": bool(p.get("api_key")),
+            }
+            for p in providers
+        ],
         "modes": [
             {"key": k, "label": v["label"], "description": v["description"]}
             for k, v in AGENT_MODES.items()

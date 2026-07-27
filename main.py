@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 
 from condor.persistence import SafePicklePersistence
-from handlers import clear_all_input_states
+from handlers import cancel_command, clear_all_input_states
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN, WEB_PORT, WEB_URL
 
@@ -314,6 +314,9 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("agent", agent_command))
     application.add_handler(CommandHandler("delegations", delegations_command))
     application.add_handler(CommandHandler("memory", memory_command))
+    # Universal escape hatch for flows that arm a "next message is the answer"
+    # input mode. Every such prompt advertises /cancel.
+    application.add_handler(CommandHandler("cancel", cancel_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -458,6 +461,7 @@ async def register_bot_commands(application: Application) -> None:
         BotCommand("keys", "Configure exchange API credentials"),
         BotCommand("gateway", "Gateway for DEX trading"),
         BotCommand("web", "Open the web dashboard"),
+        BotCommand("cancel", "Abort the current input flow"),
     ]
     try:
         await application.bot.set_my_commands(commands)
