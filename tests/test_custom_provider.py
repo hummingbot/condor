@@ -145,6 +145,20 @@ def test_find_provider_without_name_resolves_only_when_unambiguous():
     assert find_custom_provider(user_data, None) is None
 
 
+def test_picker_sentinels_are_flagged_not_shape_inferred():
+    # Clients must not infer "is a picker" from the key ending in ":" —
+    # "ollama:"/"lmstudio:" also do and ARE startable ("that backend's default
+    # model"). Inferring it silently hid them from the web model picker.
+    from handlers.agents._shared import AGENT_OPTIONS, selectable_agent_options
+
+    pickers = {k for k, v in AGENT_OPTIONS.items() if v.get("picker")}
+    assert pickers == {"openrouter:", "custom:"}
+
+    startable = selectable_agent_options()
+    assert pickers.isdisjoint(startable)
+    assert {"ollama:", "lmstudio:"} <= set(startable)
+
+
 def test_resolve_custom_endpoint():
     # Every surface that builds a model needs this, not just chat sessions —
     # consult/delegate/engine previously had no way to reach a saved endpoint.
