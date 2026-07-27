@@ -54,7 +54,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
     # Cloud providers always get full access (they're powerful enough)
     if any(
         provider in model_lower
-        for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:"]
+        for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:", "opencode-go:", "opencode:"]
     ):
         log.info("Auto-detected cloud provider → tool_filter_mode=full")
         return "full"
@@ -98,7 +98,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
 PYDANTIC_AI_PREFIXES = frozenset(
-    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"}
+    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter", "opencode-go", "opencode"}
 )
 
 # Default base URLs for local model providers and OpenRouter
@@ -106,6 +106,8 @@ DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434/v1",
     "lmstudio": "http://localhost:1234/v1",
     "openrouter": "https://openrouter.ai/api/v1",
+    "opencode-go": "https://opencode.ai/zen/go/v1",
+    "opencode": "https://opencode.ai/zen/go/v1",
 }
 
 
@@ -361,6 +363,32 @@ class PydanticAIClient:
                 )
             openai_client = AsyncOpenAI(
                 base_url=base_url or DEFAULT_BASE_URLS["openrouter"],
+                api_key=api_key,
+                timeout=_local_timeout,
+            )
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
+            )
+
+        # OpenCode-Go: OpenAI-compatible cloud gateway, requires API key.
+        # Handled before the generic DEFAULT_BASE_URLS branch because that branch
+        # uses api_key="not-needed", which OpenCode-Go rejects.
+        if prefix in ("opencode-go", "opencode"):
+            if not model_id:
+                raise RuntimeError(
+                    "OpenCode-Go requires an explicit model id, e.g. "
+                    "'opencode-go:deepseek-v4-pro' or 'opencode-go:hy3'."
+                )
+            api_key = os.environ.get("OPENCODE_GO_API_KEY") or os.environ.get(
+                "OPENCODE_API_KEY"
+            )
+            if not api_key:
+                raise RuntimeError(
+                    "OPENCODE_GO_API_KEY is not set. Add it to your .env to use "
+                    "opencode-go:* models."
+                )
+            openai_client = AsyncOpenAI(
+                base_url=base_url or DEFAULT_BASE_URLS["opencode-go"],
                 api_key=api_key,
                 timeout=_local_timeout,
             )
