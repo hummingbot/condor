@@ -649,6 +649,10 @@ export interface VoiceSettingsResponse {
 export interface ChatAgentOption {
   key: string;
   label: string;
+  /** True for sentinels that open a model list ("openrouter:", "custom:")
+   *  rather than naming a startable model. Sent explicitly because the key's
+   *  shape doesn't tell you — "ollama:" also ends in a colon but IS startable. */
+  picker?: boolean;
 }
 
 export interface ChatModeOption {
@@ -670,6 +674,14 @@ export interface ChatOptionsResponse {
   modes: ChatModeOption[];
   default_agent: string;
   default_mode: string;
+}
+
+export interface OpenRouterModelOption {
+  slug: string;
+  name: string;
+  context_length: number;
+  prompt_price: number;
+  completion_price: number;
 }
 
 /** Agent key for a model served by a saved custom endpoint. Mirrors
@@ -1396,6 +1408,9 @@ export const api = {
 
   getChatOptions: () =>
     apiFetch<ChatOptionsResponse>("/api/v1/chat/options"),
+
+  getOpenRouterModels: () =>
+    apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
 
   // ── Custom OpenAI-compatible LLM endpoints ──
 

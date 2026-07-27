@@ -7,6 +7,7 @@ All business logic lives in mcp_servers.condor.tools.*
 from mcp.server.fastmcp import FastMCP
 
 from mcp_servers.condor.middleware import handle_errors
+from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import consult as consult_tool
 from mcp_servers.condor.tools import context
 from mcp_servers.condor.tools import delegate as delegate_tool
@@ -248,6 +249,58 @@ async def get_user_context() -> dict:
         - is_admin: Whether the user is an admin
     """
     return await context.get_user_context()
+
+
+@mcp.tool()
+@handle_errors("get available models")
+async def get_available_models(
+    openrouter_query: str = "", openrouter_limit: int = 20
+) -> dict:
+    """List every model/provider currently usable for a trading agent's ``agent_key``.
+
+    Use this when helping the user pick a model for an agent they are building
+    (agent_builder skill) — recommend from what is ACTUALLY configured, not a
+    hardcoded default. Read-only; never returns key values.
+
+    Args:
+        openrouter_query: Optional substring to filter the OpenRouter catalog by
+            slug or name (e.g. "claude", "deepseek", "free"). Empty = no filter.
+        openrouter_limit: Max OpenRouter models to return (default 20, cheapest
+            input price first). ``total_matching`` reports how many matched.
+
+    Returns a dict with:
+      - acp_clis: subscription/CLI bridges (claude-code, gemini, copilot, …),
+        each with ``agent_key`` and ``available`` — the CLI is installed and
+        launchable. ``available`` does NOT mean signed in: every bridge needs its
+        own interactive login (Claude/Google/GitHub/OpenAI) that cannot be probed
+        from here. Treat a bridge as a candidate to CONFIRM with the user, and
+        prefer a credential you can verify (a set ``cloud_keys`` provider, or a
+        loaded local model) when recommending unprompted.
+      - cloud_keys: {provider: bool} — whether OPENROUTER/OPENAI/ANTHROPIC/GROQ/
+        GOOGLE keys are set in the environment.
+      - custom_endpoints: the user's own saved OpenAI-compatible endpoints, each
+        with ``name``, ``base_url``, ``reachable`` and the chat ``models`` it
+        serves (``agent_key`` set to ``custom@<endpoint>:<model-id>``). The
+        strongest signal here — the user added these deliberately and they are
+        re-validated on every call — so prefer a reachable one when it fits.
+      - local: {ollama, lmstudio} each with ``base_url``, ``reachable``, and the
+        ``models`` currently loaded on that server (empty if not running).
+      - openrouter: tool-capable catalog (``models`` with ``agent_key`` set to
+        ``openrouter:<slug>``, plus in/out $/Mtok and context). The catalog is
+        public so this is ALWAYS present — no key needed to recommend. Check
+        ``key_present``: false means these are options that need OPENROUTER_API_KEY
+        added (Settings) before they can run; recommend a runnable option first.
+
+    Guidance for choosing: correctness-critical or high-capital agents → a strong
+    model (a capable OpenRouter model when its key is set, or a subscription ACP
+    bridge the user confirms is signed in); simple
+    report/watch loops or privacy/offline needs → a loaded local model or a cheap
+    OpenRouter one. Only pydantic-ai keys (openrouter:/ollama:/lmstudio:/openai:/
+    groq:) enforce an agent's ``tools`` allowlist; ACP bridges run unrestricted.
+    """
+    return await available_models_tool.get_available_models(
+        openrouter_query, openrouter_limit
+    )
 
 
 @mcp.tool()

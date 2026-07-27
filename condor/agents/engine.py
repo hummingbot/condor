@@ -586,6 +586,7 @@ class TickEngine:
                 self.user_id,
                 self.chat_id,
                 execution_mode=mode,
+                agent_slug=self.agent.slug,
             )
         permission_cb = auto_approve_with_risk_check(
             self.risk, risk_state, execution_mode=mode

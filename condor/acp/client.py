@@ -170,7 +170,7 @@ ACP_COMMANDS: dict[str, str] = {
     "claude-acp": "claude-agent-acp",  # model-configurable form: claude-acp:<model>
     "gemini": "npx @google/gemini-cli --acp",
     "copilot": "npx @github/copilot --acp --stdio",
-    "codex": "npx @zed-industries/codex-acp",
+    "codex": "npx @agentclientprotocol/codex-acp",
 }
 
 # ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").

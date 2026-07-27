@@ -26,13 +26,14 @@ from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import (
     AGENT_MODES,
+    AGENT_OPTIONS,
     DEFAULT_AGENT,
     DEFAULT_MODE,
     is_dangerous_tool_call,
     load_assistant,
-    selectable_agent_options,
 )
 from handlers.agents.confirmation import _format_tool_summary
+from handlers.agents.openrouter_models import fetch_models
 from handlers.agents.session import destroy_session, get_or_create_session, get_session
 
 log = logging.getLogger(__name__)
@@ -485,19 +486,23 @@ def _handle_resolve_permission(user_id: int, msg: dict) -> None:
 async def get_chat_options(user: WebUser = Depends(get_current_user)):
     """Return available agent models and modes.
 
-    Picker sentinels ("openrouter:", "custom:") are filtered out — they open a
-    model picker in Telegram rather than naming a model, so offering them here
-    would hand the user a key that fails at session start. The user's saved
-    custom endpoints are returned separately, with their models resolved
-    on demand via /chat/custom-providers/{name}/models.
+    Every entry carries a ``picker`` flag. Picker sentinels ("openrouter:",
+    "custom:") are not startable agent keys — they stand for "open a model
+    list" — so a client must render them as a drill-down, never as a
+    selectable model. The flag is sent explicitly because the shape of the key
+    doesn't tell you: "ollama:" and "lmstudio:" also end in a colon but are
+    real keys meaning "that backend's default model".
+
+    The user's saved custom endpoints come back separately, with their models
+    resolved on demand via /settings/custom-providers/{name}/models.
     """
     from condor.preferences import get_custom_providers, load_user_data_for
 
     providers = get_custom_providers(load_user_data_for(user.id))
     return {
         "agents": [
-            {"key": k, "label": v["label"]}
-            for k, v in selectable_agent_options().items()
+            {"key": k, "label": v["label"], "picker": bool(v.get("picker"))}
+            for k, v in AGENT_OPTIONS.items()
         ],
         "custom_providers": [
             {
@@ -513,4 +518,27 @@ async def get_chat_options(user: WebUser = Depends(get_current_user)):
         ],
         "default_agent": DEFAULT_AGENT,
         "default_mode": DEFAULT_MODE,
+    }
+
+
+@router.get("/chat/openrouter/models")
+async def get_openrouter_models(user: WebUser = Depends(get_current_user)):
+    """OpenRouter models that support tool-calling, for the web model picker.
+
+    Mirrors the Telegram OpenRouter picker: the catalog is public/unauthenticated,
+    so this works without OPENROUTER_API_KEY set. Starting a session with one of
+    these models still requires the key, and raises a clear error if it is unset.
+    """
+    models = await fetch_models()
+    return {
+        "models": [
+            {
+                "slug": m.slug,
+                "name": m.name,
+                "context_length": m.context_length,
+                "prompt_price": m.prompt_price,
+                "completion_price": m.completion_price,
+            }
+            for m in models
+        ],
     }

@@ -47,6 +47,17 @@ def _format_tool_summary(tool_call: dict[str, Any]) -> str:
             return f"Stop executor {exec_id[:12]}..."
         return f"Executor: {action}"
 
+    if tool_name == "manage_bots":
+        action = input_data.get("action", "?")
+        bot_name = input_data.get("bot_name", "?")
+        if action == "deploy":
+            controllers = input_data.get("controllers_config", [])
+            return f"Deploy bot '{bot_name}' with controllers {controllers}"
+        if action == "update_config":
+            config_name = input_data.get("config_name", "?")
+            return f"Update config '{config_name}' on bot '{bot_name}'"
+        return f"Bot '{bot_name}': {action}"
+
     if tool_name == "manage_gateway_swaps":
         action = input_data.get("action", "?")
         pair = input_data.get("trading_pair", "?")
