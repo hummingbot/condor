@@ -113,6 +113,7 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
     # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
     "openrouter:": {"label": "OpenRouter — Pick Model"},
+    "deepseek:": {"label": "DeepSeek — API Key"},
 }
 
 

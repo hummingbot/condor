@@ -54,7 +54,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
     # Cloud providers always get full access (they're powerful enough)
     if any(
         provider in model_lower
-        for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:", "opencode-go:", "opencode:"]
+        for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:", "opencode-go:", "opencode:", "deepseek:"]
     ):
         log.info("Auto-detected cloud provider → tool_filter_mode=full")
         return "full"
@@ -98,7 +98,7 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
 PYDANTIC_AI_PREFIXES = frozenset(
-    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter", "opencode-go", "opencode"}
+    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter", "opencode-go", "opencode", "deepseek"}
 )
 
 # Default base URLs for local model providers and OpenRouter
@@ -108,6 +108,7 @@ DEFAULT_BASE_URLS: dict[str, str] = {
     "openrouter": "https://openrouter.ai/api/v1",
     "opencode-go": "https://opencode.ai/zen/go/v1",
     "opencode": "https://opencode.ai/zen/go/v1",
+    "deepseek": "https://api.deepseek.com/v1",
 }
 
 
@@ -389,6 +390,28 @@ class PydanticAIClient:
                 )
             openai_client = AsyncOpenAI(
                 base_url=base_url or DEFAULT_BASE_URLS["opencode-go"],
+                api_key=api_key,
+                timeout=_local_timeout,
+            )
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
+            )
+
+        # DeepSeek: OpenAI-compatible cloud provider, requires DEEPSEEK_API_KEY.
+        # Handled before the local-providers branch (which uses api_key="not-needed").
+        if prefix == "deepseek":
+            if not model_id:
+                raise RuntimeError(
+                    "DeepSeek requires an explicit model id, e.g. "
+                    "'deepseek:deepseek-v4-pro' or 'deepseek:deepseek-v4-flash'."
+                )
+            api_key = os.environ.get("DEEPSEEK_API_KEY")
+            if not api_key:
+                raise RuntimeError(
+                    "DEEPSEEK_API_KEY is not set. Add it to your .env to use deepseek:* models."
+                )
+            openai_client = AsyncOpenAI(
+                base_url=base_url or DEFAULT_BASE_URLS["deepseek"],
                 api_key=api_key,
                 timeout=_local_timeout,
             )
