@@ -167,14 +167,22 @@ the opposite sign. Respect the caps below. Long MUST offset short — never let 
 
 ## pmm_mister config — ONE per leg (`controller_type="generic"`, `controller_name="pmm_mister"`)
 Per leg set: `connector_name`, `trading_pair` (UPPERCASE `XYZ:<LEG>-USD`), `total_amount_quote` (that
-leg's notional from the routine), `portfolio_allocation` 0.2, `position_mode="ONEWAY"`,
+leg's notional from the routine), `portfolio_allocation` 0.5, `position_mode="ONEWAY"`,
 **`position_side="BUY"` (LONG leg) or `"SELL"` (SHORT leg)** — this is how the leg holds its
 funding-favorable directional lean while MMing, `leverage` ≤ `leverage_cap` & ≤ market max,
-`buy_spreads`/`sell_spreads` (from `buy_spread_bps`/`sell_spread_bps`, e.g. `"0.0005,0.001"`),
-`buy_amounts_pct`/`sell_amounts_pct` (per-level size distribution, e.g. `"1,1"`),
+`buy_spreads`/`sell_spreads` (from `buy_spread_bps`/`sell_spread_bps`, e.g. `"0.0005"` — a SINGLE level),
+`buy_amounts_pct`/`sell_amounts_pct` (per-level size distribution, single level → `"1"`),
 `take_profit` (`take_profit_bps`/1e4, ≥0.0004), `target_base_pct`/`min_base_pct`/`max_base_pct` leaned
-toward the lean side (e.g. long leg 0.7/0.5/0.9, short leg 0.3/0.1/0.5), `max_active_executors_by_level` 2,
+toward the lean side (e.g. long leg 0.7/0.5/0.9, short leg 0.3/0.1/0.5), `max_active_executors_by_level` 1,
 `open_order_type`=3, `take_profit_order_type`=3, `global_sl_enabled`=true, `global_stop_loss`=0.02.
+
+**MIN-NOTIONAL FLOOR (mandatory sizing check).** Every HIP-3 market enforces a per-order minimum notional
+(e.g. `XYZ:CL-USD` = **$10**). The per-order size ≈ `leg_notional × portfolio_allocation ÷ (levels × 2 sides)`,
+and base-lot quantization can round it DOWN — so an order sized right at the floor intermittently fails with
+`ValueError: ... lower than minimum notional size N`. Size so each order clears the floor with margin (target
+≥ 2× the minimum). On a small account this means **one spread level per side + `portfolio_allocation` ≥ 0.5**
+(NOT the multi-level split, which fragments each leg into sub-minimum orders). If the routine's per-leg notional
+is too small to place even one order ≥ the market minimum, HOLD that leg and alert — do not spam failed orders.
 These same knobs — `buy_spreads`/`sell_spreads`, `*_amounts_pct`, `take_profit`, `target/min/max_base_pct`,
 `total_amount_quote` — are exactly the levers the **Delta-neutral INDUCTION** block re-tunes to steer the
 book back to neutral (there is no market-order hedge). On error: journal → `manage_controllers(action="describe",
