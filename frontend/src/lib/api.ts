@@ -272,6 +272,21 @@ export interface TradingRulesResponse {
   rules: TradingRule[];
 }
 
+export interface Ticker {
+  trading_pair: string;
+  price: number;
+  base_volume: number;
+  quote_volume: number;
+  /** 24h volume in USD; null when the quote asset couldn't be priced. */
+  usd_volume: number | null;
+}
+
+export interface TickersResponse {
+  connector: string;
+  tickers: Ticker[];
+  updated_at: number | null;
+}
+
 // ── Deploy Bot ──
 
 export interface ControllerConfigSummary {
@@ -936,6 +951,11 @@ export const api = {
   getTradingRules: (server: string, connector: string) =>
     apiFetch<TradingRulesResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/trading-rules?connector=${encodeURIComponent(connector)}`,
+    ),
+
+  getTickers: (server: string, connector: string) =>
+    apiFetch<TickersResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/tickers?connector=${encodeURIComponent(connector)}`,
     ),
 
   getOrderBook: (

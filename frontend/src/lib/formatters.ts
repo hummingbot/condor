@@ -67,6 +67,18 @@ export function formatVolume(val: number) {
   return formatCurrencyVolume(val);
 }
 
+/**
+ * Compact volume with a billions tier — 24h exchange volumes routinely exceed $1B,
+ * where `formatCurrencyVolume` would render an unreadable "2400.0M".
+ */
+export function formatCompactVolume(val: number, symbol = "$"): string {
+  const abs = Math.abs(val);
+  if (abs >= 1_000_000_000) return symbol + (val / 1_000_000_000).toFixed(2) + "B";
+  if (abs >= 1_000_000) return symbol + (val / 1_000_000).toFixed(1) + "M";
+  if (abs >= 1_000) return symbol + (val / 1_000).toFixed(1) + "K";
+  return symbol + val.toFixed(0);
+}
+
 export function formatPnl(val: number) {
   return formatCurrencyPnl(val);
 }

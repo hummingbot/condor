@@ -9,6 +9,7 @@ import {
   Copy,
   Grid3X3,
   Layers,
+  List,
   Loader2,
   Rocket,
   Settings2,
@@ -21,6 +22,7 @@ import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
 import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
+import { MarketsPanel } from "@/components/market/MarketsPanel";
 import { TradeChart } from "@/components/trade/TradeChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
@@ -114,7 +116,7 @@ export function CreateExecutor() {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const [successInfo, setSuccessInfo] = useState<{ id: string; type: ExecutorType; connector: string; pair: string } | null>(null);
-  const [rightPanel, setRightPanel] = useState<"config" | "depth">("config");
+  const [rightPanel, setRightPanel] = useState<"config" | "depth" | "markets">("config");
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
@@ -522,6 +524,17 @@ export function CreateExecutor() {
               <BarChart3 className="h-3.5 w-3.5" />
               Data
             </button>
+            <button
+              onClick={() => setRightPanel("markets")}
+              className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
+                rightPanel === "markets"
+                  ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              <List className="h-3.5 w-3.5" />
+              Markets
+            </button>
           </div>
 
           {rightPanel === "config" ? (
@@ -583,8 +596,15 @@ export function CreateExecutor() {
                 </button>
               </div>
             </>
-          ) : (
+          ) : rightPanel === "depth" ? (
             <MarketDepthPanel server={server} connector={connector} pair={pair} />
+          ) : (
+            <MarketsPanel
+              server={server}
+              connector={connector}
+              pair={pair}
+              onSelectPair={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
+            />
           )}
         </div>
       </div>
