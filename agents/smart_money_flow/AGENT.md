@@ -3,7 +3,7 @@ name: Smart-Money Flow
 description: Directional perp trader on Derive (`derive_perpetual`) — reads capital-flow & positioning (cross-market regime + Solana on-chain DeFi pulse) and takes LONG/SHORT/HOLD on liquid majors. Leverage enabled; bounded risk. Tested on Derive mainnet only.
 agent_key: opencode-go:deepseek-v4-flash
 tools: []
-when_to_consult: When the user wants a directional read on where capital is flowing in crypto markets, or wants to deploy the Smart-Money Flow trading agent (flow positioning on perps — any venue).
+when_to_consult: When the user wants a directional read on where capital is flowing in crypto markets, or wants to deploy the Smart-Money Flow trading agent (flow positioning on Derive perps).
 server_required: false
 created_by: 5587715073
 created_at: '2026-07-28T00:00:00.000000+00:00'

@@ -228,7 +228,7 @@ def synthesize(global_d, markets_d, trending_syms, solana_pulse, xrpl_amm) -> di
             flow = _clamp(flow + 0.1)
         assets_out.append({
             "symbol": sym,
-            "pair": f"{sym}-USDT",
+            "pair": f"{sym}-USDC",
             "flow_score": round(flow, 3),
             "volume_to_mcap": round(vol_mcap, 3),
             "price_change_24h": round(chg, 2),
