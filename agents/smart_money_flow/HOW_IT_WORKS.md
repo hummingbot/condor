@@ -128,6 +128,33 @@ From `default_config.risk_limits`:
 
 ---
 
+## LLM usage & cost (per tick)
+
+The agent **calls the LLM on every tick** — a fresh ACP session streams the
+strategy + live market data and returns a `LONG/SHORT/HOLD` decision (and may
+emit executor tool calls). There is no "skip if nothing changed": every tick
+costs tokens. The only free ticks are **risk-blocked / shutdown** ticks, which
+return before the LLM call.
+
+**Use a cheap model.** This agent is wired to `opencode-go:deepseek-v4-flash`.
+Its pricing (DeepSeek API): **$0.14 / 1M input (cache-miss)**, **$0.0028 / 1M
+input (cache-hit)**, **$0.28 / 1M output**.
+
+The per-tick prompt is ~90% fixed boilerplate (AGENT.md + strategy + skills
+index) that repeats every tick, so it hits the **prompt cache** (cache-hit =
+$0.0028/M). Only the small live-data suffix is cache-miss.
+
+**Estimated cost (deepseek-v4-flash, 300s cadence = 288 ticks/day):**
+- Typical (with prompt caching): **~$0.10 / day**
+- Worst case (no cache): **~$0.35 / day**
+- Scales with cadence: 600s → ~half; 60s → ~5× (~$0.5–1.75/day).
+
+The routine's data fetches (CoinGecko, Solana GeckoTerminal) are free code —
+the LLM cost is purely the decision step. Keep `frequency_sec` at 300s (or
+higher) and stay on the flash model to keep cost negligible.
+
+---
+
 ## Setup & run (Condor reality, verified)
 
 1. **Connect the exchange — web dashboard only.**
