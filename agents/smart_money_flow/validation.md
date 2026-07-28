@@ -60,3 +60,24 @@ If a true testnet gate is desired, it requires a Condor change: relax the
 `"testnet" not in c.lower()` filter in `condor/web/routes/settings.py` for
 validation connectors (or add a per-user "allow testnet" flag). Out of scope
 for this agent PR unless you want to propose it.
+
+## Operational note — Derive connector init (learned during live test)
+The `hummingbot-api` container's `derive_perpetual` connector builds its
+symbol map from Derive's live API on startup. If a bad pair is attempted
+(e.g. `SOL-USDT` instead of the correct `SOL-USDC`), the order-book websocket
+subscription throws `KeyError` in
+`derive_perpetual_api_order_book_data_source.py` and **every subsequent
+`create_executor` hangs** (no order placed, funds untouched) until the
+connector re-initializes.
+
+**Fix that worked:** `docker restart hummingbot-api` forces a fresh connector
+init against Derive's API, repopulating the symbol map so `SOL-USDC` resolves.
+After that, orders place normally.
+
+**Golden rules for Derive:**
+- Always use `SOL-USDC` / `ETH-USDC` / `BTC-USDC` (Derive perps are USDC-quoted;
+  `-USDT` does not exist and poisons the connector state).
+- If `create_executor` hangs with a `KeyError` in the Derive data source,
+  restart the `hummingbot-api` container before retrying.
+- Live test result (2026-07-28): LONG `SOL-USDC` placed + closed cleanly on
+  Derive mainnet, ~$0.02 fees, funds returned. Full lifecycle verified.
