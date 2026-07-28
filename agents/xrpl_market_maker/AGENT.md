@@ -55,8 +55,19 @@ Both are computable, and when they cross, the correct action is to stop quoting:
 
 | Bound | Set by | Meaning |
 |---|---|---|
-| **Floor** | expected adverse move between requotes ≈ `k × σ × √(tick_interval)` | Quote tighter and informed flow picks you off faster than you earn spread |
+| **Floor** | expected adverse move between requotes ≈ `k × σ_adjusted × √(tick_interval)` | Quote tighter and informed flow picks you off faster than you earn spread |
 | **Ceiling** | the AMM pool's trading fee | Quote wider and pathfinding sends the flow to the AMM — you never fill |
+
+`σ_adjusted` is **not** raw realized volatility. Intraday vol has a highly stable shape
+(split-half persistence r = 0.90 over 733 days), running ~0.78× the daily average around
+10:00 UTC and ~1.50× at the 13:00–15:00 UTC US open — a ~1.9× peak-to-trough swing. A flat
+σ therefore quotes systematically too tight at the open and too wide in the quiet hours.
+
+The routine corrects for this by **deseasonalising then re-seasonalising**: it divides the
+realized estimate by the mean clock multiplier over the *lookback* hours, then multiplies by
+the mean over the *forward* window the quote will be live for. Simply multiplying by the
+current hour would double-count, because the raw estimate already embeds the hours it was
+measured in — and it would understate the floor, which is the dangerous direction.
 
 **If floor ≥ ceiling, do not quote.** This is a real no-trade condition, not a
 judgement call. Slower ticks raise the floor, so tick frequency and spread viability are

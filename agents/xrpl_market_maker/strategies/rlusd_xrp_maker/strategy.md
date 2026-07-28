@@ -16,6 +16,7 @@ default_config:
   reference_pair: XRP-USDT
   levels_per_side: 3
   adverse_k: 1.0
+  use_vol_clock: true
   inventory_target_pct: 50
   inventory_band_pct: 15
   hedge_enabled: false
@@ -40,7 +41,7 @@ XRPL reserves, and bounded above by the AMM fee you must undercut to win order f
 Read every runtime value from `[CURRENT CONFIG]` — nothing below is hardcoded:
 
 `xrpl_pair` · `reference_connector` · `reference_pair` · `levels_per_side` ·
-`total_amount_quote` · `adverse_k` · `inventory_target_pct` · `inventory_band_pct` ·
+`total_amount_quote` · `adverse_k` · `use_vol_clock` · `inventory_target_pct` · `inventory_band_pct` ·
 `hedge_enabled` · `frequency_sec` · `bot_name`
 
 **`bot_name` selects the execution path.** Non-empty → controller mode (tune the bot,
@@ -60,8 +61,15 @@ manage_routines(action="run", name="xrpl_mm_quote_planner",
                         "tick_interval_sec": <frequency_sec>,
                         "levels_per_side": <from config>,
                         "total_amount_quote": <from config>,
-                        "adverse_k": <from config>})
+                        "adverse_k": <from config>,
+                        "use_vol_clock": <from config>})
 ```
+
+The `SPREAD FLOOR` block exposes the volatility-clock adjustment step by step —
+`realized_vol_raw` → `hour_mult_lookback` → `vol_deseasonalized` → `hour_mult_forward` →
+`vol_adjusted`. Read these when a floor looks surprising; a high `hour_mult_forward` near
+13:00–15:00 UTC (US open) legitimately widens the floor and may make quoting unviable for a
+few hours. That is correct behaviour, not a fault.
 
 **2. Check viability before anything else.** If the routine reports `viable: false`, the
 adverse-selection floor has met the AMM fee ceiling. **Cancel resting offers and HOLD.**

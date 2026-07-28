@@ -2,6 +2,8 @@
 import asyncio
 import logging
 import math
+import time
+from datetime import datetime, timezone
 
 import httpx
 from pydantic import BaseModel, Field
@@ -21,6 +23,17 @@ XRPL_RPC = "https://xrplcluster.com/"
 BASE_RESERVE_XRP = 1.0
 OWNER_RESERVE_XRP = 0.2
 
+# Intraday volatility clock. Split-half persistence r=0.90 across XRP/BTC/ETH/SOL,
+# 733 days of Bitget perp 1H bars. Values are vol relative to the daily average.
+# Trough 04:00-11:00 UTC (Asia afternoon / pre-Europe); peak 13:00-15:00 UTC (US open).
+HOUR_VOL_MULT = {
+    0: 1.03, 1: 1.10, 2: 0.95, 3: 0.89, 4: 0.82, 5: 0.85,
+    6: 0.82, 7: 0.82, 8: 0.91, 9: 0.83, 10: 0.78, 11: 0.82,
+    12: 0.92, 13: 1.28, 14: 1.50, 15: 1.40, 16: 1.16, 17: 1.21,
+    18: 1.07, 19: 1.04, 20: 1.02, 21: 0.97, 22: 0.97, 23: 0.82,
+}
+MS_PER_HOUR = 3_600_000
+
 
 class Config(BaseModel):
     """Plan maker quotes for an XRPL CLOB pair against a CEX reference price."""
@@ -36,6 +49,10 @@ class Config(BaseModel):
     adverse_k: float = Field(
         default=1.0, description="Multiplier on expected adverse move; higher = wider floor"
     )
+    use_vol_clock: bool = Field(
+        default=True,
+        description="Deseasonalise/re-seasonalise realized vol via the intraday clock",
+    )
     amm_fee_pct_fallback: float = Field(
         default=0.1, description="Assumed AMM fee %% if amm_info is unreachable"
     )
@@ -46,6 +63,28 @@ class Config(BaseModel):
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
+
+
+def _hour_mult_span(start_ms: int, end_ms: int) -> float:
+    """Duration-weighted mean of HOUR_VOL_MULT over [start_ms, end_ms).
+
+    Averaging across the span matters: a realized-vol lookback covers several hours,
+    and a long tick interval means the quote stays live across several more. Using
+    only the current hour would misprice both ends.
+    """
+    if end_ms <= start_ms:
+        hour = datetime.fromtimestamp(start_ms / 1000, timezone.utc).hour
+        return HOUR_VOL_MULT.get(hour, 1.0)
+    total = weight = 0.0
+    cursor = start_ms
+    while cursor < end_ms:
+        hour = datetime.fromtimestamp(cursor / 1000, timezone.utc).hour
+        seg_end = min((cursor // MS_PER_HOUR + 1) * MS_PER_HOUR, end_ms)
+        w = seg_end - cursor
+        total += HOUR_VOL_MULT.get(hour, 1.0) * w
+        weight += w
+        cursor = seg_end
+    return total / weight if weight else 1.0
 
 
 def _realized_vol_per_sec(closes: list, interval_sec: int) -> float:
@@ -134,13 +173,48 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     out.append(f"implied_{config.xrpl_pair}: {implied_xrpl_price:.6f}  (1 / XRP-USD)")
 
     # 2. Spread FLOOR — expected adverse move over one requote interval.
-    vol_per_sec = _realized_vol_per_sec(closes, 60)
-    adverse_move = config.adverse_k * vol_per_sec * math.sqrt(max(config.tick_interval_sec, 1))
+    #
+    # The raw realized-vol estimate already embeds whatever hours it was measured
+    # in, so multiplying it by the current hour's clock value would double-count the
+    # seasonal component. Deseasonalise first (divide by the lookback's mean
+    # multiplier), then re-seasonalise onto the window the quote will actually be
+    # live for (multiply by the forward window's mean multiplier).
+    vol_raw = _realized_vol_per_sec(closes, 60)
+    now_ms = int(time.time() * 1000)
+    look_start_ms = now_ms - len(closes) * 60_000
+    fwd_end_ms = now_ms + max(config.tick_interval_sec, 1) * 1000
+
+    if config.use_vol_clock:
+        mult_look = _hour_mult_span(look_start_ms, now_ms)
+        mult_fwd = _hour_mult_span(now_ms, fwd_end_ms)
+        vol_deseason = vol_raw / mult_look if mult_look > 0 else vol_raw
+        vol_adj = vol_deseason * mult_fwd
+    else:
+        mult_look = mult_fwd = 1.0
+        vol_deseason = vol_adj = vol_raw
+
+    adverse_move = config.adverse_k * vol_adj * math.sqrt(max(config.tick_interval_sec, 1))
     floor_bps = adverse_move * 10_000
+
+    def _utc(ms: int) -> str:
+        return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime("%H:%M")
 
     out.append("")
     out.append("=== SPREAD FLOOR (adverse selection) ===")
-    out.append(f"realized_vol_1m: {vol_per_sec * math.sqrt(60) * 100:.4f}% per minute")
+    out.append(f"vol_clock_enabled: {str(config.use_vol_clock).lower()}")
+    out.append(f"realized_vol_raw: {vol_raw * math.sqrt(60) * 100:.4f}% per minute")
+    out.append(
+        f"hour_mult_lookback: {mult_look:.3f}  "
+        f"(UTC {_utc(look_start_ms)}-{_utc(now_ms)}, {len(closes)} min)"
+    )
+    out.append(
+        f"vol_deseasonalized: {vol_deseason * math.sqrt(60) * 100:.4f}% per minute"
+    )
+    out.append(
+        f"hour_mult_forward: {mult_fwd:.3f}  "
+        f"(UTC {_utc(now_ms)}-{_utc(fwd_end_ms)}, quote live window)"
+    )
+    out.append(f"vol_adjusted: {vol_adj * math.sqrt(60) * 100:.4f}% per minute")
     out.append(f"tick_interval_sec: {config.tick_interval_sec}")
     out.append(f"expected_adverse_move: {floor_bps:.2f} bps over one interval")
     out.append(f"spread_floor_bps: {floor_bps:.2f}  (per side, k={config.adverse_k})")
