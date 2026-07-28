@@ -30,7 +30,7 @@ type Phase =
 const STEP_LABEL: Record<ConnectStep, string> = {
   "switch-chain": "Approve the switch to Arbitrum One in your wallet…",
   "approve-agent": "Sign in your wallet to authorize the Condor agent wallet…",
-  "approve-builder": `Sign in your wallet to approve the ${BUILDER_FEE_BPS} bps builder fee — it goes to the not-for-profit Hummingbot Foundation to support Condor's maintenance…`,
+  "approve-builder": `Sign in your wallet to approve the Condor builder code (${BUILDER_FEE_BPS} bps — attribution only, no fee)…`,
 };
 
 // Both connectors are saved (in parallel) from the one agent approval. They're shown in this order,

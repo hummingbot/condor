@@ -26,15 +26,15 @@ import {
 } from "./evm";
 
 // ── Condor builder code ──
-// The 1 bps builder fee on trades goes to the not-for-profit Hummingbot Foundation to support
-// Condor's maintenance. These constants build the approveBuilderFee the user signs in their wallet
+// Builder-code attribution on trades goes to the operator's own address, at 0 fee (attribution
+// only, no charge). These constants build the approveBuilderFee the user signs in their wallet
 // (only the client can do this). The fee actually billed is hardcoded in the hummingbot connector
 // (FOUNDATION_BUILDER_FEE_TENTHS_BPS), which caps it — editing these here can't raise it.
 // BUILDER_ADDRESS must match the connector's builder; keep BUILDER_MAX_FEE_RATE >= the connector's
 // fee. (Not fetched: hummingbot-api doesn't expose these constants, and both change ~never.)
-export const BUILDER_ADDRESS = "0x10ba451e6439efc6a17dc20d21121aa838100705";
-export const BUILDER_FEE_BPS = 1; // UI label only ("approve the Condor builder code (1 bps)")
-export const BUILDER_MAX_FEE_RATE = "0.01%"; // 1 bps = 0.01%; the max the user authorizes on-chain
+export const BUILDER_ADDRESS = "0xf296195c1a97649131443b4d47d6327b7caaece5";
+export const BUILDER_FEE_BPS = 0; // UI label only ("approve the Condor builder code (0 bps)")
+export const BUILDER_MAX_FEE_RATE = "0%"; // the max the user authorizes on-chain (attribution only)
 
 // BUILDER_MAX_FEE_RATE expressed in tenths of a basis point (Hyperliquid's maxBuilderFee unit):
 // "0.01%" -> 10. Used to detect an existing approval so a returning user isn't asked to sign again.

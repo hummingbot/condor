@@ -19,15 +19,22 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# Single WEB_URL param: full URL including port if needed (e.g. http://myserver.com:8088)
-# Falls back to WEB_PORT for backward compat, then default 8088
+# WEB_URL is the public-facing URL used for generated links (e.g. Telegram login
+# links) and CORS — it does NOT determine the local bind port, since behind a
+# reverse proxy (e.g. https://example.com) the public port (443) and the local
+# uvicorn bind port (e.g. 8088) are different. WEB_PORT controls the bind port
+# explicitly; if unset, an explicit port embedded in WEB_URL is used for
+# backward compat (e.g. WEB_URL=http://myserver.com:8088 with no proxy);
+# otherwise it defaults to 8088.
 _web_url_raw = os.environ.get("WEB_URL", "").strip()
 _web_port_raw = os.environ.get("WEB_PORT", "").strip()
+_web_url_port = urlparse(_web_url_raw).port if _web_url_raw else None
 
-if _web_url_raw:
-    WEB_URL = _web_url_raw.rstrip("/")
-    _parsed = urlparse(WEB_URL)
-    WEB_PORT = _parsed.port or (443 if _parsed.scheme == "https" else 80)
+if _web_port_raw:
+    WEB_PORT = int(_web_port_raw)
+elif _web_url_port:
+    WEB_PORT = _web_url_port
 else:
-    WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
-    WEB_URL = f"http://localhost:{WEB_PORT}"
+    WEB_PORT = 8088
+
+WEB_URL = _web_url_raw.rstrip("/") if _web_url_raw else f"http://localhost:{WEB_PORT}"

@@ -66,24 +66,22 @@ async def web_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         "localhost" in WEB_URL or "127.0.0.1" in WEB_URL or "." not in _hostname
     )
 
+    # Always include the raw link as copyable text — some Telegram clients don't expose
+    # a reliable way to copy an inline button's URL (only the message text), so a
+    # button-only message can leave the user with nothing to paste into another browser
+    # (e.g. a mobile wallet's in-app browser).
+    text = (
+        f"🌐 *Web Dashboard*\n\n"
+        f"Open this link in your browser:\n`{url}`\n\n"
+        f"_Link valid for 5 minutes\\._"
+    )
     if is_localhost:
-        await update.message.reply_text(
-            f"🌐 *Web Dashboard*\n\n"
-            f"Open this link in your browser:\n`{url}`\n\n"
-            f"_Link valid for 5 minutes\\._",
-            parse_mode="MarkdownV2",
-        )
+        await update.message.reply_text(text, parse_mode="MarkdownV2")
     else:
         keyboard = InlineKeyboardMarkup(
             [[InlineKeyboardButton("🌐 Open Dashboard", url=url)]]
         )
-        await update.message.reply_text(
-            "🌐 *Web Dashboard*\n\n"
-            "Tap the button below to open the dashboard\\.\n"
-            "_Link valid for 5 minutes\\._",
-            reply_markup=keyboard,
-            parse_mode="MarkdownV2",
-        )
+        await update.message.reply_text(text, reply_markup=keyboard, parse_mode="MarkdownV2")
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
