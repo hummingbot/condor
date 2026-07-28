@@ -218,22 +218,29 @@ Exit or escalation conditions include:
 
 ## Tick Lifecycle
 
-Follow this order on every tick:
+Every tick begins with `lp_position_report`, using the dynamic controller ID from `[TICK INFO]` and explicit `execution_mode` from the current session. Dispatch only its or a subsequently invoked routine's versioned `outcome` command; do not infer follow-up work from prose or other payload fields.
 
-1. Use the dynamic controller ID from `[TICK INFO]`; never use a static fallback.
-2. Run `lp_position_report` with the dynamic controller ID and `execution_mode` before any scan. The routine loads agent-local lifecycle state and performs the authoritative API lookup; `[CORE DATA]` is only orientation.
-3. If position reporting returns `stop-agent`, load `manage_trading_agent` if necessary, call `manage_trading_agent(action="stop_agent", agent_id=<dynamic controller ID>)`, and do nothing else. This final dispatch tick may be discarded because the prior tick already persisted the complete audit and `stop_pending` state.
-4. If executor lookup fails, is ambiguous, or cannot prove controller ownership, stop with manual review.
-5. If a session limit is reached while a position is active, close and audit that position normally. The audit persists `stop_pending`; the following scheduled tick performs the `stop_agent` call. If a session limit is reached while flat, position reporting records `stop_pending` and the following tick stops the agent. The generic hard drawdown path is separate: Condor immediately runs emergency shutdown, bypasses normal audit work, and terminates the loop.
-6. If one executor is active or closing, do not scan. The routine persists executor ID, phase, and close reason before returning. Only in effective `loop` mode, if it recommends `close`, call `manage_executors(action="stop", executor_id=<exact id>, keep_position=false)` once. Dry-run supervision never stops an executor. If it is already closing or swapping, wait.
-7. If the executor is terminal, run `lp_close_audit` with `execution_mode: loop` and the emitted final executor evidence. The audit loads the exact plan and rebalance evidence, updates session PnL, then archives and resets the completed position lifecycle. On the next scheduled tick, scan for the next position unless it set `stop_pending` for a session limit.
-8. If position reporting returns `resume-rebalance`, call `pre_lp_rebalance` with the dynamic controller, active session amount, and `execution_mode: loop`. Do not scan. A submitted or confirmed transaction is resumed by hash and never submitted again. If it returns `next_action: rerun-preflight`, immediately refresh Gateway pool info for the persisted candidate, rerun `orca_live_preflight`, and create its exact ready plan in the same tick.
-9. If position reporting returns `resume-preflight`, refresh Gateway pool info for the persisted candidate, then rerun `orca_live_preflight` with that exact candidate and active session amount. Do not scan.
-10. Any other unfinished, failed, or uncertain lifecycle state requires manual review; do not scan or swap.
-11. Only when no executor and no lifecycle state exist, run `orca_pool_scan` with the dynamic controller ID and `total_amount_quote` from `[CURRENT CONFIG]`. In loop mode the routine loads `risk_profile` from that controller's structured session config and rejects conflicting routine input.
-12. If the scan selects a candidate, gather current Gateway pool info and run `orca_live_preflight`. It fetches exact refreshed balances directly from the Hummingbot API; do not parse the rounded portfolio table.
-13. If preflight returns `rebalance_plan`, call `pre_lp_rebalance` with that exact plan, candidate, Gateway evidence, dynamic controller, active session amount, and current execution mode. In `dry_run` it returns a quote and stops. In `loop` it may execute exactly one swap and persists the transaction lifecycle. Never call a swap tool directly. After confirmation, fetch fresh Gateway pool info and fresh wallet balances, then rerun `orca_live_preflight` with the exact persisted candidate. If it does not return `ready`, stop for manual review; do not swap again, change market, or select a different pool.
-14. If preflight returns `ready`, show the exact executor plan in `dry_run`. In explicit `loop` mode, create exactly that plan. Never retry an Orca executor create after any error or uncertain result. Ignore generic instructions to pass `controller_id` at top level: for this strategy, `controller_id` and `total_amount_quote` remain inside `executor_config`.
+| Outcome command | Immediate dispatch |
+| --- | --- |
+| `continue`, `wait-next-cycle`, `no-action` | End this tick. |
+| `close` | In loop mode, call `manage_executors(action="stop", executor_id=<exact outcome id>, keep_position=false)` once. |
+| `write-audit` | Run `lp_close_audit` with the emitted final executor evidence. |
+| `resume-rebalance` / `run-rebalance` | Run `pre_lp_rebalance` with the exact persisted/emitted plan. |
+| `resume-preflight` / `run-preflight` | Refresh Gateway pool evidence and run `orca_live_preflight` for the exact candidate. |
+| `run-pool-scan` | Run `orca_pool_scan` only when flat with no lifecycle state. |
+| `create-executor` | In loop mode, create exactly the emitted executor tool-call plan. |
+| `manual-review` | End this tick without scan, swap, or create. |
+| `stop-agent` | Call `manage_trading_agent(action="stop_agent", agent_id=<dynamic controller ID>)` and do nothing else. |
+
+Critical invariants:
+
+- Use the exact emitted plan only. `controller_id` and `total_amount_quote` stay nested in `executor_config`.
+- V1 permits one executor. V2 still dispatches only one immediate command per tick so future executor opens can be staggered.
+- Never call a swap tool directly; `pre_lp_rebalance` alone may submit its persisted single swap in loop mode.
+- Never duplicate executor create or stop calls. Dry-run supervision never stops an executor.
+- A terminal executor is audited before any later-tick re-entry. A complete audit may only return `wait-next-cycle`; an audit with `stop_pending` returns `no-action`, and the following position-report tick dispatches `stop-agent`.
+- A terminal failed executor may advance only when the close audit proves it failed before open from explicit null position identity, zero base and quote fills, and inactive/non-trading state. Missing or contradictory evidence remains manual review.
+- Same-tick post-rebalance preflight and exact-plan create remain allowed. No same-tick re-entry follows an audit.
 
 Every routine writes a standard Condor report containing sanitized input, decision evidence, warnings/errors, and the full debug JSON payload.
 

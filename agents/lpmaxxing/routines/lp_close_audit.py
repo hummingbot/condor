@@ -1,5 +1,4 @@
 import asyncio
-import importlib
 import json
 import math
 import sys
@@ -13,13 +12,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from agents.lpmaxxing.routines import orca_live_preflight as _orca_live_preflight
-
-_orca_live_preflight = importlib.reload(_orca_live_preflight)
-load_lifecycle_state = _orca_live_preflight.load_lifecycle_state
-load_position_archive = _orca_live_preflight.load_position_archive
-commit_position_audit = _orca_live_preflight.commit_position_audit
-session_execution_mode = _orca_live_preflight.session_execution_mode
+from agents.lpmaxxing.routines._orca_contracts import NextAction, attach_outcome
+from agents.lpmaxxing.routines._orca_evidence import redact
+from agents.lpmaxxing.routines._orca_lifecycle import (
+    commit_position_audit,
+    load_lifecycle_state,
+    load_position_archive,
+    session_execution_mode,
+)
 
 try:
     from routines.base import RoutineResult
@@ -37,15 +37,6 @@ TERMINAL_STATES = {
     "CANCELED",
     "CANCELLED",
     "FAILED",
-}
-REDACTED_KEYS = {
-    "privatekey",
-    "secret",
-    "password",
-    "apikey",
-    "accesstoken",
-    "walletaddress",
-    "owneraddress",
 }
 
 
@@ -144,28 +135,6 @@ def _datetime(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
-def _sanitize(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): (
-                "[redacted]"
-                if "".join(
-                    character for character in str(key).lower() if character.isalnum()
-                )
-                in REDACTED_KEYS
-                else _sanitize(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple, set)):
-        return [_sanitize(item) for item in value]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    return str(value)
-
-
 def _executor(value: dict[str, Any]) -> dict[str, Any]:
     for key in ("executor", "data", "result", "item"):
         nested = value.get(key)
@@ -188,7 +157,78 @@ def _reconciled_pnl(executor: dict[str, Any]) -> dict[str, Any]:
         "filled_amount_quote": filled_quote,
         "raw_net_pnl_pct": raw_pct,
         "reconciled_pnl_ratio": ratio,
+        "pnl_reconciliation_status": (
+            "reconciled" if ratio is not None else "unavailable"
+        ),
     }
+
+
+def _failed_before_open(executor: dict[str, Any], custom: dict[str, Any]) -> bool:
+    state = str(executor.get("status") or "").strip().upper()
+    custom_state = str(custom.get("state") or "").strip().upper()
+    close_type = (
+        str(executor.get("close_type") or custom.get("close_type") or "")
+        .strip()
+        .upper()
+    )
+    last_error = str(executor.get("last_error") or "").lower()
+    failed = state in TERMINAL_STATES and (
+        state == "FAILED"
+        or custom_state == "FAILED"
+        or close_type == "FAILED"
+        or "position creation failed" in last_error
+    )
+    if not failed or "position_address" not in custom:
+        return False
+    if custom.get("position_address") is not None:
+        return False
+    if executor.get("position_address") not in (None, ""):
+        return False
+
+    base_fill_values = [
+        source.get("filled_amount_base")
+        for source in (executor, custom)
+        if "filled_amount_base" in source
+    ]
+    quote_fill_values = [
+        source.get("filled_amount_quote")
+        for source in (executor, custom)
+        if "filled_amount_quote" in source
+    ]
+    if any(
+        value not in (None, "") and _number(value) is None
+        for value in base_fill_values + quote_fill_values
+    ):
+        return False
+    base_fills = [_number(value) for value in base_fill_values]
+    quote_fills = [_number(value) for value in quote_fill_values]
+    base_fills = [value for value in base_fills if value is not None]
+    quote_fills = [value for value in quote_fills if value is not None]
+    zero_fills = (
+        bool(base_fills)
+        and bool(quote_fills)
+        and all(value == 0 for value in base_fills + quote_fills)
+    )
+    exposure_values = [
+        source.get(key)
+        for source in (executor, custom)
+        for key in ("base_amount", "quote_amount", "total_value_quote")
+        if key in source
+    ]
+    if any(
+        value not in (None, "") and _number(value) is None for value in exposure_values
+    ):
+        return False
+    exposure = [_number(value) for value in exposure_values]
+    no_reported_exposure = all(value in (None, 0) for value in exposure)
+    return (
+        zero_fills
+        and no_reported_exposure
+        and not executor.get("held_position_orders")
+        and not custom.get("held_position_orders")
+        and executor.get("is_active") is False
+        and executor.get("is_trading") is False
+    )
 
 
 def _evaluate(config: Config) -> dict[str, Any]:
@@ -215,6 +255,16 @@ def _evaluate(config: Config) -> dict[str, Any]:
     planned_controller = plan.get("controller_id")
     actual_pool = executor.get("pool_address") or deployed.get("pool_address")
     state = str(executor.get("status") or custom.get("state") or "UNKNOWN").upper()
+    close_reason = (
+        config.close_reason or executor.get("close_type") or custom.get("close_type")
+    )
+    failed_before_open = _failed_before_open(executor, custom)
+    failure_reported = (
+        state == "FAILED"
+        or str(custom.get("state") or "").strip().upper() == "FAILED"
+        or str(executor.get("close_type") or "").strip().upper() == "FAILED"
+        or "position creation failed" in str(executor.get("last_error") or "").lower()
+    )
     opened_at = _datetime(
         executor.get("created_at")
         or executor.get("timestamp")
@@ -236,13 +286,23 @@ def _evaluate(config: Config) -> dict[str, Any]:
 
     expected_base = _number(plan.get("base_amount"))
     expected_quote = _number(plan.get("quote_amount"))
-    actual_base = _first_number(
-        custom.get("initial_base_amount"), custom.get("deposited_base_amount")
+    actual_base = (
+        0.0
+        if failed_before_open
+        else _first_number(
+            custom.get("deposited_base_amount"), custom.get("initial_base_amount")
+        )
     )
-    actual_quote = _first_number(
-        custom.get("initial_quote_amount"), custom.get("deposited_quote_amount")
+    actual_quote = (
+        0.0
+        if failed_before_open
+        else _first_number(
+            custom.get("deposited_quote_amount"), custom.get("initial_quote_amount")
+        )
     )
     pnl = _reconciled_pnl(executor)
+    if failed_before_open:
+        pnl["pnl_reconciliation_status"] = "not_applicable_no_fill"
     fees = _first_number(
         executor.get("cum_fees_quote"),
         executor.get("fees_quote"),
@@ -260,9 +320,6 @@ def _evaluate(config: Config) -> dict[str, Any]:
     rent_refunded = _first_number(
         executor.get("position_rent_refunded"),
         custom.get("position_rent_refunded"),
-    )
-    close_reason = (
-        config.close_reason or executor.get("close_type") or custom.get("close_type")
     )
     rebalance_status = str(config.rebalance.get("status") or "NOT_REQUIRED").upper()
     rebalance_tx = config.rebalance.get("transaction_hash")
@@ -377,7 +434,7 @@ def _evaluate(config: Config) -> dict[str, Any]:
     )
 
     missing: list[str] = []
-    required = {
+    required: dict[str, Any] = {
         "controller_id": config.controller_id,
         "executor_controller_id": executor_controller,
         "executor_id": executor_id,
@@ -399,11 +456,14 @@ def _evaluate(config: Config) -> dict[str, Any]:
         "transaction_cost_quote": tx_cost,
         "position_rent_quote": rent,
         "rent_refunded_quote": rent_refunded,
-        "reconciled_pnl_ratio": pnl["reconciled_pnl_ratio"],
     }
+    if not failed_before_open:
+        required["reconciled_pnl_ratio"] = pnl["reconciled_pnl_ratio"]
     for name, value in required.items():
         if value in (None, ""):
             missing.append(name)
+    if failure_reported and not failed_before_open:
+        missing.append("failed_executor_not_proven_pre_open")
     if rebalance_status == "CONFIRMED":
         for name, value in {
             "rebalance_transaction_hash": rebalance_tx,
@@ -431,7 +491,11 @@ def _evaluate(config: Config) -> dict[str, Any]:
             f"executor pool '{actual_pool}' does not match planned pool '{planned_pool}'"
         )
         missing.append("pool_match")
-    if state == "FAILED":
+    if failed_before_open:
+        warnings.append(
+            "executor failed before opening a position; zero fills and inactive state were explicitly verified"
+        )
+    elif failure_reported:
         warnings.append("executor finished in FAILED state")
 
     return {
@@ -453,6 +517,22 @@ def _evaluate(config: Config) -> dict[str, Any]:
                 round(duration_minutes, 2) if duration_minutes is not None else None
             ),
             "close_reason": close_reason,
+            **(
+                {
+                    "terminal_outcome": (
+                        "failed_before_open"
+                        if failed_before_open
+                        else "failed_after_open_or_unknown"
+                    ),
+                    "position_opened": (
+                        False
+                        if failed_before_open
+                        else (True if custom.get("position_address") else None)
+                    ),
+                }
+                if failure_reported
+                else {}
+            ),
         },
         "deposits": {
             "planned_base": expected_base,
@@ -492,13 +572,24 @@ def _evaluate(config: Config) -> dict[str, Any]:
             "preset": config.preset,
             "terminal_state": state,
             "close_reason": close_reason,
+            **(
+                {
+                    "terminal_outcome": (
+                        "failed_before_open"
+                        if failed_before_open
+                        else "failed_after_open_or_unknown"
+                    )
+                }
+                if failure_reported
+                else {}
+            ),
             "net_pnl_quote": pnl["net_pnl_quote"],
             "reconciled_pnl_ratio": pnl["reconciled_pnl_ratio"],
             "rebalance_status": rebalance_status,
         },
         "missing_fields": sorted(set(missing)),
         "warnings": warnings,
-        "source_evidence": _sanitize(executor),
+        "source_evidence": redact(executor),
     }
 
 
@@ -580,6 +671,58 @@ async def _save_report(payload: dict[str, Any]) -> None:
         await builder.save()
     except Exception:
         return
+
+
+def _outcome(
+    payload: dict[str, Any], lifecycle_state: dict[str, Any]
+) -> dict[str, Any]:
+    session_status = (payload.get("session_commit") or {}).get("session_status")
+    if payload.get("audit_status") != "complete" or session_status == "manual_review":
+        action = NextAction.MANUAL_REVIEW
+    elif session_status == "stop_pending":
+        # Position reporting dispatches the deliberately delayed stop on its next tick.
+        action = NextAction.NO_ACTION
+    elif not session_status:
+        action = NextAction.NO_ACTION
+    else:
+        action = NextAction.WAIT_NEXT_CYCLE
+    executor_id = (payload.get("identity") or {}).get(
+        "executor_id"
+    ) or lifecycle_state.get("executor_id")
+    arguments = (
+        {"controller_id": payload.get("identity", {}).get("controller_id")}
+        if action == NextAction.MANUAL_REVIEW
+        else {}
+    )
+    return attach_outcome(
+        payload,
+        routine="lp_close_audit",
+        next_action=action,
+        reason=str(payload.get("audit_status") or "unknown"),
+        arguments=arguments,
+        mutation={
+            "audit_status": payload.get("audit_status"),
+            "session_status": session_status,
+        },
+        position_number=lifecycle_state.get("position_number"),
+        executor_id=str(executor_id) if executor_id else None,
+    )
+
+
+async def _finish(
+    payload: dict[str, Any], lifecycle_state: dict[str, Any]
+) -> RoutineResult:
+    _outcome(payload, lifecycle_state)
+    payload = redact(payload, datetime_iso=False)
+    await _save_report(payload)
+    return RoutineResult(
+        text=_format(payload)
+        + "\n```json\n"
+        + json.dumps(payload, indent=2, sort_keys=True, default=str)
+        + "\n```",
+        table_data=_rows(payload["performance"]),
+        table_columns=["Field", "Value"],
+    )
 
 
 async def run(config: Config, context: Any) -> RoutineResult:
@@ -667,6 +810,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
             "net_pnl_quote",
             "filled_amount_quote",
             "reconciled_pnl_ratio",
+            "failed_executor_not_proven_pre_open",
             "close_reason",
             "preset",
             "planned_base_amount",
@@ -692,7 +836,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
             payload["audit_status"] = "complete"
             try:
                 payload["session_commit"] = commit_position_audit(
-                    config.controller_id, _sanitize(payload)
+                    config.controller_id, redact(payload)
                 )
             except Exception as exc:
                 payload["audit_status"] = "partial"
@@ -702,7 +846,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
                 payload["warnings"].append(
                     f"lifecycle state persistence failed: {type(exc).__name__}: {exc}"
                 )
-    payload["input_config"] = _sanitize(config.model_dump(mode="json"))
+    payload["input_config"] = redact(config.model_dump(mode="json"))
     if "lifecycle_not_finalized" in payload["missing_fields"]:
         payload["agent_prompt_summary"] = (
             "Close audit could not prove terminal lifecycle identity; manual review is required and the state remains open."
@@ -725,15 +869,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
         payload["agent_prompt_summary"] = (
             f"Close audit is partial; missing: {', '.join(payload['missing_fields'])}. The session remains blocked."
         )
-    await _save_report(payload)
-    return RoutineResult(
-        text=_format(payload)
-        + "\n```json\n"
-        + json.dumps(payload, indent=2, sort_keys=True, default=str)
-        + "\n```",
-        table_data=_rows(payload["performance"]),
-        table_columns=["Field", "Value"],
-    )
+    return await _finish(payload, lifecycle_state)
 
 
 def _self_check() -> None:
@@ -801,7 +937,7 @@ def _self_check() -> None:
     )
     assert "rebalance_actual_quote_input" in quote_only_rebalance["missing_fields"]
     assert "rebalance_actual_base_output" in quote_only_rebalance["missing_fields"]
-    assert _sanitize({"walletAddress": "secret"})["walletAddress"] == "[redacted]"
+    assert redact({"walletAddress": "secret"})["walletAddress"] == "[redacted]"
 
 
 if __name__ == "__main__":

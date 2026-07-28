@@ -1,5 +1,4 @@
 import asyncio
-import importlib
 import json
 import logging
 import math
@@ -15,19 +14,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from agents.lpmaxxing.routines import orca_live_preflight as _orca_live_preflight
+from agents.lpmaxxing.routines import _orca_evidence as evidence
+from agents.lpmaxxing.routines import _orca_policy as policy
+from agents.lpmaxxing.routines._orca_contracts import NextAction, attach_outcome
+from agents.lpmaxxing.routines._orca_lifecycle import (
+    clear_lifecycle_state,
+    lifecycle_lock,
+    load_lifecycle_state,
+    load_session_state,
+    save_lifecycle_state,
+    session_execution_mode,
+    session_risk_profile,
+    session_total_amount_quote,
+)
 
-_orca_live_preflight = importlib.reload(_orca_live_preflight)
-ensure_gateway_tokens = _orca_live_preflight.ensure_gateway_tokens
-candidate_is_fresh = _orca_live_preflight.candidate_is_fresh
-clear_lifecycle_state = _orca_live_preflight.clear_lifecycle_state
-lifecycle_lock = _orca_live_preflight.lifecycle_lock
-load_lifecycle_state = _orca_live_preflight.load_lifecycle_state
-load_session_state = _orca_live_preflight.load_session_state
-save_lifecycle_state = _orca_live_preflight.save_lifecycle_state
-session_execution_mode = _orca_live_preflight.session_execution_mode
-session_risk_profile = _orca_live_preflight.session_risk_profile
-session_total_amount_quote = _orca_live_preflight.session_total_amount_quote
+try:
+    from routines.base import RoutineResult
+except ModuleNotFoundError:
+    from routines.base import RoutineResult
 
 CATEGORY = "Orca LP Agent"
 logger = logging.getLogger(__name__)
@@ -119,34 +123,6 @@ def _find_text(value: Any, keys: set[str]) -> str | None:
     return None
 
 
-def _sanitize(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            str(key): (
-                "[redacted]"
-                if "".join(
-                    character for character in str(key).lower() if character.isalnum()
-                )
-                in {
-                    "privatekey",
-                    "secret",
-                    "password",
-                    "apikey",
-                    "accesstoken",
-                    "walletaddress",
-                    "owneraddress",
-                }
-                else _sanitize(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, (list, tuple, set)):
-        return [_sanitize(item) for item in value]
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    return str(value)
-
-
 async def _client(context: Any) -> Any:
     from config_manager import get_client
 
@@ -155,62 +131,6 @@ async def _client(context: Any) -> Any:
     if not client:
         raise RuntimeError("no Hummingbot API server available")
     return client
-
-
-async def _wallet_balances(
-    client: Any, account_name: str, connector_name: str
-) -> list[dict[str, Any]]:
-    balances = await client.portfolio.get_state(
-        account_names=[account_name],
-        connector_names=[connector_name],
-        refresh=True,
-    )
-    account = balances.get(account_name)
-    if not isinstance(account, dict):
-        raise ValueError("scoped account balances were not returned")
-    rows = account.get(connector_name)
-    if not isinstance(rows, list):
-        raise ValueError("scoped connector balances were not returned")
-    normalized = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        available = None
-        for key in ("available_units", "available", "available_balance", "units"):
-            if key in row:
-                available = _number(row.get(key))
-                if available is not None:
-                    break
-        symbol = _text(row.get("token") or row.get("symbol"))
-        if symbol and available is not None:
-            normalized.append(
-                {
-                    "symbol": symbol,
-                    "mint": _text(
-                        row.get("mint")
-                        or row.get("token_address")
-                        or row.get("address")
-                    ),
-                    "available": available,
-                }
-            )
-    return normalized
-
-
-def _balance(
-    balances: list[dict[str, Any]], symbol: str, mint: str = ""
-) -> float | None:
-    mint_metadata_present = any(_text(row.get("mint")) for row in balances)
-    symbol_matches = []
-    for row in balances:
-        if mint and _text(row.get("mint")) == mint:
-            return _number(row.get("available"))
-        if _text(row.get("symbol")).upper() == symbol.upper():
-            symbol_matches.append(_number(row.get("available")))
-    if mint and mint_metadata_present:
-        return None
-    matches = [value for value in symbol_matches if value is not None]
-    return matches[0] if len(matches) == 1 else None
 
 
 def _quote_pairs(plan: dict[str, Any]) -> list[str]:
@@ -322,17 +242,17 @@ def _inventory_evidence(
     balances: list[dict[str, Any]], plan: dict[str, Any]
 ) -> dict[str, Any]:
     return {
-        "base": _balance(
+        "base": evidence.balance_for_symbol(
             balances,
             _text(plan.get("base_symbol")),
             _text(plan.get("base_mint")),
         ),
-        "quote": _balance(
+        "quote": evidence.balance_for_symbol(
             balances,
             _text(plan.get("quote_symbol")),
             _text(plan.get("quote_mint")),
         ),
-        "sol": _balance(balances, "SOL"),
+        "sol": evidence.balance_for_symbol(balances, "SOL"),
     }
 
 
@@ -379,7 +299,7 @@ async def _wait_for_inventory(
         attempts += 1
         try:
             balances = await asyncio.wait_for(
-                _wallet_balances(
+                evidence.fetch_wallet_balances(
                     client, config.wallet_account_name, config.wallet_connector_name
                 ),
                 timeout=max(0.1, remaining),
@@ -460,26 +380,98 @@ async def _save_report(payload: dict[str, Any]) -> None:
         logger.exception("Failed to save pre-LP rebalance report")
 
 
-async def _finish(payload: dict[str, Any]) -> str:
+def _outcome(payload: dict[str, Any]) -> dict[str, Any]:
+    next_action = str(payload.get("next_action") or "")
+    if next_action == "rescan":
+        action = NextAction.RUN_POOL_SCAN
+    elif next_action == "rerun-preflight":
+        action = NextAction.RUN_PREFLIGHT
+    elif next_action == "manual-review":
+        action = NextAction.MANUAL_REVIEW
+    elif payload.get("reason") in {
+        "rebalance_submission_uncertain",
+        "rebalance_not_submittable",
+        "rebalance_failed",
+        "swap_failed",
+    }:
+        action = NextAction.MANUAL_REVIEW
+    else:
+        action = NextAction.NO_ACTION
+    reason = str(payload.get("reason") or "unknown")
+    controller_id = str(payload.get("controller_id") or "")
+    if action == NextAction.RUN_POOL_SCAN:
+        arguments = {
+            "execution_mode": payload.get("execution_mode"),
+            "controller_id": controller_id,
+            "risk_profile": payload.get("risk_profile") or "yield_focused",
+            "total_amount_quote": payload.get("total_amount_quote"),
+        }
+    elif action == NextAction.RUN_PREFLIGHT:
+        arguments = {
+            "execution_mode": payload.get("execution_mode"),
+            "controller_id": controller_id,
+            "selected_candidate": payload.get("selected_candidate") or {},
+            "gateway_pool_info": payload.get("gateway_pool_info") or {},
+            "total_amount_quote": payload.get("total_amount_quote"),
+            "fetch_wallet_balances": True,
+            "wallet_account_name": payload.get("wallet_account_name"),
+            "wallet_connector_name": payload.get("wallet_connector_name"),
+        }
+    elif action == NextAction.MANUAL_REVIEW:
+        arguments = {"controller_id": controller_id}
+    else:
+        arguments = {}
+    if action in {NextAction.RUN_POOL_SCAN, NextAction.RUN_PREFLIGHT}:
+        missing = [
+            key
+            for key, value in arguments.items()
+            if key != "fetch_wallet_balances" and value in (None, "", {})
+        ]
+        if missing:
+            action = NextAction.MANUAL_REVIEW
+            reason = "incomplete-follow-up-dispatch: " + ", ".join(missing)
+            arguments = {"controller_id": controller_id}
+    return attach_outcome(
+        payload,
+        routine="pre_lp_rebalance",
+        next_action=action,
+        reason=reason,
+        arguments=arguments,
+        mutation={
+            "status": payload.get("status"),
+            "next_action": payload.get("next_action"),
+            "transaction_hash": payload.get("transaction_hash"),
+        },
+        position_number=payload.get("position_number"),
+    )
+
+
+async def _finish(payload: dict[str, Any]) -> RoutineResult:
     payload["timestamp"] = _utc_now()
     payload["agent_prompt_summary"] = (
         f"Pre-LP rebalance finished with {payload.get('status')} "
         f"({payload.get('reason')})."
     )
-    payload = _sanitize(payload)
+    payload = evidence.redact(payload, datetime_iso=False)
+    _outcome(payload)
     await _save_report(payload)
-    return (
-        _format(payload)
-        + "\n```json\n"
-        + json.dumps(payload, indent=2, sort_keys=True)
-        + "\n```"
+    return RoutineResult(
+        text=(
+            _format(payload)
+            + "\n```json\n"
+            + json.dumps(payload, indent=2, sort_keys=True)
+            + "\n```"
+        )
     )
 
 
-async def run(config: Config, context: Any) -> str:
+async def run(config: Config, context: Any) -> RoutineResult:
     payload: dict[str, Any] = {
         "execution_mode": config.execution_mode,
         "controller_id": config.controller_id,
+        "total_amount_quote": config.total_amount_quote,
+        "wallet_account_name": config.wallet_account_name,
+        "wallet_connector_name": config.wallet_connector_name,
         "status": "blocked",
         "reason": "not_evaluated",
         "rebalance_plan": {},
@@ -512,6 +504,7 @@ async def run(config: Config, context: Any) -> str:
             if config.execution_mode == "loop"
             else {}
         )
+        payload["position_number"] = state.get("position_number")
         phase = _text(state.get("phase"))
         if config.execution_mode == "loop" and phase in {
             "rebalance_submission_uncertain",
@@ -522,6 +515,13 @@ async def run(config: Config, context: Any) -> str:
             return await _finish(payload)
 
         candidate, gateway, plan, budget = _state_inputs(config, state)
+        payload["selected_candidate"] = candidate
+        payload["gateway_pool_info"] = gateway
+        payload["risk_profile"] = (
+            session_risk_profile(config.controller_id)
+            if config.execution_mode == "loop"
+            else _text(candidate.get("risk_profile"))
+        )
         payload["rebalance_plan"] = plan
         _validate_identity(candidate, gateway, plan)
         if _number(plan.get("total_amount_quote")) != budget:
@@ -534,7 +534,7 @@ async def run(config: Config, context: Any) -> str:
             profile_matches = _text(
                 candidate.get("risk_profile")
             ) == session_risk_profile(config.controller_id)
-            fresh = candidate_is_fresh(candidate)
+            fresh = policy.candidate_is_fresh(candidate)
             pristine = (
                 phase == "rebalance_required"
                 and rebalance_status.lower() == "required"
@@ -594,7 +594,7 @@ async def run(config: Config, context: Any) -> str:
         if not hasattr(client, "gateway_swap"):
             raise RuntimeError("Gateway swap API is unavailable")
         if config.execution_mode == "loop":
-            payload["token_registry"] = await ensure_gateway_tokens(
+            payload["token_registry"] = await evidence.ensure_gateway_tokens(
                 client,
                 config.network,
                 candidate,
@@ -684,7 +684,7 @@ async def run(config: Config, context: Any) -> str:
             )
             return await _finish(payload)
 
-        balances = await _wallet_balances(
+        balances = await evidence.fetch_wallet_balances(
             client, config.wallet_account_name, config.wallet_connector_name
         )
         inventory = _inventory_evidence(balances, plan)
@@ -805,7 +805,7 @@ async def run(config: Config, context: Any) -> str:
                         "quote_pair": quote_pair,
                         "quote_spend": quote_spend,
                         "base_amount": base_shortfall,
-                        "quote": _sanitize(quote_result),
+                        "quote": evidence.redact(quote_result, datetime_iso=False),
                     },
                 },
             )
@@ -845,7 +845,9 @@ async def run(config: Config, context: Any) -> str:
                         "rebalance": {
                             **(current.get("rebalance") or {}),
                             "status": "SUBMISSION_UNCERTAIN",
-                            "execute_result": _sanitize(execute_result),
+                            "execute_result": evidence.redact(
+                                execute_result, datetime_iso=False
+                            ),
                         },
                     },
                 )
@@ -863,7 +865,9 @@ async def run(config: Config, context: Any) -> str:
                         **(current.get("rebalance") or {}),
                         "status": "SUBMITTED",
                         "transaction_hash": transaction_hash,
-                        "execute_result": _sanitize(execute_result),
+                        "execute_result": evidence.redact(
+                            execute_result, datetime_iso=False
+                        ),
                     },
                 },
             )

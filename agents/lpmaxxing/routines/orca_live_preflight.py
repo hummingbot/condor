@@ -1,25 +1,23 @@
 import asyncio
-import fcntl
-import hashlib
 import json
 import math
 import re
 import sys
-from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from agents.lpmaxxing.routines import _orca_evidence as evidence
+from agents.lpmaxxing.routines import _orca_policy as orca_policy
 from agents.lpmaxxing.routines import orca_pool_scan
+from agents.lpmaxxing.routines._orca_contracts import NextAction, attach_outcome
 
 try:
     from routines.base import RoutineResult
@@ -29,8 +27,8 @@ except ModuleNotFoundError:
 
 
 CATEGORY = "Orca LP Agent"
-CANONICAL_USDC_MINT = orca_pool_scan.CANONICAL_USDC_MINT
-LIVE_PROFILES = orca_pool_scan.LIVE_PROFILES
+CANONICAL_USDC_MINT = orca_policy.CANONICAL_USDC_MINT
+LIVE_PROFILES = orca_policy.LIVE_PROFILES
 ACTIVE_EXECUTOR_STATES = {
     "RUNNING",
     "ACTIVE",
@@ -52,558 +50,21 @@ TERMINAL_EXECUTOR_STATES = {
 SESSION_SCHEMA_VERSION = 2
 
 
-def _session_dir(controller_id: str) -> Path | None:
-    from condor.agents.journal import resolve_agent_dirs
-
-    session_dir, _ = resolve_agent_dirs(controller_id)
-    return session_dir if session_dir is not None and session_dir.is_dir() else None
-
-
-def _state_path(controller_id: str) -> Path:
-    session_dir = _session_dir(controller_id)
-    if session_dir is None:
-        raise ValueError(f"no loop session found for controller_id '{controller_id}'")
-    return session_dir / "orca_lifecycle.json"
-
-
-def _session_config(controller_id: str) -> dict[str, Any]:
-    session_dir = _session_dir(controller_id)
-    if session_dir is None:
-        return {}
-    value = yaml.safe_load((session_dir / "config.yml").read_text()) or {}
-    if not isinstance(value, dict):
-        raise ValueError("current session config must be a YAML object")
-    return value
-
-
-def session_execution_mode(controller_id: str) -> str:
-    session_config = _session_config(controller_id)
-    if not session_config:
-        return "dry_run"
-    runtime_mode = _text(session_config.get("execution_mode")).lower()
-    match = re.search(
-        r"^\s*SESSION_MODE:\s*(dry_run|loop|run_once)\s*$",
-        str(session_config.get("trading_context") or ""),
-        re.MULTILINE | re.IGNORECASE,
-    )
-    if not match:
-        raise ValueError("SESSION_MODE is missing from the current session context")
-    requested_mode = match.group(1).lower()
-    if "run_once" in {runtime_mode, requested_mode}:
-        return "run_once"
-    return "loop" if runtime_mode == requested_mode == "loop" else "dry_run"
-
-
-def session_total_amount_quote(controller_id: str) -> float | None:
-    session_config = _session_config(controller_id)
-    return _number(session_config.get("total_amount_quote")) if session_config else None
-
-
-def session_risk_profile(controller_id: str) -> str:
-    session_config = _session_config(controller_id)
-    profile = (
-        _text(session_config.get("risk_profile"))
-        .lower()
-        .replace("-", "_")
-        .replace(" ", "_")
-    )
-    if profile not in LIVE_PROFILES:
-        raise ValueError(
-            "current session risk_profile must be one of "
-            + ", ".join(sorted(LIVE_PROFILES))
-        )
-    return profile
-
-
-def session_policies(controller_id: str) -> dict[str, float]:
-    session_config = _session_config(controller_id)
-    if not session_config:
-        return {}
-    context = str(session_config.get("trading_context") or "")
-    fields = {
-        "position_max_age_minutes": "POSITION_MAX_AGE_MINUTES",
-        "position_take_profit_net_pnl_ratio": "POSITION_TAKE_PROFIT_NET_PNL_RATIO",
-        "position_stop_loss_net_pnl_ratio": "POSITION_STOP_LOSS_NET_PNL_RATIO",
-        "session_max_age_minutes": "SESSION_MAX_AGE_MINUTES",
-        "session_take_profit_net_pnl_ratio": "SESSION_TAKE_PROFIT_NET_PNL_RATIO",
-        "session_stop_loss_net_pnl_ratio": "SESSION_STOP_LOSS_NET_PNL_RATIO",
-    }
-    policy = {}
-    for field, label in fields.items():
-        match = re.search(
-            rf"^\s*{label}:\s*([0-9]+(?:\.[0-9]+)?)\s*$",
-            context,
-            re.MULTILINE | re.IGNORECASE,
-        )
-        if not match:
-            raise ValueError(f"{label} is missing from the current session context")
-        value = _number(match.group(1))
-        if value is None or value < 0:
-            raise ValueError(f"{label} must be a non-negative number")
-        policy[field] = value
-    return policy
-
-
-def session_exit_policy(controller_id: str) -> dict[str, float]:
-    policy = session_policies(controller_id)
-    return {key: value for key, value in policy.items() if key.startswith("position_")}
-
-
-def _load_session_state(controller_id: str) -> dict[str, Any]:
-    path = _state_path(controller_id)
-    if not path.exists():
-        return {}
-    value = json.loads(path.read_text())
-    if not isinstance(value, dict):
-        raise ValueError("Orca lifecycle state must be a JSON object")
-    if value.get("schema_version") != SESSION_SCHEMA_VERSION:
-        raise ValueError("legacy Orca lifecycle state cannot be resumed")
-    if value.get("controller_id") != controller_id:
-        raise ValueError("Orca session-state controller mismatch")
-    if not isinstance(value.get("terms"), dict):
-        raise ValueError("Orca session-state terms are missing")
-    if value.get("active_position") is not None and not isinstance(
-        value.get("active_position"), dict
-    ):
-        raise ValueError("Orca active-position state must be an object or null")
-    return value
-
-
-def _save_session_state(controller_id: str, state: dict[str, Any]) -> None:
-    path = _state_path(controller_id)
-    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
-    value = {**state, "updated_at": _utc_now()}
-    try:
-        temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-        temporary.replace(path)
-    finally:
-        if temporary.exists():
-            temporary.unlink()
-
-
-def ensure_session_state(controller_id: str) -> dict[str, Any]:
-    existing = _load_session_state(controller_id)
-    policy = session_policies(controller_id)
-    expected_terms = {
-        "total_amount_quote": session_total_amount_quote(controller_id),
-        "risk_profile": session_risk_profile(controller_id),
-        "frequency_sec": _number(_session_config(controller_id).get("frequency_sec")),
-        **policy,
-    }
-    if expected_terms["total_amount_quote"] is None:
-        raise ValueError("current session total_amount_quote is missing")
-    if expected_terms["frequency_sec"] is None or expected_terms["frequency_sec"] <= 0:
-        raise ValueError("current session frequency_sec must be positive")
-    if existing:
-        if existing.get("terms") != expected_terms:
-            raise ValueError("current Orca session terms differ from persisted terms")
-        return existing
-    now = _utc_now()
-    state = {
-        "schema_version": SESSION_SCHEMA_VERSION,
-        "controller_id": controller_id,
-        "session_status": "running",
-        "session_started_at": now,
-        "created_at": now,
-        "updated_at": now,
-        "terms": expected_terms,
-        "completed": {
-            "position_count": 0,
-            "net_pnl_quote": 0.0,
-            "executor_ids": [],
-            "archive_files": [],
-        },
-        "active_position": None,
-        "global_stop": None,
-        "manual_review": None,
-    }
-    _save_session_state(controller_id, state)
-    return state
-
-
-def load_session_state(controller_id: str) -> dict[str, Any]:
-    return ensure_session_state(controller_id)
-
-
-def load_lifecycle_state(controller_id: str) -> dict[str, Any]:
-    session_state = _load_session_state(controller_id)
-    if not session_state:
-        return {}
-    return session_state.get("active_position") or {}
-
-
-def save_lifecycle_state(controller_id: str, state: dict[str, Any]) -> None:
-    session_state = ensure_session_state(controller_id)
-    status = _text(session_state.get("session_status"))
-    if status not in {"running", "stopping"}:
-        raise ValueError(f"Orca session is not writable while {status or 'unknown'}")
-    current = session_state.get("active_position") or {}
-    next_state = dict(state)
-    if next_state:
-        if next_state.get("controller_id") != controller_id:
-            raise ValueError("active-position controller mismatch")
-        next_state.setdefault(
-            "position_number",
-            current.get("position_number")
-            or int((session_state.get("completed") or {}).get("position_count") or 0)
-            + 1,
-        )
-        next_state.setdefault(
-            "position_started_at", current.get("position_started_at") or _utc_now()
-        )
-    _save_session_state(
-        controller_id, {**session_state, "active_position": next_state or None}
-    )
-
-
-def clear_lifecycle_state(controller_id: str) -> None:
-    session_state = ensure_session_state(controller_id)
-    _save_session_state(controller_id, {**session_state, "active_position": None})
-
-
-def session_stop_trigger(
-    session_state: dict[str, Any],
-    now: datetime,
-    active_net_pnl_quote: float | None = 0.0,
-) -> dict[str, Any] | None:
-    terms = session_state.get("terms") or {}
-    completed = session_state.get("completed") or {}
-    started_at = _parse_timestamp(session_state.get("session_started_at"))
-    budget = _number(terms.get("total_amount_quote"))
-    completed_pnl = _number(completed.get("net_pnl_quote"))
-    if started_at is None or budget is None or budget <= 0 or completed_pnl is None:
-        raise ValueError("Orca session stop metrics are incomplete")
-    age_minutes = max(0.0, (now - started_at).total_seconds() / 60.0)
-    net_pnl_quote = (
-        completed_pnl + active_net_pnl_quote
-        if active_net_pnl_quote is not None
-        else None
-    )
-    net_pnl_ratio = net_pnl_quote / budget if net_pnl_quote is not None else None
-    observed = {
-        "session_age_minutes": round(age_minutes, 6),
-        "session_net_pnl_quote": (
-            round(net_pnl_quote, 12) if net_pnl_quote is not None else None
-        ),
-        "session_net_pnl_ratio": (
-            round(net_pnl_ratio, 12) if net_pnl_ratio is not None else None
-        ),
-        "completed_net_pnl_quote": completed_pnl,
-        "active_net_pnl_quote": active_net_pnl_quote,
-        "total_amount_quote": budget,
-    }
-    max_age = _number(terms.get("session_max_age_minutes"))
-    take_profit = _number(terms.get("session_take_profit_net_pnl_ratio"))
-    stop_loss = _number(terms.get("session_stop_loss_net_pnl_ratio"))
-    if max_age is not None and age_minutes >= max_age:
-        return {"reason": "session_max_age_reached", "observed": observed}
-    if (
-        take_profit is not None
-        and net_pnl_ratio is not None
-        and net_pnl_ratio >= take_profit
-    ):
-        return {"reason": "session_take_profit_reached", "observed": observed}
-    if (
-        stop_loss is not None
-        and net_pnl_ratio is not None
-        and net_pnl_ratio <= -abs(stop_loss)
-    ):
-        return {"reason": "session_stop_loss_reached", "observed": observed}
-    return None
-
-
-def mark_session_stop(
-    controller_id: str,
-    trigger: dict[str, Any],
-    *,
-    active_position: bool,
-) -> dict[str, Any]:
-    session_state = ensure_session_state(controller_id)
-    existing = session_state.get("global_stop")
-    global_stop = existing or {**trigger, "triggered_at": _utc_now()}
-    next_state = {
-        **session_state,
-        "session_status": "stopping" if active_position else "stop_pending",
-        "global_stop": global_stop,
-    }
-    _save_session_state(controller_id, next_state)
-    return next_state
-
-
-def resume_session_cycle(
-    controller_id: str, now: datetime | None = None
-) -> dict[str, Any]:
-    session_state = ensure_session_state(controller_id)
-    if session_state.get("session_status") != "cycle_complete":
-        return session_state
-    if session_state.get("active_position"):
-        raise ValueError("completed Orca cycle still has an active position")
-    resume_at = _parse_timestamp(session_state.get("cycle_resume_at"))
-    current = now or datetime.now(timezone.utc)
-    if resume_at is None or current < resume_at:
-        return session_state
-    next_state = {
-        **session_state,
-        "session_status": "running",
-        "cycle_resume_at": None,
-    }
-    _save_session_state(controller_id, next_state)
-    return next_state
-
-
-def _archive_dir(controller_id: str) -> Path:
-    session_dir = _session_dir(controller_id)
-    if session_dir is None:
-        raise ValueError(f"no loop session found for controller_id '{controller_id}'")
-    return session_dir / "orca_positions"
-
-
-def _audit_fingerprint(
-    audit_payload: dict[str, Any],
-    position_number: int,
-    executor_id: str,
-    net_pnl_quote: float | None,
-) -> str:
-    identity = audit_payload.get("identity") or {}
-    lifecycle = audit_payload.get("lifecycle") or {}
-    deposits = audit_payload.get("deposits") or {}
-    performance = audit_payload.get("performance") or {}
-    rebalance = audit_payload.get("rebalance") or {}
-    critical = {
-        "controller_id": identity.get("controller_id"),
-        "executor_id": executor_id,
-        "position_number": position_number,
-        "pool_address": identity.get("pool_address"),
-        "trading_pair": identity.get("trading_pair"),
-        "preset": identity.get("preset"),
-        "terminal_state": identity.get("terminal_state"),
-        "close_reason": lifecycle.get("close_reason"),
-        "planned_base": deposits.get("planned_base"),
-        "planned_quote": deposits.get("planned_quote"),
-        "net_pnl_quote": net_pnl_quote,
-        "filled_amount_quote": performance.get("filled_amount_quote"),
-        "reconciled_pnl_ratio": performance.get("reconciled_pnl_ratio"),
-        "net_pnl_after_rebalance_quote": performance.get(
-            "net_pnl_after_rebalance_quote"
-        ),
-        "rebalance_status": rebalance.get("status"),
-        "rebalance_transaction_hash": rebalance.get("transaction_hash"),
-        "rebalance_actual_quote_input": rebalance.get("actual_quote_input"),
-        "rebalance_actual_base_output": rebalance.get("actual_base_output"),
-    }
-    encoded = json.dumps(critical, separators=(",", ":"), sort_keys=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def load_position_archive(
-    controller_id: str, executor_id: str
-) -> dict[str, Any] | None:
-    wanted = _text(executor_id)
-    if not wanted:
-        return None
-    for path in sorted(_archive_dir(controller_id).glob("position_*.json")):
-        value = json.loads(path.read_text())
-        if value.get("executor_id") != wanted:
-            continue
-        expected_fingerprint = _audit_fingerprint(
-            value.get("audit") or {},
-            int(value.get("position_number") or 0),
-            wanted,
-            _number(value.get("net_pnl_quote")),
-        )
-        if (
-            value.get("schema_version") != SESSION_SCHEMA_VERSION
-            or value.get("controller_id") != controller_id
-            or value.get("commit_fingerprint") != expected_fingerprint
-        ):
-            raise ValueError("completed position archive is invalid")
-        return value
-    return None
-
-
-def commit_position_audit(
-    controller_id: str, audit_payload: dict[str, Any]
-) -> dict[str, Any]:
-    with lifecycle_lock(controller_id):
-        session_state = ensure_session_state(controller_id)
-        lifecycle = session_state.get("active_position") or {}
-        actual_executor_id = _text(
-            (audit_payload.get("identity") or {}).get("executor_id")
-        )
-        if not lifecycle:
-            for path in sorted(_archive_dir(controller_id).glob("position_*.json")):
-                existing_archive = json.loads(path.read_text())
-                if existing_archive.get("executor_id") != actual_executor_id:
-                    continue
-                position_number = int(existing_archive.get("position_number") or 0)
-                incoming_net_pnl = _number(
-                    (audit_payload.get("performance") or {}).get(
-                        "net_pnl_after_rebalance_quote"
-                    )
-                )
-                archived_net_pnl = _number(existing_archive.get("net_pnl_quote"))
-                if (
-                    incoming_net_pnl is None
-                    or archived_net_pnl is None
-                    or not math.isclose(
-                        incoming_net_pnl,
-                        archived_net_pnl,
-                        rel_tol=1e-12,
-                        abs_tol=1e-12,
-                    )
-                ):
-                    raise ValueError("completed position PnL conflicts with audit")
-                expected_fingerprint = _audit_fingerprint(
-                    audit_payload,
-                    position_number,
-                    actual_executor_id,
-                    incoming_net_pnl,
-                )
-                if existing_archive.get("commit_fingerprint") != expected_fingerprint:
-                    raise ValueError("completed position archive conflicts with audit")
-                return {
-                    "archive_path": str(path),
-                    "session_status": session_state.get("session_status"),
-                    "completed": session_state.get("completed") or {},
-                    "global_stop": session_state.get("global_stop"),
-                    "already_committed": True,
-                }
-            raise ValueError("active position is not terminal")
-        if lifecycle.get("phase") != "terminal":
-            raise ValueError("active position is not terminal")
-        executor_id = _text(lifecycle.get("executor_id"))
-        if not executor_id or executor_id != actual_executor_id:
-            raise ValueError("terminal executor does not match active position")
-        position_number = int(lifecycle.get("position_number") or 0)
-        if position_number <= 0:
-            raise ValueError("active position number is missing")
-        net_pnl_quote = _number(
-            (audit_payload.get("performance") or {}).get(
-                "net_pnl_after_rebalance_quote"
-            )
-        )
-        if net_pnl_quote is None:
-            raise ValueError("terminal net PnL after rebalance is unavailable")
-        commit_fingerprint = _audit_fingerprint(
-            audit_payload, position_number, executor_id, net_pnl_quote
-        )
-
-        archive_dir = _archive_dir(controller_id)
-        archive_dir.mkdir(exist_ok=True)
-        archive_path = archive_dir / f"position_{position_number:06d}.json"
-        archive = {
-            "schema_version": SESSION_SCHEMA_VERSION,
-            "record_type": "orca_lp_position",
-            "position_number": position_number,
-            "controller_id": controller_id,
-            "executor_id": executor_id,
-            "archived_at": _utc_now(),
-            "net_pnl_quote": net_pnl_quote,
-            "commit_fingerprint": commit_fingerprint,
-            "lifecycle": lifecycle,
-            "audit": audit_payload,
-        }
-        if archive_path.exists():
-            existing_archive = json.loads(archive_path.read_text())
-            if (
-                existing_archive.get("controller_id") != controller_id
-                or existing_archive.get("executor_id") != executor_id
-                or int(existing_archive.get("position_number") or 0) != position_number
-                or existing_archive.get("commit_fingerprint") != commit_fingerprint
-            ):
-                raise ValueError("position archive conflicts with terminal audit")
-        else:
-            temporary = archive_path.with_name(
-                f".{archive_path.name}.{uuid4().hex}.tmp"
-            )
-            try:
-                temporary.write_text(
-                    json.dumps(archive, indent=2, sort_keys=True) + "\n"
-                )
-                temporary.replace(archive_path)
-            finally:
-                if temporary.exists():
-                    temporary.unlink()
-
-        archives = []
-        for path in sorted(archive_dir.glob("position_*.json")):
-            value = json.loads(path.read_text())
-            expected_fingerprint = _audit_fingerprint(
-                value.get("audit") or {},
-                int(value.get("position_number") or 0),
-                _text(value.get("executor_id")),
-                _number(value.get("net_pnl_quote")),
-            )
-            if (
-                value.get("schema_version") != SESSION_SCHEMA_VERSION
-                or value.get("controller_id") != controller_id
-                or not _text(value.get("executor_id"))
-                or _number(value.get("net_pnl_quote")) is None
-                or value.get("commit_fingerprint") != expected_fingerprint
-            ):
-                raise ValueError(f"invalid Orca position archive: {path.name}")
-            archives.append((path, value))
-        completed_pnl = sum(float(value["net_pnl_quote"]) for _, value in archives)
-        completed = {
-            "position_count": len(archives),
-            "net_pnl_quote": round(completed_pnl, 12),
-            "executor_ids": [value["executor_id"] for _, value in archives],
-            "archive_files": [path.name for path, _ in archives],
-        }
-        next_state = {
-            **session_state,
-            "completed": completed,
-            "active_position": None,
-        }
-        terminal_state = _text(
-            (audit_payload.get("identity") or {}).get("terminal_state")
-        ).upper()
-        if terminal_state == "FAILED":
-            next_state["session_status"] = "manual_review"
-            next_state["manual_review"] = {
-                "reason": "executor_failed",
-                "recorded_at": _utc_now(),
-                "executor_id": executor_id,
-            }
-        else:
-            trigger = next_state.get("global_stop") or session_stop_trigger(
-                next_state, datetime.now(timezone.utc)
-            )
-            if trigger:
-                next_state["session_status"] = "stop_pending"
-                next_state["global_stop"] = (
-                    trigger
-                    if trigger.get("triggered_at")
-                    else {**trigger, "triggered_at": _utc_now()}
-                )
-            else:
-                next_state["session_status"] = "cycle_complete"
-                frequency_sec = _number(
-                    (next_state.get("terms") or {}).get("frequency_sec")
-                )
-                if frequency_sec is None or frequency_sec <= 0:
-                    raise ValueError("Orca session frequency is invalid")
-                next_state["cycle_resume_at"] = (
-                    datetime.now(timezone.utc) + timedelta(seconds=frequency_sec)
-                ).isoformat()
-        _save_session_state(controller_id, next_state)
-        return {
-            "archive_path": str(archive_path),
-            "session_status": next_state["session_status"],
-            "completed": completed,
-            "global_stop": next_state.get("global_stop"),
-        }
-
-
-@contextmanager
-def lifecycle_lock(controller_id: str):
-    path = _state_path(controller_id).with_suffix(".lock")
-    with path.open("a+") as lock_file:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+from agents.lpmaxxing.routines._orca_lifecycle import (
+    _number,
+    _parse_timestamp,
+    _session_dir,
+    _text,
+    _utc_now,
+    ensure_session_state,
+    lifecycle_lock,
+    load_lifecycle_state,
+    load_session_state,
+    save_lifecycle_state,
+    session_execution_mode,
+    session_risk_profile,
+    session_total_amount_quote,
+)
 
 
 class Config(BaseModel):
@@ -677,24 +138,6 @@ class Config(BaseModel):
         return str(value or "").strip()
 
 
-def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-def _number(value: Any) -> float | None:
-    if value is None or value == "" or isinstance(value, bool):
-        return None
-    try:
-        parsed = float(str(value).replace(",", ""))
-    except (TypeError, ValueError):
-        return None
-    return parsed if math.isfinite(parsed) else None
-
-
-def _text(value: Any) -> str:
-    return str(value or "").strip()
-
-
 def _strict_number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
@@ -707,33 +150,8 @@ def _strict_integer(value: Any) -> int | None:
     return int(number) if number is not None and number.is_integer() else None
 
 
-def _parse_timestamp(value: Any) -> datetime | None:
-    if not isinstance(value, str):
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return None
-    return parsed.astimezone(timezone.utc)
-
-
-def candidate_age_seconds(
-    candidate: dict[str, Any], now: datetime | None = None
-) -> float | None:
-    observed_at = _parse_timestamp(candidate.get("observed_at"))
-    if observed_at is None:
-        return None
-    current = now or datetime.now(timezone.utc)
-    if current.tzinfo is None:
-        raise ValueError("current time must be timezone-aware")
-    return (current.astimezone(timezone.utc) - observed_at).total_seconds()
-
-
-def candidate_is_fresh(candidate: dict[str, Any], now: datetime | None = None) -> bool:
-    age = candidate_age_seconds(candidate, now)
-    return age is not None and -30.0 <= age <= 600.0
+candidate_age_seconds = orca_policy.candidate_age_seconds
+candidate_is_fresh = orca_policy.candidate_is_fresh
 
 
 def _numbers_match(actual: Any, expected: Any) -> bool:
@@ -780,12 +198,6 @@ def _contains_executable_bounds(value: Any) -> bool:
 def _candidate_revalidation(
     candidate: dict[str, Any], budget: float, risk_profile: str
 ) -> tuple[bool, dict[str, Any], dict[str, Any] | None]:
-    errors: list[str] = []
-    if risk_profile not in LIVE_PROFILES:
-        return False, {"errors": ["invalid live risk profile"]}, None
-    if _contains_executable_bounds(candidate):
-        errors.append("scanner candidate contains executable bounds")
-
     token_a = (
         candidate.get("token_a") if isinstance(candidate.get("token_a"), dict) else {}
     )
@@ -807,7 +219,7 @@ def _candidate_revalidation(
         },
         "scanner_price": _strict_number(candidate.get("scanner_price")),
         "tvl_usd": _strict_number(candidate.get("tvl_usd")),
-        "net_price_change_24h": orca_pool_scan._decimal_ratio(
+        "net_price_change_24h": orca_policy.decimal_ratio(
             candidate.get("net_price_change_24h")
         ),
         "price_delta_24h_raw": candidate.get("net_price_change_24h"),
@@ -829,7 +241,7 @@ def _candidate_revalidation(
         "source_categories": candidate.get("source_categories"),
         "source_lenses": candidate.get("source_lenses"),
     }
-    for window in orca_pool_scan.LIVE_STATS:
+    for window in orca_policy.LIVE_STATS:
         normalized[f"volume_{window}_usd"] = _strict_number(
             candidate.get(f"volume_{window}_usd")
         )
@@ -837,125 +249,13 @@ def _candidate_revalidation(
             candidate.get(f"fees_{window}_usd")
         )
 
-    policy = orca_pool_scan.PROFILE_POLICY[risk_profile]
-    orca_pool_scan._derive(normalized, budget)
-    gate_reason = orca_pool_scan._gate(normalized, policy, True, set())
-    if gate_reason:
-        errors.append(f"candidate hard gate failed: {gate_reason}")
-
-    categories = candidate.get("source_categories")
-    lenses = candidate.get("source_lenses")
-    if (
-        not isinstance(categories, list)
-        or not categories
-        or categories != sorted(set(categories))
-        or not set(categories).issubset(policy["categories"])
-    ):
-        errors.append("candidate lacks allowed Orca category evidence")
-    if (
-        not isinstance(lenses, list)
-        or not lenses
-        or lenses != sorted(set(lenses))
-        or not set(lenses).issubset(orca_pool_scan.DISCOVERY_LENSES)
-    ):
-        errors.append("candidate lacks Orca discovery-lens evidence")
-
-    expected_range = None
-    if not gate_reason:
-        orca_pool_scan._score(normalized, policy)
-        expected_range, range_reason = orca_pool_scan._range_plan(
-            normalized, risk_profile
-        )
-        if range_reason:
-            errors.append(f"candidate range is infeasible: {range_reason}")
-        normalized["range_plan"] = expected_range
-
-    maximum = policy["max_abs_net_price_change_24h"]
-    expected_fields = {
-        "risk_profile": risk_profile,
-        "trading_pair": normalized.get("trading_pair"),
-        "price_orientation": "token_b_per_token_a",
-        "fee_tvl_24h": normalized.get("fee_tvl_24h"),
-        "fee_tvl_7d_daily": normalized.get("fee_tvl_7d_daily"),
-        "fee_productivity_1h_dailyized_bps": (
-            normalized.get("fee_productivity_1h") * 10_000.0
-            if normalized.get("fee_productivity_1h") is not None
-            else None
-        ),
-        "fee_productivity_4h_dailyized_bps": (
-            normalized.get("fee_productivity_4h") * 10_000.0
-            if normalized.get("fee_productivity_4h") is not None
-            else None
-        ),
-        "fee_productivity_24h_bps_per_day": (
-            normalized.get("fee_productivity_24h") * 10_000.0
-            if normalized.get("fee_productivity_24h") is not None
-            else None
-        ),
-        "fee_productivity_7d_daily_bps": (
-            normalized.get("fee_productivity_7d") * 10_000.0
-            if normalized.get("fee_productivity_7d") is not None
-            else None
-        ),
-        "sustained_fee_productivity": normalized.get("sustained_fee_productivity"),
-        "sustained_fee_productivity_bps_per_day": (
-            normalized.get("sustained_fee_productivity") * 10_000.0
-            if normalized.get("sustained_fee_productivity") is not None
-            else None
-        ),
-        "fee_momentum_1h_x": normalized.get("fee_momentum_1h_x"),
-        "fee_momentum_4h_x": normalized.get("fee_momentum_4h_x"),
-        "volume_tvl_24h": normalized.get("volume_tvl_24h"),
-        "volume_tvl_7d_daily": normalized.get("volume_tvl_7d_daily"),
-        "net_price_change_24h_pct": (
-            normalized.get("net_price_change_24h") * 100.0
-            if normalized.get("net_price_change_24h") is not None
-            else None
-        ),
-        "profile_net_change_limit_pct": (
-            maximum * 100.0 if maximum is not None else None
-        ),
-        "profile_net_change_limit_enabled": maximum is not None,
-        "fee_rate_fraction": (
-            normalized.get("fee_rate_raw") / 1_000_000.0
-            if normalized.get("fee_rate_raw") is not None
-            else None
-        ),
-        "fee_rate_bps": (
-            normalized.get("fee_rate_raw") / 100.0
-            if normalized.get("fee_rate_raw") is not None
-            else None
-        ),
-        "gross_fee_estimate_quote_per_day": normalized.get(
-            "gross_fee_estimate_quote_per_day"
-        ),
-        "session_budget_quote": budget,
-        "total_amount_quote": budget,
-    }
-    if not gate_reason:
-        expected_fields.update(
-            {
-                "criteria_raw": normalized.get("criteria_raw"),
-                "criteria_scores": normalized.get("criteria_scores"),
-                "mcda_weights": orca_pool_scan.MCDA_WEIGHTS,
-                "weighted_score": normalized.get("weighted_score"),
-                "score": normalized.get("weighted_score"),
-                "range_plan": expected_range,
-                "preset_suggestion": (expected_range or {}).get("preset"),
-            }
-        )
-    for field, expected in expected_fields.items():
-        if field not in candidate or not _values_match(candidate.get(field), expected):
-            errors.append(f"candidate field '{field}' does not match recomputed policy")
-
-    return (
-        not errors,
-        {
-            "passed": not errors,
-            "errors": errors,
-            "recomputed": expected_fields,
-        },
-        normalized if not errors else None,
+    return orca_policy.revalidate_candidate_contract(
+        candidate,
+        normalized,
+        budget,
+        risk_profile,
+        _contains_executable_bounds,
+        _values_match,
     )
 
 
@@ -983,147 +283,6 @@ def _executable_range(
         "lower_limit_price": lower_limit,
         "upper_limit_price": upper_limit,
     }
-
-
-def _nested_value(value: Any, paths: list[str]) -> Any:
-    for path in paths:
-        current = value
-        for part in path.split("."):
-            if not isinstance(current, dict) or part not in current:
-                break
-            current = current[part]
-        else:
-            if current is not None:
-                return current
-    return None
-
-
-def _normalize_gateway_pool_info(
-    value: Any, expected_pool_address: str
-) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise ValueError("Gateway pool info must be an object")
-    if isinstance(value.get("result"), dict):
-        value = value["result"]
-    pool_address = _text(
-        _nested_value(value, ["pool_address", "poolAddress", "address"])
-    )
-    base_mint = _text(
-        _nested_value(
-            value,
-            [
-                "base_mint",
-                "baseMint",
-                "base_token_address",
-                "token_a.mint",
-                "token_a.address",
-                "tokenA.mint",
-                "tokenA.address",
-                "tokenMintA.mint",
-                "tokenMintA.address",
-                "tokenMintA",
-            ],
-        )
-    )
-    quote_mint = _text(
-        _nested_value(
-            value,
-            [
-                "quote_mint",
-                "quoteMint",
-                "quote_token_address",
-                "token_b.mint",
-                "token_b.address",
-                "tokenB.mint",
-                "tokenB.address",
-                "tokenMintB.mint",
-                "tokenMintB.address",
-                "tokenMintB",
-            ],
-        )
-    )
-    current_price = _number(
-        _nested_value(value, ["current_price", "currentPrice", "price"])
-    )
-    if (
-        not pool_address
-        or pool_address != expected_pool_address
-        or not base_mint
-        or not quote_mint
-        or current_price is None
-    ):
-        raise ValueError("Gateway pool info is missing identity or current price")
-    return {
-        "pool_address": pool_address,
-        "base_mint": base_mint,
-        "quote_mint": quote_mint,
-        "current_price": current_price,
-        "observed_at": _utc_now(),
-    }
-
-
-def _executor_rows(value: Any) -> list[dict[str, Any]]:
-    rows = value
-    if isinstance(value, dict):
-        rows = next(
-            (
-                value[key]
-                for key in ("executors", "data", "results", "items")
-                if isinstance(value.get(key), list)
-            ),
-            None,
-        )
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise ValueError("executor search response is not a recognized list")
-    return rows
-
-
-async def _search_controller_executors(
-    client: Any, controller_id: str
-) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    for _ in range(200):
-        params: dict[str, Any] = {
-            "controller_ids": [controller_id],
-            "limit": 100,
-        }
-        if cursor:
-            params["cursor"] = cursor
-        result = await client.executors.search_executors(**params)
-        page = _executor_rows(result)
-        rows.extend(page)
-        next_cursor = None
-        if isinstance(result, dict):
-            next_cursor = result.get("next_cursor") or result.get("cursor")
-            pagination = result.get("pagination")
-            if not next_cursor and isinstance(pagination, dict):
-                next_cursor = pagination.get("next_cursor") or pagination.get("cursor")
-        if not next_cursor:
-            return rows
-        next_cursor = str(next_cursor)
-        if next_cursor in seen_cursors:
-            raise ValueError("executor pagination cursor repeated")
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-    raise ValueError("executor pagination exceeded safety limit")
-
-
-def _executor_controller_id(executor: dict[str, Any]) -> str:
-    executor_config = (
-        executor.get("config") if isinstance(executor.get("config"), dict) else {}
-    )
-    return _text(executor.get("controller_id") or executor_config.get("controller_id"))
-
-
-def _executor_id(executor: dict[str, Any]) -> str:
-    executor_config = (
-        executor.get("config") if isinstance(executor.get("config"), dict) else {}
-    )
-    return _text(
-        executor.get("executor_id") or executor.get("id") or executor_config.get("id")
-    )
 
 
 def _candidate_tokens(
@@ -1155,142 +314,6 @@ def _candidate_identity(candidate: dict[str, Any]) -> dict[str, Any]:
         "preset": _text(range_plan.get("preset")),
         "provisional_half_width": _number(range_plan.get("provisional_half_width")),
     }
-
-
-def _token_rows(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, dict):
-        rows = value.get("tokens")
-        if isinstance(rows, list):
-            return [row for row in rows if isinstance(row, dict)]
-    if isinstance(value, list):
-        return [row for row in value if isinstance(row, dict)]
-    return []
-
-
-def _token_address(token: dict[str, Any]) -> str:
-    return _text(
-        token.get("address") or token.get("token_address") or token.get("mint")
-    )
-
-
-async def ensure_gateway_tokens(
-    client: Any,
-    network_id: str,
-    candidate: dict[str, Any],
-    gateway_pool_info: dict[str, Any],
-) -> list[dict[str, Any]]:
-    identity = _candidate_identity(candidate)
-    if (
-        not identity["pool_address"]
-        or identity["pool_address"] != _text(gateway_pool_info.get("pool_address"))
-        or identity["token_a_mint"] != _text(gateway_pool_info.get("base_mint"))
-        or identity["token_b_mint"] != _text(gateway_pool_info.get("quote_mint"))
-    ):
-        raise ValueError("candidate and Gateway token identities do not match")
-    if not hasattr(client, "gateway"):
-        raise RuntimeError("Gateway configuration API is unavailable")
-
-    metadata = []
-    for key in ("token_a", "token_b"):
-        token = candidate.get(key) if isinstance(candidate.get(key), dict) else {}
-        address = _text(token.get("mint"))
-        symbol = _text(token.get("symbol"))
-        decimals_value = token.get("decimals")
-        if not address or not symbol or isinstance(decimals_value, bool):
-            raise ValueError(f"{key} metadata is incomplete")
-        try:
-            numeric_decimals = float(decimals_value)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"{key} decimals are invalid") from exc
-        if not numeric_decimals.is_integer() or not 0 <= numeric_decimals <= 18:
-            raise ValueError(f"{key} decimals are invalid")
-        metadata.append((address, symbol, int(numeric_decimals)))
-
-    rows = _token_rows(await client.gateway.get_network_tokens(network_id))
-    missing = []
-    for address, symbol, decimals in metadata:
-        exact = next((row for row in rows if _token_address(row) == address), None)
-        if exact is None:
-            collision = next(
-                (
-                    row
-                    for row in rows
-                    if _text(row.get("symbol")).upper() == symbol.upper()
-                    and _token_address(row) != address
-                ),
-                None,
-            )
-            if collision is not None:
-                raise ValueError(f"Gateway token symbol collision for {symbol}")
-            missing.append((address, symbol, decimals))
-            continue
-        observed_symbol = _text(exact.get("symbol"))
-        observed_decimals = exact.get("decimals")
-        try:
-            observed_decimals = int(observed_decimals)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Gateway token metadata mismatch for {symbol}") from exc
-        if observed_symbol.upper() != symbol.upper() or observed_decimals != decimals:
-            raise ValueError(f"Gateway token metadata mismatch for {symbol}")
-
-    for address, symbol, decimals in missing:
-        await client.gateway.add_token(
-            network_id=network_id,
-            address=address,
-            symbol=symbol,
-            decimals=decimals,
-            name=symbol,
-        )
-
-    if missing:
-        rows = _token_rows(await client.gateway.get_network_tokens(network_id))
-
-    evidence = []
-    for address, symbol, decimals in metadata:
-        exact = next((row for row in rows if _token_address(row) == address), None)
-        if exact is None:
-            raise ValueError(f"Gateway token registration did not expose {symbol}")
-        observed_symbol = _text(exact.get("symbol"))
-        observed_decimals = exact.get("decimals")
-        try:
-            observed_decimals = int(observed_decimals)
-        except (TypeError, ValueError) as exc:
-            raise ValueError(f"Gateway token metadata mismatch for {symbol}") from exc
-        if observed_symbol.upper() != symbol.upper() or observed_decimals != decimals:
-            raise ValueError(f"Gateway token metadata mismatch for {symbol}")
-        evidence.append(
-            {
-                "symbol": symbol,
-                "mint": address,
-                "decimals": decimals,
-                "registered": True,
-            }
-        )
-    return evidence
-
-
-def _balance(balances: list[dict[str, Any]], token: dict[str, Any]) -> float | None:
-    wanted_symbol = _text(token.get("symbol")).upper()
-    wanted_mint = _text(token.get("mint"))
-    mint_metadata_present = any(_text(balance.get("mint")) for balance in balances)
-    symbol_matches = []
-    for balance in balances:
-        value = (
-            balance.get("available")
-            if "available" in balance
-            else balance.get("available_units")
-        )
-        available = _number(value)
-        if available is None:
-            continue
-        balance_mint = _text(balance.get("mint") or balance.get("address"))
-        if wanted_mint and balance_mint == wanted_mint:
-            return available
-        if _text(balance.get("symbol")).upper() == wanted_symbol:
-            symbol_matches.append(available)
-    if wanted_mint and mint_metadata_present:
-        return None
-    return symbol_matches[0] if len(symbol_matches) == 1 else None
 
 
 def _inventory_plan(
@@ -1579,9 +602,11 @@ def _evaluate(
         token_a_decimals,
         token_b_decimals,
     )
-    available_base = _balance(config.wallet_balances, base_token)
-    available_quote = _balance(config.wallet_balances, quote_token)
-    available_sol = _balance(config.wallet_balances, {"symbol": "SOL"})
+    available_base = evidence.balance_for_token(config.wallet_balances, base_token)
+    available_quote = evidence.balance_for_token(config.wallet_balances, quote_token)
+    available_sol = evidence.balance_for_token(
+        config.wallet_balances, {"symbol": "SOL"}
+    )
     required_base = inventory.get("base_amount") if inventory else None
     required_quote = inventory.get("quote_amount") if inventory else None
     sol_spend = 0.0
@@ -1740,6 +765,8 @@ def _evaluate(
             "gateway_pool_info": gateway,
             "executable_range": executable_range,
             "total_amount_quote": config.total_amount_quote,
+            "wallet_account_name": config.wallet_account_name,
+            "wallet_connector_name": config.wallet_connector_name,
             "executor_plan": executor_plan,
             "executor_id": None,
             "close_reason": None,
@@ -1753,6 +780,8 @@ def _evaluate(
             "gateway_pool_info": gateway,
             "executable_range": executable_range,
             "total_amount_quote": config.total_amount_quote,
+            "wallet_account_name": config.wallet_account_name,
+            "wallet_connector_name": config.wallet_connector_name,
             "rebalance_plan": rebalance_plan,
             "rebalance": {"status": "required", "submission_attempt": 0},
             "executor_plan": None,
@@ -1848,7 +877,7 @@ async def _with_live_evidence(config: Config, context: Any) -> Config:
         if config.execution_mode == "loop":
             if not hasattr(client, "executors"):
                 raise RuntimeError("executor API is unavailable")
-            executor_rows = await _search_controller_executors(
+            executor_rows = await evidence.search_controller_executors(
                 client, config.controller_id
             )
             states = [_text(row.get("status")).upper() for row in executor_rows]
@@ -1858,7 +887,7 @@ async def _with_live_evidence(config: Config, context: Any) -> Config:
             ):
                 raise ValueError("executor search returned an unknown state")
             if any(
-                _executor_controller_id(row) != config.controller_id
+                evidence.executor_controller_id(row) != config.controller_id
                 for row in executor_rows
             ):
                 raise ValueError("executor search returned unowned records")
@@ -1869,10 +898,10 @@ async def _with_live_evidence(config: Config, context: Any) -> Config:
                 or []
             )
             unarchived_terminal_ids = [
-                _executor_id(row)
+                evidence.executor_id(row)
                 for row, state in zip(executor_rows, states, strict=True)
                 if state in TERMINAL_EXECUTOR_STATES
-                and _executor_id(row) not in archived_executor_ids
+                and evidence.executor_id(row) not in archived_executor_ids
             ]
             if unarchived_terminal_ids:
                 raise ValueError(
@@ -1904,11 +933,13 @@ async def _with_live_evidence(config: Config, context: Any) -> Config:
                 network=config.connector_name,
                 pool_address=_text(config.selected_candidate.get("pool_address")),
             )
-            gateway_pool_info = _normalize_gateway_pool_info(
-                gateway_result, _text(config.selected_candidate.get("pool_address"))
+            gateway_pool_info = evidence.normalize_gateway_pool_info(
+                gateway_result,
+                _text(config.selected_candidate.get("pool_address")),
+                _utc_now(),
             )
             config = config.model_copy(update={"gateway_pool_info": gateway_pool_info})
-            await ensure_gateway_tokens(
+            await evidence.ensure_gateway_tokens(
                 client,
                 config.wallet_connector_name,
                 config.selected_candidate,
@@ -1916,45 +947,9 @@ async def _with_live_evidence(config: Config, context: Any) -> Config:
             )
         if not config.fetch_wallet_balances:
             return config.model_copy(update={"api_errors": errors})
-        balances = await client.portfolio.get_state(
-            account_names=[config.wallet_account_name],
-            connector_names=[config.wallet_connector_name],
-            refresh=True,
+        normalized = await evidence.fetch_wallet_balances(
+            client, config.wallet_account_name, config.wallet_connector_name
         )
-        account = balances.get(config.wallet_account_name)
-        if not isinstance(account, dict):
-            raise ValueError("scoped account balances were not returned")
-        rows = account.get(config.wallet_connector_name)
-        if not isinstance(rows, list):
-            raise ValueError("scoped connector balances were not returned")
-        normalized = []
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            symbol = _text(row.get("token") or row.get("symbol"))
-            available = None
-            for key in (
-                "available_units",
-                "available",
-                "available_balance",
-                "units",
-            ):
-                if key in row:
-                    available = _number(row.get(key))
-                    if available is not None:
-                        break
-            if symbol and available is not None:
-                normalized.append(
-                    {
-                        "symbol": symbol,
-                        "mint": _text(
-                            row.get("mint")
-                            or row.get("token_address")
-                            or row.get("address")
-                        ),
-                        "available": available,
-                    }
-                )
         return config.model_copy(
             update={
                 "wallet_lookup_succeeded": True,
@@ -2052,6 +1047,64 @@ async def _save_report(payload: dict[str, Any]) -> None:
         await builder.save()
     except Exception:
         return
+
+
+def _outcome(payload: dict[str, Any], config: Config) -> dict[str, Any]:
+    state = payload.get("lifecycle_state") or {}
+    executor_plan = payload.get("executor_plan") or {}
+    rebalance_plan = payload.get("rebalance_plan") or {}
+    if rebalance_plan:
+        action = NextAction.RUN_REBALANCE
+        arguments = {
+            "controller_id": config.controller_id,
+            "selected_candidate": config.selected_candidate,
+            "gateway_pool_info": config.gateway_pool_info,
+            "rebalance_plan": rebalance_plan,
+            "total_amount_quote": config.total_amount_quote,
+            "execution_mode": config.execution_mode,
+            "wallet_account_name": config.wallet_account_name,
+            "wallet_connector_name": config.wallet_connector_name,
+        }
+    elif payload.get("decision") == "ready" and config.execution_mode == "loop":
+        action = NextAction.CREATE_EXECUTOR
+        arguments = executor_plan
+    elif (
+        payload.get("decision") == "blocked"
+        and config.execution_mode == "loop"
+        and (
+            state.get("phase") == "rebalance_blocked"
+            or state.get("post_rebalance_block")
+        )
+    ):
+        action = NextAction.MANUAL_REVIEW
+        arguments = {"controller_id": config.controller_id}
+    else:
+        action = NextAction.NO_ACTION
+        arguments = {}
+    return attach_outcome(
+        payload,
+        routine="orca_live_preflight",
+        next_action=action,
+        reason=str(payload.get("decision") or "unknown"),
+        arguments=arguments,
+        mutation={"phase": state.get("phase"), "decision": payload.get("decision")},
+        position_number=state.get("position_number"),
+        executor_id=state.get("executor_id"),
+    )
+
+
+async def _finish(payload: dict[str, Any], config: Config) -> RoutineResult:
+    _outcome(payload, config)
+    payload = evidence.redact(payload, datetime_iso=False)
+    await _save_report(payload)
+    return RoutineResult(
+        text=_format(payload)
+        + "\n```json\n"
+        + json.dumps(payload, indent=2, sort_keys=True, default=str)
+        + "\n```",
+        table_data=payload["checks"],
+        table_columns=["check", "passed", "observed", "required"],
+    )
 
 
 async def run(config: Config, context: Any) -> RoutineResult:
@@ -2175,15 +1228,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
             else f"Preflight blocked: {', '.join(payload['failed_checks'])}. Do not create an executor."
         )
     )
-    await _save_report(payload)
-    return RoutineResult(
-        text=_format(payload)
-        + "\n```json\n"
-        + json.dumps(payload, indent=2, sort_keys=True, default=str)
-        + "\n```",
-        table_data=payload["checks"],
-        table_columns=["check", "passed", "observed", "required"],
-    )
+    return await _finish(payload, config)
 
 
 def _self_check() -> None:
@@ -2217,24 +1262,24 @@ def _self_check() -> None:
             "source_categories": ["utility"],
             "source_lenses": ["volume24h"],
         }
-        orca_pool_scan._derive(raw, 10)
+        orca_policy.derive(raw, 10)
         assert (
-            orca_pool_scan._gate(
+            orca_policy.gate(
                 raw,
-                orca_pool_scan.PROFILE_POLICY["yield_focused"],
+                orca_policy.PROFILE_POLICY["yield_focused"],
                 True,
                 set(),
             )
             is None
         )
-        orca_pool_scan._score(raw, orca_pool_scan.PROFILE_POLICY["yield_focused"])
-        raw["range_plan"] = orca_pool_scan._range_plan(raw, "yield_focused")[0]
+        orca_policy.score(raw, orca_policy.PROFILE_POLICY["yield_focused"])
+        raw["range_plan"] = orca_policy.range_plan(raw, "yield_focused")[0]
         return orca_pool_scan._candidate_row(
             raw, observed_at.isoformat(), "yield_focused", 10
         )
 
     candidate = candidate_for()
-    normalized_gateway = _normalize_gateway_pool_info(
+    normalized_gateway = evidence.normalize_gateway_pool_info(
         {
             "address": "pool-1",
             "base_token_address": "sol",
@@ -2242,6 +1287,7 @@ def _self_check() -> None:
             "price": "100.5",
         },
         "pool-1",
+        _utc_now(),
     )
     assert normalized_gateway["base_mint"] == "sol"
     assert normalized_gateway["quote_mint"] == CANONICAL_USDC_MINT
@@ -2263,7 +1309,7 @@ def _self_check() -> None:
             raise AssertionError("fixture tokens should already be registered")
 
     registry_evidence = asyncio.run(
-        ensure_gateway_tokens(
+        evidence.ensure_gateway_tokens(
             type("Client", (), {"gateway": GatewayRegistry()})(),
             "solana-mainnet-beta",
             candidate,
@@ -2271,7 +1317,7 @@ def _self_check() -> None:
         )
     )
     assert len(registry_evidence) == 2
-    assert _executor_rows({"data": []}) == []
+    assert evidence.executor_rows({"data": []}) == []
     config = Config(
         controller_id="lpmaxxing.orca_self_check",
         executor_lookup_succeeded=True,

@@ -1,5 +1,4 @@
 import asyncio
-import importlib
 import json
 import math
 import sys
@@ -13,18 +12,24 @@ PROJECT_ROOT = Path(__file__).resolve().parents[3]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
-from agents.lpmaxxing.routines import orca_live_preflight as _orca_live_preflight
+from agents.lpmaxxing.routines import _orca_evidence as evidence
+from agents.lpmaxxing.routines._orca_contracts import NextAction, attach_outcome
+from agents.lpmaxxing.routines._orca_lifecycle import (
+    lifecycle_lock,
+    load_lifecycle_state,
+    load_session_state,
+    mark_session_stop,
+    resume_session_cycle,
+    save_lifecycle_state,
+    session_execution_mode,
+    session_exit_policy,
+    session_stop_trigger,
+)
 
-_orca_live_preflight = importlib.reload(_orca_live_preflight)
-load_lifecycle_state = _orca_live_preflight.load_lifecycle_state
-load_session_state = _orca_live_preflight.load_session_state
-save_lifecycle_state = _orca_live_preflight.save_lifecycle_state
-lifecycle_lock = _orca_live_preflight.lifecycle_lock
-mark_session_stop = _orca_live_preflight.mark_session_stop
-resume_session_cycle = _orca_live_preflight.resume_session_cycle
-session_execution_mode = _orca_live_preflight.session_execution_mode
-session_exit_policy = _orca_live_preflight.session_exit_policy
-session_stop_trigger = _orca_live_preflight.session_stop_trigger
+try:
+    from routines.base import RoutineResult
+except ModuleNotFoundError:
+    from routines.base import RoutineResult
 
 CATEGORY = "Orca LP Agent"
 
@@ -41,15 +46,6 @@ FAILED_STATES = {"FAILED"}
 COMPLETE_STATES = {"COMPLETE", "COMPLETED", "TERMINATED"}
 TERMINAL_STATES = INACTIVE_STATES
 ACTIVE_STATES = {"RUNNING", "OPENING", "CLOSING", "SHUTTING_DOWN"}
-REDACTED_KEYS = {
-    "privatekey",
-    "secret",
-    "password",
-    "apikey",
-    "accesstoken",
-    "walletaddress",
-    "owneraddress",
-}
 
 
 class Config(BaseModel):
@@ -62,11 +58,11 @@ class Config(BaseModel):
         description="Dynamic executor controller id from the current Condor tick",
     )
     execution_mode: Literal["dry_run", "loop"] = Field(
-        default="dry_run", description="dry_run or loop lifecycle mode"
+        description="Explicit dry_run or loop lifecycle mode"
     )
     executor_id: str | None = Field(
         default=None,
-        description="Executor id or unique id prefix to fetch executor details",
+        description="Exact executor id to fetch executor details",
     )
     now_timestamp: Any = Field(default=None, description="Current timestamp override")
 
@@ -109,28 +105,6 @@ class Config(BaseModel):
             return None
         text = str(value).strip()
         return text or None
-
-
-def _json_safe(value: Any) -> Any:
-    if value is None or isinstance(value, (str, int, float, bool)):
-        return value
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, dict):
-        return {
-            str(key): (
-                "[redacted]"
-                if "".join(
-                    character for character in str(key).lower() if character.isalnum()
-                )
-                in REDACTED_KEYS
-                else _json_safe(val)
-            )
-            for key, val in value.items()
-        }
-    if isinstance(value, (list, tuple, set)):
-        return [_json_safe(item) for item in value]
-    return str(value)
 
 
 def _utc_now() -> datetime:
@@ -192,88 +166,19 @@ def _context_chat_id(context: Any) -> Any:
     return getattr(context, "_chat_id", None) if context is not None else None
 
 
-def _executor_id(executor: dict[str, Any]) -> str | None:
-    config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
-    return executor.get("executor_id") or executor.get("id") or config.get("id")
-
-
-def _executor_controller_id(executor: dict[str, Any]) -> str | None:
-    config = executor.get("config") if isinstance(executor.get("config"), dict) else {}
-    value = executor.get("controller_id") or config.get("controller_id")
-    return str(value).strip() if value not in (None, "") else None
-
-
-def _looks_like_executor(value: dict[str, Any]) -> bool:
-    if not isinstance(value, dict):
-        return False
-    config = value.get("config") if isinstance(value.get("config"), dict) else {}
-    return bool(
-        value.get("executor_id")
-        or value.get("id")
-        or value.get("status")
-        or value.get("trading_pair")
-        or config.get("id")
-        or config.get("trading_pair")
-    )
-
-
-def _as_executor_dict(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        return {}
-    for key in ("executor", "data", "result", "item"):
-        nested = value.get(key)
-        if isinstance(nested, dict) and _looks_like_executor(nested):
-            return nested
-    return value if _looks_like_executor(value) else {}
-
-
-def _as_executor_list(value: Any) -> list[dict[str, Any]]:
-    if isinstance(value, list):
-        return [
-            item
-            for item in value
-            if isinstance(item, dict) and _looks_like_executor(item)
-        ]
-    if isinstance(value, dict):
-        for key in ("executors", "data", "results", "items"):
-            nested = value.get(key)
-            if isinstance(nested, list):
-                return [
-                    item
-                    for item in nested
-                    if isinstance(item, dict) and _looks_like_executor(item)
-                ]
-        executor = _as_executor_dict(value)
-        return [executor] if executor else []
-    return []
-
-
-def _recognized_executor_list(value: Any) -> tuple[list[dict[str, Any]], bool]:
-    if isinstance(value, list):
-        executors = _as_executor_list(value)
-        return executors, len(executors) == len(value)
-    if isinstance(value, dict):
-        for key in ("executors", "data", "results", "items"):
-            nested = value.get(key)
-            if isinstance(nested, list):
-                executors = _as_executor_list(value)
-                return executors, len(executors) == len(nested)
-    return [], False
-
-
 def _executor_matches_id(executor: dict[str, Any], executor_id: str) -> bool:
-    actual = _executor_id(executor)
+    actual = evidence.executor_id(executor)
     if actual is None:
         return False
     actual_text = str(actual).strip()
     wanted = executor_id.strip()
-    return actual_text == wanted or actual_text.startswith(wanted)
+    return actual_text == wanted
 
 
 def _is_active_executor(executor: dict[str, Any], controller_id: str) -> bool:
     if not isinstance(executor, dict):
         return False
-    owner = _executor_controller_id(executor)
+    owner = evidence.executor_controller_id(executor)
     if owner != controller_id:
         return False
     if executor.get("is_active") is False:
@@ -304,7 +209,7 @@ def _executor_plan_mismatches(
 
     mismatches: list[str] = []
     identity_values = {
-        "controller_id": _executor_controller_id(executor),
+        "controller_id": evidence.executor_controller_id(executor),
         "connector_name": executor.get("connector_name")
         or actual.get("connector_name"),
         "lp_provider": executor.get("lp_provider") or actual.get("lp_provider"),
@@ -362,6 +267,16 @@ def _executor_plan_mismatches(
     return mismatches
 
 
+def _executor_lifecycle_mismatches(
+    executor: dict[str, Any], lifecycle_state: dict[str, Any]
+) -> list[str]:
+    mismatches = _executor_plan_mismatches(executor, lifecycle_state)
+    expected_id = str(lifecycle_state.get("executor_id") or "").strip()
+    if expected_id and evidence.executor_id(executor) != expected_id:
+        mismatches.insert(0, "executor_id")
+    return mismatches
+
+
 async def _fetch_executor_from_api(
     config: Config, context: Any
 ) -> tuple[dict[str, Any] | None, list[str], dict[str, Any]]:
@@ -416,9 +331,9 @@ async def _fetch_executor_by_id(
     }
     try:
         raw_response = await client.executors.get_executor(executor_id)
-        request_debug["response"] = _json_safe(raw_response)
-        executor = _as_executor_dict(raw_response)
-        owner = _executor_controller_id(executor) if executor else None
+        request_debug["response"] = evidence.redact(raw_response)
+        executor = evidence.executor_dict(raw_response)
+        owner = evidence.executor_controller_id(executor) if executor else None
         if (
             executor
             and _executor_matches_id(executor, executor_id)
@@ -450,19 +365,21 @@ async def _fetch_executor_by_id(
             "params": {"controller_ids": [controller_id], "paginated": True},
         }
         try:
-            executors, pages = await _search_controller_executors(client, controller_id)
+            executors, pages = await evidence.search_controller_executors(
+                client, controller_id, capture_pages=True, strict=True
+            )
             request_debug["responses"] = pages
             matches = [
                 executor
                 for executor in executors
                 if _executor_matches_id(executor, executor_id)
-                and _executor_controller_id(executor) == controller_id
+                and evidence.executor_controller_id(executor) == controller_id
             ]
             request_debug["candidate_count"] = len(executors)
             request_debug["match_count"] = len(matches)
             if matches:
                 if len(matches) > 1:
-                    warning = f"executor_id prefix '{executor_id}' matched {len(matches)} executors in {scope}"
+                    warning = f"executor_id '{executor_id}' matched {len(matches)} executors in {scope}"
                     warnings.append(warning)
                     request_debug["error"] = warning
                     debug["outcome"] = "ambiguous"
@@ -497,7 +414,9 @@ async def _fetch_active_executor_by_controller(
         "params": {"controller_ids": [controller_id], "paginated": True},
     }
     try:
-        executors, pages = await _search_controller_executors(client, controller_id)
+        executors, pages = await evidence.search_controller_executors(
+            client, controller_id, capture_pages=True, strict=True
+        )
         request_debug["responses"] = pages
         unknown_states = [
             _as_state(executor.get("status"))
@@ -512,9 +431,9 @@ async def _fetch_active_executor_by_controller(
             debug["requests"].append(request_debug)
             return None, warnings
         unowned = [
-            _executor_id(executor)
+            evidence.executor_id(executor)
             for executor in executors
-            if _executor_controller_id(executor) != controller_id
+            if evidence.executor_controller_id(executor) != controller_id
         ]
         if unowned:
             warning = f"controller executor search returned records without proven ownership: {unowned}"
@@ -548,13 +467,14 @@ async def _fetch_active_executor_by_controller(
             executor
             for executor in executors
             if _as_state(executor.get("status")) in TERMINAL_STATES
-            and _executor_controller_id(executor) in {None, controller_id}
+            and evidence.executor_controller_id(executor) in {None, controller_id}
         ]
         request_debug["terminal_count"] = len(terminal_executors)
         unarchived = [
             executor
             for executor in terminal_executors
-            if str(_executor_id(executor) or "").strip() not in archived_executor_ids
+            if str(evidence.executor_id(executor) or "").strip()
+            not in archived_executor_ids
         ]
         request_debug["archived_terminal_count"] = len(terminal_executors) - len(
             unarchived
@@ -586,42 +506,6 @@ async def _fetch_active_executor_by_controller(
     return None, warnings or [
         f"no active executor found for controller_id '{controller_id}'"
     ]
-
-
-async def _search_controller_executors(
-    client: Any, controller_id: str
-) -> tuple[list[dict[str, Any]], list[Any]]:
-    rows: list[dict[str, Any]] = []
-    pages: list[Any] = []
-    cursor: str | None = None
-    seen_cursors: set[str] = set()
-    for _ in range(200):
-        params: dict[str, Any] = {
-            "controller_ids": [controller_id],
-            "limit": 100,
-        }
-        if cursor:
-            params["cursor"] = cursor
-        response = await client.executors.search_executors(**params)
-        pages.append(_json_safe(response))
-        page, recognized = _recognized_executor_list(response)
-        if not recognized:
-            raise ValueError("unrecognized executor search response")
-        rows.extend(page)
-        next_cursor = None
-        if isinstance(response, dict):
-            next_cursor = response.get("next_cursor") or response.get("cursor")
-            pagination = response.get("pagination")
-            if not next_cursor and isinstance(pagination, dict):
-                next_cursor = pagination.get("next_cursor") or pagination.get("cursor")
-        if not next_cursor:
-            return rows, pages
-        next_cursor = str(next_cursor)
-        if next_cursor in seen_cursors:
-            raise ValueError("executor pagination cursor repeated")
-        seen_cursors.add(next_cursor)
-        cursor = next_cursor
-    raise ValueError("executor pagination exceeded safety limit")
 
 
 def _reconcile_pnl(
@@ -773,7 +657,7 @@ def _extract_api_executor(executor: dict[str, Any]) -> dict[str, Any]:
     requested_lower = _to_float(config.get("lower_price"))
     requested_upper = _to_float(config.get("upper_price"))
     return {
-        "executor_id": _executor_id(executor),
+        "executor_id": evidence.executor_id(executor),
         "executor_state": _as_state(executor.get("status")),
         "lp_state": _as_state(custom_info.get("state")),
         "pool_address": config.get("pool_address"),
@@ -968,7 +852,7 @@ def _self_check() -> None:
         data.update(overrides)
         return data
 
-    config = Config(controller_id="lpmaxxing.orca_1")
+    config = Config(controller_id="lpmaxxing.orca_1", execution_mode="dry_run")
     assert _recommend(fields(estimated_net_pnl_pct=0.005), config, now)[:2] == (
         "close",
         "take_profit_reached",
@@ -1052,8 +936,8 @@ def _self_check() -> None:
     )
     assert executor is None, debug
     assert debug["outcome"] == "empty", debug
-    assert _recognized_executor_list([]) == ([], True)
-    assert _recognized_executor_list([{"unexpected": "record"}]) == ([], False)
+    assert evidence.recognized_executor_list([]) == ([], True)
+    assert evidence.recognized_executor_list([{"unexpected": "record"}]) == ([], False)
 
 
 def _format_money(value: Any) -> str:
@@ -1253,8 +1137,164 @@ async def _save_position_report(payload: dict[str, Any]) -> None:
         return
 
 
-async def run(config: Config, context: Any) -> str:
-    input_config = _json_safe(config.model_dump())
+def _outcome(payload: dict[str, Any]) -> dict[str, Any]:
+    recommended = str(payload.get("recommended_supervision_action") or "manual-review")
+    if recommended == "no-active-position":
+        action = NextAction.RUN_POOL_SCAN
+    elif recommended == "session-stop-recorded":
+        action = NextAction.NO_ACTION
+    else:
+        try:
+            action = NextAction(recommended)
+        except ValueError:
+            action = NextAction.MANUAL_REVIEW
+    lifecycle = (
+        payload.get("lifecycle_state_update")
+        or payload.get("lifecycle_resume")
+        or (payload.get("session_state") or {}).get("active_position")
+        or {}
+    )
+    executor_id = (
+        payload.get("executor_id")
+        or (payload.get("position") or {}).get("executor_id")
+        or lifecycle.get("executor_id")
+    )
+    update = payload.get("lifecycle_state_update") or lifecycle
+    input_config = payload.get("input_config") or {}
+    session_state = payload.get("session_state") or {}
+    terms = session_state.get("terms") or {}
+    controller_id = input_config.get("controller_id")
+    execution_mode = input_config.get("execution_mode")
+    outcome_reason = str(payload.get("reason") or "unknown")
+    if action == NextAction.CLOSE:
+        if executor_id:
+            arguments = {
+                "action": "stop",
+                "executor_id": executor_id,
+                "keep_position": False,
+            }
+        else:
+            action = NextAction.MANUAL_REVIEW
+            outcome_reason = "close-dispatch-missing-executor-id"
+            arguments = {"controller_id": controller_id}
+    elif action == NextAction.STOP_AGENT:
+        if controller_id:
+            arguments = {"action": "stop_agent", "agent_id": controller_id}
+        else:
+            action = NextAction.MANUAL_REVIEW
+            outcome_reason = "stop-dispatch-missing-controller-id"
+            arguments = {}
+    elif action == NextAction.WRITE_AUDIT:
+        arguments = payload.get("audit_input") or {}
+        required = {
+            "controller_id": arguments.get("controller_id"),
+            "execution_mode": arguments.get("execution_mode"),
+            "final_executor": arguments.get("final_executor"),
+        }
+        missing = [key for key, value in required.items() if value in (None, "", {})]
+        if missing:
+            action = NextAction.MANUAL_REVIEW
+            outcome_reason = "audit-dispatch-incomplete: " + ", ".join(missing)
+            arguments = {"controller_id": controller_id}
+    elif action == NextAction.RUN_POOL_SCAN:
+        arguments = {
+            "execution_mode": execution_mode,
+            "controller_id": controller_id,
+            "risk_profile": terms.get("risk_profile") or "yield_focused",
+            "total_amount_quote": terms.get("total_amount_quote") or 10,
+        }
+        if (
+            not execution_mode
+            or not controller_id
+            or (
+                execution_mode == "loop"
+                and (
+                    not terms.get("risk_profile")
+                    or terms.get("total_amount_quote") is None
+                )
+            )
+        ):
+            action = NextAction.MANUAL_REVIEW
+            outcome_reason = "scan-dispatch-incomplete"
+            arguments = {"controller_id": controller_id}
+    elif action == NextAction.RESUME_REBALANCE:
+        arguments = {
+            "execution_mode": execution_mode,
+            "controller_id": controller_id,
+            "selected_candidate": lifecycle.get("selected_candidate") or {},
+            "gateway_pool_info": lifecycle.get("gateway_pool_info") or {},
+            "rebalance_plan": lifecycle.get("rebalance_plan") or {},
+            "total_amount_quote": lifecycle.get("total_amount_quote")
+            or terms.get("total_amount_quote"),
+            "wallet_account_name": lifecycle.get("wallet_account_name"),
+            "wallet_connector_name": lifecycle.get("wallet_connector_name"),
+        }
+        missing = [key for key, value in arguments.items() if value in (None, "", {})]
+        if missing:
+            action = NextAction.MANUAL_REVIEW
+            outcome_reason = "rebalance-resume-incomplete: " + ", ".join(missing)
+            arguments = {"controller_id": controller_id}
+    elif action == NextAction.RESUME_PREFLIGHT:
+        arguments = {
+            "execution_mode": execution_mode,
+            "controller_id": controller_id,
+            "selected_candidate": lifecycle.get("selected_candidate") or {},
+            "gateway_pool_info": lifecycle.get("gateway_pool_info") or {},
+            "total_amount_quote": lifecycle.get("total_amount_quote")
+            or terms.get("total_amount_quote"),
+            "fetch_wallet_balances": True,
+            "wallet_account_name": lifecycle.get("wallet_account_name"),
+            "wallet_connector_name": lifecycle.get("wallet_connector_name"),
+        }
+        missing = [
+            key
+            for key, value in arguments.items()
+            if key != "fetch_wallet_balances" and value in (None, "", {})
+        ]
+        if missing:
+            action = NextAction.MANUAL_REVIEW
+            outcome_reason = "preflight-resume-incomplete: " + ", ".join(missing)
+            arguments = {"controller_id": controller_id}
+    elif action == NextAction.MANUAL_REVIEW:
+        arguments = {"controller_id": controller_id}
+    else:
+        arguments = {}
+    return attach_outcome(
+        payload,
+        routine="lp_position_report",
+        next_action=action,
+        reason=outcome_reason,
+        arguments=arguments,
+        mutation={
+            "recommended_supervision_action": recommended,
+            "phase": update.get("phase"),
+            "session_status": (payload.get("session_state") or {}).get(
+                "session_status"
+            ),
+        },
+        position_number=update.get("position_number"),
+        executor_id=str(executor_id) if executor_id else None,
+    )
+
+
+async def _finish(payload: dict[str, Any], suffix: str = "") -> RoutineResult:
+    _outcome(payload)
+    payload = evidence.redact(payload, datetime_iso=False)
+    await _save_position_report(payload)
+    outcome_text = (
+        "\n\nOutcome:\n```json\n"
+        + json.dumps(payload["outcome"], indent=2, sort_keys=True, default=str)
+        + "\n```"
+    )
+    return RoutineResult(
+        text=_format_position_text(payload) + outcome_text + suffix,
+        table_data=_position_rows(payload.get("position") or {}),
+        table_columns=["Field", "Value"],
+    )
+
+
+async def run(config: Config, context: Any) -> RoutineResult:
+    input_config = evidence.redact(config.model_dump())
     executor_api_debug: dict[str, Any] = {}
     lifecycle_state: dict[str, Any] = {}
     session_state: dict[str, Any] = {}
@@ -1283,7 +1323,7 @@ async def run(config: Config, context: Any) -> str:
                     **exit_policy,
                 }
             )
-            input_config = _json_safe(config.model_dump())
+            input_config = evidence.redact(config.model_dump())
         session_status = str(session_state.get("session_status") or "running")
         if session_status == "cycle_complete":
             with lifecycle_lock(config.controller_id):
@@ -1301,11 +1341,10 @@ async def run(config: Config, context: Any) -> str:
                     "executor_api_debug": {},
                     "position": None,
                     "distances": {},
-                    "session_state": _json_safe(session_state),
+                    "session_state": evidence.redact(session_state),
                     "agent_prompt_summary": "The completed position is archived; wait until the next scheduled cycle before scanning.",
                 }
-                await _save_position_report(payload)
-                return _format_position_text(payload)
+                return await _finish(payload)
         if session_status == "stop_pending":
             if lifecycle_state:
                 raise ValueError(
@@ -1322,11 +1361,10 @@ async def run(config: Config, context: Any) -> str:
                 "executor_api_debug": {},
                 "position": None,
                 "distances": {},
-                "session_state": _json_safe(session_state),
+                "session_state": evidence.redact(session_state),
                 "agent_prompt_summary": "The Orca session is fully audited and stop-pending. Call manage_trading_agent(stop_agent) for this controller and do nothing else.",
             }
-            await _save_position_report(payload)
-            return _format_position_text(payload)
+            return await _finish(payload)
         if session_status == "manual_review":
             payload = {
                 "report_status": "failed-closed",
@@ -1339,11 +1377,10 @@ async def run(config: Config, context: Any) -> str:
                 "executor_api_debug": {},
                 "position": None,
                 "distances": {},
-                "session_state": _json_safe(session_state),
+                "session_state": evidence.redact(session_state),
                 "agent_prompt_summary": "The Orca session is blocked for manual review; do not scan or re-enter.",
             }
-            await _save_position_report(payload)
-            return _format_position_text(payload)
+            return await _finish(payload)
         executor, lookup_warnings, executor_api_debug = await _fetch_executor_from_api(
             config, context
         )
@@ -1364,8 +1401,7 @@ async def run(config: Config, context: Any) -> str:
                     "distances": {},
                     "agent_prompt_summary": "Manual review: executor state could not be established; do not scan or open.",
                 }
-                await _save_position_report(payload)
-                return _format_position_text(payload)
+                return await _finish(payload)
             phase = str(lifecycle_state.get("phase") or "")
             if phase in {
                 "rebalance_required",
@@ -1383,19 +1419,19 @@ async def run(config: Config, context: Any) -> str:
                     "executor_api_debug": executor_api_debug,
                     "position": None,
                     "distances": {},
-                    "lifecycle_resume": _json_safe(lifecycle_state),
+                    "lifecycle_resume": evidence.redact(lifecycle_state),
                     "agent_prompt_summary": "Resume the persisted rebalance; do not rescan or submit a second swap.",
                 }
-                await _save_position_report(payload)
-                return _format_position_text(payload) + (
+                return await _finish(
+                    payload,
                     "\n\nLifecycle resume:\n```json\n"
                     + json.dumps(
-                        _json_safe(lifecycle_state),
+                        evidence.redact(lifecycle_state),
                         indent=2,
                         sort_keys=True,
                         default=str,
                     )
-                    + "\n```"
+                    + "\n```",
                 )
             if phase == "rebalance_confirmed":
                 payload = {
@@ -1409,19 +1445,19 @@ async def run(config: Config, context: Any) -> str:
                     "executor_api_debug": executor_api_debug,
                     "position": None,
                     "distances": {},
-                    "lifecycle_resume": _json_safe(lifecycle_state),
+                    "lifecycle_resume": evidence.redact(lifecycle_state),
                     "agent_prompt_summary": "The rebalance is confirmed; refresh Gateway evidence and rerun preflight for the persisted candidate without rescanning.",
                 }
-                await _save_position_report(payload)
-                return _format_position_text(payload) + (
+                return await _finish(
+                    payload,
                     "\n\nLifecycle resume:\n```json\n"
                     + json.dumps(
-                        _json_safe(lifecycle_state),
+                        evidence.redact(lifecycle_state),
                         indent=2,
                         sort_keys=True,
                         default=str,
                     )
-                    + "\n```"
+                    + "\n```",
                 )
             unfinished = lifecycle_state.get("phase") in {
                 "rebalance_submission_intent",
@@ -1471,7 +1507,7 @@ async def run(config: Config, context: Any) -> str:
                 "executor_api_debug": executor_api_debug,
                 "position": None,
                 "distances": {},
-                "session_state": _json_safe(session_state),
+                "session_state": evidence.redact(session_state),
                 "agent_prompt_summary": (
                     "Manual review: lifecycle state exists but no executor was found; do not scan or re-enter."
                     if unfinished
@@ -1482,8 +1518,7 @@ async def run(config: Config, context: Any) -> str:
                     )
                 ),
             }
-            await _save_position_report(payload)
-            return _format_position_text(payload)
+            return await _finish(payload)
 
         if not lifecycle_state:
             payload = {
@@ -1500,35 +1535,38 @@ async def run(config: Config, context: Any) -> str:
                 "distances": {},
                 "agent_prompt_summary": "Manual review: an untracked active executor blocks scanning and re-entry.",
             }
-            await _save_position_report(payload)
-            return _format_position_text(payload)
-        if not lifecycle_state.get("executor_id"):
+            return await _finish(payload)
+        expected_executor_id = str(lifecycle_state.get("executor_id") or "").strip()
+        if expected_executor_id:
+            plan_mismatches = _executor_lifecycle_mismatches(executor, lifecycle_state)
+            mismatch_reason = "persisted_executor_mismatch"
+        else:
             plan_mismatches = (
                 ["lifecycle_phase"]
                 if lifecycle_state.get("phase") != "preflight_ready"
                 else _executor_plan_mismatches(executor, lifecycle_state)
             )
-            if plan_mismatches:
-                payload = {
-                    "report_status": "failed-closed",
-                    "timestamp": now.isoformat(),
-                    "has_active_position": True,
-                    "recommended_supervision_action": "manual-review",
-                    "reason": "unmatched_executor_after_create",
-                    "warnings": lookup_warnings
-                    + [
-                        "active executor does not match the persisted preflight plan: "
-                        + ", ".join(plan_mismatches)
-                    ],
-                    "executor_plan_mismatches": plan_mismatches,
-                    "input_config": input_config,
-                    "executor_api_debug": executor_api_debug,
-                    "position": None,
-                    "distances": {},
-                    "agent_prompt_summary": "Manual review: executor creation could not be reconciled with the persisted plan.",
-                }
-                await _save_position_report(payload)
-                return _format_position_text(payload)
+            mismatch_reason = "unmatched_executor_after_create"
+        if plan_mismatches:
+            payload = {
+                "report_status": "failed-closed",
+                "timestamp": now.isoformat(),
+                "has_active_position": True,
+                "recommended_supervision_action": "manual-review",
+                "reason": mismatch_reason,
+                "warnings": lookup_warnings
+                + [
+                    "active executor does not match the persisted lifecycle plan: "
+                    + ", ".join(plan_mismatches)
+                ],
+                "executor_plan_mismatches": plan_mismatches,
+                "input_config": input_config,
+                "executor_api_debug": executor_api_debug,
+                "position": None,
+                "distances": {},
+                "agent_prompt_summary": "Manual review: executor identity could not be reconciled with the persisted plan.",
+            }
+            return await _finish(payload)
 
         executor_api_debug["executor_source_used"] = "api"
         fields = _extract_api_executor(executor)
@@ -1628,7 +1666,7 @@ async def run(config: Config, context: Any) -> str:
             lifecycle_state_update["close_reason"] = reason
         elif action == "write-audit":
             lifecycle_state_update["phase"] = "terminal"
-            lifecycle_state_update["terminal_executor"] = _json_safe(executor)
+            lifecycle_state_update["terminal_executor"] = evidence.redact(executor)
         elif action == "continue":
             lifecycle_state_update["phase"] = (
                 "closing"
@@ -1692,16 +1730,14 @@ async def run(config: Config, context: Any) -> str:
             "recommended_supervision_action": action,
             "reason": reason,
             "lifecycle_state_update": lifecycle_state_update,
-            "session_state": _json_safe(session_state),
-            "session_stop_trigger": _json_safe(session_trigger),
+            "session_state": evidence.redact(session_state),
+            "session_stop_trigger": evidence.redact(session_trigger),
             "active_session_net_pnl_quote": active_session_pnl,
             "rebalance_cost_quote": rebalance_cost,
             "warnings": warnings,
             "agent_prompt_summary": summary,
         }
-        await _save_position_report(payload)
-        text = _format_position_text(payload)
-        text += (
+        suffix = (
             "\n\nLifecycle state update:\n```json\n"
             + json.dumps(lifecycle_state_update, indent=2, sort_keys=True, default=str)
             + "\n```"
@@ -1712,7 +1748,7 @@ async def run(config: Config, context: Any) -> str:
                 "execution_mode": config.execution_mode,
                 "executor_plan": lifecycle_state.get("executor_plan") or {},
                 "preset": lifecycle_state.get("preset") or "",
-                "final_executor": _json_safe(executor),
+                "final_executor": evidence.redact(executor),
                 "close_reason": lifecycle_state.get("close_reason")
                 or executor.get("close_type")
                 or (
@@ -1722,12 +1758,13 @@ async def run(config: Config, context: Any) -> str:
                 )
                 or "",
             }
-            text += (
+            payload["audit_input"] = audit_input
+            suffix += (
                 "\n\nClose audit input:\n```json\n"
                 + json.dumps(audit_input, indent=2, sort_keys=True, default=str)
                 + "\n```"
             )
-        return text
+        return await _finish(payload, suffix)
     except Exception as exc:
         now = _utc_now().isoformat()
         payload = {
@@ -1743,8 +1780,7 @@ async def run(config: Config, context: Any) -> str:
             "distances": {},
             "agent_prompt_summary": "Manual review: LP position report failed closed.",
         }
-        await _save_position_report(payload)
-        return _format_position_text(payload)
+        return await _finish(payload)
 
 
 if __name__ == "__main__":
@@ -1754,4 +1790,4 @@ if __name__ == "__main__":
         _self_check()
         print("self-check passed")
     else:
-        print(asyncio.run(run(Config(), None)))
+        print(asyncio.run(run(Config(execution_mode="dry_run"), None)))
