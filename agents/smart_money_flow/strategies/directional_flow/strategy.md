@@ -22,9 +22,12 @@ default_config:
     max_open_executors: 1           # one position at a time on a tiny wallet
     max_leverage: 2                  # 2x keeps notional ~40 USDC (< balance)
 default_trading_context: |
-  Trade BTC/USDT, ETH/USDT, SOL/USDT perpetuals on Derive (connector
-  `derive_perpetual`). One-time setup: in the Hummingbot client run
-  `connect derive_perpetual` (wallet address + private key + subaccount id),
+  Trade BTC/USDC, ETH/USDC, SOL/USDC perpetuals on Derive (connector
+  `derive_perpetual`). IMPORTANT: Derive perps are quoted in **USDC**, not USDT —
+  use `SOL-USDC` / `ETH-USDC` / `BTC-USDC` (the connector's trading-rule map and
+  order-book subscription both require the `-USDC` form). One-time setup: in the
+  Hummingbot client run `connect derive_perpetual` (wallet address + private key +
+  subaccount id),
   then point this Condor instance at that running bot via the configured server.
   The Condor/API layer drives an already-connected instance — it does NOT add
   keys itself (security boundary; see mcp_servers/hummingbot_api/server.py).

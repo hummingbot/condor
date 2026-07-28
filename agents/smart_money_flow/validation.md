@@ -34,7 +34,7 @@ read call (no keys touched): `portfolio()` should show the connected
 
 ## Step 3 — Tiny-size mainnet validation
 1. Set `default_trading_context` connector to `derive_perpetual`, and start with
-   a small `total_amount_quote` (e.g. 50–100 USDT) on the isolated wallet.
+   a small `total_amount_quote` (e.g. 50–100 USDC) on the isolated wallet.
 2. Launch the agent loop (`manage_routines` + the loop strategy).
 3. Watch for, per tick:
    - `onchain_flow` routine returns a verdict + dashboard (no exceptions).
