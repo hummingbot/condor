@@ -15,14 +15,18 @@ default_config:
     max_open_executors: 2
     max_leverage: 3
 default_trading_context: |
-  Trade BTC/USDT, ETH/USDT, SOL/USDT perpetuals on ANY perpetual venue
-  (Derive `derive_perpetual`, Hyperliquid `hyperliquid`, Backpack
-  `backpack_perpetual`, Pacifica `pacifica_perpetual`, …). Read the onchain_flow
-  routine every tick; take LONG when the regime is RISK-ON and the asset's
-  flow_score >= 0.4, SHORT when RISK-OFF and flow_score <= -0.4. Max 2 concurrent
-  positions, max leverage 3x (5x only at flow conviction >= 0.7). Stand aside
-  (HOLD) when the composite is ambiguous. The on-chain signal is Solana DeFi flow
-  (GeckoTerminal), not XRPL.
+  Trade BTC/USDT, ETH/USDT, SOL/USDT perpetuals on Derive (connector
+  `derive_perpetual`). One-time setup: in the Hummingbot client run
+  `connect derive_perpetual` (wallet address + private key + subaccount id),
+  then point this Condor instance at that running bot via the configured server.
+  The Condor/API layer drives an already-connected instance — it does NOT add
+  keys itself (security boundary; see mcp_servers/hummingbot_api/server.py).
+  VALIDATION FIRST: run against `derive_perpetual_testnet` with a tiny size
+  before any mainnet capital. Read the onchain_flow routine every tick; take
+  LONG when the regime is RISK-ON and the asset's flow_score >= 0.4, SHORT when
+  RISK-OFF and flow_score <= -0.4. Max 2 concurrent positions, max leverage 3x
+  (5x only at flow conviction >= 0.7). Stand aside (HOLD) when the composite is
+  ambiguous. The on-chain signal is Solana DeFi flow (GeckoTerminal), not XRPL.
 ---
 
 # Derive Flow Trader — Playbook
