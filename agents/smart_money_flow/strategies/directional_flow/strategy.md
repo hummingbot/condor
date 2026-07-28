@@ -21,8 +21,11 @@ default_trading_context: |
   then point this Condor instance at that running bot via the configured server.
   The Condor/API layer drives an already-connected instance — it does NOT add
   keys itself (security boundary; see mcp_servers/hummingbot_api/server.py).
-  VALIDATION FIRST: run against `derive_perpetual_testnet` with a tiny size
-  before any mainnet capital. Read the onchain_flow routine every tick; take
+  VALIDATION FIRST: connect `derive_perpetual` (mainnet) via the web dashboard
+  (Settings → Keys) using a dedicated, minimally-funded wallet, then run with a
+  tiny `total_amount_quote` before scaling. NOTE: Condor's web UI filters out
+  testnet connectors (see validation.md), so validation is mainnet-with-small-
+  size, not testnet. Read the onchain_flow routine every tick; take
   LONG when the regime is RISK-ON and the asset's flow_score >= 0.4, SHORT when
   RISK-OFF and flow_score <= -0.4. Max 2 concurrent positions, max leverage 3x
   (5x only at flow conviction >= 0.7). Stand aside (HOLD) when the composite is
