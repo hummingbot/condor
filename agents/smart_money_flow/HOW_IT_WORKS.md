@@ -111,11 +111,19 @@ gracefully instead of crashing the tick.
 ## Risk limits (built-in guardrails)
 
 From `default_config.risk_limits`:
+
+**Production defaults:**
 - `max_total_exposure_quote: 2000` — never deploy more than this notional.
 - `max_drawdown_pct: 8` — hard stop if losses hit 8%.
 - `max_open_executors: 2` — at most 2 concurrent positions.
 - `max_leverage: 3` — 3x default; 5x only at high conviction (≥0.7).
 - `frequency_sec: 300` — one decision every 5 minutes.
+
+**50-USDC test-mode (current `default_config` values — wallet-sized):**
+- `total_amount_quote: 50`, `min_order_amount_quote: 10`, `position_size_quote: 20`
+- `max_total_exposure_quote: 50`, `max_position_size_quote: 20`
+- `max_open_executors: 1` (one position at a time)
+- `max_leverage: 2` (notional ~40 USDC, under the 50 balance)
 - The Risk Engine automatically rejects anything that breaches these.
 
 ---
