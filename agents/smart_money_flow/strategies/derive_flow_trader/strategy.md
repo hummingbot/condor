@@ -1,6 +1,6 @@
 ---
 name: Derive Flow Trader
-description: Directional perp trader on any perpetual venue (Derive, Hyperliquid, Backpack, Pacifica, …). Takes LONG/SHORT on BTC/ETH/SOL where capital-flow conviction is decisive and regime-aligned; bounded leverage, position-hold risk.
+description: Directional perp trader on Derive (derive_perpetual). Takes LONG/SHORT on BTC/ETH/SOL where capital-flow conviction is decisive and regime-aligned; bounded leverage, position-hold risk. Tested on Derive mainnet only.
 agent_key: opencode-go:deepseek-v4-flash
 skills:
   - smart_money_flow:smart_money_playbook
