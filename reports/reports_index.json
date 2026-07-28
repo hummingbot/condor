@@ -1,1050 +1,9 @@
 [
   {
-    "id": "7b0e76",
+    "id": "425427",
     "title": "Orca Pool Scan",
-    "filename": "20260617_102717_orca_pool_scan_7b0e76.html",
-    "created_at": "2026-06-17T10:27:17.302830+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "df304c",
-    "title": "Orca Pool Scan",
-    "filename": "20260617_105454_orca_pool_scan_df304c.html",
-    "created_at": "2026-06-17T10:54:54.173716+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "045081",
-    "title": "Orca Pool Scan",
-    "filename": "20260617_105823_orca_pool_scan_045081.html",
-    "created_at": "2026-06-17T10:58:23.479962+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "a71067",
-    "title": "Orca LP Position Report",
-    "filename": "20260617_110423_orca_lp_position_report_a71067.html",
-    "created_at": "2026-06-17T11:04:23.214199+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "540e17",
-    "title": "Orca LP Position Report",
-    "filename": "20260617_113957_orca_lp_position_report_540e17.html",
-    "created_at": "2026-06-17T11:39:57.638380+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "bbd604",
-    "title": "Orca LP Position Report",
-    "filename": "20260617_115036_orca_lp_position_report_bbd604.html",
-    "created_at": "2026-06-17T11:50:36.818455+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "38f9b7",
-    "title": "Orca LP Position Report",
-    "filename": "20260617_123612_orca_lp_position_report_38f9b7.html",
-    "created_at": "2026-06-17T12:36:12.524586+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "c959aa",
-    "title": "Orca LP Position Report",
-    "filename": "20260617_134658_orca_lp_position_report_c959aa.html",
-    "created_at": "2026-06-17T13:46:58.421254+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "6b3b26",
-    "title": "Orca LP Position Report",
-    "filename": "20260617_135238_orca_lp_position_report_6b3b26.html",
-    "created_at": "2026-06-17T13:52:38.023673+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "65d916",
-    "title": "Orca LP Position Report",
-    "filename": "20260618_081322_orca_lp_position_report_65d916.html",
-    "created_at": "2026-06-18T08:13:22.740450+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "3afe15",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_141440_orca_pool_scan_3afe15.html",
-    "created_at": "2026-06-22T14:14:40.330852+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "d4d33e",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_142205_orca_pool_scan_d4d33e.html",
-    "created_at": "2026-06-22T14:22:05.143224+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "8831e0",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_144753_orca_pool_scan_8831e0.html",
-    "created_at": "2026-06-22T14:47:53.259363+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "815518",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_145629_orca_pool_scan_815518.html",
-    "created_at": "2026-06-22T14:56:29.063785+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "5b93d0",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_145911_orca_pool_scan_5b93d0.html",
-    "created_at": "2026-06-22T14:59:11.803761+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "268b73",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_153134_orca_pool_scan_268b73.html",
-    "created_at": "2026-06-22T15:31:34.464246+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "6a87e4",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_154747_orca_pool_scan_6a87e4.html",
-    "created_at": "2026-06-22T15:47:47.259313+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "708920",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_160909_orca_pool_scan_708920.html",
-    "created_at": "2026-06-22T16:09:09.406058+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "62e8f0",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_162033_orca_pool_scan_62e8f0.html",
-    "created_at": "2026-06-22T16:20:33.326736+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "1348a4",
-    "title": "Orca Pool Scan",
-    "filename": "20260622_163424_orca_pool_scan_1348a4.html",
-    "created_at": "2026-06-22T16:34:24.679975+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "231e00",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_045620_orca_pre_lp_rebalance_231e00.html",
-    "created_at": "2026-06-23T04:56:20.908750+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "6dd459",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_045737_orca_pre_lp_rebalance_6dd459.html",
-    "created_at": "2026-06-23T04:57:37.766688+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "a6efa9",
-    "title": "Orca Pool Scan",
-    "filename": "20260623_050926_orca_pool_scan_a6efa9.html",
-    "created_at": "2026-06-23T05:09:26.469122+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "9b8ff0",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_051004_orca_pre_lp_rebalance_9b8ff0.html",
-    "created_at": "2026-06-23T05:10:04.515442+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "30166f",
-    "title": "Orca Pool Scan",
-    "filename": "20260623_052333_orca_pool_scan_30166f.html",
-    "created_at": "2026-06-23T05:23:33.557723+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "d992c0",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_052418_orca_pre_lp_rebalance_d992c0.html",
-    "created_at": "2026-06-23T05:24:18.215435+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "50502d",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_052429_orca_pre_lp_rebalance_50502d.html",
-    "created_at": "2026-06-23T05:24:29.525795+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "61cb1e",
-    "title": "Orca Pool Scan",
-    "filename": "20260623_053557_orca_pool_scan_61cb1e.html",
-    "created_at": "2026-06-23T05:35:57.192747+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "99dc34",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_053638_orca_pre_lp_rebalance_99dc34.html",
-    "created_at": "2026-06-23T05:36:38.411461+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "2cceb2",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_053657_orca_pre_lp_rebalance_2cceb2.html",
-    "created_at": "2026-06-23T05:36:57.090076+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "286b6f",
-    "title": "Orca Pool Scan",
-    "filename": "20260623_061600_orca_pool_scan_286b6f.html",
-    "created_at": "2026-06-23T06:16:00.321606+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "291c70",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_061651_orca_pre_lp_rebalance_291c70.html",
-    "created_at": "2026-06-23T06:16:51.942659+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "d5c2c5",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_062249_orca_lp_position_report_d5c2c5.html",
-    "created_at": "2026-06-23T06:22:49.486206+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "7404b8",
-    "title": "Orca Pool Scan",
-    "filename": "20260623_103449_orca_pool_scan_7404b8.html",
-    "created_at": "2026-06-23T10:34:49.284258+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "14dd19",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_103532_orca_pre_lp_rebalance_14dd19.html",
-    "created_at": "2026-06-23T10:35:32.143093+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "8afa15",
-    "title": "Orca Pool Scan",
-    "filename": "20260623_110711_orca_pool_scan_8afa15.html",
-    "created_at": "2026-06-23T11:07:11.967937+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "a07f00",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_110750_orca_pre_lp_rebalance_a07f00.html",
-    "created_at": "2026-06-23T11:07:50.759508+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "5bae4e",
-    "title": "Orca Pool Scan",
-    "filename": "20260623_111414_orca_pool_scan_5bae4e.html",
-    "created_at": "2026-06-23T11:14:14.210633+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "d6b9e9",
-    "title": "Orca Pool Scan",
-    "filename": "20260623_112441_orca_pool_scan_d6b9e9.html",
-    "created_at": "2026-06-23T11:24:41.643326+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "937fe3",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_112517_orca_pre_lp_rebalance_937fe3.html",
-    "created_at": "2026-06-23T11:25:17.793417+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "90d19e",
-    "title": "Orca Pre-LP Rebalance",
-    "filename": "20260623_112531_orca_pre_lp_rebalance_90d19e.html",
-    "created_at": "2026-06-23T11:25:31.953723+00:00",
-    "source_type": "routine",
-    "source_name": "pre_lp_rebalance",
-    "tags": [
-      "orca",
-      "lp",
-      "rebalance",
-      "agent"
-    ]
-  },
-  {
-    "id": "c31fa2",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_113152_orca_lp_position_report_c31fa2.html",
-    "created_at": "2026-06-23T11:31:52.350864+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "74c31c",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_113807_orca_lp_position_report_74c31c.html",
-    "created_at": "2026-06-23T11:38:07.912982+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "a71d59",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_114356_orca_lp_position_report_a71d59.html",
-    "created_at": "2026-06-23T11:43:56.636400+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "9c34a1",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_114932_orca_lp_position_report_9c34a1.html",
-    "created_at": "2026-06-23T11:49:32.582048+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "f3180e",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_115528_orca_lp_position_report_f3180e.html",
-    "created_at": "2026-06-23T11:55:28.222587+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "4d89ca",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_120102_orca_lp_position_report_4d89ca.html",
-    "created_at": "2026-06-23T12:01:02.479568+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "624865",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_120723_orca_lp_position_report_624865.html",
-    "created_at": "2026-06-23T12:07:23.672738+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "f35fce",
-    "title": "Orca LP Position Report",
-    "filename": "20260623_121357_orca_lp_position_report_f35fce.html",
-    "created_at": "2026-06-23T12:13:57.376608+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "375213",
-    "title": "Orca Pool Scan",
-    "filename": "20260624_072456_orca_pool_scan_375213.html",
-    "created_at": "2026-06-24T07:24:56.746851+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "fecb94",
-    "title": "Orca Pool Scan",
-    "filename": "20260624_073001_orca_pool_scan_fecb94.html",
-    "created_at": "2026-06-24T07:30:01.546764+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "aeb8ca",
-    "title": "Orca Pool Scan",
-    "filename": "20260624_073223_orca_pool_scan_aeb8ca.html",
-    "created_at": "2026-06-24T07:32:23.485865+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "f5ede5",
-    "title": "Orca LP Position Report",
-    "filename": "20260624_073927_orca_lp_position_report_f5ede5.html",
-    "created_at": "2026-06-24T07:39:27.233782+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ]
-  },
-  {
-    "id": "4bda76",
-    "title": "Orca Pool Scan",
-    "filename": "20260624_074520_orca_pool_scan_4bda76.html",
-    "created_at": "2026-06-24T07:45:20.580618+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ]
-  },
-  {
-    "id": "1c2665",
-    "title": "LP Pool Watcher",
-    "filename": "20260629_115519_lp_pool_watcher_1c2665.html",
-    "created_at": "2026-06-29T11:55:19.887033+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "4313ac",
-    "title": "LP Pool Watcher",
-    "filename": "20260629_115812_lp_pool_watcher_4313ac.html",
-    "created_at": "2026-06-29T11:58:12.064351+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "a620d9",
-    "title": "LP Pool Discovery",
-    "filename": "20260629_120118_lp_pool_discovery_a620d9.html",
-    "created_at": "2026-06-29T12:01:18.671032+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "6ace76",
-    "title": "LP Pool Discovery",
-    "filename": "20260629_120606_lp_pool_discovery_6ace76.html",
-    "created_at": "2026-06-29T12:06:06.831056+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "1ffed9",
-    "title": "LP Pool Watcher",
-    "filename": "20260629_120613_lp_pool_watcher_1ffed9.html",
-    "created_at": "2026-06-29T12:06:13.904508+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "8eac4a",
-    "title": "LP Pool Discovery",
-    "filename": "20260629_123553_lp_pool_discovery_8eac4a.html",
-    "created_at": "2026-06-29T12:35:53.771125+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "861866",
-    "title": "LP Pool Watcher",
-    "filename": "20260629_123553_lp_pool_watcher_861866.html",
-    "created_at": "2026-06-29T12:35:53.812898+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "b23f30",
-    "title": "LP Pool Discovery",
-    "filename": "20260629_125809_lp_pool_discovery_b23f30.html",
-    "created_at": "2026-06-29T12:58:09.474327+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "8bae9f",
-    "title": "LP Pool Watcher",
-    "filename": "20260629_125809_lp_pool_watcher_8bae9f.html",
-    "created_at": "2026-06-29T12:58:09.513089+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "61bdf4",
-    "title": "LP Pool Discovery",
-    "filename": "20260629_130131_lp_pool_discovery_61bdf4.html",
-    "created_at": "2026-06-29T13:01:31.691769+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "3073c1",
-    "title": "LP Pool Discovery",
-    "filename": "20260629_133538_lp_pool_discovery_3073c1.html",
-    "created_at": "2026-06-29T13:35:38.220694+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "ee81c0",
-    "title": "LP Pool Watcher",
-    "filename": "20260629_133655_lp_pool_watcher_ee81c0.html",
-    "created_at": "2026-06-29T13:36:55.706152+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "26f601",
-    "title": "LP Pool Discovery",
-    "filename": "20260629_133805_lp_pool_discovery_26f601.html",
-    "created_at": "2026-06-29T13:38:05.440550+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "804bc3",
-    "title": "LP Pool Watcher",
-    "filename": "20260629_133945_lp_pool_watcher_804bc3.html",
-    "created_at": "2026-06-29T13:39:45.299197+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "aceed7",
-    "title": "Current Orca/Meteora LP Pool Discovery",
-    "filename": "20260629_141521_current_orcameteora_lp_pool_discovery_aceed7.html",
-    "created_at": "2026-06-29T14:15:21.730815+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "30b46f",
-    "title": "Orca/Meteora LP Pool Discovery 2026-06-29",
-    "filename": "20260629_141547_orcameteora_lp_pool_discovery_2026_06_29_30b46f.html",
-    "created_at": "2026-06-29T14:15:47.281215+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "7318b3",
-    "title": "Orca/Meteora LP Pool Scorer 2026-06-29",
-    "filename": "20260629_141633_orcameteora_lp_pool_scorer_2026_06_29_7318b3.html",
-    "created_at": "2026-06-29T14:16:33.810232+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "74a3c2",
-    "title": "LP Pool Discovery",
-    "filename": "20260629_142024_lp_pool_discovery_74a3c2.html",
-    "created_at": "2026-06-29T14:20:24.919735+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "64435f",
-    "title": "LP Pool Watcher",
-    "filename": "20260629_142122_lp_pool_watcher_64435f.html",
-    "created_at": "2026-06-29T14:21:22.586832+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "0b35a2",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_113236_orca_pool_scan_0b35a2.html",
-    "created_at": "2026-07-01T11:32:36.465356+00:00",
+    "filename": "20260723_104059_orca_pool_scan_425427.html",
+    "created_at": "2026-07-23T10:40:59.078563+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1056,10 +15,25 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "96217e",
+    "id": "23c02d",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_104420_orca_lp_position_report_23c02d.html",
+    "created_at": "2026-07-23T10:44:20.298441+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "d82dff",
     "title": "Orca Pool Scan",
-    "filename": "20260701_113247_orca_pool_scan_96217e.html",
-    "created_at": "2026-07-01T11:32:47.084450+00:00",
+    "filename": "20260723_104426_orca_pool_scan_d82dff.html",
+    "created_at": "2026-07-23T10:44:26.594818+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1071,10 +45,40 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "faebdb",
+    "id": "ec9019",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_104453_orca_live_preflight_ec9019.html",
+    "created_at": "2026-07-23T10:44:53.953105+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "f2b9cc",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_105027_orca_lp_position_report_f2b9cc.html",
+    "created_at": "2026-07-23T10:50:27.207750+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "81c442",
     "title": "Orca Pool Scan",
-    "filename": "20260701_114112_orca_pool_scan_faebdb.html",
-    "created_at": "2026-07-01T11:41:12.961514+00:00",
+    "filename": "20260723_105033_orca_pool_scan_81c442.html",
+    "created_at": "2026-07-23T10:50:33.719160+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1086,10 +90,25 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "d8c0e1",
+    "id": "d3d8ff",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_105108_orca_live_preflight_d3d8ff.html",
+    "created_at": "2026-07-23T10:51:08.528504+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "ffcffe",
     "title": "Orca Pool Scan",
-    "filename": "20260701_114125_orca_pool_scan_d8c0e1.html",
-    "created_at": "2026-07-01T11:41:25.990620+00:00",
+    "filename": "20260723_134815_orca_pool_scan_ffcffe.html",
+    "created_at": "2026-07-23T13:48:15.448721+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1101,10 +120,55 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "8b14b8",
+    "id": "1b0256",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_134842_orca_live_preflight_1b0256.html",
+    "created_at": "2026-07-23T13:48:42.984390+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "bae113",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_134901_orca_live_preflight_bae113.html",
+    "created_at": "2026-07-23T13:49:01.286684+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "e00756",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_140239_orca_lp_position_report_e00756.html",
+    "created_at": "2026-07-23T14:02:39.573504+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "b4f540",
     "title": "Orca Pool Scan",
-    "filename": "20260701_121249_orca_pool_scan_8b14b8.html",
-    "created_at": "2026-07-01T12:12:49.225093+00:00",
+    "filename": "20260723_140248_orca_pool_scan_b4f540.html",
+    "created_at": "2026-07-23T14:02:48.292819+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1116,10 +180,55 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "0f3c0e",
+    "id": "868884",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_140317_orca_live_preflight_868884.html",
+    "created_at": "2026-07-23T14:03:17.878359+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "2aef24",
+    "title": "Orca Pre-LP Rebalance",
+    "filename": "20260723_140343_orca_pre_lp_rebalance_2aef24.html",
+    "created_at": "2026-07-23T14:03:43.130838+00:00",
+    "source_type": "routine",
+    "source_name": "pre_lp_rebalance",
+    "tags": [
+      "orca",
+      "lp",
+      "rebalance",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "79c4b2",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_143158_orca_lp_position_report_79c4b2.html",
+    "created_at": "2026-07-23T14:31:58.796869+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "d55031",
     "title": "Orca Pool Scan",
-    "filename": "20260701_121559_orca_pool_scan_0f3c0e.html",
-    "created_at": "2026-07-01T12:15:59.039206+00:00",
+    "filename": "20260723_143209_orca_pool_scan_d55031.html",
+    "created_at": "2026-07-23T14:32:09.976598+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1131,10 +240,686 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "58ab78",
+    "id": "250009",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_143238_orca_live_preflight_250009.html",
+    "created_at": "2026-07-23T14:32:38.990931+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "442c4b",
+    "title": "Orca Pre-LP Rebalance",
+    "filename": "20260723_143259_orca_pre_lp_rebalance_442c4b.html",
+    "created_at": "2026-07-23T14:32:59.235119+00:00",
+    "source_type": "routine",
+    "source_name": "pre_lp_rebalance",
+    "tags": [
+      "orca",
+      "lp",
+      "rebalance",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "1e913b",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_144734_orca_lp_position_report_1e913b.html",
+    "created_at": "2026-07-23T14:47:34.554212+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "9f8d3c",
     "title": "Orca Pool Scan",
-    "filename": "20260701_124443_orca_pool_scan_58ab78.html",
-    "created_at": "2026-07-01T12:44:43.113069+00:00",
+    "filename": "20260723_144743_orca_pool_scan_9f8d3c.html",
+    "created_at": "2026-07-23T14:47:43.132500+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "207d7c",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_144811_orca_live_preflight_207d7c.html",
+    "created_at": "2026-07-23T14:48:11.155675+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "680e59",
+    "title": "Orca Pre-LP Rebalance",
+    "filename": "20260723_144839_orca_pre_lp_rebalance_680e59.html",
+    "created_at": "2026-07-23T14:48:39.091642+00:00",
+    "source_type": "routine",
+    "source_name": "pre_lp_rebalance",
+    "tags": [
+      "orca",
+      "lp",
+      "rebalance",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "5cda21",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_152004_orca_lp_position_report_5cda21.html",
+    "created_at": "2026-07-23T15:20:04.618181+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "b30441",
+    "title": "Orca Pool Scan",
+    "filename": "20260723_152013_orca_pool_scan_b30441.html",
+    "created_at": "2026-07-23T15:20:13.892468+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "cea0ea",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_152041_orca_live_preflight_cea0ea.html",
+    "created_at": "2026-07-23T15:20:41.371859+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "7bc2cd",
+    "title": "Orca Pre-LP Rebalance",
+    "filename": "20260723_152108_orca_pre_lp_rebalance_7bc2cd.html",
+    "created_at": "2026-07-23T15:21:08.676216+00:00",
+    "source_type": "routine",
+    "source_name": "pre_lp_rebalance",
+    "tags": [
+      "orca",
+      "lp",
+      "rebalance",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "6dee80",
+    "title": "Orca Live Preflight",
+    "filename": "20260723_152124_orca_live_preflight_6dee80.html",
+    "created_at": "2026-07-23T15:21:24.044258+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "170ece",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_152714_orca_lp_position_report_170ece.html",
+    "created_at": "2026-07-23T15:27:14.855256+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "b86b86",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_153247_orca_lp_position_report_b86b86.html",
+    "created_at": "2026-07-23T15:32:47.737291+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "7b7913",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_153818_orca_lp_position_report_7b7913.html",
+    "created_at": "2026-07-23T15:38:18.355688+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "25ad0d",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_154352_orca_lp_position_report_25ad0d.html",
+    "created_at": "2026-07-23T15:43:52.438802+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "9e04b9",
+    "title": "Orca LP Position Report",
+    "filename": "20260723_154929_orca_lp_position_report_9e04b9.html",
+    "created_at": "2026-07-23T15:49:29.726268+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "ac1439",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_095222_orca_lp_position_report_ac1439.html",
+    "created_at": "2026-07-26T09:52:22.636743+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "86bacd",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_095241_orca_pool_scan_86bacd.html",
+    "created_at": "2026-07-26T09:52:41.616280+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "6735ed",
+    "title": "Orca Live Preflight",
+    "filename": "20260726_095321_orca_live_preflight_6735ed.html",
+    "created_at": "2026-07-26T09:53:21.870819+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "509614",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_095934_orca_lp_position_report_509614.html",
+    "created_at": "2026-07-26T09:59:34.125467+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "b372a1",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_100713_orca_lp_position_report_b372a1.html",
+    "created_at": "2026-07-26T10:07:13.597323+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "3cf38e",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_101758_orca_lp_position_report_3cf38e.html",
+    "created_at": "2026-07-26T10:17:58.398355+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "48be0f",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_101809_orca_pool_scan_48be0f.html",
+    "created_at": "2026-07-26T10:18:09.847203+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "f82642",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_101929_orca_pool_scan_f82642.html",
+    "created_at": "2026-07-26T10:19:29.527932+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "830938",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_101943_orca_pool_scan_830938.html",
+    "created_at": "2026-07-26T10:19:43.759615+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "8083ee",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_101953_orca_pool_scan_8083ee.html",
+    "created_at": "2026-07-26T10:19:53.052233+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "4eedde",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_103851_orca_pool_scan_4eedde.html",
+    "created_at": "2026-07-26T10:38:51.410544+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "53693d",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_104139_orca_lp_position_report_53693d.html",
+    "created_at": "2026-07-26T10:41:39.388053+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "50fe8b",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_104152_orca_pool_scan_50fe8b.html",
+    "created_at": "2026-07-26T10:41:52.887029+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "5bf8ab",
+    "title": "Orca Live Preflight",
+    "filename": "20260726_104237_orca_live_preflight_5bf8ab.html",
+    "created_at": "2026-07-26T10:42:37.683727+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "77c56f",
+    "title": "Orca Pre-LP Rebalance",
+    "filename": "20260726_104342_orca_pre_lp_rebalance_77c56f.html",
+    "created_at": "2026-07-26T10:43:42.623600+00:00",
+    "source_type": "routine",
+    "source_name": "pre_lp_rebalance",
+    "tags": [
+      "orca",
+      "lp",
+      "rebalance",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "7e17c3",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_104949_orca_lp_position_report_7e17c3.html",
+    "created_at": "2026-07-26T10:49:49.286405+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "32cfb2",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_105005_orca_lp_position_report_32cfb2.html",
+    "created_at": "2026-07-26T10:50:05.437612+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "673734",
+    "title": "Orca Pre-LP Rebalance",
+    "filename": "20260726_105025_orca_pre_lp_rebalance_673734.html",
+    "created_at": "2026-07-26T10:50:25.598605+00:00",
+    "source_type": "routine",
+    "source_name": "pre_lp_rebalance",
+    "tags": [
+      "orca",
+      "lp",
+      "rebalance",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "28f848",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_151059_orca_lp_position_report_28f848.html",
+    "created_at": "2026-07-26T15:10:59.363417+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "9d1c38",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_155405_orca_lp_position_report_9d1c38.html",
+    "created_at": "2026-07-26T15:54:05.166395+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "2ed9a8",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_155418_orca_pool_scan_2ed9a8.html",
+    "created_at": "2026-07-26T15:54:18.789487+00:00",
+    "source_type": "routine",
+    "source_name": "orca_pool_scan",
+    "tags": [
+      "orca",
+      "lp",
+      "scanner",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "a4e076",
+    "title": "Orca Live Preflight",
+    "filename": "20260726_155458_orca_live_preflight_a4e076.html",
+    "created_at": "2026-07-26T15:54:58.856813+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "54ca4e",
+    "title": "Orca Pre-LP Rebalance",
+    "filename": "20260726_155542_orca_pre_lp_rebalance_54ca4e.html",
+    "created_at": "2026-07-26T15:55:42.293684+00:00",
+    "source_type": "routine",
+    "source_name": "pre_lp_rebalance",
+    "tags": [
+      "orca",
+      "lp",
+      "rebalance",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "af4ec3",
+    "title": "Orca Live Preflight",
+    "filename": "20260726_155617_orca_live_preflight_af4ec3.html",
+    "created_at": "2026-07-26T15:56:17.100947+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "53bbc1",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_160212_orca_lp_position_report_53bbc1.html",
+    "created_at": "2026-07-26T16:02:12.371638+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "38d9b0",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_160749_orca_lp_position_report_38d9b0.html",
+    "created_at": "2026-07-26T16:07:49.160772+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "c87c14",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_161319_orca_lp_position_report_c87c14.html",
+    "created_at": "2026-07-26T16:13:19.384653+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "e35bc6",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_161859_orca_lp_position_report_e35bc6.html",
+    "created_at": "2026-07-26T16:18:59.576339+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "de5d2a",
+    "title": "Orca LP Close Audit",
+    "filename": "20260726_161914_orca_lp_close_audit_de5d2a.html",
+    "created_at": "2026-07-26T16:19:14.711330+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "7844d1",
+    "title": "Orca Pool Scan",
+    "filename": "20260726_170359_orca_pool_scan_7844d1.html",
+    "created_at": "2026-07-26T17:03:59.910518+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1146,175 +931,86 @@
     "agent": "condor"
   },
   {
-    "id": "323d5b",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_124456_orca_pool_scan_323d5b.html",
-    "created_at": "2026-07-01T12:44:56.371088+00:00",
+    "id": "ddaf7d",
+    "title": "Orca Live Preflight",
+    "filename": "20260726_170400_orca_live_preflight_ddaf7d.html",
+    "created_at": "2026-07-26T17:04:00.395586+00:00",
     "source_type": "routine",
-    "source_name": "orca_pool_scan",
+    "source_name": "orca_live_preflight",
     "tags": [
       "orca",
       "lp",
-      "scanner",
+      "preflight",
       "agent"
     ],
     "agent": "condor"
   },
   {
-    "id": "42e016",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_124620_orca_pool_scan_42e016.html",
-    "created_at": "2026-07-01T12:46:20.625457+00:00",
+    "id": "34357e",
+    "title": "Orca Pre-LP Rebalance",
+    "filename": "20260726_170400_orca_pre_lp_rebalance_34357e.html",
+    "created_at": "2026-07-26T17:04:00.605299+00:00",
     "source_type": "routine",
-    "source_name": "orca_pool_scan",
+    "source_name": "pre_lp_rebalance",
     "tags": [
       "orca",
       "lp",
-      "scanner",
+      "rebalance",
       "agent"
     ],
     "agent": "condor"
   },
   {
-    "id": "9921c2",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_125004_orca_pool_scan_9921c2.html",
-    "created_at": "2026-07-01T12:50:04.588428+00:00",
+    "id": "6e1e6f",
+    "title": "Orca LP Position Report",
+    "filename": "20260726_170400_orca_lp_position_report_6e1e6f.html",
+    "created_at": "2026-07-26T17:04:00.807491+00:00",
     "source_type": "routine",
-    "source_name": "orca_pool_scan",
+    "source_name": "lp_position_report",
     "tags": [
       "orca",
       "lp",
-      "scanner",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "dc0bf4",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_130836_orca_pool_scan_dc0bf4.html",
-    "created_at": "2026-07-01T13:08:36.225860+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "c3f427",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_130848_orca_pool_scan_c3f427.html",
-    "created_at": "2026-07-01T13:08:48.794824+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "732b37",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_130857_orca_pool_scan_732b37.html",
-    "created_at": "2026-07-01T13:08:57.769863+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "0f733a",
-    "title": "Meme LP discovery Orca Meteora",
-    "filename": "20260701_130946_meme_lp_discovery_orca_meteora_0f733a.html",
-    "created_at": "2026-07-01T13:09:46.664826+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "57a82c",
-    "title": "Broad meme LP discovery Orca Meteora",
-    "filename": "20260701_131007_broad_meme_lp_discovery_orca_meteora_57a82c.html",
-    "created_at": "2026-07-01T13:10:07.421741+00:00",
-    "source_type": "routine",
-    "source_name": "discover_lp_pools",
-    "tags": [
-      "lp",
-      "discovery",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "f209dd",
-    "title": "Meme LP candidate scoring Orca Meteora",
-    "filename": "20260701_131033_meme_lp_candidate_scoring_orca_meteora_f209dd.html",
-    "created_at": "2026-07-01T13:10:33.117801+00:00",
-    "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
-    "tags": [
-      "lp",
-      "pools",
-      "orca",
-      "meteora"
-    ],
-    "agent": "lp_pools_watcher"
-  },
-  {
-    "id": "16789c",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_131636_orca_pool_scan_16789c.html",
-    "created_at": "2026-07-01T13:16:36.729682+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "5f3783",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_134438_orca_pool_scan_5f3783.html",
-    "created_at": "2026-07-01T13:44:38.864858+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
+      "position",
       "agent"
     ],
     "agent": "condor"
   },
   {
-    "id": "07b2aa",
+    "id": "1ca6bf",
+    "title": "Orca LP Close Audit",
+    "filename": "20260726_170401_orca_lp_close_audit_1ca6bf.html",
+    "created_at": "2026-07-26T17:04:01.019223+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "condor"
+  },
+  {
+    "id": "05af37",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_112247_orca_lp_position_report_05af37.html",
+    "created_at": "2026-07-27T11:22:47.619064+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "30d4dd",
     "title": "Orca Pool Scan",
-    "filename": "20260701_134842_orca_pool_scan_07b2aa.html",
-    "created_at": "2026-07-01T13:48:42.117012+00:00",
+    "filename": "20260727_112301_orca_pool_scan_30d4dd.html",
+    "created_at": "2026-07-27T11:23:01.504686+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1326,40 +1022,256 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "987095",
-    "title": "MET-USDC LP Discovery",
-    "filename": "20260701_134929_met_usdc_lp_discovery_987095.html",
-    "created_at": "2026-07-01T13:49:29.434860+00:00",
+    "id": "68df52",
+    "title": "Orca Live Preflight",
+    "filename": "20260727_112356_orca_live_preflight_68df52.html",
+    "created_at": "2026-07-27T11:23:56.846843+00:00",
     "source_type": "routine",
-    "source_name": "discover_lp_pools",
+    "source_name": "orca_live_preflight",
     "tags": [
-      "lp",
-      "discovery",
       "orca",
-      "meteora"
+      "lp",
+      "preflight",
+      "agent"
     ],
-    "agent": "lp_pools_watcher"
+    "agent": "lpmaxxing"
   },
   {
-    "id": "537c91",
-    "title": "MET-USDC LP candidates",
-    "filename": "20260701_135045_met_usdc_lp_candidates_537c91.html",
-    "created_at": "2026-07-01T13:50:45.737807+00:00",
+    "id": "05d1a4",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_112805_orca_lp_position_report_05d1a4.html",
+    "created_at": "2026-07-27T11:28:05.916010+00:00",
     "source_type": "routine",
-    "source_name": "optimal_pool_scorer",
+    "source_name": "lp_position_report",
     "tags": [
-      "lp",
-      "pools",
       "orca",
-      "meteora"
+      "lp",
+      "position",
+      "agent"
     ],
-    "agent": "lp_pools_watcher"
+    "agent": "lpmaxxing"
   },
   {
-    "id": "3205ed",
+    "id": "66be86",
+    "title": "Orca LP Close Audit",
+    "filename": "20260727_112821_orca_lp_close_audit_66be86.html",
+    "created_at": "2026-07-27T11:28:21.702591+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "15126d",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_113214_orca_lp_position_report_15126d.html",
+    "created_at": "2026-07-27T11:32:14.345149+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "049838",
+    "title": "Orca LP Close Audit",
+    "filename": "20260727_113228_orca_lp_close_audit_049838.html",
+    "created_at": "2026-07-27T11:32:28.783727+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "0e9383",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_113618_orca_lp_position_report_0e9383.html",
+    "created_at": "2026-07-27T11:36:18.278627+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "cd436d",
+    "title": "Orca LP Close Audit",
+    "filename": "20260727_113633_orca_lp_close_audit_cd436d.html",
+    "created_at": "2026-07-27T11:36:33.311972+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "344d1a",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_114828_orca_lp_position_report_344d1a.html",
+    "created_at": "2026-07-27T11:48:28.724652+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "1bc973",
+    "title": "Orca LP Close Audit",
+    "filename": "20260727_114843_orca_lp_close_audit_1bc973.html",
+    "created_at": "2026-07-27T11:48:43.526902+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "2cbc7b",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_115221_orca_lp_position_report_2cbc7b.html",
+    "created_at": "2026-07-27T11:52:21.396933+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "2c146e",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_115556_orca_lp_position_report_2c146e.html",
+    "created_at": "2026-07-27T11:55:56.576902+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "9d9dae",
+    "title": "Orca LP Close Audit",
+    "filename": "20260727_115612_orca_lp_close_audit_9d9dae.html",
+    "created_at": "2026-07-27T11:56:12.187373+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "0f281c",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_115958_orca_lp_position_report_0f281c.html",
+    "created_at": "2026-07-27T11:59:58.768437+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "9ac59e",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_120336_orca_lp_position_report_9ac59e.html",
+    "created_at": "2026-07-27T12:03:36.134099+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "1e080c",
+    "title": "Orca LP Close Audit",
+    "filename": "20260727_120352_orca_lp_close_audit_1e080c.html",
+    "created_at": "2026-07-27T12:03:52.462535+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "2b446d",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_125127_orca_lp_position_report_2b446d.html",
+    "created_at": "2026-07-27T12:51:27.949028+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "1caebe",
     "title": "Orca Pool Scan",
-    "filename": "20260701_140801_orca_pool_scan_3205ed.html",
-    "created_at": "2026-07-01T14:08:01.820871+00:00",
+    "filename": "20260727_125143_orca_pool_scan_1caebe.html",
+    "created_at": "2026-07-27T12:51:43.391271+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1371,10 +1283,131 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "012a5d",
+    "id": "728d07",
+    "title": "Orca Live Preflight",
+    "filename": "20260727_125225_orca_live_preflight_728d07.html",
+    "created_at": "2026-07-27T12:52:25.965799+00:00",
+    "source_type": "routine",
+    "source_name": "orca_live_preflight",
+    "tags": [
+      "orca",
+      "lp",
+      "preflight",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "bd9f4a",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_125606_orca_lp_position_report_bd9f4a.html",
+    "created_at": "2026-07-27T12:56:06.554366+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "75581f",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_125918_orca_lp_position_report_75581f.html",
+    "created_at": "2026-07-27T12:59:18.579719+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "51b76c",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_130248_orca_lp_position_report_51b76c.html",
+    "created_at": "2026-07-27T13:02:48.584603+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "c54d8f",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_130653_orca_lp_position_report_c54d8f.html",
+    "created_at": "2026-07-27T13:06:53.728510+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "971163",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_131048_orca_lp_position_report_971163.html",
+    "created_at": "2026-07-27T13:10:48.610451+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "acc47b",
+    "title": "Orca LP Close Audit",
+    "filename": "20260727_131104_orca_lp_close_audit_acc47b.html",
+    "created_at": "2026-07-27T13:11:04.313848+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "d50251",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_131431_orca_lp_position_report_d50251.html",
+    "created_at": "2026-07-27T13:14:31.650557+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "e306dc",
     "title": "Orca Pool Scan",
-    "filename": "20260701_140819_orca_pool_scan_012a5d.html",
-    "created_at": "2026-07-01T14:08:19.484622+00:00",
+    "filename": "20260727_131445_orca_pool_scan_e306dc.html",
+    "created_at": "2026-07-27T13:14:45.776724+00:00",
     "source_type": "routine",
     "source_name": "orca_pool_scan",
     "tags": [
@@ -1386,64 +1419,94 @@
     "agent": "lpmaxxing"
   },
   {
-    "id": "515044",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_140819_orca_pool_scan_515044.html",
-    "created_at": "2026-07-01T14:08:19.963886+00:00",
+    "id": "b00b0b",
+    "title": "Orca Live Preflight",
+    "filename": "20260727_131529_orca_live_preflight_b00b0b.html",
+    "created_at": "2026-07-27T13:15:29.873491+00:00",
     "source_type": "routine",
-    "source_name": "orca_pool_scan",
+    "source_name": "orca_live_preflight",
     "tags": [
       "orca",
       "lp",
-      "scanner",
+      "preflight",
       "agent"
     ],
     "agent": "lpmaxxing"
   },
   {
-    "id": "7e5cd4",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_140820_orca_pool_scan_7e5cd4.html",
-    "created_at": "2026-07-01T14:08:20.321860+00:00",
+    "id": "fcd6d0",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_131846_orca_lp_position_report_fcd6d0.html",
+    "created_at": "2026-07-27T13:18:46.685137+00:00",
     "source_type": "routine",
-    "source_name": "orca_pool_scan",
+    "source_name": "lp_position_report",
     "tags": [
       "orca",
       "lp",
-      "scanner",
+      "position",
       "agent"
     ],
     "agent": "lpmaxxing"
   },
   {
-    "id": "8c5bf0",
-    "title": "Orca Pool Scan",
-    "filename": "20260701_140820_orca_pool_scan_8c5bf0.html",
-    "created_at": "2026-07-01T14:08:20.793375+00:00",
+    "id": "5e5817",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_132150_orca_lp_position_report_5e5817.html",
+    "created_at": "2026-07-27T13:21:50.325880+00:00",
     "source_type": "routine",
-    "source_name": "orca_pool_scan",
+    "source_name": "lp_position_report",
     "tags": [
       "orca",
       "lp",
-      "scanner",
+      "position",
       "agent"
     ],
     "agent": "lpmaxxing"
   },
   {
-    "id": "92e5f5",
-    "title": "Robinhood Chain Launch Scout",
-    "filename": "20260712_083448_robinhood_chain_launch_scout_92e5f5.html",
-    "created_at": "2026-07-12T08:34:48.988621+00:00",
+    "id": "3e57aa",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_132509_orca_lp_position_report_3e57aa.html",
+    "created_at": "2026-07-27T13:25:09.620397+00:00",
     "source_type": "routine",
-    "source_name": "robinhood_launch_scan",
+    "source_name": "lp_position_report",
     "tags": [
-      "robinhood-chain",
-      "launches",
-      "memecoin",
-      "nft",
-      "security"
+      "orca",
+      "lp",
+      "position",
+      "agent"
     ],
-    "agent": "robinhood_launch_scout"
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "de1647",
+    "title": "Orca LP Close Audit",
+    "filename": "20260727_132524_orca_lp_close_audit_de1647.html",
+    "created_at": "2026-07-27T13:25:24.673329+00:00",
+    "source_type": "routine",
+    "source_name": "lp_close_audit",
+    "tags": [
+      "orca",
+      "lp",
+      "close",
+      "audit",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
+  },
+  {
+    "id": "90bb1d",
+    "title": "Orca LP Position Report",
+    "filename": "20260727_132832_orca_lp_position_report_90bb1d.html",
+    "created_at": "2026-07-27T13:28:32.566015+00:00",
+    "source_type": "routine",
+    "source_name": "lp_position_report",
+    "tags": [
+      "orca",
+      "lp",
+      "position",
+      "agent"
+    ],
+    "agent": "lpmaxxing"
   }
 ]
