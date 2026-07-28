@@ -44,6 +44,7 @@ class ServerDataType(Enum):
     CANDLE_CONNECTORS = "candle_connectors"
     SERVER_STATUS = "server_status"
     ALL_CONNECTORS = "all_connectors"
+    TICKERS = "tickers"
 
 
 @dataclass(frozen=True)
@@ -80,6 +81,7 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.ALL_CONNECTORS: DataTypeDefaults(
         interval=300, ttl=600, stale_threshold=30
     ),
+    ServerDataType.TICKERS: DataTypeDefaults(interval=60, ttl=180, stale_threshold=30),
 }
 
 
@@ -843,6 +845,7 @@ def register_default_fetches() -> None:
         fetch_portfolio,
         fetch_positions,
         fetch_server_status,
+        fetch_tickers,
         fetch_trading_rules,
     )
 
@@ -868,6 +871,7 @@ def register_default_fetches() -> None:
     sds.register_fetch(ServerDataType.BOT_RUNS, fetch_bot_runs)
     sds.register_fetch(ServerDataType.CANDLE_CONNECTORS, fetch_candle_connectors)
     sds.register_fetch(ServerDataType.SERVER_STATUS, fetch_server_status)
+    sds.register_fetch(ServerDataType.TICKERS, fetch_tickers)
 
     logger.info(
         "ServerDataService: registered fetch functions for %d data types",

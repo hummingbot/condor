@@ -4,7 +4,6 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-
 # ── Auth ──
 
 
@@ -267,6 +266,21 @@ class TradingRuleItem(BaseModel):
 class TradingRulesResponse(BaseModel):
     connector: str
     rules: list[TradingRuleItem]
+
+
+class TickerItem(BaseModel):
+    trading_pair: str
+    price: float = 0.0
+    base_volume: float = 0.0
+    quote_volume: float = 0.0
+    # 24h volume converted to USD; None when the quote asset can't be priced.
+    usd_volume: float | None = None
+
+
+class TickersResponse(BaseModel):
+    connector: str
+    tickers: list[TickerItem]
+    updated_at: float | None = None
 
 
 # ── Deploy Bot ──

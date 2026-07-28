@@ -43,10 +43,117 @@ async def fetch_candles(
             return None
         return candles
     except Exception as e:
-        logger.error("Error fetching candles for %s: %s", trading_pair, e, exc_info=True)
+        logger.error(
+            "Error fetching candles for %s: %s", trading_pair, e, exc_info=True
+        )
         return None
 
 
 async def fetch_candle_connectors(client, **_kw) -> List[str]:
     """Fetch available candle connectors."""
     return await client.market_data.get_available_candle_connectors()
+
+
+# Quote assets already denominated in (approximately) USD.
+_USD_QUOTES = frozenset(
+    {"USDT", "USDC", "USD", "BUSD", "FDUSD", "TUSD", "DAI", "USDE", "PYUSD"}
+)
+
+
+def _usd_rate(quote: str, prices: Dict[str, float]) -> Optional[float]:
+    """USD value of one unit of `quote`, using the connector's own tickers.
+
+    Returns None when the quote asset can't be priced (volume stays quote-denominated).
+    """
+    if quote in _USD_QUOTES:
+        return 1.0
+    for usd_quote in ("USDT", "USDC", "USD"):
+        price = prices.get(f"{quote}-{usd_quote}")
+        if price:
+            return price
+    # Fiat quotes are usually listed the other way round (USDT-TRY, USDT-BRL).
+    for usd_quote in ("USDT", "USDC", "USD"):
+        price = prices.get(f"{usd_quote}-{quote}")
+        if price:
+            return 1 / price
+    return None
+
+
+async def fetch_tickers(client, connector_name: str = "", **_kw) -> Dict[str, Any]:
+    """Fetch 24h tickers (price + volumes) for a connector.
+
+    The Hummingbot API returns `quote_volume` denominated in the *quote asset*, so
+    BTC-quoted pairs aren't comparable with USDT-quoted ones. We add `usd_volume`
+    by pricing each quote asset off the same ticker payload — no extra API call.
+
+    Returns:
+        {"tickers": {pair: {price, base_volume, quote_volume, usd_volume}}, "updated_at": float|None}
+    """
+    if not connector_name:
+        return {"tickers": {}, "updated_at": None}
+
+    try:
+        # No client-lib method for this endpoint yet — call it directly.
+        result = await client.market_data._get(
+            "/market-data/tickers",
+            params={"connectors": connector_name, "refresh": "false"},
+        )
+    except Exception as e:
+        error_str = str(e)
+        if "404" in error_str or "not found" in error_str.lower():
+            logger.debug(
+                "Server has no /market-data/tickers endpoint (connector=%s): %s",
+                connector_name,
+                e,
+            )
+        else:
+            logger.warning("Error fetching tickers for %s: %s", connector_name, e)
+        return {"tickers": {}, "updated_at": None}
+
+    raw = ((result or {}).get("tickers") or {}).get(connector_name) or {}
+    if not isinstance(raw, dict):
+        return {"tickers": {}, "updated_at": None}
+
+    prices = {
+        pair: float(t.get("price") or 0)
+        for pair, t in raw.items()
+        if isinstance(t, dict)
+    }
+    rate_cache: Dict[str, Optional[float]] = {}
+
+    tickers: Dict[str, Dict[str, Any]] = {}
+    latest_ts = 0.0
+    for pair, t in raw.items():
+        if not isinstance(t, dict):
+            continue
+        parts = pair.split("-")
+        quote = parts[-1] if len(parts) > 1 else ""
+        if quote not in rate_cache:
+            rate_cache[quote] = _usd_rate(quote, prices)
+        rate = rate_cache[quote]
+
+        price = float(t.get("price") or 0)
+        # Older API versions expose a single `volume` field (quote-denominated)
+        # instead of the base/quote split.
+        quote_volume = float(t.get("quote_volume") or t.get("volume") or 0)
+        base_volume = float(t.get("base_volume") or 0)
+        if not base_volume and quote_volume and price:
+            base_volume = quote_volume / price
+
+        latest_ts = max(latest_ts, float(t.get("timestamp") or 0))
+        tickers[pair] = {
+            "price": price,
+            "base_volume": base_volume,
+            "quote_volume": quote_volume,
+            "usd_volume": quote_volume * rate if rate is not None else None,
+        }
+
+    updated_at = (result or {}).get("updated_at") or {}
+    return {
+        "tickers": tickers,
+        # `updated_at` is absent on older API versions — fall back to the ticker timestamps.
+        "updated_at": (
+            updated_at.get(connector_name) if isinstance(updated_at, dict) else None
+        )
+        or (latest_ts or None),
+    }

@@ -34,6 +34,8 @@ from condor.web.models import (
     MarketPriceResponse,
     OrderBookLevel,
     OrderBookResponse,
+    TickerItem,
+    TickersResponse,
     TradingRuleItem,
     TradingRulesResponse,
     WebUser,
@@ -178,6 +180,44 @@ async def get_trading_rules(
                 )
             )
     return TradingRulesResponse(connector=connector, rules=rules)
+
+
+@router.get("/servers/{name}/market/tickers", response_model=TickersResponse)
+async def get_tickers(
+    name: str,
+    connector: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    """24h tickers for a connector, sorted by USD volume (highest first)."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from condor.server_data_service import ServerDataType, get_server_data_service
+
+    try:
+        result = await get_server_data_service().get_or_fetch(
+            name, ServerDataType.TICKERS, connector_name=connector
+        )
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not isinstance(result, dict):
+        return TickersResponse(connector=connector, tickers=[])
+
+    tickers = [
+        TickerItem(trading_pair=pair, **data)
+        for pair, data in (result.get("tickers") or {}).items()
+        if isinstance(data, dict)
+    ]
+    # Unpriced quotes sort last rather than mixing in at zero volume.
+    tickers.sort(
+        key=lambda t: (t.usd_volume is not None, t.usd_volume or 0), reverse=True
+    )
+
+    return TickersResponse(
+        connector=connector, tickers=tickers, updated_at=result.get("updated_at")
+    )
 
 
 @router.get("/servers/{name}/market/order-book", response_model=OrderBookResponse)
