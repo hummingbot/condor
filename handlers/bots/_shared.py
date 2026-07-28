@@ -129,6 +129,39 @@ async def get_bots_client(
     return client, server_name
 
 
+async def deploy_v2_controllers_headless(
+    client: Any,
+    instance_name: str,
+    credentials_profile: str,
+    controllers_config: List[str],
+    max_global_drawdown_quote: Optional[float] = None,
+    max_controller_drawdown_quote: Optional[float] = None,
+    image: str = "condor/hummingbot:hyperliquid-price-fix",
+) -> Dict[str, Any]:
+    """Deploy a V2 controllers bot with headless=True forced in the payload.
+
+    hummingbot-api only force-enables the MQTT bridge (mqtt_autostart) when the deploy
+    request includes headless=true, but hummingbot_api_client's deploy_v2_controllers()
+    doesn't expose that param at all. Without it, the bot trades normally but is invisible
+    to Condor's MQTT-based status/discovery layer (shows as stopped/0 controllers even
+    while actively placing orders). Bypasses the client wrapper and posts directly.
+    """
+    payload = {
+        "instance_name": instance_name,
+        "credentials_profile": credentials_profile,
+        "controllers_config": controllers_config,
+        "image": image,
+        "headless": True,
+    }
+    if max_global_drawdown_quote is not None:
+        payload["max_global_drawdown_quote"] = max_global_drawdown_quote
+    if max_controller_drawdown_quote is not None:
+        payload["max_controller_drawdown_quote"] = max_controller_drawdown_quote
+    return await client.bot_orchestration._post(
+        "/bot-orchestration/deploy-v2-controllers", json=payload
+    )
+
+
 # ============================================
 # STATE MANAGEMENT
 # ============================================
@@ -165,6 +198,82 @@ def clear_bots_state(context) -> None:
     context.user_data.pop("configs_page", None)
     context.user_data.pop("selected_configs", None)
     context.user_data.pop("configs_type_filtered", None)
+
+
+# Internal/auto-managed fields that a controller config template doesn't declare
+# as regular parameters but which are still legitimate to submit.
+_CONFIG_TEMPLATE_SKIP_FIELDS = {
+    "id",
+    "controller_name",
+    "controller_type",
+    "candles_config",
+    "initial_positions",
+}
+
+
+def validate_config_against_template(
+    config_data: Dict[str, Any], template: Dict[str, Any]
+) -> None:
+    """Validate a controller config dict against the controller's real field template.
+
+    Catches the case where a hand-written or LLM-drafted config uses field names from
+    a different (often similarly-named) controller — e.g. pmm_dynamic's `cooldown_time`/
+    `stop_loss`/`time_limit` pasted into a `pmm_mister` config, which actually uses
+    `buy_cooldown_time`/`sell_cooldown_time`/`global_stop_loss` and has no time_limit
+    field at all. Without this check, such a config saves and deploys successfully but
+    the strategy crashes at startup with an opaque pydantic "extra_forbidden" error,
+    silently leaving the bot running with zero active controllers.
+
+    Raises:
+        ValueError: listing missing required fields and/or unknown fields, with a
+            closest-match suggestion (via difflib) for each unknown field name.
+    """
+    import difflib
+
+    missing_fields: List[str] = []
+    unknown_fields: List[str] = []
+
+    template_field_names = set(template.keys())
+
+    for param_name, param_info in template.items():
+        if param_name in _CONFIG_TEMPLATE_SKIP_FIELDS:
+            continue
+        default = param_info.get("default")
+        has_default = default is not None
+        if not has_default and param_name not in config_data:
+            param_type = str(param_info.get("type", "unknown"))
+            param_type = param_type.replace("<class '", "").replace("'>", "")
+            missing_fields.append(f"  - {param_name} ({param_type})")
+
+    known_field_names = template_field_names | _CONFIG_TEMPLATE_SKIP_FIELDS
+    for key in config_data:
+        if key.startswith("_") or key in known_field_names:
+            continue
+        suggestion = difflib.get_close_matches(
+            key, template_field_names, n=1, cutoff=0.5
+        )
+        if suggestion:
+            unknown_fields.append(f"  - {key} (did you mean '{suggestion[0]}'?)")
+        else:
+            unknown_fields.append(f"  - {key}")
+
+    errors: List[str] = []
+    if missing_fields:
+        errors.append(
+            "Missing required fields (no default value in schema):\n"
+            + "\n".join(missing_fields)
+        )
+    if unknown_fields:
+        errors.append(
+            "Unknown fields not in controller schema (possible typos or the wrong "
+            "controller's field names):\n" + "\n".join(unknown_fields)
+        )
+
+    if errors:
+        raise ValueError(
+            "Config validation failed against controller template schema.\n\n"
+            + "\n\n".join(errors)
+        )
 
 
 def get_controller_config(context) -> Dict[str, Any]:

@@ -426,7 +426,7 @@ async def deploy_bot(
     account_name: str | None = "master_account",
     max_global_drawdown_quote: float | None = None,
     max_controller_drawdown_quote: float | None = None,
-    image: str = "hummingbot/hummingbot:latest",
+    image: str = "condor/hummingbot:hyperliquid-price-fix",
 ) -> dict[str, Any]:
     """
     Deploy a bot with specified controller configurations.
@@ -443,13 +443,23 @@ async def deploy_bot(
     Returns:
         Dictionary containing deployment results
     """
-    result = await client.bot_orchestration.deploy_v2_controllers(
-        instance_name=bot_name,
-        controllers_config=controllers_config,
-        credentials_profile=account_name,
-        max_global_drawdown_quote=max_global_drawdown_quote,
-        max_controller_drawdown_quote=max_controller_drawdown_quote,
-        image=image,
+    # hummingbot_api_client's deploy_v2_controllers() doesn't expose a `headless` param,
+    # but hummingbot-api only force-enables the MQTT bridge (mqtt_autostart) when the
+    # deploy request includes headless=true. Without it the bot trades normally but is
+    # invisible to Condor's MQTT-based status/discovery layer. Post directly to include it.
+    payload: dict[str, Any] = {
+        "instance_name": bot_name,
+        "credentials_profile": account_name,
+        "controllers_config": controllers_config,
+        "image": image,
+        "headless": True,
+    }
+    if max_global_drawdown_quote is not None:
+        payload["max_global_drawdown_quote"] = max_global_drawdown_quote
+    if max_controller_drawdown_quote is not None:
+        payload["max_controller_drawdown_quote"] = max_controller_drawdown_quote
+    result = await client.bot_orchestration._post(
+        "/bot-orchestration/deploy-v2-controllers", json=payload
     )
 
     return {

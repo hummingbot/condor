@@ -556,7 +556,7 @@ async def manage_bots(
     account_name: str | None = "master_account",
     max_global_drawdown_quote: float | None = None,
     max_controller_drawdown_quote: float | None = None,
-    image: str = "hummingbot/hummingbot:latest",
+    image: str = "condor/hummingbot:hyperliquid-price-fix",
     log_type: Literal["error", "general", "all"] = "all",
     limit: int = 50,
     search_term: str | None = None,
@@ -588,7 +588,7 @@ async def manage_bots(
         account_name: Account name for deployment (default: master_account).
         max_global_drawdown_quote: Maximum global drawdown in quote currency (deploy only).
         max_controller_drawdown_quote: Maximum per-controller drawdown in quote currency (deploy only).
-        image: Docker image for deployment (default: "hummingbot/hummingbot:latest").
+        image: Docker image for deployment (default: "condor/hummingbot:hyperliquid-price-fix").
         log_type: Type of logs to retrieve for 'logs' action ('error', 'general', 'all').
         limit: Maximum log entries for 'logs' action (default: 50, max: 1000).
         search_term: Search term to filter logs by message content (logs only).

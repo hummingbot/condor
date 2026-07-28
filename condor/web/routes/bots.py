@@ -23,7 +23,7 @@ from condor.web.models import (
     WebUser,
 )
 from config_manager import get_config_manager
-from handlers.bots._shared import clean_config_for_save
+from handlers.bots._shared import clean_config_for_save, validate_config_against_template
 
 logger = logging.getLogger(__name__)
 
@@ -518,6 +518,18 @@ async def update_controller_config(
         # Strip internal fields like _config_name that cause Pydantic validation errors
         merged = {k: v for k, v in merged.items() if not k.startswith("_")}
 
+        controller_type = merged.get("controller_type")
+        controller_name = merged.get("controller_name")
+        if controller_type and controller_name:
+            template = await client.controllers.get_controller_config_template(
+                controller_type, controller_name
+            )
+            if isinstance(template, dict):
+                try:
+                    validate_config_against_template(merged, template)
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e))
+
         result = await client.controllers.create_or_update_controller_config(
             config_id, merged
         )
@@ -666,9 +678,29 @@ async def create_controller_config(
         # Strip internal fields like _config_name and normalize stringified enum
         # values (e.g. "PositionMode.ONEWAY" -> "ONEWAY") before saving.
         clean_body = clean_config_for_save(body)
+
+        controller_type = clean_body.get("controller_type")
+        controller_name = clean_body.get("controller_name")
+        if not controller_type or not controller_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Config must include 'controller_type' and 'controller_name'",
+            )
+
+        template = await client.controllers.get_controller_config_template(
+            controller_type, controller_name
+        )
+        if isinstance(template, dict):
+            try:
+                validate_config_against_template(clean_body, template)
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         result = await client.controllers.create_or_update_controller_config(
             config_id, clean_body
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 

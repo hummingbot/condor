@@ -76,7 +76,25 @@ export function BotDetail() {
   const canSave = isDirty && !yamlError && !!configId;
 
   const saveMutation = useMutation({
-    mutationFn: () => api.updateConfigYaml(server!, configId, yamlValue),
+    mutationFn: async () => {
+      // If the bot is actively running, push the edit to the live controller first
+      // (only fields the controller marks `is_updatable` actually apply, no restart
+      // needed — there's no redeploy button on this page, so this has to be it).
+      // Then sync the saved-config store so a future redeploy uses the same values.
+      if (data?.bot?.status === "running") {
+        const parsed = yaml.load(yamlValue);
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          throw new Error("YAML must be a mapping (key: value)");
+        }
+        await api.updateBotControllerConfig(
+          server!,
+          data.bot.name,
+          configId,
+          parsed as Record<string, unknown>,
+        );
+      }
+      await api.updateConfigYaml(server!, configId, yamlValue);
+    },
     onSuccess: () => {
       setOriginalYaml(yamlValue);
       prevConfigSig.current = ""; // force re-sync on next fetch
