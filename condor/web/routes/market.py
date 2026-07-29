@@ -34,6 +34,7 @@ from condor.web.models import (
     MarketPriceResponse,
     OrderBookLevel,
     OrderBookResponse,
+    RatesResponse,
     TickerItem,
     TickersResponse,
     TradingRuleItem,
@@ -120,27 +121,32 @@ async def get_price(
     raise HTTPException(status_code=502, detail="Unexpected response format")
 
 
-@router.post("/servers/{name}/rate-oracle/rates")
-async def get_rate_oracle_rates(
+@router.post("/servers/{name}/market/rates", response_model=RatesResponse)
+async def get_rates(
     name: str,
     body: dict,
     user: WebUser = Depends(get_current_user),
 ):
+    """Cross-rates resolved from the API's ticker pool (replaces the rate oracle)."""
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
-    trading_pairs = body.get("trading_pairs", [])
+    trading_pairs = body.get("trading_pairs") or []
     if not trading_pairs:
-        return {"rates": {}}
+        return RatesResponse(rates={})
+
+    from condor.fetchers.market_data import fetch_rates
 
     client = await cm.get_client(name)
     try:
-        result = await client.rate_oracle.get_rates(trading_pairs=trading_pairs)
+        rates = await fetch_rates(
+            client, trading_pairs, connector_name=body.get("connector")
+        )
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    return result
+    return RatesResponse(rates=rates)
 
 
 @router.get("/servers/{name}/market/trading-rules", response_model=TradingRulesResponse)

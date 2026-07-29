@@ -54,6 +54,39 @@ async def fetch_candle_connectors(client, **_kw) -> List[str]:
     return await client.market_data.get_available_candle_connectors()
 
 
+async def fetch_rates(
+    client,
+    trading_pairs: List[str],
+    connector_name: Optional[str] = None,
+    **_kw,
+) -> Dict[str, Optional[float]]:
+    """Resolve cross-rates for `trading_pairs` from the API's ticker pool.
+
+    Replaces the removed `/rate-oracle/rates` endpoint. Rates are resolved via
+    direct, reverse or bridged ticker paths; pass `connector_name` to restrict
+    resolution to a single exchange, otherwise the merged pool is used.
+
+    Returns:
+        {"BASE-QUOTE": rate|None} — None when the pair can't be resolved.
+    """
+    if not trading_pairs:
+        return {}
+
+    body: Dict[str, Any] = {"trading_pairs": trading_pairs}
+    if connector_name:
+        body["connector"] = connector_name
+
+    try:
+        # No client-lib method for this endpoint yet — call it directly.
+        result = await client.market_data._post("/market-data/rates", json=body)
+    except Exception as e:
+        logger.warning("Error fetching rates for %s: %s", trading_pairs, e)
+        return {pair: None for pair in trading_pairs}
+
+    rates = (result or {}).get("rates") or {}
+    return {pair: rates.get(pair) for pair in trading_pairs}
+
+
 # Quote assets already denominated in (approximately) USD.
 _USD_QUOTES = frozenset(
     {"USDT", "USDC", "USD", "BUSD", "FDUSD", "TUSD", "DAI", "USDE", "PYUSD"}

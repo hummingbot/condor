@@ -42,6 +42,7 @@ from condor.fetchers.market_data import (
     fetch_current_price,
     fetch_candles,
     fetch_candle_connectors,
+    fetch_rates,
     fetch_tickers,
 )
 from condor.fetchers.server_status import fetch_server_status
@@ -70,6 +71,7 @@ __all__ = [
     "fetch_current_price",
     "fetch_candles",
     "fetch_candle_connectors",
+    "fetch_rates",
     "fetch_tickers",
     "fetch_server_status",
 ]

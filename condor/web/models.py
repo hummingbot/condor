@@ -283,6 +283,11 @@ class TickersResponse(BaseModel):
     updated_at: float | None = None
 
 
+class RatesResponse(BaseModel):
+    # Trading pair -> rate; None when the pair can't be resolved from the tickers.
+    rates: dict[str, float | None]
+
+
 # ── Deploy Bot ──
 
 

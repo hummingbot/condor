@@ -942,10 +942,13 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/market/prices?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
     ),
 
-  getRateOracleRates: (server: string, tradingPairs: string[]) =>
-    apiFetch<{ rates: Record<string, number> }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/rate-oracle/rates`,
-      { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
+  getRates: (server: string, tradingPairs: string[], connector?: string) =>
+    apiFetch<{ rates: Record<string, number | null> }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/rates`,
+      {
+        method: "POST",
+        body: JSON.stringify({ trading_pairs: tradingPairs, connector }),
+      },
     ),
 
   getTradingRules: (server: string, connector: string) =>

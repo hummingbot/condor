@@ -42,7 +42,7 @@ export function useRates(quoteCurrencies: string[]) {
       if (needed.length > 0) {
         const pairs = needed.map((quote) => `${currency}-${quote}`);
         try {
-          const resp = await api.getRateOracleRates(server!, pairs);
+          const resp = await api.getRates(server!, pairs);
           const rateMap = resp.rates ?? {};
           for (const quote of needed) {
             const pair = `${currency}-${quote}`;
