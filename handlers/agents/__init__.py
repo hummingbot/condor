@@ -35,6 +35,26 @@ log = logging.getLogger(__name__)
 # Cache CLI availability checks so we only hit the filesystem once per key
 _cli_available_cache: dict[str, bool] = {}
 
+# Flags that make the next plain message mean something other than "talk to the
+# agent". Tapping any button is a fresh intent, so they are all disarmed before
+# the callback router dispatches: otherwise walking away from a prompt (e.g.
+# "Enter model manually", then picking a different LLM) leaves the flag set and
+# the user's next task is parsed as a model slug / URL / compact instruction.
+# Handlers that genuinely want an armed mode set their own flag after this runs.
+_ARMED_TEXT_INPUT_KEYS = (
+    "_openrouter_typing_slug",
+    "_custom_typing_url",
+    "_custom_typing_key",
+    "_custom_typing_search",
+    "agent_compact_custom",
+)
+
+
+def _disarm_text_input(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Drop every armed "next message is the answer" mode."""
+    for key in _ARMED_TEXT_INPUT_KEYS:
+        context.user_data.pop(key, None)
+
 
 def _is_agent_available(agent_key: str) -> bool:
     """Check if the agent backend is available.
@@ -161,6 +181,10 @@ async def agent_callback_handler(
     if chat_type in ("group", "supergroup"):
         await query.message.edit_text("Agent mode is only available in private chats.")
         return
+
+    # A tap supersedes any half-finished typing prompt. Cleared before dispatch
+    # so handlers that want an armed mode can re-arm it below.
+    _disarm_text_input(context)
 
     data = query.data
     action = data.split(":", 1)[1] if ":" in data else data
@@ -446,12 +470,15 @@ async def _handle_openrouter_type_prompt(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Arm slug-input mode: next text message is parsed as an OpenRouter slug."""
+    from .menu import _openrouter_input_keyboard
+
     query = update.callback_query
     context.user_data["_openrouter_typing_slug"] = True
     await query.message.edit_text(
         "Send the OpenRouter model slug as a message.\n"
         "Example: anthropic/claude-sonnet-4.5\n\n"
-        "Send /cancel to abort."
+        "Send /cancel, or tap Cancel, to abort.",
+        reply_markup=_openrouter_input_keyboard(),
     )
 
 
@@ -459,6 +486,7 @@ async def _resolve_openrouter_typed_slug(
     update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
 ) -> None:
     """Validate a typed slug; on match, prompt confirmation."""
+    from .menu import _openrouter_input_keyboard
     from .openrouter_models import fetch_models, find_model_by_slug
 
     slug = text.strip()
@@ -475,12 +503,15 @@ async def _resolve_openrouter_typed_slug(
 
     model = find_model_by_slug(models, slug)
     if not model:
-        # Re-arm so the user can retype without hunting for the button again
+        # Re-arm so the user can retype without hunting for the button again —
+        # with a Cancel button, so a mistyped slug can't trap them in a loop of
+        # "that isn't a model either" with no visible way out.
         context.user_data["_openrouter_typing_slug"] = True
         await update.message.reply_text(
             f"No tool-calling OpenRouter model matches '{slug}'.\n"
             "The slug must be exact (e.g. anthropic/claude-sonnet-4.5).\n"
-            "Try again, or send /cancel."
+            "Try again, send /cancel, or tap Cancel.",
+            reply_markup=_openrouter_input_keyboard(),
         )
         return
 

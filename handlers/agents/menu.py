@@ -132,6 +132,24 @@ def _openrouter_picker_keyboard(
     return InlineKeyboardMarkup(keyboard)
 
 
+def _openrouter_input_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard shown while waiting for a typed OpenRouter slug.
+
+    The prompt arms a "next message is the slug" mode, so it needs a visible way
+    out — otherwise a user who changed their mind has to know to type /cancel.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Back to model list", callback_data="agent:or_page:0"
+                )
+            ],
+            [InlineKeyboardButton("Cancel", callback_data="agent:or_type_cancel")],
+        ]
+    )
+
+
 # Custom provider picker pagination
 CUSTOM_PAGE_SIZE = 8
 
