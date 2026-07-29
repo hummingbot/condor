@@ -136,7 +136,18 @@ emit executor tool calls). There is no "skip if nothing changed": every tick
 costs tokens. The only free ticks are **risk-blocked / shutdown** ticks, which
 return before the LLM call.
 
-**Use a cheap model.** This agent is wired to `opencode-go:deepseek-v4-flash`.
+**Use a cheap model.** This agent runs on DeepSeek v4-flash through the
+opencode-go OpenAI-compatible gateway. With PR #175 it is wired to the named
+custom endpoint `custom@opencode:deepseek-v4-flash` (legacy form:
+`opencode-go:deepseek-v4-flash`). To make it work you must register the
+`opencode` endpoint once:
+
+- **Web/Telegram:** `Settings → LLM Endpoints → Add endpoint` (or `/agent →
+  Change LLM → Custom — OpenAI-compatible API`), name it `opencode`,
+  base URL `https://opencode.ai/zen/go/v1`, API key = your `OPENCODE_GO_API_KEY`.
+- **Headless (condor-bot.service):** set `CUSTOM_LLM_BASE_URL=https://opencode.ai/zen/go/v1`
+  and `CUSTOM_LLM_API_KEY=<your OPENCODE_GO_API_KEY>` in condor's `.env`.
+  Leave `CUSTOM_LLM_BLOCK_PRIVATE_URLS` unset for a personal deploy.
 Its pricing (DeepSeek API): **$0.14 / 1M input (cache-miss)**, **$0.0028 / 1M
 input (cache-hit)**, **$0.28 / 1M output**.
 
