@@ -426,7 +426,7 @@ async def deploy_bot(
     account_name: str | None = "master_account",
     max_global_drawdown_quote: float | None = None,
     max_controller_drawdown_quote: float | None = None,
-    image: str = "condor/hummingbot:hyperliquid-price-fix",
+    image: str = "condor/hummingbot:hyperliquid-cancel-fix",
 ) -> dict[str, Any]:
     """
     Deploy a bot with specified controller configurations.

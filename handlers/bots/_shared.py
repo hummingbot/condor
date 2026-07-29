@@ -136,7 +136,7 @@ async def deploy_v2_controllers_headless(
     controllers_config: List[str],
     max_global_drawdown_quote: Optional[float] = None,
     max_controller_drawdown_quote: Optional[float] = None,
-    image: str = "condor/hummingbot:hyperliquid-price-fix",
+    image: str = "condor/hummingbot:hyperliquid-cancel-fix",
 ) -> Dict[str, Any]:
     """Deploy a V2 controllers bot with headless=True forced in the payload.
 
