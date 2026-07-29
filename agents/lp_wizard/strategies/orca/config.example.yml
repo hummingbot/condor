@@ -1,0 +1,13 @@
+account_name: master_account
+risk_profile: yield_focused
+total_amount_quote: 20
+max_slot_count: 2
+min_capital_per_slot_quote: 2
+max_capital_per_slot_quote: 10
+max_slots_per_pool: 1
+max_slippage_pct: 1
+min_sol_reserve: 0.05
+inventory_dust_quote: 0.01
+session_max_age_minutes: 1440
+session_take_profit_net_pnl_ratio: 0.02
+session_stop_loss_net_pnl_ratio: 0.02
