@@ -443,6 +443,13 @@ async def deploy_bot(
     Returns:
         Dictionary containing deployment results
     """
+    # Seed each controller's initial_positions from the real exchange position before
+    # it deploys -- otherwise a fresh/redeployed controller's own position tracking
+    # (and therefore its max_base_pct/SL/TP safety checks) starts from zero even though
+    # the real wallet position is nonzero. See _shared.reconcile_initial_positions.
+    from handlers.bots._shared import reconcile_initial_positions
+    await reconcile_initial_positions(client, account_name, controllers_config)
+
     # hummingbot_api_client's deploy_v2_controllers() doesn't expose a `headless` param,
     # but hummingbot-api only force-enables the MQTT bridge (mqtt_autostart) when the
     # deploy request includes headless=true. Without it the bot trades normally but is

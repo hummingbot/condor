@@ -129,6 +129,97 @@ async def get_bots_client(
     return client, server_name
 
 
+async def reconcile_initial_positions(
+    client: Any,
+    credentials_profile: str,
+    controllers_config: List[str],
+) -> List[str]:
+    """Seed each controller's `initial_positions` from the real exchange position
+    before it deploys, so the controller's own base_pct/SL/TP accounting starts from
+    the truth instead of zero.
+
+    Without this, every fresh deploy (including a redeploy of an existing bot, e.g. to
+    pick up a new image or config) resets a controller's position tracking to empty.
+    hummingbot's v2 controllers don't reconcile against the real wallet balance on
+    their own -- `positions_held` is just an in-memory list seeded only from
+    `initial_positions` at startup and otherwise built up from that instance's own
+    executor fills. A controller that had already accumulated a large position keeps
+    trading against the real exchange position, but its own dashboard/SL/TP can silently
+    fall behind (worse, the max_base_pct safety cap can stop protecting once the real
+    position runs ahead of what the controller thinks it holds). See the pmm_mister
+    07-29 incident where a bot's tracked position (11,840.7 OP) was found to be well
+    behind the real exchange position (18,032.8 OP, ~79% of allocation vs. the
+    intended 70% cap) after the underlying rate-limit/retry storm caused fills to be
+    silently under-counted.
+
+    Best-effort: any failure here is logged and swallowed so a reconciliation problem
+    never blocks a deploy outright -- the bot would otherwise start from a *safe*
+    (zero) baseline instead of a real one, which is the pre-existing behavior.
+
+    Returns the list of config_names that were updated with a nonzero seeded position
+    (for logging/confirmation to the user).
+    """
+    updated: List[str] = []
+    try:
+        positions_result = await client.trading.get_positions(
+            account_names=[credentials_profile], limit=1000
+        )
+    except Exception:
+        logger.exception(
+            "reconcile_initial_positions: failed to fetch live positions, "
+            "deploying without position reconciliation"
+        )
+        return updated
+
+    position_by_key = {}
+    for pos in positions_result.get("data", []):
+        key = (pos.get("connector_name"), pos.get("trading_pair"))
+        position_by_key[key] = pos
+
+    for config_name in controllers_config:
+        try:
+            config = await client.controllers.get_controller_config(config_name)
+            connector_name = config.get("connector_name")
+            trading_pair = config.get("trading_pair")
+            if not connector_name or not trading_pair:
+                # Multi-pair/non-positional controller types don't map to a single
+                # (connector, trading_pair) position -- nothing to reconcile.
+                continue
+
+            pos = position_by_key.get((connector_name, trading_pair))
+            amount = float(pos["amount"]) if pos else 0.0
+            if abs(amount) < 1e-9:
+                new_initial_positions: List[Dict[str, Any]] = []
+            else:
+                side = "BUY" if pos.get("side") == "LONG" else "SELL"
+                new_initial_positions = [{
+                    "connector_name": connector_name,
+                    "trading_pair": trading_pair,
+                    "amount": abs(amount),
+                    "side": side,
+                }]
+
+            if config.get("initial_positions") == new_initial_positions:
+                continue
+
+            config["initial_positions"] = new_initial_positions
+            config = {k: v for k, v in config.items() if not k.startswith("_")}
+            await client.controllers.create_or_update_controller_config(config_name, config)
+            if new_initial_positions:
+                updated.append(config_name)
+                logger.info(
+                    f"reconcile_initial_positions: seeded {config_name} with real "
+                    f"{trading_pair} position ({side} {abs(amount)}) before deploy"
+                )
+        except Exception:
+            logger.exception(
+                f"reconcile_initial_positions: failed to reconcile {config_name}, "
+                "leaving its config as-is"
+            )
+
+    return updated
+
+
 async def deploy_v2_controllers_headless(
     client: Any,
     instance_name: str,
@@ -145,7 +236,13 @@ async def deploy_v2_controllers_headless(
     doesn't expose that param at all. Without it, the bot trades normally but is invisible
     to Condor's MQTT-based status/discovery layer (shows as stopped/0 controllers even
     while actively placing orders). Bypasses the client wrapper and posts directly.
+
+    Before deploying, reconciles each controller's `initial_positions` against the real
+    exchange position (see `reconcile_initial_positions`) -- this runs on every deploy,
+    including a redeploy of a pre-existing bot, which is exactly the case where a
+    controller's own position tracking would otherwise silently reset to zero.
     """
+    await reconcile_initial_positions(client, credentials_profile, controllers_config)
     payload = {
         "instance_name": instance_name,
         "credentials_profile": credentials_profile,
