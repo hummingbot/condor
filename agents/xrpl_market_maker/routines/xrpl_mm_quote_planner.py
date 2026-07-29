@@ -129,6 +129,37 @@ def _norm_candles(raw) -> list:
     return raw if isinstance(raw, list) else raw.get("data", raw.get("candles", []))
 
 
+def _extract_ref_price(raw, pair: str, fallback: float) -> float:
+    """Pull ``pair``'s price out of a prices payload, else ``fallback``.
+
+    The endpoint returns either ``{pair: price}`` or a per-connector nesting
+    (``{connector: {pair: price}}``), and a flat payload can carry non-numeric
+    values (connector names) alongside the prices. Taking the first value and
+    calling ``float()`` on it therefore raises or yields a bogus reference —
+    and a wrong reference price silently misplaces every quote, so anything we
+    can't read as a positive number falls back to the last candle close.
+    """
+    if not isinstance(raw, dict):
+        return fallback
+
+    def _positive(value) -> float | None:
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return None
+        return num if num > 0 else None
+
+    direct = _positive(raw.get(pair))
+    if direct is not None:
+        return direct
+    for value in raw.values():
+        if isinstance(value, dict):
+            nested = _positive(value.get(pair))
+            if nested is not None:
+                return nested
+    return fallback
+
+
 # ── routine ──────────────────────────────────────────────────────────────────
 
 
@@ -155,14 +186,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     if not closes:
         return f"reference_price: ERROR no candle data for {config.reference_pair}"
 
-    if isinstance(ref_prices, dict):
-        ref_mid = float(
-            ref_prices.get(config.reference_pair)
-            or next(iter(ref_prices.values()), 0)
-            or closes[-1]
-        )
-    else:
-        ref_mid = closes[-1]
+    ref_mid = _extract_ref_price(ref_prices, config.reference_pair, closes[-1])
 
     # RLUSD/XRP is the inverse of XRP/USD (RLUSD pegged to 1 USD).
     implied_xrpl_price = (1.0 / ref_mid) if ref_mid > 0 else 0.0
@@ -270,7 +294,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     out.append("")
     out.append("=== XRPL BOOK ===")
     try:
-        book = await client.market_data.get_order_book(config.xrpl_pair, connector_name="xrpl")
+        # Signature is get_order_book(connector_name, trading_pair, depth=10) —
+        # passing the pair positionally binds it to connector_name and collides
+        # with the keyword ("got multiple values for argument 'connector_name'").
+        book = await client.market_data.get_order_book("xrpl", config.xrpl_pair)
         bids = (book or {}).get("bids") or []
         asks = (book or {}).get("asks") or []
         if bids and asks:

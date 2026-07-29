@@ -4,10 +4,13 @@ cancel_open_orders: true        # cancel resting offers during winddown
 ---
 # XRPL maker shutdown (LLM judgment layer)
 
-`keep_all` is deliberate and not a soft default: **XRPL supports LIMIT orders only.**
-There is no market order and no stop-market, so a flatten cannot be guaranteed on this
-venue. Claiming otherwise would be a lie the policy could not honour. Spot inventory in a
-stablecoin pair is a benign thing to hold, which makes keeping it the honest choice.
+`keep_all` is deliberate and not a soft default. A flatten is *possible* here — the
+connector supports MARKET and AMM_SWAP alongside LIMIT — but it is not free: crossing a
+thin CLOB book pays the spread plus whatever slippage the book holds, on inventory that
+is a stablecoin pair and benign to keep. Holding is the better trade, not the only one.
+
+So do not claim the venue cannot flatten. If a flatten is ever genuinely warranted,
+escalate to the user with the expected cost rather than quietly crossing.
 
 The deterministic pass has already stopped this session's executors and cancelled resting
 offers. Your job now:

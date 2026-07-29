@@ -23,9 +23,9 @@ The intended architecture is **controller mode**: a PMM controller requotes cont
 while the LLM only *tunes* it. That decouples quote frequency from inference frequency —
 which is also what makes the strategy viable on a small account.
 
-**But it is unverified that a PMM controller drives the `xrpl` connector.** The connector
-is LIMIT-only with a polling user stream, unlike the CEX connectors PMM controllers were
-built against. Establish this first.
+Whether a PMM controller drives the `xrpl` connector is a question to **test**, not to
+infer. The connector polls its user stream rather than pushing fills, which is the one
+genuine difference from the CEX connectors PMM controllers were built against.
 
 ## Step 1 — Can a PMM controller target `xrpl`?
 
@@ -33,24 +33,52 @@ built against. Establish this first.
 manage_controllers(action="list")
 ```
 
-Inspect available market-making controllers and their config schemas. For each candidate,
-check whether its connector field accepts `xrpl` and whether it requires anything the
-connector cannot provide:
+**A controller's schema defaults are not its requirements.** Every market-making
+controller ships perpetual-flavoured defaults (`connector_name: binance_perpetual`,
+`leverage: 20`, `position_mode: HEDGE`) because that is the common case, not because
+spot connectors are rejected. `connector_name` is a plain `str`. Do not conclude
+"unsupported" from a `describe` output — that answers nothing about `xrpl`.
 
-- Does it require MARKET orders anywhere (stop-loss, emergency close)? XRPL has none.
-- Does it assume a websocket user stream for fill callbacks? XRPL polls.
-- Does it assume a `_perpetual` connector or position mode? XRPL is spot CLOB.
+Known-settled points (verified 2026-07-30 against hummingbot-api; re-verify only after
+a Hummingbot or connector upgrade):
+
+- **`leverage` / `position_mode` are inert for spot.** `v2_with_controllers.py` applies
+  both only when `is_perpetual(connector_name)` — i.e. `"perpetual" in connector`. On
+  `xrpl` they are never sent. Set `leverage: 1` and ignore `position_mode`.
+- **XRPL supports MARKET orders.** `/connectors/xrpl/order-types` reports
+  `LIMIT, LIMIT_MAKER, MARKET, AMM_SWAP`, so the triple barrier's MARKET stop-loss and
+  time-limit exits are not a blocker. Confirm with `manage_controllers(action="describe")`
+  plus the order-types endpoint rather than assuming either way.
+- **`pmm_simple` validates against `xrpl`.** A config with `connector_name="xrpl"` and an
+  XRPL pair is accepted and yields `markets: {'xrpl': {...}}`.
+
+Still worth checking per candidate:
+
+- Does it need a candles feed for the connector? `pmm_dynamic` derives spreads from
+  NATR/MACD candles; `pmm_simple` needs none. No XRPL candle feed means `pmm_dynamic`
+  is out while `pmm_simple` is fine.
 - Does it size orders against total balance? XRPL reserves make that wrong.
 
 ## Step 2 — Dry-run a controller config
 
-If a candidate looks viable, upsert a config against `xrpl` and inspect validation:
+**Do not skip this step.** It is the only thing that actually answers Step 1; a schema
+read is evidence about defaults, not about `xrpl`. Upsert a config against `xrpl` and
+inspect validation:
 
 ```
 manage_controllers(action="upsert", target="config", ...)
 ```
 
-A schema rejection here is a clean answer — record it and move to Step 3.
+A schema rejection here is a clean answer — record the exact error and move to Step 3.
+An acceptance is also a clean answer: controller mode is available.
+
+**Expect pair lookups to fail even when the controller is fine.** The API's shared
+keyless data connector is built with `trading_pairs=[]`, and the XRPL connector derives
+trading rules only for the pairs it was constructed with — so
+`/connectors/xrpl/trading-rules` reports *every* XRPL pair as "not found", including the
+connector's own default `SOLO-XRP`. That is a market-data plumbing limitation, not a
+verdict on controller support, and it affects executor mode identically. Configuring XRPL
+credentials for an account gives a real trading connector with pairs and sidesteps it.
 
 ## Step 3 — Confirm the executor-mode fallback
 
@@ -73,6 +101,10 @@ strategy's `bot_name` accordingly.
 | A PMM controller drives `xrpl` | set it | **Controller mode.** LLM tunes; bot requotes. Target design. |
 | No controller, `order_executor` works | leave empty | **Executor mode.** LLM places LIMIT ladders each tick. Widen spreads to cover the longer requote interval. |
 | Neither works | — | **Stop.** Report to the user; do not improvise with `place_order`. |
+
+Record *what was tried and what it returned*, not a conclusion on its own. "Controller
+mode unavailable" with no upsert error attached is not a verdict — it is a skipped step,
+and it will be inherited as fact by every later run.
 
 ## Step 5 — If executor mode, re-check spread viability
 

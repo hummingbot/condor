@@ -75,8 +75,10 @@ directly coupled — see the `xrpl_mm_quote_planner` routine, which computes bot
 
 ## XRPL mechanics you must respect
 
-- **LIMIT orders only.** No market orders, no stop-market exits. Inventory is managed by
-  leaning quotes, never by crossing the spread.
+- **Quote with LIMIT / LIMIT_MAKER — by choice, not by limitation.** The connector also
+  supports MARKET and AMM_SWAP (`/connectors/xrpl/order-types`), but a maker that crosses
+  the spread pays it. Manage inventory by leaning quotes. Treat MARKET as an explicit,
+  logged exception, never a routine tool — and never state that the venue lacks it.
 - **Reserves lock XRP.** 1 XRP base reserve + 0.2 XRP per open offer. A wide ladder locks
   real balance — size against *free* balance, never raw balance.
 - **Trustlines.** Holding an issued token (RLUSD) requires a trustline; the first two are
