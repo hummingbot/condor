@@ -1,110 +1,5 @@
 [
   {
-    "id": "25ad0d",
-    "title": "Orca LP Position Report",
-    "filename": "20260723_154352_orca_lp_position_report_25ad0d.html",
-    "created_at": "2026-07-23T15:43:52.438802+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "9e04b9",
-    "title": "Orca LP Position Report",
-    "filename": "20260723_154929_orca_lp_position_report_9e04b9.html",
-    "created_at": "2026-07-23T15:49:29.726268+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "ac1439",
-    "title": "Orca LP Position Report",
-    "filename": "20260726_095222_orca_lp_position_report_ac1439.html",
-    "created_at": "2026-07-26T09:52:22.636743+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "86bacd",
-    "title": "Orca Pool Scan",
-    "filename": "20260726_095241_orca_pool_scan_86bacd.html",
-    "created_at": "2026-07-26T09:52:41.616280+00:00",
-    "source_type": "routine",
-    "source_name": "orca_pool_scan",
-    "tags": [
-      "orca",
-      "lp",
-      "scanner",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "6735ed",
-    "title": "Orca Live Preflight",
-    "filename": "20260726_095321_orca_live_preflight_6735ed.html",
-    "created_at": "2026-07-26T09:53:21.870819+00:00",
-    "source_type": "routine",
-    "source_name": "orca_live_preflight",
-    "tags": [
-      "orca",
-      "lp",
-      "preflight",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "509614",
-    "title": "Orca LP Position Report",
-    "filename": "20260726_095934_orca_lp_position_report_509614.html",
-    "created_at": "2026-07-26T09:59:34.125467+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
-    "id": "b372a1",
-    "title": "Orca LP Position Report",
-    "filename": "20260726_100713_orca_lp_position_report_b372a1.html",
-    "created_at": "2026-07-26T10:07:13.597323+00:00",
-    "source_type": "routine",
-    "source_name": "lp_position_report",
-    "tags": [
-      "orca",
-      "lp",
-      "position",
-      "agent"
-    ],
-    "agent": "lpmaxxing"
-  },
-  {
     "id": "3cf38e",
     "title": "Orca LP Position Report",
     "filename": "20260726_101758_orca_lp_position_report_3cf38e.html",
@@ -1528,6 +1423,118 @@
     "title": "LP Wizard State",
     "filename": "20260729_134823_lp_wizard_state_6d76c0.html",
     "created_at": "2026-07-29T13:48:23.235190+00:00",
+    "source_type": "routine",
+    "source_name": "lp_wizard/state",
+    "tags": [
+      "lp_wizard",
+      "orca",
+      "lp",
+      "state",
+      "live"
+    ],
+    "agent": "lp_wizard"
+  },
+  {
+    "id": "255782",
+    "title": "LP Wizard State",
+    "filename": "20260729_135127_lp_wizard_state_255782.html",
+    "created_at": "2026-07-29T13:51:27.980921+00:00",
+    "source_type": "routine",
+    "source_name": "lp_wizard/state",
+    "tags": [
+      "lp_wizard",
+      "orca",
+      "lp",
+      "state",
+      "live"
+    ],
+    "agent": "lp_wizard"
+  },
+  {
+    "id": "1a1be7",
+    "title": "LP Wizard State",
+    "filename": "20260729_135435_lp_wizard_state_1a1be7.html",
+    "created_at": "2026-07-29T13:54:35.344166+00:00",
+    "source_type": "routine",
+    "source_name": "lp_wizard/state",
+    "tags": [
+      "lp_wizard",
+      "orca",
+      "lp",
+      "state",
+      "live"
+    ],
+    "agent": "lp_wizard"
+  },
+  {
+    "id": "0c4181",
+    "title": "LP Wizard State",
+    "filename": "20260729_135748_lp_wizard_state_0c4181.html",
+    "created_at": "2026-07-29T13:57:48.169087+00:00",
+    "source_type": "routine",
+    "source_name": "lp_wizard/state",
+    "tags": [
+      "lp_wizard",
+      "orca",
+      "lp",
+      "state",
+      "live"
+    ],
+    "agent": "lp_wizard"
+  },
+  {
+    "id": "8a44bb",
+    "title": "LP Wizard State",
+    "filename": "20260729_140522_lp_wizard_state_8a44bb.html",
+    "created_at": "2026-07-29T14:05:22.232772+00:00",
+    "source_type": "routine",
+    "source_name": "lp_wizard/state",
+    "tags": [
+      "lp_wizard",
+      "orca",
+      "lp",
+      "state",
+      "live"
+    ],
+    "agent": "lp_wizard"
+  },
+  {
+    "id": "9e2f11",
+    "title": "LP Wizard Scan",
+    "filename": "20260729_140531_lp_wizard_scan_9e2f11.html",
+    "created_at": "2026-07-29T14:05:31.959753+00:00",
+    "source_type": "routine",
+    "source_name": "lp_wizard/scan",
+    "tags": [
+      "lp_wizard",
+      "orca",
+      "lp",
+      "scan",
+      "live"
+    ],
+    "agent": "lp_wizard"
+  },
+  {
+    "id": "0c653f",
+    "title": "LP Wizard Open",
+    "filename": "20260729_140708_lp_wizard_open_0c653f.html",
+    "created_at": "2026-07-29T14:07:08.884133+00:00",
+    "source_type": "routine",
+    "source_name": "lp_wizard/open",
+    "tags": [
+      "lp_wizard",
+      "orca",
+      "lp",
+      "open",
+      "runtime"
+    ],
+    "agent": "lp_wizard"
+  },
+  {
+    "id": "63fdfe",
+    "title": "LP Wizard State",
+    "filename": "20260729_140716_lp_wizard_state_63fdfe.html",
+    "created_at": "2026-07-29T14:07:16.655245+00:00",
     "source_type": "routine",
     "source_name": "lp_wizard/state",
     "tags": [
