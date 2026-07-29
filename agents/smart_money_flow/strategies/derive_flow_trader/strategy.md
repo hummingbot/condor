@@ -8,7 +8,7 @@ default_config:
   execution_mode: loop
   frequency_sec: 300
   total_amount_quote: 50
-  # --- Small-wallet / test-mode sizing (50 USDC total balance) ---
+  # Small-wallet / test-mode sizing (50 USDC total balance)
   # Treat the entire wallet as the budget. No margin scaling beyond the
   # balance: one position at a time, minimal per-order amount, leverage kept
   # low so notional stays within ~50 USDC collateral.
