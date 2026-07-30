@@ -1,7 +1,8 @@
 """Scan & rank Solana CLMM memecoin pools by fee yield (fees/TVL) for LP entry.
 
 Agent-local routine for solana_dex_lp_expert. Sources pools from GeckoTerminal
-(trending + top-per-venue), filters to the configured quote asset + venues,
+(trending + top-per-venue), filters to the configured quote asset + venues
+(quote matched by mint on either pool side — GeckoTerminal orientation varies),
 enriches the top candidates with on-chain CLMM pool-info (fee %, bin_step/tick,
 mints), computes fee_yield = fees(window)/TVL, and returns a ranked shortlist
 with the exact fields to open an lp_executor — including the MEMECOIN mint and a
@@ -16,8 +17,9 @@ hold — the agent should never open a 2nd slot on the same pool or token.
 """
 import logging
 import asyncio
+import re
 import aiohttp
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from telegram.ext import ContextTypes
 from config_manager import get_client
 from handlers.dex.geckoterminal import _extract_pool_data
@@ -46,6 +48,14 @@ class Config(BaseModel):
     exclude_pools: list[str] = Field(default=[], description="Pool addresses to exclude (already held)")
     exclude_mints: list[str] = Field(default=[], description="Base token mints to exclude (already held)")
 
+    @field_validator("venues", "exclude_pools", "exclude_mints", mode="before")
+    @classmethod
+    def _coerce_list(cls, v):
+        # Telegram config forms submit these as text ("" when left blank).
+        if isinstance(v, str):
+            return [s for s in re.split(r"[,\s]+", v.strip()) if s]
+        return v
+
 
 async def _gecko_get(session: aiohttp.ClientSession, path: str, params: dict | None = None) -> dict:
     url = f"{GECKO_BASE}/{path}"
@@ -70,6 +80,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     quote = config.quote_asset.strip().upper()
     quote_mint = _QUOTE_MINTS.get(quote)
+    if not quote_mint:
+        return f"lp_scanner: unsupported quote_asset '{quote}' — supported: {', '.join(_QUOTE_MINTS)}."
     venues = [v.strip().lower() for v in config.venues]
     vol_field = _WINDOW_TO_FIELD.get(config.ranking_window, "volume_24h")
     excl_pools = {p for p in config.exclude_pools if p}
@@ -106,9 +118,20 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         dex = d.get("dex_id") or ""
         if addr in seen:
             continue
-        if quote_sym.upper() != quote:
-            continue
         if dex not in venues:
+            continue
+        # Match the quote side by MINT and accept either GeckoTerminal orientation:
+        # a SOL-quoted scan must also find pools Gecko lists as SOL/USDC (SOL as base).
+        gecko_base_mint = d.get("base_token_address") or ""
+        gecko_quote_mint = d.get("quote_token_address") or ""
+        price_usd = _num(d.get("base_token_price_usd"))
+        if gecko_quote_mint == quote_mint:
+            pass
+        elif gecko_base_mint == quote_mint:
+            base_sym, quote_sym = quote_sym, base_sym
+            gecko_base_mint, gecko_quote_mint = gecko_quote_mint, gecko_base_mint
+            price_usd = _num(d.get("quote_token_price_usd"))
+        else:
             continue
         tvl = _num(d.get("reserve_usd"))
         if tvl < config.min_tvl_usd:
@@ -123,11 +146,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "base_symbol": base_sym,
             "quote_symbol": quote_sym,
             "trading_pair": f"{base_sym}-{quote_sym}",
-            "gecko_base_mint": d.get("base_token_address") or "",
-            "gecko_quote_mint": d.get("quote_token_address") or "",
+            "gecko_base_mint": gecko_base_mint,
+            "gecko_quote_mint": gecko_quote_mint,
             "tvl_usd": tvl,
             "vol_window": vol_window,
-            "price_usd": _num(d.get("base_token_price_usd")),
+            "price_usd": price_usd,
         })
 
     if not candidates:
@@ -157,9 +180,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             c.get("gecko_base_mint"), c.get("gecko_quote_mint"),
         ]
         mints = [m for m in mints if m]
-        memecoin_mint = ""
-        if quote_mint:
-            memecoin_mint = next((m for m in mints if m != quote_mint), "")
+        memecoin_mint = next((m for m in mints if m != quote_mint), "")
         if not memecoin_mint:
             memecoin_mint = c.get("gecko_base_mint") or (mints[0] if mints else "")
         # Diversification: drop tokens already held.
