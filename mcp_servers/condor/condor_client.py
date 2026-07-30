@@ -9,21 +9,25 @@ from mcp_servers.condor.settings import settings
 
 
 async def call_main_api(
-    method: str, path: str, body: dict | None = None, timeout: float = 15
+    method: str, path: str, body: dict | None = None, timeout: float | None = None
 ) -> dict | list:
     """Call the Condor web API in the main process.
 
     The MCP server runs as a subprocess -- TickEngines must be created in the
     main process so they survive beyond the MCP subprocess lifecycle.
 
-    ``timeout`` defaults to 15s but callers that block on the main process (e.g. a
-    consult that awaits a user confirmation) should pass a larger value.
+    ``timeout`` defaults to the shared policy (condor.runtime.timeouts) but
+    callers that block on the main process (e.g. a consult that awaits a user
+    confirmation) should pass a larger value.
 
     Raises APIError on failure instead of returning {"error": ...}.
     """
+    from condor.runtime.timeouts import TIMEOUTS
     from condor.web.auth import create_jwt
     from utils.config import WEB_PORT
 
+    if timeout is None:
+        timeout = TIMEOUTS.mcp_call
     url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"
     token = create_jwt(settings.user_id, role="user")
     headers = {"Authorization": f"Bearer {token}"}

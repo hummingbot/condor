@@ -713,8 +713,11 @@ def main() -> None:
         # sequence — winding down positions is an emergency action, not what a
         # restart should do. Each engine records its final state on the way out.
         from condor.runtime.loops import get_supervisor
+        from condor.runtime.state import flush_all
 
         await get_supervisor().stop_all()
+        # Writes are debounced, so force the last one out on a clean shutdown.
+        flush_all()
 
         # Stop WebSocket manager
         from condor.web.ws_manager import get_ws_manager

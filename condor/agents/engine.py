@@ -92,6 +92,8 @@ class TickEngine:
     risk: RiskEngine = field(init=False)
     provider_registry: ProviderRegistry = field(init=False)
     session_dir: "Path | None" = field(default=None, init=False)
+    # Scratch KV scoped to this (agent, strategy) — see condor.runtime.state.
+    state: "BoundState" = field(init=False, repr=False)
 
     # Runtime state
     _task: asyncio.Task | None = field(default=None, init=False, repr=False)
@@ -149,6 +151,14 @@ class TickEngine:
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
         self.risk = RiskEngine(risk_limits)
         self.provider_registry = ProviderRegistry()
+
+        # Scratch KV for cheap facts this strategy carries across ticks (a
+        # cursor, a cooldown deadline). Keyed on (agent, strategy) rather than
+        # the session, so it survives into the next session — which is the
+        # point of persisting it. Anything worth *remembering* goes to memory.
+        from condor.runtime.state import BoundState, namespace_for
+
+        self.state = BoundState(namespace_for(self))
 
     # ------------------------------------------------------------------
     # Lifecycle

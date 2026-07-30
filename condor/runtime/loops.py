@@ -54,6 +54,7 @@ class ReconcileReport:
     restarted: list[InterruptedRun] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     delegations: int = 0
+    orphan_state: int = 0
 
     @property
     def total(self) -> int:
@@ -188,6 +189,14 @@ class LoopSupervisor:
                     report.errors.append(f"{run.label}: restart failed ({exc})")
 
         report.delegations = self._reconcile_delegations(agents_root)
+
+        # Forget state belonging to strategies that no longer exist.
+        try:
+            from condor.runtime.state import cleanup_orphans
+
+            report.orphan_state = cleanup_orphans(agents_root)
+        except Exception:
+            log.warning("State cleanup failed during boot", exc_info=True)
 
         if report.total or report.delegations:
             log.warning(
