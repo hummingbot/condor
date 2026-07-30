@@ -22,6 +22,8 @@ from condor.acp.client import (
     ToolCallEvent,
     ToolCallUpdate,
 )
+from condor.runtime import SessionKey, SessionSpec
+from condor.runtime import client as runtime
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import (
@@ -34,7 +36,6 @@ from handlers.agents._shared import (
 )
 from handlers.agents.confirmation import _format_tool_summary
 from handlers.agents.openrouter_models import fetch_models
-from handlers.agents.session import destroy_session, get_or_create_session, get_session
 
 log = logging.getLogger(__name__)
 
@@ -53,9 +54,9 @@ PERMISSION_TIMEOUT = 120  # seconds
 MAX_SESSIONS_PER_USER = 5
 
 
-def _session_key(user_id: int, slot_id: str) -> str:
-    """Build a session key that won't collide with Telegram int chat_ids."""
-    return f"web_{user_id}_{slot_id}"
+def _session_key(user_id: int, slot_id: str) -> SessionKey:
+    """Build the canonical runtime key for one web chat slot."""
+    return SessionKey.web(user_id, slot_id)
 
 
 def _get_user_sessions(user_id: int) -> list[dict]:
@@ -64,7 +65,7 @@ def _get_user_sessions(user_id: int) -> list[dict]:
     result = []
     for slot_id in slots:
         key = _session_key(user_id, slot_id)
-        session = get_session(key)
+        session = runtime.get_live(key)
         if session and session.client.alive:
             result.append(
                 {
@@ -230,7 +231,7 @@ async def _handle_start_session(
     # Clean dead slots
     alive_slots = []
     for s in slots:
-        session = get_session(_session_key(user_id, s))
+        session = runtime.get_live(_session_key(user_id, s))
         if session and session.client.alive:
             alive_slots.append(s)
     _user_slots[user_id] = alive_slots
@@ -253,17 +254,22 @@ async def _handle_start_session(
     from condor.preferences import load_user_data_for
 
     try:
-        session = await get_or_create_session(
-            chat_id=session_key,
-            agent_key=agent_key,
+        await runtime.create_session(
+            SessionSpec(
+                key=str(session_key),
+                agent_key=agent_key,
+                mode=mode,
+                user_id=user_id,
+                platform="web",
+                lazy_context=True,  # Don't block — inject context on first message
+                server_name=server_name,
+            ),
             permission_callback=perm_cb,
-            user_id=user_id,
             user_data=load_user_data_for(user_id),
-            mode=mode,
-            platform="web",
-            lazy_context=True,  # Don't block — inject context on first message
-            server_name=server_name,
         )
+        # In-process escape hatch: appending the mode context below mutates the
+        # live session. Moves behind the facade when prompting does (FEAT-009).
+        session = runtime.get_live(session_key)
 
         # Append mode-specific assistant context (e.g. agent_builder instructions)
         if mode != DEFAULT_MODE:
@@ -305,11 +311,11 @@ async def _handle_send_message(
         return
 
     session_key = _session_key(user_id, slot_id)
-    session = get_session(session_key)
+    session = runtime.get_live(session_key)
 
     if not session or not session.client.alive:
         # Session died — clean up and notify frontend
-        await destroy_session(session_key)
+        await runtime.destroy(session_key)
         slots = _user_slots.get(user_id, [])
         if slot_id in slots:
             slots.remove(slot_id)
@@ -416,7 +422,7 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
     # session.abort() sets an event flag that makes prompt_stream break out on the
     # next iteration, triggering its finally block to release the lock properly.
     session_key = _session_key(user_id, slot_id)
-    session = get_session(session_key)
+    session = runtime.get_live(session_key)
     if session:
         session.abort()
 
@@ -444,7 +450,7 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
         return
 
     session_key = _session_key(user_id, slot_id)
-    destroyed = await destroy_session(session_key)
+    destroyed = await runtime.destroy(session_key)
 
     # Clean up active prompt task to prevent memory leaks
     task_key = f"{user_id}:{slot_id}"

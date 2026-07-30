@@ -5,9 +5,11 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
+from condor.runtime import SessionKey
+from condor.runtime import client as runtime
+
 from ._shared import AGENT_MODES, AGENT_OPTIONS, DEFAULT_AGENT, normalize_mode
 from .custom_models import format_model_label
-from .session import get_session
 
 log = logging.getLogger(__name__)
 
@@ -66,7 +68,9 @@ def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
     keyboard = []
     for key, info in AGENT_OPTIONS.items():
         label = info["label"]
-        picked = _picked_model_label(key, current_llm) if key in _PICKER_SENTINELS else None
+        picked = (
+            _picked_model_label(key, current_llm) if key in _PICKER_SENTINELS else None
+        )
         if picked:
             label = picked
         elif key == current_llm:
@@ -173,7 +177,9 @@ def _custom_endpoints_keyboard(
             [InlineKeyboardButton(label, callback_data=f"agent:cu_use:{idx}")]
         )
 
-    keyboard.append([InlineKeyboardButton("+ Add endpoint", callback_data="agent:cu_add")])
+    keyboard.append(
+        [InlineKeyboardButton("+ Add endpoint", callback_data="agent:cu_add")]
+    )
     if providers:
         keyboard.append(
             [InlineKeyboardButton("Manage endpoints", callback_data="agent:cu_manage")]
@@ -310,7 +316,9 @@ def _custom_picker_keyboard(
         nav_row: list[InlineKeyboardButton] = []
         if page > 0:
             nav_row.append(
-                InlineKeyboardButton("‹ Prev", callback_data=f"agent:cu_page:{page - 1}")
+                InlineKeyboardButton(
+                    "‹ Prev", callback_data=f"agent:cu_page:{page - 1}"
+                )
             )
         nav_row.append(
             InlineKeyboardButton(
@@ -319,14 +327,20 @@ def _custom_picker_keyboard(
         )
         if page < total_pages - 1:
             nav_row.append(
-                InlineKeyboardButton("Next ›", callback_data=f"agent:cu_page:{page + 1}")
+                InlineKeyboardButton(
+                    "Next ›", callback_data=f"agent:cu_page:{page + 1}"
+                )
             )
         keyboard.append(nav_row)
 
     # A search row only earns its space once the list is too long to scan
     if query:
         keyboard.append(
-            [InlineKeyboardButton(f"Clear filter '{query}'", callback_data="agent:cu_clear")]
+            [
+                InlineKeyboardButton(
+                    f"Clear filter '{query}'", callback_data="agent:cu_clear"
+                )
+            ]
         )
     elif len(model_ids) > CUSTOM_PAGE_SIZE:
         keyboard.append(
@@ -368,7 +382,8 @@ async def show_agent_menu(
 ) -> None:
     """Show agent menu: active session info or auto-start."""
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    # In-process escape hatch: the menu reads client.alive off the live object.
+    session = runtime.get_live(SessionKey.telegram(chat_id))
 
     if session and session.client.alive:
         mode_label = AGENT_MODES.get(session.mode, {}).get("label", session.mode)
