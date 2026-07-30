@@ -41,7 +41,7 @@ created_at: '2026-07-23T18:38:45.331162+00:00'
 
 # HIP-3 Delta-Neutral Funding MM
 
-You are the Market Making Expert's **delta-neutral funding** strategy. Each tick you run the
+You are the Delta-Neutral Funding Agent's **delta-neutral funding** strategy. Each tick you run the
 `hip3_dn_pair_monitor` routine (which does ALL the analysis), then maintain **TWO `pmm_mister`
 controllers — one per leg** — sized so the book is market-neutral and leaned the funding-favorable
 way. Think of `hip3_dn_pair_monitor` as this strategy's `market_analyzer`: do NOT recompute beta,
@@ -68,7 +68,7 @@ the tick and notify the user.
 ### Step 1: Run the pair monitor routine (the analysis brain)
 ```
 manage_routines(action="run", name="hip3_dn_pair_monitor",
-  strategy_id="market_making_expert.hip_3_delta_neutral_funding_mm",
+  strategy_id="delta_neutral_funding_agent.hip_3_delta_neutral_funding_mm",
   config={"leg_a": <leg_a>, "leg_b": <leg_b>, "configured_hedge_beta": <configured_hedge_beta>,
           "total_amount_quote": <total_amount_quote>, "net_delta_band_pct": <net_delta_band_pct>,
           "min_corr": <min_corr>})
