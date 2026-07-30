@@ -16,6 +16,11 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
+from condor.runtime.confirmations import (
+    PendingConfirmation,
+    build_permission_callback,
+    get_registry,
+)
 from condor.runtime.events import RuntimeEvent
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
@@ -24,24 +29,17 @@ from handlers.agents._shared import (
     AGENT_OPTIONS,
     DEFAULT_AGENT,
     DEFAULT_MODE,
-    is_dangerous_tool_call,
     load_assistant,
 )
-from handlers.agents.confirmation import _format_tool_summary
 from handlers.agents.openrouter_models import fetch_models
 
 log = logging.getLogger(__name__)
 
 router = APIRouter(tags=["chat"])
 
-# Pending permission futures for web clients: request_id -> (user_id, Future[bool])
-_pending_permissions: dict[str, tuple[int, asyncio.Future]] = {}
-
 # Track active prompt tasks per slot: "user_id:slot_id" -> asyncio.Task.
 # Connection-scoped, not session state, so this stays local to the WS layer.
 _active_prompt_tasks: dict[str, asyncio.Task] = {}
-
-PERMISSION_TIMEOUT = 120  # seconds
 
 
 def _session_key(user_id: int, slot_id: str) -> SessionKey:
@@ -76,7 +74,7 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
     (``frontend/src/lib/api.ts``): this refactor re-plumbs the inside of the
     endpoint, not its outside, so the keys here must not change. Returns None
     for events the WS protocol carries out-of-band (permission requests go
-    through ``_web_permission_callback``).
+    through the confirmation channel).
     """
     if event.type == EventType.TEXT:
         return {"event": "text_chunk", "slot_id": slot_id, "text": event.text}
@@ -126,56 +124,27 @@ async def _send(ws: WebSocket, event: dict) -> None:
         pass
 
 
-async def _web_permission_callback(
-    ws: WebSocket,
-    user_id: int,
-    tool_call: dict[str, Any],
-    options: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Permission callback for web sessions."""
-    if not is_dangerous_tool_call(tool_call):
-        for opt in options:
-            if opt.get("kind") in ("allow_once", "allow_always"):
-                return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
-        if options:
-            return {
-                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
-            }
-        return {"outcome": {"outcome": "cancelled"}}
+class WebSocketChannel:
+    """Renders a pending confirmation as a `permission_request` event.
 
-    request_id = str(uuid.uuid4())[:8]
-    summary = _format_tool_summary(tool_call)
+    The event shape is unchanged for the shipped dashboard; ``request_id`` is
+    now the registry's id rather than a locally-minted one, which is what lets
+    the same request also be answered from Telegram or over HTTP after a page
+    reload kills this socket.
+    """
 
-    await _send(
-        ws,
-        {
-            "event": "permission_request",
-            "request_id": request_id,
-            "summary": summary,
-        },
-    )
+    def __init__(self, ws: WebSocket):
+        self._ws = ws
 
-    future: asyncio.Future = asyncio.get_event_loop().create_future()
-    _pending_permissions[request_id] = (user_id, future)
-
-    try:
-        approved = await asyncio.wait_for(future, timeout=PERMISSION_TIMEOUT)
-    except asyncio.TimeoutError:
-        _pending_permissions.pop(request_id, None)
-        return {"outcome": {"outcome": "cancelled"}}
-    finally:
-        _pending_permissions.pop(request_id, None)
-
-    if approved:
-        for opt in options:
-            if opt.get("kind") in ("allow_once", "allow_always"):
-                return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
-        if options:
-            return {
-                "outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}
-            }
-
-    return {"outcome": {"outcome": "cancelled"}}
+    async def deliver(self, pending: PendingConfirmation) -> None:
+        await _send(
+            self._ws,
+            {
+                "event": "permission_request",
+                "request_id": pending.id,
+                "summary": pending.summary,
+            },
+        )
 
 
 @router.websocket("/ws/chat")
@@ -236,7 +205,7 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
                 sessions = await _get_user_sessions(user_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
-                _handle_resolve_permission(user_id, msg)
+                await _handle_resolve_permission(user_id, msg)
             elif action == "abort_prompt":
                 _spawn(_handle_abort_prompt(ws, user_id, msg))
             else:
@@ -270,8 +239,11 @@ async def _handle_start_session(
     slot_id = str(uuid.uuid4())[:8]
     session_key = _session_key(user_id, slot_id)
 
-    async def perm_cb(tool_call: dict, options: list[dict]) -> dict:
-        return await _web_permission_callback(ws, user_id, tool_call, options)
+    perm_cb = build_permission_callback(
+        session_key=str(session_key),
+        user_id=user_id,
+        channels=[WebSocketChannel(ws)],
+    )
 
     # Hydrate the user's stored preferences so web sessions resolve the same
     # things a Telegram session would — notably the saved custom endpoint
@@ -428,23 +400,17 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
     )
 
 
-def _handle_resolve_permission(user_id: int, msg: dict) -> None:
-    request_id = msg.get("request_id", "")
-    approved = msg.get("approved", False)
-    entry = _pending_permissions.get(request_id)
-    if entry is None:
-        return
-    owner_id, future = entry
-    if owner_id != user_id:
-        # Ignore attempts to resolve another user's pending permission
-        log.warning(
-            "User %d tried to resolve permission %s owned by another user",
-            user_id,
-            request_id,
-        )
-        return
-    if not future.done():
-        future.set_result(approved)
+async def _handle_resolve_permission(user_id: int, msg: dict) -> None:
+    """Forward a dashboard answer to the shared registry.
+
+    The registry enforces ownership and is idempotent, so a stale click after
+    the request was answered in Telegram is a silent no-op.
+    """
+    await get_registry().resolve(
+        msg.get("request_id", ""),
+        approved=msg.get("approved", False),
+        by_user_id=user_id,
+    )
 
 
 # ── REST endpoint for chat options ──

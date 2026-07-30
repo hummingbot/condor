@@ -9,15 +9,14 @@ whose local backend is down falls back to claude-code — and return its answer 
 No strategy is involved — CONSULT runs the Agent's identity + shared memory/skills.
 
 The Agent may call mutating tools; those are gated by the SAME interactive
-confirmation flow condor uses (:func:`handlers.agents.confirmation.permission_callback`),
-routed to the user's Telegram chat. The confirmation registry is process-global, so
-the user's Approve/Reject tap resolves the pending future even while condor's own
-session is busy awaiting the consult result.
+confirmation flow condor uses, routed to the user's Telegram chat. Approvals live
+in :mod:`condor.runtime.confirmations` as addressable entries, so the user's
+Approve/Reject resolves the pending request even while condor's own session is busy
+awaiting the consult result — and it can be answered from the dashboard instead.
 """
 
 from __future__ import annotations
 
-import functools
 import logging
 import os
 
@@ -32,17 +31,27 @@ from condor.preferences import resolve_custom_endpoint
 log = logging.getLogger(__name__)
 
 
-def _build_consult_permission_cb(chat_id: int):
-    """Build the human-confirm callback that routes dangerous-tool confirmations
-    to the user's Telegram chat, reusing the live bot registered at startup
-    (main.py: routine_store.set_bot). Returns ``None`` if no bot is available."""
+def _build_consult_permission_cb(slug: str, user_id: int, chat_id: int):
+    """Build the human-confirm callback for a consult.
+
+    Registers into the shared confirmation registry, so the approval is also
+    listed by ``GET /api/v1/confirmations`` and can be answered from the
+    dashboard rather than only by tapping in Telegram. Returns ``None`` when no
+    bot is available, which keeps today's behavior: mutations then error rather
+    than being silently auto-approved.
+    """
     try:
         from condor.routine_store import get_routine_store
-        from handlers.agents import confirmation
+        from condor.runtime.confirmations import build_permission_callback
+        from handlers.agents.confirmation import TelegramChannel
 
         bot = get_routine_store().get_bot()
         if bot is not None:
-            return functools.partial(confirmation.permission_callback, bot, chat_id)
+            return build_permission_callback(
+                session_key=f"consult:{slug}",
+                user_id=user_id,
+                channels=[TelegramChannel(bot, chat_id)],
+            )
     except Exception:
         log.exception(
             "Could not build consult permission callback; mutations will error"
@@ -65,7 +74,7 @@ async def run_consult(
     (:mod:`condor.agents.delegate`), which reuses :func:`_run_agent_to_completion`
     with ``permission_callback=None`` (auto-approve).
     """
-    permission_cb = _build_consult_permission_cb(chat_id)
+    permission_cb = _build_consult_permission_cb(slug, user_id, chat_id)
     return await _run_agent_to_completion(
         slug=slug,
         user_id=user_id,
@@ -134,9 +143,7 @@ async def _run_agent_to_completion(
                 model_key = fallback
                 # The fallback is a different model — re-resolve, or a custom
                 # endpoint's credentials would leak into an unrelated backend.
-                base_url, api_key = resolve_custom_endpoint(
-                    model_key, user_id=user_id
-                )
+                base_url, api_key = resolve_custom_endpoint(model_key, user_id=user_id)
                 fallback_note = (
                     f"_(note: {agent.name}'s configured model was unavailable — "
                     f"{backend_err} Answered with fallback `{fallback}`.)_\n\n"
