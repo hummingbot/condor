@@ -22,13 +22,10 @@ from condor.acp.pydantic_ai_client import (
     is_pydantic_ai_model,
     model_prefix,
 )
+from condor.runtime import binding
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
-from handlers.agents._shared import (
-    build_initial_context,
-    build_mcp_servers_for_session,
-    get_project_dir,
-)
+from handlers.agents._shared import build_initial_context, get_project_dir
 
 log = logging.getLogger(__name__)
 
@@ -67,6 +64,7 @@ class AgentSession:
     server_name: str | None = None  # Which Condor server this session uses
     user_id: int | None = None
     agent_slug: str = ""
+    label: str = "Condor"  # who is answering, for both UIs' headers
     is_busy: bool = False
     pending_context: str | None = None  # Lazy context: injected on first prompt
     created_at: datetime = field(default_factory=_utcnow)
@@ -89,6 +87,7 @@ class AgentSession:
             created_at=self.created_at,
             last_prompt_at=self.last_prompt_at,
             agent_slug=self.agent_slug,
+            label=self.label,
         )
 
     async def prompt_stream(self, text: str):
@@ -194,8 +193,17 @@ async def get_or_create_session(
     raw_key = str(key)
     session = _sessions.get(raw_key)
 
-    # Reuse existing session if same agent and still alive
-    if session and session.agent_key == spec.agent_key and session.client.alive:
+    # Reuse existing session only if the same brain is still on the other end:
+    # a different model OR a different bound Agent means a different session.
+    # An empty spec.agent_key means "whatever the binding resolves", so it must
+    # not count as a mismatch — otherwise every bound call would respawn.
+    same_model = not spec.agent_key or session and session.agent_key == spec.agent_key
+    if (
+        session
+        and same_model
+        and session.agent_slug == spec.agent_slug
+        and session.client.alive
+    ):
         return session
 
     # Destroy old session if exists
@@ -216,15 +224,16 @@ async def get_or_create_session(
         "CONDOR_USER_ID": str(spec.user_id or effective_chat_id),
     }
 
-    # Build dynamic MCP servers from user's Condor permissions
-    mcp_servers: list[dict] = []
-    if spec.user_id:
-        mcp_servers = build_mcp_servers_for_session(
-            spec.user_id, spec.chat_id, user_data, server_name=spec.server_name
-        )
+    # Who is answering: an assistant persona, or a bound domain Agent with its
+    # own model, tool allowlist, server pin and memory scope. Raises UnknownAgent
+    # before anything is spawned, so a bad slug cannot orphan a subprocess.
+    bound = binding.resolve(spec, user_data)
+    extra_env.update(bound.mcp_env)
+    mcp_servers = bound.mcp_servers
+    agent_key = bound.agent_key or spec.agent_key
 
     # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
-    use_pydantic_ai = is_pydantic_ai_model(spec.agent_key)
+    use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
     if use_pydantic_ai:
         # For Pydantic AI models: auto-detect or use configured filter mode
@@ -245,14 +254,14 @@ async def get_or_create_session(
         )
 
         api_key = None
-        if model_prefix(spec.agent_key) == "custom":
+        if model_prefix(agent_key) == "custom":
             # Custom OpenAI-compatible provider. The agent key names one of the
             # user's saved endpoints ("custom@venice:..."); those live in the
             # shared preference store so Telegram and the web dashboard resolve
             # them identically. CUSTOM_LLM_* env vars cover headless deploys.
             from condor.preferences import find_custom_provider, parse_custom_agent_key
 
-            provider_name, _ = parse_custom_agent_key(spec.agent_key)
+            provider_name, _ = parse_custom_agent_key(agent_key)
             provider = (
                 find_custom_provider(user_data, provider_name) if user_data else None
             )
@@ -267,20 +276,23 @@ async def get_or_create_session(
             api_key = provider.get("api_key") or os.environ.get("CUSTOM_LLM_API_KEY")
 
         client = PydanticAIClient(
-            model=spec.agent_key,
+            model=agent_key,
             mcp_servers=mcp_servers,
             permission_callback=permission_callback,
             extra_env=extra_env,
             tool_filter_mode=tool_filter_mode,  # Auto-detects if None
             base_url=base_url,
             api_key=api_key,
+            # A bound Agent's allowlist is enforced here exactly as it is on
+            # consult and loop, so an Agent has the same reach in every mode.
+            allowed_tools=bound.tools or None,
         )
     else:
         # For ACP subprocess models: claude-code, gemini, codex.
         # A Claude model can be pinned via a suffix, e.g. "claude-acp:opus" /
         # "claude-acp:sonnet"; ACPClient selects it via session/set_model after
         # handshake (the bridge ignores ANTHROPIC_MODEL). Bare key = agent default.
-        command, model_env, model_pref = resolve_acp(spec.agent_key)
+        command, model_env, model_pref = resolve_acp(agent_key)
         client = ACPClient(
             command=command,
             working_dir=get_project_dir(),
@@ -293,14 +305,20 @@ async def get_or_create_session(
     await client.start()
 
     try:
-        # Build initial context about server and permissions
+        # Build initial context about server and permissions. A bound Agent
+        # opens with its OWN identity and domain memory instead of the chat
+        # assistant's — that is what makes it a different brain, not a skin.
         initial_context = ""
-        if spec.user_id:
+        if bound.is_agent and spec.user_id:
+            initial_context = binding.agent_identity_context(
+                bound.agent_slug, spec.user_id, bound.instructions
+            )
+        elif spec.user_id:
             initial_context = build_initial_context(
                 spec.user_id,
                 spec.chat_id,
                 user_data,
-                agent_key=spec.agent_key,
+                agent_key=agent_key,
                 platform=spec.platform,
                 server_name=spec.server_name,
             )
@@ -330,12 +348,13 @@ async def get_or_create_session(
 
         session = AgentSession(
             key=key,
-            agent_key=spec.agent_key,
+            agent_key=agent_key,
             client=client,
             mode=spec.mode,
-            server_name=resolved_server,
+            server_name=bound.server_name or resolved_server,
             user_id=spec.user_id,
-            agent_slug=spec.agent_slug,
+            agent_slug=bound.agent_slug,
+            label=bound.label,
             pending_context=initial_context or None,
         )
     except Exception:
@@ -344,7 +363,7 @@ async def get_or_create_session(
         raise
 
     _sessions[raw_key] = session
-    log.info("Created agent session %s: %s", raw_key, spec.agent_key)
+    log.info("Created agent session %s: %s (%s)", raw_key, agent_key, bound.label)
     return session
 
 

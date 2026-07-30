@@ -13,11 +13,13 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 
 from condor.runtime import PromptRequest, SessionInfo, SessionKey, SessionSpec
 from condor.runtime import client as runtime
+from condor.runtime.binding import UnknownAgent
 from condor.runtime.sse import SSE_HEADERS, event_stream
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
@@ -81,6 +83,7 @@ async def session_options(user: WebUser = Depends(get_current_user)):
     a startable model — the key's shape does not tell you, since "ollama:" also
     ends in a colon but is a real key.
     """
+    from condor.agents.agent import AgentStore
     from condor.preferences import get_custom_providers, load_user_data_for
     from handlers.agents._shared import (
         AGENT_MODES,
@@ -109,6 +112,17 @@ async def session_options(user: WebUser = Depends(get_current_user)):
             for k, v in AGENT_MODES.items()
         ],
         "servers": cm.get_accessible_servers(user.id),
+        # Every Agent is chattable for the same reason it is consultable: it has
+        # an identity and a toolset. No separate flag (FEAT-004 rule).
+        "agent_bindings": [
+            {
+                "slug": a.slug,
+                "name": a.name,
+                "description": a.description,
+                "when_to_consult": a.when_to_consult,
+            }
+            for a in AgentStore().list_all()
+        ],
         "default_agent": DEFAULT_AGENT,
         "default_mode": DEFAULT_MODE,
     }
@@ -132,6 +146,8 @@ async def create_session(
         return await runtime.create_session(
             spec, user_data=load_user_data_for(spec.user_id)
         )
+    except UnknownAgent as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
     except Exception as exc:  # noqa: BLE001 - surfaced as an HTTP error
         log.exception("Failed to create session %s", spec.key)
         raise HTTPException(status_code=400, detail=str(exc))
@@ -172,32 +188,75 @@ async def prompt_session(
     )
 
 
+class SessionAction(BaseModel):
+    """Body of the multiplexed action endpoint."""
+
+    action: str
+    agent_slug: str | None = None
+    mode: str | None = None
+    agent_key: str | None = None
+    handoff: str = Field(
+        default="",
+        description="Short recap of the conversation so far, carried into the "
+        "new session's opening context when switching.",
+    )
+
+
 @router.post("/{key}/action")
 async def session_action(
     key: str,
-    action: str = Body(..., embed=True),
+    body: SessionAction,
     user: WebUser = Depends(get_current_user),
 ):
     """One multiplexed endpoint for the small lifecycle verbs."""
     parsed = _parse_key(key)
     info = await _authorized_info(parsed, user)
 
-    if action == "cancel":
+    if body.action == "cancel":
         return {"ok": await runtime.abort(parsed)}
-    if action == "new":
-        # Rebuild the session in place, keeping the agent and mode it had.
-        await runtime.destroy(parsed)
-        from condor.preferences import load_user_data_for
 
-        spec = SessionSpec(
-            key=str(parsed),
-            agent_key=info.agent_key,
-            mode=info.mode,
-            user_id=info.user_id,
-            server_name=info.server_name,
-            agent_slug=info.agent_slug,
+    if body.action in ("new", "switch"):
+        return await _respawn(parsed, info, body)
+
+    raise HTTPException(status_code=400, detail=f"Unknown action: {body.action}")
+
+
+async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> dict:
+    """Tear the session down and bring it back under the same key.
+
+    ACP has no identity hot-swap, so switching who is answering means reaping
+    the subprocess and spawning a new one. The conversation is carried over
+    explicitly as a handoff note rather than by forking the ACP session.
+    """
+    from condor.preferences import load_user_data_for
+
+    # Unspecified fields keep their current value, so "new" is just a switch
+    # to the same identity.
+    agent_slug = info.agent_slug if body.agent_slug is None else body.agent_slug
+    spec = SessionSpec(
+        key=str(key),
+        agent_key=body.agent_key if body.agent_key is not None else info.agent_key,
+        mode=body.mode or info.mode,
+        user_id=info.user_id,
+        server_name=info.server_name,
+        agent_slug=agent_slug,
+        # Deferred so the new identity lands on the user's next prompt rather
+        # than blocking this request on a model round trip.
+        lazy_context=True,
+        extra_context=(
+            f"Previously in this chat:\n{body.handoff}" if body.handoff else ""
+        ),
+    )
+
+    await runtime.destroy(key)
+    try:
+        new_info = await runtime.create_session(
+            spec, user_data=load_user_data_for(info.user_id)
         )
-        await runtime.create_session(spec, user_data=load_user_data_for(info.user_id))
-        return {"ok": True}
+    except UnknownAgent as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001 - surfaced as an HTTP error
+        log.exception("Failed to respawn session %s", key)
+        raise HTTPException(status_code=400, detail=str(exc))
 
-    raise HTTPException(status_code=400, detail=f"Unknown action: {action}")
+    return {"ok": True, "session": new_info.model_dump(mode="json")}

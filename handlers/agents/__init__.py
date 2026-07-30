@@ -71,8 +71,13 @@ async def _create_tg_session(
     permission_callback,
     user_data: dict | None,
     extra_context: str = "",
+    agent_slug: str = "",
 ) -> SessionInfo:
-    """Provision the session for a Telegram chat."""
+    """Provision the session for a Telegram chat.
+
+    An empty ``agent_key`` with ``agent_slug`` set lets the bound Agent's own
+    configured model win; pass both to override it deliberately.
+    """
     return await runtime.create_session(
         SessionSpec(
             key=str(_tg_key(chat_id)),
@@ -82,6 +87,7 @@ async def _create_tg_session(
             chat_id=chat_id,
             platform="telegram",
             extra_context=extra_context,
+            agent_slug=agent_slug,
         ),
         permission_callback=permission_callback,
         user_data=user_data,
@@ -327,6 +333,16 @@ async def agent_callback_handler(
         await _handle_compact_custom_prompt(update, context)
     elif action == "new":
         await _handle_new_session(update, context)
+
+    # Agent binding — who is on the other end of the chat
+    elif action == "talk_to":
+        await _handle_talk_to(update, context, page=0)
+    elif action.startswith("talk_page:"):
+        await _handle_talk_to(update, context, page=int(action.split(":", 1)[1]))
+    elif action.startswith("talk_pick:"):
+        await _handle_talk_pick(update, context, int(action.split(":", 1)[1]))
+    elif action == "talk_noop":
+        pass  # page indicator — do nothing
 
     # Trade confirmations
     elif action.startswith("confirm_trade:"):
@@ -1313,6 +1329,99 @@ async def _handle_new_session(
 
     mode = session.mode
     await _handle_mode_start(update, context, mode)
+
+
+async def _handle_talk_to(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0
+) -> None:
+    """Show the picker of domain Agents this chat can talk to."""
+    from condor.agents.agent import AgentStore
+
+    from .menu import _talk_to_keyboard
+
+    query = update.callback_query
+    session = await get_session(update.effective_chat.id)
+    agents = AgentStore().list_all()
+
+    if not agents:
+        await query.message.edit_text(
+            "No agents defined yet. Create one with /agent → Condor, or from the "
+            "dashboard's Agents page.",
+            reply_markup=_talk_to_keyboard([], 0, ""),
+        )
+        return
+
+    # Indices are resolved against this snapshot, so the pick handler must
+    # re-read the same ordering (AgentStore.list_all is directory order).
+    await query.message.edit_text(
+        "Who do you want to talk to?\n\n"
+        "A domain Agent answers with its own identity, tools and memory. "
+        "Condor is the general coordinator.",
+        reply_markup=_talk_to_keyboard(
+            agents, page, session.agent_slug if session else ""
+        ),
+    )
+
+
+async def _handle_talk_pick(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, index: int
+) -> None:
+    """Bind (or unbind) the chat's session to a domain Agent.
+
+    ACP cannot hot-swap an identity, so this reaps the subprocess and spawns a
+    new one under the same key. The conversation does not survive; the user is
+    told so rather than silently losing it.
+    """
+    from condor.agents.agent import AgentStore
+
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    agent_slug = ""
+    label = "Condor"
+    if index >= 0:
+        agents = AgentStore().list_all()
+        if index >= len(agents):
+            await query.message.edit_text("That agent no longer exists.")
+            return
+        agent_slug = agents[index].slug
+        label = agents[index].name or agent_slug
+
+    session = await get_session(chat_id)
+    mode = (
+        session.mode if session else normalize_mode(context.user_data.get("agent_mode"))
+    )
+    agent_key = _reclaim_default_agent(context)
+    bot = context.bot
+
+    async def _perm_cb(tool_call, options):
+        from .confirmation import permission_callback
+
+        return await permission_callback(bot, chat_id, tool_call, options)
+
+    await query.message.edit_text(f"Switching to {label}...")
+    await destroy_session(chat_id)
+
+    try:
+        await _create_tg_session(
+            chat_id=chat_id,
+            agent_key="" if agent_slug else agent_key,
+            mode=mode,
+            user_id=user_id,
+            permission_callback=_perm_cb,
+            user_data=context.user_data,
+            agent_slug=agent_slug,
+        )
+    except Exception as e:
+        log.exception("Failed to bind session to agent %r", agent_slug)
+        await query.message.edit_text(f"Could not switch to {label}: {e}")
+        return
+
+    await query.message.edit_text(
+        f"Now talking to {label}. Previous conversation was not carried over.\n\n"
+        "Send a message to start."
+    )
 
 
 async def _do_compact_from_message(

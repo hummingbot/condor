@@ -70,6 +70,9 @@ class SessionInfo(BaseModel):
     created_at: datetime = Field(default_factory=_utcnow)
     last_prompt_at: datetime | None = None
     agent_slug: str = ""
+    label: str = Field(
+        default="Condor", description="Display name of whoever is answering."
+    )
 
 
 class PromptRequest(BaseModel):
