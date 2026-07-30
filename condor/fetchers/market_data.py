@@ -60,6 +60,7 @@ async def fetch_rates(
     client,
     trading_pairs: List[str],
     connector_name: Optional[str] = None,
+    strict: bool = False,
     **_kw,
 ) -> Dict[str, Optional[float]]:
     """Resolve cross-rates for `trading_pairs` from the API's ticker pool.
@@ -67,6 +68,11 @@ async def fetch_rates(
     Replaces the removed `/rate-oracle/rates` endpoint. Rates are resolved via
     direct, reverse or bridged ticker paths; pass `connector_name` to restrict
     resolution to a single exchange, otherwise the merged pool is used.
+
+    Args:
+        strict: Raise when the request itself fails, instead of reporting every pair
+            as unresolvable. Callers that cache the answer want the distinction: an
+            unreachable server is worth retrying, "no such market" is not.
 
     Returns:
         {"BASE-QUOTE": rate|None} — None when the pair can't be resolved.
@@ -82,6 +88,8 @@ async def fetch_rates(
         # No client-lib method for this endpoint yet — call it directly.
         result = await client.market_data._post("/market-data/rates", json=body)
     except Exception as e:
+        if strict:
+            raise
         logger.warning("Error fetching rates for %s: %s", trading_pairs, e)
         return {pair: None for pair in trading_pairs}
 
