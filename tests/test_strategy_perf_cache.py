@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from condor.agents import engine as engine_module
+from condor.runtime import loops as loops_module
 from condor.web.routes import agents as agents_routes
 
 RUN_KEY = "my_agent.my_strategy"
@@ -66,7 +66,8 @@ def perf_env(tmp_path, monkeypatch):
     """Isolated caches + engine registry + a client factory hook."""
     monkeypatch.setattr(agents_routes, "_PERF_CACHE", {})
     monkeypatch.setattr(agents_routes, "_CLOSED_PERF_CACHE", {})
-    monkeypatch.setattr(engine_module, "_engines", {})
+    # The running-engine registry moved into the supervisor (FEAT-012).
+    monkeypatch.setattr(loops_module.get_supervisor(), "_engines", {})
 
     def use_client(client):
         async def _fake_get_client(strategy_dir, default_config):
@@ -96,7 +97,7 @@ def test_closed_sessions_fetched_once_only_active_refetched(perf_env):
     use_client(_FakeClient(api))
     # Session 3 has a live engine.
     aid3 = f"{RUN_KEY}_3"
-    engine_module._engines[aid3] = SimpleNamespace(agent_id=aid3)
+    loops_module.get_supervisor()._engines[aid3] = SimpleNamespace(agent_id=aid3)
 
     sessions1, totals1 = _compute(strategy_dir)
     assert api.calls == {f"{RUN_KEY}_1": 1, f"{RUN_KEY}_2": 1, f"{RUN_KEY}_3": 1}
@@ -199,7 +200,7 @@ def test_reactivated_id_evicts_frozen_entry(perf_env):
     # Session 1's engine comes back (e.g. restored after restart): the stale
     # frozen entry must be evicted and the id fetched fresh.
     aid1 = f"{RUN_KEY}_1"
-    engine_module._engines[aid1] = SimpleNamespace(agent_id=aid1)
+    loops_module.get_supervisor()._engines[aid1] = SimpleNamespace(agent_id=aid1)
     agents_routes._PERF_CACHE.clear()
     _compute(strategy_dir)
     assert api.calls[f"{RUN_KEY}_1"] == 2

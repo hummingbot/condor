@@ -27,6 +27,7 @@ from condor.acp.client import (
     resolve_acp,
 )
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
+from condor.runtime.registry_file import LoopState
 
 from .agent import Agent
 from .journal import JournalManager, next_experiment_number, next_session_number
@@ -37,8 +38,13 @@ from .strategy import Strategy
 
 log = logging.getLogger(__name__)
 
-# Module-level registry of running engines
-_engines: dict[str, "TickEngine"] = {}
+# The running-engine registry lives in the supervisor (condor.runtime.loops),
+# which is the single place that mutates it and records each transition to
+# disk. These stay as thin delegations for existing callers.
+#
+# NOTE: neither this module nor condor.runtime.* belongs in main.py's
+# modules_to_reload — they hold live process state (running tick tasks, ACP
+# subprocesses), and re-executing them would orphan every running loop.
 
 
 class _NullTracker:
@@ -54,12 +60,18 @@ class _NullTracker:
         return 0.0
 
 
+def _supervisor():
+    from condor.runtime.loops import get_supervisor
+
+    return get_supervisor()
+
+
 def get_engine(agent_id: str) -> TickEngine | None:
-    return _engines.get(agent_id)
+    return _supervisor().get(agent_id)
 
 
 def get_all_engines() -> dict[str, "TickEngine"]:
-    return dict(_engines)
+    return _supervisor().all()
 
 
 @dataclass
@@ -149,7 +161,7 @@ class TickEngine:
         self._running = True
         self._bot = bot
         self._task = asyncio.create_task(self._loop())
-        _engines[self.agent_id] = self
+        _supervisor().register(self)
         log.info(
             "TickEngine %s started (freq=%ss)",
             self.agent_id,
@@ -179,7 +191,7 @@ class TickEngine:
             self._active_client = None
         if self.journal:
             self.journal.close()
-        _engines.pop(self.agent_id, None)
+        _supervisor().unregister(self.agent_id, LoopState.STOPPED)
         log.info("TickEngine %s stopped", self.agent_id)
 
     async def _run_shutdown(self, reason: str) -> None:
@@ -238,14 +250,16 @@ class TickEngine:
         finally:
             if self.journal:
                 self.journal.close()
-            _engines.pop(self.agent_id, None)
+            _supervisor().unregister(self.agent_id, LoopState.STOPPED)
             log.info("TickEngine %s shut down (%s)", self.agent_id, reason)
 
     def pause(self) -> None:
         self._paused = True
+        _supervisor().record(self, LoopState.PAUSED)
 
     def resume(self) -> None:
         self._paused = False
+        _supervisor().record(self, LoopState.RUNNING)
 
     def inject_directive(self, text: str) -> None:
         """Queue a user directive to be included in the next tick's prompt."""
@@ -289,6 +303,11 @@ class TickEngine:
                         self.journal.append_error(str(e))
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
 
+                # Record the tick we just finished. A tiny atomic write, so if
+                # the process dies mid-sleep the boot pass can say which tick
+                # this run reached instead of guessing.
+                _supervisor().record_tick(self)
+
                 # Single-tick modes: stop after first tick
                 if mode in ("dry_run", "run_once"):
                     label = "Dry run" if mode == "dry_run" else "Run-once"
@@ -299,7 +318,7 @@ class TickEngine:
                     )
                     await self._notify(f"Agent {self.agent_id}: {label} complete.")
                     self._running = False
-                    _engines.pop(self.agent_id, None)
+                    _supervisor().unregister(self.agent_id, LoopState.COMPLETED)
                     return
 
                 # max_ticks limit (loop mode only)
@@ -315,7 +334,7 @@ class TickEngine:
                     )
                     self._running = False
                     self.journal.close()
-                    _engines.pop(self.agent_id, None)
+                    _supervisor().unregister(self.agent_id, LoopState.COMPLETED)
                     return
 
             try:
