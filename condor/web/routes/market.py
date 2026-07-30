@@ -127,7 +127,7 @@ async def get_rates(
     body: dict,
     user: WebUser = Depends(get_current_user),
 ):
-    """Cross-rates resolved from the API's ticker pool (replaces the rate oracle)."""
+    """Cross-rates resolved from Condor's cached ticker pool (replaces the rate oracle)."""
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
@@ -136,13 +136,10 @@ async def get_rates(
     if not trading_pairs:
         return RatesResponse(rates={})
 
-    from condor.fetchers.market_data import fetch_rates
+    from condor.market_rates import get_rates as resolve
 
-    client = await cm.get_client(name)
     try:
-        rates = await fetch_rates(
-            client, trading_pairs, connector_name=body.get("connector")
-        )
+        rates = await resolve(name, trading_pairs, connector=body.get("connector"))
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
@@ -199,12 +196,10 @@ async def get_tickers(
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
-    from condor.server_data_service import ServerDataType, get_server_data_service
+    from condor.market_rates import get_connector_tickers
 
     try:
-        result = await get_server_data_service().get_or_fetch(
-            name, ServerDataType.TICKERS, connector_name=connector
-        )
+        result = await get_connector_tickers(name, connector)
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 

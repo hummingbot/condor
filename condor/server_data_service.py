@@ -45,6 +45,7 @@ class ServerDataType(Enum):
     SERVER_STATUS = "server_status"
     ALL_CONNECTORS = "all_connectors"
     TICKERS = "tickers"
+    TICKER_POOL = "ticker_pool"
 
 
 @dataclass(frozen=True)
@@ -82,6 +83,11 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
         interval=300, ttl=600, stale_threshold=30
     ),
     ServerDataType.TICKERS: DataTypeDefaults(interval=60, ttl=180, stale_threshold=30),
+    # Whole-server ticker pool: one poll feeds every per-connector ticker view and
+    # all currency conversion, so reads never hit the network.
+    ServerDataType.TICKER_POOL: DataTypeDefaults(
+        interval=60, ttl=300, stale_threshold=60
+    ),
 }
 
 
@@ -515,6 +521,7 @@ class ServerDataService:
             ServerDataType.ACTIVE_ORDERS,
             ServerDataType.SERVER_STATUS,
             ServerDataType.ALL_CONNECTORS,
+            ServerDataType.TICKER_POOL,
         ]
         subscriber_id = "_auto"
 
@@ -845,6 +852,7 @@ def register_default_fetches() -> None:
         fetch_portfolio,
         fetch_positions,
         fetch_server_status,
+        fetch_ticker_pool,
         fetch_tickers,
         fetch_trading_rules,
     )
@@ -872,6 +880,7 @@ def register_default_fetches() -> None:
     sds.register_fetch(ServerDataType.CANDLE_CONNECTORS, fetch_candle_connectors)
     sds.register_fetch(ServerDataType.SERVER_STATUS, fetch_server_status)
     sds.register_fetch(ServerDataType.TICKERS, fetch_tickers)
+    sds.register_fetch(ServerDataType.TICKER_POOL, fetch_ticker_pool)
 
     logger.info(
         "ServerDataService: registered fetch functions for %d data types",
