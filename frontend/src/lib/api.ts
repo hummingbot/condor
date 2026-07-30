@@ -272,6 +272,21 @@ export interface TradingRulesResponse {
   rules: TradingRule[];
 }
 
+export interface Ticker {
+  trading_pair: string;
+  price: number;
+  base_volume: number;
+  quote_volume: number;
+  /** 24h volume in USD; null when the quote asset couldn't be priced. */
+  usd_volume: number | null;
+}
+
+export interface TickersResponse {
+  connector: string;
+  tickers: Ticker[];
+  updated_at: number | null;
+}
+
 // ── Deploy Bot ──
 
 export interface ControllerConfigSummary {
@@ -927,15 +942,23 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/market/prices?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
     ),
 
-  getRateOracleRates: (server: string, tradingPairs: string[]) =>
-    apiFetch<{ rates: Record<string, number> }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/rate-oracle/rates`,
-      { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
+  getRates: (server: string, tradingPairs: string[], connector?: string) =>
+    apiFetch<{ rates: Record<string, number | null> }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/rates`,
+      {
+        method: "POST",
+        body: JSON.stringify({ trading_pairs: tradingPairs, connector }),
+      },
     ),
 
   getTradingRules: (server: string, connector: string) =>
     apiFetch<TradingRulesResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/trading-rules?connector=${encodeURIComponent(connector)}`,
+    ),
+
+  getTickers: (server: string, connector: string) =>
+    apiFetch<TickersResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/tickers?connector=${encodeURIComponent(connector)}`,
     ),
 
   getOrderBook: (

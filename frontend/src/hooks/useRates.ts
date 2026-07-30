@@ -41,18 +41,18 @@ export function useRates(quoteCurrencies: string[]) {
       }
       if (needed.length > 0) {
         const pairs = needed.map((quote) => `${currency}-${quote}`);
-        try {
-          const resp = await api.getRateOracleRates(server!, pairs);
-          const rateMap = resp.rates ?? {};
-          for (const quote of needed) {
-            const pair = `${currency}-${quote}`;
-            const rate = rateMap[pair];
-            results[quote] = rate != null ? rate : null;
-          }
-        } catch {
-          for (const quote of needed) {
-            results[quote] = null;
-          }
+        // A request failure must propagate: turning it into null rates would cache a
+        // "successful" unconvertible result for the whole staleTime, so a single blip
+        // (a server still warming up, say) freezes every value in the old currency
+        // until the page is reloaded. Throwing lets React Query retry instead.
+        const resp = await api.getRates(server!, pairs);
+        const rateMap = resp.rates ?? {};
+        for (const quote of needed) {
+          const pair = `${currency}-${quote}`;
+          const rate = rateMap[pair];
+          // A null here is the server saying "no path for this pair" — a real answer,
+          // rendered with the ⚠ marker rather than retried.
+          results[quote] = rate != null ? rate : null;
         }
       }
       return results;
@@ -60,7 +60,18 @@ export function useRates(quoteCurrencies: string[]) {
     enabled: !!server && (needed.length > 0 || stablePairs.length > 0),
     staleTime: 60_000,
     refetchInterval: 60_000,
-    placeholderData: (prev: Record<string, number | null> | undefined) => prev,
+    retry: 3,
+    retryDelay: (attempt: number) => Math.min(500 * 2 ** attempt, 5_000),
+    // Only reuse rates when just the requested quote set changed. Carrying them
+    // across a currency switch leaves `convert()` silently unconverted while the
+    // new rates load, so values would render unchanged under the new symbol.
+    placeholderData: (
+      prev: Record<string, number | null> | undefined,
+      prevQuery: { queryKey: readonly unknown[] } | undefined,
+    ) => {
+      const prevKey = prevQuery?.queryKey;
+      return prevKey?.[1] === server && prevKey?.[2] === currency ? prev : undefined;
+    },
   });
 
   const convert = useMemo(() => {
@@ -72,6 +83,12 @@ export function useRates(quoteCurrencies: string[]) {
       return { value, converted: false };
     };
   }, [rates, currency]);
+
+  // Symbol for values already run through `convert()` (aggregates, USD totals).
+  // Falls back to "$" until the USD -> display-currency rate is live, so the
+  // number and its label never disagree.
+  const usdConverted = useMemo(() => convert(1, "USDT").converted, [convert]);
+  const resolvedSymbol = usdConverted ? currencySymbol : "$";
 
   const formatValue = useMemo(() => {
     return (val: number, quoteCurrency: string): string => {
@@ -106,5 +123,7 @@ export function useRates(quoteCurrencies: string[]) {
     isLoading,
     currency,
     currencySymbol,
+    resolvedSymbol,
+    usdConverted,
   };
 }

@@ -847,7 +847,7 @@ export function Portfolio() {
     }
     return Array.from(quotes);
   }, [controllers, executorsList]);
-  const { convert, currencySymbol } = useRates(quoteCurrencies);
+  const { convert, resolvedSymbol: currencySymbol } = useRates(quoteCurrencies);
 
   // Convert a USDT-denominated value to the display currency
   const convertFromUsd = useCallback(
