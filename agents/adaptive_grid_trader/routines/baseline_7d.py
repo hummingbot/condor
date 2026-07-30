@@ -2,7 +2,6 @@ from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 from config_manager import get_client
 import logging
-import statistics
 
 logger = logging.getLogger(__name__)
 
@@ -10,11 +9,36 @@ CATEGORY = "Analysis"
 
 
 class Config(BaseModel):
-    """7-day baseline analysis: trend direction, support/resistance levels, and ATR volatility for the adaptive grid trader."""
+    """Compute 7-day baseline stats: ATR, range, trend for a perpetual pair."""
 
-    connector_name: str = Field(default="binance_perpetual", description="Exchange connector name")
-    trading_pair: str = Field(default="BTC-USDT", description="Trading pair to analyze")
-    lookback_days: int = Field(default=7, description="Number of days to look back (uses 4h candles)")
+    trading_pair: str = Field(default="BTC-USDT")
+    connector_name: str = Field(default="binance_perpetual")
+    atr_period: int = Field(default=14, description="Candles for ATR calculation")
+
+
+def _ema(values: list, period: int) -> list:
+    if len(values) < period:
+        return []
+    k = 2.0 / (period + 1)
+    seed = sum(values[:period]) / period
+    result = [seed]
+    for v in values[period:]:
+        result.append(v * k + result[-1] * (1 - k))
+    return result
+
+
+def _compute_atr(candles: list, period: int) -> float:
+    if len(candles) < period + 1:
+        return 0.0
+    true_ranges = []
+    for i in range(1, len(candles)):
+        h = float(candles[i]["high"])
+        lo = float(candles[i]["low"])
+        prev_c = float(candles[i - 1]["close"])
+        tr = max(h - lo, abs(h - prev_c), abs(lo - prev_c))
+        true_ranges.append(tr)
+    recent_trs = true_ranges[-period:]
+    return sum(recent_trs) / len(recent_trs)
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -22,139 +46,122 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     if not client:
         return "No server available"
 
+    # --- Fetch 7 days of 1h candles ---
     try:
-        max_records = config.lookback_days * 6 + 10  # 6 four-hour candles per day
         result = await client.market_data.get_candles(
-            config.connector_name, config.trading_pair, interval="4h", max_records=max_records
+            config.connector_name,
+            config.trading_pair,
+            interval="1h",
+            max_records=168,
         )
-        records = result if isinstance(result, list) else result.get("data", result.get("candles", []))
-
-        if not records or len(records) < 5:
-            return f"Insufficient candle data for {config.trading_pair} on {config.connector_name}"
-
-        closes = [float(c["close"]) for c in records]
-        highs = [float(c["high"]) for c in records]
-        lows = [float(c["low"]) for c in records]
-        current_price = closes[-1]
-
-        # Trend: SMA short vs SMA long
-        sma_short = statistics.mean(closes[-7:])
-        sma_long = statistics.mean(closes[-21:]) if len(closes) >= 21 else statistics.mean(closes)
-
-        if sma_short > sma_long * 1.001:
-            trend_direction = "up"
-        elif sma_short < sma_long * 0.999:
-            trend_direction = "down"
-        else:
-            trend_direction = "range"
-
-        # ATR-based volatility
-        true_ranges = []
-        for i in range(1, len(records)):
-            high = float(records[i]["high"])
-            low = float(records[i]["low"])
-            prev_close = float(records[i - 1]["close"])
-            tr = max(high - low, abs(high - prev_close), abs(low - prev_close))
-            true_ranges.append(tr)
-
-        atr_period = min(14, len(true_ranges))
-        atr = statistics.mean(true_ranges[-atr_period:])
-        volatility_pct = (atr / current_price) * 100
-
-        # Support/resistance via swing highs/lows
-        window = 3
-        resistance_levels = []
-        support_levels = []
-        for i in range(window, len(highs) - window):
-            if highs[i] == max(highs[i - window : i + window + 1]):
-                resistance_levels.append(highs[i])
-            if lows[i] == min(lows[i - window : i + window + 1]):
-                support_levels.append(lows[i])
-
-        resistance_levels.sort(key=lambda x: abs(x - current_price))
-        support_levels.sort(key=lambda x: abs(x - current_price))
-
-        key_levels = []
-        for level in resistance_levels[:3]:
-            key_levels.append(
-                {
-                    "level": round(level, 4),
-                    "type": "resistance",
-                    "distance_pct": round((level - current_price) / current_price * 100, 2),
-                }
-            )
-        for level in support_levels[:3]:
-            key_levels.append(
-                {
-                    "level": round(level, 4),
-                    "type": "support",
-                    "distance_pct": round((level - current_price) / current_price * 100, 2),
-                }
-            )
-        key_levels.sort(key=lambda x: abs(x["distance_pct"]))
-
-        period_high = max(highs)
-        period_low = min(lows)
-        range_pct = (period_high - period_low) / period_low * 100
-
-        # Report
-        try:
-            from condor.reports import ReportBuilder
-
-            builder = ReportBuilder(f"{config.lookback_days}d Baseline: {config.trading_pair}")
-            builder.source("routine", "baseline_7d").tags(["analysis", "grid", "baseline"])
-
-            builder.section("01 / TREND", f"{config.lookback_days}d of 4h candles — SMA cross signal")
-            builder.kpi("Trend Direction", trend_direction.upper())
-            builder.kpi("Current Price", f"{current_price:,.4f}")
-            builder.kpi("SMA Short (7c)", f"{sma_short:,.4f}")
-            builder.kpi("SMA Long (21c)", f"{sma_long:,.4f}")
-
-            builder.section("02 / VOLATILITY", "ATR (14-period) on 4h candles")
-            builder.kpi("ATR (14-period)", f"{atr:,.4f}")
-            builder.kpi("Volatility %", f"{volatility_pct:.2f}%")
-            builder.kpi(f"{config.lookback_days}d High", f"{period_high:,.4f}")
-            builder.kpi(f"{config.lookback_days}d Low", f"{period_low:,.4f}")
-            builder.kpi("Price Range %", f"{range_pct:.2f}%")
-
-            builder.section("03 / KEY LEVELS", "Nearest swing-high resistances and swing-low supports")
-            if key_levels:
-                builder.table(
-                    [
-                        {
-                            "Level": f"{level['level']:,.4f}",
-                            "Type": level["type"].capitalize(),
-                            "Distance %": f"{level['distance_pct']:+.2f}%",
-                        }
-                        for level in key_levels
-                    ],
-                    ["Level", "Type", "Distance %"],
-                )
-            else:
-                builder.markdown("_No significant swing levels detected in this window._")
-
-            builder.manual_order()
-            await builder.save()
-        except Exception as e:
-            logger.warning(f"Report generation failed: {e}")
-
-        from routines.base import RoutineResult
-
-        return RoutineResult(
-            text=(
-                f"{config.trading_pair} {config.lookback_days}d Baseline | "
-                f"Trend: **{trend_direction.upper()}** | "
-                f"Volatility: {volatility_pct:.2f}% | "
-                f"Key levels: {len(key_levels)}"
-            ),
-            sections=[
-                {"type": "kpi", "label": "Trend Direction", "value": trend_direction.upper()},
-                {"type": "kpi", "label": "Volatility %", "value": f"{volatility_pct:.2f}%"},
-                {"type": "kpi", "label": "ATR", "value": f"{atr:,.4f}"},
-                {"type": "kpi", "label": "Key Levels", "value": str(len(key_levels))},
-            ],
+        records = (
+            result
+            if isinstance(result, list)
+            else result.get("data", result.get("candles", []))
         )
-
     except Exception as e:
-        logger.error(f"baseline_7d error: {e}")
-        return f"Error running baseline analysis: {e}"
+        return f"Failed to fetch candles: {e}"
+
+    if not records or len(records) < 20:
+        return (
+            f"Insufficient candle data — got {len(records) if records else 0} candles, "
+            "need at least 20."
+        )
+
+    try:
+        records = sorted(records, key=lambda c: c["timestamp"])
+    except Exception:
+        pass
+
+    highs = [float(c["high"]) for c in records]
+    lows = [float(c["low"]) for c in records]
+    closes = [float(c["close"]) for c in records]
+
+    # --- 7D range ---
+    seven_d_high = max(highs)
+    seven_d_low = min(lows)
+    range_pct = (seven_d_high - seven_d_low) / seven_d_low * 100
+
+    # --- ATR ---
+    atr = _compute_atr(records, config.atr_period)
+    current_price = closes[-1]
+    atr_pct = (atr / current_price * 100) if current_price else 0.0
+
+    # --- EMAs ---
+    ema20_series = _ema(closes, 20)
+    ema50_series = _ema(closes, 50)
+
+    if not ema20_series or not ema50_series:
+        trend_direction = "NEUTRAL"
+        trend_strength = "weak"
+        ema20_val = ema50_val = 0.0
+        sep_vs_atr = 0.0
+    else:
+        ema20_val = ema20_series[-1]
+        ema50_val = ema50_series[-1]
+        separation = ema20_val - ema50_val
+        sep_vs_atr = abs(separation) / atr if atr > 0 else 0.0
+
+        if ema20_val > ema50_val:
+            rising = len(ema20_series) >= 3 and ema20_series[-1] > ema20_series[-3]
+            trend_direction = "BULLISH" if rising else "NEUTRAL"
+        elif ema20_val < ema50_val:
+            falling = len(ema20_series) >= 3 and ema20_series[-1] < ema20_series[-3]
+            trend_direction = "BEARISH" if falling else "NEUTRAL"
+        else:
+            trend_direction = "NEUTRAL"
+
+        if sep_vs_atr < 0.5:
+            trend_strength = "weak"
+        elif sep_vs_atr < 1.5:
+            trend_strength = "moderate"
+        else:
+            trend_strength = "strong"
+
+    # --- Report ---
+    try:
+        from condor.reports import ReportBuilder
+
+        builder = ReportBuilder(f"7D Baseline — {config.trading_pair}")
+        builder.source("routine", "baseline_7d").tags(
+            ["baseline", "adaptive_grid", "atr", "trend"]
+        )
+
+        builder.section(
+            "7-Day Market Snapshot",
+            f"{config.trading_pair} on {config.connector_name}  |  {len(records)} × 1h candles",
+        )
+        builder.kpi("Current Price", f"${current_price:,.2f}")
+        builder.kpi("7D High", f"${seven_d_high:,.2f}")
+        builder.kpi("7D Low", f"${seven_d_low:,.2f}")
+        builder.kpi("7D Range %", f"{range_pct:.2f}%")
+
+        builder.section(
+            "Volatility — ATR",
+            f"Average True Range over last {config.atr_period} × 1h candles",
+        )
+        builder.kpi("ATR (1h)", f"${atr:,.2f}")
+        builder.kpi("ATR % of Price", f"{atr_pct:.3f}%")
+
+        builder.section("Trend", "EMA20 vs EMA50 on 1h closes")
+        builder.kpi("EMA20", f"${ema20_val:,.2f}")
+        builder.kpi("EMA50", f"${ema50_val:,.2f}")
+        builder.kpi("EMA Sep / ATR", f"{sep_vs_atr:.2f}×")
+        builder.kpi("Trend Direction", trend_direction)
+        builder.kpi("Trend Strength", trend_strength)
+
+        builder.manual_order()
+        report_id = await builder.save()
+    except Exception as e:
+        logger.warning(f"Report generation failed: {e}")
+        report_id = None
+
+    summary = (
+        f"7D Baseline — {config.trading_pair}\n"
+        f"Price: ${current_price:,.2f}  |  High: ${seven_d_high:,.2f}  |  Low: ${seven_d_low:,.2f}\n"
+        f"Range: {range_pct:.2f}%  |  ATR(1h,{config.atr_period}): ${atr:,.2f} ({atr_pct:.3f}%)\n"
+        f"Trend: {trend_direction} / {trend_strength}  |  EMA20: ${ema20_val:,.2f}  |  EMA50: ${ema50_val:,.2f}"
+    )
+    if report_id:
+        summary += f"\nReport: {report_id}"
+    return summary
