@@ -23,11 +23,78 @@ def _active_session_keyboard(mode: str) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
-            InlineKeyboardButton("Stop", callback_data="agent:stop"),
+            InlineKeyboardButton("Talk to", callback_data="agent:talk_to"),
         ],
-        [InlineKeyboardButton("Close", callback_data="agent:close")],
+        [
+            InlineKeyboardButton("Stop", callback_data="agent:stop"),
+            InlineKeyboardButton("Close", callback_data="agent:close"),
+        ],
     ]
     return InlineKeyboardMarkup(rows)
+
+
+# "Talk to" picker pagination
+TALK_PAGE_SIZE = 8
+
+
+def _talk_to_keyboard(
+    agents: list, page: int, current_slug: str
+) -> InlineKeyboardMarkup:
+    """Paginated picker of domain Agents to hold a conversation with.
+
+    Agents are referenced by index so callback_data stays well under Telegram's
+    64-byte cap regardless of slug length, matching the OpenRouter picker.
+    """
+    keyboard: list[list[InlineKeyboardButton]] = [
+        [
+            InlineKeyboardButton(
+                ("• " if not current_slug else "") + "Condor (coordinator)",
+                callback_data="agent:talk_pick:-1",
+            )
+        ]
+    ]
+
+    if not agents:
+        keyboard.append([InlineKeyboardButton("Back", callback_data="agent:menu")])
+        return InlineKeyboardMarkup(keyboard)
+
+    total_pages = (len(agents) + TALK_PAGE_SIZE - 1) // TALK_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    start = page * TALK_PAGE_SIZE
+    end = min(start + TALK_PAGE_SIZE, len(agents))
+
+    for idx in range(start, end):
+        agent = agents[idx]
+        label = agent.name or agent.slug
+        if agent.slug == current_slug:
+            label = f"• {label}"
+        keyboard.append(
+            [InlineKeyboardButton(label, callback_data=f"agent:talk_pick:{idx}")]
+        )
+
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(
+                InlineKeyboardButton(
+                    "‹ Prev", callback_data=f"agent:talk_page:{page - 1}"
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                f"{page + 1}/{total_pages}", callback_data="agent:talk_noop"
+            )
+        )
+        if page < total_pages - 1:
+            nav.append(
+                InlineKeyboardButton(
+                    "Next ›", callback_data=f"agent:talk_page:{page + 1}"
+                )
+            )
+        keyboard.append(nav)
+
+    keyboard.append([InlineKeyboardButton("Back", callback_data="agent:menu")])
+    return InlineKeyboardMarkup(keyboard)
 
 
 # Sentinel rows that open a model picker instead of setting agent_llm directly.
@@ -390,8 +457,15 @@ async def show_agent_menu(
             "label", session.agent_key
         )
         status = "busy" if session.is_busy else "ready"
+        # A bound domain Agent replaces the assistant persona on the header:
+        # it is a different brain, not a different mode.
+        who = (
+            f"Talking to: {session.label}"
+            if session.agent_slug
+            else (f"Mode: {mode_label}")
+        )
         lines = [
-            f"Mode: {mode_label}",
+            who,
             f"LLM: {agent_label}",
             f"Status: {status}",
             "\nSend a message to chat, or use the buttons below.",

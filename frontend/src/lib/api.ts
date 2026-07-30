@@ -699,6 +699,56 @@ export interface OpenRouterModelOption {
   completion_price: number;
 }
 
+/** A domain Agent a session can be bound to. Every Agent is chattable. */
+export interface AgentBindingOption {
+  slug: string;
+  name: string;
+  description: string;
+  when_to_consult: string;
+}
+
+export interface SessionOptionsResponse extends ChatOptionsResponse {
+  servers: string[];
+  agent_bindings: AgentBindingOption[];
+}
+
+/** Mirrors condor/runtime/models.py SessionInfo. */
+export interface SessionInfo {
+  key: string;
+  agent_key: string;
+  mode: string;
+  user_id: number | null;
+  /** Originating frontend: "tg" | "web" | "mcp". */
+  surface: string;
+  slot: string;
+  server_name: string | null;
+  is_busy: boolean;
+  alive: boolean;
+  created_at: string;
+  last_prompt_at: string | null;
+  /** Bound domain Agent, or "" for the plain assistant. */
+  agent_slug: string;
+  /** Display name of whoever is answering. */
+  label: string;
+}
+
+export interface CreateSessionRequest {
+  key: string;
+  agent_key: string;
+  mode?: string;
+  server_name?: string | null;
+  agent_slug?: string;
+  lazy_context?: boolean;
+}
+
+export interface SwitchSessionRequest {
+  agent_slug?: string;
+  mode?: string;
+  agent_key?: string;
+  /** Short recap carried into the new session — the subprocess is replaced. */
+  handoff?: string;
+}
+
 /** Agent key for a model served by a saved custom endpoint. Mirrors
  *  build_custom_agent_key() in condor/preferences.py. */
 export function customAgentKey(provider: string, model: string): string {
@@ -1434,6 +1484,42 @@ export const api = {
 
   getOpenRouterModels: () =>
     apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
+
+  // ── Sessions (runtime API) ──
+  //
+  // The same sessions the Telegram bot uses: one keyspace, so a session started
+  // there is listed and killable here.
+
+  getSessionOptions: () =>
+    apiFetch<SessionOptionsResponse>("/api/v1/sessions/options"),
+
+  listSessions: () => apiFetch<SessionInfo[]>("/api/v1/sessions"),
+
+  createSession: (spec: CreateSessionRequest) =>
+    apiFetch<SessionInfo>("/api/v1/sessions", {
+      method: "POST",
+      body: JSON.stringify(spec),
+    }),
+
+  destroySession: (key: string) =>
+    apiFetch<{ destroyed: boolean }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}`,
+      { method: "DELETE" },
+    ),
+
+  // Binds the chat to a different brain. The subprocess is replaced, so the
+  // conversation only carries over via `handoff`.
+  switchSession: (key: string, body: SwitchSessionRequest) =>
+    apiFetch<{ ok: boolean; session: SessionInfo }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}/action`,
+      { method: "POST", body: JSON.stringify({ action: "switch", ...body }) },
+    ),
+
+  cancelSessionPrompt: (key: string) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}/action`,
+      { method: "POST", body: JSON.stringify({ action: "cancel" }) },
+    ),
 
   // ── Custom OpenAI-compatible LLM endpoints ──
 
