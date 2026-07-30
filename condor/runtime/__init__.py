@@ -14,13 +14,15 @@ itself as ``from condor.runtime import client as runtime`` — it pulls in the
 registry lazily to keep the handler import graph acyclic.
 """
 
+from condor.runtime.events import EventType, RuntimeEvent
 from condor.runtime.keys import MCP, TELEGRAM, WEB, SessionKey
-from condor.runtime.models import PromptRequest, RuntimeEvent, SessionInfo, SessionSpec
+from condor.runtime.models import PromptRequest, SessionInfo, SessionSpec
 
 __all__ = [
     "MCP",
     "TELEGRAM",
     "WEB",
+    "EventType",
     "PromptRequest",
     "RuntimeEvent",
     "SessionInfo",

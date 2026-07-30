@@ -183,8 +183,10 @@ def test_no_direct_registry_imports():
     Everything else goes through ``condor.runtime.client`` so that swapping the
     transport later is a config flip instead of a rewrite.
     """
+    # Assembled at runtime so this file does not match its own search string.
+    pattern = "from condor.runtime." + "sessions import"
     result = subprocess.run(
-        ["git", "grep", "-l", "from condor.runtime.sessions import", "--", "*.py"],
+        ["git", "grep", "-l", pattern, "--", "*.py"],
         cwd=REPO_ROOT,
         capture_output=True,
         text=True,

@@ -382,10 +382,9 @@ async def show_agent_menu(
 ) -> None:
     """Show agent menu: active session info or auto-start."""
     chat_id = update.effective_chat.id
-    # In-process escape hatch: the menu reads client.alive off the live object.
-    session = runtime.get_live(SessionKey.telegram(chat_id))
+    session = await runtime.get_info(SessionKey.telegram(chat_id))
 
-    if session and session.client.alive:
+    if session and session.alive:
         mode_label = AGENT_MODES.get(session.mode, {}).get("label", session.mode)
         agent_label = AGENT_OPTIONS.get(session.agent_key, {}).get(
             "label", session.agent_key

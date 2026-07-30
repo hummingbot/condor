@@ -7,9 +7,15 @@ import time
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from condor.acp import ACP_COMMANDS, PromptDone
+from condor.acp import ACP_COMMANDS
 from condor.acp.pydantic_ai_client import is_pydantic_ai_model
-from condor.runtime import SessionKey, SessionSpec
+from condor.runtime import (
+    EventType,
+    PromptRequest,
+    SessionInfo,
+    SessionKey,
+    SessionSpec,
+)
 from condor.runtime import client as runtime
 from handlers import clear_all_input_states
 from utils.auth import restricted
@@ -38,20 +44,18 @@ log = logging.getLogger(__name__)
 #
 # Session state lives in condor.runtime, outside the hot-reload blast radius.
 # These are the only place this module turns a Telegram chat_id into a
-# SessionKey; everything else keeps calling get_session/destroy_session.
+# SessionKey. Everything below works with SessionInfo — the serializable view —
+# never the live session object, so this surface behaves identically once the
+# runtime moves out of process.
 
 
 def _tg_key(chat_id: int) -> SessionKey:
     return SessionKey.telegram(chat_id)
 
 
-def get_session(chat_id: int):
-    """Live session object for a chat, or None.
-
-    In-process escape hatch: streaming and context injection still reach for
-    ``session.client`` directly.
-    """
-    return runtime.get_live(_tg_key(chat_id))
+async def get_session(chat_id: int) -> SessionInfo | None:
+    """Serializable view of a chat's session, or None."""
+    return await runtime.get_info(_tg_key(chat_id))
 
 
 async def destroy_session(chat_id: int) -> bool:
@@ -66,9 +70,10 @@ async def _create_tg_session(
     user_id: int,
     permission_callback,
     user_data: dict | None,
-):
-    """Provision the session for a Telegram chat and return the live object."""
-    await runtime.create_session(
+    extra_context: str = "",
+) -> SessionInfo:
+    """Provision the session for a Telegram chat."""
+    return await runtime.create_session(
         SessionSpec(
             key=str(_tg_key(chat_id)),
             agent_key=agent_key,
@@ -76,14 +81,11 @@ async def _create_tg_session(
             user_id=user_id,
             chat_id=chat_id,
             platform="telegram",
+            extra_context=extra_context,
         ),
         permission_callback=permission_callback,
         user_data=user_data,
     )
-    session = get_session(chat_id)
-    if session is None:  # pragma: no cover - registry write is synchronous
-        raise RuntimeError(f"Session {_tg_key(chat_id)} vanished right after creation")
-    return session
 
 
 # Cache CLI availability checks so we only hit the filesystem once per key
@@ -376,23 +378,17 @@ async def _handle_mode_start(
 
             return await permission_callback(bot, chat_id, tool_call, options)
 
-        session = await _create_tg_session(
+        await _create_tg_session(
             chat_id=chat_id,
             agent_key=agent_key,
             mode=mode,
             user_id=user_id,
             permission_callback=_perm_cb,
             user_data=context.user_data,
+            # Mode-specific context (auto-loaded from assistants/*.md) is part
+            # of the spec, so provisioning is a single round trip.
+            extra_context=load_assistant(mode) or "",
         )
-
-        # Inject mode-specific context (auto-loaded from assistants/*.md)
-        extra_context = load_assistant(mode)
-
-        if extra_context:
-            try:
-                await session.client.prompt(extra_context)
-            except Exception:
-                log.warning("Failed to inject %s context for chat %d", mode, chat_id)
 
         await message.edit_text(
             f"{mode_label} is ready. Send a message to start chatting.\n\n"
@@ -1184,7 +1180,7 @@ async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     """Close the agent menu (keep session alive if running)."""
     query = update.callback_query
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
 
     await query.message.delete()
 
@@ -1197,9 +1193,9 @@ async def _handle_compact_menu(
 
     query = update.callback_query
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
 
-    if not session or not session.client.alive:
+    if not session or not session.alive:
         await query.message.edit_text("No active session to compact.")
         return
 
@@ -1219,9 +1215,9 @@ async def _handle_compact(
     """Compact: summarize context → destroy session → recreate with summary."""
     query = update.callback_query
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
 
-    if not session or not session.client.alive:
+    if not session or not session.alive:
         await query.message.edit_text("No active session to compact.")
         return
 
@@ -1237,7 +1233,7 @@ async def _handle_compact(
         prompt = COMPACT_PROMPT_AUTO
 
     try:
-        summary = await session.client.prompt(prompt)
+        summary = await runtime.prompt_once(_tg_key(chat_id), prompt)
     except Exception as e:
         log.exception("Failed to get compact summary")
         await query.message.edit_text(f"Compact failed: {e}")
@@ -1270,7 +1266,7 @@ async def _handle_compact(
         )
 
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
-        await new_session.client.prompt(compact_context)
+        await runtime.prompt_once(_tg_key(chat_id), compact_context)
 
     except Exception as e:
         log.exception("Failed to recreate session after compact")
@@ -1290,9 +1286,9 @@ async def _handle_compact_custom_prompt(
     """Prompt user to type custom compact instructions."""
     query = update.callback_query
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
 
-    if not session or not session.client.alive:
+    if not session or not session.alive:
         await query.message.edit_text("No active session to compact.")
         return
 
@@ -1309,9 +1305,9 @@ async def _handle_new_session(
     """Destroy current session and start a fresh one in the same mode."""
     query = update.callback_query
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
 
-    if not session or not session.client.alive:
+    if not session or not session.alive:
         await query.message.edit_text("No active session.")
         return
 
@@ -1324,9 +1320,9 @@ async def _do_compact_from_message(
 ) -> None:
     """Execute custom compact from user's text input."""
     chat_id = update.effective_chat.id
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
 
-    if not session or not session.client.alive:
+    if not session or not session.alive:
         await update.message.reply_text("No active session to compact.")
         return
 
@@ -1339,7 +1335,7 @@ async def _do_compact_from_message(
 
     prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=instructions)
     try:
-        summary = await session.client.prompt(prompt)
+        summary = await runtime.prompt_once(_tg_key(chat_id), prompt)
     except Exception as e:
         log.exception("Failed to get compact summary")
         await placeholder.edit_text(f"Compact failed: {e}")
@@ -1371,7 +1367,7 @@ async def _do_compact_from_message(
             user_data=context.user_data,
         )
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
-        await new_session.client.prompt(compact_context)
+        await runtime.prompt_once(_tg_key(chat_id), compact_context)
     except Exception as e:
         log.exception("Failed to recreate session after compact")
         await placeholder.edit_text(f"Compact failed during session reset: {e}")
@@ -1403,7 +1399,9 @@ async def agent_voice_handler(
 
     # Skip if no agent CLI available
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
-    if not get_session(update.effective_chat.id) and not _is_agent_available(agent_key):
+    if not await get_session(update.effective_chat.id) and not _is_agent_available(
+        agent_key
+    ):
         return
 
     voice = update.message.voice
@@ -1485,7 +1483,7 @@ async def agent_message_handler(
 
     # "-" resets the ACP session: destroy current and let the next block auto-create a new one
     if text.strip() == "-":
-        session = get_session(chat_id)
+        session = await get_session(chat_id)
         if session:
             await destroy_session(chat_id)
         await update.message.reply_text("Session reset. Send a message to start fresh.")
@@ -1514,10 +1512,10 @@ async def agent_message_handler(
 
     mode = normalize_mode(context.user_data.get("agent_mode"))
 
-    session = get_session(chat_id)
+    session = await get_session(chat_id)
 
     # Auto-create session if none exists (always-on agent)
-    if not session or not session.client.alive:
+    if not session or not session.alive:
         # Reclaim the configured default after an auto-switch — same healing the
         # /agent command does, so users who only ever type messages benefit too.
         agent_key = _reclaim_default_agent(context)
@@ -1547,18 +1545,9 @@ async def agent_message_handler(
                 user_id=user_id,
                 permission_callback=_perm_cb,
                 user_data=context.user_data,
+                # Mode-specific context (auto-loaded from assistants/*.md).
+                extra_context=load_assistant(mode) or "",
             )
-
-            # Inject mode-specific context (auto-loaded from assistants/*.md)
-            extra_context = load_assistant(mode)
-
-            if extra_context:
-                try:
-                    await session.client.prompt(extra_context)
-                except Exception:
-                    log.warning(
-                        "Failed to inject %s context for chat %d", mode, chat_id
-                    )
 
         except Exception as e:
             log.exception("Failed to create agent session")
@@ -1605,7 +1594,7 @@ async def agent_message_handler(
 
     last_event = None
     try:
-        async for event in session.prompt_stream(text):
+        async for event in runtime.prompt(_tg_key(chat_id), PromptRequest(text=text)):
             await streamer.process_event(event)
             last_event = event
     except Exception as e:
@@ -1622,13 +1611,18 @@ async def agent_message_handler(
     await streamer.finalize()
 
     # Detect subprocess death mid-stream
-    if isinstance(last_event, PromptDone) and last_event.stop_reason == "disconnected":
+    stop_reason = (
+        last_event.stop_reason
+        if last_event is not None and last_event.type == EventType.DONE
+        else ""
+    )
+    if stop_reason == "disconnected":
         await destroy_session(chat_id)
         await context.bot.send_message(
             chat_id=chat_id,
             text="Agent session disconnected. Send a message to start a new session.",
         )
-    elif isinstance(last_event, PromptDone) and last_event.stop_reason == "timeout":
+    elif stop_reason == "timeout":
         await destroy_session(chat_id)
         await context.bot.send_message(
             chat_id=chat_id,

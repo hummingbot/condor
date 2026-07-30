@@ -12,11 +12,9 @@ from datetime import datetime, timezone
 
 from pydantic import BaseModel, Field
 
-from condor.acp import ACPEvent
-
-# Events streamed back from a prompt. Today these are the in-process ACP event
-# dataclasses; the HTTP transport will serialize them.
-RuntimeEvent = ACPEvent
+# Events streamed back from a prompt. Re-exported so callers can keep importing
+# the whole boundary from one place; the definition lives in events.py.
+from condor.runtime.events import EventType, RuntimeEvent  # noqa: F401
 
 # Default conversational mode. Mirrors handlers.agents._shared.DEFAULT_MODE but
 # is duplicated here so the boundary models stay free of handler imports.
@@ -44,6 +42,10 @@ class SessionSpec(BaseModel):
         default=False,
         description="Inject the initial context on the first prompt instead of now.",
     )
+    extra_context: str = Field(
+        default="",
+        description="Appended to the initial context, e.g. mode-specific instructions.",
+    )
     agent_slug: str = Field(
         default="",
         description="Reserved: binds the session to a specific domain Agent.",
@@ -56,6 +58,12 @@ class SessionInfo(BaseModel):
     key: str
     agent_key: str
     mode: str = DEFAULT_MODE
+    user_id: int | None = Field(
+        default=None,
+        description="Owning Condor user. Authorization compares against this.",
+    )
+    surface: str = Field(default="", description="Originating frontend: tg/web/mcp.")
+    slot: str = Field(default="", description="Web slot id; empty on other surfaces.")
     server_name: str | None = None
     is_busy: bool = False
     alive: bool = False

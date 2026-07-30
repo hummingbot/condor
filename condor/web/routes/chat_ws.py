@@ -14,16 +14,9 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
-from condor.acp.client import (
-    Heartbeat,
-    PromptDone,
-    TextChunk,
-    ThoughtChunk,
-    ToolCallEvent,
-    ToolCallUpdate,
-)
-from condor.runtime import SessionKey, SessionSpec
+from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
+from condor.runtime.events import RuntimeEvent
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import (
@@ -44,14 +37,11 @@ router = APIRouter(tags=["chat"])
 # Pending permission futures for web clients: request_id -> (user_id, Future[bool])
 _pending_permissions: dict[str, tuple[int, asyncio.Future]] = {}
 
-# Track which session slots exist per user: user_id -> [slot_id, ...]
-_user_slots: dict[int, list[str]] = {}
-
-# Track active prompt tasks per slot: "user_id:slot_id" -> asyncio.Task
+# Track active prompt tasks per slot: "user_id:slot_id" -> asyncio.Task.
+# Connection-scoped, not session state, so this stays local to the WS layer.
 _active_prompt_tasks: dict[str, asyncio.Task] = {}
 
 PERMISSION_TIMEOUT = 120  # seconds
-MAX_SESSIONS_PER_USER = 5
 
 
 def _session_key(user_id: int, slot_id: str) -> SessionKey:
@@ -59,24 +49,73 @@ def _session_key(user_id: int, slot_id: str) -> SessionKey:
     return SessionKey.web(user_id, slot_id)
 
 
-def _get_user_sessions(user_id: int) -> list[dict]:
-    """List all alive sessions for a user."""
-    slots = _user_slots.get(user_id, [])
-    result = []
-    for slot_id in slots:
-        key = _session_key(user_id, slot_id)
-        session = runtime.get_live(key)
-        if session and session.client.alive:
-            result.append(
-                {
-                    "slot_id": slot_id,
-                    "agent_key": session.agent_key,
-                    "mode": session.mode,
-                    "is_busy": session.is_busy,
-                    "server_name": session.server_name,
-                }
-            )
-    return result
+async def _get_user_sessions(user_id: int) -> list[dict]:
+    """This user's live web sessions, as the frontend expects them.
+
+    Derived from the runtime rather than from local slot bookkeeping, so a
+    session survives a WebSocket reconnect and a session killed elsewhere
+    (Telegram, the REST API) disappears here without any cross-talk.
+    """
+    return [
+        {
+            "slot_id": info.slot,
+            "agent_key": info.agent_key,
+            "mode": info.mode,
+            "is_busy": info.is_busy,
+            "server_name": info.server_name,
+        }
+        for info in await runtime.list_sessions(user_id)
+        if info.surface == WEB and info.alive
+    ]
+
+
+def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
+    """Render a RuntimeEvent in this endpoint's wire format.
+
+    These shapes are a live contract with the shipped dashboard
+    (``frontend/src/lib/api.ts``): this refactor re-plumbs the inside of the
+    endpoint, not its outside, so the keys here must not change. Returns None
+    for events the WS protocol carries out-of-band (permission requests go
+    through ``_web_permission_callback``).
+    """
+    if event.type == EventType.TEXT:
+        return {"event": "text_chunk", "slot_id": slot_id, "text": event.text}
+    if event.type == EventType.THOUGHT:
+        return {"event": "thought_chunk", "slot_id": slot_id, "text": event.text}
+    if event.type == EventType.TOOL_CALL:
+        return {
+            "event": "tool_call",
+            "slot_id": slot_id,
+            "tool_call_id": event.field("tool_call_id"),
+            "title": event.field("title"),
+            "status": event.field("status"),
+        }
+    if event.type == EventType.TOOL_UPDATE:
+        return {
+            "event": "tool_call_update",
+            "slot_id": slot_id,
+            "tool_call_id": event.field("tool_call_id"),
+            "status": event.field("status"),
+        }
+    if event.type == EventType.HEARTBEAT:
+        return {
+            "event": "heartbeat",
+            "slot_id": slot_id,
+            "elapsed_seconds": event.field("elapsed_seconds"),
+        }
+    if event.type == EventType.DONE:
+        return {
+            "event": "prompt_done",
+            "slot_id": slot_id,
+            "stop_reason": event.stop_reason,
+        }
+    if event.type == EventType.ERROR:
+        return {
+            "event": "error",
+            "slot_id": slot_id,
+            "message": event.field("message", "Stream error"),
+        }
+    return None
 
 
 async def _send(ws: WebSocket, event: dict) -> None:
@@ -165,7 +204,7 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
     await ws.accept(subprotocol=accept_subprotocol)
 
     # Send list of existing alive sessions on connect
-    sessions = _get_user_sessions(user_id)
+    sessions = await _get_user_sessions(user_id)
     await _send(ws, {"event": "sessions_list", "sessions": sessions})
 
     # Background tasks so long-running operations don't block the receive loop
@@ -194,7 +233,7 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
             elif action == "destroy_session":
                 _spawn(_handle_destroy_session(ws, user_id, msg))
             elif action == "list_sessions":
-                sessions = _get_user_sessions(user_id)
+                sessions = await _get_user_sessions(user_id)
                 await _send(ws, {"event": "sessions_list", "sessions": sessions})
             elif action == "resolve_permission":
                 _handle_resolve_permission(user_id, msg)
@@ -226,22 +265,8 @@ async def _handle_start_session(
     mode = msg.get("mode", DEFAULT_MODE)
     server_name = msg.get("server_name")  # From frontend's selected server
 
-    # Check slot limit
-    slots = _user_slots.get(user_id, [])
-    # Clean dead slots
-    alive_slots = []
-    for s in slots:
-        session = runtime.get_live(_session_key(user_id, s))
-        if session and session.client.alive:
-            alive_slots.append(s)
-    _user_slots[user_id] = alive_slots
-
-    if len(alive_slots) >= MAX_SESSIONS_PER_USER:
-        await _send(
-            ws, {"event": "error", "message": f"Max {MAX_SESSIONS_PER_USER} sessions"}
-        )
-        return
-
+    # The per-user session cap now lives in the runtime, so Telegram and the
+    # dashboard draw on one budget; exceeding it raises out of create_session.
     slot_id = str(uuid.uuid4())[:8]
     session_key = _session_key(user_id, slot_id)
 
@@ -253,8 +278,12 @@ async def _handle_start_session(
     # behind a "custom@<endpoint>:<model>" agent key.
     from condor.preferences import load_user_data_for
 
+    # Mode-specific assistant context (e.g. agent_builder instructions) travels
+    # as spec data rather than by mutating the live session after creation.
+    mode_context = load_assistant(mode) if mode != DEFAULT_MODE else ""
+
     try:
-        await runtime.create_session(
+        info = await runtime.create_session(
             SessionSpec(
                 key=str(session_key),
                 agent_key=agent_key,
@@ -263,24 +292,12 @@ async def _handle_start_session(
                 platform="web",
                 lazy_context=True,  # Don't block — inject context on first message
                 server_name=server_name,
+                extra_context=mode_context or "",
             ),
             permission_callback=perm_cb,
             user_data=load_user_data_for(user_id),
         )
-        # In-process escape hatch: appending the mode context below mutates the
-        # live session. Moves behind the facade when prompting does (FEAT-009).
-        session = runtime.get_live(session_key)
 
-        # Append mode-specific assistant context (e.g. agent_builder instructions)
-        if mode != DEFAULT_MODE:
-            mode_context = load_assistant(mode)
-            if mode_context:
-                existing = session.pending_context or ""
-                session.pending_context = (
-                    f"{existing}\n\n{mode_context}".strip() or None
-                )
-
-        _user_slots.setdefault(user_id, []).append(slot_id)
         await _send(
             ws,
             {
@@ -288,7 +305,7 @@ async def _handle_start_session(
                 "slot_id": slot_id,
                 "agent_key": agent_key,
                 "mode": mode,
-                "server_name": session.server_name,
+                "server_name": info.server_name,
             },
         )
     except Exception as e:
@@ -311,14 +328,11 @@ async def _handle_send_message(
         return
 
     session_key = _session_key(user_id, slot_id)
-    session = runtime.get_live(session_key)
+    info = await runtime.get_info(session_key)
 
-    if not session or not session.client.alive:
+    if info is None or not info.alive:
         # Session died — clean up and notify frontend
         await runtime.destroy(session_key)
-        slots = _user_slots.get(user_id, [])
-        if slot_id in slots:
-            slots.remove(slot_id)
         await _send(
             ws,
             {
@@ -332,7 +346,7 @@ async def _handle_send_message(
         )
         return
 
-    if session.is_busy:
+    if info.is_busy:
         await _send(ws, {"event": "error", "message": "Agent is busy"})
         return
 
@@ -342,55 +356,10 @@ async def _handle_send_message(
         _active_prompt_tasks[task_key] = task
 
     try:
-        async for event in session.prompt_stream(text):
-            if isinstance(event, TextChunk):
-                await _send(
-                    ws, {"event": "text_chunk", "slot_id": slot_id, "text": event.text}
-                )
-            elif isinstance(event, ThoughtChunk):
-                await _send(
-                    ws,
-                    {"event": "thought_chunk", "slot_id": slot_id, "text": event.text},
-                )
-            elif isinstance(event, ToolCallEvent):
-                await _send(
-                    ws,
-                    {
-                        "event": "tool_call",
-                        "slot_id": slot_id,
-                        "tool_call_id": event.tool_call_id,
-                        "title": event.title,
-                        "status": event.status,
-                    },
-                )
-            elif isinstance(event, ToolCallUpdate):
-                await _send(
-                    ws,
-                    {
-                        "event": "tool_call_update",
-                        "slot_id": slot_id,
-                        "tool_call_id": event.tool_call_id,
-                        "status": event.status,
-                    },
-                )
-            elif isinstance(event, Heartbeat):
-                await _send(
-                    ws,
-                    {
-                        "event": "heartbeat",
-                        "slot_id": slot_id,
-                        "elapsed_seconds": event.elapsed_seconds,
-                    },
-                )
-            elif isinstance(event, PromptDone):
-                await _send(
-                    ws,
-                    {
-                        "event": "prompt_done",
-                        "slot_id": slot_id,
-                        "stop_reason": event.stop_reason,
-                    },
-                )
+        async for event in runtime.prompt(session_key, PromptRequest(text=text)):
+            message = _to_ws_message(event, slot_id)
+            if message:
+                await _send(ws, message)
     except asyncio.CancelledError:
         await _send(
             ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"}
@@ -419,12 +388,10 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
         return
 
     # Abort the ACP-level prompt so stale events don't leak into the next message.
-    # session.abort() sets an event flag that makes prompt_stream break out on the
-    # next iteration, triggering its finally block to release the lock properly.
+    # runtime.abort() sets an event flag that makes the prompt stream break out
+    # on the next iteration, triggering its finally block to release the lock.
     session_key = _session_key(user_id, slot_id)
-    session = runtime.get_live(session_key)
-    if session:
-        session.abort()
+    await runtime.abort(session_key)
 
     task_key = f"{user_id}:{slot_id}"
     task = _active_prompt_tasks.get(task_key)
@@ -455,11 +422,6 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
     # Clean up active prompt task to prevent memory leaks
     task_key = f"{user_id}:{slot_id}"
     _active_prompt_tasks.pop(task_key, None)
-
-    # Remove from user slots
-    slots = _user_slots.get(user_id, [])
-    if slot_id in slots:
-        slots.remove(slot_id)
 
     await _send(
         ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": destroyed}
