@@ -9,6 +9,8 @@ from telegram.ext import ContextTypes
 
 from condor.acp import ACP_COMMANDS, PromptDone
 from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+from condor.runtime import SessionKey, SessionSpec
+from condor.runtime import client as runtime
 from handlers import clear_all_input_states
 from utils.auth import restricted
 
@@ -27,10 +29,62 @@ from ._shared import (
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
-from .session import destroy_session, get_or_create_session, get_session
 from .stream import TelegramStreamer
 
 log = logging.getLogger(__name__)
+
+
+# --- Session runtime adapters (Telegram surface) ---
+#
+# Session state lives in condor.runtime, outside the hot-reload blast radius.
+# These are the only place this module turns a Telegram chat_id into a
+# SessionKey; everything else keeps calling get_session/destroy_session.
+
+
+def _tg_key(chat_id: int) -> SessionKey:
+    return SessionKey.telegram(chat_id)
+
+
+def get_session(chat_id: int):
+    """Live session object for a chat, or None.
+
+    In-process escape hatch: streaming and context injection still reach for
+    ``session.client`` directly.
+    """
+    return runtime.get_live(_tg_key(chat_id))
+
+
+async def destroy_session(chat_id: int) -> bool:
+    """Destroy a chat's session. Returns True if one existed."""
+    return await runtime.destroy(_tg_key(chat_id))
+
+
+async def _create_tg_session(
+    chat_id: int,
+    agent_key: str,
+    mode: str,
+    user_id: int,
+    permission_callback,
+    user_data: dict | None,
+):
+    """Provision the session for a Telegram chat and return the live object."""
+    await runtime.create_session(
+        SessionSpec(
+            key=str(_tg_key(chat_id)),
+            agent_key=agent_key,
+            mode=mode,
+            user_id=user_id,
+            chat_id=chat_id,
+            platform="telegram",
+        ),
+        permission_callback=permission_callback,
+        user_data=user_data,
+    )
+    session = get_session(chat_id)
+    if session is None:  # pragma: no cover - registry write is synchronous
+        raise RuntimeError(f"Session {_tg_key(chat_id)} vanished right after creation")
+    return session
+
 
 # Cache CLI availability checks so we only hit the filesystem once per key
 _cli_available_cache: dict[str, bool] = {}
@@ -250,7 +304,9 @@ async def agent_callback_handler(
     elif action.startswith("cu_delok:"):
         await _handle_custom_delete(update, context, int(action.split(":", 1)[1]))
     elif action.startswith("cu_del:"):
-        await _handle_custom_delete_confirm(update, context, int(action.split(":", 1)[1]))
+        await _handle_custom_delete_confirm(
+            update, context, int(action.split(":", 1)[1])
+        )
     elif action == "cu_noop":
         pass  # page indicator / section header — do nothing
 
@@ -320,13 +376,13 @@ async def _handle_mode_start(
 
             return await permission_callback(bot, chat_id, tool_call, options)
 
-        session = await get_or_create_session(
+        session = await _create_tg_session(
             chat_id=chat_id,
             agent_key=agent_key,
-            permission_callback=_perm_cb,
-            user_id=user_id,
-            user_data=context.user_data,
             mode=mode,
+            user_id=user_id,
+            permission_callback=_perm_cb,
+            user_data=context.user_data,
         )
 
         # Inject mode-specific context (auto-loaded from assistants/*.md)
@@ -715,7 +771,9 @@ async def _resolve_custom_url(
         # Re-arm so the user can retype — with a Cancel button, so a failed
         # parse can't trap them in a loop of "that isn't a URL either".
         context.user_data["_custom_typing_url"] = True
-        await _show(update, f"{e}\n\nSend another URL, or cancel.", _custom_input_keyboard())
+        await _show(
+            update, f"{e}\n\nSend another URL, or cancel.", _custom_input_keyboard()
+        )
         return
 
     name = unique_provider_name(context.user_data, suggest_provider_name(base_url))
@@ -791,7 +849,9 @@ async def _validate_and_save(
     try:
         saved = save_custom_provider(context.user_data, name, resolved_url, api_key)
     except ValueError as e:
-        await placeholder.edit_text(str(e), reply_markup=_custom_error_keyboard("agent:cu_retry"))
+        await placeholder.edit_text(
+            str(e), reply_markup=_custom_error_keyboard("agent:cu_retry")
+        )
         return
 
     _clear_custom_input(context)
@@ -1200,13 +1260,13 @@ async def _handle_compact(
 
             return await permission_callback(bot, chat_id, tool_call, options)
 
-        new_session = await get_or_create_session(
+        new_session = await _create_tg_session(
             chat_id=chat_id,
             agent_key=agent_key,
-            permission_callback=_perm_cb,
-            user_id=user_id,
-            user_data=context.user_data,
             mode=mode,
+            user_id=user_id,
+            permission_callback=_perm_cb,
+            user_data=context.user_data,
         )
 
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
@@ -1302,13 +1362,13 @@ async def _do_compact_from_message(
 
             return await permission_callback(bot, chat_id, tool_call, options)
 
-        new_session = await get_or_create_session(
+        new_session = await _create_tg_session(
             chat_id=chat_id,
             agent_key=agent_key,
-            permission_callback=_perm_cb,
-            user_id=user_id,
-            user_data=context.user_data,
             mode=mode,
+            user_id=user_id,
+            permission_callback=_perm_cb,
+            user_data=context.user_data,
         )
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
         await new_session.client.prompt(compact_context)
@@ -1480,13 +1540,13 @@ async def agent_message_handler(
 
                 return await permission_callback(bot, chat_id, tool_call, options)
 
-            session = await get_or_create_session(
+            session = await _create_tg_session(
                 chat_id=chat_id,
                 agent_key=agent_key,
-                permission_callback=_perm_cb,
-                user_id=user_id,
-                user_data=context.user_data,
                 mode=mode,
+                user_id=user_id,
+                permission_callback=_perm_cb,
+                user_data=context.user_data,
             )
 
             # Inject mode-specific context (auto-loaded from assistants/*.md)

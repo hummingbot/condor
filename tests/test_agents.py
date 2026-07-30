@@ -498,9 +498,10 @@ class _FakeACPClient:
         pass
 
 
-def _run_create_session(monkeypatch, **kwargs):
-    """Invoke get_or_create_session with the ACP client + context stubbed out."""
-    from handlers.agents import session as session_module
+def _run_create_session(monkeypatch, *, chat_id, user_id):
+    """Invoke the runtime's session factory with the ACP client + context stubbed out."""
+    from condor.runtime import SessionKey, SessionSpec
+    from condor.runtime import sessions as session_module
 
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr(session_module, "ACPClient", _FakeACPClient)
@@ -509,7 +510,13 @@ def _run_create_session(monkeypatch, **kwargs):
         session_module, "build_mcp_servers_for_session", lambda *a, **k: []
     )
     _FakeACPClient.last_extra_env = None
-    asyncio.run(session_module.get_or_create_session(agent_key="claude-code", **kwargs))
+    spec = SessionSpec(
+        key=str(SessionKey.telegram(chat_id)),
+        agent_key="claude-code",
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    asyncio.run(session_module.get_or_create_session(spec))
     return _FakeACPClient.last_extra_env
 
 
@@ -666,7 +673,6 @@ def test_session_mcp_servers_carry_agent_slug(monkeypatch):
     without it, routine_builder-style agents silently read/write the CHAT's
     stores (e.g. 'routine_cookbook not found')."""
     import config_manager
-
     from handlers.agents._shared import build_mcp_servers_for_session
 
     class _NoServers:

@@ -238,7 +238,10 @@ def reload_handlers():
         "handlers.routines",
         "handlers.agents",
         "handlers.agents.menu",
-        "handlers.agents.session",
+        # NOTE: neither "handlers.agents.session" nor any "condor.runtime.*"
+        # module belongs in this list. The runtime holds live subprocess handles
+        # (agent sessions); re-executing those modules resets the registry and
+        # silently orphans every running agent.
         "handlers.agents.stream",
         "handlers.agents.confirmation",
         "handlers.agents._shared",
@@ -517,10 +520,12 @@ async def post_init(application: Application) -> None:
     sds.start()
     await sds.auto_subscribe_servers()
 
-    # Start agent session health monitor
-    from handlers.agents.session import start_health_monitor
+    # Start agent session health monitor. The health monitor is process
+    # lifecycle, not a session operation, so it is driven off the module
+    # directly rather than through the client facade.
+    from condor.runtime import sessions as runtime_sessions
 
-    await start_health_monitor(application.bot)
+    await runtime_sessions.start_health_monitor(application.bot)
 
     # Schedule periodic update checks (notifies admin)
     from handlers.admin.update import schedule_update_checks
@@ -647,10 +652,11 @@ def main() -> None:
 
     async def post_shutdown(application: Application) -> None:
         """Clean up agent subprocesses on shutdown."""
-        from handlers.agents.session import destroy_all_sessions, stop_health_monitor
+        from condor.runtime import client as runtime
+        from condor.runtime import sessions as runtime_sessions
 
-        await stop_health_monitor()
-        await destroy_all_sessions()
+        await runtime_sessions.stop_health_monitor()
+        await runtime.destroy_all()
 
         # Stop all trading agents
         from condor.agents.engine import get_all_engines
@@ -763,7 +769,7 @@ async def _run_dual(application: Application) -> None:
         await asyncio.wait({web_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         # Always run teardown — even if the run raised — so post_shutdown
-        # (destroy_all_sessions + engine.stop) reaps every ACP subprocess tree.
+        # (runtime.destroy_all + engine.stop) reaps every ACP subprocess tree.
         logger.info("Shutting down...")
         stop_task.cancel()
         server.should_exit = True
