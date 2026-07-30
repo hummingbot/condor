@@ -486,6 +486,36 @@ async def register_bot_commands(application: Application) -> None:
             logger.warning(f"Failed to set admin-specific commands: {e}", exc_info=True)
 
 
+async def _notify_interrupted_runs(bot, report) -> None:
+    """Tell each owner, once, what the restart found.
+
+    One summary per chat rather than a message per run: a crash with several
+    live loops would otherwise spam the user at the worst possible moment.
+    """
+    by_chat: dict[int, list] = {}
+    for run in report.interrupted:
+        status = None
+        try:
+            from condor.runtime.registry_file import read_status
+
+            status = read_status(run.session_dir)
+        except Exception:
+            pass
+        chat_id = (status or {}).get("chat_id")
+        if chat_id:
+            by_chat.setdefault(int(chat_id), []).append(run)
+
+    for chat_id, runs in by_chat.items():
+        lines = [f"Found {len(runs)} interrupted run(s) after restart:"]
+        for run in runs:
+            suffix = " — restarted" if run.restarted else ""
+            lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
+        try:
+            await bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        except Exception:
+            logger.warning("Could not notify chat %s about interrupted runs", chat_id)
+
+
 async def post_init(application: Application) -> None:
     """Register bot commands after initialization."""
     # Sync server permissions (ensures all servers have ownership entries)
@@ -529,6 +559,22 @@ async def post_init(application: Application) -> None:
     await runtime_sessions.start_health_monitor(application.bot)
     # Sweeps expired approvals so a request nobody answers is denied, not leaked.
     await get_registry().start()
+
+    # Settle whatever the previous process left running: mark orphaned loops
+    # interrupted, restart only the ones that opted in, and tell the owner once.
+    from condor.runtime.loops import get_supervisor
+
+    try:
+        report = await get_supervisor().reconcile_boot()
+        if report.total:
+            logger.warning(
+                "Boot reconciliation: %d interrupted, %d restarted",
+                report.total,
+                len(report.restarted),
+            )
+            await _notify_interrupted_runs(application.bot, report)
+    except Exception:
+        logger.exception("Boot reconciliation failed; continuing startup")
 
     # Schedule periodic update checks (notifies admin)
     from handlers.admin.update import schedule_update_checks
@@ -663,14 +709,12 @@ def main() -> None:
         await get_registry().stop()
         await runtime.destroy_all()
 
-        # Stop all trading agents
-        from condor.agents.engine import get_all_engines
+        # Stop all trading agents. Graceful stop, deliberately NOT the shutdown
+        # sequence — winding down positions is an emergency action, not what a
+        # restart should do. Each engine records its final state on the way out.
+        from condor.runtime.loops import get_supervisor
 
-        for engine in list(get_all_engines().values()):
-            try:
-                await engine.stop()
-            except Exception:
-                pass
+        await get_supervisor().stop_all()
 
         # Stop WebSocket manager
         from condor.web.ws_manager import get_ws_manager

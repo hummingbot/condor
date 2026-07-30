@@ -29,7 +29,15 @@ _EXPERIMENT_FILE_RE = re.compile(r"experiment_(\d+)\.md")
 def infer_latest_session_status(
     strategy_dir: Path, run_key: str
 ) -> dict[str, Any] | None:
-    """Infer status from the latest session on disk when no engine is in memory."""
+    """Status of the latest session on disk when no engine is in memory.
+
+    Prefers the recorded status (FEAT-012) so a run the process died on reports
+    ``interrupted`` rather than the ``idle`` this used to fabricate. Sessions
+    written before status files existed have none, and those still fall back to
+    ``idle`` — the honest answer when nothing was recorded.
+    """
+    from condor.runtime.registry_file import read_status
+
     session_dirs: list[Path] = []
     for dirname in SESSION_DIRNAMES:
         sessions_dir = strategy_dir / dirname
@@ -49,11 +57,11 @@ def infer_latest_session_status(
     except (ValueError, IndexError):
         return None
 
-    # If no engine is in memory, the agent is not running — idle metadata only.
+    status = read_status(latest) or {}
     return {
-        "agent_id": f"{run_key}_{num}",
+        "agent_id": status.get("agent_id") or f"{run_key}_{num}",
         "session_num": num,
-        "status": "idle",
+        "status": status.get("state", "idle"),
         "tick_count": count_journal_ticks(latest / "journal.md"),
     }
 

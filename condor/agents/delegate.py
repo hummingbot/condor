@@ -13,10 +13,13 @@ via :func:`condor.agents.consult._run_agent_to_completion`, passing
 (:meth:`condor.acp.client.ACPClient._on_request_permission`). This is the user's
 chosen authorization model: full auto-approve, no sandbox (see FEAT-006 Risks).
 
-The registry is in-memory and ephemeral -- a delegation dies with the process, like
-a running ``TickEngine`` in ``_engines``. The *result transcript* is persisted to a
-flat file under ``agents/{slug}/delegations/{task_id}.md`` so nothing is lost if you
-weren't watching, but an unfinished task does not resume after a restart.
+The registry is in-memory and ephemeral -- a delegation dies with the process. The
+*result transcript* is persisted to a flat file under
+``agents/{slug}/delegations/{task_id}.md`` so nothing is lost if you weren't
+watching. Since FEAT-012 a small ``{task_id}.status.json`` is written alongside it
+when the task starts, so a delegation killed by a restart is reported as
+``interrupted`` instead of vanishing without a trace. It is never auto-restarted:
+delegations are one-shot and re-running could duplicate side effects.
 """
 
 from __future__ import annotations
@@ -99,8 +102,44 @@ async def start_delegation(
         task=task,
     )
     _delegations[dt.task_id] = dt
+    _record_delegation_status(dt)
     dt._task = asyncio.create_task(_run(dt, bot, timeout_s))
     return dt
+
+
+def _delegation_status_name(task_id: str) -> str:
+    return f"{task_id}.status.json"
+
+
+def _record_delegation_status(dt: "DelegateTask") -> None:
+    """Persist this delegation's state next to its transcript.
+
+    Written at start (not only at the end) precisely so a task the process dies
+    on leaves something to reconcile — a transcript is only written when the
+    task finishes.
+    """
+    try:
+        from condor.agents.agent import AgentStore
+        from condor.runtime.registry_file import write_status
+
+        agent = AgentStore().get(dt.agent_slug)
+        if agent is None:
+            return
+        delegations_dir = agent.agent_dir / "delegations"
+        delegations_dir.mkdir(parents=True, exist_ok=True)
+        write_status(
+            delegations_dir,
+            _delegation_status_name(dt.task_id),
+            state=dt.status,
+            task_id=dt.task_id,
+            agent_slug=dt.agent_slug,
+            chat_id=dt.chat_id,
+            user_id=dt.user_id,
+        )
+    except Exception:
+        log.debug(
+            "Could not record delegation status for %s", dt.task_id, exc_info=True
+        )
 
 
 def _make_event_sink(dt: DelegateTask):
@@ -178,6 +217,7 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
             _persist_transcript(dt)
         except Exception:
             log.exception("Failed to persist delegation transcript for %s", dt.task_id)
+        _record_delegation_status(dt)
         if dt.status != "stopped":
             try:
                 await _notify_done(dt, bot)

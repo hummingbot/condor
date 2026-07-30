@@ -309,13 +309,9 @@ def _get_strategy(slug: str, sslug: str):
 
 def _get_engines_for(agent_slug: str, sslug: str) -> list:
     """All engines (running or paused) for a given (agent, strategy)."""
-    from condor.agents.engine import get_all_engines
+    from condor.runtime.loops import get_supervisor
 
-    return [
-        e
-        for e in get_all_engines().values()
-        if e.agent.slug == agent_slug and e.strategy.slug == sslug
-    ]
+    return get_supervisor().for_strategy(agent_slug, sslug)
 
 
 # ── Disk lookups ──
