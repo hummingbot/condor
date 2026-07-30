@@ -7,7 +7,11 @@ from dataclasses import dataclass, field
 from telegram import Bot
 
 from condor.acp import ACPClient, PermissionCallback, PromptDone, resolve_acp
-from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
+from condor.acp.pydantic_ai_client import (
+    PydanticAIClient,
+    is_pydantic_ai_model,
+    model_prefix,
+)
 from handlers.agents._shared import (
     build_initial_context,
     build_mcp_servers_for_session,
@@ -171,6 +175,26 @@ async def get_or_create_session(
             agent_prefs.get("base_url") or os.environ.get("LMSTUDIO_BASE_URL") or None
         )
 
+        api_key = None
+        if model_prefix(agent_key) == "custom":
+            # Custom OpenAI-compatible provider. The agent key names one of the
+            # user's saved endpoints ("custom@venice:..."); those live in the
+            # shared preference store so Telegram and the web dashboard resolve
+            # them identically. CUSTOM_LLM_* env vars cover headless deploys.
+            from condor.preferences import find_custom_provider, parse_custom_agent_key
+
+            provider_name, _ = parse_custom_agent_key(agent_key)
+            provider = find_custom_provider(user_data, provider_name) if user_data else None
+            if provider is None and provider_name:
+                raise RuntimeError(
+                    f"No saved endpoint named '{provider_name}'. Add it via "
+                    "/agent → Change LLM → Custom endpoint, or Settings → "
+                    "AI Providers on the web dashboard."
+                )
+            provider = provider or {}
+            base_url = provider.get("base_url") or os.environ.get("CUSTOM_LLM_BASE_URL")
+            api_key = provider.get("api_key") or os.environ.get("CUSTOM_LLM_API_KEY")
+
         client = PydanticAIClient(
             model=agent_key,
             mcp_servers=mcp_servers,
@@ -178,6 +202,7 @@ async def get_or_create_session(
             extra_env=extra_env,
             tool_filter_mode=tool_filter_mode,  # Auto-detects if None
             base_url=base_url,
+            api_key=api_key,
         )
     else:
         # For ACP subprocess models: claude-code, gemini, codex.

@@ -278,6 +278,11 @@ async def get_available_models(
         loaded local model) when recommending unprompted.
       - cloud_keys: {provider: bool} — whether OPENROUTER/OPENAI/ANTHROPIC/GROQ/
         GOOGLE keys are set in the environment.
+      - custom_endpoints: the user's own saved OpenAI-compatible endpoints, each
+        with ``name``, ``base_url``, ``reachable`` and the chat ``models`` it
+        serves (``agent_key`` set to ``custom@<endpoint>:<model-id>``). The
+        strongest signal here — the user added these deliberately and they are
+        re-validated on every call — so prefer a reachable one when it fits.
       - local: {ollama, lmstudio} each with ``base_url``, ``reachable``, and the
         ``models`` currently loaded on that server (empty if not running).
       - openrouter: tool-capable catalog (``models`` with ``agent_key`` set to

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
   Brain,
@@ -19,8 +20,11 @@ import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import {
   api,
+  customAgentKey,
+  parseCustomAgentKey,
   type ChatAgentOption,
   type ChatModeOption,
+  type CustomProvider,
   type OpenRouterModelOption,
 } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
@@ -52,6 +56,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
   // Chat options from backend
   const [agents, setAgents] = useState<ChatAgentOption[]>([]);
+  const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
   const [modes, setModes] = useState<ChatModeOption[]>([]);
   const [defaultAgent, setDefaultAgent] = useState("claude-code");
   const [defaultMode, setDefaultMode] = useState("condor");
@@ -65,6 +70,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
       optionsFetched.current = true;
       api.getChatOptions().then((opts) => {
         setAgents(opts.agents);
+        setCustomProviders(opts.custom_providers ?? []);
         setModes(opts.modes);
         setDefaultAgent(opts.default_agent);
         setDefaultMode(opts.default_mode);
@@ -188,6 +194,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               {showNewMenu && (
                 <NewSessionMenu
                   agents={agents}
+                  customProviders={customProviders}
                   modes={modes}
                   selectedAgent={effectiveAgent}
                   selectedMode={effectiveMode}
@@ -278,6 +285,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           ) : !activeSlot ? (
             <EmptyState
               agents={agents}
+              customProviders={customProviders}
               modes={modes}
               defaultAgent={defaultAgent}
               defaultMode={defaultMode}
@@ -362,43 +370,57 @@ function agentDisplayLabel(
     const model = orModels?.find((m) => m.slug === slug);
     return `OpenRouter: ${model?.name || slug}`;
   }
+  // Name the endpoint, so a user with several can tell which one is live
+  const custom = parseCustomAgentKey(agentKey);
+  if (custom) return `${custom.provider}: ${custom.model}`;
   return agentKey;
 }
 
 /**
  * Model selector used by both the new-session menu and the empty state.
  *
- * Direct agents (CLI/ACP) select immediately. The "openrouter:" sentinel from
- * the backend opens a searchable model list (fetched lazily on first open);
- * picking a model sets the agent to "openrouter:<slug>".
+ * Direct agents (CLI/ACP) select immediately. Picker sentinels open a submenu:
+ * "openrouter:" a searchable catalog, and each saved custom endpoint its own
+ * model list. Both are fetched lazily on first open, since each is a live call.
  */
 function AgentDropdown({
   agents,
+  customProviders = [],
   selectedAgent,
   onSelectAgent,
   variant,
 }: {
   agents: ChatAgentOption[];
+  customProviders?: CustomProvider[];
   selectedAgent: string;
   onSelectAgent: (key: string) => void;
   variant: "block" | "inline";
 }) {
   const [open, setOpen] = useState(false);
-  const [showModels, setShowModels] = useState(false);
+  // null = top level, otherwise the submenu we drilled into
+  const [submenu, setSubmenu] = useState<
+    { kind: "openrouter" } | { kind: "custom"; name: string } | null
+  >(null);
   const [models, setModels] = useState<OpenRouterModelOption[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
 
-  // Direct picks: the CLI/ACP agents plus the local "Default Model" sentinels
-  // (ollama:/lmstudio:), which select a loaded local model directly — same set
-  // the Telegram /agent picker shows. Only "openrouter:" is a real picker (it
-  // needs a specific model chosen), handled by the submenu below.
-  const directAgents = agents.filter(
-    (a) => !a.key.endsWith(":") || a.key === "ollama:" || a.key === "lmstudio:",
-  );
-  const hasOpenRouter = agents.some((a) => a.key === "openrouter:");
+  // Direct picks are everything the backend didn't flag as a picker. Note this
+  // is NOT "doesn't end in a colon" — "ollama:"/"lmstudio:" end in one and are
+  // startable ("that backend's default model").
+  const directAgents = agents.filter((a) => !a.picker);
+  const hasOpenRouter = agents.some((a) => a.key === "openrouter:" && a.picker);
   const label = agentDisplayLabel(selectedAgent, agents, models);
+  const activeCustom = parseCustomAgentKey(selectedAgent);
+
+  // Custom endpoint models, fetched per endpoint on open
+  const customModels = useQuery({
+    queryKey: ["custom-provider-models", submenu?.kind === "custom" ? submenu.name : null],
+    queryFn: () => api.getCustomProviderModels((submenu as { name: string }).name),
+    enabled: submenu?.kind === "custom",
+    staleTime: 5 * 60 * 1000,
+  });
 
   const loadModels = () => {
     if (models || loading) return;
@@ -413,7 +435,7 @@ function AgentDropdown({
 
   const closeAll = () => {
     setOpen(false);
-    setShowModels(false);
+    setSubmenu(null);
     setQuery("");
   };
 
@@ -443,7 +465,7 @@ function AgentDropdown({
               variant === "block" ? "left-0 w-full" : "left-1/2 w-56 -translate-x-1/2"
             }`}
           >
-            {!showModels ? (
+            {submenu === null ? (
               <>
                 {directAgents.map((a) => (
                   <button
@@ -464,7 +486,7 @@ function AgentDropdown({
                 {hasOpenRouter && (
                   <button
                     onClick={() => {
-                      setShowModels(true);
+                      setSubmenu({ kind: "openrouter" });
                       loadModels();
                     }}
                     className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
@@ -477,11 +499,82 @@ function AgentDropdown({
                     <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
                   </button>
                 )}
+                {customProviders.length > 0 && (
+                  <div className="mt-0.5 border-t border-[var(--color-border)] px-2.5 pt-1.5 pb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                    Custom endpoints
+                  </div>
+                )}
+                {customProviders.map((p) => (
+                  <button
+                    key={p.name}
+                    onClick={() => setSubmenu({ kind: "custom", name: p.name })}
+                    className={`flex w-full items-center justify-between gap-1 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                      activeCustom?.provider === p.name
+                        ? "font-medium text-[var(--color-primary)]"
+                        : "text-[var(--color-text)]"
+                    }`}
+                  >
+                    <span className="truncate">
+                      {p.name}
+                      {activeCustom?.provider === p.name && (
+                        <span className="text-[var(--color-text-muted)]">
+                          {" "}
+                          — {activeCustom.model}
+                        </span>
+                      )}
+                    </span>
+                    <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+                  </button>
+                ))}
+              </>
+            ) : submenu.kind === "custom" ? (
+              <>
+                <button
+                  onClick={() => setSubmenu(null)}
+                  className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                >
+                  <ChevronLeft className="h-3 w-3" /> {submenu.name}
+                </button>
+                {customModels.isLoading && (
+                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+                    <Loader2 className="h-3 w-3 animate-spin" /> Loading models…
+                  </div>
+                )}
+                {customModels.isError && (
+                  <div className="px-2.5 py-2 text-xs text-red-400">
+                    {(customModels.error as Error).message}
+                  </div>
+                )}
+                {customModels.data?.models.map((model) => {
+                  const key = customAgentKey(submenu.name, model);
+                  return (
+                    <button
+                      key={model}
+                      title={model}
+                      onClick={() => {
+                        onSelectAgent(key);
+                        closeAll();
+                      }}
+                      className={`flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                        key === selectedAgent
+                          ? "font-medium text-[var(--color-primary)]"
+                          : "text-[var(--color-text)]"
+                      }`}
+                    >
+                      <span className="w-full truncate">{model}</span>
+                    </button>
+                  );
+                })}
+                {customModels.data?.models.length === 0 && (
+                  <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
+                    No chat models available
+                  </div>
+                )}
               </>
             ) : (
               <>
                 <button
-                  onClick={() => setShowModels(false)}
+                  onClick={() => setSubmenu(null)}
                   className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                 >
                   <ChevronLeft className="h-3 w-3" /> Back
@@ -541,6 +634,7 @@ function AgentDropdown({
 
 function NewSessionMenu({
   agents,
+  customProviders = [],
   modes,
   selectedAgent,
   selectedMode,
@@ -550,6 +644,7 @@ function NewSessionMenu({
   onClose,
 }: {
   agents: ChatAgentOption[];
+  customProviders?: CustomProvider[];
   modes: ChatModeOption[];
   selectedAgent: string;
   selectedMode: string;
@@ -572,6 +667,7 @@ function NewSessionMenu({
           <div className="mt-1">
             <AgentDropdown
               agents={agents}
+              customProviders={customProviders}
               selectedAgent={selectedAgent}
               onSelectAgent={onSelectAgent}
               variant="block"
@@ -622,11 +718,13 @@ function NewSessionMenu({
 
 function EmptyState({
   agents,
+  customProviders = [],
   modes,
   defaultAgent,
   onStart,
 }: {
   agents: ChatAgentOption[];
+  customProviders?: CustomProvider[];
   modes: ChatModeOption[];
   defaultAgent: string;
   defaultMode?: string;
@@ -642,10 +740,11 @@ function EmptyState({
       </p>
 
       {/* Agent picker */}
-      {agents.length > 1 && (
+      {(agents.length > 1 || customProviders.length > 0) && (
         <div className="mt-4 mb-2">
           <AgentDropdown
             agents={agents}
+            customProviders={customProviders}
             selectedAgent={selectedAgent}
             onSelectAgent={setSelectedAgent}
             variant="inline"

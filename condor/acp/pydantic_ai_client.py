@@ -51,10 +51,20 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 
     model_lower = model_name.lower()
 
-    # Cloud providers always get full access (they're powerful enough)
+    # Cloud providers always get full access (they're powerful enough).
+    # Custom endpoints are deliberately absent: "custom:" says nothing about
+    # the model behind it — it's just as likely a 4B model on a local vLLM as
+    # a frontier model on Together — so those fall through to the size
+    # heuristics below like any other unknown backend.
     if any(
         provider in model_lower
-        for provider in ["openai:", "anthropic:", "groq:", "google:", "openrouter:"]
+        for provider in [
+            "openai:",
+            "anthropic:",
+            "groq:",
+            "google:",
+            "openrouter:",
+        ]
     ):
         log.info("Auto-detected cloud provider → tool_filter_mode=full")
         return "full"
@@ -98,7 +108,16 @@ def _infer_tool_filter_mode(model_name: str) -> str:
 # Users set agent_key like "ollama:llama3.1:70b" or "openai:gpt-4o"
 # which maps directly to pydantic-ai model identifiers.
 PYDANTIC_AI_PREFIXES = frozenset(
-    {"ollama", "openai", "groq", "anthropic", "google", "lmstudio", "openrouter"}
+    {
+        "ollama",
+        "openai",
+        "groq",
+        "anthropic",
+        "google",
+        "lmstudio",
+        "openrouter",
+        "custom",
+    }
 )
 
 # Default base URLs for local model providers and OpenRouter
@@ -121,10 +140,20 @@ def _get_server_semaphore(base_url: str) -> asyncio.Semaphore:
     return _SERVER_SEMAPHORES[base_url]
 
 
+def model_prefix(agent_key: str) -> str:
+    """Provider prefix of an agent key, with any endpoint name stripped.
+
+    Custom endpoints carry their saved nickname in the prefix
+    (``custom@venice:llama-3.3-70b``) so that the model id — which may itself
+    contain colons and slashes — stays recoverable with a single partition.
+    """
+    prefix = agent_key.split(":", 1)[0] if ":" in agent_key else ""
+    return prefix.split("@", 1)[0]
+
+
 def is_pydantic_ai_model(agent_key: str) -> bool:
     """Check if an agent_key should use the PydanticAI client."""
-    prefix = agent_key.split(":", 1)[0] if ":" in agent_key else ""
-    return prefix in PYDANTIC_AI_PREFIXES
+    return model_prefix(agent_key) in PYDANTIC_AI_PREFIXES
 
 
 def resolve_base_url(model_name: str, base_url: str | None = None) -> str | None:
@@ -141,38 +170,58 @@ def resolve_base_url(model_name: str, base_url: str | None = None) -> str | None
 
 
 async def healthcheck_local_backend(
-    model_name: str, base_url: str | None = None
+    model_name: str,
+    base_url: str | None = None,
+    api_key: str | None = None,
 ) -> str | None:
-    """Preflight a LOCAL OpenAI-compatible backend before a run.
+    """Preflight an OpenAI-compatible backend with a known base URL before a run.
 
-    For ollama / lmstudio (or openai:* with a custom base_url) this verifies the
-    inference server is reachable and, when a model id is given, that the model is
-    actually loaded. Returns ``None`` when healthy or when ``model_name`` is not a
-    local backend (cloud providers are left to fail with their own formatted error);
-    otherwise a short, human-readable reason string.
+    Covers ollama / lmstudio, openai:* with a custom base_url, and custom
+    endpoints (``custom@<endpoint>:<model>``) — anything we can point a
+    ``/models`` request at. Verifies the server is reachable and, when a model
+    id is given, that the model is actually served. Returns ``None`` when
+    healthy or when there is nothing to preflight (cloud providers are left to
+    fail with their own formatted error); otherwise a short, human-readable
+    reason string.
+
+    Without this a custom endpoint that is down or has a stale key fails deep
+    inside the run instead of falling back cleanly.
     """
     import httpx
 
     prefix, _, model_id = model_name.partition(":")
-    is_local = prefix in ("ollama", "lmstudio") or (prefix == "openai" and base_url)
-    if not is_local:
+    prefix = prefix.split("@", 1)[0]  # "custom@venice" → "custom"
+    is_checkable = prefix in ("ollama", "lmstudio") or (
+        prefix in ("openai", "custom") and base_url
+    )
+    if not is_checkable:
         return None
 
     url = resolve_base_url(model_name, base_url)
     if not url:
         return None
 
+    # A custom endpoint usually rejects an unauthenticated /models with 401,
+    # which would look like a dead backend rather than a working one.
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
     models_url = f"{url.rstrip('/')}/models"
     try:
         timeout = httpx.Timeout(connect=3.0, read=5.0, write=3.0, pool=3.0)
         async with httpx.AsyncClient(timeout=timeout) as client:
-            resp = await client.get(models_url)
+            resp = await client.get(models_url, headers=headers)
     except Exception as e:
+        server = "endpoint" if prefix == "custom" else f"{prefix} server"
         return (
             f"the model backend at {url} is unreachable ({type(e).__name__}) — "
-            f"is the {prefix} server running?"
+            f"is the {server} running?"
         )
 
+    if resp.status_code in (401, 403):
+        return (
+            f"the endpoint at {url} rejected the API key "
+            f"(HTTP {resp.status_code})."
+        )
     if resp.status_code != 200:
         return f"the model backend at {url} returned HTTP {resp.status_code}."
 
@@ -187,9 +236,14 @@ async def healthcheck_local_backend(
         # Ollama reports ids like "qwen3:32b"; match exact or tag-prefix.
         loaded = any(i == model_id or i.startswith(f"{model_id}:") for i in ids)
         if ids and not loaded:
-            available = ", ".join(sorted(ids)) or "(none)"
+            # A hosted endpoint can list hundreds of models — don't paste them
+            # all into a Telegram message.
+            shown = sorted(ids)
+            available = ", ".join(shown[:10]) or "(none)"
+            if len(shown) > 10:
+                available += f", ... (+{len(shown) - 10} more)"
             return (
-                f"model '{model_id}' is not loaded on the {prefix} backend at {url}. "
+                f"model '{model_id}' is not served by the backend at {url}. "
                 f"Available: {available}."
             )
 
@@ -266,6 +320,12 @@ class PydanticAIClient:
       - "groq:llama-3.3-70b-versatile" → uses Groq cloud
       - "anthropic:claude-sonnet-4-6" → uses Anthropic API
       - "openrouter:anthropic/claude-sonnet-4-5" → uses OpenRouter (requires OPENROUTER_API_KEY)
+      - "custom@venice:llama-3.3-70b" → any OpenAI-compatible API (Venice AI,
+        Together, a local vLLM, ...). The "@venice" segment names one of the
+        user's saved endpoints; base_url and api_key are resolved from it by
+        handlers/agents/session.py, with CUSTOM_LLM_* env vars as fallback.
+        The bare "custom:<model-id>" form (no endpoint name) is still accepted
+        for configs written before endpoints were nameable.
     """
 
     def __init__(
@@ -275,6 +335,7 @@ class PydanticAIClient:
         permission_callback: PermissionCallback | None = None,
         extra_env: dict[str, str] | None = None,
         base_url: str | None = None,
+        api_key: str | None = None,
         tool_filter_mode: (
             str | None
         ) = None,  # "essential", "moderate", "full", or None for auto-detect
@@ -287,6 +348,7 @@ class PydanticAIClient:
         self.permission_callback = permission_callback
         self.extra_env = extra_env
         self.base_url = base_url
+        self.api_key = api_key
         # When set, the agent only sees tools whose name is in this allowlist
         # (used by domain-expert consults to scope an agent to one domain).
         self.allowed_tools = set(allowed_tools) if allowed_tools else None
@@ -332,6 +394,7 @@ class PydanticAIClient:
         from pydantic_ai.providers.openai import OpenAIProvider
 
         prefix, _, model_id = self.model_name.partition(":")
+        prefix = prefix.split("@", 1)[0]  # "custom@venice" → "custom"
         base_url = self.base_url
 
         # The OpenAI SDK applies its own default timeout (connect=5s) that takes
@@ -361,6 +424,37 @@ class PydanticAIClient:
                 )
             openai_client = AsyncOpenAI(
                 base_url=base_url or DEFAULT_BASE_URLS["openrouter"],
+                api_key=api_key,
+                timeout=_local_timeout,
+            )
+            return _make_openai_compat_model(
+                model_id, OpenAIProvider(openai_client=openai_client)
+            )
+
+        # Custom OpenAI-compatible provider (Venice AI, Together, any vLLM/TGI...):
+        # base_url and api_key come from the user's setup flow (stored per-user)
+        # with CUSTOM_LLM_BASE_URL / CUSTOM_LLM_API_KEY env fallbacks.
+        if prefix == "custom":
+            if not model_id:
+                raise RuntimeError(
+                    "Custom provider requires an explicit model id, e.g. "
+                    "'custom@venice:llama-3.3-70b'. Pick one via /agent → "
+                    "Change LLM → Custom endpoint (or Settings → AI Providers "
+                    "on the web dashboard)."
+                )
+            base_url = base_url or os.environ.get("CUSTOM_LLM_BASE_URL")
+            if not base_url:
+                raise RuntimeError(
+                    "No base URL configured for the custom provider. Add the "
+                    "endpoint via /agent → Change LLM → Custom endpoint (or "
+                    "Settings → AI Providers on the web dashboard), or set "
+                    "CUSTOM_LLM_BASE_URL."
+                )
+            api_key = (
+                self.api_key or os.environ.get("CUSTOM_LLM_API_KEY") or "not-needed"
+            )
+            openai_client = AsyncOpenAI(
+                base_url=base_url,
                 api_key=api_key,
                 timeout=_local_timeout,
             )
@@ -790,5 +884,29 @@ class PydanticAIClient:
             return (
                 f"OpenRouter upstream error ({status}). The selected provider may "
                 "be down — try again, or switch models with /agent → Change LLM."
+            )
+
+        is_custom = model_prefix(self.model_name) == "custom"
+        if is_custom and status in (401, 403):
+            return (
+                f"The custom provider rejected the API key ({status}). "
+                "Update it via /agent → Change LLM → Custom endpoint, or "
+                "Settings → AI Providers on the web dashboard."
+            )
+        if is_custom and status == 402:
+            return (
+                "The custom provider rejected the request: insufficient credits "
+                "(402). Top up your account with the provider and retry."
+            )
+        if is_custom and status == 429:
+            return (
+                "The custom provider rate-limited the request (429). "
+                "Wait a moment and retry."
+            )
+        if is_custom and status == 404:
+            return (
+                f"The custom provider returned 404 for model "
+                f"'{self.model_name.partition(':')[2]}'. The model may have been "
+                "removed — pick another via /agent → Change LLM → Custom endpoint."
             )
         return f"(error: {e})"

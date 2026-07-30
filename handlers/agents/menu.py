@@ -6,6 +6,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ._shared import AGENT_MODES, AGENT_OPTIONS, DEFAULT_AGENT, normalize_mode
+from .custom_models import format_model_label
 from .session import get_session
 
 log = logging.getLogger(__name__)
@@ -27,30 +28,48 @@ def _active_session_keyboard(mode: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+# Sentinel rows that open a model picker instead of setting agent_llm directly.
+# Maps sentinel key → display name used when a picked model is the current LLM.
+_PICKER_SENTINELS = {"openrouter:": "OpenRouter", "custom:": "Custom"}
+
+
+def _picked_model_label(sentinel_key: str, current_llm: str) -> str | None:
+    """Label for a sentinel row when the active LLM came from that picker.
+
+    Returns None when `current_llm` isn't one of this sentinel's models. For
+    custom endpoints the row is named after the saved endpoint rather than the
+    word "Custom", so a user with two endpoints can tell which one is live.
+    """
+    from condor.acp.pydantic_ai_client import model_prefix
+    from condor.preferences import parse_custom_agent_key
+
+    sentinel_prefix = sentinel_key.rstrip(":")
+    if model_prefix(current_llm) != sentinel_prefix or current_llm == sentinel_key:
+        return None
+
+    if sentinel_prefix == "custom":
+        provider, model_id = parse_custom_agent_key(current_llm)
+        if not model_id:
+            return None
+        return f"• {provider or 'Custom'} — {model_id}"
+
+    return f"• {_PICKER_SENTINELS[sentinel_key]} — {current_llm.partition(':')[2]}"
+
+
 def _settings_keyboard(current_llm: str) -> InlineKeyboardMarkup:
     """Build LLM picker keyboard.
 
     The current selection is marked with a bullet. If the user has previously
-    picked an OpenRouter model (agent_llm starts with "openrouter:<slug>"), the
-    "openrouter:" sentinel row matches and shows the slug they picked.
+    picked a model through a sentinel row (agent_llm like "openrouter:<slug>"
+    or "custom@venice:<model-id>"), that sentinel row matches and shows the pick.
     """
     keyboard = []
     for key, info in AGENT_OPTIONS.items():
         label = info["label"]
-        # Treat any "openrouter:<slug>" as matching the sentinel "openrouter:" row
-        is_current = key == current_llm or (
-            key == "openrouter:"
-            and current_llm.startswith("openrouter:")
-            and current_llm != "openrouter:"
-        )
-        if (
-            is_current
-            and current_llm.startswith("openrouter:")
-            and current_llm != "openrouter:"
-        ):
-            slug = current_llm.split(":", 1)[1]
-            label = f"• OpenRouter — {slug}"
-        elif is_current:
+        picked = _picked_model_label(key, current_llm) if key in _PICKER_SENTINELS else None
+        if picked:
+            label = picked
+        elif key == current_llm:
             label = f"• {label}"
         keyboard.append(
             [InlineKeyboardButton(label, callback_data=f"agent:set_llm:{key}")]
@@ -110,6 +129,211 @@ def _openrouter_picker_keyboard(
         )
     keyboard.append(nav_row)
     keyboard.append([InlineKeyboardButton("Back", callback_data="agent:settings")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _openrouter_input_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard shown while waiting for a typed OpenRouter slug.
+
+    The prompt arms a "next message is the slug" mode, so it needs a visible way
+    out — otherwise a user who changed their mind has to know to type /cancel.
+    """
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Back to model list", callback_data="agent:or_page:0"
+                )
+            ],
+            [InlineKeyboardButton("Cancel", callback_data="agent:or_type_cancel")],
+        ]
+    )
+
+
+# Custom provider picker pagination
+CUSTOM_PAGE_SIZE = 8
+
+
+def _custom_endpoints_keyboard(
+    providers: list[dict], current_llm: str
+) -> InlineKeyboardMarkup:
+    """Landing screen for custom endpoints: pick one, add one, or manage them."""
+    from condor.preferences import parse_custom_agent_key
+
+    active_provider, active_model = parse_custom_agent_key(current_llm)
+
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for idx, provider in enumerate(providers):
+        name = provider.get("name", "?")
+        if active_provider == name and active_model:
+            label = f"• {name} — {format_model_label(active_model, limit=24)}"
+        else:
+            label = name
+        keyboard.append(
+            [InlineKeyboardButton(label, callback_data=f"agent:cu_use:{idx}")]
+        )
+
+    keyboard.append([InlineKeyboardButton("+ Add endpoint", callback_data="agent:cu_add")])
+    if providers:
+        keyboard.append(
+            [InlineKeyboardButton("Manage endpoints", callback_data="agent:cu_manage")]
+        )
+    keyboard.append([InlineKeyboardButton("Back", callback_data="agent:settings")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _custom_manage_keyboard(providers: list[dict]) -> InlineKeyboardMarkup:
+    """Per-endpoint maintenance: replace the API key, or forget the endpoint."""
+    keyboard: list[list[InlineKeyboardButton]] = []
+    for idx, provider in enumerate(providers):
+        name = provider.get("name", "?")
+        keyboard.append([InlineKeyboardButton(name, callback_data="agent:cu_noop")])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "Change API key", callback_data=f"agent:cu_key:{idx}"
+                ),
+                InlineKeyboardButton("Forget", callback_data=f"agent:cu_del:{idx}"),
+            ]
+        )
+    keyboard.append([InlineKeyboardButton("Back", callback_data="agent:cu_list")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _custom_delete_keyboard(idx: int, name: str) -> InlineKeyboardMarkup:
+    """Confirmation for forgetting an endpoint."""
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    f"Forget {name}", callback_data=f"agent:cu_delok:{idx}"
+                )
+            ],
+            [InlineKeyboardButton("Keep it", callback_data="agent:cu_manage")],
+        ]
+    )
+
+
+def _custom_input_keyboard() -> InlineKeyboardMarkup:
+    """Keyboard shown while waiting for typed input (URL, key, search)."""
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("Cancel", callback_data="agent:cu_cancel")]]
+    )
+
+
+def _custom_key_prompt_keyboard() -> InlineKeyboardMarkup:
+    """API-key prompt: type one, or declare the endpoint doesn't need one."""
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("No API key needed", callback_data="agent:cu_nokey")],
+            [InlineKeyboardButton("Cancel", callback_data="agent:cu_cancel")],
+        ]
+    )
+
+
+def _custom_error_keyboard(
+    retry_action: str, secondary: tuple[str, str] | None = None
+) -> InlineKeyboardMarkup:
+    """Recovery keyboard for a failed validation.
+
+    Validation failures are exactly where a dead-end message hurts most — the
+    user has just typed a URL and a key and has nothing to tap. `secondary` is
+    the (label, callback) for the sideways fix, which differs by context:
+    a new endpoint needs its URL corrected, a saved one usually needs its key.
+    """
+    label, action = secondary or ("Edit URL", "agent:cu_add")
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Try again", callback_data=retry_action),
+                InlineKeyboardButton(label, callback_data=action),
+            ],
+            [InlineKeyboardButton("Back", callback_data="agent:cu_list")],
+        ]
+    )
+
+
+def _order_models(
+    model_ids: list[str], current_id: str | None, query: str
+) -> list[str]:
+    """Apply the search filter and float the active model to the top."""
+    models = list(model_ids)
+    if query:
+        needle = query.lower()
+        models = [m for m in models if needle in m.lower()]
+    if current_id and current_id in models:
+        models.remove(current_id)
+        models.insert(0, current_id)
+    return models
+
+
+def _custom_picker_keyboard(
+    model_ids: list[str],
+    page: int,
+    current_id: str | None,
+    query: str = "",
+) -> InlineKeyboardMarkup:
+    """Paginated keyboard for picking a model from a custom endpoint.
+
+    Buttons carry a short content hash of the model id rather than its index:
+    ids are unbounded and callback_data is capped at 64 bytes, and a hash still
+    resolves to the right model if the list was refetched between render and tap.
+    """
+    from .custom_models import model_token
+
+    models = _order_models(model_ids, current_id, query)
+    keyboard: list[list[InlineKeyboardButton]] = []
+
+    if not models:
+        keyboard.append(
+            [InlineKeyboardButton("No models match", callback_data="agent:cu_noop")]
+        )
+        total_pages = 1
+        page = 0
+    else:
+        total_pages = (len(models) + CUSTOM_PAGE_SIZE - 1) // CUSTOM_PAGE_SIZE
+        page = max(0, min(page, total_pages - 1))
+        start = page * CUSTOM_PAGE_SIZE
+        for model_id in models[start : start + CUSTOM_PAGE_SIZE]:
+            label = format_model_label(model_id)
+            if current_id and model_id == current_id:
+                label = f"• {label}"
+            keyboard.append(
+                [
+                    InlineKeyboardButton(
+                        label, callback_data=f"agent:cu_pick:{model_token(model_id)}"
+                    )
+                ]
+            )
+
+    if total_pages > 1:
+        nav_row: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav_row.append(
+                InlineKeyboardButton("‹ Prev", callback_data=f"agent:cu_page:{page - 1}")
+            )
+        nav_row.append(
+            InlineKeyboardButton(
+                f"{page + 1}/{total_pages}", callback_data="agent:cu_noop"
+            )
+        )
+        if page < total_pages - 1:
+            nav_row.append(
+                InlineKeyboardButton("Next ›", callback_data=f"agent:cu_page:{page + 1}")
+            )
+        keyboard.append(nav_row)
+
+    # A search row only earns its space once the list is too long to scan
+    if query:
+        keyboard.append(
+            [InlineKeyboardButton(f"Clear filter '{query}'", callback_data="agent:cu_clear")]
+        )
+    elif len(model_ids) > CUSTOM_PAGE_SIZE:
+        keyboard.append(
+            [InlineKeyboardButton("Search models", callback_data="agent:cu_search")]
+        )
+
+    keyboard.append([InlineKeyboardButton("Back", callback_data="agent:cu_list")])
     return InlineKeyboardMarkup(keyboard)
 
 

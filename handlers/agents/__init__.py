@@ -2,6 +2,7 @@
 
 import logging
 import shutil
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -22,6 +23,7 @@ from ._shared import (
     get_project_dir,
     load_assistant,
     normalize_mode,
+    selectable_agent_options,
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
@@ -32,6 +34,26 @@ log = logging.getLogger(__name__)
 
 # Cache CLI availability checks so we only hit the filesystem once per key
 _cli_available_cache: dict[str, bool] = {}
+
+# Flags that make the next plain message mean something other than "talk to the
+# agent". Tapping any button is a fresh intent, so they are all disarmed before
+# the callback router dispatches: otherwise walking away from a prompt (e.g.
+# "Enter model manually", then picking a different LLM) leaves the flag set and
+# the user's next task is parsed as a model slug / URL / compact instruction.
+# Handlers that genuinely want an armed mode set their own flag after this runs.
+_ARMED_TEXT_INPUT_KEYS = (
+    "_openrouter_typing_slug",
+    "_custom_typing_url",
+    "_custom_typing_key",
+    "_custom_typing_search",
+    "agent_compact_custom",
+)
+
+
+def _disarm_text_input(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Drop every armed "next message is the answer" mode."""
+    for key in _ARMED_TEXT_INPUT_KEYS:
+        context.user_data.pop(key, None)
 
 
 def _is_agent_available(agent_key: str) -> bool:
@@ -60,6 +82,23 @@ def _is_agent_available(agent_key: str) -> bool:
     return available
 
 
+def set_active_llm(context: ContextTypes.DEFAULT_TYPE, agent_key: str) -> None:
+    """Set the chat's model and mirror it into the shared preference store.
+
+    ``user_data["agent_llm"]`` lives only in the PTB pickle, which nothing
+    outside the bot process can read. Mirroring it to config.yml is what lets
+    a newly created Agent inherit the model the user is actually running,
+    instead of the coordinator guessing one.
+    """
+    from condor.preferences import set_active_agent_key
+
+    context.user_data["agent_llm"] = agent_key
+    try:
+        set_active_agent_key(context.user_data, agent_key)
+    except Exception:
+        log.debug("Could not mirror agent_llm to preferences", exc_info=True)
+
+
 def _reclaim_default_agent(context: ContextTypes.DEFAULT_TYPE) -> str:
     """Resolve the effective agent_key, reclaiming DEFAULT_AGENT after an auto-switch.
 
@@ -70,16 +109,21 @@ def _reclaim_default_agent(context: ContextTypes.DEFAULT_TYPE) -> str:
     reverted. Used by both the /agent command and the always-on message handler so
     healing happens no matter how the user re-enters.
     """
-    context.user_data.setdefault("agent_llm", DEFAULT_AGENT)
+    if not context.user_data.get("agent_llm"):
+        set_active_llm(context, DEFAULT_AGENT)
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     if (
         context.user_data.get("agent_llm_auto")
         and agent_key != DEFAULT_AGENT
         and _is_agent_available(DEFAULT_AGENT)
     ):
-        context.user_data["agent_llm"] = DEFAULT_AGENT
+        set_active_llm(context, DEFAULT_AGENT)
         context.user_data.pop("agent_llm_auto", None)
         agent_key = DEFAULT_AGENT
+    # Backfill the shared mirror for users who picked their model before it
+    # existed — otherwise agent creation sees no active model until they
+    # happen to re-pick one. No-ops once the value already matches.
+    set_active_llm(context, agent_key)
     return agent_key
 
 
@@ -103,7 +147,10 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
     # Warn if no agent CLI is available
     if not _is_agent_available(agent_key):
-        available = [k for k in AGENT_OPTIONS if _is_agent_available(k)]
+        # Sentinels are excluded: they open a picker rather than naming a
+        # model, so auto-switching onto one would park the user on a key that
+        # can't start a session.
+        available = [k for k in selectable_agent_options() if _is_agent_available(k)]
         if not available:
             await update.message.reply_text(
                 "No agent CLI found.\n\n"
@@ -116,7 +163,7 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             return
         # Auto-switch to an available one. Flag it as non-user so the reclaim
         # logic above can restore DEFAULT_AGENT once its CLI is installed.
-        context.user_data["agent_llm"] = available[0]
+        set_active_llm(context, available[0])
         context.user_data["agent_llm_auto"] = True
 
     await show_agent_menu(update, context)
@@ -135,6 +182,10 @@ async def agent_callback_handler(
         await query.message.edit_text("Agent mode is only available in private chats.")
         return
 
+    # A tap supersedes any half-finished typing prompt. Cleared before dispatch
+    # so handlers that want an armed mode can re-arm it below.
+    _disarm_text_input(context)
+
     data = query.data
     action = data.split(":", 1)[1] if ":" in data else data
 
@@ -151,6 +202,9 @@ async def agent_callback_handler(
         # OpenRouter sentinel -> open the model picker instead of setting directly
         if llm_key == "openrouter:":
             await _handle_openrouter_picker(update, context, page=0)
+        # Custom sentinel -> open the saved-endpoints screen
+        elif llm_key == "custom:":
+            await _handle_custom_list(update, context)
         else:
             await _handle_set_llm(update, context, llm_key)
     elif action.startswith("or_page:"):
@@ -167,6 +221,38 @@ async def agent_callback_handler(
         await _handle_openrouter_type_cancel(update, context)
     elif action == "or_noop":
         pass  # page indicator button — do nothing
+
+    # Custom OpenAI-compatible endpoints
+    elif action == "cu_list":
+        await _handle_custom_list(update, context)
+    elif action == "cu_add":
+        await _handle_custom_url_prompt(update, context)
+    elif action == "cu_nokey":
+        await _handle_custom_no_key(update, context)
+    elif action == "cu_retry":
+        await _handle_custom_retry(update, context)
+    elif action == "cu_cancel":
+        await _handle_custom_cancel(update, context)
+    elif action == "cu_manage":
+        await _handle_custom_manage(update, context)
+    elif action == "cu_search":
+        await _handle_custom_search_prompt(update, context)
+    elif action == "cu_clear":
+        await _handle_custom_clear_filter(update, context)
+    elif action.startswith("cu_use:"):
+        await _handle_custom_use(update, context, int(action.split(":", 1)[1]))
+    elif action.startswith("cu_page:"):
+        await _handle_custom_page(update, context, int(action.split(":", 1)[1]))
+    elif action.startswith("cu_pick:"):
+        await _handle_custom_pick(update, context, action.split(":", 1)[1])
+    elif action.startswith("cu_key:"):
+        await _handle_custom_rekey(update, context, int(action.split(":", 1)[1]))
+    elif action.startswith("cu_delok:"):
+        await _handle_custom_delete(update, context, int(action.split(":", 1)[1]))
+    elif action.startswith("cu_del:"):
+        await _handle_custom_delete_confirm(update, context, int(action.split(":", 1)[1]))
+    elif action == "cu_noop":
+        pass  # page indicator / section header — do nothing
 
     # Session management
     elif action == "stop":
@@ -282,7 +368,7 @@ async def _handle_set_llm(
         await query.message.edit_text("Unknown LLM option.")
         return
 
-    context.user_data["agent_llm"] = llm_key
+    set_active_llm(context, llm_key)
     context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
@@ -360,7 +446,7 @@ async def _handle_openrouter_pick(
 
     model = models[idx]
     agent_key = f"openrouter:{model.slug}"
-    context.user_data["agent_llm"] = agent_key
+    set_active_llm(context, agent_key)
     context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
@@ -384,12 +470,15 @@ async def _handle_openrouter_type_prompt(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Arm slug-input mode: next text message is parsed as an OpenRouter slug."""
+    from .menu import _openrouter_input_keyboard
+
     query = update.callback_query
     context.user_data["_openrouter_typing_slug"] = True
     await query.message.edit_text(
         "Send the OpenRouter model slug as a message.\n"
         "Example: anthropic/claude-sonnet-4.5\n\n"
-        "Send /cancel to abort."
+        "Send /cancel, or tap Cancel, to abort.",
+        reply_markup=_openrouter_input_keyboard(),
     )
 
 
@@ -397,6 +486,7 @@ async def _resolve_openrouter_typed_slug(
     update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
 ) -> None:
     """Validate a typed slug; on match, prompt confirmation."""
+    from .menu import _openrouter_input_keyboard
     from .openrouter_models import fetch_models, find_model_by_slug
 
     slug = text.strip()
@@ -413,12 +503,15 @@ async def _resolve_openrouter_typed_slug(
 
     model = find_model_by_slug(models, slug)
     if not model:
-        # Re-arm so the user can retype without hunting for the button again
+        # Re-arm so the user can retype without hunting for the button again —
+        # with a Cancel button, so a mistyped slug can't trap them in a loop of
+        # "that isn't a model either" with no visible way out.
         context.user_data["_openrouter_typing_slug"] = True
         await update.message.reply_text(
             f"No tool-calling OpenRouter model matches '{slug}'.\n"
             "The slug must be exact (e.g. anthropic/claude-sonnet-4.5).\n"
-            "Try again, or send /cancel."
+            "Try again, send /cancel, or tap Cancel.",
+            reply_markup=_openrouter_input_keyboard(),
         )
         return
 
@@ -459,7 +552,7 @@ async def _handle_openrouter_type_confirm(
         )
         return
 
-    context.user_data["agent_llm"] = f"openrouter:{slug}"
+    set_active_llm(context, f"openrouter:{slug}")
     context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
 
     # Destroy existing session so the next interaction uses the new LLM
@@ -478,6 +571,540 @@ async def _handle_openrouter_type_cancel(
     query = update.callback_query
     context.user_data.pop("_openrouter_typed_slug", None)
     await query.message.edit_text("Cancelled. Use /agent to continue.")
+
+
+# -- Custom OpenAI-compatible endpoints --
+# Flow: "Custom" sentinel → endpoint list → (Add: base URL → API key →
+# validate by fetching {base_url}/models) → paginated model picker →
+# agent_llm = "custom@<endpoint>:<model-id>".
+#
+# Endpoints are stored through condor/preferences.py, which syncs them to
+# config.yml — so the web dashboard reads and writes the same records rather
+# than each surface keeping its own copy.
+
+# How long a fetched model list stays usable before we re-hit /models.
+CUSTOM_MODEL_CACHE_TTL = 600
+
+_CUSTOM_INPUT_KEYS = (
+    "_custom_typing_url",
+    "_custom_typing_key",
+    "_custom_typing_search",
+    "_custom_pending_url",
+    "_custom_pending_name",
+    "_custom_rekey_provider",
+)
+
+
+def _current_custom_model(context: ContextTypes.DEFAULT_TYPE) -> str | None:
+    """Model id of the current agent_llm when it points at a custom endpoint."""
+    from condor.preferences import parse_custom_agent_key
+
+    _, model_id = parse_custom_agent_key(context.user_data.get("agent_llm", ""))
+    return model_id or None
+
+
+def _clear_custom_input(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Disarm any half-finished typing step in this flow."""
+    for key in _CUSTOM_INPUT_KEYS:
+        context.user_data.pop(key, None)
+
+
+async def _show(
+    update: Update,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None = None,
+    placeholder=None,
+):
+    """Render a screen, whichever way the user got here.
+
+    Callback taps edit the message in place; typed input has no message of
+    ours to edit, so it gets a fresh one (or reuses an explicit placeholder).
+    """
+    if placeholder is not None:
+        await placeholder.edit_text(text, reply_markup=keyboard)
+        return placeholder
+    query = update.callback_query
+    if query is not None:
+        await query.message.edit_text(text, reply_markup=keyboard)
+        return query.message
+    return await update.effective_chat.send_message(text, reply_markup=keyboard)
+
+
+async def _handle_custom_list(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    notice: str = "",
+    placeholder=None,
+) -> None:
+    """Landing screen — the user's saved endpoints."""
+    from condor.preferences import get_custom_providers
+
+    from .menu import _custom_endpoints_keyboard
+
+    _clear_custom_input(context)
+    providers = get_custom_providers(context.user_data)
+
+    if providers:
+        body = (
+            "Custom OpenAI-compatible endpoints\n\n"
+            "Pick an endpoint to choose a model from it."
+        )
+    else:
+        body = (
+            "Custom OpenAI-compatible endpoints\n\n"
+            "Connect any OpenAI-compatible API — Venice AI, Together, "
+            "Fireworks, or your own vLLM / LM Studio server."
+        )
+
+    text = f"{notice}\n\n{body}" if notice else body
+    await _show(
+        update,
+        text,
+        _custom_endpoints_keyboard(providers, context.user_data.get("agent_llm", "")),
+        placeholder=placeholder,
+    )
+
+
+def _provider_at(context: ContextTypes.DEFAULT_TYPE, idx: int) -> dict | None:
+    from condor.preferences import get_custom_providers
+
+    providers = get_custom_providers(context.user_data)
+    if 0 <= idx < len(providers):
+        return providers[idx]
+    return None
+
+
+# -- Adding an endpoint --
+
+
+async def _handle_custom_url_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Arm URL-input mode: the next text message is the endpoint base URL."""
+    from .menu import _custom_input_keyboard
+
+    _clear_custom_input(context)
+    context.user_data["_custom_typing_url"] = True
+    await _show(
+        update,
+        "Send the base URL of the OpenAI-compatible API as a message.\n\n"
+        "Examples:\n"
+        "  https://api.venice.ai/api/v1\n"
+        "  http://localhost:8000/v1",
+        _custom_input_keyboard(),
+    )
+
+
+async def _resolve_custom_url(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
+    """Validate the typed base URL, then prompt for the API key."""
+    from condor.preferences import suggest_provider_name, unique_provider_name
+
+    from .custom_models import normalize_base_url
+    from .menu import _custom_input_keyboard, _custom_key_prompt_keyboard
+
+    raw = text.strip()
+    if raw.lower() in ("/cancel", "cancel"):
+        await _handle_custom_list(update, context, notice="Cancelled.")
+        return
+
+    try:
+        base_url = normalize_base_url(raw)
+    except ValueError as e:
+        # Re-arm so the user can retype — with a Cancel button, so a failed
+        # parse can't trap them in a loop of "that isn't a URL either".
+        context.user_data["_custom_typing_url"] = True
+        await _show(update, f"{e}\n\nSend another URL, or cancel.", _custom_input_keyboard())
+        return
+
+    name = unique_provider_name(context.user_data, suggest_provider_name(base_url))
+    context.user_data["_custom_pending_url"] = base_url
+    context.user_data["_custom_pending_name"] = name
+    context.user_data["_custom_typing_key"] = True
+
+    await _show(
+        update,
+        f"Endpoint: {base_url}\nIt will be saved as '{name}'.\n\n"
+        "Now send the API key as a message. Your message is deleted from the "
+        "chat as soon as it's read; the key is stored on this bot's host so it "
+        "can sign requests.",
+        _custom_key_prompt_keyboard(),
+    )
+
+
+async def _handle_custom_no_key(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """'No API key needed' — validate the pending endpoint unauthenticated."""
+    await _validate_and_save(update, context, api_key="")
+
+
+async def _resolve_custom_key(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
+    """Consume the typed API key and validate the endpoint with it."""
+    key = text.strip()
+    if key.lower() in ("/cancel", "cancel"):
+        await _handle_custom_list(update, context, notice="Cancelled.")
+        return
+
+    # Best effort: get the secret out of the visible chat history
+    try:
+        await update.message.delete()
+    except Exception:
+        log.debug(
+            "Could not delete API key message in chat %s", update.effective_chat.id
+        )
+
+    await _validate_and_save(update, context, api_key=key)
+
+
+async def _validate_and_save(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, api_key: str
+) -> None:
+    """Fetch /models to prove the endpoint works, then persist it."""
+    from condor.preferences import save_custom_provider
+
+    from .custom_models import CustomProviderError, fetch_models
+    from .menu import _custom_error_keyboard, _custom_picker_keyboard
+
+    base_url = context.user_data.get("_custom_pending_url")
+    name = context.user_data.get("_custom_pending_name")
+    if not base_url or not name:
+        await _handle_custom_list(
+            update, context, notice="That setup step expired — start again."
+        )
+        return
+
+    placeholder = await _show(update, f"Checking {base_url}...")
+
+    try:
+        resolved_url, models = await fetch_models(base_url, api_key)
+    except CustomProviderError as e:
+        await placeholder.edit_text(
+            f"Couldn't use that endpoint: {e}",
+            reply_markup=_custom_error_keyboard("agent:cu_retry"),
+        )
+        return
+
+    try:
+        saved = save_custom_provider(context.user_data, name, resolved_url, api_key)
+    except ValueError as e:
+        await placeholder.edit_text(str(e), reply_markup=_custom_error_keyboard("agent:cu_retry"))
+        return
+
+    _clear_custom_input(context)
+    _cache_models(context, saved["name"], models)
+
+    await placeholder.edit_text(
+        f"'{saved['name']}' saved — {len(models)} chat models available at "
+        f"{resolved_url}.\n\nSelect the model for new sessions:",
+        reply_markup=_custom_picker_keyboard(
+            models, page=0, current_id=_current_custom_model(context)
+        ),
+    )
+
+
+async def _handle_custom_retry(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Re-run validation for the endpoint the user was just adding."""
+    if not context.user_data.get("_custom_pending_url"):
+        await _handle_custom_list(
+            update, context, notice="That setup step expired — start again."
+        )
+        return
+    context.user_data["_custom_typing_key"] = True
+    from .menu import _custom_key_prompt_keyboard
+
+    await _show(
+        update,
+        f"Endpoint: {context.user_data['_custom_pending_url']}\n\n"
+        "Send the API key again, or continue without one.",
+        _custom_key_prompt_keyboard(),
+    )
+
+
+# -- Using a saved endpoint --
+
+
+def _cache_models(
+    context: ContextTypes.DEFAULT_TYPE, provider_name: str, models: list[str]
+) -> None:
+    context.user_data["_custom_models"] = {
+        "provider": provider_name,
+        "models": models,
+        "ts": time.time(),
+    }
+    context.user_data.pop("_custom_filter", None)
+
+
+def _cached_models(
+    context: ContextTypes.DEFAULT_TYPE, provider_name: str
+) -> list[str] | None:
+    """Model list for `provider_name` if we fetched it recently enough."""
+    cache = context.user_data.get("_custom_models") or {}
+    if cache.get("provider") != provider_name:
+        return None
+    if time.time() - cache.get("ts", 0) > CUSTOM_MODEL_CACHE_TTL:
+        return None
+    return cache.get("models") or None
+
+
+async def _handle_custom_use(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+) -> None:
+    """Open the model picker for a saved endpoint, refetching if stale."""
+    from .custom_models import CustomProviderError, fetch_models
+    from .menu import _custom_error_keyboard, _custom_picker_keyboard
+
+    provider = _provider_at(context, idx)
+    if provider is None:
+        await _handle_custom_list(update, context, notice="That endpoint is gone.")
+        return
+
+    name = provider["name"]
+    models = _cached_models(context, name)
+
+    if models is None:
+        placeholder = await _show(update, f"Fetching models from {name}...")
+        try:
+            resolved_url, models = await fetch_models(
+                provider["base_url"], provider.get("api_key", "")
+            )
+        except CustomProviderError as e:
+            await placeholder.edit_text(
+                f"'{name}' isn't responding: {e}",
+                reply_markup=_custom_error_keyboard(
+                    f"agent:cu_use:{idx}",
+                    secondary=("Change API key", f"agent:cu_key:{idx}"),
+                ),
+            )
+            return
+        _cache_models(context, name, models)
+        if resolved_url != provider["base_url"]:
+            from condor.preferences import save_custom_provider
+
+            save_custom_provider(
+                context.user_data, name, resolved_url, provider.get("api_key", "")
+            )
+    else:
+        placeholder = None
+
+    await _show(
+        update,
+        f"{name} — {len(models)} chat models.\nSelect the model for new sessions:",
+        _custom_picker_keyboard(
+            models, page=0, current_id=_current_custom_model(context)
+        ),
+        placeholder=placeholder,
+    )
+
+
+async def _handle_custom_page(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page: int
+) -> None:
+    """Page through the cached model list."""
+    from .menu import _custom_picker_keyboard
+
+    cache = context.user_data.get("_custom_models") or {}
+    models = cache.get("models") or []
+    if not models:
+        await _handle_custom_list(update, context, notice="That model list expired.")
+        return
+
+    query = context.user_data.get("_custom_filter", "")
+    await _show(
+        update,
+        f"{cache.get('provider', 'Endpoint')} — {len(models)} chat models."
+        + (f"\nFilter: '{query}'" if query else "")
+        + "\nSelect the model for new sessions:",
+        _custom_picker_keyboard(
+            models, page=page, current_id=_current_custom_model(context), query=query
+        ),
+    )
+
+
+async def _handle_custom_search_prompt(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Arm search-input mode for the current model list."""
+    from .menu import _custom_input_keyboard
+
+    if not (context.user_data.get("_custom_models") or {}).get("models"):
+        await _handle_custom_list(update, context, notice="That model list expired.")
+        return
+    context.user_data["_custom_typing_search"] = True
+    await _show(
+        update,
+        "Send a search term to filter the model list (e.g. 'llama' or '70b').",
+        _custom_input_keyboard(),
+    )
+
+
+async def _resolve_custom_search(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, text: str
+) -> None:
+    """Apply a typed search term and re-render page 1."""
+    term = text.strip()
+    if term.lower() in ("/cancel", "cancel"):
+        term = ""
+    context.user_data["_custom_filter"] = term
+    await _handle_custom_page(update, context, page=0)
+
+
+async def _handle_custom_clear_filter(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    context.user_data.pop("_custom_filter", None)
+    await _handle_custom_page(update, context, page=0)
+
+
+async def _handle_custom_pick(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, token: str
+) -> None:
+    """Resolve a picker token → set agent_llm to custom@<endpoint>:<model-id>."""
+    from condor.preferences import build_custom_agent_key
+
+    from .custom_models import find_by_token
+
+    cache = context.user_data.get("_custom_models") or {}
+    models = cache.get("models") or []
+    provider_name = cache.get("provider")
+    model_id = find_by_token(models, token) if models else None
+
+    if not model_id or not provider_name:
+        await _handle_custom_list(
+            update, context, notice="That selection expired — pick again."
+        )
+        return
+
+    set_active_llm(context, build_custom_agent_key(provider_name, model_id))
+    context.user_data.pop("agent_llm_auto", None)  # explicit choice — don't auto-revert
+
+    # Destroy existing session so the next interaction uses the new LLM
+    await destroy_session(update.effective_chat.id)
+
+    keyboard = InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Change model", callback_data="agent:cu_page:0")],
+            [InlineKeyboardButton("Back to agent", callback_data="agent:menu")],
+        ]
+    )
+    await _show(
+        update,
+        f"LLM set to {model_id} via '{provider_name}'.\n\n"
+        "New sessions will use this model.",
+        keyboard,
+    )
+
+
+# -- Managing saved endpoints --
+
+
+async def _handle_custom_manage(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """List endpoints with per-endpoint maintenance actions."""
+    from condor.preferences import get_custom_providers
+
+    from .menu import _custom_manage_keyboard
+
+    _clear_custom_input(context)
+    providers = get_custom_providers(context.user_data)
+    if not providers:
+        await _handle_custom_list(update, context, notice="No saved endpoints.")
+        return
+
+    lines = [
+        f"{p['name']} — {p['base_url']} "
+        f"({'API key saved' if p.get('api_key') else 'no API key'})"
+        for p in providers
+    ]
+    await _show(
+        update,
+        "Manage endpoints\n\n" + "\n".join(lines),
+        _custom_manage_keyboard(providers),
+    )
+
+
+async def _handle_custom_rekey(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+) -> None:
+    """Replace the API key on a saved endpoint without re-entering its URL."""
+    from .menu import _custom_key_prompt_keyboard
+
+    provider = _provider_at(context, idx)
+    if provider is None:
+        await _handle_custom_list(update, context, notice="That endpoint is gone.")
+        return
+
+    _clear_custom_input(context)
+    context.user_data["_custom_pending_url"] = provider["base_url"]
+    context.user_data["_custom_pending_name"] = provider["name"]
+    context.user_data["_custom_rekey_provider"] = provider["name"]
+    context.user_data["_custom_typing_key"] = True
+    context.user_data.pop("_custom_models", None)  # force a refetch with the new key
+
+    await _show(
+        update,
+        f"Send the new API key for '{provider['name']}' ({provider['base_url']}).\n\n"
+        "Your message is deleted as soon as it's read.",
+        _custom_key_prompt_keyboard(),
+    )
+
+
+async def _handle_custom_delete_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+) -> None:
+    from .menu import _custom_delete_keyboard
+
+    provider = _provider_at(context, idx)
+    if provider is None:
+        await _handle_custom_list(update, context, notice="That endpoint is gone.")
+        return
+
+    await _show(
+        update,
+        f"Forget '{provider['name']}' ({provider['base_url']})?\n\n"
+        "The saved URL and API key are deleted from this bot.",
+        _custom_delete_keyboard(idx, provider["name"]),
+    )
+
+
+async def _handle_custom_delete(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+) -> None:
+    """Forget an endpoint, clearing agent_llm if it pointed at that endpoint."""
+    from condor.preferences import parse_custom_agent_key, remove_custom_provider
+
+    provider = _provider_at(context, idx)
+    if provider is None:
+        await _handle_custom_list(update, context, notice="That endpoint is gone.")
+        return
+
+    name = provider["name"]
+    remove_custom_provider(context.user_data, name)
+    context.user_data.pop("_custom_models", None)
+
+    # Don't leave agent_llm pointing at an endpoint that no longer resolves
+    active_provider, _ = parse_custom_agent_key(context.user_data.get("agent_llm", ""))
+    notice = f"Forgot '{name}'."
+    if active_provider == name:
+        set_active_llm(context, DEFAULT_AGENT)
+        context.user_data.pop("agent_llm_auto", None)
+        await destroy_session(update.effective_chat.id)
+        notice += f" Active LLM reset to {AGENT_OPTIONS[DEFAULT_AGENT]['label']}."
+
+    await _handle_custom_list(update, context, notice=notice)
+
+
+async def _handle_custom_cancel(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """Cancel button on any armed input step."""
+    await _handle_custom_list(update, context, notice="Cancelled.")
 
 
 async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -812,6 +1439,17 @@ async def agent_message_handler(
     # Handle typed OpenRouter slug input
     if context.user_data.pop("_openrouter_typing_slug", None):
         await _resolve_openrouter_typed_slug(update, context, text)
+        return
+
+    # Handle custom endpoint input (base URL, then API key) and model search
+    if context.user_data.pop("_custom_typing_url", None):
+        await _resolve_custom_url(update, context, text)
+        return
+    if context.user_data.pop("_custom_typing_key", None):
+        await _resolve_custom_key(update, context, text)
+        return
+    if context.user_data.pop("_custom_typing_search", None):
+        await _resolve_custom_search(update, context, text)
         return
 
     mode = normalize_mode(context.user_data.get("agent_mode"))

@@ -664,6 +664,10 @@ export interface VoiceSettingsResponse {
 export interface ChatAgentOption {
   key: string;
   label: string;
+  /** True for sentinels that open a model list ("openrouter:", "custom:")
+   *  rather than naming a startable model. Sent explicitly because the key's
+   *  shape doesn't tell you — "ollama:" also ends in a colon but IS startable. */
+  picker?: boolean;
 }
 
 export interface ChatModeOption {
@@ -672,8 +676,16 @@ export interface ChatModeOption {
   description: string;
 }
 
+/** A saved OpenAI-compatible endpoint (Venice AI, Together, local vLLM, ...). */
+export interface CustomProvider {
+  name: string;
+  base_url: string;
+  has_key: boolean;
+}
+
 export interface ChatOptionsResponse {
   agents: ChatAgentOption[];
+  custom_providers: CustomProvider[];
   modes: ChatModeOption[];
   default_agent: string;
   default_mode: string;
@@ -685,6 +697,23 @@ export interface OpenRouterModelOption {
   context_length: number;
   prompt_price: number;
   completion_price: number;
+}
+
+/** Agent key for a model served by a saved custom endpoint. Mirrors
+ *  build_custom_agent_key() in condor/preferences.py. */
+export function customAgentKey(provider: string, model: string): string {
+  return `custom@${provider}:${model}`;
+}
+
+/** Inverse of customAgentKey; returns null for non-custom keys. */
+export function parseCustomAgentKey(
+  agentKey: string,
+): { provider: string; model: string } | null {
+  const colon = agentKey.indexOf(":");
+  if (colon < 0) return null;
+  const prefix = agentKey.slice(0, colon);
+  if (!prefix.startsWith("custom@")) return null;
+  return { provider: prefix.slice("custom@".length), model: agentKey.slice(colon + 1) };
 }
 
 // ── Backtesting ──
@@ -1405,4 +1434,28 @@ export const api = {
 
   getOpenRouterModels: () =>
     apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
+
+  // ── Custom OpenAI-compatible LLM endpoints ──
+
+  getCustomProviders: () =>
+    apiFetch<{ providers: CustomProvider[] }>("/api/v1/settings/custom-providers"),
+
+  /** Validates the endpoint server-side before saving; rejects with the
+   *  provider's own error text (bad key, unreachable host, wrong shape). */
+  addCustomProvider: (data: { base_url: string; api_key?: string; name?: string }) =>
+    apiFetch<{ provider: CustomProvider; models: string[] }>(
+      "/api/v1/settings/custom-providers",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  getCustomProviderModels: (name: string) =>
+    apiFetch<{ provider: CustomProvider; models: string[] }>(
+      `/api/v1/settings/custom-providers/${encodeURIComponent(name)}/models`,
+    ),
+
+  deleteCustomProvider: (name: string) =>
+    apiFetch<{ deleted: boolean; name: string }>(
+      `/api/v1/settings/custom-providers/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
 };

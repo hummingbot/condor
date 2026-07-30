@@ -76,6 +76,13 @@ manage_trading_agent(
 )
 ```
 
+> **Never invent an `agent_key`.** You cannot tell which backends are installed,
+> running, or authenticated — a guessed key names a model that may not exist, and it
+> only fails on the first consult, long after creation "succeeded". Pass one *only*
+> when the user named a specific model. `get_user_context()` reports the user's
+> `active_agent_key` and their saved `custom_llm_endpoints` if you need to show or
+> confirm the choice.
+
 The **AGENT.md body (`instructions`)** is the brain — write it as the agent's own system
 prompt, kept tight: **who it is** (its domain + what it explicitly does NOT handle),
 **what it knows** (durable domain knowledge), and **how it answers** (lead with the
@@ -152,7 +159,7 @@ manage_trading_agent(
     name="BRL MM",
     description="…",
     instructions="<tick system prompt>",
-    agent_key="ollama:qwen3:32b",          # default model; overridable at launch
+    # agent_key omitted → inherits the owning agent's model; overridable at launch
     config={"connector_name": "binance", "frequency_sec": 60,
             "total_amount_quote": 100, "execution_mode": "loop"}
 )
@@ -220,6 +227,11 @@ default to a hardcoded model.** The tool reports:
   server not running). Free, private, offline; addressed as `ollama:<model>` /
   `lmstudio:<model>`. Only offer a local model that is actually loaded.
 - `cloud_keys` — which of openrouter / openai / anthropic / groq / google keys are set.
+- `custom_endpoints` — the user's own OpenAI-compatible endpoints (Venice, Together,
+  a self-hosted vLLM…), each already validated, with the chat models it serves and a
+  ready `agent_key` (`custom@<endpoint>:<model-id>`). These are the strongest signal
+  in the whole report: the user configured them deliberately and Condor verified them
+  reachable, so prefer one when it fits the job.
 - `openrouter` — tool-capable catalog, cheapest first, each with a ready `agent_key`
   (`openrouter:<slug>`) and in/out $/Mtok. **The catalog is public — recommendations work
   with no key.** If `openrouter.key_present` is false, those models need `OPENROUTER_API_KEY`
@@ -237,8 +249,11 @@ Choose by the agent's job, not by habit:
   (`ollama:…`/`lmstudio:…`) or a cheap OpenRouter model.
 - **Must be sandboxed to specific `tools`** → a pydantic-ai key
   (`openrouter:`/`ollama:`/`lmstudio:`/`openai:`/`groq:`); only these enforce the allowlist.
-- Custom OpenAI-compatible endpoint (remote Ollama, vLLM): `openai:<model>` +
-  `model_base_url` in config. Default local URLs: Ollama=localhost:11434, LM Studio=localhost:1234.
+- **A saved custom endpoint** → `custom@<endpoint>:<model-id>` (e.g.
+  `custom@Venice:claude-sonnet-4-6`). The URL and API key are resolved from the user's
+  saved endpoints at run time — do NOT set `model_base_url` for these. Enforces the
+  `tools` allowlist like any other pydantic-ai key.
+  Default local URLs: Ollama=localhost:11434, LM Studio=localhost:1234.
 
 Propose one sensible pick with a one-line why; offer the alternatives you saw. Don't turn
 it into a questionnaire — it's the easiest thing to change later.
