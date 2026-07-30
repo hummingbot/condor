@@ -40,6 +40,11 @@ PROMPT_LOCK_TIMEOUT = 30
 # Prevents infinite loops when the agent subprocess stalls.
 PROMPT_OVERALL_TIMEOUT = 1800  # 30 minutes
 
+# Maximum concurrent live sessions per user, across every surface. Each session
+# is an agent subprocess, so this is a real resource bound. Enforced here rather
+# than in a frontend so Telegram and the web dashboard share one budget.
+MAX_SESSIONS_PER_USER = 5
+
 # Module-level session storage keyed by str(SessionKey).
 # Not persisted -- subprocesses can't survive restarts.
 _sessions: dict[str, "AgentSession"] = {}
@@ -75,6 +80,9 @@ class AgentSession:
             key=str(self.key),
             agent_key=self.agent_key,
             mode=self.mode,
+            user_id=self.user_id,
+            surface=self.key.surface,
+            slot=self.key.slot,
             server_name=self.server_name,
             is_busy=self.is_busy,
             alive=bool(self.client.alive),
@@ -151,6 +159,24 @@ class AgentSession:
         log.info("Session %s: prompt aborted", self.key)
 
 
+class SessionLimitReached(RuntimeError):
+    """Raised when a user already holds MAX_SESSIONS_PER_USER live sessions."""
+
+
+def _enforce_session_budget(user_id: int) -> None:
+    """Reap this user's dead sessions, then refuse if still at the cap."""
+    for raw_key, session in list(_sessions.items()):
+        if session.user_id == user_id and not session.client.alive:
+            _sessions.pop(raw_key, None)
+
+    live = sum(1 for s in _sessions.values() if s.user_id == user_id)
+    if live >= MAX_SESSIONS_PER_USER:
+        raise SessionLimitReached(
+            f"Max {MAX_SESSIONS_PER_USER} concurrent sessions reached. "
+            "Close one before starting another."
+        )
+
+
 async def get_or_create_session(
     spec: SessionSpec,
     permission_callback: PermissionCallback | None = None,
@@ -175,6 +201,10 @@ async def get_or_create_session(
     # Destroy old session if exists
     if session:
         await _destroy_session_internal(key)
+    elif spec.user_id:
+        # Only a genuinely new key counts against the budget — replacing the
+        # session behind an existing key is a swap, not an extra subprocess.
+        _enforce_session_budget(spec.user_id)
 
     # MCP subprocess env expects a numeric chat id; surfaces without a chat
     # (web, mcp) fall back to the user id.
@@ -274,6 +304,11 @@ async def get_or_create_session(
                 platform=spec.platform,
                 server_name=spec.server_name,
             )
+        # Caller-supplied context (e.g. mode-specific assistant instructions)
+        # rides along as spec data, so no caller needs the live session object.
+        if spec.extra_context:
+            initial_context = f"{initial_context}\n\n{spec.extra_context}".strip()
+
         # Resolve the server name that was actually used for this session
         resolved_server = spec.server_name
         if not resolved_server and spec.user_id:

@@ -12,14 +12,15 @@ for an HTTP client is a config flip rather than a rewrite.
 
 from __future__ import annotations
 
+import logging
 import os
-from typing import TYPE_CHECKING, AsyncIterator
+from typing import AsyncIterator
 
+from condor.runtime.events import RuntimeEvent
 from condor.runtime.keys import SessionKey
-from condor.runtime.models import PromptRequest, RuntimeEvent, SessionInfo, SessionSpec
+from condor.runtime.models import PromptRequest, SessionInfo, SessionSpec
 
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    from condor.runtime.sessions import AgentSession
+log = logging.getLogger(__name__)
 
 LOCAL = "local"
 HTTP = "http"
@@ -78,16 +79,43 @@ async def destroy_all() -> None:
 
 
 async def prompt(key: SessionKey, req: PromptRequest) -> AsyncIterator[RuntimeEvent]:
-    """Stream one user turn through the session.
+    """Stream one user turn through the session as canonical RuntimeEvents.
+
+    Both surfaces consume this, so neither can drift from the other's idea of
+    what an event looks like. A mid-stream failure is surfaced as an ``ERROR``
+    followed by a ``DONE`` — a consumer that stops only on ``DONE`` must never
+    be left hanging by an exception.
 
     ``req.image_b64``/``req.image_mime`` are accepted but not yet forwarded:
     the underlying ACP and Pydantic AI clients are text-only today.
     """
+    raw_key = str(key)
+    session = _local().get_session(key)
+    if session is None:
+        yield RuntimeEvent.error(f"No session for {raw_key}", session_key=raw_key)
+        yield RuntimeEvent.done("no_session", session_key=raw_key)
+        return
+
+    try:
+        async for event in session.prompt_stream(req.text):
+            yield RuntimeEvent.from_acp(event, session_key=raw_key)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the caller as an event
+        log.exception("Prompt failed for session %s", raw_key)
+        yield RuntimeEvent.error(str(exc), session_key=raw_key)
+        yield RuntimeEvent.done("error", session_key=raw_key)
+
+
+async def prompt_once(key: SessionKey, text: str) -> str:
+    """Send a prompt and wait for the whole reply.
+
+    For turns the user never sees streamed — injecting mode context, asking the
+    agent to summarize itself for /compact. Raises KeyError when the session is
+    gone, since every caller here has just checked that it exists.
+    """
     session = _local().get_session(key)
     if session is None:
         raise KeyError(f"No session for {key}")
-    async for event in session.prompt_stream(req.text):
-        yield event
+    return await session.client.prompt(text)
 
 
 async def abort(key: SessionKey) -> bool:
@@ -99,12 +127,6 @@ async def abort(key: SessionKey) -> bool:
     return True
 
 
-def get_live(key: SessionKey) -> "AgentSession | None":
-    """In-process escape hatch returning the live session object.
-
-    Only valid in ``local`` mode. Streaming and context injection still reach
-    for ``session.client`` directly; those call sites move behind ``prompt()``
-    when the runtime gains an HTTP transport, and this function disappears
-    with them.
-    """
-    return _local().get_session(key)
+# The FEAT-008 ``get_live()`` escape hatch is gone: prompting, context
+# injection and liveness checks all go through the functions above, so no
+# caller outside this package holds a live session object any more.
