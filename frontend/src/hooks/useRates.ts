@@ -60,7 +60,16 @@ export function useRates(quoteCurrencies: string[]) {
     enabled: !!server && (needed.length > 0 || stablePairs.length > 0),
     staleTime: 60_000,
     refetchInterval: 60_000,
-    placeholderData: (prev: Record<string, number | null> | undefined) => prev,
+    // Only reuse rates when just the requested quote set changed. Carrying them
+    // across a currency switch leaves `convert()` silently unconverted while the
+    // new rates load, so values would render unchanged under the new symbol.
+    placeholderData: (
+      prev: Record<string, number | null> | undefined,
+      prevQuery: { queryKey: readonly unknown[] } | undefined,
+    ) => {
+      const prevKey = prevQuery?.queryKey;
+      return prevKey?.[1] === server && prevKey?.[2] === currency ? prev : undefined;
+    },
   });
 
   const convert = useMemo(() => {
@@ -72,6 +81,12 @@ export function useRates(quoteCurrencies: string[]) {
       return { value, converted: false };
     };
   }, [rates, currency]);
+
+  // Symbol for values already run through `convert()` (aggregates, USD totals).
+  // Falls back to "$" until the USD -> display-currency rate is live, so the
+  // number and its label never disagree.
+  const usdConverted = useMemo(() => convert(1, "USDT").converted, [convert]);
+  const resolvedSymbol = usdConverted ? currencySymbol : "$";
 
   const formatValue = useMemo(() => {
     return (val: number, quoteCurrency: string): string => {
@@ -106,5 +121,7 @@ export function useRates(quoteCurrencies: string[]) {
     isLoading,
     currency,
     currencySymbol,
+    resolvedSymbol,
+    usdConverted,
   };
 }
