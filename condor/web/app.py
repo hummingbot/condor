@@ -17,6 +17,7 @@ from condor.web.routes import (
     backtesting,
     bots,
     chat_ws,
+    confirmations,
     controller_performance,
     executors,
     market,
@@ -79,6 +80,7 @@ def create_app() -> FastAPI:
     app.include_router(settings.router, prefix="/api/v1")
     app.include_router(sessions.router, prefix="/api/v1")
     app.include_router(chat_ws.router, prefix="/api/v1")
+    app.include_router(confirmations.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
 
     # ── Serve report HTML files ──

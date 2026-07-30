@@ -524,8 +524,11 @@ async def post_init(application: Application) -> None:
     # lifecycle, not a session operation, so it is driven off the module
     # directly rather than through the client facade.
     from condor.runtime import sessions as runtime_sessions
+    from condor.runtime.confirmations import get_registry
 
     await runtime_sessions.start_health_monitor(application.bot)
+    # Sweeps expired approvals so a request nobody answers is denied, not leaked.
+    await get_registry().start()
 
     # Schedule periodic update checks (notifies admin)
     from handlers.admin.update import schedule_update_checks
@@ -654,8 +657,10 @@ def main() -> None:
         """Clean up agent subprocesses on shutdown."""
         from condor.runtime import client as runtime
         from condor.runtime import sessions as runtime_sessions
+        from condor.runtime.confirmations import get_registry
 
         await runtime_sessions.stop_health_monitor()
+        await get_registry().stop()
         await runtime.destroy_all()
 
         # Stop all trading agents

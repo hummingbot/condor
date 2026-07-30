@@ -53,6 +53,23 @@ def _tg_key(chat_id: int) -> SessionKey:
     return SessionKey.telegram(chat_id)
 
 
+def _tg_permission_callback(bot, chat_id: int, user_id: int):
+    """Confirmation gate for this chat, delivered as an inline keyboard.
+
+    The pending approval is registered centrally, so the same request can also
+    be answered from the dashboard or over HTTP — whichever answers first wins.
+    """
+    from condor.runtime.confirmations import build_permission_callback
+
+    from .confirmation import TelegramChannel
+
+    return build_permission_callback(
+        session_key=str(_tg_key(chat_id)),
+        user_id=user_id,
+        channels=[TelegramChannel(bot, chat_id)],
+    )
+
+
 async def get_session(chat_id: int) -> SessionInfo | None:
     """Serializable view of a chat's session, or None."""
     return await runtime.get_info(_tg_key(chat_id))
@@ -344,15 +361,21 @@ async def agent_callback_handler(
     elif action == "talk_noop":
         pass  # page indicator — do nothing
 
-    # Trade confirmations
+    # Trade confirmations. "Request expired" also covers "already answered
+    # elsewhere" — resolve() is idempotent, so a dashboard click that beat this
+    # tap is not an error.
     elif action.startswith("confirm_trade:"):
         request_id = action.split(":", 1)[1]
-        resolved = resolve_confirmation(request_id, approved=True)
+        resolved = await resolve_confirmation(
+            request_id, approved=True, by_user_id=update.effective_user.id
+        )
         text = "Approved." if resolved else "Request expired."
         await query.message.edit_text(text)
     elif action.startswith("reject_trade:"):
         request_id = action.split(":", 1)[1]
-        resolved = resolve_confirmation(request_id, approved=False)
+        resolved = await resolve_confirmation(
+            request_id, approved=False, by_user_id=update.effective_user.id
+        )
         text = "Rejected." if resolved else "Request expired."
         await query.message.edit_text(text)
 
@@ -389,10 +412,7 @@ async def _handle_mode_start(
     try:
         bot = context.bot
 
-        async def _perm_cb(tool_call, options):
-            from .confirmation import permission_callback
-
-            return await permission_callback(bot, chat_id, tool_call, options)
+        _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
         await _create_tg_session(
             chat_id=chat_id,
@@ -1267,10 +1287,7 @@ async def _handle_compact(
         user_id = update.effective_user.id
         bot = context.bot
 
-        async def _perm_cb(tool_call, options):
-            from .confirmation import permission_callback
-
-            return await permission_callback(bot, chat_id, tool_call, options)
+        _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
         new_session = await _create_tg_session(
             chat_id=chat_id,
@@ -1395,10 +1412,7 @@ async def _handle_talk_pick(
     agent_key = _reclaim_default_agent(context)
     bot = context.bot
 
-    async def _perm_cb(tool_call, options):
-        from .confirmation import permission_callback
-
-        return await permission_callback(bot, chat_id, tool_call, options)
+    _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
     await query.message.edit_text(f"Switching to {label}...")
     await destroy_session(chat_id)
@@ -1462,10 +1476,7 @@ async def _do_compact_from_message(
         user_id = update.effective_user.id
         bot = context.bot
 
-        async def _perm_cb(tool_call, options):
-            from .confirmation import permission_callback
-
-            return await permission_callback(bot, chat_id, tool_call, options)
+        _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
         new_session = await _create_tg_session(
             chat_id=chat_id,
@@ -1642,10 +1653,7 @@ async def agent_message_handler(
         try:
             bot = context.bot
 
-            async def _perm_cb(tool_call, options):
-                from .confirmation import permission_callback
-
-                return await permission_callback(bot, chat_id, tool_call, options)
+            _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
             session = await _create_tg_session(
                 chat_id=chat_id,
