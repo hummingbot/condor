@@ -12,10 +12,14 @@ import json
 from typing import AsyncIterator
 
 from condor.runtime.events import EventType, RuntimeEvent
+from condor.runtime.timeouts import TIMEOUTS
 
 # Emitted so proxies and clients see traffic on a quiet stream. A comment frame
 # is ignored by every SSE parser, including EventSource.
 KEEPALIVE_FRAME = ": keepalive\n\n"
+
+# Cadence of the keepalive above, from the shared timeout policy.
+HEARTBEAT_INTERVAL = TIMEOUTS.sse_heartbeat
 
 # Headers an SSE response must carry. X-Accel-Buffering disables nginx's
 # response buffering, which otherwise holds frames until the stream closes and

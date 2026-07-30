@@ -25,17 +25,16 @@ from condor.acp.pydantic_ai_client import (
 from condor.runtime import binding
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
+from condor.runtime.timeouts import TIMEOUTS
 from handlers.agents._shared import build_initial_context, get_project_dir
 
 log = logging.getLogger(__name__)
 
-# Timeout for acquiring the session lock (seconds).
-# If another prompt is running, we wait this long before giving up.
-PROMPT_LOCK_TIMEOUT = 30
-
-# Maximum wall-clock time for a single prompt (seconds).
-# Prevents infinite loops when the agent subprocess stalls.
-PROMPT_OVERALL_TIMEOUT = 1800  # 30 minutes
+# Deadlines come from the shared policy (condor.runtime.timeouts) so changing
+# one is a single edit that every surface honors. Kept as module names because
+# they read better at the call sites below.
+PROMPT_LOCK_TIMEOUT = TIMEOUTS.prompt_lock
+PROMPT_OVERALL_TIMEOUT = TIMEOUTS.prompt_overall
 
 # Maximum concurrent live sessions per user, across every surface. Each session
 # is an agent subprocess, so this is a real resource bound. Enforced here rather

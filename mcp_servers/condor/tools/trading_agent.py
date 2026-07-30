@@ -616,6 +616,30 @@ def _agent_monitoring(action: str, agent_id: str | None) -> dict:
     return {"error": f"Unknown monitoring action: {action}"}
 
 
+async def _agent_state(
+    action: str, agent_id: str | None, key: str | None, config: dict | None
+) -> dict:
+    """Read or write this agent's scratch state through the main process.
+
+    State is for cursors and counters the loop would otherwise re-derive every
+    tick. Anything worth *remembering* belongs in memory (manage_memory).
+    """
+    if not agent_id:
+        return {"error": "agent_id is required"}
+    agent_slug, sslug = agent_strategy_from_agent_id(agent_id)
+    path = f"/agents/{agent_slug}/strategies/{sslug}/state"
+
+    if action == "get_state":
+        result = await call_main_api("GET", path)
+        state = result.get("state", {}) if isinstance(result, dict) else {}
+        return {"state": state.get(key) if key else state}
+
+    if not key:
+        return {"error": "name (the state key) is required for set_state"}
+    body = {"key": key, **(config or {})}
+    return await call_main_api("POST", path, body)
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -714,6 +738,12 @@ async def manage_trading_agent(
     # Journal reads/writes are the standalone trading_agent_journal_read /
     # trading_agent_journal_write tools — the canonical interface used by live
     # tick prompts. They are intentionally NOT duplicated as actions here.
+
+    # Scratch state scoped to the calling agent's own strategy. The namespace
+    # is derived from agent_id, never taken from the caller, so an agent cannot
+    # read another's cursors by guessing a key.
+    if action in ("get_state", "set_state"):
+        return await _agent_state(action, agent_id, name, config)
 
     # Journal/monitoring that's file-based
     if action in ("agent_tracker", "agent_journal"):

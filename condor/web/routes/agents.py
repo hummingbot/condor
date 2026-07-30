@@ -252,6 +252,15 @@ class UpdateLearningsRequest(BaseModel):
     content: str
 
 
+class SetStateRequest(BaseModel):
+    """One scratch-KV write. The namespace comes from the URL, never the body."""
+
+    key: str
+    value: Any = None
+    expires_in: int | None = None
+    clear: bool = False
+
+
 class ConsultRequest(BaseModel):
     task: str
     context: str = ""
@@ -1368,6 +1377,46 @@ async def update_learnings(
     strategy = _get_strategy(slug, sslug)
     (strategy.dir / "learnings.md").write_text(req.content)
     return {"updated": True}
+
+
+# ── Runtime state ──
+#
+# The scratch KV a loop uses for cursors and cooldowns. Distinct from memory
+# (durable, curated, the agent's reasoning) and from the journal (append-only
+# narrative). See condor/runtime/state.py.
+
+
+@router.get("/{slug}/strategies/{sslug}/state")
+async def get_strategy_state(
+    slug: str, sslug: str, user: WebUser = Depends(get_current_user)
+):
+    """Every live key in this strategy's namespace."""
+    from condor.runtime.state import list_state, namespace_for_session
+
+    _get_strategy(slug, sslug)  # 404s if it does not exist
+    return {"state": list_state(namespace_for_session(f"{slug}.{sslug}"))}
+
+
+@router.post("/{slug}/strategies/{sslug}/state")
+async def set_strategy_state(
+    slug: str,
+    sslug: str,
+    req: SetStateRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Set or clear one key. The namespace is derived, never caller-supplied."""
+    from condor.runtime.state import clear_state, namespace_for_session, set_state
+
+    _get_strategy(slug, sslug)
+    namespace = namespace_for_session(f"{slug}.{sslug}")
+
+    if req.clear:
+        return {"cleared": clear_state(namespace, req.key)}
+    try:
+        set_state(namespace, req.key, req.value, expires_in=req.expires_in)
+    except TypeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
 
 
 # ── Sessions ──

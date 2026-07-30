@@ -25,10 +25,13 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
+from condor.runtime.timeouts import TIMEOUTS
+
 log = logging.getLogger(__name__)
 
-# How long a human has to answer before the request is denied.
-CONFIRMATION_TIMEOUT = 120  # seconds
+# How long a human has to answer before the request is denied. Sourced from the
+# shared timeout policy so every deadline lives in one file.
+CONFIRMATION_TIMEOUT = TIMEOUTS.confirmation
 
 # How often expired entries are swept out of the registry.
 CLEANUP_INTERVAL = 30  # seconds
