@@ -1,0 +1,29 @@
+execution_mode: dry_run
+frequency_sec: 14400
+report_profile: memecoin_radar
+chains:
+  - solana
+  - ethereum
+  - robinhood
+news_lookback_hours: 24
+market_history_days: 30
+nowcast_hours: 24
+near_term_days: 3
+established_extended_weeks: 2
+min_pair_age_hours: 6
+min_liquidity_usd: 50000
+min_chain_eligible_pairs: 5
+max_discovery_candidates: 100
+max_detailed_candidates: 40
+max_report_candidates: 15
+max_news_items: 40
+max_social_items: 60
+max_event_items: 20
+source_collection_budget_sec: 120
+report_language: en
+report_timezone: UTC
+risk_limits:
+  max_position_size_quote: 0
+  max_open_executors: 0
+  max_drawdown_pct: -1
+  shutdown_drawdown_pct: -1
