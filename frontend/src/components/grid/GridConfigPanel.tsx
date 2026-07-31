@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
@@ -8,8 +8,8 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { LeverageField, SelectField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
-import type { GridState, GridAction } from "@/pages/CreateGridExecutor";
+import { LeverageField, SelectField, ToggleField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
+import type { GridState, GridAction } from "@/lib/gridExecutor";
 
 interface GridConfigPanelProps {
   state: GridState;
@@ -37,6 +37,7 @@ function PriceField({
   hint?: string;
 }) {
   const isActive = activePickField === field;
+  const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(value === 0 ? "" : String(value));
 
@@ -49,7 +50,7 @@ function PriceField({
 
   return (
     <div>
-      <label className="mb-1 flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
+      <label htmlFor={id} className="mb-1 flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]">
         {label}
         {value > 0 && (
           valid
@@ -59,6 +60,7 @@ function PriceField({
       </label>
       <div className="flex gap-1">
         <input
+          id={id}
           ref={inputRef}
           type="number"
           step="any"
@@ -119,6 +121,7 @@ function NumberField({
   isPercent?: boolean;
 }) {
   const displayValue = isPercent ? value * 100 : value;
+  const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
   const [localValue, setLocalValue] = useState(displayValue === 0 ? "" : String(displayValue));
 
@@ -130,9 +133,10 @@ function NumberField({
 
   return (
     <div>
-      <label className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
+      <label htmlFor={id} className="mb-1 block text-xs text-[var(--color-text-muted)]">{label}</label>
       <div className="flex items-center gap-1">
         <input
+          id={id}
           ref={inputRef}
           type="number"
           step={isPercent ? step * 100 : step}
@@ -155,36 +159,6 @@ function NumberField({
   );
 }
 
-
-function ToggleField({
-  label,
-  value,
-  field,
-  dispatch,
-}: {
-  label: string;
-  value: boolean;
-  field: string;
-  dispatch: React.Dispatch<GridAction>;
-}) {
-  return (
-    <div className="flex items-center gap-2">
-      <button
-        onClick={() => dispatch({ type: "SET_FIELD", field, value: !value })}
-        className={`relative h-5 w-9 rounded-full transition-colors ${
-          value ? "bg-[var(--color-primary)]" : "bg-[var(--color-border)]"
-        }`}
-      >
-        <span
-          className={`absolute top-0.5 h-4 w-4 rounded-full bg-white transition-transform ${
-            value ? "left-[18px]" : "left-0.5"
-          }`}
-        />
-      </button>
-      <span className="text-xs text-[var(--color-text)]">{label}</span>
-    </div>
-  );
-}
 
 function SectionHeader({ children }: { children: React.ReactNode }) {
   return (

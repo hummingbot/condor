@@ -2,6 +2,7 @@ import { LogOut } from "lucide-react";
 import { useSearchParams } from "react-router-dom";
 
 import { ApiKeysSettings } from "@/components/settings/ApiKeysSettings";
+import { CustomProvidersSettings } from "@/components/settings/CustomProvidersSettings";
 import { GatewaySettings } from "@/components/settings/GatewaySettings";
 import { ServersSettings } from "@/components/settings/ServersSettings";
 import { VoiceSettings } from "@/components/settings/VoiceSettings";
@@ -11,6 +12,7 @@ const TABS = [
   { key: "servers", label: "Servers" },
   { key: "gateway", label: "Gateway" },
   { key: "keys", label: "API Keys" },
+  { key: "llm", label: "LLM Endpoints" },
   { key: "voice", label: "Voice & AI" },
 ] as const;
 
@@ -24,7 +26,7 @@ export function Settings() {
   return (
     <div className="mx-auto max-w-3xl">
       <div className="mb-4 flex items-center justify-between">
-        <h1 className="text-lg font-bold text-[var(--color-text)]">Settings</h1>
+        <h1 className="text-xl font-bold text-[var(--color-text)]">Settings</h1>
         <button
           onClick={logout}
           className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"
@@ -55,6 +57,7 @@ export function Settings() {
       {tab === "servers" && <ServersSettings />}
       {tab === "gateway" && <GatewaySettings />}
       {tab === "keys" && <ApiKeysSettings />}
+      {tab === "llm" && <CustomProvidersSettings />}
       {tab === "voice" && <VoiceSettings />}
     </div>
   );

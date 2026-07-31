@@ -8,6 +8,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
+import { tsToSeconds } from "@/lib/formatters";
 import { getThemeColors } from "@/lib/theme-colors";
 
 interface Props {
@@ -18,21 +19,6 @@ interface Props {
   tradingPair: string;
   startTime?: number;
   endTime?: number;
-}
-
-function getChartColors() {
-  const style = getComputedStyle(document.documentElement);
-  return {
-    bg: style.getPropertyValue("--chart-bg").trim() || "#0f1525",
-    grid: style.getPropertyValue("--chart-grid").trim() || "#1c2541",
-    text: style.getPropertyValue("--chart-text").trim() || "#6b7994",
-    up: style.getPropertyValue("--chart-up").trim() || "#22c55e",
-    down: style.getPropertyValue("--chart-down").trim() || "#ef4444",
-  };
-}
-
-function tsToSeconds(ts: number): number {
-  return ts > 1e12 ? Math.floor(ts / 1000) : ts;
 }
 
 function pickCandleInterval(startSec: number, endSec: number): { interval: string; limit: number } {
@@ -286,7 +272,7 @@ export function ArchivedPerformanceCharts({
     import("lightweight-charts").then((mod) => {
       if (cancelled || !chartContainerRef.current) return;
 
-      const colors = getChartColors();
+      const colors = getThemeColors();
 
       const chart = mod.createChart(chartContainerRef.current, {
         autoSize: true,

@@ -1,6 +1,7 @@
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useEffect, useState } from "react";
 import type { RoutineInstance } from "@/lib/api";
+import { authFetch } from "@/lib/auth-token";
 
 interface Props {
   instance: RoutineInstance;
@@ -15,28 +16,43 @@ interface KpiSection {
 }
 
 function AuthImage({ src, alt, className }: { src: string; alt: string; className?: string }) {
-  const [blobUrl, setBlobUrl] = useState<string | null>(null);
+  // Result is keyed by src so a src change derives back to "loading" without
+  // resetting state inside the effect. blobUrl === null means the fetch failed.
+  const [result, setResult] = useState<{ src: string; blobUrl: string | null } | null>(null);
 
   useEffect(() => {
     let revoke: string | null = null;
-    const token = localStorage.getItem("condor_token");
-    fetch(src, {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    })
+    authFetch(src)
       .then((res) => (res.ok ? res.blob() : Promise.reject()))
       .then((blob) => {
         const url = URL.createObjectURL(blob);
         revoke = url;
-        setBlobUrl(url);
+        setResult({ src, blobUrl: url });
       })
-      .catch(() => setBlobUrl(null));
+      .catch(() => setResult({ src, blobUrl: null }));
     return () => {
       if (revoke) URL.revokeObjectURL(revoke);
     };
   }, [src]);
 
-  if (!blobUrl) return null;
-  return <img src={blobUrl} alt={alt} className={className} />;
+  const settled = result?.src === src ? result : null;
+  // Reserve the image box while loading so content below doesn't shift (CLS)
+  if (!settled) {
+    return (
+      <div
+        className={`aspect-[2/1] animate-pulse bg-[var(--color-border)]/30 ${className ?? ""}`}
+      />
+    );
+  }
+  // Failed fetch: collapse like before, only after the request settles
+  if (!settled.blobUrl) return null;
+  return (
+    <img
+      src={settled.blobUrl}
+      alt={alt}
+      className={`aspect-[2/1] object-contain ${className ?? ""}`}
+    />
+  );
 }
 
 function KpiBar({ kpis }: { kpis: KpiSection[] }) {

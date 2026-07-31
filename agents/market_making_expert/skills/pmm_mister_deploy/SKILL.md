@@ -1,0 +1,371 @@
+---
+name: pmm_mister_deploy
+description: End-to-end playbook for deploying a pmm_mister bot on a token — regime
+  analysis, profile selection, config creation, and bot deployment.
+when_to_use: When asked to set up, deploy, or launch a market making bot on a token/pair.
+  This is the autonomous deployment flow — follow it when running as a delegate task.
+created: '2026-07-02T10:31:11Z'
+source: agent:market_making_expert
+---
+
+# PMM Mister Deploy Playbook
+
+Full end-to-end flow for deploying a `pmm_mister` market making bot on a given
+pair. Follow these steps in order. You are running as a background delegate —
+no user confirmation mid-flow. Be decisive and complete the deployment.
+
+---
+
+## Config Layers — TWO separate stores, they CAN diverge
+
+When managing a running pmm_mister bot, there are **two independent config stores**:
+
+| Layer | What it is | How to modify |
+|---|---|---|
+| **Saved controller config** | The template on disk (used for future deployments) | `manage_controllers(action="upsert", target="config", ...)` |
+| **Live bot config** | The running bot's in-memory config (affects live behavior immediately) | `manage_bots(action="update_config", bot_name=..., config_name=..., config_data=...)` |
+
+**Critical rule:** these stores are independent. Updating one does NOT update the other. When asked to update a parameter:
+- Update **both** unless the user explicitly wants only one layer changed.
+- Always verify which bots are running with `manage_bots(action="status")` before updating live config.
+- The live bot name is NOT the config name — discover it with `manage_bots(action="status")` or check `manage_bots(action="logs", bot_name=<guess>)` which returns available bots on 404.
+- Use `confirm_override=True` for both `manage_controllers` upsert and `manage_bots` update_config.
+
+---
+
+## Step 1 — Gather market data
+
+Fetch candles for the target pair (1h, last 7 days) and current price:
+
+```
+get_market_data(data_type="candles", connector_name=<connector>, trading_pair=<pair>, interval="1h", days=7)
+get_market_data(data_type="prices", connector_name=<connector>, trading_pairs=[<pair>])
+```
+
+If the pair is on a perpetual connector, also fetch funding rate:
+```
+get_market_data(data_type="funding_rate", connector_name=<connector_perpetual>, trading_pair=<pair>)
+```
+
+---
+
+## Step 2 — Classify regime
+
+Use the candle data to classify the current regime:
+
+- **Quiet / low-vol ranging** (ADX < 18, tight BBW, small candles) → **Aggressive**
+- **Normal ranging** (ADX < 25, moderate BBW) → **Balanced**
+- **Volatile / trending / uncertain** (ADX > 25, expanding ATR, volume surge, large candles) → **Conservative**
+
+When in doubt, default to **Balanced**.
+
+---
+
+## Step 3 — Read the matching profile template
+
+Load the profile companion file from the `pmm_config_playbook` skill:
+
+```
+manage_skill(action="read_file", name="pmm_config_playbook", file="config_<profile>.md")
+```
+
+Where `<profile>` is `aggressive`, `balanced`, or `conservative`.
+
+---
+
+## Step 4 — Adapt the config
+
+Take the JSON block from the template and substitute the actual values:
+
+- `connector_name` — the target connector
+- `trading_pair` — the target pair
+- `total_amount_quote` — from the task context (user-specified or strategy risk limit)
+- `leverage` — from task context; if not specified use the template default; always 1 for spot
+
+Also validate:
+- **Min order size**: `total_amount_quote × portfolio_allocation ÷ number_of_levels` must exceed the exchange's minimum notional (typically $5–10 on Binance spot, $20 on perps). If not, increase `total_amount_quote` or reduce levels.
+- **Spreads vs fees**: `take_profit` must exceed round-trip maker fee (e.g. if fee is 0.02%, take_profit ≥ 0.04%).
+
+### Key parameter notes
+
+**`price_distance_tolerance`** — re-entry gate after a fill:
+- If the last buy fill was at price X, the bot will NOT place a new buy order until price drops to `X × (1 - price_distance_tolerance)`.
+- Example: fill at $100, price_distance=0.002 → next buy only when price ≤ $99.80.
+- This prevents stacking orders at the same price level in a slow drift. Higher values = more price separation required between fills, fewer entries in choppy sideways action.
+- Default 0.0005 (0.05%) is tight. Use 0.002 (0.2%) for more separation.
+
+**`buy_cooldown_time` / `sell_cooldown_time`** — time gate after a fill:
+- After a fill, no new order is placed on that level for this many seconds, regardless of price.
+- Works in tandem with price_distance_tolerance: both conditions must pass before re-entry.
+- Default 10s is aggressive. Use 45s to reduce chasing in fast markets.
+
+**`max_active_executors_by_level`** — max simultaneous open orders per level:
+- Each unfilled order at a given spread level counts as one active executor.
+- After a fill, the slot frees up (after cooldown) — up to this cap.
+
+---
+
+## Step 5 — Upsert the controller config
+
+```
+manage_controllers(
+  action="upsert",
+  target="config",
+  controller_name="pmm_mister",
+  config_name="<auto-generated: NNN_pmm_<connector>_<pair>>",
+  config_data=<adapted config dict>
+)
+```
+
+---
+
+## Step 6 — Deploy the bot
+
+```
+manage_bots(
+  action="deploy",
+  bot_name="pmm_<pair>_<timestamp>",
+  controllers_config=["<config_name from step 5>"],
+  account_name="master_account"
+)
+```
+
+---
+
+## Step 7 — Verify and journal
+
+After deployment:
+1. Call `manage_bots(action="status")` to confirm the bot is running.
+2. Write a journal entry summarizing what was deployed:
+   - pair, connector, profile chosen, regime rationale, key params (spreads, allocation, TP, effectivization times, global SL/TP)
+
+---
+
+## Summary output
+
+When the task completes, return a concise summary:
+- regime detected and profile chosen
+- final config key params (spreads, allocation, take_profit, effectivization times, global SL/TP if enabled)
+- bot name and status
+- any validation warnings (e.g. near min order size)
+
+---
+
+## Active Inventory Management — Base Allocation Levers
+
+`min_base_pct`, `max_base_pct`, and `target_base_pct` are not just deploy-time settings.
+They are **primary active management levers** — the main way to express a market opinion
+or unblock a stuck bot without redeploying. They can be mutated live at any time via
+`manage_bots(action="update_config", ...)` with immediate effect.
+
+**Default baseline:** `target_base_pct=0.5`, `min_base_pct=0.3`, `max_base_pct=0.7`
+(symmetric, no directional bias, bot quotes both sides freely)
+
+Constraint that must always hold: `min_base_pct < target_base_pct < max_base_pct`
+
+---
+
+### Scenario 1 — Bot stuck buying (inventory piling up in base)
+
+**Symptoms:** Market drifting down, `position_profit_protection` is blocking new sells,
+base inventory accumulating above `max_base_pct`, bot effectively stopped quoting.
+
+**Cause:** The bot's ceiling (`max_base_pct`) is too low for the current inventory level.
+Once base holdings exceed `max_base_pct`, buys are suppressed and the bot stalls.
+
+**Fix — raise all three values upward:**
+```
+target_base_pct: 0.5 → 0.65
+min_base_pct:    0.3 → 0.45
+max_base_pct:    0.7 → 0.85
+```
+This tells the controller "holding more base is acceptable now" — it can resume quoting
+within the new band and will skew toward selling to reach the new (higher) target.
+
+**When to apply:** bot is clearly accumulating inventory in a downtrend and has stopped
+placing meaningful sell orders, or `position_profit_protection` is trapping base exposure.
+
+---
+
+### Scenario 2 — Position carrying unrealized profit, want to realize it
+
+**Symptoms:** Bot is long and in profit, but the position is sitting in "hold" mode
+(effectivization expired, waiting for global TP). You want to actively skew the bot
+toward selling rather than waiting passively.
+
+**Fix — lower all three values downward:**
+```
+target_base_pct: 0.5 → 0.35
+min_base_pct:    0.3 → 0.15
+max_base_pct:    0.7 → 0.55
+```
+This shifts the target to quote-heavy. The controller will treat current base holdings
+as overweight and skew its quoting aggressively toward sells, effectively draining the
+position into the market without a hard close.
+
+**When to apply:** accumulated unrealized profit you want to realize progressively,
+or you want to reduce base exposure after a strong move up without a hard `manual_kill_switch`.
+
+---
+
+### Scenario 3 — Directional bias (bullish or bearish view)
+
+Use these params to encode a market opinion without changing spreads or allocation size:
+
+**Bullish (want to hold more base, take more upside risk):**
+```
+target_base_pct: 0.5 → 0.60
+min_base_pct:    0.3 → 0.40
+max_base_pct:    0.7 → 0.80
+```
+Bot will buy more aggressively and be slower to sell, accumulating base as the market rises.
+
+**Bearish (want to reduce base exposure, stay quote-heavy):**
+```
+target_base_pct: 0.5 → 0.40
+min_base_pct:    0.3 → 0.20
+max_base_pct:    0.7 → 0.60
+```
+Bot will sell more aggressively and be slower to buy, staying lighter on base.
+
+**When to apply:** regime has shifted (e.g. trending up → raise target; breaking down → lower
+target), or user expresses a directional view and wants the bot to lean into it.
+
+---
+
+### How to apply live (no redeploy needed)
+
+Always update **both** the live bot and the saved config:
+
+```python
+# 1. Update the live bot (immediate effect)
+manage_bots(
+  action="update_config",
+  bot_name=<running_bot_name>,
+  config_name=<controller_config_name>,
+  config_data={
+    "target_base_pct": <new_value>,
+    "min_base_pct": <new_value>,
+    "max_base_pct": <new_value>
+  },
+  confirm_override=True
+)
+
+# 2. Persist to saved config (so a future redeploy uses the same values)
+manage_controllers(
+  action="upsert",
+  target="config",
+  controller_name="pmm_mister",
+  config_name=<controller_config_name>,
+  config_data={..., "target_base_pct": <new>, "min_base_pct": <new>, "max_base_pct": <new>},
+  confirm_override=True
+)
+```
+
+**Proactive monitoring:** when checking bot health (e.g. via the `mm_bot_report` skill),
+always note the current base/quote split from `get_portfolio_overview`. If base holdings
+are near or above `max_base_pct`, flag it and suggest raising the band or lowering target.
+If the bot is far below `min_base_pct`, flag it and suggest lowering the band.
+
+---
+
+## Advanced: Multi-Controller A/B Comparison
+
+> **⚠️ Hard constraint: controllers are fixed at deploy time.**
+> You CANNOT add a new controller to an already-running bot. The `controllers_config`
+> list is set when the bot is deployed and is immutable for that bot's lifetime.
+> `manage_bots update_config` and `stop/start_controllers` only operate on controllers
+> that were included at deploy time — you cannot inject new ones into a live bot.
+>
+> **Plan A/B testing BEFORE you deploy.** If you think you may want to compare configs
+> later, include multiple controllers from the start. For a bot that is already running,
+> the only lever is mutating the configs of its existing controllers.
+
+Instead of deploying one controller per bot and mutating its config over time to find best
+parameters, you can deploy **multiple controllers with different parameter sets inside the
+same bot**. This enables a live A/B comparison — each controller runs with its own config
+on an allocated slice of capital, so you observe which params perform better in real market
+conditions **simultaneously**.
+
+This is strictly better than sequential testing: sequential tests run under different market
+conditions, making results incomparable. Simultaneous controllers share the same conditions.
+
+### When to use this pattern
+
+- User wants to compare two spread profiles (e.g. tight vs wide) on the same pair
+- User wants to A/B test a single param (e.g. cooldown_time=10s vs 45s, price_distance=0.0005 vs 0.002)
+- User says "try different configs and see which works better"
+
+> **Timing:** raise this option with the user BEFORE deploying. Once the bot is running,
+> A/B is no longer possible without a full redeploy. Ask the user upfront: "Do you want
+> to A/B test two parameter sets simultaneously?"
+
+### How to set it up (plan at deploy time)
+
+**1. Create variant configs** — upsert two (or more) controllers with the differing params.
+Use a naming convention that makes the variant clear:
+
+```
+NNN_pmm_<connector>_<PAIR>_variantA   ← e.g. tight spreads, short cooldown
+NNN_pmm_<connector>_<PAIR>_variantB   ← e.g. wider spreads, longer cooldown
+```
+
+Split `total_amount_quote` proportionally across variants (e.g. $500 each if total budget is $1000).
+Each controller's allocation is independent — they do NOT share capital.
+
+**2. Deploy a single bot with both controllers:**
+
+```
+manage_bots(
+  action="deploy",
+  bot_name="pmm_<pair>_ab_<timestamp>",
+  controllers_config=[
+    "NNN_pmm_<connector>_<PAIR>_variantA",
+    "NNN_pmm_<connector>_<PAIR>_variantB"
+  ],
+  account_name="master_account"
+)
+```
+
+`manage_bots deploy` accepts a list — both controllers run inside the same bot process,
+each with its own executor set and capital allocation.
+
+**3. Verify both controllers are active:**
+
+```
+manage_bots(action="status")
+manage_executors(action="list", bot_name=<bot_name>)
+```
+
+Confirm executors appear for both config names.
+
+### For a bot that is already running
+
+You cannot add new controllers. The only levers are:
+
+- **Mutate an existing controller's config** via `manage_bots(action="update_config", ...)` —
+  changes take effect live but you can only change params of controllers already in the bot.
+- **Stop one controller** (if the bot has multiple) via `stop_controllers` to effectively
+  pause a variant — but this is not the same as replacing it with a new one.
+- **Redeploy** — stop the running bot and deploy a new one with the desired
+  `controllers_config` list if you need a true A/B setup that wasn't planned at launch.
+
+### Comparison and follow-up
+
+After sufficient runtime (typically 24–48h), compare performance:
+- PnL per controller (via executor history filtered by controller config name)
+- Fill rate, TP hit rate, inventory drift
+
+Promote the winner: upsert its config as the canonical (non-variant) name and redeploy a
+clean single-controller bot, or simply stop the losing variant via `manage_controllers`
+while the bot keeps running.
+
+### Guardrails
+
+- Keep total capital the same as a single-controller deploy — just split it. Do NOT double
+  the budget to run the comparison.
+- Validate min order size for **each** variant independently (smaller per-controller
+  allocation means smaller orders).
+- Name variants clearly so the journal and status output are unambiguous.
+- Prefer comparing ONE parameter at a time. Changing multiple params between variants
+  makes it impossible to attribute the difference in performance.

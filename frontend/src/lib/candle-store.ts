@@ -265,18 +265,25 @@ class CandleStore {
   }
 
   private _enforceMaxCollections(): void {
-    while (this.collections.size >= MAX_COLLECTIONS && this.accessOrder.length > 0) {
-      const oldest = this.accessOrder.shift()!;
-      // Don't evict collections with active subscribers
-      const sub = this.subscriptions.get(oldest);
-      if (sub && sub.refCount > 0) {
-        this.accessOrder.push(oldest); // put it back
-        // If all are active, just break to avoid infinite loop
-        break;
+    // Walk a snapshot of the LRU order (front = oldest). Evict the oldest
+    // collections with no active subscribers until we're back under the cap,
+    // skipping (never deleting) collections that still have subscribers. The
+    // snapshot guarantees termination; if every remaining entry is active we
+    // simply stop without evicting anything.
+    if (this.collections.size < MAX_COLLECTIONS) return;
+    const survivors: string[] = [];
+    for (const key of this.accessOrder) {
+      if (this.collections.size >= MAX_COLLECTIONS) {
+        const sub = this.subscriptions.get(key);
+        if (!sub || sub.refCount === 0) {
+          this.collections.delete(key);
+          this.listeners.delete(key);
+          continue; // drop from accessOrder too
+        }
       }
-      this.collections.delete(oldest);
-      this.listeners.delete(oldest);
+      survivors.push(key); // active or already under cap → keep
     }
+    this.accessOrder = survivors;
   }
 
   private _cleanupIdle(): void {

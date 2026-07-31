@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Loader2, X } from "lucide-react";
 import type { ToolCall } from "@/hooks/useChatSocket";
+import { formatToolName } from "@/lib/formatters";
 
 function StatusIcon({ status }: { status: string }) {
   switch (status) {
@@ -11,12 +12,6 @@ function StatusIcon({ status }: { status: string }) {
     default:
       return <Loader2 className="h-3 w-3 animate-spin text-[var(--color-text-muted)]" />;
   }
-}
-
-function formatToolName(title: string): string {
-  // Strip MCP prefixes like mcp__mcp-hummingbot__get_portfolio
-  const name = title.includes("__") ? title.split("__").pop()! : title;
-  return name.replace(/_/g, " ");
 }
 
 export function ToolCallStatus({ toolCalls }: { toolCalls: ToolCall[] }) {

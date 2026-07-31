@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api } from "@/lib/api";
 
 // ── Start Session Dialog ──
@@ -19,16 +20,19 @@ export function StartSessionDialog({
   open,
   onClose,
   slug,
+  sslug,
   agentConfig,
   defaultContext,
 }: {
   open: boolean;
   onClose: () => void;
   slug: string;
+  sslug: string;
   agentConfig: Record<string, unknown>;
   defaultContext: string;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(open, onClose);
   const riskDefaults = (agentConfig.risk_limits || {}) as Record<string, unknown>;
 
   const [executionMode, setExecutionMode] = useState<"dry_run" | "run_once" | "loop">("loop");
@@ -59,10 +63,10 @@ export function StartSessionDialog({
           max_drawdown_pct: Number(maxDrawdown),
         },
       };
-      return api.startAgent(slug, config, context);
+      return api.startStrategy(slug, sslug, config, context);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
       onClose();
     },
   });
@@ -81,7 +85,7 @@ export function StartSessionDialog({
       >
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold text-[var(--color-text)]">Start New Session</h2>
-          <button onClick={onClose} className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]">
+          <button onClick={onClose} className="text-[var(--color-text-muted)] hover:text-[var(--color-text)]" title="Close" aria-label="Close">
             <X className="h-4 w-4" />
           </button>
         </div>
@@ -252,6 +256,9 @@ export function StartSessionDialog({
                   : "Start Session"}
           </button>
         </div>
+        {startMut.isError && (
+          <p className="mt-3 text-xs text-red-400">{startMut.error.message}</p>
+        )}
       </div>
     </div>
   );
@@ -259,24 +266,56 @@ export function StartSessionDialog({
 
 // ── Agent Controls ──
 
-export function AgentControls({ slug, status, defaultContext, agentConfig }: { slug: string; status: string; defaultContext: string; agentConfig: Record<string, unknown> }) {
+export function AgentControls({ slug, sslug, status, defaultContext, agentConfig }: { slug: string; sslug: string; status: string; defaultContext: string; agentConfig: Record<string, unknown> }) {
   const queryClient = useQueryClient();
   const [showStartDialog, setShowStartDialog] = useState(false);
+  const [confirmStop, setConfirmStop] = useState(false);
 
   const stopMut = useMutation({
-    mutationFn: () => api.stopAgent(slug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    mutationFn: () => api.stopStrategy(slug, sslug),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] });
+      setConfirmStop(false);
+    },
   });
   const pauseMut = useMutation({
-    mutationFn: () => api.pauseAgent(slug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    mutationFn: () => api.pauseStrategy(slug, sslug),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
   });
   const resumeMut = useMutation({
-    mutationFn: () => api.resumeAgent(slug),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+    mutationFn: () => api.resumeStrategy(slug, sslug),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["strategy", slug, sslug] }),
   });
 
   const loading = stopMut.isPending || pauseMut.isPending || resumeMut.isPending;
+  const controlError = stopMut.error || pauseMut.error || resumeMut.error;
+
+  const stopControls = confirmStop ? (
+    <div className="flex items-center gap-1.5">
+      <button
+        onClick={() => stopMut.mutate()}
+        disabled={stopMut.isPending}
+        className="rounded-lg bg-red-600 px-3 py-1.5 text-xs font-semibold text-white transition-all hover:bg-red-500 disabled:opacity-40"
+      >
+        {stopMut.isPending ? "Stopping..." : "Confirm"}
+      </button>
+      <button
+        onClick={() => setConfirmStop(false)}
+        disabled={stopMut.isPending}
+        className="rounded-lg px-3 py-1.5 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)] disabled:opacity-40"
+      >
+        Cancel
+      </button>
+    </div>
+  ) : (
+    <button
+      onClick={() => setConfirmStop(true)}
+      disabled={loading}
+      className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:opacity-40"
+    >
+      <Square className="h-3.5 w-3.5" /> Stop
+    </button>
+  );
 
   return (
     <>
@@ -297,13 +336,7 @@ export function AgentControls({ slug, status, defaultContext, agentConfig }: { s
             >
               <Pause className="h-3.5 w-3.5" /> Pause
             </button>
-            <button
-              onClick={() => stopMut.mutate()}
-              disabled={loading}
-              className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:opacity-40"
-            >
-              <Square className="h-3.5 w-3.5" /> Stop
-            </button>
+            {stopControls}
           </>
         ) : status === "paused" ? (
           <>
@@ -314,21 +347,19 @@ export function AgentControls({ slug, status, defaultContext, agentConfig }: { s
             >
               <Play className="h-3.5 w-3.5" /> Resume
             </button>
-            <button
-              onClick={() => stopMut.mutate()}
-              disabled={loading}
-              className="flex items-center gap-1.5 rounded-lg border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-xs font-semibold text-red-400 transition-all hover:bg-red-500/20 disabled:opacity-40"
-            >
-              <Square className="h-3.5 w-3.5" /> Stop
-            </button>
+            {stopControls}
           </>
         ) : null}
+        {controlError && (
+          <p className="text-xs text-red-400">{controlError.message}</p>
+        )}
       </div>
 
       <StartSessionDialog
         open={showStartDialog}
         onClose={() => setShowStartDialog(false)}
         slug={slug}
+        sslug={sslug}
         agentConfig={agentConfig}
         defaultContext={defaultContext}
       />

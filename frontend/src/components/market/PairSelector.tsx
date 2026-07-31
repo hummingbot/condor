@@ -3,6 +3,8 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, Search, X } from "lucide-react";
 
 import { api } from "@/lib/api";
+import { formatCompactVolume } from "@/lib/formatters";
+import { useTickers } from "./useTickers";
 
 interface PairSelectorProps {
   server: string;
@@ -33,10 +35,20 @@ export function PairSelector({
     staleTime: 5 * 60 * 1000,
   });
 
-  const pairs = useMemo(
-    () => rulesData?.rules?.map((r) => r.trading_pair).sort() ?? [],
-    [rulesData],
-  );
+  const { byPair, rankByPair, hasTickers } = useTickers(server, connector);
+
+  // Tradable pairs come from trading rules; tickers only decide the order and the
+  // volume badge, so the selector still works on servers without /market-data/tickers.
+  const pairs = useMemo(() => {
+    const list = rulesData?.rules?.map((r) => r.trading_pair) ?? [];
+    if (!hasTickers) return list.sort();
+    const unranked = rankByPair.size;
+    return list.sort((a, b) => {
+      const ra = rankByPair.get(a) ?? unranked;
+      const rb = rankByPair.get(b) ?? unranked;
+      return ra !== rb ? ra - rb : a.localeCompare(b);
+    });
+  }, [rulesData, hasTickers, rankByPair]);
 
   // Group pairs by quote asset
   const quoteGroups = useMemo(() => {
@@ -126,7 +138,7 @@ export function PairSelector({
     <div ref={containerRef} className="relative">
       <button
         onClick={() => setOpen(!open)}
-        className="group flex items-center gap-1 px-4 py-2.5 transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none"
+        className="group flex items-center gap-1 px-4 py-2.5 transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)]"
       >
         {isLoading ? (
           <span className="text-sm text-[var(--color-text-muted)]">Loading...</span>
@@ -156,7 +168,7 @@ export function PairSelector({
               className="flex-1 bg-transparent text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
             />
             {search && (
-              <button onClick={() => setSearch("")}>
+              <button onClick={() => setSearch("")} title="Clear search" aria-label="Clear search">
                 <X className="h-3.5 w-3.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]" />
               </button>
             )}
@@ -186,6 +198,7 @@ export function PairSelector({
             ) : (
               filtered.map((p, i) => {
                 const [base, quote] = p.split("-");
+                const usdVolume = byPair.get(p)?.usd_volume;
                 return (
                   <button
                     key={p}
@@ -194,7 +207,7 @@ export function PairSelector({
                       onChange(p);
                       setOpen(false);
                     }}
-                    className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm ${
+                    className={`flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-sm ${
                       i === activeIndex
                         ? "bg-[var(--color-primary)]/10 text-[var(--color-text)]"
                         : p === value
@@ -203,13 +216,20 @@ export function PairSelector({
                     }`}
                   >
                     <span><span className="font-medium">{base}</span><span className="text-[var(--color-text-muted)]">-{quote}</span></span>
+                    {usdVolume != null && (
+                      <span className="shrink-0 font-mono text-[11px] tabular-nums text-[var(--color-text-muted)]">
+                        {formatCompactVolume(usdVolume)}
+                      </span>
+                    )}
                   </button>
                 );
               })
             )}
             {filtered.length === MAX_VISIBLE && (
               <p className="px-3 py-1.5 text-center text-xs text-[var(--color-text-muted)]">
-                Type to search more...
+                {hasTickers && !search
+                  ? `Top ${MAX_VISIBLE} by 24h volume — type to search more...`
+                  : "Type to search more..."}
               </p>
             )}
           </div>

@@ -5,7 +5,8 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from config_manager import get_config_manager
+from condor.fetchers.bot_performance import extract_snapshots as _extract_snapshots
+from condor.fetchers.bot_performance import fetch_all_bot_performance
 from condor.web.auth import get_current_user
 from condor.web.models import (
     BotRunInfo,
@@ -15,6 +16,7 @@ from condor.web.models import (
     ControllerPerformanceSnapshot,
     WebUser,
 )
+from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -124,25 +126,11 @@ async def get_bot_runs(
     async def _fetch_perf() -> dict[str, dict]:
         """Fetch latest controller performance and aggregate by bot_name."""
         try:
-            result = await client.bot_orchestration.get_latest_controller_performance()
-            snapshots = _extract_snapshots(result)
-            agg: dict[str, dict] = {}
-            for snap in snapshots:
-                bn = snap.get("bot_name", "")
-                if not bn:
-                    continue
-                perf = snap.get("performance", snap)
-                if not isinstance(perf, dict):
-                    perf = {}
-                if bn not in agg:
-                    agg[bn] = {"realized_pnl_quote": 0.0, "unrealized_pnl_quote": 0.0, "volume_traded": 0.0, "num_controllers": 0}
-                agg[bn]["realized_pnl_quote"] += float(perf.get("realized_pnl_quote", 0) or 0)
-                agg[bn]["unrealized_pnl_quote"] += float(perf.get("unrealized_pnl_quote", 0) or 0)
-                agg[bn]["volume_traded"] += float(perf.get("volume_traded", 0) or 0)
-                agg[bn]["num_controllers"] += 1
-            return agg
+            return await fetch_all_bot_performance(client)
         except Exception:
-            logger.debug("Could not fetch controller performance for bot runs enrichment")
+            logger.debug(
+                "Could not fetch controller performance for bot runs enrichment"
+            )
             return {}
 
     try:
@@ -223,7 +211,9 @@ async def get_latest_controller_performance(
             bot_name=bot_name,
         )
     except Exception as e:
-        logger.warning("Failed to fetch latest controller performance from '%s': %s", name, e)
+        logger.warning(
+            "Failed to fetch latest controller performance from '%s': %s", name, e
+        )
         return ControllerPerformanceLatestResponse(
             server_online=False,
             error_hint=f"Connection error: {e}",
@@ -272,7 +262,9 @@ async def get_controller_performance_history(
             cursor=cursor,
         )
     except Exception as e:
-        logger.warning("Failed to fetch controller performance history from '%s': %s", name, e)
+        logger.warning(
+            "Failed to fetch controller performance history from '%s': %s", name, e
+        )
         return ControllerPerformanceHistoryResponse(
             server_online=False,
             error_hint=f"Connection error: {e}",
@@ -288,27 +280,3 @@ async def get_controller_performance_history(
         next_cursor=next_cursor,
         interval=interval,
     )
-
-
-def _extract_snapshots(result) -> list[dict]:
-    """Normalize performance API response into a list of snapshot dicts."""
-    if isinstance(result, list):
-        return [s for s in result if isinstance(s, dict)]
-    if isinstance(result, dict):
-        data = result.get("data", result.get("snapshots", result.get("records", [])))
-        if isinstance(data, list):
-            return [s for s in data if isinstance(s, dict)]
-        if isinstance(data, dict):
-            # Could be keyed by controller_id
-            out = []
-            for key, val in data.items():
-                if isinstance(val, dict):
-                    val.setdefault("controller_id", key)
-                    out.append(val)
-                elif isinstance(val, list):
-                    for item in val:
-                        if isinstance(item, dict):
-                            item.setdefault("controller_id", key)
-                            out.append(item)
-            return out
-    return []

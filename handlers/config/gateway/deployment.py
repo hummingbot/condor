@@ -67,58 +67,23 @@ async def start_deploy_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> Non
 
 
 async def deploy_gateway_with_image(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt for passphrase before deploying Gateway"""
+    """Deploy Gateway directly with the selected image.
+
+    The Hummingbot API always runs the Gateway secured (TLS + mTLS) and manages the
+    certificates itself, using its own CONFIG_PASSWORD as the Gateway passphrase
+    (hummingbot-api SEC-048). No passphrase prompt is needed anymore.
+    """
     try:
         # Extract image tag from callback data
         image_tag = query.data.replace("gateway_deploy_image_", "")
         docker_image = f"hummingbot/gateway:{image_tag}"
 
-        # Store image and prompt for passphrase
-        context.user_data["gateway_deploy_image"] = docker_image
-        await prompt_passphrase(query, context)
+        await execute_gateway_deploy(
+            context, query.message.chat_id, query.message.message_id, docker_image
+        )
 
     except Exception as e:
         logger.error(f"Error starting deploy flow: {e}", exc_info=True)
-        await query.answer(f"❌ Error: {str(e)[:100]}")
-
-
-async def prompt_passphrase(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt user to enter passphrase for Gateway deployment"""
-    try:
-        chat_id = query.message.chat_id
-        header, server_online, _ = await build_config_message_header(
-            "🔐 Gateway Passphrase",
-            include_gateway=False,
-            chat_id=chat_id,
-            user_data=context.user_data,
-        )
-
-        docker_image = context.user_data.get(
-            "gateway_deploy_image", "hummingbot/gateway:latest"
-        )
-        image_escaped = escape_markdown_v2(docker_image)
-
-        context.user_data["awaiting_gateway_input"] = "passphrase"
-        context.user_data["gateway_message_id"] = query.message.message_id
-        context.user_data["gateway_chat_id"] = query.message.chat_id
-
-        message_text = (
-            header + f"*Image:* `{image_escaped}`\n\n"
-            "*Enter Gateway Passphrase:*\n\n"
-            "This passphrase is used by Gateway to encrypt stored wallet keys\\.\n\n"
-            "_Please send your passphrase as a message\\._"
-        )
-
-        keyboard = [[InlineKeyboardButton("« Cancel", callback_data="gateway_deploy")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.message.edit_text(
-            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
-        await query.answer()
-
-    except Exception as e:
-        logger.error(f"Error prompting passphrase: {e}", exc_info=True)
         await query.answer(f"❌ Error: {str(e)[:100]}")
 
 
@@ -127,7 +92,6 @@ async def execute_gateway_deploy(
     chat_id: int,
     message_id: int,
     docker_image: str,
-    passphrase: str,
 ) -> None:
     """Execute the actual Gateway deployment with provided config"""
     from config_manager import get_config_manager
@@ -139,12 +103,11 @@ async def execute_gateway_deploy(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
 
-        # Gateway configuration
+        # Gateway configuration. The API runs the Gateway secured and supplies the
+        # passphrase (its CONFIG_PASSWORD) and certs itself, so only image/port are sent.
         config = {
             "image": docker_image,
             "port": 15888,
-            "passphrase": passphrase,
-            "dev_mode": True,
         }
 
         # Show deploying message
@@ -427,55 +390,29 @@ async def show_gateway_logs(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 
 async def handle_deployment_input(update, context) -> None:
-    """Handle text input during gateway deployment flow"""
+    """Handle text input during gateway deployment flow (custom image entry)."""
 
     awaiting_field = context.user_data.get("awaiting_gateway_input")
     if not awaiting_field:
         return
 
-    # Delete user's input message for security (passphrase shouldn't be visible)
-    try:
-        await update.message.delete()
-    except:
-        pass
-
     try:
         message_id = context.user_data.get("gateway_message_id")
         chat_id = context.user_data.get("gateway_chat_id")
 
-        if awaiting_field == "passphrase":
-            passphrase = update.message.text.strip()
-            docker_image = context.user_data.get(
-                "gateway_deploy_image", "hummingbot/gateway:latest"
-            )
-
-            # Clear context
-            context.user_data.pop("awaiting_gateway_input", None)
-            context.user_data.pop("gateway_deploy_image", None)
-            context.user_data.pop("gateway_message_id", None)
-            context.user_data.pop("gateway_chat_id", None)
-
-            if not passphrase:
-                await update.get_bot().edit_message_text(
-                    chat_id=chat_id,
-                    message_id=message_id,
-                    text="❌ Passphrase cannot be empty",
-                    parse_mode="MarkdownV2",
-                )
-                return
-
-            # Execute deployment with provided passphrase
-            await execute_gateway_deploy(
-                context, chat_id, message_id, docker_image, passphrase
-            )
-
-        elif awaiting_field == "custom_image":
+        if awaiting_field == "custom_image":
             custom_image = update.message.text.strip()
 
             # Clear context
             context.user_data.pop("awaiting_gateway_input", None)
             context.user_data.pop("gateway_message_id", None)
             context.user_data.pop("gateway_chat_id", None)
+
+            # Remove the user's input message to keep the chat clean
+            try:
+                await update.message.delete()
+            except:
+                pass
 
             if not custom_image:
                 await update.get_bot().edit_message_text(
@@ -486,36 +423,8 @@ async def handle_deployment_input(update, context) -> None:
                 )
                 return
 
-            # Store custom image and prompt for passphrase
-            context.user_data["gateway_deploy_image"] = custom_image
-            context.user_data["gateway_message_id"] = message_id
-            context.user_data["gateway_chat_id"] = chat_id
-
-            # Create mock query for prompt_passphrase
-            class MockQuery:
-                def __init__(self, message):
-                    self.message = message
-
-                async def answer(self, *args, **kwargs):
-                    pass
-
-            class MockMessage:
-                def __init__(self, chat_id, message_id, bot):
-                    self.chat_id = chat_id
-                    self.message_id = message_id
-                    self._bot = bot
-
-                async def edit_text(self, text, **kwargs):
-                    await self._bot.edit_message_text(
-                        chat_id=self.chat_id,
-                        message_id=self.message_id,
-                        text=text,
-                        **kwargs,
-                    )
-
-            mock_message = MockMessage(chat_id, message_id, context.bot)
-            mock_query = MockQuery(mock_message)
-            await prompt_passphrase(mock_query, context)
+            # Deploy directly with the custom image (no passphrase needed)
+            await execute_gateway_deploy(context, chat_id, message_id, custom_image)
 
     except Exception as e:
         logger.error(f"Error handling deployment input: {e}", exc_info=True)

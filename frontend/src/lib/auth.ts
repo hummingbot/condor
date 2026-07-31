@@ -6,6 +6,8 @@ import {
   useState,
 } from "react";
 
+import { TOKEN_KEY, authHeaders } from "./auth-token";
+
 export interface User {
   id: number;
   username: string;
@@ -21,7 +23,6 @@ export interface AuthState {
   logout: () => void;
 }
 
-const TOKEN_KEY = "condor_token";
 const USER_KEY = "condor_user";
 
 export const AuthContext = createContext<AuthState>({
@@ -73,7 +74,7 @@ export function useAuthState(): AuthState {
   useEffect(() => {
     if (!token) return;
     fetch("/api/v1/auth/me", {
-      headers: { Authorization: `Bearer ${token}` },
+      headers: authHeaders(),
     }).then((res) => {
       if (!res.ok) {
         logout();

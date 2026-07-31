@@ -12,7 +12,6 @@ from mcp.server.fastmcp import FastMCP
 from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_bot_logs_as_table,
-    format_connector_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
     format_gateway_container_result,
@@ -27,27 +26,37 @@ from mcp_servers.hummingbot_api.schemas import (
     GatewayContainerRequest,
     GatewaySwapRequest,
     ManageExecutorsRequest,
-    SetupConnectorRequest,
 )
 from mcp_servers.hummingbot_api.settings import settings
 from mcp_servers.hummingbot_api.tools import bot_management as bot_management_tools
 from mcp_servers.hummingbot_api.tools import controllers as controllers_tools
+from mcp_servers.hummingbot_api.tools import history as history_tools
 from mcp_servers.hummingbot_api.tools import market_data as market_data_tools
 from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
-from mcp_servers.hummingbot_api.tools.account import setup_connector as setup_connector_impl
-from mcp_servers.hummingbot_api.tools.executors import manage_executors as manage_executors_impl
-from mcp_servers.hummingbot_api.tools.gateway import (
-    manage_gateway_config as manage_gateway_config_impl,
-    manage_gateway_container as manage_gateway_container_impl,
-)
-from mcp_servers.hummingbot_api.tools.gateway_clmm import explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl
-from mcp_servers.hummingbot_api.tools.gateway_swap import manage_gateway_swaps as manage_gateway_swaps_impl
-from mcp_servers.hummingbot_api.tools.geckoterminal import explore_geckoterminal as explore_geckoterminal_impl
-from mcp_servers.hummingbot_api.tools import history as history_tools
 from mcp_servers.hummingbot_api.tools.backtesting import (
     manage_backtest_tasks as manage_backtest_tasks_impl,
+)
+from mcp_servers.hummingbot_api.tools.backtesting import (
     run_backtest as run_backtest_impl,
+)
+from mcp_servers.hummingbot_api.tools.executors import (
+    manage_executors as manage_executors_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway import (
+    manage_gateway_config as manage_gateway_config_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway import (
+    manage_gateway_container as manage_gateway_container_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway_clmm import (
+    explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway_swap import (
+    manage_gateway_swaps as manage_gateway_swaps_impl,
+)
+from mcp_servers.hummingbot_api.tools.geckoterminal import (
+    explore_geckoterminal as explore_geckoterminal_impl,
 )
 
 # Configure root logger
@@ -62,56 +71,20 @@ logger = logging.getLogger("hummingbot-mcp")
 mcp = FastMCP("hummingbot-mcp")
 
 
-# Account Management Tools
-
-
-@mcp.tool()
-@handle_errors("setup/delete connector")
-async def setup_connector(
-        action: Literal["setup", "delete"] | None = None,
-        connector: str | None = None,
-        credentials: dict[str, Any] | None = None,
-        account: str | None = None,
-        confirm_override: bool | None = None,
-) -> str:
-    """Setup or delete an exchange connector for an account with credentials using progressive disclosure.
-
-    This tool guides you through the entire process of connecting an exchange with a four-step flow:
-    1. No parameters → List available exchanges
-    2. Connector only → Show required credential fields
-    3. Connector + credentials, no account → Select account from available accounts
-    4. All parameters → Connect the exchange (with override confirmation if needed)
-
-    Delete flow (action="delete"):
-    1. action="delete" only → List all accounts and their configured connectors
-    2. action="delete" + connector → Show which accounts have this connector configured
-    3. action="delete" + connector + account → Delete the credential
-
-    Args:
-        action: Action to perform. 'setup' (default) to add/update credentials, 'delete' to remove credentials.
-        connector: Exchange connector name (e.g., 'binance', 'binance_perpetual'). Leave empty to list available connectors.
-        credentials: Credentials object with required fields for the connector. Leave empty to see required fields first.
-        account: Account name to add credentials to. If not provided, prompts for account selection.
-        confirm_override: Explicit confirmation to override existing connector. Required when connector already exists.
-    """
-    request = SetupConnectorRequest(
-        action=action, connector=connector, credentials=credentials,
-        account=account, confirm_override=confirm_override,
-    )
-
-    client = await hummingbot_client.get_client()
-    result = await setup_connector_impl(client, request)
-    return format_connector_result(result)
+# Server Management Tools
+#
+# Connecting/removing exchange API keys is intentionally NOT exposed here.
+# Keys are managed exclusively through the Condor web dashboard (Settings → Keys).
 
 
 @mcp.tool()
 @handle_errors("configure server")
 async def configure_server(
-        name: str | None = None,
-        host: str | None = None,
-        port: int | None = None,
-        username: str | None = None,
-        password: str | None = None,
+    name: str | None = None,
+    host: str | None = None,
+    port: int | None = None,
+    username: str | None = None,
+    password: str | None = None,
 ) -> str:
     """Configure the active Hummingbot API server connection.
 
@@ -131,7 +104,13 @@ async def configure_server(
     from mcp_servers.hummingbot_api.settings import ServerConfig, save_server_config
 
     # No params → show active server (use in-memory settings which include CLI overrides)
-    if name is None and host is None and port is None and username is None and password is None:
+    if (
+        name is None
+        and host is None
+        and port is None
+        and username is None
+        and password is None
+    ):
         return (
             f"Active Server:\n\n"
             f"  Name: {settings.server_name}\n"
@@ -141,6 +120,7 @@ async def configure_server(
 
     # Build new config with partial updates (use in-memory settings, not disk)
     from urllib.parse import urlparse
+
     parsed = urlparse(settings.api_url)
     current_host = parsed.hostname or "localhost"
     current_port = parsed.port or 8000
@@ -182,14 +162,14 @@ async def configure_server(
 @mcp.tool()
 @handle_errors("get portfolio overview")
 async def get_portfolio_overview(
-        account_names: list[str] | None = None,
-        connector_names: list[str] | None = None,
-        include_balances: bool = True,
-        include_perp_positions: bool = True,
-        include_lp_positions: bool = True,
-        include_active_orders: bool = True,
-        as_distribution: bool = False,
-        refresh: bool = True,
+    account_names: list[str] | None = None,
+    connector_names: list[str] | None = None,
+    include_balances: bool = True,
+    include_perp_positions: bool = True,
+    include_lp_positions: bool = True,
+    include_active_orders: bool = True,
+    as_distribution: bool = False,
+    refresh: bool = True,
 ) -> str:
     """Get a unified portfolio overview with balances, perpetual positions, LP positions, and active orders.
 
@@ -223,8 +203,7 @@ async def get_portfolio_overview(
     # Handle distribution mode separately
     if as_distribution:
         result = await client.portfolio.get_distribution(
-            account_names=account_names,
-            connector_names=connector_names
+            account_names=account_names, connector_names=connector_names
         )
         return f"Portfolio Distribution:\n{result}"
 
@@ -249,11 +228,11 @@ async def get_portfolio_overview(
 @mcp.tool()
 @handle_errors("set position mode and leverage")
 async def set_account_position_mode_and_leverage(
-        account_name: str,
-        connector_name: str,
-        trading_pair: str | None = None,
-        position_mode: str | None = None,
-        leverage: int | None = None,
+    account_name: str,
+    connector_name: str,
+    trading_pair: str | None = None,
+    position_mode: str | None = None,
+    leverage: int | None = None,
 ) -> str:
     """Set position mode and leverage for an account on a specific exchange. If position mode is not specified, will only
     set the leverage. If leverage is not specified, will only set the position mode.
@@ -287,18 +266,18 @@ async def set_account_position_mode_and_leverage(
 @mcp.tool()
 @handle_errors("search history")
 async def search_history(
-        data_type: Literal["orders", "perp_positions", "clmm_positions"],
-        account_names: list[str] | None = None,
-        connector_names: list[str] | None = None,
-        trading_pairs: list[str] | None = None,
-        status: str | None = None,
-        start_time: int | None = None,
-        end_time: int | None = None,
-        limit: int = 50,
-        offset: int = 0,
-        network: str | None = None,
-        wallet_address: str | None = None,
-        position_addresses: list[str] | None = None,
+    data_type: Literal["orders", "perp_positions", "clmm_positions"],
+    account_names: list[str] | None = None,
+    connector_names: list[str] | None = None,
+    trading_pairs: list[str] | None = None,
+    status: str | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+    network: str | None = None,
+    wallet_address: str | None = None,
+    position_addresses: list[str] | None = None,
 ) -> str:
     """Search historical data from the backend database.
 
@@ -357,16 +336,24 @@ async def search_history(
 @mcp.tool()
 @handle_errors("get market data")
 async def get_market_data(
-        data_type: Literal["prices", "candles", "funding_rate", "order_book"],
-        connector_name: str,
-        trading_pairs: list[str] | None = None,
-        trading_pair: str | None = None,
-        interval: str = "1h",
-        days: int = 30,
-        query_type: Literal[
-            "snapshot", "volume_for_price", "price_for_volume", "quote_volume_for_price", "price_for_quote_volume"] | None = None,
-        query_value: float | None = None,
-        is_buy: bool = True,
+    data_type: Literal["prices", "candles", "funding_rate", "order_book"],
+    connector_name: str,
+    trading_pairs: list[str] | None = None,
+    trading_pair: str | None = None,
+    interval: str = "1h",
+    days: int = 30,
+    query_type: (
+        Literal[
+            "snapshot",
+            "volume_for_price",
+            "price_for_volume",
+            "quote_volume_for_price",
+            "price_for_quote_volume",
+        ]
+        | None
+    ) = None,
+    query_value: float | None = None,
+    is_buy: bool = True,
 ) -> str:
     """Get market data: prices, candles, funding rates, or order book data.
 
@@ -394,7 +381,9 @@ async def get_market_data(
         if not trading_pairs:
             return "Error: 'trading_pairs' is required for data_type='prices'"
         result = await market_data_tools.get_prices(
-            client=client, connector_name=connector_name, trading_pairs=trading_pairs,
+            client=client,
+            connector_name=connector_name,
+            trading_pairs=trading_pairs,
         )
         return (
             f"Latest Prices for {result['connector_name']}:\n"
@@ -406,8 +395,11 @@ async def get_market_data(
         if not trading_pair:
             return "Error: 'trading_pair' is required for data_type='candles'"
         result = await market_data_tools.get_candles(
-            client=client, connector_name=connector_name,
-            trading_pair=trading_pair, interval=interval, days=days,
+            client=client,
+            connector_name=connector_name,
+            trading_pair=trading_pair,
+            interval=interval,
+            days=days,
         )
         return (
             f"Candles for {result['trading_pair']} on {result['connector_name']}:\n"
@@ -420,7 +412,9 @@ async def get_market_data(
         if not trading_pair:
             return "Error: 'trading_pair' is required for data_type='funding_rate'"
         result = await market_data_tools.get_funding_rate(
-            client=client, connector_name=connector_name, trading_pair=trading_pair,
+            client=client,
+            connector_name=connector_name,
+            trading_pair=trading_pair,
         )
         return (
             f"Funding Rate for {result['trading_pair']} on {result['connector_name']}:\n\n"
@@ -434,8 +428,12 @@ async def get_market_data(
         if not trading_pair:
             return "Error: 'trading_pair' is required for data_type='order_book'"
         result = await market_data_tools.get_order_book(
-            client=client, connector_name=connector_name, trading_pair=trading_pair,
-            query_type=query_type or "snapshot", query_value=query_value, is_buy=is_buy,
+            client=client,
+            connector_name=connector_name,
+            trading_pair=trading_pair,
+            query_type=query_type or "snapshot",
+            query_value=query_value,
+            is_buy=is_buy,
         )
         if result["query_type"] == "snapshot":
             return (
@@ -460,15 +458,17 @@ async def get_market_data(
 @mcp.tool()
 @handle_errors("manage controllers")
 async def manage_controllers(
-        action: Literal["list", "describe", "upsert", "delete"],
-        target: Literal["controller", "config"] | None = None,
-        controller_type: Literal["directional_trading", "market_making", "generic"] | None = None,
-        controller_name: str | None = None,
-        controller_code: str | None = None,
-        config_name: str | None = None,
-        config_data: dict[str, Any] | None = None,
-        confirm_override: bool = False,
-        include_code: bool = False,
+    action: Literal["list", "describe", "upsert", "delete"],
+    target: Literal["controller", "config"] | None = None,
+    controller_type: (
+        Literal["directional_trading", "market_making", "generic"] | None
+    ) = None,
+    controller_name: str | None = None,
+    controller_code: str | None = None,
+    config_name: str | None = None,
+    config_data: dict[str, Any] | None = None,
+    confirm_override: bool = False,
+    include_code: bool = False,
 ) -> str:
     """
     Manage controller templates and saved configurations (design-time).
@@ -541,20 +541,29 @@ async def manage_controllers(
 @mcp.tool()
 @handle_errors("manage bots")
 async def manage_bots(
-        action: Literal["deploy", "status", "logs", "stop_bot", "stop_controllers", "start_controllers", "get_config", "update_config"],
-        bot_name: str | None = None,
-        controllers_config: list[str] | None = None,
-        account_name: str | None = "master_account",
-        max_global_drawdown_quote: float | None = None,
-        max_controller_drawdown_quote: float | None = None,
-        image: str = "hummingbot/hummingbot:latest",
-        log_type: Literal["error", "general", "all"] = "all",
-        limit: int = 50,
-        search_term: str | None = None,
-        controller_names: list[str] | None = None,
-        config_name: str | None = None,
-        config_data: dict[str, Any] | None = None,
-        confirm_override: bool = False,
+    action: Literal[
+        "deploy",
+        "status",
+        "logs",
+        "stop_bot",
+        "stop_controllers",
+        "start_controllers",
+        "get_config",
+        "update_config",
+    ],
+    bot_name: str | None = None,
+    controllers_config: list[str] | None = None,
+    account_name: str | None = "master_account",
+    max_global_drawdown_quote: float | None = None,
+    max_controller_drawdown_quote: float | None = None,
+    image: str = "hummingbot/hummingbot:latest",
+    log_type: Literal["error", "general", "all"] = "all",
+    limit: int = 50,
+    search_term: str | None = None,
+    controller_names: list[str] | None = None,
+    config_name: str | None = None,
+    config_data: dict[str, Any] | None = None,
+    confirm_override: bool = False,
 ) -> str:
     """Manage controller-based bots: deploy, monitor, get logs, control execution, and modify runtime configs.
 
@@ -648,7 +657,9 @@ async def manage_bots(
     elif action == "get_config":
         if not bot_name:
             return "Error: 'bot_name' is required for get_config action"
-        result = await bot_management_tools.get_bot_controller_configs(client=client, bot_name=bot_name)
+        result = await bot_management_tools.get_bot_controller_configs(
+            client=client, bot_name=bot_name
+        )
         return result["formatted_output"]
 
     elif action == "update_config":
@@ -675,26 +686,40 @@ async def manage_bots(
 @mcp.tool()
 @handle_errors("manage executors")
 async def manage_executors(
-        action: Literal["create", "search", "stop", "get_logs", "get_preferences", "save_preferences", "reset_preferences", "positions_summary", "clear_position", "performance_report"] | None = None,
-        executor_type: str | None = None,
-        executor_config: dict[str, Any] | None = None,
-        executor_id: str | None = None,
-        log_level: str | None = None,
-        account_names: list[str] | None = None,
-        connector_names: list[str] | None = None,
-        trading_pairs: list[str] | None = None,
-        executor_types: list[str] | None = None,
-        status: str | None = None,
-        cursor: str | None = None,
-        limit: int = 50,
-        keep_position: bool = False,
-        save_as_default: bool = False,
-        preferences_content: str | None = None,
-        account_name: str | None = None,
-        connector_name: str | None = None,
-        trading_pair: str | None = None,
-        controller_id: str | None = None,
-        controller_ids: list[str] | None = None,
+    action: (
+        Literal[
+            "create",
+            "search",
+            "stop",
+            "get_logs",
+            "get_preferences",
+            "save_preferences",
+            "reset_preferences",
+            "positions_summary",
+            "clear_position",
+            "performance_report",
+        ]
+        | None
+    ) = None,
+    executor_type: str | None = None,
+    executor_config: dict[str, Any] | None = None,
+    executor_id: str | None = None,
+    log_level: str | None = None,
+    account_names: list[str] | None = None,
+    connector_names: list[str] | None = None,
+    trading_pairs: list[str] | None = None,
+    executor_types: list[str] | None = None,
+    status: str | None = None,
+    cursor: str | None = None,
+    limit: int = 50,
+    keep_position: bool = False,
+    save_as_default: bool = False,
+    preferences_content: str | None = None,
+    account_name: str | None = None,
+    connector_name: str | None = None,
+    trading_pair: str | None = None,
+    controller_id: str | None = None,
+    controller_ids: list[str] | None = None,
 ) -> str:
     """Manage trading executors: create, search, stop, and configure preferences.
 
@@ -774,17 +799,17 @@ async def manage_executors(
 @mcp.tool()
 @handle_errors("explore DEX pools", GATEWAY_LOG_HINT)
 async def explore_dex_pools(
-        action: Literal["list_pools", "get_pool_info"],
-        connector: str | None = None,
-        network: str | None = None,
-        pool_address: str | None = None,
-        page: int = 0,
-        limit: int = 50,
-        search_term: str | None = None,
-        sort_key: str | None = "volume",
-        order_by: str | None = "desc",
-        include_unknown: bool = True,
-        detailed: bool = False,
+    action: Literal["list_pools", "get_pool_info"],
+    connector: str | None = None,
+    network: str | None = None,
+    pool_address: str | None = None,
+    page: int = 0,
+    limit: int = 50,
+    search_term: str | None = None,
+    sort_key: str | None = "volume",
+    order_by: str | None = "desc",
+    include_unknown: bool = True,
+    detailed: bool = False,
 ) -> str:
     """Explore DeFi CLMM pools — discover pools, compare yields, and get pool details.
 
@@ -834,21 +859,30 @@ async def explore_dex_pools(
 @mcp.tool()
 @handle_errors("explore GeckoTerminal")
 async def explore_geckoterminal(
-        action: Literal[
-            "networks", "dexes", "trending_pools", "top_pools", "new_pools",
-            "pool_detail", "multi_pools", "token_pools", "token_info", "ohlcv", "trades",
-        ],
-        network: str | None = None,
-        dex_id: str | None = None,
-        pool_address: str | None = None,
-        pool_addresses: list[str] | None = None,
-        token_address: str | None = None,
-        timeframe: str = "1h",
-        before_timestamp: int | None = None,
-        currency: str = "usd",
-        token: str = "base",
-        limit: int = 1000,
-        trade_volume_filter: float | None = None,
+    action: Literal[
+        "networks",
+        "dexes",
+        "trending_pools",
+        "top_pools",
+        "new_pools",
+        "pool_detail",
+        "multi_pools",
+        "token_pools",
+        "token_info",
+        "ohlcv",
+        "trades",
+    ],
+    network: str | None = None,
+    dex_id: str | None = None,
+    pool_address: str | None = None,
+    pool_addresses: list[str] | None = None,
+    token_address: str | None = None,
+    timeframe: str = "1h",
+    before_timestamp: int | None = None,
+    currency: str = "usd",
+    token: str = "base",
+    limit: int = 1000,
+    trade_volume_filter: float | None = None,
 ) -> str:
     """Explore DEX market data from GeckoTerminal (free, no API key needed).
 
@@ -899,11 +933,11 @@ async def explore_geckoterminal(
 @mcp.tool()
 @handle_errors("run backtest")
 async def run_backtest(
-        config_name: str,
-        start_time: int,
-        end_time: int,
-        backtesting_resolution: str = "1m",
-        trade_cost: float = 0.0002,
+    config_name: str,
+    start_time: int,
+    end_time: int,
+    backtesting_resolution: str = "1m",
+    trade_cost: float = 0.0002,
 ) -> str:
     """Run a synchronous backtest on a saved controller config.
 
@@ -933,13 +967,13 @@ async def run_backtest(
 @mcp.tool()
 @handle_errors("manage backtest tasks")
 async def manage_backtest_tasks(
-        action: Literal["submit", "list", "get", "delete"],
-        config_name: str | None = None,
-        task_id: str | None = None,
-        start_time: int | None = None,
-        end_time: int | None = None,
-        backtesting_resolution: str = "1m",
-        trade_cost: float = 0.0002,
+    action: Literal["submit", "list", "get", "delete"],
+    config_name: str | None = None,
+    task_id: str | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    backtesting_resolution: str = "1m",
+    trade_cost: float = 0.0002,
 ) -> str:
     """Manage async backtesting tasks: submit background jobs, check status, get results, or delete.
 
@@ -1004,7 +1038,9 @@ async def _run():
     logger.info(f"Configured API URL: {settings.api_url}")
     logger.info(f"Default Account: {settings.default_account}")
     logger.info("Server will connect to API on first use (lazy initialization)")
-    logger.info("💡 Use 'configure_server' tool to view or update the API server connection")
+    logger.info(
+        "💡 Use 'configure_server' tool to view or update the API server connection"
+    )
 
     # Run the server with FastMCP
     # Connection to API will happen lazily on first tool use

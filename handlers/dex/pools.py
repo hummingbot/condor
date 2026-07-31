@@ -20,6 +20,7 @@ from utils.telegram_formatters import (
     KNOWN_TOKENS,
     escape_markdown_v2,
     format_amount,
+    format_compact_number,
     format_error_message,
     resolve_token_symbol,
 )
@@ -217,11 +218,11 @@ def _format_pool_info(pool: dict) -> str:
     # TVL and volume
     tvl = pool.get("liquidity") or pool.get("tvl")
     if tvl is not None:
-        lines.append(f"💰 TVL: ${_format_number(tvl)}")
+        lines.append(f"💰 TVL: ${format_compact_number(tvl)}")
 
     vol_24h = pool.get("volume_24h")
     if vol_24h is not None:
-        lines.append(f"📈 Volume 24h: ${_format_number(vol_24h)}")
+        lines.append(f"📈 Volume 24h: ${format_compact_number(vol_24h)}")
 
     # APR/Fees
     apr = pool.get("apr")
@@ -430,7 +431,11 @@ async def handle_pool_list(
 
     connector_name = connector.capitalize()
     help_text = (
-        rf"📋 *List {connector_name} Pools*" + "\n\n" + balance_table + r"Reply with:" + "\n\n"
+        rf"📋 *List {connector_name} Pools*"
+        + "\n\n"
+        + balance_table
+        + r"Reply with:"
+        + "\n\n"
         r"`[search_term] [limit]`" + "\n\n"
         r"*Examples:*" + "\n"
         r"`SOL 10`" + "\n"
@@ -456,27 +461,6 @@ async def handle_pool_list_orca(
 ) -> None:
     """Handle Orca CLMM pool list"""
     await handle_pool_list(update, context, connector="orca")
-
-
-def _format_number(value, decimals: int = 2) -> str:
-    """Format number with K/M suffix for readability"""
-    if value is None:
-        return "—"
-    try:
-        num = float(value)
-        if num == 0:
-            return "0"
-        if abs(num) >= 1_000_000:
-            return f"{num/1_000_000:.{decimals}f}M"
-        if abs(num) >= 1_000:
-            return f"{num/1_000:.{decimals}f}K"
-        if abs(num) >= 1:
-            return f"{num:.{decimals}f}"
-        if abs(num) >= 0.01:
-            return f"{num:.4f}"
-        return f"{num:.6f}"
-    except (ValueError, TypeError):
-        return "—"
 
 
 def _format_percent(value, decimals: int = 2) -> str:
@@ -523,7 +507,7 @@ def _format_pool_table(pools: list) -> str:
             base, quote = full_pair.rsplit("-", 1)
             max_base_len = 11 - len(quote) - 1  # -1 for the dash
             if max_base_len > 2:
-                base = base[:max_base_len-1] + "…"
+                base = base[: max_base_len - 1] + "…"
             pair = f"{base}-{quote}"[:11]
         else:
             pair = full_pair[:11]
@@ -1014,7 +998,7 @@ async def handle_plot_liquidity(
             "",
             f"📈 Pools included: {len(pools_data)}"
             + (f" ({failed_count} failed)" if failed_count else ""),
-            f"💰 Total TVL: ${_format_number(total_tvl_selected)}",
+            f"💰 Total TVL: ${format_compact_number(total_tvl_selected)}",
             f"📊 Percentile: Top {percentile}%",
             f"🎯 Min bin step (resolution): {min_bin_step}",
         ]
@@ -1320,11 +1304,11 @@ async def _show_pool_detail(
     if tvl or vol_24h or fees_24h or apr:
         lines = []
         if tvl:
-            lines.append(f"💰 TVL: ${_format_number(tvl)}")
+            lines.append(f"💰 TVL: ${format_compact_number(tvl)}")
         if vol_24h:
-            lines.append(f"📈 Vol 24h: ${_format_number(vol_24h)}")
+            lines.append(f"📈 Vol 24h: ${format_compact_number(vol_24h)}")
         if fees_24h:
-            lines.append(f"💵 Fees 24h: ${_format_number(fees_24h)}")
+            lines.append(f"💵 Fees 24h: ${format_compact_number(fees_24h)}")
         if apr:
             try:
                 apr_val = float(apr)
@@ -1365,12 +1349,12 @@ async def _show_pool_detail(
     quote_val = balances.get("quote_value", 0)
 
     message += "\n" + escape_markdown_v2("━━━ Wallet Balances ━━━") + "\n"
-    base_bal_str = _format_number(base_bal)
-    base_val_str = f"${_format_number(base_val)}" if base_val > 0 else ""
+    base_bal_str = format_compact_number(base_bal)
+    base_val_str = f"${format_compact_number(base_val)}" if base_val > 0 else ""
     message += f"💰 `{escape_markdown_v2(base_symbol)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
 
-    quote_bal_str = _format_number(quote_bal)
-    quote_val_str = f"${_format_number(quote_val)}" if quote_val > 0 else ""
+    quote_bal_str = format_compact_number(quote_bal)
+    quote_val_str = f"${format_compact_number(quote_val)}" if quote_val > 0 else ""
     message += f"💵 `{escape_markdown_v2(quote_symbol)}`: `{escape_markdown_v2(quote_bal_str)}` {escape_markdown_v2(quote_val_str)}\n"
 
     # ========== POSITION PREVIEW ==========
@@ -1447,8 +1431,8 @@ async def _show_pool_detail(
             pass
 
     # Show calculated amounts with $ values
-    base_amt_fmt = escape_markdown_v2(_format_number(base_amount))
-    quote_amt_fmt = escape_markdown_v2(_format_number(quote_amount))
+    base_amt_fmt = escape_markdown_v2(format_compact_number(base_amount))
+    quote_amt_fmt = escape_markdown_v2(format_compact_number(quote_amount))
 
     # Calculate $ values for amounts using actual token prices from wallet
     try:
@@ -1461,10 +1445,14 @@ async def _show_pool_detail(
         base_usd, quote_usd = 0, 0
 
     base_usd_str = (
-        f" _${escape_markdown_v2(_format_number(base_usd))}_" if base_usd > 0 else ""
+        f" _${escape_markdown_v2(format_compact_number(base_usd))}_"
+        if base_usd > 0
+        else ""
     )
     quote_usd_str = (
-        f" _${escape_markdown_v2(_format_number(quote_usd))}_" if quote_usd > 0 else ""
+        f" _${escape_markdown_v2(format_compact_number(quote_usd))}_"
+        if quote_usd > 0
+        else ""
     )
 
     message += (
@@ -4178,18 +4166,18 @@ async def show_add_position_menu(
             help_text += "\n" + r"━━━ Wallet Balances ━━━" + "\n"
 
             # Format base token balance - always show, even if 0
-            base_bal_str = _format_number(balances["base_balance"])
+            base_bal_str = format_compact_number(balances["base_balance"])
             base_val_str = (
-                f"${_format_number(balances['base_value'])}"
+                f"${format_compact_number(balances['base_value'])}"
                 if balances["base_value"] > 0
                 else ""
             )
             help_text += f"💰 `{escape_markdown_v2(base_symbol)}`: `{escape_markdown_v2(base_bal_str)}` {escape_markdown_v2(base_val_str)}\n"
 
             # Format quote token balance - always show, even if 0
-            quote_bal_str = _format_number(balances["quote_balance"])
+            quote_bal_str = format_compact_number(balances["quote_balance"])
             quote_val_str = (
-                f"${_format_number(balances['quote_value'])}"
+                f"${format_compact_number(balances['quote_value'])}"
                 if balances["quote_value"] > 0
                 else ""
             )
@@ -4274,8 +4262,8 @@ async def show_add_position_menu(
                 pass
 
         # Show amounts with $ values
-        base_amt_fmt = escape_markdown_v2(_format_number(base_amount))
-        quote_amt_fmt = escape_markdown_v2(_format_number(quote_amount))
+        base_amt_fmt = escape_markdown_v2(format_compact_number(base_amount))
+        quote_amt_fmt = escape_markdown_v2(format_compact_number(quote_amount))
 
         # Calculate $ values for amounts using actual token prices from wallet
         try:
@@ -4292,12 +4280,12 @@ async def show_add_position_menu(
             base_usd, quote_usd = 0, 0
 
         base_usd_str = (
-            f" _${escape_markdown_v2(_format_number(base_usd))}_"
+            f" _${escape_markdown_v2(format_compact_number(base_usd))}_"
             if base_usd > 0
             else ""
         )
         quote_usd_str = (
-            f" _${escape_markdown_v2(_format_number(quote_usd))}_"
+            f" _${escape_markdown_v2(format_compact_number(quote_usd))}_"
             if quote_usd > 0
             else ""
         )
@@ -4789,7 +4777,7 @@ async def handle_pos_set_base(
     balances = context.user_data.get("token_balances", {})
     base_bal = balances.get("base_balance", 0)
     bal_info = (
-        f"_Balance: {escape_markdown_v2(_format_number(base_bal))}_\n\n"
+        f"_Balance: {escape_markdown_v2(format_compact_number(base_bal))}_\n\n"
         if base_bal > 0
         else ""
     )
@@ -4826,7 +4814,7 @@ async def handle_pos_set_quote(
     balances = context.user_data.get("token_balances", {})
     quote_bal = balances.get("quote_balance", 0)
     bal_info = (
-        f"_Balance: {escape_markdown_v2(_format_number(quote_bal))}_\n\n"
+        f"_Balance: {escape_markdown_v2(format_compact_number(quote_bal))}_\n\n"
         if quote_bal > 0
         else ""
     )

@@ -16,11 +16,19 @@ async def get_reports(
     source_type: str | None = None,
     tag: str | None = None,
     search: str | None = None,
+    agent: str | None = None,
     limit: int = 50,
     offset: int = 0,
     user: WebUser = Depends(get_current_user),
 ):
-    entries, total = list_reports(source_type=source_type, tag=tag, search=search, limit=limit, offset=offset)
+    entries, total = list_reports(
+        source_type=source_type,
+        tag=tag,
+        search=search,
+        agent=agent,
+        limit=limit,
+        offset=offset,
+    )
     return ReportsListResponse(
         reports=[ReportSummary(**e) for e in entries],
         total=total,
@@ -41,7 +49,9 @@ async def get_report_detail(report_id: str, user: WebUser = Depends(get_current_
 
 
 @router.delete("/{report_id}")
-async def delete_report_endpoint(report_id: str, user: WebUser = Depends(get_current_user)):
+async def delete_report_endpoint(
+    report_id: str, user: WebUser = Depends(get_current_user)
+):
     if not await delete_report(report_id):
         raise HTTPException(404, "Report not found")
     return {"deleted": True}

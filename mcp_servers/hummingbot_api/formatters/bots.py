@@ -83,7 +83,7 @@ def format_active_bots_as_table(bots_data: dict[str, Any]) -> str:
         if not performance:
             # Bot with no controllers
             row = (
-                f"{bot_name[:20]} | "
+                f"{bot_name} | "
                 f"N/A | "
                 f"{bot_status} | "
                 f"N/A | N/A | N/A | N/A | "
@@ -104,8 +104,8 @@ def format_active_bots_as_table(bots_data: dict[str, Any]) -> str:
                 volume = format_number(get_field(ctrl_perf, "volume_traded", default=None), compact=False)
 
                 row = (
-                    f"{bot_name[:20]} | "
-                    f"{controller_name[:20]} | "
+                    f"{bot_name} | "
+                    f"{controller_name} | "
                     f"{ctrl_status} | "
                     f"{realized_pnl} | "
                     f"{unrealized_pnl} | "

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { getViewContext } from "@/lib/viewContext";
+import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
 
 export interface ToolCall {
   tool_call_id: string;
@@ -36,14 +37,20 @@ function nextMsgId(): string {
 
 // ── localStorage persistence for chat messages ──
 const STORAGE_KEY = "condor_chat_messages";
+// Cap the persisted history so localStorage can't grow unbounded across
+// long-running sessions (streaming chunks re-serialize on every update).
+// Only the persisted copy is trimmed; the in-memory `slots` stay intact.
+const MAX_PERSISTED_SLOTS = 10; // keep the most recently active slots
+const MAX_PERSISTED_MESSAGES_PER_SLOT = 100; // keep the last N messages per slot
 
 function saveSlotMessages(slots: ChatSlot[]) {
   try {
     const data: Record<string, ChatMessage[]> = {};
-    for (const s of slots) {
-      if (s.messages.length > 0) {
-        data[s.info.slot_id] = s.messages;
-      }
+    // Keep only the last MAX_PERSISTED_SLOTS slots that have messages.
+    const withMessages = slots.filter((s) => s.messages.length > 0);
+    for (const s of withMessages.slice(-MAX_PERSISTED_SLOTS)) {
+      // Keep only the most recent messages per slot.
+      data[s.info.slot_id] = s.messages.slice(-MAX_PERSISTED_MESSAGES_PER_SLOT);
     }
     localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
   } catch { /* quota exceeded or private mode */ }
@@ -69,11 +76,21 @@ export function useChatSocket() {
   const { token } = useAuth();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Trailing debounce for localStorage persistence: streaming chunks update
+  // `slots` per token, so serializing on every change would run JSON.stringify
+  // hundreds of times per response on the main thread.
+  const persistTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Set by events that should persist immediately (e.g. prompt_done) instead
+  // of waiting for the trailing debounce.
+  const persistNow = useRef(false);
   // Track current assistant message per slot
   const currentAssistantMsg = useRef<Record<string, string | null>>({});
 
   const [isConnected, setIsConnected] = useState(false);
   const [slots, setSlots] = useState<ChatSlot[]>([]);
+  // Mirror of the latest committed `slots` so event handlers can read the
+  // current list synchronously without closing over stale state.
+  const slotsRef = useRef<ChatSlot[]>([]);
   const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
   // Track whether we've received the initial sessions_list from the backend.
   // Prevents the empty initial slots from overwriting localStorage.
@@ -104,9 +121,11 @@ export function useChatSocket() {
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = import.meta.env.DEV ? "localhost:8088" : window.location.host;
-    const url = `${protocol}//${host}/api/v1/ws/chat?token=${token}`;
+    const url = `${protocol}//${host}/api/v1/ws/chat`;
 
-    const ws = new WebSocket(url);
+    // Pass the JWT via the Sec-WebSocket-Protocol subprotocol header instead of
+    // the URL query string, so it never leaks via proxy logs or history.
+    const ws = new WebSocket(url, [WS_AUTH_SUBPROTOCOL, token]);
     wsRef.current = ws;
 
     ws.onopen = () => setIsConnected(true);
@@ -175,21 +194,20 @@ export function useChatSocket() {
         case "session_destroyed": {
           const destroyedId = data.slot_id as string;
           clearStoredSlot(destroyedId);
-          setSlots((prev) => prev.filter((s) => s.info.slot_id !== destroyedId));
-          setActiveSlotId((prev) => {
-            if (prev === destroyedId) return null;
-            return prev;
-          });
-          // Fix: select another slot if active was destroyed
-          setSlots((prev) => {
-            setActiveSlotId((cur) => {
-              if (cur === destroyedId || cur === null) {
-                return prev.length > 0 ? prev[0].info.slot_id : null;
-              }
-              return cur;
-            });
-            return prev;
-          });
+          // Compute the slots that remain after removal once, outside any
+          // updater, so both setters below stay pure (safe under StrictMode /
+          // concurrent rendering, which may invoke updaters more than once).
+          const remaining = slotsRef.current.filter(
+            (s) => s.info.slot_id !== destroyedId,
+          );
+          setSlots(remaining);
+          // If the destroyed slot was active (or nothing was active), fall back
+          // to the first remaining slot; otherwise keep the current selection.
+          setActiveSlotId((cur) =>
+            cur === destroyedId || cur === null
+              ? (remaining[0]?.info.slot_id ?? null)
+              : cur,
+          );
           break;
         }
 
@@ -335,6 +353,8 @@ export function useChatSocket() {
             );
             currentAssistantMsg.current[slotId] = null;
           }
+          // Flush the debounced persistence as soon as the response settles.
+          persistNow.current = true;
           setStreamingSlotId(null);
           break;
 
@@ -456,16 +476,30 @@ export function useChatSocket() {
   useEffect(() => {
     return () => {
       clearTimeout(reconnectTimer.current);
+      clearTimeout(persistTimer.current);
+      // Flush any pending debounced persistence so no messages are lost.
+      if (hydrated.current) saveSlotMessages(slotsRef.current);
       wsRef.current?.close();
     };
   }, []);
 
-  // Persist messages to localStorage on every change (but only after initial hydration
-  // to avoid the empty initial state wiping saved messages before WS reconnects)
+  // Persist messages to localStorage on change (but only after initial hydration
+  // to avoid the empty initial state wiping saved messages before WS reconnects).
+  // Writes are debounced with a trailing timer so streaming chunks don't
+  // re-serialize the whole history per token; prompt_done flushes immediately.
   useEffect(() => {
-    if (hydrated.current) {
+    slotsRef.current = slots;
+    if (!hydrated.current) return;
+    clearTimeout(persistTimer.current);
+    if (persistNow.current) {
+      persistNow.current = false;
       saveSlotMessages(slots);
+      return;
     }
+    persistTimer.current = setTimeout(
+      () => saveSlotMessages(slotsRef.current),
+      1000,
+    );
   }, [slots]);
 
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;

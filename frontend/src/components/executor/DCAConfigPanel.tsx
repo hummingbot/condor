@@ -321,13 +321,13 @@ const MODE_OPTIONS = [
 interface Props {
   state: DCAState;
   dispatch: React.Dispatch<DCAAction>;
+  validation: ExecutorValidation;
   currentPrice: number | null;
   isSpot?: boolean;
   pair?: string;
 }
 
-export function DCAConfigPanel({ state, dispatch, currentPrice, isSpot = false, pair: _pair }: Props) {
-  const validation = useDCAValidation(state);
+export function DCAConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair: _pair }: Props) {
   const d = dispatch as unknown as FieldDispatch;
   const totalQuote = state.amounts_quote.reduce((s, a) => s + a, 0);
 

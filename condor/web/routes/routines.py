@@ -15,6 +15,7 @@ from condor.reports import list_reports
 from condor.routine_store import get_routine_store
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
+from config_manager import get_config_manager
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/routines", tags=["routines"])
@@ -102,6 +103,9 @@ async def run_routine(
     user: WebUser = Depends(get_current_user),
 ):
     """Execute a one-shot routine. Returns instance_id for polling."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server_name):
+        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.execute(
@@ -123,6 +127,9 @@ async def schedule_routine(
     user: WebUser = Depends(get_current_user),
 ):
     """Schedule a routine at an interval. Returns instance_id."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server_name):
+        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.schedule(
@@ -143,6 +150,9 @@ async def run_routine_v2(
     user: WebUser = Depends(get_current_user),
 ):
     """Execute a routine (supports names with slashes like agent/routine)."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, body.server_name):
+        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.execute(
@@ -162,6 +172,9 @@ async def schedule_routine_v2(
     user: WebUser = Depends(get_current_user),
 ):
     """Schedule a routine (supports names with slashes like agent/routine)."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, body.server_name):
+        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.schedule(
@@ -211,8 +224,6 @@ async def get_field_options(
     """Return dynamic options for routine config fields (e.g. controller_configs)."""
     if source == "controller_configs":
         try:
-            from config_manager import get_config_manager
-
             cm = get_config_manager()
             client = await cm.get_client(server)
             if not client:

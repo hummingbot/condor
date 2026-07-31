@@ -3,7 +3,6 @@ import {
   Activity,
   Bot,
   Brain,
-  MessageSquare,
   Eye,
   Moon,
   Settings,
@@ -21,6 +20,7 @@ import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
+import { AgentToggleButton } from "./AgentToggleButton";
 import { CurrencySelector } from "./CurrencySelector";
 import { ServerSelector } from "./ServerSelector";
 
@@ -114,18 +114,7 @@ export function AppShell() {
 
           </div>
 
-          <button
-            onClick={() => setChatOpen((v) => !v)}
-            className={`ml-2 flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs font-medium transition-all ${
-              chatOpen
-                ? "bg-amber-500 text-black shadow-sm shadow-amber-500/25"
-                : "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25 border border-amber-500/30"
-            }`}
-            title="Agent (⌘K)"
-          >
-            <MessageSquare className="h-3.5 w-3.5" />
-            <span>Agent</span>
-          </button>
+          <AgentToggleButton active={chatOpen} onClick={() => setChatOpen((v) => !v)} className="ml-2" />
         </div>
       </header>
 

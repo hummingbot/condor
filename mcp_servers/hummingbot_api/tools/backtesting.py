@@ -162,37 +162,81 @@ async def manage_backtest_tasks(
         raise ValueError(f"Invalid action '{action}'. Use 'submit', 'list', 'get', or 'delete'.")
 
 
-def _format_backtest_results(config_name: str, results: dict) -> str:
-    """Format backtest results into a readable string."""
+def _pct(v) -> str:
+    return f"{v:.2%}" if isinstance(v, (int, float)) else str(v)
+
+
+def _num(v) -> str:
+    return f"{v:,.4f}".rstrip("0").rstrip(".") if isinstance(v, float) else str(v)
+
+
+def _format_backtest_results(config_name: str, payload: dict) -> str:
+    """Format backtest results into a readable string.
+
+    `POST /backtesting/run` returns the metrics NESTED under a "results" key, alongside
+    "executors", "processed_data" and friends:
+
+        {"executors": [...], "results": {...}, "processed_data": {...}, ...}
+
+    An earlier version read the metric names off the TOP level, matched nothing, and then
+    fell back to dumping top-level scalars -- but every top-level value is a dict or a
+    list, so the fallback printed nothing and a successful backtest rendered as a bare
+    header with no body. Errors happened to render only because the API returns those as
+    a top-level string under "error".
+    """
+    if not payload:
+        return f"Backtest '{config_name}': No results returned."
+
+    # The API reports engine failures in-band with HTTP 200. Never let that render blank.
+    err = payload.get("error")
+    if err:
+        return f"Backtest '{config_name}' FAILED:\n  {err}"
+
+    results = payload.get("results")
+    if not isinstance(results, dict):
+        results = payload  # already-unwrapped metrics (task "get" path)
+
     if not results:
         return f"Backtest '{config_name}': No results returned."
 
     lines = [f"Backtest Results for '{config_name}':", ""]
 
-    # Try common result fields
-    for key in ("net_pnl", "net_pnl_quote", "total_pnl", "pnl"):
-        if key in results:
-            lines.append(f"  PnL: {results[key]}")
-            break
+    def add(label, key, fmt=_num):
+        if key in results and results[key] is not None:
+            lines.append(f"  {label}: {fmt(results[key])}")
 
-    for key in ("total_trades", "trade_count", "num_trades"):
-        if key in results:
-            lines.append(f"  Trades: {results[key]}")
-            break
+    add("Net PnL (quote)", "net_pnl_quote")
+    add("Net PnL", "net_pnl", _pct)
+    add("Executors", "total_executors")
+    add("Positions", "total_positions")
+    add("Accuracy", "accuracy", _pct)
+    add("Win / Loss", "win_signals")
+    if "loss_signals" in results and lines and lines[-1].startswith("  Win / Loss"):
+        lines[-1] += f" / {results['loss_signals']}"
+    add("Profit Factor", "profit_factor")
+    add("Sharpe Ratio", "sharpe_ratio")
+    add("Max Drawdown", "max_drawdown_pct", _pct)
+    add("Max Drawdown (usd)", "max_drawdown_usd")
+    add("Total Volume", "total_volume")
+    add("Total Fees (quote)", "total_fees_quote")
+    add("Long / Short", "total_long")
+    if "total_short" in results and lines and lines[-1].startswith("  Long / Short"):
+        lines[-1] += f" / {results['total_short']}"
+    if isinstance(results.get("close_types"), dict) and results["close_types"]:
+        lines.append(f"  Close Types: {results['close_types']}")
 
-    if "win_rate" in results:
-        lines.append(f"  Win Rate: {results['win_rate']:.1%}" if isinstance(results["win_rate"], float) else f"  Win Rate: {results['win_rate']}")
+    n_exec = len(payload.get("executors") or []) if isinstance(payload, dict) else 0
+    if n_exec:
+        lines.append(f"  Executors returned: {n_exec}")
 
-    if "max_drawdown" in results:
-        lines.append(f"  Max Drawdown: {results['max_drawdown']}")
-
-    if "sharpe_ratio" in results:
-        lines.append(f"  Sharpe Ratio: {results['sharpe_ratio']}")
-
-    # If we didn't match any known keys, dump all top-level keys
+    # Last resort: never return a bare header. Show whatever scalars exist, and if there
+    # are none, say so explicitly with the shape of what came back.
     if len(lines) <= 2:
-        for k, v in results.items():
-            if not isinstance(v, (dict, list)):
-                lines.append(f"  {k}: {v}")
+        scalars = {k: v for k, v in results.items() if not isinstance(v, (dict, list))}
+        if scalars:
+            lines += [f"  {k}: {v}" for k, v in scalars.items()]
+        else:
+            shape = {k: type(v).__name__ for k, v in payload.items()}
+            lines.append(f"  (no recognised metrics; payload shape: {shape})")
 
     return "\n".join(lines)

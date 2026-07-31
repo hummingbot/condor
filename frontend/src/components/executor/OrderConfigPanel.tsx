@@ -175,13 +175,13 @@ const POSITION_ACTION_OPTIONS = [
 interface Props {
   state: OrderState;
   dispatch: React.Dispatch<OrderAction>;
+  validation: ExecutorValidation;
   currentPrice: number | null;
   isSpot?: boolean;
   pair?: string;
 }
 
-export function OrderConfigPanel({ state, dispatch, currentPrice, isSpot = false, pair }: Props) {
-  const validation = useOrderValidation(state);
+export function OrderConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair }: Props) {
   const d = dispatch as FieldDispatch;
   const needsPrice = state.execution_strategy === "LIMIT" || state.execution_strategy === "LIMIT_MAKER";
   const isChaser = state.execution_strategy === "LIMIT_CHASER";

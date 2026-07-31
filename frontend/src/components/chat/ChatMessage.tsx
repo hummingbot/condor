@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { memo, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, ChevronRight, User, Bot } from "lucide-react";
@@ -26,7 +26,11 @@ function ThoughtBlock({ text }: { text: string }) {
   );
 }
 
-export function ChatMessageView({ message }: { message: ChatMessageType }) {
+export const ChatMessageView = memo(function ChatMessageView({
+  message,
+}: {
+  message: ChatMessageType;
+}) {
   if (message.role === "user") {
     return (
       <div className="flex justify-end mb-3">
@@ -65,4 +69,4 @@ export function ChatMessageView({ message }: { message: ChatMessageType }) {
       </div>
     </div>
   );
-}
+});

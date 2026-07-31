@@ -7,13 +7,13 @@ the same instances, schedule runs, and read results.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import logging
 import time
 import traceback
-from typing import Any
-
 from pathlib import Path
+from typing import Any
 
 import condor.reports as reports
 from condor import routine_hooks
@@ -84,9 +84,7 @@ class _HttpBot:
             # Honor the buffer's name (e.g. "Daily_PnL.html") and the explicit
             # `filename` kwarg so the file arrives with a real name + extension
             # instead of a generic, extension-less "file".
-            filename = (
-                kw.get("filename") or getattr(document, "name", None) or "file"
-            )
+            filename = kw.get("filename") or getattr(document, "name", None) or "file"
             mime = mimetypes.guess_type(filename)[0] or "application/octet-stream"
             files = {"document": (filename, document, mime)}
         return await self._post("sendDocument", data, files=files)
@@ -97,6 +95,17 @@ class _HttpBot:
 
 
 _http_bot = _HttpBot()
+
+
+def _agent_of(routine) -> str:
+    """Which assistant produced this routine's reports.
+
+    A routine's ``source`` is ``"agent:<slug>"`` for an agent/expert-local routine
+    or ``"global"`` for the shared/condor library — so reports are attributed to
+    the owning expert, else to the chat ``condor``.
+    """
+    src = getattr(routine, "source", "global") or "global"
+    return src.split(":", 1)[1] if src.startswith("agent:") else "condor"
 
 
 class WebRoutineContext:
@@ -127,14 +136,26 @@ class RoutineStore:
         """Inject the Telegram bot so web-triggered routines can send messages."""
         self._bot = bot
 
+    def get_bot(self):
+        """Return the registered Telegram bot, or None if not set yet."""
+        return self._bot
+
     # ── Discovery ──
 
     def _discover_all(self) -> dict[str, "RoutineInfo"]:
-        """Discover global routines + agent routines, merged into one dict."""
-        all_routines = dict(discover_routines(force_reload=True))
+        """Discover routines: the general library (root ``routines/``) + each agent's.
 
-        # Scan trading_agents/*/routines/
-        agents_dir = Path(__file__).resolve().parent.parent / "trading_agents"
+        The chat ``condor`` sees the general library plus every agent's routines
+        (prefixed). Each agent's own routines stay isolated under its slug.
+
+        Discovery is mtime-cached in routines.base: only new/changed files are
+        (re)imported, so this stays cheap on every list call while edits are
+        still picked up without a restart.
+        """
+        all_routines = dict(discover_routines())
+
+        # Scan agents/*/routines/
+        agents_dir = Path(__file__).resolve().parent.parent / "agents"
         if agents_dir.exists():
             for agent_dir in sorted(agents_dir.iterdir()):
                 routines_path = agent_dir / "routines"
@@ -145,9 +166,11 @@ class RoutineStore:
                     routines_path, agent_slug=slug
                 )
                 for rname, rinfo in agent_routines.items():
-                    prefixed = f"{slug}/{rname}"
-                    rinfo.name = prefixed
-                    all_routines[prefixed] = rinfo
+                    # Shallow-copy before prefixing: the RoutineInfo is shared
+                    # with the discovery cache and must keep its bare name.
+                    prefixed_info = copy.copy(rinfo)
+                    prefixed_info.name = f"{slug}/{rname}"
+                    all_routines[prefixed_info.name] = prefixed_info
 
         return all_routines
 
@@ -179,6 +202,7 @@ class RoutineStore:
                     "category": info.category,
                     "source": info.source,
                     "fields": info.get_fields(),
+                    "last_modified": info.last_modified,
                     "report_count": report_counts.get(name, 0)
                     or report_counts.get(name.split("/")[-1], 0),
                 }
@@ -254,6 +278,94 @@ class RoutineStore:
                 f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
             )
 
+    def _new_instance_meta(
+        self,
+        routine_name: str,
+        config: dict,
+        server_name: str,
+        user_id: int,
+        source: str,
+        **extra,
+    ) -> dict:
+        """Fresh instance-metadata dict shared by execute/start_continuous/schedule."""
+        return {
+            "routine_name": routine_name,
+            "config": config,
+            "status": "running",
+            "source": source,
+            "server_name": server_name,
+            "user_id": user_id,
+            "created_at": time.time(),
+            "last_run_at": None,
+            "last_result": None,
+            "last_duration": None,
+            "run_count": 0,
+            **extra,
+        }
+
+    async def _execute_and_record(
+        self,
+        instance_id: str,
+        routine,
+        config: dict,
+        server_name: str,
+        user_id: int = 0,
+        *,
+        status_after: str,
+        failed_status: str | None = None,
+        fire_hooks: bool = True,
+    ) -> None:
+        """Run a routine once, store the result, update instance metadata, fire hooks.
+
+        Shared by one-shot, continuous and scheduled runs — the entry points
+        only differ in loop/cancellation semantics. ``status_after`` is the
+        instance status recorded after the run; ``failed_status`` (defaults to
+        ``status_after``) is used when the run raises. ``CancelledError`` is
+        recorded as a clean "Stopped by user" run so a stopped continuous
+        routine still stores its final result.
+        """
+        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
+        start = time.time()
+        reports.reset_last_report_id()
+        error_msg = None
+        failed = False
+        try:
+            cfg = routine.config_class(**config)
+            with reports.attribute_to(_agent_of(routine)):
+                raw = await routine.run_fn(cfg, ctx)
+            result = normalize_result(raw)
+        except asyncio.CancelledError:
+            result = RoutineResult(text="Stopped by user")
+        except Exception as e:
+            tb = traceback.format_exc()
+            logger.error(
+                f"Routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}"
+            )
+            error_msg = f"{type(e).__name__}: {e}"
+            result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
+            failed = True
+
+        duration = time.time() - start
+        report_id = reports.get_last_report_id()
+        self._results[instance_id] = result
+
+        if instance_id in self._instances:
+            self._instances[instance_id].update(
+                {
+                    "status": (
+                        (failed_status or status_after) if failed else status_after
+                    ),
+                    "last_run_at": time.time(),
+                    "last_result": result.text[:500],
+                    "last_duration": duration,
+                    "run_count": self._instances[instance_id].get("run_count", 0) + 1,
+                    "error": error_msg,
+                }
+            )
+
+        if fire_hooks:
+            await self._fire_hooks(instance_id, result, report_id, failed)
+
     def _resolve_routine(self, routine_name: str):
         """Resolve a routine by name, supporting 'agent_slug/routine_name' format."""
         # Try global first
@@ -264,10 +376,7 @@ class RoutineStore:
         if "/" in routine_name:
             slug, rname = routine_name.split("/", 1)
             agents_dir = (
-                Path(__file__).resolve().parent.parent
-                / "trading_agents"
-                / slug
-                / "routines"
+                Path(__file__).resolve().parent.parent / "agents" / slug / "routines"
             )
             agent_routines = discover_routines_from_path(agents_dir, agent_slug=slug)
             return agent_routines.get(rname)
@@ -286,19 +395,9 @@ class RoutineStore:
             raise ValueError(f"Routine '{routine_name}' not found")
 
         instance_id = self._gen_id()
-        self._instances[instance_id] = {
-            "routine_name": routine_name,
-            "config": config,
-            "status": "running",
-            "source": "web",
-            "server_name": server_name,
-            "user_id": user_id,
-            "created_at": time.time(),
-            "last_run_at": None,
-            "last_result": None,
-            "last_duration": None,
-            "run_count": 0,
-        }
+        self._instances[instance_id] = self._new_instance_meta(
+            routine_name, config, server_name, user_id, source="web"
+        )
 
         task = asyncio.create_task(
             self._run_oneshot(instance_id, routine, config, server_name, user_id)
@@ -314,42 +413,15 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
     ) -> None:
-        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
-        start = time.time()
-        reports._last_report_id = None
-        try:
-            cfg = routine.config_class(**config)
-            raw = await routine.run_fn(cfg, ctx)
-            result = normalize_result(raw)
-        except Exception as e:
-            tb = traceback.format_exc()
-            logger.error(
-                f"Web routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}"
-            )
-            error_msg = f"{type(e).__name__}: {e}"
-            result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
-            failed = True
-        else:
-            error_msg = None
-            failed = False
-
-        duration = time.time() - start
-        report_id = reports._last_report_id
-        self._results[instance_id] = result
-
-        if instance_id in self._instances:
-            self._instances[instance_id].update(
-                {
-                    "status": "failed" if failed else "completed",
-                    "last_run_at": time.time(),
-                    "last_result": result.text[:500],
-                    "last_duration": duration,
-                    "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-                    "error": error_msg,
-                }
-            )
-
-        await self._fire_hooks(instance_id, result, report_id, failed)
+        await self._execute_and_record(
+            instance_id,
+            routine,
+            config,
+            server_name,
+            user_id,
+            status_after="completed",
+            failed_status="failed",
+        )
 
     async def start_continuous(
         self,
@@ -368,19 +440,9 @@ class RoutineStore:
             )
 
         instance_id = self._gen_id()
-        self._instances[instance_id] = {
-            "routine_name": routine_name,
-            "config": config,
-            "status": "running",
-            "source": "mcp",
-            "server_name": server_name,
-            "user_id": user_id,
-            "created_at": time.time(),
-            "last_run_at": None,
-            "last_result": None,
-            "last_duration": None,
-            "run_count": 0,
-        }
+        self._instances[instance_id] = self._new_instance_meta(
+            routine_name, config, server_name, user_id, source="mcp"
+        )
 
         task = asyncio.create_task(
             self._run_continuous(instance_id, routine, config, server_name, user_id)
@@ -396,34 +458,18 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
     ) -> None:
-        ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
-        start = time.time()
-        try:
-            cfg = routine.config_class(**config)
-            raw = await routine.run_fn(cfg, ctx)
-            result = normalize_result(raw)
-        except asyncio.CancelledError:
-            result = RoutineResult(text="Stopped by user")
-        except Exception as e:
-            tb = traceback.format_exc()
-            logger.error(
-                f"Continuous routine {routine.name}[{instance_id}] failed: {type(e).__name__}: {e}\n{tb}"
-            )
-            result = RoutineResult(text=f"Error: {type(e).__name__}: {e}\n\n{tb}")
-
-        duration = time.time() - start
-        self._results[instance_id] = result
-
-        if instance_id in self._instances:
-            self._instances[instance_id].update(
-                {
-                    "status": "stopped",
-                    "last_run_at": time.time(),
-                    "last_result": result.text[:500],
-                    "last_duration": duration,
-                    "run_count": self._instances[instance_id].get("run_count", 0) + 1,
-                }
-            )
+        # Continuous routines message the user from inside their own loop and
+        # only end on stop/error, so per-run completion hooks are intentionally
+        # not fired for them (they would only trigger once, at shutdown).
+        await self._execute_and_record(
+            instance_id,
+            routine,
+            config,
+            server_name,
+            user_id,
+            status_after="stopped",
+            fire_hooks=False,
+        )
 
     async def schedule(
         self,
@@ -439,20 +485,15 @@ class RoutineStore:
             raise ValueError(f"Routine '{routine_name}' not found")
 
         instance_id = self._gen_id()
-        self._instances[instance_id] = {
-            "routine_name": routine_name,
-            "config": config,
-            "status": "scheduled",
-            "source": "web",
-            "server_name": server_name,
-            "user_id": user_id,
-            "schedule": {"type": "interval", "interval_sec": interval_sec},
-            "created_at": time.time(),
-            "last_run_at": None,
-            "last_result": None,
-            "last_duration": None,
-            "run_count": 0,
-        }
+        self._instances[instance_id] = self._new_instance_meta(
+            routine_name,
+            config,
+            server_name,
+            user_id,
+            source="web",
+            status="scheduled",
+            schedule={"type": "interval", "interval_sec": interval_sec},
+        )
 
         task = asyncio.create_task(
             self._run_scheduled(
@@ -473,46 +514,19 @@ class RoutineStore:
     ) -> None:
         try:
             while instance_id in self._instances:
-                ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
-                start = time.time()
-                reports._last_report_id = None
-                try:
-                    cfg = routine.config_class(**config)
-                    raw = await routine.run_fn(cfg, ctx)
-                    result = normalize_result(raw)
-                except Exception as e:
-                    tb = traceback.format_exc()
-                    logger.error(
-                        f"Scheduled routine {routine.name}[{instance_id}] error: {type(e).__name__}: {e}\n{tb}"
-                    )
-                    error_msg = f"{type(e).__name__}: {e}"
-                    result = RoutineResult(text=f"Error: {error_msg}\n\n{tb}")
-                    run_failed = True
-                else:
-                    error_msg = None
-                    run_failed = False
-
-                duration = time.time() - start
-                report_id = reports._last_report_id
-                self._results[instance_id] = result
-
-                if instance_id in self._instances:
-                    self._instances[instance_id].update(
-                        {
-                            "status": "scheduled",
-                            "last_run_at": time.time(),
-                            "last_result": result.text[:500],
-                            "last_duration": duration,
-                            "run_count": self._instances[instance_id].get(
-                                "run_count", 0
-                            )
-                            + 1,
-                            "error": error_msg,
-                        }
-                    )
-
-                await self._fire_hooks(instance_id, result, report_id, run_failed)
-
+                await self._execute_and_record(
+                    instance_id,
+                    routine,
+                    config,
+                    server_name,
+                    user_id,
+                    status_after="scheduled",
+                )
+                # A cancel that lands mid-run is swallowed (and recorded) by
+                # _execute_and_record; stop() removed the instance, so bail out
+                # instead of sleeping through one more interval.
+                if instance_id not in self._instances:
+                    break
                 await asyncio.sleep(interval_sec)
         except asyncio.CancelledError:
             logger.info(f"Scheduled routine {instance_id} cancelled")

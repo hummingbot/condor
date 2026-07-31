@@ -4,7 +4,9 @@ import { useCallback, useMemo, useState } from "react";
 import yaml from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
+import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { api, type ControllerConfigSummary } from "@/lib/api";
+import { configToYaml } from "@/lib/configYaml";
 
 // ── Delete Confirm Dialog ──
 
@@ -20,6 +22,7 @@ export function DeleteConfirmDialog({
   onDeleted?: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(true, onClose);
 
   const deleteMutation = useMutation({
     mutationFn: () => {
@@ -81,6 +84,49 @@ export function DeleteConfirmDialog({
   );
 }
 
+// ── Discard Changes Confirm Dialog ──
+
+export function DiscardChangesDialog({
+  fileName,
+  onDiscard,
+  onClose,
+}: {
+  fileName: string;
+  onDiscard: () => void;
+  onClose: () => void;
+}) {
+  useEscapeKey(true, onClose);
+
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
+      <div className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[400px] bg-[var(--color-bg)] border border-[var(--color-border)] rounded-xl shadow-xl z-50 p-5">
+        <h2 className="text-sm font-semibold mb-2">Unsaved Changes</h2>
+        <p className="text-xs text-[var(--color-text-muted)] mb-4">
+          <span className="font-mono font-medium text-[var(--color-text)]">
+            {fileName}
+          </span>{" "}
+          has unsaved changes. Closing will discard them.
+        </p>
+        <div className="flex items-center justify-end gap-3">
+          <button
+            onClick={onClose}
+            className="rounded-md px-3 py-1.5 text-sm text-[var(--color-text-muted)]"
+          >
+            Keep editing
+          </button>
+          <button
+            onClick={onDiscard}
+            className="rounded-md bg-[var(--color-red)] px-4 py-1.5 text-sm font-medium text-white"
+          >
+            Discard changes
+          </button>
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ── Upload Dialog (Config .yml or Controller .py) ──
 
 type UploadMode = "config" | "controller";
@@ -95,6 +141,7 @@ export function UploadDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(true, onClose);
   const [mode, setMode] = useState<UploadMode>("config");
   const [content, setContent] = useState("");
   const [parseError, setParseError] = useState<string | null>(null);
@@ -208,6 +255,8 @@ export function UploadDialog({
           <button
             onClick={onClose}
             className="p-1 rounded hover:bg-[var(--color-surface-hover)]"
+            title="Close"
+            aria-label="Close"
           >
             <X className="h-4 w-4" />
           </button>
@@ -352,6 +401,7 @@ export function CloneConfigDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(true, onClose);
   const [newId, setNewId] = useState(`${sourceConfig.id}_copy`);
   const [yamlContent, setYamlContent] = useState("");
   const [yamlError, setYamlError] = useState<string | null>(null);
@@ -363,10 +413,7 @@ export function CloneConfigDialog({
 
   useMemo(() => {
     if (!data?.config) return;
-    const filtered = Object.fromEntries(
-      Object.entries(data.config).filter(([k]) => k !== "id"),
-    );
-    setYamlContent(yaml.dump(filtered, { sortKeys: false, lineWidth: -1 }));
+    setYamlContent(configToYaml(data.config));
   }, [data?.config]);
 
   const handleYamlChange = useCallback((val: string) => {
@@ -408,6 +455,8 @@ export function CloneConfigDialog({
           <button
             onClick={onClose}
             className="p-1 rounded hover:bg-[var(--color-surface-hover)]"
+            title="Close"
+            aria-label="Close"
           >
             <X className="h-4 w-4" />
           </button>
@@ -494,6 +543,7 @@ export function NewConfigDialog({
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
+  useEscapeKey(true, onClose);
   const [configId, setConfigId] = useState("");
   const [fieldValues, setFieldValues] = useState<Record<string, unknown>>({});
 
@@ -600,6 +650,8 @@ export function NewConfigDialog({
           <button
             onClick={onClose}
             className="p-1 rounded hover:bg-[var(--color-surface-hover)]"
+            title="Close"
+            aria-label="Close"
           >
             <X className="h-4 w-4" />
           </button>

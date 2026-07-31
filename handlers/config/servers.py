@@ -451,7 +451,7 @@ async def set_default_server(
         invalidate_cache(context.user_data, "all")
         context.user_data["_current_server"] = server_name
 
-        # Note: DataManager uses server-scoped sessions, no need to invalidate
+        # Note: SDS cache is server-scoped, no need to invalidate
         # when switching servers — data is shared per-server, not per-user
 
         await query.answer(f"✅ Set {server_name} as your default server")
@@ -526,6 +526,7 @@ async def delete_server(
                 # Also invalidate SDS (server-scoped)
                 try:
                     from condor.server_data_service import get_server_data_service
+
                     get_server_data_service().invalidate_server(server_name)
                 except Exception:
                     pass
@@ -986,7 +987,7 @@ async def confirm_add_server(query, context: ContextTypes.DEFAULT_TYPE) -> None:
             success_msg = f"✅ Added server '{server_data['name']}'"
             if auto_default:
                 success_msg += " (set as default)"
-            
+
             await query.answer(success_msg)
             context.user_data.pop("adding_server", None)
             context.user_data.pop("awaiting_add_server_input", None)
