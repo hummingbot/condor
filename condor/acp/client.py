@@ -263,6 +263,7 @@ class ToolCallUpdate:
     status: str | None = None
     title: str | None = None
     output: str | None = None
+    input: dict | None = None
 
 
 @dataclass
@@ -319,6 +320,8 @@ def fold_tool_call_event(
                 tc["name"] = event.title
             if event.output:
                 tc["output"] = event.output
+            if event.input:
+                tc["input"] = event.input
     return None
 
 
@@ -679,13 +682,17 @@ class ACPClient:
             if text:
                 self._event_queue.put_nowait(ThoughtChunk(text=text))
         elif kind == "tool_call":
+            # claude-agent-acp sends tool arguments as ``rawInput`` (ACP wire
+            # field), not ``input`` — without the fallback every tool call
+            # arrives argument-less, which silently disabled input-dependent
+            # consumers (risk checks, snapshots' Input blocks, bot_name capture).
             self._event_queue.put_nowait(
                 ToolCallEvent(
                     tool_call_id=update.get("toolCallId", ""),
                     title=update.get("title", ""),
                     status=update.get("status", "pending"),
                     kind=update.get("kind", "other"),
-                    input=update.get("input"),
+                    input=update.get("input") or update.get("rawInput"),
                 )
             )
         elif kind == "tool_call_update":
@@ -695,6 +702,7 @@ class ACPClient:
                     status=update.get("status"),
                     title=update.get("title"),
                     output=update.get("output"),
+                    input=update.get("input") or update.get("rawInput"),
                 )
             )
 
@@ -708,9 +716,16 @@ class ACPClient:
     ) -> dict[str, Any]:
         options = options or []
 
-        # If we have a permission callback, delegate to it
+        # If we have a permission callback, delegate to it. Normalize the ACP
+        # wire field ``rawInput`` into ``input`` first — the risk engine reads
+        # tool_call["input"], and without this every permission check saw empty
+        # arguments (deploy caps, dry-run blocks and controller_id validation
+        # all silently passed).
         if self.permission_callback:
-            return await self.permission_callback(toolCall or {}, options)
+            tc = dict(toolCall or {})
+            if not tc.get("input") and tc.get("rawInput"):
+                tc["input"] = tc["rawInput"]
+            return await self.permission_callback(tc, options)
 
         # Default: auto-approve
         for opt in options:

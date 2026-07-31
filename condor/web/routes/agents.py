@@ -157,6 +157,11 @@ class AgentPerformanceModel(BaseModel):
     open_count: int = 0
     closed_count: int = 0
     executors: list[dict[str, Any]] = []
+    # Bot-mode attribution: which bot this session operates (resolved instance
+    # name) and its per-controller breakdown, so the UI can label bot-mode
+    # sessions and filter live executors by the bot's controller ids.
+    bot_name: str = ""
+    controllers: list[dict[str, Any]] = []
 
 
 class StrategyPerformanceResponse(BaseModel):
@@ -378,6 +383,54 @@ def _session_start_epoch(strategy_dir: Path, num: int) -> float:
         return os.path.getmtime(target)
     except OSError:
         return 0.0
+
+
+async def _merge_session_bot_slice(
+    client: Any,
+    perf: Any,
+    bot_base: str,
+    strategy_dir: Path,
+    session_num: int,
+    session_nums: list[int],
+) -> None:
+    """Fold one closed session's slice of its bot's history into ``perf`` in place.
+
+    Same window tiling as :func:`_apply_bot_mode_pnl` — ``[start_N, start_next)``
+    where ``start_next`` is the next session's start (or now for the last one) —
+    so the per-session detail agrees with the strategy performance rollup.
+    Realized-only: a closed session never carries the bot's live unrealized PnL
+    or open positions, which belong to the current operator.
+    """
+    from condor.fetchers.bot_performance import (
+        fetch_all_bot_performance,
+        fetch_instance_history,
+        resolve_bot_instances,
+        slice_history,
+    )
+
+    start = _session_start_epoch(strategy_dir, session_num)
+    if start <= 0:
+        return
+    later = [n for n in session_nums if n > session_num]
+    end = _session_start_epoch(strategy_dir, min(later)) if later else time.time()
+    if end <= start:
+        end = time.time()
+
+    try:
+        all_bot_perf = await fetch_all_bot_performance(client)
+    except Exception as e:
+        log.warning("session bot slice: fetch_all_bot_performance failed: %s", e)
+        return
+    instances = resolve_bot_instances(all_bot_perf, bot_base)
+    if not instances:
+        return
+    histories = [await fetch_instance_history(client, inst) for inst in instances]
+    realized, volume, trades = slice_history(histories, start, end)
+    perf.realized_pnl += realized
+    perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
+    perf.volume += volume
+    perf.trade_count += int(round(trades))
+    perf.bot_name = perf.bot_name or bot_base
 
 
 async def _apply_bot_mode_pnl(
@@ -1178,12 +1231,18 @@ async def get_session_executors(
         if k == "session"
     ]
     is_operator = bool(session_nums) and session_num == max(session_nums)
-    bot_name = (
-        _session_bot_base(strategy.dir, strategy.default_config, session_num)
-        if is_operator
-        else ""
+    bot_base = _session_bot_base(strategy.dir, strategy.default_config, session_num)
+    perf = await fetch_agent_performance(
+        client, agent_id, bot_name=bot_base if is_operator else ""
     )
-    perf = await fetch_agent_performance(client, agent_id, bot_name=bot_name)
+    if bot_base and not is_operator:
+        # Closed bot-mode session: attribute its own time-window slice of the
+        # bot's history (same tiling as _apply_bot_mode_pnl) so a finished run
+        # still shows what it earned instead of an empty page. No live rows —
+        # open positions belong to the current operator.
+        await _merge_session_bot_slice(
+            client, perf, bot_base, strategy.dir, session_num, session_nums
+        )
     model = AgentPerformanceModel(
         agent_id=agent_id,
         session_num=session_num,
@@ -1197,6 +1256,8 @@ async def get_session_executors(
         open_count=perf.open_count,
         closed_count=perf.closed_count,
         executors=perf.executors,
+        bot_name=perf.bot_name,
+        controllers=perf.controllers,
     )
     return {"executors": perf.executors, "performance": model.model_dump()}
 
