@@ -92,6 +92,9 @@ class TickEngine:
     risk: RiskEngine = field(init=False)
     provider_registry: ProviderRegistry = field(init=False)
     session_dir: "Path | None" = field(default=None, init=False)
+    # Which bots this session owns (FEAT-017). Controller mode only; None for
+    # executor-mode runs, which are unaffected by ownership enforcement.
+    ledger: "BotLedger | None" = field(default=None, init=False, repr=False)
     # Scratch KV scoped to this (agent, strategy) — see condor.runtime.state.
     state: "BoundState" = field(init=False, repr=False)
 
@@ -105,6 +108,7 @@ class TickEngine:
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
+    _adoption_done: bool = field(default=False, init=False, repr=False)
     # The live per-tick ACP client, held so stop() can reap it if the tick's own
     # finally is skipped (e.g. cancelled mid-await). None between ticks.
     _active_client: "ACPClient | PydanticAIClient | None" = field(
@@ -123,6 +127,21 @@ class TickEngine:
         # "..._e{N}" for experiments). The dot separates the two slugs cleanly —
         # slugs never contain a dot.
         run_key = f"{self.agent.slug}.{self.strategy.slug}"
+
+        # Controller mode (FEAT-017): resolve the effective bot name BEFORE the
+        # session config is persisted, so the session record — which per-session
+        # PnL attribution reads back — carries the name this run actually used.
+        from .ownership import (
+            BotLedger,
+            bot_namespace,
+            declared_names,
+            resolve_bot_name,
+        )
+
+        self.config["bot_name"] = resolve_bot_name(
+            self.config, self.agent.slug, self.strategy.slug
+        )
+
         if self.is_experiment:
             self.session_num = next_experiment_number(strategy_dir)
             self.agent_id = f"{run_key}_e{self.session_num}"
@@ -146,6 +165,16 @@ class TickEngine:
                 strategy_description=self.strategy.description,
                 session_dir=self.session_dir,
                 agent_dir=strategy_dir,
+            )
+
+        # The ledger only exists in controller mode: an executor-mode agent never
+        # touches a bot, so it gets no ownership enforcement and writes no file.
+        if self.config["bot_name"]:
+            namespace = bot_namespace(self.agent.slug, self.strategy.slug)
+            self.ledger = BotLedger(
+                namespace,
+                self.session_dir,
+                declared=declared_names(self.config, namespace),
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
@@ -363,6 +392,11 @@ class TickEngine:
                 self.journal.append_error("No API client available")
             return
 
+        # 1b. Adopt any bot of ours already running (first tick only). A crash
+        # restart always mints a NEW session (see condor/runtime/loops.py), so the
+        # live bot must be taken over rather than orphaned and redeployed.
+        await self._adopt_running_bots(client)
+
         # 2. Run core data providers (executors only -- agent uses MCP for market data)
         skill_results = await self.provider_registry.run_core_providers(
             client, self.config, agent_id=self.agent_id
@@ -459,6 +493,7 @@ class TickEngine:
             cached_routines_section=self._cached_routines_section or None,
             user_memory=user_memory,
             skills_index=skills_index,
+            ledger=self.ledger,
         )
 
         # Inject pending user directives
@@ -530,6 +565,8 @@ class TickEngine:
                 response_summary=response_text[:500],
             )
 
+            self._journal_ownership_violations(tick_num)
+
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
             skill_volume = self._last_skill_data.get("total_volume", 0.0)
             skill_executors = len(self._last_skill_data.get("executors", []))
@@ -571,6 +608,53 @@ class TickEngine:
                 tick_num,
                 len(tool_calls),
                 len(response_text),
+            )
+
+    async def _adopt_running_bots(self, client) -> None:
+        """Record the bots in our namespace that are already live (FEAT-017).
+
+        Runs once, on the first tick — not in ``__post_init__``, which is sync and
+        must not do network I/O. Reaching the API is best-effort: a failure means
+        "own nothing yet" and is retried on the next tick, never fatal.
+        """
+        if self._adoption_done or self.ledger is None:
+            return
+        from condor.fetchers.bot_performance import fetch_all_bot_performance
+
+        try:
+            all_perf = await fetch_all_bot_performance(client)
+        except Exception as e:
+            log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
+            return
+
+        now = time.time()
+        for instance_name in all_perf:
+            if self.ledger.owns(instance_name):
+                self.ledger.adopt(instance_name, now)
+        self._adoption_done = True
+        if self.ledger.bases():
+            log.info(
+                "TickEngine %s adopted bots: %s",
+                self.agent_id,
+                ", ".join(self.ledger.bases()),
+            )
+
+    def _journal_ownership_violations(self, tick_num: int) -> None:
+        """Surface refused bot calls in the journal.
+
+        The permission callback can only allow or cancel — it cannot hand a
+        corrective message back to the model mid-tick (see
+        condor/acp/pydantic_ai_client.py). The correction reaches the agent here
+        and via the next tick's [CONTROLLER MODE] block.
+        """
+        if not self.journal or self.ledger is None:
+            return
+        for v in self.ledger.drain_violations():
+            self.journal.append_action(
+                tick_num,
+                "bot_ownership_blocked",
+                f"manage_bots({v['action']}) on '{v['name']}' refused — outside "
+                f"namespace '{self.ledger.namespace}'",
             )
 
     async def _collect_stream(self, acp_client: ACPClient, prompt: str):
@@ -618,7 +702,7 @@ class TickEngine:
                 agent_slug=self.agent.slug,
             )
         permission_cb = auto_approve_with_risk_check(
-            self.risk, risk_state, execution_mode=mode
+            self.risk, risk_state, execution_mode=mode, ledger=self.ledger
         )
 
         agent_key = self._agent_key()

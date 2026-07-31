@@ -137,18 +137,31 @@ This is the closest thing to giving each LLM its own virtual sub-account without
 
 By default an agent acts through standalone executors tagged with its `controller_id`. As an alternative, an agent can **operate a Hummingbot bot's controllers** — deploy a bot under a stable name and retune its controller configs each tick — instead of (or in addition to) spawning executors.
 
-Controller mode is triggered solely by setting a non-empty **`bot_name`** in the strategy config (`default_config.bot_name`, overridable at start time). There is no separate mode flag: "has a `bot_name`" *is* the mode. When set:
+Controller mode is triggered by the effective **`bot_name`** being non-empty. `bot_mode` (default `auto`) decides how that name is resolved (`condor/agents/ownership.py:resolve_bot_name`):
 
-- The tick prompt gains a `[CONTROLLER MODE]` block telling the agent it owns bot `{bot_name}` and should steer it via `manage_controllers` (define/update controller configs) + `manage_bots` (`deploy` / `update_config` / `start_controllers` / `stop_controllers`), not standalone executors.
+| `bot_mode` | Effective `bot_name` |
+|---|---|
+| `auto` (default) | exactly the configured `bot_name` — controller mode iff it is non-empty |
+| `bot` | the configured `bot_name`, or, when empty, **derived** as `{agent_slug}-{strategy_slug}` |
+| `executors` | always empty — forces executor mode even with a `bot_name` set |
+
+The name is resolved once at engine start and written back into the session's `config.yml`, so per-session PnL attribution reads back the name the run actually used. When controller mode is on:
+
+- The tick prompt gains a `[CONTROLLER MODE]` block telling the agent which bots it owns and that it should steer them via `manage_controllers` (define/update controller configs) + `manage_bots` (`deploy` / `update_config` / `start_controllers` / `stop_controllers`), not standalone executors.
 - The agent's reported PnL becomes `executor_pnl(controller_id == agent_id)` **+** `bot_pnl(bot_name == config.bot_name)`. The two sources are disjoint — bot controllers tag their executors with their own config ids, never the `agent_id` — so the merge is plain addition with no double counting (`condor/fetchers/bot_performance.py` aggregates the bot side; `condor/agents/performance.py` folds it in).
 
-**Stable identity.** The bot is persistent infrastructure, so its name should derive from the **stable** `run_key` (`{agent_slug}.{strategy_slug}`), not the per-session `agent_id`. The suggested default is `sanitize(run_key)` = `{agent_slug}-{strategy_slug}`; a restarted agent then reattaches to the same bot. If you hardcode a `bot_name`, keep it stable across restarts.
+**Ownership is a namespace, enforced at the tool call** (FEAT-017, `condor/agents/ownership.py`). Every bot a strategy may deploy or mutate lives under `{agent_slug}-{strategy_slug}` — the base itself, any tagged sibling (`…-btc`, `…-eth`), and their deployed instances (Hummingbot appends a `-YYYYMMDD-HHMMSS` timestamp). Slugs never contain `-` (`strategy._slugify` maps `[\s-]+ → _`), so the delimiter is unambiguous and two agents can never claim the same bot — uniqueness is structural, with no registry or lock.
+
+- A `manage_bots` call with a *dangerous* action (`deploy`, `stop_bot`, `start_controllers`, `stop_controllers`, `update_config`) on a bot outside the namespace is **cancelled** at the permission callback (`condor/agents/risk.py:auto_approve_with_risk_check`) and recorded. Read-only actions (`status`, `logs`, `get_config`) are never restricted — an agent still sees the whole fleet.
+- A `bot_name` configured before this convention (e.g. `river-scalper`) is carried as a **declared** name and stays owned, so existing agents keep working with no config change.
+- Each session writes `{session_dir}/owned_bots.json`: the bases it owns, whether it `deployed` or `adopted` each, and when. A restart always mints a *new* session (see `condor/runtime/loops.py`), so the first tick runs an **adoption pass** that takes over the still-running bot instead of orphaning it and deploying a duplicate. Experiments (`dry_run` / `run_once`) have no session dir and keep the ledger in memory only.
+- The guard can only allow or cancel — it cannot reply to the model mid-tick. A refusal reaches the agent through the journal (`bot_ownership_blocked`) and the next tick's `[CONTROLLER MODE]` block, which is generated from the ledger.
 
 **Enablement (data, not code).** A controller-mode agent needs `manage_bots` **and** `manage_controllers` in its `AGENT.md` `tools:` allowlist (the allowlist is enforced in `condor/acp/pydantic_ai_client.py`). Example `default_config`:
 
 ```yaml
 default_config:
-  bot_name: river-scalper      # stable; defaults to {agent_slug}-{strategy_slug}
+  bot_mode: bot                # derives bot_name = {agent_slug}-{strategy_slug}
   total_amount_quote: 500
 ```
 
