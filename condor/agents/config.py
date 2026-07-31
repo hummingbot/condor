@@ -61,6 +61,12 @@ class AgentConfig(BaseModel):
         "(deploy/retune) instead of creating standalone executors, and the bot's "
         "PnL is merged into the agent's reported performance. Empty = executor mode.",
     )
+    bot_mode: Literal["auto", "executors", "bot"] = Field(
+        default="auto",
+        description="auto = controller mode iff bot_name is set (default); "
+        "bot = controller mode on, deriving bot_name as {agent_slug}-{strategy_slug} "
+        "when empty; executors = force executor mode even with a bot_name set.",
+    )
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 
     def to_engine_dict(self) -> dict[str, Any]:
