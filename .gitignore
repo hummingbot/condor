@@ -184,6 +184,10 @@ node_modules/
 # Routine reports
 /reports/
 
+# Runtime store: loop scratch state (FEAT-013) and chat transcripts (FEAT-015).
+# Durable across restarts, but it is this deployment's data, not the codebase's.
+condor/.runtime/
+
 # Agent runtime artifacts: learnings, session journals, dry-run experiments,
 # and delegation records (not committed)
 agents/**/learnings.md

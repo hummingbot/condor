@@ -261,7 +261,12 @@ def test_prompt_on_missing_session_still_terminates(registry):
 
 
 def test_session_budget_is_shared_across_surfaces(registry):
-    """The per-user cap lives in the runtime, so both surfaces draw on it."""
+    """The per-user cap lives in the runtime, so both surfaces draw on it.
+
+    Since FEAT-015 the cap is an LRU rather than a wall, so the refusal only
+    survives when every session is busy — see ``test_conversations.py`` for the
+    detach path.
+    """
     monkey_max = session_module.MAX_SESSIONS_PER_USER
 
     async def scenario():
@@ -273,7 +278,11 @@ def test_session_budget_is_shared_across_surfaces(registry):
                     user_id=42,
                 )
             )
-        # One more, from the *other* surface, must be refused.
+        for session in session_module._sessions.values():
+            session.is_busy = True
+
+        # One more, from the *other* surface, must be refused: there is no
+        # idle session to give up.
         with pytest.raises(session_module.SessionLimitReached):
             await runtime.create_session(
                 SessionSpec(

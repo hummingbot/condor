@@ -730,6 +730,8 @@ export interface SessionInfo {
   agent_slug: string;
   /** Display name of whoever is answering. */
   label: string;
+  /** Durable conversation behind this session. Outlives it. */
+  conversation_id: string;
 }
 
 export interface CreateSessionRequest {
@@ -739,6 +741,46 @@ export interface CreateSessionRequest {
   server_name?: string | null;
   agent_slug?: string;
   lazy_context?: boolean;
+  /** Empty mints a new conversation; an id resumes that transcript. */
+  conversation_id?: string;
+}
+
+// ── Conversations ──
+//
+// A session is the live subprocess; a conversation is what was said. The
+// second outlives the first, so this — not localStorage — is the source of
+// truth for a transcript.
+
+export interface ConversationMeta {
+  id: string;
+  user_id: number;
+  /** Where it was born: "tg" | "web" | "mcp". */
+  surface: string;
+  title: string;
+  agent_key: string;
+  agent_slug: string;
+  mode: string;
+  server_name: string | null;
+  created_at: string;
+  updated_at: string;
+  turn_count: number;
+  last_snippet: string;
+}
+
+export interface ConversationTurn {
+  /** "user" | "assistant" | "system". */
+  role: string;
+  text: string;
+  thought: string;
+  tool_calls: { id?: string; title?: string; status?: string }[];
+  /** System entries only: "switch" | "error". */
+  kind: string;
+  ts: number;
+}
+
+export interface ConversationDetail {
+  meta: ConversationMeta;
+  turns: ConversationTurn[];
 }
 
 export interface SwitchSessionRequest {
@@ -1519,6 +1561,32 @@ export const api = {
     apiFetch<{ ok: boolean }>(
       `/api/v1/sessions/${encodeURIComponent(key)}/action`,
       { method: "POST", body: JSON.stringify({ action: "cancel" }) },
+    ),
+
+  // ── Conversations (durable transcripts) ──
+  //
+  // Everything the user has ever said, across Telegram and the dashboard, in
+  // one keyspace. A conversation is continuable long after its session died.
+
+  listConversations: (limit = 100) =>
+    apiFetch<ConversationMeta[]>(`/api/v1/conversations?limit=${limit}`),
+
+  getConversation: (id: string, limit = 200) =>
+    apiFetch<ConversationDetail>(
+      `/api/v1/conversations/${encodeURIComponent(id)}?limit=${limit}`,
+    ),
+
+  renameConversation: (id: string, title: string) =>
+    apiFetch<ConversationMeta>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
+
+  /** The only way to lose a transcript. Killing a session no longer does. */
+  deleteConversation: (id: string) =>
+    apiFetch<{ deleted: boolean; sessions_destroyed: number }>(
+      `/api/v1/conversations/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
     ),
 
   // ── Custom OpenAI-compatible LLM endpoints ──

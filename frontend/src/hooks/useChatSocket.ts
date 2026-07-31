@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { api, type ConversationTurn } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { getViewContext } from "@/lib/viewContext";
 import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
@@ -19,6 +20,8 @@ export interface ChatMessage {
 
 export interface SlotInfo {
   slot_id: string;
+  /** Durable conversation behind the slot. Same value as slot_id for web. */
+  conversation_id?: string;
   agent_key: string;
   mode: string;
   is_busy?: boolean;
@@ -35,56 +38,44 @@ function nextMsgId(): string {
   return `msg_${Date.now()}_${++msgIdCounter}`;
 }
 
-// ── localStorage persistence for chat messages ──
-const STORAGE_KEY = "condor_chat_messages";
-// Cap the persisted history so localStorage can't grow unbounded across
-// long-running sessions (streaming chunks re-serialize on every update).
-// Only the persisted copy is trimmed; the in-memory `slots` stay intact.
-const MAX_PERSISTED_SLOTS = 10; // keep the most recently active slots
-const MAX_PERSISTED_MESSAGES_PER_SLOT = 100; // keep the last N messages per slot
+// ── History comes from the server ──
+//
+// This used to keep a copy of the rendered messages in localStorage. That was
+// a second truth about what was said: per-browser, keyed on a slot id that
+// died with the subprocess, and invisible to Telegram. The backend now records
+// every turn (FEAT-015), so the transcript is fetched, never mirrored.
 
-function saveSlotMessages(slots: ChatSlot[]) {
-  try {
-    const data: Record<string, ChatMessage[]> = {};
-    // Keep only the last MAX_PERSISTED_SLOTS slots that have messages.
-    const withMessages = slots.filter((s) => s.messages.length > 0);
-    for (const s of withMessages.slice(-MAX_PERSISTED_SLOTS)) {
-      // Keep only the most recent messages per slot.
-      data[s.info.slot_id] = s.messages.slice(-MAX_PERSISTED_MESSAGES_PER_SLOT);
-    }
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch { /* quota exceeded or private mode */ }
-}
-
-function loadSlotMessages(): Record<string, ChatMessage[]> {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
-  } catch { /* corrupted */ }
-  return {};
-}
-
-function clearStoredSlot(slotId: string) {
-  try {
-    const data = loadSlotMessages();
-    delete data[slotId];
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
-  } catch { /* ignore */ }
+function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
+  const messages: ChatMessage[] = [];
+  turns.forEach((turn, i) => {
+    const toolCalls: ToolCall[] = (turn.tool_calls || []).map((tc) => ({
+      tool_call_id: String(tc.id ?? ""),
+      title: String(tc.title ?? ""),
+      status: String(tc.status ?? "completed"),
+    }));
+    // A turn with no text and no tools is an artifact of a prompt that died
+    // before producing anything; rendering it as an empty bubble is noise.
+    if (!turn.text && toolCalls.length === 0) return;
+    messages.push({
+      id: `hist_${i}_${turn.ts}`,
+      role: turn.role === "user" ? "user" : "assistant",
+      text: turn.text,
+      toolCalls,
+      thought: turn.thought || undefined,
+    });
+  });
+  return messages;
 }
 
 export function useChatSocket() {
   const { token } = useAuth();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  // Trailing debounce for localStorage persistence: streaming chunks update
-  // `slots` per token, so serializing on every change would run JSON.stringify
-  // hundreds of times per response on the main thread.
-  const persistTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
-  // Set by events that should persist immediately (e.g. prompt_done) instead
-  // of waiting for the trailing debounce.
-  const persistNow = useRef(false);
   // Track current assistant message per slot
   const currentAssistantMsg = useRef<Record<string, string | null>>({});
+  // Conversations already fetched, so a WS reconnect doesn't re-hydrate a slot
+  // that is mid-answer and clobber the streaming bubble.
+  const hydratedSlots = useRef<Set<string>>(new Set());
 
   const [isConnected, setIsConnected] = useState(false);
   const [slots, setSlots] = useState<ChatSlot[]>([]);
@@ -92,9 +83,6 @@ export function useChatSocket() {
   // current list synchronously without closing over stale state.
   const slotsRef = useRef<ChatSlot[]>([]);
   const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
-  // Track whether we've received the initial sessions_list from the backend.
-  // Prevents the empty initial slots from overwriting localStorage.
-  const hydrated = useRef(false);
   const [streamingSlotId, setStreamingSlotId] = useState<string | null>(null);
   const [permissionRequest, setPermissionRequest] = useState<{
     request_id: string;
@@ -149,6 +137,33 @@ export function useChatSocket() {
     setIsConnected(false);
   }, []);
 
+  // Pull a slot's transcript from the server and drop it into the slot. Only
+  // ever runs once per slot: the WS is authoritative for anything after.
+  const hydrateSlot = useCallback(
+    async (conversationId: string, slotId: string) => {
+      if (!conversationId || hydratedSlots.current.has(slotId)) return;
+      hydratedSlots.current.add(slotId);
+      try {
+        const detail = await api.getConversation(conversationId);
+        const restored = turnsToMessages(detail.turns);
+        if (restored.length === 0) return;
+        setSlots((prev) =>
+          prev.map((s) =>
+            // Prepend rather than replace: a turn that streamed in while the
+            // fetch was in flight must survive it.
+            s.info.slot_id === slotId
+              ? { ...s, messages: [...restored, ...s.messages] }
+              : s,
+          ),
+        );
+      } catch {
+        // A conversation we cannot read is not worth breaking the chat over.
+        hydratedSlots.current.delete(slotId);
+      }
+    },
+    [],
+  );
+
   const handleEvent = useCallback(
     (data: Record<string, unknown>) => {
       const event = data.event as string;
@@ -157,24 +172,23 @@ export function useChatSocket() {
       switch (event) {
         case "sessions_list": {
           const sessions = data.sessions as SlotInfo[];
-          hydrated.current = true;
           if (sessions.length > 0) {
-            const stored = loadSlotMessages();
             setSlots((prev) => {
-              // Merge: keep existing messages for known slots, restore from localStorage, or start empty
+              // Keep whatever is already rendered for a known slot; a slot we
+              // have not seen starts empty and is filled by hydrateSlot below.
               const existing = new Map(prev.map((s) => [s.info.slot_id, s]));
-              const merged = sessions.map((info) => {
+              return sessions.map((info) => {
                 const ex = existing.get(info.slot_id);
-                if (ex) return { ...ex, info };
-                const restored = stored[info.slot_id];
-                return { info, messages: restored || [] };
+                return ex ? { ...ex, info } : { info, messages: [] };
               });
-              return merged;
             });
             setActiveSlotId((prev) => {
               if (prev && sessions.some((s) => s.slot_id === prev)) return prev;
               return sessions[0].slot_id;
             });
+            for (const info of sessions) {
+              void hydrateSlot(info.conversation_id || info.slot_id, info.slot_id);
+            }
           }
           break;
         }
@@ -182,18 +196,35 @@ export function useChatSocket() {
         case "session_started": {
           const newSlot: SlotInfo = {
             slot_id: data.slot_id as string,
+            conversation_id: (data.conversation_id as string) || undefined,
             agent_key: data.agent_key as string,
             mode: data.mode as string,
             server_name: (data.server_name as string) || undefined,
           };
-          setSlots((prev) => [...prev, { info: newSlot, messages: [] }]);
+          setSlots((prev) =>
+            prev.some((s) => s.info.slot_id === newSlot.slot_id)
+              ? prev.map((s) =>
+                  s.info.slot_id === newSlot.slot_id ? { ...s, info: newSlot } : s,
+                )
+              : [...prev, { info: newSlot, messages: [] }],
+          );
           setActiveSlotId(newSlot.slot_id);
+          // A resumed conversation arrives with a transcript; a brand new one
+          // is empty and hydrating it is a cheap no-op.
+          if (data.restored) {
+            void hydrateSlot(
+              newSlot.conversation_id || newSlot.slot_id,
+              newSlot.slot_id,
+            );
+          } else {
+            hydratedSlots.current.add(newSlot.slot_id);
+          }
           break;
         }
 
         case "session_destroyed": {
           const destroyedId = data.slot_id as string;
-          clearStoredSlot(destroyedId);
+          hydratedSlots.current.delete(destroyedId);
           // Compute the slots that remain after removal once, outside any
           // updater, so both setters below stay pure (safe under StrictMode /
           // concurrent rendering, which may invoke updaters more than once).
@@ -353,8 +384,6 @@ export function useChatSocket() {
             );
             currentAssistantMsg.current[slotId] = null;
           }
-          // Flush the debounced persistence as soon as the response settles.
-          persistNow.current = true;
           setStreamingSlotId(null);
           break;
 
@@ -389,7 +418,7 @@ export function useChatSocket() {
           break;
       }
     },
-    [],
+    [hydrateSlot],
   );
 
   const send = useCallback((msg: Record<string, unknown>) => {
@@ -424,10 +453,25 @@ export function useChatSocket() {
     [send],
   );
 
+  /** Reattach a session to a conversation whose subprocess is long gone. The
+   *  agent is handed the transcript, so it picks up where the last one left off. */
+  const resumeConversation = useCallback(
+    (conversationId: string, opts?: { agentKey?: string; mode?: string }) => {
+      send({
+        action: "resume_conversation",
+        conversation_id: conversationId,
+        agent_key: opts?.agentKey,
+        mode: opts?.mode,
+      });
+    },
+    [send],
+  );
+
   const destroySession = useCallback(
     (slotId: string) => {
       currentAssistantMsg.current[slotId] = null;
-      clearStoredSlot(slotId);
+      // Only the session goes; the transcript stays on the server, which is
+      // what makes this reversible.
       send({ action: "destroy_session", slot_id: slotId });
     },
     [send],
@@ -476,30 +520,12 @@ export function useChatSocket() {
   useEffect(() => {
     return () => {
       clearTimeout(reconnectTimer.current);
-      clearTimeout(persistTimer.current);
-      // Flush any pending debounced persistence so no messages are lost.
-      if (hydrated.current) saveSlotMessages(slotsRef.current);
       wsRef.current?.close();
     };
   }, []);
 
-  // Persist messages to localStorage on change (but only after initial hydration
-  // to avoid the empty initial state wiping saved messages before WS reconnects).
-  // Writes are debounced with a trailing timer so streaming chunks don't
-  // re-serialize the whole history per token; prompt_done flushes immediately.
   useEffect(() => {
     slotsRef.current = slots;
-    if (!hydrated.current) return;
-    clearTimeout(persistTimer.current);
-    if (persistNow.current) {
-      persistNow.current = false;
-      saveSlotMessages(slots);
-      return;
-    }
-    persistTimer.current = setTimeout(
-      () => saveSlotMessages(slotsRef.current),
-      1000,
-    );
   }, [slots]);
 
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;
@@ -518,6 +544,7 @@ export function useChatSocket() {
     disconnect,
     sendMessage,
     startSession,
+    resumeConversation,
     destroySession,
     abortPrompt,
     resolvePermission,

@@ -9,13 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import uuid
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
+from condor.runtime import conversations
 from condor.runtime.confirmations import (
     PendingConfirmation,
     build_permission_callback,
@@ -57,6 +57,7 @@ async def _get_user_sessions(user_id: int) -> list[dict]:
     return [
         {
             "slot_id": info.slot,
+            "conversation_id": info.conversation_id,
             "agent_key": info.agent_key,
             "mode": info.mode,
             "is_busy": info.is_busy,
@@ -197,6 +198,8 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
 
             if action == "start_session":
                 _spawn(_handle_start_session(ws, user_id, msg))
+            elif action == "resume_conversation":
+                _spawn(_handle_resume_conversation(ws, user_id, msg))
             elif action == "send_message":
                 _spawn(_handle_send_message(ws, user_id, msg))
             elif action == "destroy_session":
@@ -230,13 +233,73 @@ async def _handle_start_session(
     user_id: int,
     msg: dict,
 ) -> None:
+    """Open a chat on a brand new conversation."""
     agent_key = msg.get("agent_key", DEFAULT_AGENT)
     mode = msg.get("mode", DEFAULT_MODE)
     server_name = msg.get("server_name")  # From frontend's selected server
 
+    # The conversation is minted first and *is* the slot, so the key
+    # web:{user}:{conversation} is stable forever instead of being a throwaway
+    # uuid that dies with the subprocess.
+    conv = conversations.new_conversation(
+        user_id, WEB, agent_key=agent_key, mode=mode, server_name=server_name
+    )
+    await _start(ws, user_id, conv.id, agent_key, mode, server_name, restored=False)
+
+
+async def _handle_resume_conversation(
+    ws: WebSocket,
+    user_id: int,
+    msg: dict,
+) -> None:
+    """Reattach a session to a conversation that already exists.
+
+    The transcript is replayed into the new session's opening context by the
+    runtime, so the agent picks up where the last one left off — a fresh brain
+    that has read the chat, which is the same trade a model switch already
+    makes today.
+    """
+    conversation_id = str(msg.get("conversation_id") or "")
+    try:
+        conv = conversations.get_conversation(user_id, conversation_id)
+    except conversations.ConversationIdError:
+        conv = None
+    if conv is None:
+        await _send(ws, {"event": "error", "message": "No such conversation"})
+        return
+
+    await _start(
+        ws,
+        user_id,
+        conv.id,
+        msg.get("agent_key") or conv.agent_key or DEFAULT_AGENT,
+        msg.get("mode") or conv.mode or DEFAULT_MODE,
+        msg.get("server_name") or conv.server_name,
+        restored=True,
+        agent_slug=conv.agent_slug,
+    )
+
+
+async def _start(
+    ws: WebSocket,
+    user_id: int,
+    conversation_id: str,
+    agent_key: str,
+    mode: str,
+    server_name: str | None,
+    *,
+    restored: bool,
+    agent_slug: str = "",
+) -> None:
+    """Spawn the session behind a conversation and announce it.
+
+    Shared by ``start_session`` and ``resume_conversation``: the two differ only
+    in whether the conversation already had turns, and the runtime decides that
+    by looking at the transcript, not at which action was called.
+    """
     # The per-user session cap now lives in the runtime, so Telegram and the
     # dashboard draw on one budget; exceeding it raises out of create_session.
-    slot_id = str(uuid.uuid4())[:8]
+    slot_id = conversation_id
     session_key = _session_key(user_id, slot_id)
 
     perm_cb = build_permission_callback(
@@ -265,6 +328,8 @@ async def _handle_start_session(
                 lazy_context=True,  # Don't block — inject context on first message
                 server_name=server_name,
                 extra_context=mode_context or "",
+                agent_slug=agent_slug,
+                conversation_id=conversation_id,
             ),
             permission_callback=perm_cb,
             user_data=load_user_data_for(user_id),
@@ -274,10 +339,15 @@ async def _handle_start_session(
             ws,
             {
                 "event": "session_started",
+                # The wire still calls it slot_id — that is the shipped
+                # dashboard's contract. It now *is* the conversation id, sent
+                # alongside under its real name.
                 "slot_id": slot_id,
-                "agent_key": agent_key,
+                "conversation_id": conversation_id,
+                "agent_key": info.agent_key,
                 "mode": mode,
                 "server_name": info.server_name,
+                "restored": restored,
             },
         )
     except Exception as e:
