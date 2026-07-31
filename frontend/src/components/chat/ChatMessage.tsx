@@ -31,6 +31,21 @@ export const ChatMessageView = memo(function ChatMessageView({
 }: {
   message: ChatMessageType;
 }) {
+  // A handover is not a bubble. Rendering it as a divider is what makes the
+  // switch visible in the scrollback instead of implied by a header that
+  // silently changed.
+  if (message.role === "system") {
+    return (
+      <div className="my-3 flex items-center gap-2">
+        <div className="h-px flex-1 bg-[var(--color-border)]" />
+        <span className="whitespace-nowrap text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+          {message.text}
+        </span>
+        <div className="h-px flex-1 bg-[var(--color-border)]" />
+      </div>
+    );
+  }
+
   if (message.role === "user") {
     return (
       <div className="flex justify-end mb-3">

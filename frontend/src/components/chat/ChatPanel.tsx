@@ -1,16 +1,13 @@
 import { useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
 import {
   AlertTriangle,
+  Bot,
   Brain,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
+  History,
   Loader2,
   MessageSquare,
   Minus,
   Plus,
-  Search,
   Server,
   X,
   Zap,
@@ -18,15 +15,16 @@ import {
 import { useChatSocket, type ChatSlot } from "@/hooks/useChatSocket";
 import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
+import { BrainPicker, type BrainSelection } from "./BrainPicker";
+import { ConversationList } from "./ConversationList";
 import {
   api,
-  customAgentKey,
-  parseCustomAgentKey,
+  type AgentBindingOption,
   type ChatAgentOption,
   type ChatModeOption,
   type CustomProvider,
-  type OpenRouterModelOption,
 } from "@/lib/api";
+import { onChatRequest } from "@/lib/chatIntent";
 import { useServer } from "@/hooks/useServer";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 
@@ -52,25 +50,31 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const [showNewMenu, setShowNewMenu] = useState(false);
-  const [pendingSession, setPendingSession] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [switchError, setSwitchError] = useState<string | null>(null);
 
   // Chat options from backend
   const [agents, setAgents] = useState<ChatAgentOption[]>([]);
   const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
+  const [agentBindings, setAgentBindings] = useState<AgentBindingOption[]>([]);
   const [modes, setModes] = useState<ChatModeOption[]>([]);
   const [defaultAgent, setDefaultAgent] = useState("claude-code");
   const [defaultMode, setDefaultMode] = useState("condor");
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
+  const [selectedSlug, setSelectedSlug] = useState("");
   const [selectedMode, setSelectedMode] = useState<string | null>(null);
   const optionsFetched = useRef(false);
 
-  // Fetch chat options on first open
+  // Fetch chat options on first open. /sessions/options is /chat/options plus
+  // the domain Agents a session can be bound to, which is what the picker's
+  // "Agents" section is.
   useEffect(() => {
     if (isOpen && !optionsFetched.current) {
       optionsFetched.current = true;
-      api.getChatOptions().then((opts) => {
+      api.getSessionOptions().then((opts) => {
         setAgents(opts.agents);
         setCustomProviders(opts.custom_providers ?? []);
+        setAgentBindings(opts.agent_bindings ?? []);
         setModes(opts.modes);
         setDefaultAgent(opts.default_agent);
         setDefaultMode(opts.default_mode);
@@ -117,21 +121,29 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     direction: "inverted",
   });
 
-  // Clear pending state when active slot becomes available
-  useEffect(() => {
-    if (chat.activeSlot && pendingSession) {
-      setPendingSession(false);
-    }
-  }, [chat.activeSlot, pendingSession]);
-
-  const handleNewSession = (agentKey: string, mode: string) => {
-    setPendingSession(true);
+  const handleNewSession = (agentKey: string, mode: string, agentSlug?: string) => {
     onToggle(true);
-    chat.startSession(agentKey, mode, server || undefined);
+    chat.startSession(agentKey, mode, server || undefined, agentSlug);
     setShowNewMenu(false);
+    setShowHistory(false);
     setSelectedAgent(null);
+    setSelectedSlug("");
     setSelectedMode(null);
   };
+
+  // "Chat" on an agent's detail page lands here: one start_session already
+  // bound to the agent, so the click costs one spawn rather than a start
+  // followed by a switch.
+  useEffect(
+    () =>
+      onChatRequest(({ agentSlug }) => {
+        onToggle(true);
+        chat.startSession(defaultAgent, defaultMode, server || undefined, agentSlug);
+        setShowNewMenu(false);
+        setShowHistory(false);
+      }),
+    [chat, defaultAgent, defaultMode, onToggle, server],
+  );
 
   const activeSlot = chat.activeSlot;
   const isActiveStreaming = chat.streamingSlotId === chat.activeSlotId;
@@ -139,6 +151,20 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   // Resolve effective selections for the new-session menu
   const effectiveAgent = selectedAgent || defaultAgent;
   const effectiveMode = selectedMode || defaultMode;
+
+  const handleSwitch = (selection: BrainSelection) => {
+    if (!chat.activeSlotId) return;
+    setSwitchError(null);
+    chat
+      .switchBrain(chat.activeSlotId, selection)
+      .catch((e: Error) => setSwitchError(e.message || "Could not switch"));
+  };
+
+  // Both views of one list, keyed the same way: the tabs are the conversations
+  // attached right now, the drawer is all of them.
+  const liveIds = new Set(
+    chat.slots.map((s) => s.info.conversation_id || s.info.slot_id),
+  );
 
   return (
     <>
@@ -164,14 +190,31 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
         {/* Header */}
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
-          <div className="flex items-center gap-2">
-            <MessageSquare className="h-4 w-4 text-[var(--color-primary)]" />
-            <span className="text-sm font-semibold whitespace-nowrap">Agent</span>
-            <kbd className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--color-text-muted)] border border-[var(--color-border)]">
-              ⌘K
-            </kbd>
+          <div className="flex min-w-0 items-center gap-2">
+            <MessageSquare className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />
             {chat.isConnected && (
-              <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-500" />
+            )}
+            {/* Who is answering. One picker, because the user is asking one
+                question — a bound Agent brings its own model. */}
+            {activeSlot ? (
+              <BrainPicker
+                agents={agents}
+                customProviders={customProviders}
+                agentBindings={agentBindings}
+                selectedAgentKey={activeSlot.info.agent_key}
+                selectedAgentSlug={activeSlot.info.agent_slug || ""}
+                onSelect={handleSwitch}
+                variant="inline"
+                disabled={activeSlot.pending || isActiveStreaming}
+              />
+            ) : (
+              <>
+                <span className="text-sm font-semibold whitespace-nowrap">Agent</span>
+                <kbd className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--color-text-muted)] border border-[var(--color-border)]">
+                  ⌘K
+                </kbd>
+              </>
             )}
           </div>
           {/* Active session server indicator */}
@@ -182,6 +225,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             </div>
           )}
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => setShowHistory(true)}
+              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Conversations"
+            >
+              <History className="h-4 w-4" />
+            </button>
             {/* New session button */}
             <div className="relative">
               <button
@@ -195,12 +245,19 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 <NewSessionMenu
                   agents={agents}
                   customProviders={customProviders}
+                  agentBindings={agentBindings}
                   modes={modes}
                   selectedAgent={effectiveAgent}
+                  selectedAgentSlug={selectedSlug}
                   selectedMode={effectiveMode}
-                  onSelectAgent={setSelectedAgent}
+                  onSelectBrain={(sel) => {
+                    if (sel.agentSlug !== undefined) setSelectedSlug(sel.agentSlug);
+                    if (sel.agentKey !== undefined) setSelectedAgent(sel.agentKey);
+                  }}
                   onSelectMode={setSelectedMode}
-                  onStart={(agent, mode) => handleNewSession(agent, mode)}
+                  onStart={(agent, mode) =>
+                    handleNewSession(agent, mode, selectedSlug || undefined)
+                  }
                   onClose={() => setShowNewMenu(false)}
                 />
               )}
@@ -266,26 +323,24 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           </div>
         )}
 
+        {/* Switch failure — the header still shows whoever is actually answering */}
+        {switchError && (
+          <div className="flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-400">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+            <span className="flex-1">{switchError}</span>
+            <button onClick={() => setSwitchError(null)} title="Dismiss">
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
+
         {/* Messages area */}
         <div className="flex-1 overflow-y-auto px-4 py-4">
-          {pendingSession && !activeSlot ? (
-            <div className="flex h-full flex-col items-center justify-center text-center">
-              <div className="relative mb-4">
-                <div className="h-12 w-12 rounded-full border-2 border-[var(--color-primary)]/20" />
-                <div className="absolute inset-0 h-12 w-12 animate-spin rounded-full border-2 border-transparent border-t-[var(--color-primary)]" style={{ animationDuration: "1s" }} />
-                <Zap className="absolute inset-0 m-auto h-5 w-5 text-[var(--color-primary)]" />
-              </div>
-              <p className="text-sm font-medium text-[var(--color-text)]">
-                Starting session...
-              </p>
-              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                Connecting to Condor agent
-              </p>
-            </div>
-          ) : !activeSlot ? (
+          {!activeSlot ? (
             <EmptyState
               agents={agents}
               customProviders={customProviders}
+              agentBindings={agentBindings}
               modes={modes}
               defaultAgent={defaultAgent}
               defaultMode={defaultMode}
@@ -304,9 +359,18 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 {modes.find((m) => m.key === activeSlot.info.mode)?.description ||
                   "Ask about your portfolio, prices, trades, or bot status."}
               </p>
-              <p className="mt-2 text-[10px] text-[var(--color-text-muted)] opacity-60">
-                {resolveAgentLabel(activeSlot.info.agent_key, agents)}
+              <p className="mt-2 flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] opacity-60">
+                {activeSlot.info.agent_slug && <Bot className="h-2.5 w-2.5" />}
+                {activeSlot.info.label && activeSlot.info.agent_slug
+                  ? activeSlot.info.label
+                  : resolveAgentLabel(activeSlot.info.agent_key, agents)}
               </p>
+              {activeSlot.pending && (
+                <p className="mt-3 flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Warming up — type away, it will be sent
+                </p>
+              )}
             </div>
           ) : (
             activeSlot.messages.map((msg) => (
@@ -323,6 +387,26 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
             disabled={isActiveStreaming}
             isStreaming={isActiveStreaming}
             onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
+          />
+        )}
+
+        {/* Conversation history — a slide-over, so the panel stays an overlay
+            available on every page rather than becoming a route. */}
+        {isOpen && showHistory && (
+          <ConversationList
+            liveIds={liveIds}
+            activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
+            onNew={() => handleNewSession(effectiveAgent, effectiveMode)}
+            onOpen={(meta) => {
+              chat.resumeConversation(meta.id, {
+                agent_key: meta.agent_key,
+                mode: meta.mode,
+                server_name: meta.server_name || undefined,
+                agent_slug: meta.agent_slug,
+              });
+              setShowHistory(false);
+            }}
+            onClose={() => setShowHistory(false)}
           />
         )}
       </div>
@@ -355,300 +439,29 @@ function shortAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
   return shortMap[full] || (full.length > 12 ? full.slice(0, 12) + "..." : full);
 }
 
-// ── Agent Dropdown (shared) ──
-
-/** Resolve the button label for the current selection, incl. openrouter:<slug>. */
-function agentDisplayLabel(
-  agentKey: string,
-  agents: ChatAgentOption[],
-  orModels: OpenRouterModelOption[] | null,
-): string {
-  const match = agents.find((a) => a.key === agentKey);
-  if (match) return match.label;
-  if (agentKey.startsWith("openrouter:")) {
-    const slug = agentKey.slice("openrouter:".length);
-    const model = orModels?.find((m) => m.slug === slug);
-    return `OpenRouter: ${model?.name || slug}`;
-  }
-  // Name the endpoint, so a user with several can tell which one is live
-  const custom = parseCustomAgentKey(agentKey);
-  if (custom) return `${custom.provider}: ${custom.model}`;
-  return agentKey;
-}
-
-/**
- * Model selector used by both the new-session menu and the empty state.
- *
- * Direct agents (CLI/ACP) select immediately. Picker sentinels open a submenu:
- * "openrouter:" a searchable catalog, and each saved custom endpoint its own
- * model list. Both are fetched lazily on first open, since each is a live call.
- */
-function AgentDropdown({
-  agents,
-  customProviders = [],
-  selectedAgent,
-  onSelectAgent,
-  variant,
-}: {
-  agents: ChatAgentOption[];
-  customProviders?: CustomProvider[];
-  selectedAgent: string;
-  onSelectAgent: (key: string) => void;
-  variant: "block" | "inline";
-}) {
-  const [open, setOpen] = useState(false);
-  // null = top level, otherwise the submenu we drilled into
-  const [submenu, setSubmenu] = useState<
-    { kind: "openrouter" } | { kind: "custom"; name: string } | null
-  >(null);
-  const [models, setModels] = useState<OpenRouterModelOption[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-
-  // Direct picks are everything the backend didn't flag as a picker. Note this
-  // is NOT "doesn't end in a colon" — "ollama:"/"lmstudio:" end in one and are
-  // startable ("that backend's default model").
-  const directAgents = agents.filter((a) => !a.picker);
-  const hasOpenRouter = agents.some((a) => a.key === "openrouter:" && a.picker);
-  const label = agentDisplayLabel(selectedAgent, agents, models);
-  const activeCustom = parseCustomAgentKey(selectedAgent);
-
-  // Custom endpoint models, fetched per endpoint on open
-  const customModels = useQuery({
-    queryKey: ["custom-provider-models", submenu?.kind === "custom" ? submenu.name : null],
-    queryFn: () => api.getCustomProviderModels((submenu as { name: string }).name),
-    enabled: submenu?.kind === "custom",
-    staleTime: 5 * 60 * 1000,
-  });
-
-  const loadModels = () => {
-    if (models || loading) return;
-    setLoading(true);
-    setError(null);
-    api
-      .getOpenRouterModels()
-      .then((res) => setModels(res.models))
-      .catch(() => setError("Failed to load OpenRouter models"))
-      .finally(() => setLoading(false));
-  };
-
-  const closeAll = () => {
-    setOpen(false);
-    setSubmenu(null);
-    setQuery("");
-  };
-
-  const q = query.trim().toLowerCase();
-  const filtered = (models || []).filter(
-    (m) => !q || m.slug.toLowerCase().includes(q) || m.name.toLowerCase().includes(q),
-  );
-
-  return (
-    <div className="relative">
-      <button
-        onClick={() => setOpen((v) => !v)}
-        className={
-          variant === "block"
-            ? "flex w-full items-center justify-between rounded border border-[var(--color-border)] bg-[var(--color-bg)] px-2.5 py-1.5 text-left text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
-            : "flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:border-[var(--color-primary)]/40"
-        }
-      >
-        <span className="truncate">{label}</span>
-        <ChevronDown className="ml-1 h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-      </button>
-      {open && (
-        <>
-          <div className="fixed inset-0 z-40" onClick={closeAll} />
-          <div
-            className={`absolute top-full z-50 mt-1 flex max-h-64 flex-col overflow-y-auto rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg ${
-              variant === "block" ? "left-0 w-full" : "left-1/2 w-56 -translate-x-1/2"
-            }`}
-          >
-            {submenu === null ? (
-              <>
-                {directAgents.map((a) => (
-                  <button
-                    key={a.key}
-                    onClick={() => {
-                      onSelectAgent(a.key);
-                      closeAll();
-                    }}
-                    className={`flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      a.key === selectedAgent
-                        ? "font-medium text-[var(--color-primary)]"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    {a.label}
-                  </button>
-                ))}
-                {hasOpenRouter && (
-                  <button
-                    onClick={() => {
-                      setSubmenu({ kind: "openrouter" });
-                      loadModels();
-                    }}
-                    className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      selectedAgent.startsWith("openrouter:")
-                        ? "font-medium text-[var(--color-primary)]"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    <span>OpenRouter — Pick Model</span>
-                    <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-                  </button>
-                )}
-                {customProviders.length > 0 && (
-                  <div className="mt-0.5 border-t border-[var(--color-border)] px-2.5 pt-1.5 pb-1 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-                    Custom endpoints
-                  </div>
-                )}
-                {customProviders.map((p) => (
-                  <button
-                    key={p.name}
-                    onClick={() => setSubmenu({ kind: "custom", name: p.name })}
-                    className={`flex w-full items-center justify-between gap-1 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      activeCustom?.provider === p.name
-                        ? "font-medium text-[var(--color-primary)]"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    <span className="truncate">
-                      {p.name}
-                      {activeCustom?.provider === p.name && (
-                        <span className="text-[var(--color-text-muted)]">
-                          {" "}
-                          — {activeCustom.model}
-                        </span>
-                      )}
-                    </span>
-                    <ChevronRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-                  </button>
-                ))}
-              </>
-            ) : submenu.kind === "custom" ? (
-              <>
-                <button
-                  onClick={() => setSubmenu(null)}
-                  className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                >
-                  <ChevronLeft className="h-3 w-3" /> {submenu.name}
-                </button>
-                {customModels.isLoading && (
-                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Loading models…
-                  </div>
-                )}
-                {customModels.isError && (
-                  <div className="px-2.5 py-2 text-xs text-red-400">
-                    {(customModels.error as Error).message}
-                  </div>
-                )}
-                {customModels.data?.models.map((model) => {
-                  const key = customAgentKey(submenu.name, model);
-                  return (
-                    <button
-                      key={model}
-                      title={model}
-                      onClick={() => {
-                        onSelectAgent(key);
-                        closeAll();
-                      }}
-                      className={`flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                        key === selectedAgent
-                          ? "font-medium text-[var(--color-primary)]"
-                          : "text-[var(--color-text)]"
-                      }`}
-                    >
-                      <span className="w-full truncate">{model}</span>
-                    </button>
-                  );
-                })}
-                {customModels.data?.models.length === 0 && (
-                  <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
-                    No chat models available
-                  </div>
-                )}
-              </>
-            ) : (
-              <>
-                <button
-                  onClick={() => setSubmenu(null)}
-                  className="flex items-center gap-1 border-b border-[var(--color-border)] px-2.5 py-1.5 text-left text-[11px] text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                >
-                  <ChevronLeft className="h-3 w-3" /> Back
-                </button>
-                <div className="sticky top-0 flex items-center gap-1 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1.5">
-                  <Search className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
-                  <input
-                    autoFocus
-                    value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    placeholder="Search models..."
-                    className="w-full bg-transparent text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
-                  />
-                </div>
-                {loading && (
-                  <div className="flex items-center gap-2 px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Loading models…
-                  </div>
-                )}
-                {error && <div className="px-2.5 py-2 text-xs text-red-400">{error}</div>}
-                {!loading && !error && filtered.length === 0 && (
-                  <div className="px-2.5 py-2 text-xs text-[var(--color-text-muted)]">
-                    No models found
-                  </div>
-                )}
-                {filtered.map((m) => (
-                  <button
-                    key={m.slug}
-                    title={m.slug}
-                    onClick={() => {
-                      onSelectAgent(`openrouter:${m.slug}`);
-                      closeAll();
-                    }}
-                    className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      selectedAgent === `openrouter:${m.slug}`
-                        ? "font-medium text-[var(--color-primary)]"
-                        : "text-[var(--color-text)]"
-                    }`}
-                  >
-                    <span className="w-full truncate">{m.name}</span>
-                    <span className="w-full truncate text-[10px] text-[var(--color-text-muted)]">
-                      {m.slug}
-                      {m.prompt_price > 0 ? ` · $${m.prompt_price.toFixed(2)}/M in` : " · free"}
-                    </span>
-                  </button>
-                ))}
-              </>
-            )}
-          </div>
-        </>
-      )}
-    </div>
-  );
-}
-
 // ── New Session Menu ──
 
 function NewSessionMenu({
   agents,
   customProviders = [],
+  agentBindings = [],
   modes,
   selectedAgent,
+  selectedAgentSlug,
   selectedMode,
-  onSelectAgent,
+  onSelectBrain,
   onSelectMode,
   onStart,
   onClose,
 }: {
   agents: ChatAgentOption[];
   customProviders?: CustomProvider[];
+  agentBindings?: AgentBindingOption[];
   modes: ChatModeOption[];
   selectedAgent: string;
+  selectedAgentSlug: string;
   selectedMode: string;
-  onSelectAgent: (key: string) => void;
+  onSelectBrain: (selection: BrainSelection) => void;
   onSelectMode: (key: string) => void;
   onStart: (agent: string, mode: string) => void;
   onClose: () => void;
@@ -659,17 +472,19 @@ function NewSessionMenu({
     <>
       <div className="fixed inset-0 z-50" onClick={onClose} />
       <div className="absolute right-0 top-full z-50 mt-1 w-56 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl">
-        {/* Model selector */}
+        {/* Who answers */}
         <div className="px-3 pt-2 pb-1">
           <label className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-            Model
+            Answered by
           </label>
           <div className="mt-1">
-            <AgentDropdown
+            <BrainPicker
               agents={agents}
               customProviders={customProviders}
-              selectedAgent={selectedAgent}
-              onSelectAgent={onSelectAgent}
+              agentBindings={agentBindings}
+              selectedAgentKey={selectedAgent}
+              selectedAgentSlug={selectedAgentSlug}
+              onSelect={onSelectBrain}
               variant="block"
             />
           </div>
@@ -719,18 +534,21 @@ function NewSessionMenu({
 function EmptyState({
   agents,
   customProviders = [],
+  agentBindings = [],
   modes,
   defaultAgent,
   onStart,
 }: {
   agents: ChatAgentOption[];
   customProviders?: CustomProvider[];
+  agentBindings?: AgentBindingOption[];
   modes: ChatModeOption[];
   defaultAgent: string;
   defaultMode?: string;
-  onStart: (agent: string, mode: string) => void;
+  onStart: (agent: string, mode: string, agentSlug?: string) => void;
 }) {
   const [selectedAgent, setSelectedAgent] = useState(defaultAgent);
+  const [selectedSlug, setSelectedSlug] = useState("");
 
   return (
     <div className="flex h-full flex-col items-center justify-center text-center">
@@ -739,14 +557,19 @@ function EmptyState({
         Start a new session to chat with the AI assistant.
       </p>
 
-      {/* Agent picker */}
-      {(agents.length > 1 || customProviders.length > 0) && (
+      {/* Who answers */}
+      {(agents.length > 1 || customProviders.length > 0 || agentBindings.length > 0) && (
         <div className="mt-4 mb-2">
-          <AgentDropdown
+          <BrainPicker
             agents={agents}
             customProviders={customProviders}
-            selectedAgent={selectedAgent}
-            onSelectAgent={setSelectedAgent}
+            agentBindings={agentBindings}
+            selectedAgentKey={selectedAgent}
+            selectedAgentSlug={selectedSlug}
+            onSelect={(sel) => {
+              if (sel.agentSlug !== undefined) setSelectedSlug(sel.agentSlug);
+              if (sel.agentKey !== undefined) setSelectedAgent(sel.agentKey);
+            }}
             variant="inline"
           />
         </div>
@@ -759,7 +582,7 @@ function EmptyState({
           return (
             <button
               key={key}
-              onClick={() => onStart(selectedAgent, key)}
+              onClick={() => onStart(selectedAgent, key, selectedSlug || undefined)}
               className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
             >
               <Icon className="h-3.5 w-3.5 text-[var(--color-primary)]" />
@@ -793,8 +616,12 @@ function SessionTab({
 }) {
   const modeLabel =
     modes.find((m) => m.key === slot.info.mode)?.label || slot.info.mode;
-  const agentShort = shortAgentLabel(slot.info.agent_key, agents);
-  const ModeIcon = MODE_ICONS[slot.info.mode] || Zap;
+  // A bound Agent names the tab; only an unbound one falls back to the model,
+  // which is the same rule the header's picker follows.
+  const agentShort = slot.info.agent_slug
+    ? slot.info.label || slot.info.agent_slug
+    : shortAgentLabel(slot.info.agent_key, agents);
+  const ModeIcon = slot.info.agent_slug ? Bot : MODE_ICONS[slot.info.mode] || Zap;
 
   return (
     <button
@@ -810,13 +637,15 @@ function SessionTab({
       )}
       <ModeIcon className="h-3 w-3 shrink-0" />
       <span className="max-w-[140px] truncate">
-        {modeLabel}
-        <span className="text-[var(--color-text-muted)]"> · {agentShort}</span>
+        {slot.info.agent_slug ? agentShort : modeLabel}
+        {!slot.info.agent_slug && (
+          <span className="text-[var(--color-text-muted)]"> · {agentShort}</span>
+        )}
         {slot.info.server_name && (
           <span className="text-[var(--color-text-muted)]"> · {slot.info.server_name}</span>
         )}
       </span>
-      {isStreaming && (
+      {(isStreaming || slot.pending) && (
         <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--color-primary)]" />
       )}
       <span
