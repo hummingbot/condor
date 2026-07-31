@@ -240,27 +240,29 @@ def _catalog_fixture_items() -> list[dict]:
 
 def _memecoin_meta_fixture_items() -> list[dict]:
     rows = [
-        ("dog", 15_700_000_000.0, -0.3, ["DOGE", "SHIB", "BONK"]),
-        ("frog", 5_400_000_000.0, 1.8, ["PEPE"]),
-        ("political", 2_100_000_000.0, -2.2, ["TRUMP"]),
-        ("cat", 1_400_000_000.0, 3.4, ["POPCAT", "MEW"]),
-        ("ai", 900_000_000.0, 4.1, ["GOAT", "TURBO"]),
+        ("dog", 15_700_000_000.0, -0.3, ["dogecoin", "shiba-inu", "bonk"]),
+        ("frog", 5_400_000_000.0, 1.8, ["pepe", "brett"]),
+        ("political", 2_100_000_000.0, -2.2, ["official-trump"]),
+        ("cat", 1_400_000_000.0, 3.4, ["popcat", "cat-in-a-dogs-world"]),
+        ("ai", 900_000_000.0, -4.1, ["goatseus-maximus", "turbo"]),
+        ("celebrity", 500_000_000.0, 5.2, ["mother-iggy", "jenner"]),
     ]
     return [
         {
             "evidence_id": f"ev_meta_{meta}",
-            "provider_id": "coinmarketcap",
+            "provider_id": "coingecko",
             "source_family": "market_catalog",
-            "metric": "memecoin_meta_sample",
+            "metric": "memecoin_meta_category",
             "source_time": "2026-07-31T00:00:00Z",
             "primary_meta": meta,
-            "sample_market_cap_usd": market_cap,
-            "sample_market_cap_weighted_return_24h_pct": change,
-            "sample_volume_24h_usd": market_cap * 0.05,
-            "constituent_count": len(symbols),
-            "representative_symbols": symbols,
-            "aggregation_basis": "mutually_exclusive_top_100_ranked_asset_sample",
-            "categories_may_overlap": False,
+            "provider_category_id": f"{meta}-themed-coins",
+            "provider_category_name": f"{meta.title()} themed coins",
+            "market_cap_usd": market_cap,
+            "market_cap_change_24h_pct": change,
+            "volume_24h_usd": market_cap * 0.05,
+            "representative_coin_ids": symbols,
+            "aggregation_basis": "provider_category_non_additive",
+            "categories_may_overlap": True,
         }
         for meta, market_cap, change, symbols in rows
     ]
@@ -4656,65 +4658,60 @@ def test_all_strategies_render_complete_auditable_reports(reports_dir) -> None:
             )
             assert leader_chart["title"].startswith("S&P 500 stock sample")
         if strategy == "memecoin_market_intelligence":
-            assert {
+            assert "v3_meta_landscape" in spec["datasets"]
+            assert "v3_meta_landscape_chart" in component_ids
+            assert not {
                 "v3_metas_ethereum",
                 "v3_metas_solana",
                 "v3_metas_robinhood",
-            }.issubset(spec["datasets"])
-            assert {
                 "v3_meta_ethereum_chart",
                 "v3_meta_solana_chart",
                 "v3_meta_robinhood_chart",
-            }.issubset(component_ids)
+            }.intersection(set(spec["datasets"]) | component_ids)
             assert "v3_meta_chart" not in component_ids
             assert "v3_chain_chart" not in component_ids
             assert "v3_drivers" not in spec["datasets"]
-            assert "compare themes within a panel" in document
+            assert "same retained all-theme summary" in document
+            assert "Rotation at a glance" in document
             assert "Robinhood Chain" in document
             assert "News headlines" in document
             assert "Public social pulse" not in document
             assert "Sampled assets" in document
-            ethereum_rows = spec["datasets"]["v3_metas_ethereum"]
-            assert len(ethereum_rows) == 3
-            ethereum_frog = next(
-                row for row in ethereum_rows if row["meta"] == "Frog-themed"
+            landscape = spec["datasets"]["v3_meta_landscape"]
+            assert {row["meta"] for row in landscape} == {
+                "Dog-themed",
+                "Cat-themed",
+                "Frog-themed",
+                "Political",
+                "AI-themed",
+                "Celebrity",
+            }
+            strongest = next(
+                metric["value"]
+                for metric in full_package["analysis_context"]["snapshot_metrics"]
+                if metric["label"] == "Strongest theme today"
             )
-            assert ethereum_frog["sampled_assets"] == 21
-            assert ethereum_frog["size_usd"] == pytest.approx(1_300_000_000)
-            assert ethereum_frog["change_24h_pct"] == pytest.approx(-1)
-            assert ethereum_frog["coverage"] == "CoinGecko top categorized sample"
-            solana_dog = next(
-                row
-                for row in spec["datasets"]["v3_metas_solana"]
-                if row["meta"] == "Dog-themed"
+            assert strongest in {row["meta"] for row in landscape}
+            celebrity = next(row for row in landscape if row["meta"] == "Celebrity")
+            assert celebrity["market_cap_usd"] == pytest.approx(500_000_000)
+            assert celebrity["change_24h_pct"] == pytest.approx(5.2)
+            assert celebrity["observed_chains"] == "Not expanded in current sample"
+            heatmap = next(
+                component
+                for component in spec["components"]
+                if component["id"] == "v3_meta_landscape_chart"
             )
-            assert solana_dog["change_24h_pct"] == pytest.approx(-0.6)
-            assert len(spec["datasets"]["v3_metas_robinhood"]) == 2
-            assert all(
-                row["meta"]
-                in {
-                    "Dog-themed",
-                    "Cat-themed",
-                    "Frog-themed",
-                    "Political",
-                    "AI-themed",
-                    "Celebrity",
-                }
-                for dataset_name in (
-                    "v3_metas_ethereum",
-                    "v3_metas_solana",
-                    "v3_metas_robinhood",
-                )
-                for row in spec["datasets"][dataset_name]
-            )
-            assert "Memes" not in {
-                row["meta"]
-                for dataset_name in (
-                    "v3_metas_ethereum",
-                    "v3_metas_solana",
-                    "v3_metas_robinhood",
-                )
-                for row in spec["datasets"][dataset_name]
+            assert heatmap["chart_type"] == "treemap"
+            assert heatmap["x"] == "meta"
+            assert heatmap["y"] == "market_cap_usd"
+            assert heatmap["color"] == "change_24h_pct"
+            assert heatmap["encodings"] == {
+                "value_label": "Category market cap",
+                "value_prefix": "$",
+                "value_format": ",.0f",
+                "color_label": "24h move",
+                "color_format": ".2f",
+                "color_suffix": "%",
             }
 
     assert len(report_ids) == len(set(report_ids)) == 3

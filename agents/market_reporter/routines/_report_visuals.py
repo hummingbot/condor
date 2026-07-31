@@ -56,32 +56,24 @@ async def render_report(package: ReportPackage) -> str:
     cross_market = _cross_market_rows(package)
     drivers = _driver_rows(package)
     meta_chain = _meta_chain_rows(package)
+    meta_landscape = _meta_landscape_rows(package, meta_chain)
     evidence = _evidence_rows(package)
 
     for name, rows in (
         ("v3_leaders", leaders),
         ("v3_drivers", drivers),
+        ("v3_meta_landscape", meta_landscape),
         ("v3_evidence", evidence),
     ):
         if rows:
             builder.dataset(name, rows)
-    for chain_key, _ in _MEMECOIN_CHAINS:
-        rows = [
-            row
-            for row in meta_chain
-            if row["chain_key"] == chain_key
-            and row["size_usd"] is not None
-            and row["size_usd"] > 0
-            and row["change_24h_pct"] is not None
-        ]
-        if rows:
-            builder.dataset(f"v3_metas_{chain_key}", rows)
 
     _market_section(
         builder,
         package,
         leaders,
         drivers,
+        meta_landscape,
         meta_chain,
         cross_market,
     )
@@ -96,6 +88,7 @@ def _market_section(
     package: ReportPackage,
     leaders: list[dict[str, Any]],
     drivers: list[dict[str, Any]],
+    meta_landscape: list[dict[str, Any]],
     meta_chain: list[dict[str, Any]],
     cross_market: list[dict[str, Any]],
 ) -> None:
@@ -131,8 +124,39 @@ def _market_section(
 
     strategy = package.metadata.strategy_key
     if strategy == "memecoin_market_intelligence":
-        _memecoin_charts(builder, meta_chain)
+        _memecoin_landscape(builder, meta_landscape)
+        if meta_landscape:
+            builder.markdown("### Theme landscape details")
+            builder.table(
+                [
+                    {
+                        "Theme": row["meta"],
+                        "Market cap": _money(row["market_cap_usd"]),
+                        "24h move": _percent(row["change_24h_pct"]),
+                        "24h volume": _money(row["volume_24h_usd"]),
+                        "Representative coins": row["representatives"],
+                        "Observed chains": row["observed_chains"],
+                        "Coverage": row["coverage"],
+                    }
+                    for row in meta_landscape
+                ],
+                [
+                    "Theme",
+                    "Market cap",
+                    "24h move",
+                    "24h volume",
+                    "Representative coins",
+                    "Observed chains",
+                    "Coverage",
+                ],
+            )
         if meta_chain:
+            builder.markdown(
+                "### Observed chain footprint\n\n"
+                "This is the bounded constituent sample used for chain attribution. "
+                "A missing theme-chain row means it was not observed in the expanded "
+                "sample; it does not mean zero market activity."
+            )
             builder.table(
                 [
                     {
@@ -220,49 +244,51 @@ def _market_section(
             )
 
 
-def _memecoin_charts(
+def _memecoin_landscape(
     builder: ReportBuilder,
-    meta_chain: list[dict[str, Any]],
+    landscape: list[dict[str, Any]],
 ) -> None:
-    builder.markdown(
-        "**Chain theme maps:** each panel uses provider-categorized coins from the "
-        "bounded CoinGecko sample. Bar length is sampled market cap and color shows "
-        "the market-cap-weighted 24-hour direction. Theme memberships can overlap, "
-        "so compare themes within a panel and read each bar independently rather "
-        "than adding them together."
-    )
-    for chain_key, chain_label in _MEMECOIN_CHAINS:
-        chain_rows = [
-            row
-            for row in meta_chain
-            if row["chain_key"] == chain_key
-            and row["size_usd"] is not None
-            and row["size_usd"] > 0
-            and row["change_24h_pct"] is not None
-        ]
-        if not chain_rows:
-            builder.markdown(
-                f"### {chain_label}\n\n"
-                "No provider-categorized assets in the bounded sample have both "
-                "market-cap and 24-hour change data, so no zero or empty chart is "
-                "shown."
-            )
-            continue
-        builder.chart(
-            "horizontal_bar",
-            f"{chain_label} memecoin themes — sampled market cap and 24h direction",
-            f"v3_metas_{chain_key}",
-            "meta",
-            "size_usd",
-            color="direction",
-            color_map=_DIRECTION_COLORS,
-            cross_filter=False,
-            x_label="Sampled category market cap (USD)",
-            category_order=[row["meta"] for row in chain_rows],
-            width=12,
-            height=max(260, len(chain_rows) * 64),
-            component_id=f"v3_meta_{chain_key}_chart",
+    if not landscape:
+        builder.markdown(
+            "No provider theme has both a positive market-cap observation and a "
+            "usable category label, so no landscape heatmap is shown."
         )
+        return
+    builder.markdown(
+        "**Memecoin landscape:** this heatmap uses the same retained all-theme "
+        "summary as the “Strongest theme today” card. Tile size is provider category "
+        "market cap and color is its 24-hour move. CoinGecko categories can overlap, "
+        "so compare tiles individually and do not add their areas into a total."
+    )
+    movers = [row for row in landscape if row["change_24h_pct"] is not None]
+    if movers:
+        strongest = max(movers, key=lambda row: row["change_24h_pct"])
+        weakest = min(movers, key=lambda row: row["change_24h_pct"])
+        builder.markdown(
+            f"**Rotation at a glance:** {_clean(strongest['meta'])} is strongest "
+            f"at {_percent(strongest['change_24h_pct'])}; "
+            f"{_clean(weakest['meta'])} is weakest at "
+            f"{_percent(weakest['change_24h_pct'])}. These are category moves, "
+            "not token recommendations."
+        )
+    builder.chart(
+        "treemap",
+        "Memecoin landscape heatmap — category size and 24h direction",
+        "v3_meta_landscape",
+        "meta",
+        "market_cap_usd",
+        color="change_24h_pct",
+        cross_filter=False,
+        value_label="Category market cap",
+        value_prefix="$",
+        value_format=",.0f",
+        color_label="24h move",
+        color_format=".2f",
+        color_suffix="%",
+        width=12,
+        height=520,
+        component_id="v3_meta_landscape_chart",
+    )
 
 
 def _events_section(builder: ReportBuilder, package: ReportPackage) -> None:
@@ -601,6 +627,84 @@ def _meta_chain_rows(package: ReportPackage) -> list[dict[str, Any]]:
             }
         )
     return rows
+
+
+def _meta_landscape_rows(
+    package: ReportPackage,
+    meta_chain: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if package.metadata.strategy_key != "memecoin_market_intelligence":
+        return []
+    features = package.analysis_context.strategy_features
+    source_rows = (
+        features.get("provider_meta_categories")
+        or features.get("exclusive_ranked_sample_metas")
+        or []
+    )
+    chains_by_meta: dict[str, list[str]] = {}
+    for row in meta_chain:
+        chains = chains_by_meta.setdefault(str(row["meta"]), [])
+        if row["chain"] not in chains:
+            chains.append(str(row["chain"]))
+
+    rows = []
+    for row in source_rows:
+        meta_key = str(row.get("primary_meta") or "").casefold()
+        meta = MEMECOIN_META_LABELS.get(meta_key)
+        provider_summary = (
+            row.get("aggregation_basis") == "provider_category_non_additive"
+        )
+        market_cap = _finite(
+            row.get("market_cap_usd")
+            if provider_summary
+            else row.get("sample_market_cap_usd")
+        )
+        if not meta or market_cap is None or market_cap <= 0:
+            continue
+        change = _finite(
+            row.get("market_cap_change_24h_pct")
+            if provider_summary
+            else row.get("sample_market_cap_weighted_return_24h_pct")
+        )
+        volume = _finite(
+            row.get("volume_24h_usd")
+            if provider_summary
+            else row.get("sample_volume_24h_usd")
+        )
+        representatives = (
+            row.get("representative_coin_ids")
+            or row.get("representative_symbols")
+            or []
+        )
+        observed_chains = chains_by_meta.get(meta) or []
+        expanded = bool(observed_chains)
+        rows.append(
+            {
+                "meta": meta,
+                "market_cap_usd": market_cap,
+                "change_24h_pct": change,
+                "volume_24h_usd": volume,
+                "representatives": ", ".join(
+                    str(value).replace("-", " ") for value in representatives
+                )
+                or "Not identified",
+                "observed_chains": (
+                    ", ".join(observed_chains)
+                    if observed_chains
+                    else "Not expanded in current sample"
+                ),
+                "coverage": (
+                    "Provider category summary + expanded constituents"
+                    if provider_summary and expanded
+                    else (
+                        "Provider category summary"
+                        if provider_summary
+                        else "Ranked categorized sample"
+                    )
+                ),
+            }
+        )
+    return sorted(rows, key=lambda row: row["market_cap_usd"], reverse=True)
 
 
 def _evidence_rows(package: ReportPackage) -> list[dict[str, Any]]:

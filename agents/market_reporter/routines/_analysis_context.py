@@ -876,6 +876,7 @@ def _compact_meta(item: dict[str, Any]) -> dict[str, Any]:
             "sampled_constituent_count",
             "constituent_count",
             "constituent_count_complete",
+            "representative_coin_ids",
             "chain",
             "market_cap_weighted_change_24h_pct",
             "representative_symbols",

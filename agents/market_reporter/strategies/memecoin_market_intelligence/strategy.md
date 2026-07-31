@@ -88,20 +88,22 @@ events. It never gathers issuer fundamentals.
    then organic-oriented discovery, then clearly labeled paid-visible
    discovery. Quote assets and obvious infrastructure tokens are not memecoin
    highlights.
-11. Build the three-chain theme overview from the bounded categorized-coin
-    sample, using CoinGecko Solana/Robinhood category membership plus its
-    platform mapping for Ethereum. Use sampled market cap, market-cap-weighted
-    24-hour change, constituent count, and representatives. Categories can
-    overlap, so each bar is independent and must not be summed. Keep the much
-    smaller exact-pair screen separate for liquidity, age, turnover, and
-    tradability checks.
+11. Build one all-theme landscape heatmap from every retained CoinGecko
+    category summary. Tile size is provider category market cap and color is
+    24-hour market-cap direction. Use the bounded categorized-coin sample,
+    CoinGecko Solana/Robinhood membership, and its Ethereum platform mapping
+    only for the separate chain-footprint table. Categories can overlap, so
+    each tile is independent and must not be summed. Keep the much smaller
+    exact-pair screen separate for liquidity, age, turnover, and tradability
+    checks.
 
 For cross-source attention, treat a token named in a controlled meta's
 `representative_symbols` as present in the current catalog and carry the meta
-evidence ID into its attention row. Never let a Robinhood-only meta create an
-empty row in the comparable Solana/Ethereum heatmap. Numerical superlatives
-such as “strongest” or “largest” must be recomputed from the retained meta rows
-and must agree with the plotted value.
+evidence ID into its attention row. Never turn a missing theme-chain row into
+an observed zero; it means the theme was not present in the expanded
+constituent sample. Numerical superlatives such as “strongest” or “largest”
+must be recomputed from the same retained all-theme rows used by the landscape
+heatmap.
 
 Missing or stale Robinhood Stock Token/ETF exclusions block ranked Robinhood
 candidates. Promotion-biased Robinhood discovery cannot support a
