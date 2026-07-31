@@ -298,17 +298,30 @@ export function useChatSocket() {
         case "sessions_list": {
           const sessions = data.sessions as SlotInfo[];
           if (sessions.length > 0) {
+            const known = new Set(sessions.map((s) => s.slot_id));
+            // A tab opened before the socket finished connecting — "Chat" on an
+            // agent's page is exactly that — is still waiting for its
+            // session_started, so the server cannot list it yet. It outlives
+            // this roster instead of being replaced by it, and keeps the focus:
+            // the user asked for that conversation, not for the oldest one.
+            const pendingLocal = slotsRef.current.filter(
+              (s) => s.pending && !known.has(s.info.slot_id),
+            );
+            const pendingIds = new Set(pendingLocal.map((s) => s.info.slot_id));
             setSlots((prev) => {
               // Keep whatever is already rendered for a known slot; a slot we
               // have not seen starts empty and is filled by hydrateSlot below.
               const existing = new Map(prev.map((s) => [s.info.slot_id, s]));
-              return sessions.map((info) => {
-                const ex = existing.get(info.slot_id);
-                return ex ? { ...ex, info, pending: false } : { info, messages: [] };
-              });
+              return [
+                ...sessions.map((info) => {
+                  const ex = existing.get(info.slot_id);
+                  return ex ? { ...ex, info, pending: false } : { info, messages: [] };
+                }),
+                ...pendingLocal,
+              ];
             });
             setActiveSlotId((prev) => {
-              if (prev && sessions.some((s) => s.slot_id === prev)) return prev;
+              if (prev && (known.has(prev) || pendingIds.has(prev))) return prev;
               return sessions[0].slot_id;
             });
             for (const info of sessions) {
