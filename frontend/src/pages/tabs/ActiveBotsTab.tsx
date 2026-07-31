@@ -671,18 +671,6 @@ export function ActiveBotsTab() {
   );
   const { convert, formatPnlValue, formatValue, currencySymbol } = useRates(quoteCurrencies);
 
-  // Base coin symbols (e.g. "APT-USD" -> "APT") across active controllers, for the
-  // fill-history-based PnL summary -- deduplicated since multiple controllers could
-  // in principle share a pair.
-  const activeCoins = useMemo(() => {
-    const set = new Set<string>();
-    for (const ctrl of controllers) {
-      const base = ctrl.trading_pair?.split("-")[0];
-      if (base) set.add(base);
-    }
-    return Array.from(set);
-  }, [controllers]);
-
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to view active bots." />;
   }
@@ -746,11 +734,15 @@ export function ActiveBotsTab() {
         </button>
       </div>
 
-      {/* Cumulative fill-based PnL summary (Today/7D/30D) -- survives restarts/redeploys,
-          unlike the per-run stat cards and chart above/below which reset on every deploy. */}
-      {server && activeCoins.length > 0 && (
-        <PnlRangeSummary server={server} coins={activeCoins} currencySymbol={currencySymbol} />
-      )}
+      {/* Cumulative fill-based PnL summary (Today/7D/30D) -- survives restarts/redeploys
+          AND stopped bots, unlike the per-run stat cards and chart above/below which
+          reset on every deploy and drop a bot's PnL the moment it's stopped. Deliberately
+          account-wide (no coin filter) rather than scoped to "currently active
+          controllers' coins" -- a coin filter derived from running controllers would
+          silently exclude a stopped bot's own realized PnL from this window's total,
+          which is exactly the bug this panel exists to avoid. See handlers/bots/
+          hyperliquid_pnl.py. */}
+      {server && <PnlRangeSummary server={server} coins={[]} currencySymbol={currencySymbol} />}
 
       {/* Aggregated PnL chart */}
       {activeSnapshots.length > 0 && (

@@ -33,10 +33,12 @@ export function PnlRangeSummary({
 }) {
   const [period, setPeriod] = useState<Period>("today");
 
+  // An empty `coins` list means "no filter" (account-wide) -- see api.getPnlSummary
+  // and handlers/bots/hyperliquid_pnl.py -- so it must not gate the query.
   const { data, isLoading, isError } = useQuery({
     queryKey: ["pnl-summary", server, period, coins.join(",")],
     queryFn: () => api.getPnlSummary(server, period, coins),
-    enabled: !!server && coins.length > 0,
+    enabled: !!server,
     refetchInterval: 60_000,
     staleTime: 30_000,
   });
