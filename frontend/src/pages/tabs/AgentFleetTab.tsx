@@ -20,6 +20,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import { AgentsTabSwitch, type AgentsTab } from "@/components/chat/AgentsTabSwitch";
 import { ModeBadge } from "@/components/agent/ModeBadge";
 import { StatusBadge } from "@/components/agent/StatusBadge";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
@@ -494,7 +495,12 @@ function DeleteAgentDialog({
   );
 }
 
-export function AgentFleetTab() {
+export function AgentFleetTab({
+  onTabChange,
+}: {
+  /** Back to the conversation — the host owns the `?tab=` param. */
+  onTabChange: (tab: AgentsTab) => void;
+}) {
   const navigate = useNavigate();
   const [showCreate, setShowCreate] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<AgentSummary | null>(null);
@@ -529,17 +535,20 @@ export function AgentFleetTab() {
     <div className="w-full">
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-[var(--color-text)]">Trading Agents</h1>
-          <p className="mt-1 text-sm text-[var(--color-text-muted)]">
-            {agents.length} agent{agents.length !== 1 ? "s" : ""}
-            {running.length > 0 && (
-              <span className="ml-2 text-emerald-400">
-                <Zap className="mr-0.5 inline h-3 w-3" />
-                {running.length} live
-              </span>
-            )}
-          </p>
+        <div className="flex items-center gap-3">
+          <AgentsTabSwitch tab="fleet" onChange={onTabChange} />
+          <div>
+            <h1 className="text-xl font-bold text-[var(--color-text)]">Trading Agents</h1>
+            <p className="mt-1 text-sm text-[var(--color-text-muted)]">
+              {agents.length} agent{agents.length !== 1 ? "s" : ""}
+              {running.length > 0 && (
+                <span className="ml-2 text-emerald-400">
+                  <Zap className="mr-0.5 inline h-3 w-3" />
+                  {running.length} live
+                </span>
+              )}
+            </p>
+          </div>
         </div>
         <button
           onClick={() => setShowCreate(true)}

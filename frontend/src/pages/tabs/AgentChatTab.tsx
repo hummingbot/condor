@@ -12,6 +12,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
+import { AgentsTabSwitch, type AgentsTab } from "@/components/chat/AgentsTabSwitch";
 import { BrainPicker, type BrainSelection } from "@/components/chat/BrainPicker";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatThread } from "@/components/chat/ChatThread";
@@ -36,7 +37,12 @@ const AGENT_STARTERS = ["What are you working on?", "Review your last session"];
  * the same `useChat()` state, so this is a second view of one chat rather than
  * a second chat.
  */
-export function AgentChatTab() {
+export function AgentChatTab({
+  onTabChange,
+}: {
+  /** Flip `/agents` to the fleet report — the host owns the `?tab=` param. */
+  onTabChange: (tab: AgentsTab) => void;
+}) {
   const chat = useChat();
   const { server } = useServer();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -140,23 +146,27 @@ export function AgentChatTab() {
           railOpen ? "flex" : "hidden"
         } absolute inset-y-0 left-0 z-30 w-[260px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg)] md:relative md:flex`}
       >
-        {/* What is running, from the chat tab. One click to the numbers. */}
-        <button
-          onClick={() => setSearchParams({ tab: "fleet" }, { replace: true })}
-          className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2 text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-          title="Open the fleet report"
-        >
-          <Zap
-            className={`h-3 w-3 shrink-0 ${
-              liveAgents.length > 0 ? "text-emerald-400" : ""
-            }`}
-          />
-          <span className="flex-1 truncate">
-            {liveAgents.length} live
-            {runningTasks > 0 && ` · ${runningTasks} task${runningTasks !== 1 ? "s" : ""}`}
-          </span>
-          <ArrowUpRight className="h-3 w-3 shrink-0" />
-        </button>
+        {/* Where you are and what is running. Two doors to the fleet report —
+            fine, when one of them is a live count. */}
+        <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
+          <AgentsTabSwitch tab="chat" onChange={onTabChange} />
+          <button
+            onClick={() => onTabChange("fleet")}
+            className="flex min-w-0 flex-1 items-center gap-2 text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+            title="Open the fleet report"
+          >
+            <Zap
+              className={`h-3 w-3 shrink-0 ${
+                liveAgents.length > 0 ? "text-emerald-400" : ""
+              }`}
+            />
+            <span className="min-w-0 flex-1 truncate">
+              {liveAgents.length} live
+              {runningTasks > 0 && ` · ${runningTasks} task${runningTasks !== 1 ? "s" : ""}`}
+            </span>
+            <ArrowUpRight className="h-3 w-3 shrink-0" />
+          </button>
+        </div>
 
         {/* Who you can talk to */}
         <div className="border-b border-[var(--color-border)] py-1">
