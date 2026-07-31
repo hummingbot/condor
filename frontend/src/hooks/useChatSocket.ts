@@ -599,24 +599,30 @@ export function useChatSocket() {
     [send, updateSlotMessages],
   );
 
-  /** Open a brand new conversation. The tab is live before the spawn is. */
+  /**
+   * Open a brand new conversation. The tab is live before the spawn is.
+   *
+   * Returns the tab's id so the caller can talk into it on the same tick — a
+   * composer that starts the chat with its first message needs that, and
+   * `slotsRef` only catches up on the next commit, so the new slot is written
+   * there eagerly rather than left for `sendMessage` to miss.
+   */
   const startSession = useCallback(
-    (agentKey: string, mode: string, serverName?: string, agentSlug?: string) => {
+    (agentKey: string, mode: string, serverName?: string, agentSlug?: string): string => {
       const ref = nextClientRef();
-      setSlots((prev) => [
-        ...prev,
-        {
-          info: {
-            slot_id: ref,
-            agent_key: agentKey,
-            mode,
-            server_name: serverName,
-            agent_slug: agentSlug || "",
-          },
-          messages: [],
-          pending: true,
+      const slot: ChatSlot = {
+        info: {
+          slot_id: ref,
+          agent_key: agentKey,
+          mode,
+          server_name: serverName,
+          agent_slug: agentSlug || "",
         },
-      ]);
+        messages: [],
+        pending: true,
+      };
+      slotsRef.current = [...slotsRef.current, slot];
+      setSlots((prev) => [...prev, slot]);
       setActiveSlotId(ref);
       hydratedSlots.current.add(ref);
       prewarmed.current = true; // An explicit start is the warm session.
@@ -628,6 +634,7 @@ export function useChatSocket() {
         agent_slug: agentSlug,
         client_ref: ref,
       });
+      return ref;
     },
     [send],
   );

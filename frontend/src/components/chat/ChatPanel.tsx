@@ -12,13 +12,13 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { useChatSocket, type ChatSlot } from "@/hooks/useChatSocket";
+import { type ChatSlot } from "@/hooks/useChatSocket";
+import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { ChatMessageView } from "./ChatMessage";
 import { ChatInput } from "./ChatInput";
 import { BrainPicker, type BrainSelection } from "./BrainPicker";
 import { ConversationList } from "./ConversationList";
 import {
-  api,
   type AgentBindingOption,
   type ChatAgentOption,
   type ChatModeOption,
@@ -43,7 +43,7 @@ interface ChatPanelProps {
 }
 
 export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
-  const chat = useChatSocket();
+  const chat = useChat();
   const { server } = useServer();
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -53,41 +53,20 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const [showHistory, setShowHistory] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
 
-  // Chat options from backend
-  const [agents, setAgents] = useState<ChatAgentOption[]>([]);
-  const [customProviders, setCustomProviders] = useState<CustomProvider[]>([]);
-  const [agentBindings, setAgentBindings] = useState<AgentBindingOption[]>([]);
-  const [modes, setModes] = useState<ChatModeOption[]>([]);
-  const [defaultAgent, setDefaultAgent] = useState("claude-code");
-  const [defaultMode, setDefaultMode] = useState("condor");
+  // Chat options, shared with the `/agents` workspace on one query key: the
+  // panel only asks for them once it has been opened.
+  const {
+    agents,
+    customProviders,
+    agentBindings,
+    modes,
+    defaultAgent,
+    defaultMode,
+  } = useSessionOptions(isOpen);
+
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedSlug, setSelectedSlug] = useState("");
   const [selectedMode, setSelectedMode] = useState<string | null>(null);
-  const optionsFetched = useRef(false);
-
-  // Fetch chat options on first open. /sessions/options is /chat/options plus
-  // the domain Agents a session can be bound to, which is what the picker's
-  // "Agents" section is.
-  useEffect(() => {
-    if (isOpen && !optionsFetched.current) {
-      optionsFetched.current = true;
-      api.getSessionOptions().then((opts) => {
-        setAgents(opts.agents);
-        setCustomProviders(opts.custom_providers ?? []);
-        setAgentBindings(opts.agent_bindings ?? []);
-        setModes(opts.modes);
-        setDefaultAgent(opts.default_agent);
-        setDefaultMode(opts.default_mode);
-      }).catch(() => {
-        // Fallback defaults
-        setAgents([{ key: "claude-code", label: "Claude Code" }]);
-        setModes([
-          { key: "condor", label: "Condor", description: "" },
-          { key: "agent_builder", label: "Agent Builder", description: "" },
-        ]);
-      });
-    }
-  }, [isOpen]);
 
   // Keyboard shortcut: Cmd+K (Mac) / Ctrl+K (other) to toggle panel
   useEffect(() => {
