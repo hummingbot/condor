@@ -148,6 +148,17 @@ re-applied every time (edit `conf_client.yml` inside the container, then
 risk above). With N bot processes sharing the account, budget roughly `100/N` each
 (e.g. 3 processes → ~33 each) and adjust down further if 429s persist.
 
+**Stagger restarts by 1-2 minutes when restarting/redeploying multiple bots
+together** (e.g. applying a `rate_limits_share_pct` change to several running bots at
+once). Each restart independently bursts leverage-setting, order placement, and
+stale-order cancellation all at once — doing this for N bots simultaneously stacks
+those bursts on top of each other and can trigger a 429 storm even when each bot's
+steady-state share is correctly sized, exactly like the one-time transient bursts seen
+after simultaneous kPEPE/AVAX `pmm_dynamic` validation restarts on 2026-07-31. Restart
+one, confirm it's placing orders cleanly again (no more than one 429 in the last
+~30s of logs), then move to the next — don't restart/redeploy multiple bots in the
+same breath.
+
 ## pmm_mister config defaults to always set explicitly
 
 Never deploy `pmm_mister` on silent defaults for these — they combine dangerously:
