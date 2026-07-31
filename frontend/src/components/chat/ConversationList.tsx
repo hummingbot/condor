@@ -44,10 +44,11 @@ function relativeTime(iso: string): string {
 /**
  * Every conversation the user has ever held, on either surface.
  *
- * A slide-over rather than a route: the panel is deliberately an overlay
- * available on every page, and history should not cost the user that. The tab
- * strip above shows what is *attached* right now; this shows everything. Both
- * are keyed on conversation id, so neither can drift from the other.
+ * Two shapes, one list. In the overlay panel it is a slide-over, because the
+ * panel is available on every page and history should not cost the user that;
+ * in the `/agents` workspace it is the rail, in flow. Grouping, rename, delete,
+ * the live dot and the Telegram badge are shared — only the chrome differs.
+ * Everything is keyed on conversation id, so the two cannot drift.
  */
 export function ConversationList({
   liveIds,
@@ -55,13 +56,16 @@ export function ConversationList({
   onNew,
   onOpen,
   onClose,
+  variant = "drawer",
 }: {
   /** Conversations with a live session, drawn from the panel's slots. */
   liveIds: Set<string>;
   activeId: string | null;
   onNew: () => void;
   onOpen: (meta: ConversationMeta) => void;
-  onClose: () => void;
+  onClose?: () => void;
+  /** `drawer` slides over the panel; `inline` renders in flow, no backdrop. */
+  variant?: "drawer" | "inline";
 }) {
   const queryClient = useQueryClient();
   const [renaming, setRenaming] = useState<string | null>(null);
@@ -101,19 +105,43 @@ export function ConversationList({
     items: conversations.filter((c) => groupOf(c.updated_at) === group),
   })).filter((g) => g.items.length > 0);
 
+  const isDrawer = variant === "drawer";
+
   return (
     <>
-      <div className="absolute inset-0 z-[70] bg-black/40" onClick={onClose} />
-      <div className="absolute inset-y-0 left-0 z-[71] flex w-full max-w-[340px] flex-col border-r border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
-        <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
-          <span className="text-sm font-semibold">Conversations</span>
-          <button
-            onClick={onClose}
-            className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            title="Close"
+      {isDrawer && (
+        <div className="absolute inset-0 z-[70] bg-black/40" onClick={onClose} />
+      )}
+      <div
+        className={
+          isDrawer
+            ? "absolute inset-y-0 left-0 z-[71] flex w-full max-w-[340px] flex-col border-r border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl"
+            : "flex min-h-0 flex-1 flex-col"
+        }
+      >
+        <div
+          className={`flex items-center justify-between border-b border-[var(--color-border)] px-3 py-2 ${
+            isDrawer ? "bg-[var(--color-surface)]" : ""
+          }`}
+        >
+          <span
+            className={
+              isDrawer
+                ? "text-sm font-semibold"
+                : "text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]"
+            }
           >
-            <X className="h-4 w-4" />
-          </button>
+            Conversations
+          </span>
+          {isDrawer && (
+            <button
+              onClick={onClose}
+              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              title="Close"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
         </div>
 
         <button
