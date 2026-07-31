@@ -1,6 +1,7 @@
 """Constants and MCP config loader for agent sessions."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -307,6 +308,27 @@ def get_project_dir() -> str:
     return str(Path(__file__).parent.parent.parent)
 
 
+def resolve_condor_chat_id(chat_id: int | str, user_id: int | None) -> int:
+    """Resolve the Telegram chat used by Condor tools.
+
+    Telegram launches already carry their real numeric chat ID. Dashboard
+    launches use either ``0`` or a string session key, so prefer the explicitly
+    configured notification destination and retain the authenticated user ID as
+    the single-user fallback.
+    """
+    if isinstance(chat_id, int) and chat_id != 0:
+        return chat_id
+
+    configured_chat_id = os.environ.get("CONDOR_CHAT_ID", "").strip()
+    if configured_chat_id:
+        try:
+            return int(configured_chat_id)
+        except ValueError as exc:
+            raise ValueError("CONDOR_CHAT_ID must be an integer") from exc
+
+    return user_id or 0
+
+
 def _condor_mcp_args(
     chat_id: int | str,
     user_id: int,
@@ -314,11 +336,7 @@ def _condor_mcp_args(
     server_name: str | None = None,
 ) -> list[str]:
     """Build CLI args for the condor MCP subprocess."""
-    import os
-
-    # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
-    # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
-    effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
+    effective_chat_id = resolve_condor_chat_id(chat_id, user_id)
     args = [
         "--chat-id",
         str(effective_chat_id),

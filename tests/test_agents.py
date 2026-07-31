@@ -520,6 +520,40 @@ def test_extra_env_uses_user_id(monkeypatch):
     assert env["CONDOR_CHAT_ID"] == "555"
 
 
+def test_web_extra_env_uses_configured_condor_chat_id(monkeypatch):
+    """Web session keys must not replace the configured Telegram destination."""
+    monkeypatch.setenv("CONDOR_CHAT_ID", "-1001234567890")
+
+    env = _run_create_session(monkeypatch, chat_id="web_42_slot", user_id=42)
+
+    assert env["CONDOR_USER_ID"] == "42"
+    assert env["CONDOR_CHAT_ID"] == "-1001234567890"
+
+
+def test_web_agent_mcp_args_use_configured_condor_chat_id(monkeypatch):
+    """A dashboard-launched strategy must receive its Telegram destination."""
+    from handlers.agents._shared import _condor_mcp_args
+
+    monkeypatch.setenv("CONDOR_CHAT_ID", "-1001234567890")
+
+    # The dashboard API represents a web-launched strategy with chat_id=0.
+    args = _condor_mcp_args(0, user_id=42)
+
+    assert args[args.index("--chat-id") + 1] == "-1001234567890"
+    assert args[args.index("--user-id") + 1] == "42"
+
+
+def test_web_agent_mcp_args_fall_back_to_user_id(monkeypatch):
+    """Web launches retain the Telegram-DM fallback when no chat is configured."""
+    from handlers.agents._shared import _condor_mcp_args
+
+    monkeypatch.delenv("CONDOR_CHAT_ID", raising=False)
+
+    args = _condor_mcp_args(0, user_id=42)
+
+    assert args[args.index("--chat-id") + 1] == "42"
+
+
 def test_extra_env_falls_back_to_chat_id(monkeypatch):
     """With no user_id, CONDOR_USER_ID falls back to the chat_id, not '0'."""
     env = _run_create_session(monkeypatch, chat_id=777, user_id=None)
