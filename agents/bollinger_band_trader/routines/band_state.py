@@ -13,7 +13,7 @@ is built to tell those two apart before any level is quoted.
 
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from telegram.ext import ContextTypes
 
 from condor.reports.footprint import candle_timestamps
@@ -49,6 +49,11 @@ _CONTINUATION_SETUPS = {
 
 class Config(BaseModel):
     """Classify Bollinger Band state and derive entry/stop/target for one pair."""
+
+    # Reject unknown keys. Without this, a model passing `symbol` instead of
+    # `trading_pair` would silently fall back to the default pair/connector and
+    # return a confident answer about the wrong market.
+    model_config = ConfigDict(extra="forbid")
 
     trading_pair: str = Field(default="BTC-USDT", description="Trading pair to analyze")
     connector_name: str = Field(

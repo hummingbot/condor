@@ -50,21 +50,26 @@ per trade and every exit derived from the bands rather than from a fixed percent
 ### Step 1: Read the band state
 
 ```
-run_routine(name="band_state", config={"trading_pair": "<trading_pair>",
-                                       "connector_name": "<connector_name>"})
+manage_routines(action="run", name="band_state",
+                strategy_id="bollinger_band_trader.bb_squeeze_breakout",
+                config={"trading_pair": "<trading_pair>",
+                        "connector_name": "<connector_name>"})
 ```
 
 Extract `setup`, `bias`, `entry`, `stop`, `target`, `rr`, and the per-timeframe verdicts.
 
 ### Step 2: Check what is already open
 
-```
-manage_executors(action="list", status="active")
-```
+**Do NOT call a tool for this.** Your open executors and positions are already in
+`[CORE DATA - executors]` and `[CORE DATA - positions]`, and your usage against the caps
+is in `[RISK STATE]`. Read them.
 
-Count active executors **for this pair**. If the count is at or above
-`max_open_executors` from `[CURRENT CONFIG]`, skip to Step 5 (manage only). Never open a
-second position in the same direction on the same pair.
+If open executors for this pair are at or above `max_open_executors` from `[RISK STATE]`,
+skip to Step 5 (manage only). Never open a second position in the same direction on the
+same pair.
+
+Querying this costs a tool round-trip that resends the whole context, and a mis-guessed
+argument schema will abort the tick on a retry. The data is already in front of you.
 
 ### Step 3: Decide
 
@@ -90,11 +95,12 @@ manage_skill(action="read", name="bollinger_playbook")
 **Never size by hand.** Run the sizer with the levels the state routine produced:
 
 ```
-run_routine(name="band_trade_sizer",
-            config={"trading_pair": "<trading_pair>", "connector_name": "<connector_name>",
-                    "side": "<bias>", "entry_price": <entry>, "stop_price": <stop>,
-                    "target_price": <target>, "risk_pct": 0.5,
-                    "max_position_pct": 10, "reserve_pct": 20, "leverage": <leverage>})
+manage_routines(action="run", name="band_trade_sizer",
+                strategy_id="bollinger_band_trader.bb_squeeze_breakout",
+                config={"trading_pair": "<trading_pair>", "connector_name": "<connector_name>",
+                        "side": "<bias>", "entry_price": <entry>, "stop_price": <stop>,
+                        "target_price": <target>, "risk_pct": 0.5,
+                        "max_position_pct": 10, "reserve_pct": 20, "leverage": <leverage>})
 ```
 
 If `verdict` is `FAIL`, journal `blocked_by` and hold. Do not adjust inputs to force a

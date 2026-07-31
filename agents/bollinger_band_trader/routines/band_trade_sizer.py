@@ -15,7 +15,7 @@ intentionally self-contained rather than imported from a sibling routine.
 import json
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from telegram.ext import ContextTypes
 
 from config_manager import get_client
@@ -33,6 +33,11 @@ _MAX_LEVERAGE = 5
 
 class Config(BaseModel):
     """Size a Bollinger setup from its band-derived stop and run pre-trade guardrails."""
+
+    # Reject unknown keys. Without this, a model passing `symbol` instead of
+    # `trading_pair` would silently fall back to the default pair/connector and
+    # return a confident answer about the wrong market.
+    model_config = ConfigDict(extra="forbid")
 
     trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
     connector_name: str = Field(

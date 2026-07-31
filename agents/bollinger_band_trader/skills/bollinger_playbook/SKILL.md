@@ -21,9 +21,8 @@ Follow it in order. Each gate exists because skipping it is a known way to lose 
 Run the state read:
 
 ```
-manage_trading_agent(action="run_routine", strategy_id="bollinger_band_trader",
-                     name="band_state",
-                     config={"trading_pair": "<pair>", "connector_name": "<connector>"})
+manage_routines(action="run", name="band_state", strategy_id="bollinger_band_trader",
+                config={"trading_pair": "<pair>", "connector_name": "<connector>"})
 ```
 
 Read `verdict` on the entry timeframe and on the trend timeframe. **Do not read `%B`
@@ -50,11 +49,10 @@ this, but if you are reasoning from a manual reading, apply it yourself.
 ## Step 3 — Size it (mandatory)
 
 ```
-manage_trading_agent(action="run_routine", strategy_id="bollinger_band_trader",
-                     name="band_trade_sizer",
-                     config={"trading_pair": "<pair>", "connector_name": "<connector>",
-                             "side": "long", "entry_price": <entry>, "stop_price": <stop>,
-                             "target_price": <target>, "risk_pct": 0.5, "leverage": 1})
+manage_routines(action="run", name="band_trade_sizer", strategy_id="bollinger_band_trader",
+                config={"trading_pair": "<pair>", "connector_name": "<connector>",
+                        "side": "long", "entry_price": <entry>, "stop_price": <stop>,
+                        "target_price": <target>, "risk_pct": 0.5, "leverage": 1})
 ```
 
 The routine returns `verdict: PASS|FAIL`, the base-currency `amount`, and a ready
@@ -108,9 +106,8 @@ whether it needs to be 10.
 When there is no specific pair in question, screen first:
 
 ```
-manage_trading_agent(action="run_routine", strategy_id="bollinger_band_trader",
-                     name="squeeze_screener",
-                     config={"trading_pairs": "BTC-USDT,ETH-USDT,SOL-USDT", "interval": "1h"})
+manage_routines(action="run", name="squeeze_screener", strategy_id="bollinger_band_trader",
+                config={"trading_pairs": "BTC-USDT,ETH-USDT,SOL-USDT", "interval": "1h"})
 ```
 
 Then run `band_state` on the top candidates. A screener row is never a trade on its own —

@@ -2,8 +2,9 @@
 name: Bollinger Band Trader
 description: Bollinger Band specialist — squeeze/expansion cycles, band-walk vs mean-reversion
   classification, and %B-driven directional entries with band-derived stops
-agent_key: claude-acp:sonnet
+agent_key: openrouter:nvidia/nemotron-3-super-120b-a12b:free
 tools:
+- manage_routines
 - get_market_data
 - get_portfolio_overview
 - manage_executors
@@ -78,9 +79,8 @@ Run these before you answer. They are the difference between a real read and a g
 
 ### `band_state` — the primary read
 ```
-manage_trading_agent(action="run_routine", strategy_id="bollinger_band_trader",
-                     name="band_state",
-                     config={"trading_pair": "SOL-USDT", "connector_name": "binance_perpetual"})
+manage_routines(action="run", name="band_state", strategy_id="bollinger_band_trader",
+                config={"trading_pair": "SOL-USDT", "connector_name": "binance_perpetual"})
 ```
 Returns, per timeframe (15m entry / 1h context / 4h trend):
 - `pct_b` — 0.0 = at the lower band, 0.5 = middle band, 1.0 = upper band. Values outside

@@ -33,6 +33,11 @@ from .client import (
 log = logging.getLogger(__name__)
 
 
+# Tool-call retries before a run is abandoned. pydantic-ai's default is 1, which
+# small/free models frequently exhaust on a mis-guessed argument schema.
+_TOOL_RETRIES = 4
+
+
 def _infer_tool_filter_mode(model_name: str) -> str:
     """Automatically detect the best tool filter mode based on model name.
 
@@ -508,7 +513,13 @@ class PydanticAIClient:
 
         model = self._build_model()
         prepare = self._prepare_tools if self.allowed_tools else None
-        self._agent = Agent(model, toolsets=toolsets, prepare_tools=prepare)
+        # pydantic-ai defaults to retries=1, which is too tight for small/cheap models:
+        # they routinely mis-guess a tool's argument schema on the first attempt, and a
+        # single retry is often not enough to recover. One aborted retry kills the whole
+        # tick, so a HOLD tick that did all its real work still reports an error.
+        self._agent = Agent(
+            model, toolsets=toolsets, prepare_tools=prepare, retries=_TOOL_RETRIES
+        )
 
         # Resolve the global semaphore for this server's base URL so all client
         # instances targeting the same local inference server share one request
