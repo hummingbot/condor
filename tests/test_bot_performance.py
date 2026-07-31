@@ -227,7 +227,7 @@ def test_merge_is_disjoint_addition():
     assert base.bot_name == ""
 
     # With bot_name "river": adds river's 7/7/1500 on top, no double count.
-    merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_name="river"))
+    merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["river"]))
     assert merged.bot_name == "river"
     assert merged.realized_pnl == 4.0 + 7.0
     assert merged.unrealized_pnl == 7.0
@@ -259,7 +259,7 @@ def test_merge_appends_bot_positions_as_rows():
     ]
     client = _FakeClient(rows_by_id={}, snapshots=snaps)
     # base name resolves suffix-tolerantly to the deployed instance
-    merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_name="dn-mm"))
+    merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["dn-mm"]))
     # bot_name reflects the resolved deployed instance, not just the base
     assert merged.bot_name == "dn-mm-20260724-1"
     assert len(merged.executors) == 1
@@ -284,7 +284,7 @@ def test_no_snapshot_leaves_executor_totals_unchanged():
     client = _FakeClient(rows_by_id=rows_by_id)
     no_bot = asyncio.run(fetch_agent_performance(client, agent_id))
     # bot_name set but no matching snapshot → totals identical to executor-only.
-    ghost = asyncio.run(fetch_agent_performance(client, agent_id, bot_name="ghost"))
+    ghost = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["ghost"]))
     assert ghost.bot_name == "ghost"
     assert ghost.unrealized_pnl == no_bot.unrealized_pnl == 2.0
     assert ghost.total_pnl == no_bot.total_pnl
@@ -294,7 +294,7 @@ def test_no_snapshot_leaves_executor_totals_unchanged():
 def test_batch_merges_only_named_agents():
     a1, a2 = "river.scalp_1", "plain.scalp_1"
     client = _FakeClient(rows_by_id={})
-    out = asyncio.run(fetch_agent_performance_batch(client, [a1, a2], {a1: "river"}))
+    out = asyncio.run(fetch_agent_performance_batch(client, [a1, a2], {a1: ["river"]}))
     assert out[a1].bot_name == "river"
     assert out[a1].realized_pnl == 7.0
     assert out[a2].bot_name == ""  # not named → untouched, executor-only
@@ -342,6 +342,83 @@ def test_resolve_bot_instances_returns_all_matches_sorted():
     got = resolve_bot_instances(agg, "dn-mm")
     assert got == ["dn-mm-20260101-000000", "dn-mm-20260724-182221"]  # oldest→newest
     assert resolve_bot_instances(agg, "nope") == []
+
+
+def _instances_agg(*names_ts):
+    return _aggregate_by_bot(
+        [
+            {
+                "bot_name": name,
+                "controller_id": "c",
+                "timestamp": ts,
+                "performance": {},
+            }
+            for name, ts in names_ts
+        ]
+    )
+
+
+def test_partition_assigns_a_tagged_instance_to_its_own_base():
+    from condor.fetchers.bot_performance import (
+        partition_instances,
+        resolve_bot_instances,
+    )
+
+    agg = _instances_agg(
+        ("brigado-ema_trend-20260731-100000", "2026-07-31T10:00:00"),
+        ("brigado-ema_trend-btc-20260731-101500", "2026-07-31T10:15:00"),
+    )
+    bases = ["brigado-ema_trend", "brigado-ema_trend-btc"]
+
+    # Asked one base at a time, the parent swallows its tagged sibling…
+    assert len(resolve_bot_instances(agg, "brigado-ema_trend")) == 2
+    # …but deciding over all owned bases at once, each instance lands on exactly one.
+    assert partition_instances(agg, bases) == {
+        "brigado-ema_trend": ["brigado-ema_trend-20260731-100000"],
+        "brigado-ema_trend-btc": ["brigado-ema_trend-btc-20260731-101500"],
+    }
+
+
+def test_partition_keeps_unowned_instances_out_and_orders_oldest_first():
+    from condor.fetchers.bot_performance import partition_instances
+
+    agg = _instances_agg(
+        ("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
+        ("dn-mm-20260101-000000", "2026-01-01T00:00:00"),
+        ("someone-else", "2026-07-24T00:00:00"),
+    )
+    assert partition_instances(agg, ["dn-mm", "ghost"]) == {
+        "dn-mm": ["dn-mm-20260101-000000", "dn-mm-20260724-182221"],
+        "ghost": [],  # owned but never deployed
+    }
+    assert partition_instances(agg, []) == {}
+
+
+def test_resolve_bots_never_hands_the_same_aggregate_to_two_bases():
+    from condor.fetchers.bot_performance import resolve_bot, resolve_bots
+
+    agg = _instances_agg(
+        ("ns-bot-20260731-100000", "2026-07-31T10:00:00"),
+        ("ns-bot-btc-20260731-101500", "2026-07-31T10:15:00"),
+    )
+    # resolve_bot alone picks the freshest prefix match for BOTH bases…
+    assert resolve_bot(agg, "ns-bot")["bot_name"] == "ns-bot-btc-20260731-101500"
+    assert resolve_bot(agg, "ns-bot-btc")["bot_name"] == "ns-bot-btc-20260731-101500"
+    # …partition-aware resolution gives each base its own live instance.
+    live = resolve_bots(agg, ["ns-bot", "ns-bot-btc"])
+    assert live["ns-bot"]["bot_name"] == "ns-bot-20260731-100000"
+    assert live["ns-bot-btc"]["bot_name"] == "ns-bot-btc-20260731-101500"
+
+
+def test_resolve_bots_prefers_an_exact_deploy_over_a_newer_suffixed_one():
+    from condor.fetchers.bot_performance import resolve_bots
+
+    agg = _instances_agg(
+        ("dn-mm", "2026-01-01T00:00:00"),
+        ("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
+    )
+    # Same rule resolve_bot applies: a bot deployed under the bare base wins.
+    assert resolve_bots(agg, ["dn-mm"])["dn-mm"]["bot_name"] == "dn-mm"
 
 
 def test_slice_history_tiles_exactly():
@@ -419,29 +496,53 @@ def test_fetch_instance_history_sums_controllers_and_filters_trades():
 # ── Provider wiring ──
 
 
-def test_executors_provider_forwards_bot_name(monkeypatch):
-    from condor.agents.providers.executors import ExecutorsProvider
+def _capture_provider_fetch(monkeypatch) -> dict:
+    from condor.agents.performance import AgentPerformance as _AP
 
-    captured = {}
+    captured: dict = {}
 
-    async def _fake_fetch(client, agent_id, bot_name=""):
+    async def _fake_fetch(client, agent_id, bot_names=None):
         captured["agent_id"] = agent_id
-        captured["bot_name"] = bot_name
-        return AgentPerformance(agent_id=agent_id, bot_name=bot_name)
+        captured["bot_names"] = bot_names
+        return _AP(agent_id=agent_id, bot_names=list(bot_names or []))
 
     monkeypatch.setattr(
         "condor.agents.performance.fetch_agent_performance", _fake_fetch
     )
+    return captured
 
-    provider = ExecutorsProvider()
+
+def test_executors_provider_falls_back_to_config_bot_name(monkeypatch):
+    # No ledger (executor-mode caller / older engine): the configured name is
+    # still what the session would deploy under, so it must reach the fetch.
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    captured = _capture_provider_fetch(monkeypatch)
     asyncio.run(
-        provider.execute(
+        ExecutorsProvider().execute(
             client=object(),
             config={"bot_name": "river"},
             agent_id="river.scalp_1",
         )
     )
-    assert captured == {"agent_id": "river.scalp_1", "bot_name": "river"}
+    assert captured == {"agent_id": "river.scalp_1", "bot_names": ["river"]}
+
+
+def test_executors_provider_prefers_ledger_bases(monkeypatch):
+    # With a ledger, the session's OWNED bases win over the configured single
+    # name — a session that deployed two bots must see both.
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    captured = _capture_provider_fetch(monkeypatch)
+    asyncio.run(
+        ExecutorsProvider().execute(
+            client=object(),
+            config={"bot_name": "river"},
+            agent_id="river.scalp_1",
+            bot_names=["river-btc", "river-eth"],
+        )
+    )
+    assert captured["bot_names"] == ["river-btc", "river-eth"]
 
 
 # ── Prompt controller-mode block ──

@@ -101,9 +101,47 @@ def declared_names(config: dict[str, Any], namespace: str) -> list[str]:
 @dataclass
 class OwnedBot:
     base: str  # the name as the agent asked for it (no deploy timestamp)
-    origin: str  # "deployed" | "adopted"
+    origin: str  # "deployed" | "adopted" | "legacy"
     since: float  # epoch this session took ownership
     last_seen: float
+
+
+def _parse_bots(data: dict[str, Any]) -> dict[str, OwnedBot]:
+    """Decode the ``bots`` map of a serialized ledger, skipping corrupt entries."""
+    out: dict[str, OwnedBot] = {}
+    for base, raw in (data.get("bots") or {}).items():
+        try:
+            out[base] = OwnedBot(
+                base=raw.get("base", base),
+                origin=raw.get("origin", "adopted"),
+                since=float(raw.get("since", 0.0)),
+                last_seen=float(raw.get("last_seen", 0.0)),
+            )
+        except Exception:
+            continue
+    return out
+
+
+def read_owned(session_dir: Path | None) -> list[OwnedBot]:
+    """Bots a session recorded owning, oldest takeover first.
+
+    Read-only view of ``{session_dir}/owned_bots.json`` for consumers outside the
+    tick loop — per-session PnL attribution ([[FEAT-018]]) needs the takeover
+    instants without instantiating the live ledger. Empty when the session
+    predates the ledger or the file is unreadable, which callers read as "no
+    evidence" and fall back on.
+    """
+    if session_dir is None:
+        return []
+    path = Path(session_dir) / LEDGER_FILENAME
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text()) or {}
+    except Exception:
+        log.warning("BotLedger: unreadable %s", path)
+        return []
+    return sorted(_parse_bots(data).values(), key=lambda b: (b.since, b.base))
 
 
 class BotLedger:
@@ -216,16 +254,7 @@ class BotLedger:
         except Exception:
             log.warning("BotLedger: unreadable %s, starting empty", path)
             return
-        for base, raw in (data.get("bots") or {}).items():
-            try:
-                self.bots[base] = OwnedBot(
-                    base=raw.get("base", base),
-                    origin=raw.get("origin", "adopted"),
-                    since=float(raw.get("since", 0.0)),
-                    last_seen=float(raw.get("last_seen", 0.0)),
-                )
-            except Exception:
-                continue
+        self.bots = _parse_bots(data)
         self.violations = list(data.get("violations") or [])[-_MAX_VIOLATIONS:]
 
     def _save(self) -> None:
