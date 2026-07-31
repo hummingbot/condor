@@ -73,7 +73,8 @@ new baseline — a live-only patch will vanish the next time a container restart
 ## GitHub mirror rule
 
 Any change to Condor or Hummingbot-Condor must be committed **and pushed**, never left
-as local-only commits.
+as local-only commits — and never left uncommitted in a working tree at all, even
+temporarily.
 - Condor app changes → `/home/nate/condor`, push to remote `fork`
   (`SpicySOB/condor`), not `origin` (`hummingbot/condor`, upstream, read-only for this
   user). `fork/main` is a deliberately-diverged personal mirror force-pushed to match
@@ -81,7 +82,15 @@ as local-only commits.
 - Hummingbot connector/controller changes → clone/push
   `https://github.com/SpicySOB/Hummingbot-Condor.git`, branch `condor-main`, remote
   `origin` there (no separate fork needed, `origin` already points at the user's own
-  repo). No durable local checkout — re-clone each session if needed.
+  repo). **No durable local checkout — it only ever exists in a session's ephemeral
+  scratchpad.** This makes uncommitted changes here strictly more dangerous than in
+  `/home/nate/condor`: a change sitting uncommitted in `condor` is bad practice but
+  still physically persists on the VPS; a change sitting uncommitted in a
+  `Hummingbot-Condor` scratch clone is gone the moment the session ends, no VPS
+  failure required. **Commit and push immediately after editing anything in this
+  clone — before running any other command, not batched at the end of a task.** This
+  is exactly how the original custom image's working copy was lost, requiring a
+  from-scratch re-clone and re-discovery on 2026-07-31.
 - `~/.git-credentials` has a working personal access token; no `gh` CLI installed.
 
 ## Verifying order/position state — do not trust these
