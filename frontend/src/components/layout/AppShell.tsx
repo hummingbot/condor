@@ -16,6 +16,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ChatPanel } from "@/components/chat/ChatPanel";
+import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
@@ -33,7 +34,22 @@ const NAV_ITEMS = [
   { to: "/routines", icon: Zap, label: "Routines" },
 ] as const;
 
+/**
+ * The shell owns the chat state, not the panel.
+ *
+ * Both surfaces that render a conversation — the overlay panel here and the
+ * workspace at `/agents` — live under this provider, so there is one socket and
+ * one transcript however the user got to it.
+ */
 export function AppShell() {
+  return (
+    <ChatProvider>
+      <AppShellBody />
+    </ChatProvider>
+  );
+}
+
+function AppShellBody() {
   const { server } = useServer();
   const { pathname } = useLocation();
   const { theme, toggleTheme } = useTheme();
