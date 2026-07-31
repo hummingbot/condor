@@ -77,6 +77,20 @@ def _runkey(agent_slug: str, sslug: str) -> str:
     return f"{agent_slug}.{sslug}"
 
 
+def _resolve_notification_chat_id(chat_id: int) -> int:
+    """Resolve a web-launched Agent's Telegram notification destination."""
+    if chat_id:
+        return chat_id
+
+    configured_chat_id = os.environ.get("CONDOR_CHAT_ID", "").strip()
+    if not configured_chat_id:
+        return 0
+    try:
+        return int(configured_chat_id)
+    except ValueError as exc:
+        raise ValueError("CONDOR_CHAT_ID must be an integer") from exc
+
+
 # ── Request/Response Models ──
 
 
@@ -255,7 +269,7 @@ class UpdateLearningsRequest(BaseModel):
 class ConsultRequest(BaseModel):
     task: str
     context: str = ""
-    chat_id: int = 0
+    chat_id: int = 0  # 0 resolves from the server-side CONDOR_CHAT_ID
     user_id: int | None = None
     server_name: str | None = None
 
@@ -263,13 +277,13 @@ class ConsultRequest(BaseModel):
 class StartStrategyRequest(BaseModel):
     config: dict[str, Any] = {}
     trading_context: str = ""
-    chat_id: int = 0  # Telegram chat for notifications (0 = web-launched, no chat)
+    chat_id: int = 0  # 0 resolves from the server-side CONDOR_CHAT_ID
     user_id: int | None = None  # Accepted for compat but ignored (see handler)
 
 
 class DelegateRequest(BaseModel):
     task: str
-    chat_id: int = 0  # Telegram chat for the completion notification
+    chat_id: int = 0  # 0 resolves from the server-side CONDOR_CHAT_ID
     user_id: int | None = None  # Accepted for compat but ignored (see handler)
     server_name: str | None = None
     timeout_s: int = 900
@@ -909,7 +923,7 @@ async def consult_agent(
     answer = await run_consult(
         slug=slug,
         user_id=user.id,
-        chat_id=req.chat_id,
+        chat_id=_resolve_notification_chat_id(req.chat_id),
         server_name=req.server_name,
         task=req.task,
         context=req.context,
@@ -950,7 +964,7 @@ async def delegate_agent(
     dt = await start_delegation(
         agent_slug=slug,
         user_id=user.id,
-        chat_id=req.chat_id,
+        chat_id=_resolve_notification_chat_id(req.chat_id),
         server_name=req.server_name,
         task=req.task,
         timeout_s=req.timeout_s,
@@ -1234,7 +1248,7 @@ async def start_strategy(
         agent=agent,
         strategy=strategy,
         config=config_dict,
-        chat_id=req.chat_id,
+        chat_id=_resolve_notification_chat_id(req.chat_id),
         user_id=user.id,
     )
     await new_engine.start()

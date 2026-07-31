@@ -520,40 +520,6 @@ def test_extra_env_uses_user_id(monkeypatch):
     assert env["CONDOR_CHAT_ID"] == "555"
 
 
-def test_web_extra_env_uses_configured_condor_chat_id(monkeypatch):
-    """Web session keys must not replace the configured Telegram destination."""
-    monkeypatch.setenv("CONDOR_CHAT_ID", "-1001234567890")
-
-    env = _run_create_session(monkeypatch, chat_id="web_42_slot", user_id=42)
-
-    assert env["CONDOR_USER_ID"] == "42"
-    assert env["CONDOR_CHAT_ID"] == "-1001234567890"
-
-
-def test_web_agent_mcp_args_use_configured_condor_chat_id(monkeypatch):
-    """A dashboard-launched strategy must receive its Telegram destination."""
-    from handlers.agents._shared import _condor_mcp_args
-
-    monkeypatch.setenv("CONDOR_CHAT_ID", "-1001234567890")
-
-    # The dashboard API represents a web-launched strategy with chat_id=0.
-    args = _condor_mcp_args(0, user_id=42)
-
-    assert args[args.index("--chat-id") + 1] == "-1001234567890"
-    assert args[args.index("--user-id") + 1] == "42"
-
-
-def test_web_agent_mcp_args_fall_back_to_user_id(monkeypatch):
-    """Web launches retain the Telegram-DM fallback when no chat is configured."""
-    from handlers.agents._shared import _condor_mcp_args
-
-    monkeypatch.delenv("CONDOR_CHAT_ID", raising=False)
-
-    args = _condor_mcp_args(0, user_id=42)
-
-    assert args[args.index("--chat-id") + 1] == "42"
-
-
 def test_extra_env_falls_back_to_chat_id(monkeypatch):
     """With no user_id, CONDOR_USER_ID falls back to the chat_id, not '0'."""
     env = _run_create_session(monkeypatch, chat_id=777, user_id=None)
@@ -619,6 +585,105 @@ def _consult_request(**kw):
 
 def _web_user(uid):
     return SimpleNamespace(id=uid, username="", first_name="", role="user")
+
+
+def test_web_notification_chat_id_resolution_has_no_user_fallback(monkeypatch):
+    from condor.web.routes.agents import _resolve_notification_chat_id
+
+    monkeypatch.delenv("CONDOR_CHAT_ID", raising=False)
+    assert _resolve_notification_chat_id(0) == 0
+
+    monkeypatch.setenv("CONDOR_CHAT_ID", "-1001234567890")
+    assert _resolve_notification_chat_id(0) == -1001234567890
+    assert _resolve_notification_chat_id(555) == 555
+
+
+def test_consult_resolves_configured_chat_id(monkeypatch):
+    from condor.agents import consult as consult_module
+    from condor.web.routes import agents as agents_module
+
+    seen = {}
+
+    async def _capture_run_consult(**kw):
+        seen.update(kw)
+        return "ok"
+
+    monkeypatch.setattr(consult_module, "run_consult", _capture_run_consult)
+    monkeypatch.setenv("CONDOR_CHAT_ID", "-1001234567890")
+
+    result = asyncio.run(
+        agents_module.consult_agent("em", _consult_request(), user=_web_user(42))
+    )
+
+    assert result["answer"] == "ok"
+    assert seen["chat_id"] == -1001234567890
+
+
+def test_delegate_resolves_configured_chat_id(monkeypatch):
+    from condor.agents import delegate as delegate_module
+    from condor.web.routes import agents as agents_module
+
+    seen = {}
+
+    async def _capture_start_delegation(**kw):
+        seen.update(kw)
+        return SimpleNamespace(task_id="em-delegate-test", status="running")
+
+    monkeypatch.setattr(agents_module, "_get_agent", lambda _slug: object())
+    monkeypatch.setattr(delegate_module, "start_delegation", _capture_start_delegation)
+    monkeypatch.setenv("CONDOR_CHAT_ID", "-1001234567890")
+
+    req = agents_module.DelegateRequest(task="check balances")
+    result = asyncio.run(agents_module.delegate_agent("em", req, user=_web_user(42)))
+
+    assert result == {"task_id": "em-delegate-test", "status": "running"}
+    assert seen["chat_id"] == -1001234567890
+
+
+def test_start_strategy_resolves_configured_chat_id(monkeypatch, tmp_path):
+    from condor.agents import config as config_module
+    from condor.agents import engine as engine_module
+    from condor.web.routes import agents as agents_module
+
+    seen = {}
+
+    class _FakeTickEngine:
+        def __init__(self, **kw):
+            seen.update(kw)
+            self.agent_id = "em.strategy_1"
+            self.session_num = 1
+
+        async def start(self):
+            seen["started"] = True
+
+    strategy = SimpleNamespace(
+        dir=tmp_path,
+        default_config={},
+        default_trading_context="",
+    )
+    monkeypatch.setattr(agents_module, "_get_agent", lambda _slug: object())
+    monkeypatch.setattr(agents_module, "_get_strategy", lambda _slug, _sslug: strategy)
+    monkeypatch.setattr(config_module, "load_full_config", lambda *_args: {})
+    monkeypatch.setattr(engine_module, "TickEngine", _FakeTickEngine)
+    monkeypatch.setenv("CONDOR_CHAT_ID", "-1001234567890")
+
+    result = asyncio.run(
+        agents_module.start_strategy(
+            "em",
+            "strategy",
+            agents_module.StartStrategyRequest(),
+            user=_web_user(42),
+        )
+    )
+
+    assert result == {
+        "started": True,
+        "agent_id": "em.strategy_1",
+        "session_num": 1,
+    }
+    assert seen["chat_id"] == -1001234567890
+    assert seen["user_id"] == 42
+    assert seen["started"] is True
 
 
 def test_consult_denies_server_without_access(monkeypatch):

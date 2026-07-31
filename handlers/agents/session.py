@@ -16,7 +16,6 @@ from handlers.agents._shared import (
     build_initial_context,
     build_mcp_servers_for_session,
     get_project_dir,
-    resolve_condor_chat_id,
 )
 
 log = logging.getLogger(__name__)
@@ -142,9 +141,8 @@ async def get_or_create_session(
     if session:
         await _destroy_session_internal(chat_id)
 
-    # Dashboard sessions use a non-Telegram key, so resolve their notification
-    # target from CONDOR_CHAT_ID before falling back to the authenticated user.
-    effective_chat_id = resolve_condor_chat_id(chat_id, user_id)
+    # MCP subprocess env expects numeric chat_id; for web sessions use user_id
+    effective_chat_id = chat_id if isinstance(chat_id, int) else (user_id or 0)
     extra_env = {
         "CONDOR_CHAT_ID": str(effective_chat_id),
         "CONDOR_USER_ID": str(user_id or effective_chat_id),
