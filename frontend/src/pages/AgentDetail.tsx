@@ -25,7 +25,6 @@ import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { type StrategySummary, api } from "@/lib/api";
-import { requestChat } from "@/lib/chatIntent";
 import { formatCurrencyPnl } from "@/lib/formatters";
 
 // ── Strategy Card ──
@@ -382,7 +381,7 @@ export function AgentDetail() {
           </div>
           <div className="flex items-center gap-2">
             <button
-              onClick={() => requestChat({ agentSlug: agent.slug })}
+              onClick={() => navigate(`/agents?agent=${encodeURIComponent(agent.slug)}`)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
               title={`Chat with ${agent.name}`}
             >

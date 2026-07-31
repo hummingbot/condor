@@ -51,13 +51,20 @@ export function AppShell() {
 
 function AppShellBody() {
   const { server } = useServer();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const { theme, toggleTheme } = useTheme();
   const [chatOpen, setChatOpen] = useState(false);
   const { hasKeys, isLoading: keysLoading } = useCredentials();
 
   const exemptRoutes = ["/routines", "/settings"];
   const showKeysOverlay = server && !keysLoading && !hasKeys && !exemptRoutes.some((r) => pathname.startsWith(r));
+
+  // The overlay exists to ask about the page you are looking at. On the chat
+  // workspace there is no other page, so it stays out of the way — and the
+  // workspace takes the full height and owns its own scrolling. Everywhere
+  // else, `/agents?tab=fleet` and `/agents/:slug` included, nothing changes.
+  const isChatWorkspace =
+    pathname === "/agents" && !new URLSearchParams(search).get("tab");
 
   // Prefetch core data (executors, bots) and subscribe to WS channels early
   usePrefetchData();
@@ -130,12 +137,18 @@ function AppShellBody() {
 
           </div>
 
-          <AgentToggleButton active={chatOpen} onClick={() => setChatOpen((v) => !v)} className="ml-2" />
+          {!isChatWorkspace && (
+            <AgentToggleButton active={chatOpen} onClick={() => setChatOpen((v) => !v)} className="ml-2" />
+          )}
         </div>
       </header>
 
       {/* Main content */}
-      <main className="relative flex-1 overflow-auto p-6">
+      <main
+        className={`relative flex-1 ${
+          isChatWorkspace ? "overflow-hidden" : "overflow-auto p-6"
+        }`}
+      >
         <ErrorBoundary resetKey={pathname + server}>
           <Outlet key={server} />
         </ErrorBoundary>
@@ -143,7 +156,7 @@ function AppShellBody() {
       </main>
 
       {/* Chat panel */}
-      <ChatPanel isOpen={chatOpen} onToggle={setChatOpen} />
+      {!isChatWorkspace && <ChatPanel isOpen={chatOpen} onToggle={setChatOpen} />}
     </div>
   );
 }
