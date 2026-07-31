@@ -43,7 +43,13 @@ class Config(BaseModel):
         default="bitget_perpetual", description="CEX connector supplying fair value"
     )
     reference_pair: str = Field(default="XRP-USDT", description="Reference pair for XRP/USD")
-    tick_interval_sec: int = Field(default=300, description="Seconds between requotes")
+    tick_interval_sec: int = Field(default=300, description="Seconds between LLM ticks")
+    requote_interval_sec: int = Field(
+        default=0,
+        description="Actual seconds a quote stays live; 0 = same as tick_interval_sec. "
+        "In controller mode this is the controller's executor_refresh_time, NOT the LLM "
+        "tick — the bot requotes without the agent, so the LLM tick must not set the floor",
+    )
     levels_per_side: int = Field(default=3, description="Quote levels per side")
     total_amount_quote: float = Field(default=100.0, description="Capital to deploy, USD")
     adverse_k: float = Field(
@@ -203,10 +209,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # seasonal component. Deseasonalise first (divide by the lookback's mean
     # multiplier), then re-seasonalise onto the window the quote will actually be
     # live for (multiply by the forward window's mean multiplier).
+    # The floor is set by how long a quote stays exposed, which in controller mode is the
+    # controller's executor_refresh_time — the bot requotes without the agent. Using the
+    # LLM tick interval instead inflates the floor by sqrt(tick / refresh) and produces a
+    # spurious `viable: false` that would block a deploy that is in fact viable.
+    requote_sec = max(config.requote_interval_sec or config.tick_interval_sec, 1)
+
     vol_raw = _realized_vol_per_sec(closes, 60)
     now_ms = int(time.time() * 1000)
     look_start_ms = now_ms - len(closes) * 60_000
-    fwd_end_ms = now_ms + max(config.tick_interval_sec, 1) * 1000
+    fwd_end_ms = now_ms + requote_sec * 1000
 
     if config.use_vol_clock:
         mult_look = _hour_mult_span(look_start_ms, now_ms)
@@ -217,7 +229,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         mult_look = mult_fwd = 1.0
         vol_deseason = vol_adj = vol_raw
 
-    adverse_move = config.adverse_k * vol_adj * math.sqrt(max(config.tick_interval_sec, 1))
+    adverse_move = config.adverse_k * vol_adj * math.sqrt(requote_sec)
     floor_bps = adverse_move * 10_000
 
     def _utc(ms: int) -> str:
@@ -239,7 +251,21 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"(UTC {_utc(now_ms)}-{_utc(fwd_end_ms)}, quote live window)"
     )
     out.append(f"vol_adjusted: {vol_adj * math.sqrt(60) * 100:.4f}% per minute")
-    out.append(f"tick_interval_sec: {config.tick_interval_sec}")
+    out.append(f"tick_interval_sec: {config.tick_interval_sec}  (LLM reasoning cadence)")
+    out.append(
+        f"requote_interval_sec: {requote_sec}  (quote exposure — THIS sets the floor)"
+    )
+    if config.requote_interval_sec:
+        out.append(
+            "note: floor computed from requote_interval_sec, not the LLM tick — correct for "
+            "controller mode, where the bot requotes on its own executor_refresh_time"
+        )
+    else:
+        out.append(
+            "note: no requote_interval_sec given, so the LLM tick is assumed to be the "
+            "exposure window (executor mode). In controller mode pass executor_refresh_time "
+            "or the floor will be overstated by sqrt(tick / refresh)"
+        )
     out.append(f"expected_adverse_move: {floor_bps:.2f} bps over one interval")
     out.append(f"spread_floor_bps: {floor_bps:.2f}  (per side, k={config.adverse_k})")
 
@@ -269,11 +295,37 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         out.append(f"suggested_spread_bps_per_side: {target:.2f}")
         out.append(f"suggested_bid: {implied_xrpl_price * (1 - target / 10_000):.6f}")
         out.append(f"suggested_ask: {implied_xrpl_price * (1 + target / 10_000):.6f}")
+        # pmm_simple's buy_spreads/sell_spreads are FRACTIONS of the reference price
+        # (order_price = reference_price * (1 +/- spread)), not bps. Emit the converted
+        # values so a bps figure can never be pasted into a controller config: 22 bps
+        # entered as 22 would quote at 2200%.
+        #
+        # Levels are spaced strictly inside (floor, ceiling) rather than as multiples of
+        # the target. A geometric ladder walks straight through the AMM fee ceiling on the
+        # outer level — 3 levels at 2x/3x a 7 bps target reaches 21 bps against a 10 bps
+        # ceiling, and every offer above the ceiling loses the flow to the pool.
+        levels = max(config.levels_per_side, 1)
+        ladder_bps = [
+            floor_bps + headroom * (i + 1) / (levels + 1) for i in range(levels)
+        ]
+        out.append(
+            "controller_spreads (FRACTIONS for pmm_simple buy_spreads/sell_spreads — "
+            "never paste bps here): "
+            + ",".join(f"{b / 10_000:.6f}" for b in ladder_bps)
+        )
+        out.append(
+            "ladder_bps: "
+            + ",".join(f"{b:.2f}" for b in ladder_bps)
+            + f"  (all strictly between floor {floor_bps:.2f} and ceiling {ceiling_bps:.2f})"
+        )
     else:
         out.append("suggested_action: DO NOT QUOTE")
         out.append(
             "reason: adverse-selection floor meets or exceeds the AMM fee ceiling. "
-            "Either requote faster (lower tick_interval_sec) or wait for vol to fall."
+            "Either shorten the exposure window or wait for vol to fall — in controller "
+            "mode that means lowering executor_refresh_time, in executor mode "
+            "frequency_sec. Note a long LLM tick does NOT itself widen the floor in "
+            "controller mode; only executor_refresh_time does."
         )
 
     # 5. Reserves and deployable capital.
@@ -286,9 +338,31 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     out.append("=== RESERVES & SIZING ===")
     out.append(f"levels_per_side: {config.levels_per_side}  (offers: {n_offers})")
     out.append(f"reserve_locked_xrp: {reserve_xrp:.2f}  (~${reserve_usd:.2f})")
-    out.append(f"total_amount_quote: ${config.total_amount_quote:.2f}")
+    out.append(f"capital_usd: ${config.total_amount_quote:.2f}")
     out.append(f"per_level_notional: ${per_level:.2f}")
     out.append("note: size against FREE balance — reserved XRP is not spendable")
+
+    # A controller's total_amount_quote is denominated in the pair's QUOTE asset. On
+    # RLUSD-XRP that is XRP, not USD — passing a USD figure straight through oversizes
+    # the deployment by the XRP price (~3x), silently breaching the risk limit.
+    quote_asset = config.xrpl_pair.split("-")[-1].upper() if "-" in config.xrpl_pair else ""
+    if quote_asset == "XRP" and ref_mid > 0:
+        amount_in_quote = config.total_amount_quote / ref_mid
+        out.append(
+            f"controller_total_amount_quote: {amount_in_quote:.4f}  "
+            f"({quote_asset}, = ${config.total_amount_quote:.2f} / {ref_mid:.6f} XRP-USD)"
+        )
+        out.append(
+            "WARNING: quote asset is XRP. A controller's total_amount_quote is in the "
+            "QUOTE asset — pass the converted figure above, never the USD number, or the "
+            "deploy is oversized by the XRP price."
+        )
+    else:
+        out.append(
+            f"controller_total_amount_quote: {config.total_amount_quote:.4f}  "
+            f"(quote asset '{quote_asset or 'unknown'}' — verify it is USD-denominated "
+            "before passing this to a controller)"
+        )
 
     # 6. Live XRPL book state. Absence is a hard stop, not a warning.
     out.append("")

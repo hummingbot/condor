@@ -32,7 +32,16 @@ A non-zero transfer fee on the issued asset applies on top of everything and can
 the entire spread. Check the issuer's account settings before sizing. If it is non-zero,
 subtract it from the spread ceiling — or do not quote.
 
-**3. Confirm balances and free reserve.**
+**3. Confirm the account has XRPL credentials configured.** This gates controller mode and
+is the most likely reason a deploy looks fine and then does nothing. The API's shared
+*keyless* data connector is built with `trading_pairs=[]`, and the XRPL connector derives
+trading rules only for the pairs it was constructed with — so every XRPL pair, including
+the connector's own default, comes back "not found" and no order can be sized. An account
+with XRPL credentials gets a real trading connector with pairs and sidesteps it. If
+credentials are absent, stop and tell the user: this is not a controller-support verdict,
+and executor mode will not rescue it either.
+
+**4. Confirm balances and free reserve.**
 
 ```
 get_portfolio_overview()
@@ -48,12 +57,19 @@ against free balance.
 manage_routines(action="run", name="xrpl_mm_quote_planner",
                 strategy_id="xrpl_market_maker.rlusd_xrp_maker",
                 config={"xrpl_pair": "<pair>", "tick_interval_sec": <frequency_sec>,
+                        "requote_interval_sec": <executor_refresh_time>,
                         "levels_per_side": <n>, "total_amount_quote": <capital>})
 ```
 
-Read the `VIABILITY` block. **`viable: false` means do not deploy** — the adverse-selection
-floor has met the AMM fee ceiling. Requote faster or wait for volatility to fall. Never
-tighten below the floor to force fills.
+`requote_interval_sec` is required for a controller deploy. The floor scales with how long
+a quote stays exposed, and in controller mode that is `executor_refresh_time` — the bot
+requotes on its own clock. Pass `frequency_sec` by mistake and you get a `viable: false`
+that is an artefact of your tick cadence, blocking a deploy that is genuinely viable.
+
+Read the `VIABILITY` block. **A `viable: false` computed from the right interval means do
+not deploy** — the adverse-selection floor has met the AMM fee ceiling. Shorten
+`executor_refresh_time` or wait for volatility to fall. Never tighten below the floor to
+force fills.
 
 Also read `divergence_vs_reference_bps`. A large gap between the XRPL book and the CEX
 reference means stale data far more often than it means opportunity.
@@ -69,16 +85,36 @@ executors just because feasibility was "unverified" for this pair/session.
 Use `pmm_simple` — `pmm_dynamic` needs a NATR/MACD candles feed that XRPL does not have.
 Its perpetual-flavoured defaults are inert on a spot connector, so set `leverage=1` and
 leave `stop_loss`/`take_profit`/`time_limit`/`trailing_stop` `null`; do not read those
-defaults as a rejection. Remember there are **two config stores** and updating one does
-not update the other:
+defaults as a rejection.
+
+**Four defaults are actively wrong for XRPL. Set all four explicitly:**
+
+| Field | Default | Set to | Why the default breaks it |
+|---|---|---|---|
+| `executor_refresh_time` | `300` | `30` (from config) | Sets the quote's exposure window, so it sets the adverse-selection floor. At 300s the floor is ~22 bps against a ~10 bps AMM ceiling — never viable. |
+| `skip_rebalance` | `false` | `true` | `check_position_rebalance` skips only perpetual connectors, so on `xrpl` it fires and submits an `ExecutionStrategy.MARKET` order to true up base inventory — crossing a thin book with a market order, which is the one thing a maker must not do. |
+| `buy_spreads` / `sell_spreads` | `0.01,0.02` | planner's `controller_spreads` | These are **fractions of the reference price**, not bps. `order_price = reference_price * (1 ± spread)`. Pasting `22.4` from a bps field quotes at 2240%. |
+| `total_amount_quote` | `100` | planner's `controller_total_amount_quote` | Denominated in the pair's **quote asset**. On RLUSD-XRP that is XRP, not USD — a USD figure oversizes by the XRP price and breaches the risk limit silently. |
+
+Know what you are deploying: `pmm_simple` centres its ladder on the **`xrpl` connector's own
+mid price** (`update_processed_data` reads `PriceType.MidPrice`), not on your CEX reference.
+There is no config field to repoint it. Between your ticks the bot quotes off the on-ledger
+mid — so `divergence_vs_reference_bps` is the number that tells you whether it is quoting
+around a stale centre, and killing the switch is the response. If divergence is routinely
+large on this pair, recommend executor mode rather than deploying a controller that cannot
+see the reference.
+
+Remember there are **two config stores** and updating one does not update the other:
 
 ```
 manage_controllers(action="upsert", target="config", ...)   # saved template
 manage_bots(action="deploy", ...)                           # live bot
 ```
 
-Declare `max_global_drawdown_quote` within the session's risk limits on every deploy.
-Derive `bot_name` from the run key so restarts reattach to the same bot.
+Declare `max_global_drawdown_quote` within the session's risk limits on every deploy — in
+the quote asset, same conversion as `total_amount_quote`. Deploy under the `bot_name` from
+config (`rlusd-xrp-maker`), not a per-run name: a fresh name each restart orphans the
+previous bot's resting offers on-ledger while their reserves stay locked.
 
 **Confirm it actually worked before trusting it** — a config that merely *saved* is not
 proof. Check `manage_bots(action="status")` and the on-ledger order book (Phase 4). Treat

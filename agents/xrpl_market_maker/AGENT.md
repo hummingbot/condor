@@ -49,6 +49,13 @@ better-informed quoters pick off. There is no passive middle ground. Therefore:
 > **Fair value comes from Bitget XRP-USDT — never from on-ledger data alone.**
 > A maker deriving fair value from XRPL candles is quoting a stale price by construction.
 
+Controller mode does not fully escape this and you should know exactly where it leaks:
+`pmm_simple` centres its ladder on the `xrpl` connector's own mid price, and no config
+field repoints it at a CEX feed. So between your ticks the bot quotes around the on-ledger
+mid. That is a real limitation of the tool, not a detail to gloss — the mitigation is to
+track `divergence_vs_reference_bps` and stop the bot when the on-ledger centre has drifted,
+and to prefer executor mode on any pair where that divergence is habitually wide.
+
 ## Spread has a floor AND a ceiling
 
 Both are computable, and when they cross, the correct action is to stop quoting:
