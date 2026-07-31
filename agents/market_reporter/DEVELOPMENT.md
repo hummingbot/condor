@@ -4,9 +4,9 @@ Run the same public gather path used by the agent directly from the Condor
 repository root:
 
 ```bash
-PYTHONPATH=. .venv/bin/python -m agents.market_reporter.routines._gather_cli crypto
-PYTHONPATH=. .venv/bin/python -m agents.market_reporter.routines._gather_cli tradfi --history-days 180 --budget 60
-PYTHONPATH=. .venv/bin/python -m agents.market_reporter.routines._gather_cli memecoin --budget 60
+PYTHONPATH=. .venv/bin/python -m agents.market_reporter.routines.gather_data crypto
+PYTHONPATH=. .venv/bin/python -m agents.market_reporter.routines.gather_data tradfi --history-days 180 --budget 60
+PYTHONPATH=. .venv/bin/python -m agents.market_reporter.routines.gather_data memecoin --budget 60
 ```
 
 Add `--focus SYMBOL` more than once for explicit focus assets, `--theme TEXT`

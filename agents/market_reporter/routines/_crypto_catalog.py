@@ -70,7 +70,7 @@ async def collect_catalog(
     memecoin_task = (
         collect_memecoin_catalog()
         if include_meta_categories
-        else _empty_memecoin_catalog()
+        else asyncio.sleep(0, result=([], [], {}))
     )
     gathered, (memecoin_items, memecoin_results, memecoin_coverage) = (
         await asyncio.gather(catalog_task, memecoin_task)
@@ -121,10 +121,6 @@ async def collect_catalog(
         ),
     }
     return items, results, coverage
-
-
-async def _empty_memecoin_catalog():
-    return [], [], {}
 
 
 def dynamic_symbols(

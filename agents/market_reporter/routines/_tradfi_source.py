@@ -10,10 +10,6 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from xml.etree import ElementTree
 
-from agents.market_reporter.routines._crypto_metrics import (
-    calculate_ohlcv_metrics,
-    compact_series,
-)
 from agents.market_reporter.routines._evidence import evidence_id, safe_float
 from agents.market_reporter.routines._http import FetchResult, fetch_json, fetch_text
 from agents.market_reporter.routines._identity import (
@@ -22,8 +18,10 @@ from agents.market_reporter.routines._identity import (
     TRADFI_SP500_STOCKS,
     tradfi_symbols,
 )
-from agents.market_reporter.routines._tradfi_metrics import (
+from agents.market_reporter.routines._market_metrics import (
     breadth_summary,
+    calculate_ohlcv_metrics,
+    compact_series,
     relative_strength,
     treasury_curve,
 )

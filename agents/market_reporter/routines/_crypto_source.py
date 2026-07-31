@@ -11,13 +11,13 @@ from agents.market_reporter.routines._crypto_catalog import (
     collect_catalog,
     dynamic_symbols,
 )
-from agents.market_reporter.routines._crypto_metrics import (
-    calculate_ohlcv_metrics,
-    compact_series,
-)
 from agents.market_reporter.routines._evidence import evidence_id, safe_float
 from agents.market_reporter.routines._http import FetchResult, fetch_json
 from agents.market_reporter.routines._identity import CRYPTO_UNIVERSE, crypto_symbols
+from agents.market_reporter.routines._market_metrics import (
+    calculate_ohlcv_metrics,
+    compact_series,
+)
 
 KRAKEN_PAIRS = {
     "BTC": "XBTUSD",

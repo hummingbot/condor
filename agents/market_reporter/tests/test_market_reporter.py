@@ -16,7 +16,6 @@ from pydantic import ValidationError
 import condor.reports as reports
 from agents.market_reporter.routines import (
     _evidence,
-    _gather_cli,
     _social_source,
     build_market_report,
     gather_data,
@@ -33,12 +32,7 @@ from agents.market_reporter.routines._crypto_catalog import (
     dynamic_symbols,
     primary_meta_for_asset,
 )
-from agents.market_reporter.routines._crypto_metrics import calculate_ohlcv_metrics
-from agents.market_reporter.routines._dexscreener_discovery import (
-    _interleave_attention,
-    _round_robin_chains,
-)
-from agents.market_reporter.routines._event_adapters import parse_calendar
+from agents.market_reporter.routines._event_source import parse_calendar
 from agents.market_reporter.routines._evidence import (
     bundle_text,
     cache_evidence_snapshot,
@@ -47,13 +41,19 @@ from agents.market_reporter.routines._evidence import (
     finalize_bundle,
     resolve_evidence_snapshot,
 )
-from agents.market_reporter.routines._fundamentals import normalize_company_facts
+from agents.market_reporter.routines._fundamentals_source import (
+    normalize_company_facts,
+)
 from agents.market_reporter.routines._http import FetchResult
 from agents.market_reporter.routines._identity import (
     TICKER_TO_CIK,
     TRADFI_SP500_STOCKS,
     registry_metadata,
     tradfi_symbols,
+)
+from agents.market_reporter.routines._market_metrics import (
+    calculate_ohlcv_metrics,
+    treasury_curve,
 )
 from agents.market_reporter.routines._memecoin_catalog import (
     _categorized_assets,
@@ -62,15 +62,11 @@ from agents.market_reporter.routines._memecoin_catalog import (
     _coingecko_headers,
     _keyless_theme_category_ids,
 )
-from agents.market_reporter.routines._memecoin_metrics import (
-    eligibility,
-    normalize_dex_pair,
-)
 from agents.market_reporter.routines._models import (
     BaseSourceConfig,
     ReportPackage,
 )
-from agents.market_reporter.routines._news_adapters import (
+from agents.market_reporter.routines._news_source import (
     balance_publishers,
     deduplicate_news,
     feed_urls,
@@ -88,15 +84,20 @@ from agents.market_reporter.routines._report_validation import (
     validate_coverage,
     validate_manifest,
 )
-from agents.market_reporter.routines._robinhood_identity import (
-    fetch_stock_token_exclusions,
-)
-from agents.market_reporter.routines._solana_identity import observe_concentration
 from agents.market_reporter.routines._token_discovery_source import (
     Config as DiscoveryConfig,
 )
-from agents.market_reporter.routines._token_selection import build_items
-from agents.market_reporter.routines._tradfi_metrics import treasury_curve
+from agents.market_reporter.routines._token_discovery_source import (
+    _interleave_attention,
+    _round_robin_chains,
+)
+from agents.market_reporter.routines._token_selection import (
+    build_items,
+    eligibility,
+    fetch_stock_token_exclusions,
+    normalize_dex_pair,
+    observe_concentration,
+)
 from agents.market_reporter.routines._tradfi_source import (
     _cftc_items,
     _fred_csv_item,
@@ -2649,7 +2650,7 @@ def test_gather_data_runs_collectors_concurrently_and_keeps_partial_results(
     monkeypatch.setattr(
         gather_data._social_source, "run", collector("social", hang=True)
     )
-    monkeypatch.setattr(gather_data._market_signal_source, "run", collector("market"))
+    monkeypatch.setattr(gather_data, "_collect_market", collector("market"))
     monkeypatch.setattr(gather_data._event_source, "run", collector("events"))
 
     config = GatherConfig(
@@ -2717,7 +2718,7 @@ def test_gather_data_runs_collectors_concurrently_and_keeps_partial_results(
 
 
 def test_manual_gather_cli_builds_same_read_only_config() -> None:
-    args = _gather_cli.build_parser().parse_args(
+    args = gather_data.build_parser().parse_args(
         [
             "tradfi",
             "--budget",
@@ -2730,13 +2731,13 @@ def test_manual_gather_cli_builds_same_read_only_config() -> None:
             "NVDA",
         ]
     )
-    config = _gather_cli.build_config(args)
+    config = gather_data.build_config(args)
     assert config.strategy_key == "tradfi_market_intelligence"
     assert config.scope == "tradfi"
     assert config.source_collection_budget_sec == 30
     assert config.market_history_days == 180
     assert config.focus_assets == ["NVDA"]
-    summary = _gather_cli.diagnostic_summary(
+    summary = gather_data.diagnostic_summary(
         {
             "status": "partial",
             "strategy_key": config.strategy_key,
@@ -2750,8 +2751,8 @@ def test_manual_gather_cli_builds_same_read_only_config() -> None:
     assert summary["timed_out_sources"] == ["social"]
     assert "source_bundles" not in summary
 
-    memecoin_args = _gather_cli.build_parser().parse_args(["memecoin"])
-    memecoin_config = _gather_cli.build_config(memecoin_args)
+    memecoin_args = gather_data.build_parser().parse_args(["memecoin"])
+    memecoin_config = gather_data.build_config(memecoin_args)
     assert memecoin_config.news_lookback_hours == 24
     assert memecoin_config.market_history_days == 30
     assert memecoin_config.event_future_days == 3
@@ -2762,7 +2763,7 @@ def test_manual_gather_cli_builds_same_read_only_config() -> None:
         "tradfi_market_brief_v3",
         "memecoin_meta_chain_brief_v3",
     ):
-        diagnostic = _gather_cli._diagnostic_analysis_context(
+        diagnostic = gather_data._diagnostic_analysis_context(
             {"strategy_features": {"product": product}}
         )
         assert "strategy_snapshot" in diagnostic
@@ -4041,7 +4042,7 @@ def test_public_identity_observations_are_bounded(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(
-        "agents.market_reporter.routines._solana_identity.fetch_json",
+        "agents.market_reporter.routines._token_selection.fetch_json",
         fake_solana_fetch,
     )
     observations, results = asyncio.run(
@@ -4079,7 +4080,7 @@ def test_public_identity_observations_are_bounded(monkeypatch) -> None:
         )
 
     monkeypatch.setattr(
-        "agents.market_reporter.routines._robinhood_identity.fetch_json",
+        "agents.market_reporter.routines._token_selection.fetch_json",
         fake_registry_fetch,
     )
     exclusions, symbols, fresh, registry_results = asyncio.run(

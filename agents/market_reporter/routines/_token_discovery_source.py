@@ -5,33 +5,323 @@ from typing import Any, Literal
 
 from pydantic import Field, field_validator
 
-from agents.market_reporter.routines._dexscreener_discovery import (
-    collect_dexscreener,
+from agents.market_reporter.routines._evidence import (
+    bundle_text,
+    finalize_bundle,
+    safe_float,
 )
-from agents.market_reporter.routines._evidence import bundle_text, finalize_bundle
-from agents.market_reporter.routines._gecko_discovery import (
-    collect_gecko,
-    collect_gecko_details,
-)
+from agents.market_reporter.routines._http import FetchResult, fetch_json
 from agents.market_reporter.routines._identity import (
+    GECKO_NETWORKS,
     SUPPORTED_DISCOVERY_CHAINS,
+    normalize_address,
+    normalize_chain,
     registry_is_current,
 )
 from agents.market_reporter.routines._models import BaseSourceConfig
-from agents.market_reporter.routines._robinhood_identity import (
-    confirm_contracts,
-    fetch_stock_token_exclusions,
-)
-from agents.market_reporter.routines._solana_identity import observe_concentration
 from agents.market_reporter.routines._token_selection import (
     build_items,
+    confirm_contracts,
     coverage,
+    fetch_stock_token_exclusions,
+    normalize_dex_pair,
+    observe_concentration,
     seed_tokens,
     select_pairs,
 )
 from routines.base import RoutineResult
 
 CATEGORY = "Market Reporter"
+REQUEST_INTERVAL_SEC = 0.75
+
+
+async def collect_dexscreener(
+    seed_tokens: list[tuple[str, str]],
+    *,
+    maximum_details: int,
+) -> tuple[
+    list[dict[str, Any]],
+    list[FetchResult],
+    dict[tuple[str, str], dict[str, Any]],
+]:
+    feed_tasks = [
+        fetch_json(
+            "dexscreener",
+            "https://api.dexscreener.com/token-profiles/latest/v1",
+            retry=False,
+        ),
+        fetch_json(
+            "dexscreener",
+            "https://api.dexscreener.com/community-takeovers/latest/v1",
+            retry=False,
+        ),
+        fetch_json(
+            "dexscreener",
+            "https://api.dexscreener.com/token-boosts/latest/v1",
+            retry=False,
+        ),
+    ]
+    feed_results: list[FetchResult] = list(await asyncio.gather(*feed_tasks))
+    flags: dict[tuple[str, str], dict[str, Any]] = {}
+    feed_names = ("profile", "community_takeover", "boost")
+    for feed_name, result in zip(feed_names, feed_results):
+        if result.status != "complete":
+            continue
+        rows = result.data if isinstance(result.data, list) else []
+        for row in rows:
+            chain = normalize_chain(str(row.get("chainId") or ""))
+            address = normalize_address(chain, str(row.get("tokenAddress") or ""))
+            if not chain or not address:
+                continue
+            entry = flags.setdefault(
+                (chain, address),
+                {
+                    "profile": False,
+                    "community_takeover": False,
+                    "boost": False,
+                    "paid_visibility": False,
+                },
+            )
+            entry[feed_name] = True
+            description = str(row.get("description") or "").strip()
+            if description and not entry.get("provider_description"):
+                entry["provider_description"] = description[:1000]
+            links = [
+                str(link.get("url") or "")
+                for link in row.get("links") or []
+                if isinstance(link, dict)
+                and str(link.get("url") or "").startswith("https://")
+            ]
+            if links:
+                entry["provider_links"] = list(
+                    dict.fromkeys([*(entry.get("provider_links") or []), *links])
+                )[:8]
+            if feed_name == "boost":
+                entry["paid_visibility"] = True
+                entry["boost_amount"] = row.get("amount")
+                entry["boost_total_amount"] = row.get("totalAmount")
+
+    candidates = _interleave_attention(seed_tokens, list(flags))
+    ordered = _round_robin_chains(candidates, maximum_details)
+    pair_tasks = [
+        fetch_json(
+            "dexscreener",
+            f"https://api.dexscreener.com/token-pairs/v1/{chain}/{address}",
+            retry=False,
+        )
+        for chain, address in ordered
+    ]
+    order_tasks = [
+        fetch_json(
+            "dexscreener",
+            f"https://api.dexscreener.com/orders/v1/{chain}/{address}",
+            retry=False,
+        )
+        for chain, address in ordered
+    ]
+    detail_results: list[FetchResult] = list(
+        await asyncio.gather(*(pair_tasks + order_tasks))
+    )
+    pairs = []
+    pair_results = detail_results[: len(ordered)]
+    order_results = detail_results[len(ordered) :]
+    for (chain, address), result, order_result in zip(
+        ordered, pair_results, order_results
+    ):
+        order_rows = (
+            order_result.data
+            if isinstance(order_result.data, list)
+            else (order_result.data or {}).get("orders") or []
+        )
+        if order_rows:
+            entry = flags.setdefault(
+                (chain, address),
+                {
+                    "profile": False,
+                    "community_takeover": False,
+                    "boost": False,
+                    "paid_visibility": False,
+                },
+            )
+            entry["paid_order"] = True
+            entry["paid_visibility"] = True
+        if result.status != "complete":
+            continue
+        rows = result.data if isinstance(result.data, list) else []
+        origin = (
+            "paid_attention:dexscreener"
+            if (flags.get((chain, address)) or {}).get("paid_visibility")
+            else "known_address:dexscreener"
+        )
+        for raw in rows:
+            normalized = normalize_dex_pair(raw, origin=origin)
+            if normalized:
+                pairs.append(normalized)
+    return pairs, feed_results + detail_results, flags
+
+
+def _round_robin_chains(
+    candidates: list[tuple[str, str]], maximum: int
+) -> list[tuple[str, str]]:
+    buckets: dict[str, list[tuple[str, str]]] = {}
+    for candidate in candidates:
+        buckets.setdefault(candidate[0], []).append(candidate)
+    ordered = []
+    while len(ordered) < maximum:
+        added = False
+        for chain in ("solana", "ethereum", "robinhood"):
+            bucket = buckets.get(chain) or []
+            if bucket:
+                ordered.append(bucket.pop(0))
+                added = True
+                if len(ordered) >= maximum:
+                    break
+        if not added:
+            break
+    return ordered
+
+
+def _interleave_attention(
+    seeds: list[tuple[str, str]],
+    attention: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    seed_buckets: dict[str, list[tuple[str, str]]] = {}
+    attention_buckets: dict[str, list[tuple[str, str]]] = {}
+    for source, buckets in ((seeds, seed_buckets), (attention, attention_buckets)):
+        for chain, address in source:
+            key = (normalize_chain(chain), normalize_address(chain, address))
+            if key[0] and key[1] and key not in buckets.setdefault(key[0], []):
+                buckets[key[0]].append(key)
+    output = []
+    for chain in ("solana", "ethereum", "robinhood"):
+        while seed_buckets.get(chain) or attention_buckets.get(chain):
+            for bucket in (seed_buckets.get(chain), attention_buckets.get(chain)):
+                if bucket:
+                    candidate = bucket.pop(0)
+                    if candidate not in output:
+                        output.append(candidate)
+    return output
+
+
+async def collect_gecko(
+    chains: list[str],
+) -> tuple[list[dict[str, Any]], list[FetchResult]]:
+    requests = []
+    metadata = []
+    for chain in chains:
+        network = GECKO_NETWORKS.get(chain)
+        if not network:
+            continue
+        for endpoint, origin in (
+            ("new_pools", "organic_oriented:new_pool"),
+            ("trending_pools", "organic_oriented:trending_pool"),
+        ):
+            requests.append(
+                (
+                    f"https://api.geckoterminal.com/api/v2/networks/{network}/{endpoint}",
+                    {"page": 1},
+                )
+            )
+            metadata.append((chain, endpoint, origin))
+    results = await _sequential_fetches(requests)
+    pairs = []
+    for (chain, endpoint, origin), result in zip(metadata, results):
+        if result.status != "complete":
+            continue
+        for raw in (result.data or {}).get("data") or []:
+            candidate = dict(raw)
+            candidate["network"] = chain
+            normalized = normalize_dex_pair(candidate, origin=origin)
+            if normalized:
+                pairs.append(normalized)
+    return pairs, results
+
+
+async def collect_gecko_details(
+    pairs: list[dict[str, Any]],
+    *,
+    maximum: int = 1,
+) -> tuple[dict[tuple[str, str], dict[str, Any]], list[FetchResult]]:
+    selected = []
+    seen_chains = set()
+    for pair in pairs:
+        chain = pair.get("chain_id")
+        if chain not in GECKO_NETWORKS or chain in seen_chains:
+            continue
+        if not any(
+            str(origin).startswith(("organic_oriented", "known_address:geckoterminal"))
+            for origin in pair.get("discovery_origins")
+            or [pair.get("discovery_origin")]
+        ):
+            continue
+        selected.append(pair)
+        seen_chains.add(chain)
+        if len(selected) >= maximum:
+            break
+    requests = []
+    for pair in selected:
+        network = GECKO_NETWORKS[pair["chain_id"]]
+        address = pair["pair_address"]
+        requests.extend(
+            [
+                (
+                    f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{address}/ohlcv/hour",
+                    {"aggregate": 1, "limit": 24, "currency": "usd"},
+                ),
+                (
+                    f"https://api.geckoterminal.com/api/v2/networks/{network}/pools/{address}/trades",
+                    None,
+                ),
+            ]
+        )
+    results = await _sequential_fetches(requests)
+    details = {}
+    for index, pair in enumerate(selected):
+        ohlcv_result = results[index * 2]
+        trades_result = results[index * 2 + 1]
+        ohlcv_rows = (
+            (((ohlcv_result.data or {}).get("data") or {}).get("attributes") or {}).get(
+                "ohlcv_list"
+            )
+            or []
+            if ohlcv_result.status == "complete"
+            else []
+        )
+        trades = (
+            (trades_result.data or {}).get("data") or []
+            if trades_result.status == "complete"
+            else []
+        )
+        details[(pair["chain_id"], pair["pair_address"])] = {
+            "ohlcv_status": ohlcv_result.status,
+            "trade_status": trades_result.status,
+            "hourly_observation_count": len(ohlcv_rows),
+            "latest_hour_close_usd": (
+                safe_float(ohlcv_rows[0][4])
+                if ohlcv_rows and len(ohlcv_rows[0]) > 4
+                else None
+            ),
+            "recent_trade_count": len(trades),
+        }
+    return details, results
+
+
+async def _sequential_fetches(
+    requests: list[tuple[str, dict[str, Any] | None]],
+) -> list[FetchResult]:
+    results = []
+    for index, (url, params) in enumerate(requests):
+        if index:
+            await asyncio.sleep(REQUEST_INTERVAL_SEC)
+        results.append(
+            await fetch_json(
+                "geckoterminal",
+                url,
+                params=params,
+                retry=False,
+            )
+        )
+    return results
 
 
 class Config(BaseSourceConfig):
