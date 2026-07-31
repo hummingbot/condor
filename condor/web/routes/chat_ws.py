@@ -22,6 +22,7 @@ from condor.runtime.confirmations import (
     get_registry,
 )
 from condor.runtime.events import RuntimeEvent
+from condor.runtime.timeouts import TIMEOUTS
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import (
@@ -41,10 +42,33 @@ router = APIRouter(tags=["chat"])
 # Connection-scoped, not session state, so this stays local to the WS layer.
 _active_prompt_tasks: dict[str, asyncio.Task] = {}
 
+# Spawns still in flight, keyed like _active_prompt_tasks. Subprocess start plus
+# the ACP handshake takes seconds, and the dashboard now lets the user type
+# through it: a message that arrives mid-spawn waits here instead of reading the
+# not-yet-registered session as "ended".
+_pending_spawns: dict[str, asyncio.Task] = {}
+
 
 def _session_key(user_id: int, slot_id: str) -> SessionKey:
     """Build the canonical runtime key for one web chat slot."""
     return SessionKey.web(user_id, slot_id)
+
+
+async def _await_spawn(user_id: int, slot_id: str) -> None:
+    """Block until a spawn for this slot finishes, if one is running.
+
+    Shielded so a timeout here abandons the *wait*, never the spawn — killing
+    the half-started subprocess would turn a slow start into a dead session.
+    """
+    task = _pending_spawns.get(f"{user_id}:{slot_id}")
+    if task is None or task.done():
+        return
+    try:
+        await asyncio.wait_for(asyncio.shield(task), timeout=TIMEOUTS.prompt_lock)
+    except Exception:  # noqa: BLE001 - a spawn that failed already told the client
+        # Timed out or raised: the liveness checks below decide what happens
+        # next, and the spawn reported its own error over the same socket.
+        pass
 
 
 async def _get_user_sessions(user_id: int) -> list[dict]:
@@ -62,6 +86,10 @@ async def _get_user_sessions(user_id: int) -> list[dict]:
             "mode": info.mode,
             "is_busy": info.is_busy,
             "server_name": info.server_name,
+            # Who is answering, so the header can name a bound Agent rather
+            # than the model it happens to run on.
+            "agent_slug": info.agent_slug,
+            "label": info.label,
         }
         for info in await runtime.list_sessions(user_id)
         if info.surface == WEB and info.alive
@@ -237,14 +265,33 @@ async def _handle_start_session(
     agent_key = msg.get("agent_key", DEFAULT_AGENT)
     mode = msg.get("mode", DEFAULT_MODE)
     server_name = msg.get("server_name")  # From frontend's selected server
+    # A dashboard chat can be born already bound to a domain Agent. Without
+    # this, "Chat" on an agent's page would have to start-then-switch, which
+    # spawns two subprocesses for one click.
+    agent_slug = str(msg.get("agent_slug") or "")
 
     # The conversation is minted first and *is* the slot, so the key
     # web:{user}:{conversation} is stable forever instead of being a throwaway
     # uuid that dies with the subprocess.
     conv = conversations.new_conversation(
-        user_id, WEB, agent_key=agent_key, mode=mode, server_name=server_name
+        user_id,
+        WEB,
+        agent_key=agent_key,
+        agent_slug=agent_slug,
+        mode=mode,
+        server_name=server_name,
     )
-    await _start(ws, user_id, conv.id, agent_key, mode, server_name, restored=False)
+    await _start(
+        ws,
+        user_id,
+        conv.id,
+        agent_key,
+        mode,
+        server_name,
+        restored=False,
+        agent_slug=agent_slug,
+        client_ref=str(msg.get("client_ref") or ""),
+    )
 
 
 async def _handle_resume_conversation(
@@ -277,6 +324,7 @@ async def _handle_resume_conversation(
         msg.get("server_name") or conv.server_name,
         restored=True,
         agent_slug=conv.agent_slug,
+        client_ref=str(msg.get("client_ref") or ""),
     )
 
 
@@ -290,17 +338,30 @@ async def _start(
     *,
     restored: bool,
     agent_slug: str = "",
+    client_ref: str = "",
 ) -> None:
     """Spawn the session behind a conversation and announce it.
 
     Shared by ``start_session`` and ``resume_conversation``: the two differ only
     in whether the conversation already had turns, and the runtime decides that
     by looking at the transcript, not at which action was called.
+
+    ``client_ref`` is echoed back untouched. The dashboard renders a tab the
+    instant the user asks for one, before any id exists, and uses the echo to
+    reconcile that optimistic tab with the conversation it turned out to be.
     """
     # The per-user session cap now lives in the runtime, so Telegram and the
     # dashboard draw on one budget; exceeding it raises out of create_session.
     slot_id = conversation_id
     session_key = _session_key(user_id, slot_id)
+
+    # Registered before the first await, so a send_message dispatched in the
+    # same batch of WS frames finds the spawn and waits for it. The task here is
+    # the handler's own — awaiting it means awaiting the whole announce.
+    task_key = f"{user_id}:{slot_id}"
+    current = asyncio.current_task()
+    if current is not None:
+        _pending_spawns[task_key] = current
 
     perm_cb = build_permission_callback(
         session_key=str(session_key),
@@ -348,11 +409,26 @@ async def _start(
                 "mode": mode,
                 "server_name": info.server_name,
                 "restored": restored,
+                "agent_slug": info.agent_slug,
+                "label": info.label,
+                "client_ref": client_ref,
             },
         )
     except Exception as e:
         log.exception("Failed to start chat session for user %d", user_id)
-        await _send(ws, {"event": "error", "message": f"Failed to start session: {e}"})
+        await _send(
+            ws,
+            {
+                "event": "error",
+                "message": f"Failed to start session: {e}",
+                # Named so the client can drop the optimistic tab it opened
+                # rather than leaving one that will never have a session.
+                "client_ref": client_ref,
+                "slot_id": slot_id,
+            },
+        )
+    finally:
+        _pending_spawns.pop(task_key, None)
 
 
 async def _handle_send_message(
@@ -368,6 +444,11 @@ async def _handle_send_message(
     if not slot_id:
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
+
+    # The user is allowed to type through a spawn, so a message can legitimately
+    # arrive before the subprocess exists. Waiting for it is the difference
+    # between a warm session and "Session ended. Start a new one."
+    await _await_spawn(user_id, slot_id)
 
     session_key = _session_key(user_id, slot_id)
     info = await runtime.get_info(session_key)
@@ -457,6 +538,10 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
     if not slot_id:
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
+
+    # Ordered after any in-flight spawn, so closing a tab mid-start reaps the
+    # subprocess instead of racing past it and orphaning one.
+    await _await_spawn(user_id, slot_id)
 
     session_key = _session_key(user_id, slot_id)
     destroyed = await runtime.destroy(session_key)
