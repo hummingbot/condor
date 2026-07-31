@@ -22,7 +22,6 @@ import {
   type ChatModeOption,
   type CustomProvider,
 } from "@/lib/api";
-import { onChatRequest } from "@/lib/chatIntent";
 import { useServer } from "@/hooks/useServer";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 
@@ -101,20 +100,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     setSelectedSlug("");
     setSelectedMode(null);
   };
-
-  // "Chat" on an agent's detail page lands here: one start_session already
-  // bound to the agent, so the click costs one spawn rather than a start
-  // followed by a switch.
-  useEffect(
-    () =>
-      onChatRequest(({ agentSlug }) => {
-        onToggle(true);
-        chat.startSession(defaultAgent, defaultMode, server || undefined, agentSlug);
-        setShowNewMenu(false);
-        setShowHistory(false);
-      }),
-    [chat, defaultAgent, defaultMode, onToggle, server],
-  );
 
   const activeSlot = chat.activeSlot;
   const isActiveStreaming = chat.streamingSlotId === chat.activeSlotId;
