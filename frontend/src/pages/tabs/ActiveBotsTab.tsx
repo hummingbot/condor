@@ -19,6 +19,7 @@ import { NoServerCard } from "@/components/NoServerCard";
 import { AggregatedPnlChart } from "@/components/bots/AggregatedPnlChart";
 import { ControllerBrowser } from "@/components/bots/ControllerBrowser";
 import { DeployBotDialog } from "@/components/bots/DeployBotDialog";
+import { PnlRangeSummary } from "@/components/bots/PnlRangeSummary";
 import { PnlSparkline } from "@/components/bots/PnlSparkline";
 import { FallbackSpinner } from "@/components/ui/FallbackSpinner";
 
@@ -670,6 +671,18 @@ export function ActiveBotsTab() {
   );
   const { convert, formatPnlValue, formatValue, currencySymbol } = useRates(quoteCurrencies);
 
+  // Base coin symbols (e.g. "APT-USD" -> "APT") across active controllers, for the
+  // fill-history-based PnL summary -- deduplicated since multiple controllers could
+  // in principle share a pair.
+  const activeCoins = useMemo(() => {
+    const set = new Set<string>();
+    for (const ctrl of controllers) {
+      const base = ctrl.trading_pair?.split("-")[0];
+      if (base) set.add(base);
+    }
+    return Array.from(set);
+  }, [controllers]);
+
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to view active bots." />;
   }
@@ -732,6 +745,12 @@ export function ActiveBotsTab() {
           Deploy Bot
         </button>
       </div>
+
+      {/* Cumulative fill-based PnL summary (Today/7D/30D) -- survives restarts/redeploys,
+          unlike the per-run stat cards and chart above/below which reset on every deploy. */}
+      {server && activeCoins.length > 0 && (
+        <PnlRangeSummary server={server} coins={activeCoins} currencySymbol={currencySymbol} />
+      )}
 
       {/* Aggregated PnL chart */}
       {activeSnapshots.length > 0 && (

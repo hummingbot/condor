@@ -19,6 +19,12 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
+# Hyperliquid account address for direct fill-history PnL/volume queries (see
+# handlers/bots/hyperliquid_pnl.py) -- bypasses hummingbot-api's per-bot-instance
+# performance bookkeeping, which resets on every redeploy and was found unreliable
+# 2026-07-29 (see project memory). Single-account assumption for now.
+HYPERLIQUID_ADDRESS = os.environ.get("HYPERLIQUID_ADDRESS", "").strip()
+
 # WEB_URL is the public-facing URL used for generated links (e.g. Telegram login
 # links) and CORS — it does NOT determine the local bind port, since behind a
 # reverse proxy (e.g. https://example.com) the public port (443) and the local

@@ -165,6 +165,21 @@ export interface ControllerPerformanceHistoryResponse {
   error_hint?: string;
 }
 
+export interface PnlSummaryCoinBucket {
+  realized_pnl: number;
+  fees: number;
+  volume: number;
+  trade_count: number;
+}
+
+export interface PnlSummaryResponse {
+  period: "today" | "7d" | "30d";
+  start_time_ms: number;
+  end_time_ms: number | null;
+  by_coin: Record<string, PnlSummaryCoinBucket>;
+  total: PnlSummaryCoinBucket;
+}
+
 export interface ExecutorInfo {
   id: string;
   type: string;
@@ -810,6 +825,15 @@ export const api = {
     const q = qs.toString();
     return apiFetch<ControllerPerformanceHistoryResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/controller-performance/history${q ? `?${q}` : ""}`,
+    );
+  },
+
+  getPnlSummary: (server: string, period: "today" | "7d" | "30d", coins: string[]) => {
+    const qs = new URLSearchParams();
+    qs.set("period", period);
+    if (coins.length) qs.set("coins", coins.join(","));
+    return apiFetch<PnlSummaryResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/pnl-summary?${qs.toString()}`,
     );
   },
 

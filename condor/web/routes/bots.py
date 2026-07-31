@@ -203,6 +203,63 @@ def _extract_perf_snapshots(result: Any) -> list[dict]:
     return []
 
 
+_PNL_SUMMARY_PERIODS_MS = {
+    "today": None,  # computed dynamically as midnight UTC, see below
+    "7d": 7 * 86400 * 1000,
+    "30d": 30 * 86400 * 1000,
+}
+
+
+@router.get("/servers/{name}/pnl-summary")
+async def get_pnl_summary_endpoint(
+    name: str,
+    period: str = "today",
+    coins: str = "",
+    user: WebUser = Depends(get_current_user),
+):
+    """
+    Cumulative realized PnL/volume/fees over a time window, sourced directly from
+    Hyperliquid's own fill history rather than any specific bot instance's
+    performance bookkeeping -- see handlers/bots/hyperliquid_pnl.py for why. This
+    is restart-proof: it reflects real trading activity in the window regardless
+    of how many times a bot has been redeployed within it.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from utils.config import HYPERLIQUID_ADDRESS
+
+    if not HYPERLIQUID_ADDRESS:
+        raise HTTPException(
+            status_code=503,
+            detail="HYPERLIQUID_ADDRESS is not configured; cannot compute fill-based PnL summary.",
+        )
+
+    if period not in _PNL_SUMMARY_PERIODS_MS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown period '{period}'; expected one of {sorted(_PNL_SUMMARY_PERIODS_MS)}.",
+        )
+
+    from handlers.bots.hyperliquid_pnl import get_pnl_summary, midnight_utc_ms
+
+    if period == "today":
+        start_time_ms = midnight_utc_ms()
+    else:
+        start_time_ms = int(time.time() * 1000) - _PNL_SUMMARY_PERIODS_MS[period]
+
+    coin_list = [c.strip() for c in coins.split(",") if c.strip()] or None
+
+    try:
+        result = await get_pnl_summary(HYPERLIQUID_ADDRESS, start_time_ms, coins=coin_list)
+    except Exception as e:
+        logger.warning("Failed to fetch Hyperliquid PnL summary for '%s': %s", name, e)
+        raise HTTPException(status_code=502, detail=f"Failed to fetch PnL summary: {e}")
+
+    return {"period": period, **result}
+
+
 @router.get("/servers/{name}/bots", response_model=BotsPageResponse)
 async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
     cm = get_config_manager()
