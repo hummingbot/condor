@@ -147,7 +147,13 @@ async def manage_bot_execution(
         ValueError: If parameters are invalid
     """
     if action == "stop_bot":
-        result = await client.bot_orchestration.stop_and_archive_bot(bot_name)
+        # hummingbot_api_client's stop_and_archive_bot() defaults
+        # skip_order_cancellation=True (opposite of its own stop_bot()'s default),
+        # which would leave resting orders orphaned on the exchange when stopped
+        # from this path. Pass it explicitly so cancellation always happens.
+        result = await client.bot_orchestration.stop_and_archive_bot(
+            bot_name, skip_order_cancellation=False
+        )
         return {
             "action": "stop_bot",
             "bot_name": bot_name,

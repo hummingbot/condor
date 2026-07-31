@@ -1951,8 +1951,10 @@ async def handle_confirm_stop_bot(
     try:
         client, _ = await get_bots_client(chat_id, context.user_data)
 
+        # skip_order_cancellation=True would leave resting orders on the exchange
+        # when the Telegram "Stop Bot" button is used -- explicitly cancel instead.
         result = await client.bot_orchestration.stop_and_archive_bot(
-            bot_name=bot_name, skip_order_cancellation=True, archive_locally=True
+            bot_name=bot_name, skip_order_cancellation=False, archive_locally=True
         )
 
         status = result.get("status", "unknown")

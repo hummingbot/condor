@@ -405,7 +405,6 @@ async def modify_controllers(
                 raise ValueError("config_name is required for config delete")
 
             result = await client.controllers.delete_controller_config(config_name)
-            await client.bot_orchestration.deploy_v2_controllers()
 
             return {
                 "action": "delete",
