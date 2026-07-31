@@ -103,7 +103,7 @@ Envelope already forbids TWO_SIDED; even if HEDGE/two_sided YES, **still one gri
 
 ### 5–7. Teardown / liq guard / deploy
 - total_amount_quote **54**, min_order **6.5**, max_open_orders **8**, activation_bounds 0.002
-- TP ≥ 0.001, keep_position false, controller_id = session agent_id
+- TP ≥ 0.001, stop_loss **0.10**, keep_position false, controller_id = session agent_id
 - BTC-USDT only
 
 ### 8. Journal
@@ -112,6 +112,6 @@ entry_path, mode (HEDGE|ONEWAY), mode_read if any, two_sided_allowed, baseline, 
 ## Constraints
 - First entry baseline-driven
 - TWO_SIDED disabled regardless of HEDGE
-- No stop_loss / trailing_stop
+- stop_loss 0.10 = 10% of **filled** position PnL, not of budget — tighter in dollars early in the grid's life. No trailing_stop.
 - Fee-clear spacing/TP
 

@@ -116,7 +116,7 @@ stop keep_position=False; both legs if two-sided; verify flat; notify if orphan 
 liquidation_guard skill; $90 one-sided / $45 per leg; per_level ≥7.
 
 ### 7. Deploy grid_executor
-total_amount_quote 90 (or 45×2 if two_sided_allowed YES only); min_order 7; max_open_orders 12; activation_bounds 0.002; TP≥0.001; time_limit 43200; keep_position false; controller_id = this session agent_id.
+total_amount_quote 90 (or 45×2 if two_sided_allowed YES only); min_order 7; max_open_orders 12; activation_bounds 0.002; TP≥0.001; stop_loss 0.10; time_limit 43200; keep_position false; controller_id = this session agent_id.
 
 ### 8. Journal
 entry_path, mode (HEDGE|ONEWAY), mode_read if present, two_sided_allowed, baseline, 4h/1d, liq_guard.
@@ -124,6 +124,6 @@ entry_path, mode (HEDGE|ONEWAY), mode_read if present, two_sided_allowed, baseli
 ## Constraints
 - First entry baseline-driven
 - mode ONEWAY or two_sided_allowed NO → never two grids
-- No stop_loss / trailing_stop
+- stop_loss 0.10 = 10% of **filled** position PnL, not of budget — tighter in dollars early in the grid's life. No trailing_stop.
 - Fee-clear TP and spacing
 

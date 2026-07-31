@@ -170,7 +170,7 @@ If hourly HOLD but Layer 1 deploys → build prices from ATR/D yourself. No fixe
 **Liq guard** before every deploy (full fill worst case):  
 LONG liq < limit; SHORT liq > limit. Else reduce leverage / narrow / HOLD.
 
-**Exit:** limit_price only — no stop_loss / trailing_stop in triple_barrier.  
+**Exit:** limit_price + stop_loss. `stop_loss` is a % of the **filled** position's PnL (not of budget) and is checked before limit_price, so it bites harder early in a grid's life than at full fill. Leave `stop_loss_order_type` at MARKET — the executor rejects anything else. Still no trailing_stop.  
 Set time_limit dead-man switch.  
 Normal stop + verify flat. Orphan = reduce-only close, retry bound, alert, never stack grids on dirt.
 

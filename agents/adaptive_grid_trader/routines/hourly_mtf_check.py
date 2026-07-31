@@ -133,8 +133,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     try:
         raw_1h, raw_4h, raw_1d = await asyncio.gather(
             client.market_data.get_candles(config.connector_name, config.trading_pair, "1h", max_records=50),
-            client.market_data.get_candles(config.connector_name, config.trading_pair, "4h", max_records=30),
-            client.market_data.get_candles(config.connector_name, config.trading_pair, "1d", max_records=20),
+            # _trend_direction needs slow EMA period + 2 = 23 candles minimum,
+            # so keep a margin above that or the timeframe reads NEUTRAL forever.
+            client.market_data.get_candles(config.connector_name, config.trading_pair, "4h", max_records=60),
+            client.market_data.get_candles(config.connector_name, config.trading_pair, "1d", max_records=60),
         )
     except Exception as e:
         logger.error(f"[hourly_mtf_check] candle fetch failed: {e}")
@@ -157,10 +159,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     vol_level, range_high, range_low, range_pct, range_pos = _volatility_level(atr_1h, window_24)
     current_price = float(candles_1h[-1].get("close", 0) or 0)
 
-    # 4h (proxy for 6h): trend direction
+    # 4h: trend direction
     trend_4h = _trend_direction(candles_4h) if candles_4h else "NEUTRAL"
 
-    # 1d (proxy for 12h): trend confirmation
+    # 1d: trend confirmation
     trend_1d = _trend_direction(candles_1d) if candles_1d else "NEUTRAL"
 
     # -- 3. Signal synthesis --
