@@ -399,7 +399,13 @@ class TickEngine:
 
         # 2. Run core data providers (executors only -- agent uses MCP for market data)
         skill_results = await self.provider_registry.run_core_providers(
-            client, self.config, agent_id=self.agent_id
+            client,
+            self.config,
+            agent_id=self.agent_id,
+            # Adoption above just refreshed the ledger, so its bases are exactly
+            # the bots this session operates right now — including any extra one
+            # it deployed beyond the configured name.
+            bot_names=self.ledger.bases() if self.ledger else None,
         )
 
         # Extract structured data from providers for tracking

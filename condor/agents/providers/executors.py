@@ -17,7 +17,11 @@ class ExecutorsProvider(BaseProvider):
     is_core = True
 
     async def execute(
-        self, client: Any, config: dict, agent_id: str = ""
+        self,
+        client: Any,
+        config: dict,
+        agent_id: str = "",
+        bot_names: list[str] | None = None,
     ) -> ProviderResult:
         from condor.agents.performance import fetch_agent_performance
 
@@ -28,10 +32,13 @@ class ExecutorsProvider(BaseProvider):
                 summary="Active Executors: no agent_id provided",
             )
 
+        # The ledger's bases are what this session actually owns — several, if it
+        # deployed several. Without one (executor mode, tests) fall back to the
+        # configured name, which is what the session would deploy under anyway.
+        bases = list(bot_names or []) or [config.get("bot_name", "")]
+
         try:
-            perf = await fetch_agent_performance(
-                client, agent_id, bot_name=config.get("bot_name", "")
-            )
+            perf = await fetch_agent_performance(client, agent_id, bot_names=bases)
         except Exception as e:
             return ProviderResult(
                 name=self.name,
