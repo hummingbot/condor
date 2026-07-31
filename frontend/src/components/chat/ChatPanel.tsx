@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from "react";
 import {
-  AlertTriangle,
   Bot,
   Brain,
   History,
@@ -14,8 +13,7 @@ import {
 } from "lucide-react";
 import { type ChatSlot } from "@/hooks/useChatSocket";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
-import { ChatMessageView } from "./ChatMessage";
-import { ChatInput } from "./ChatInput";
+import { ChatThread, resolveAgentLabel } from "./ChatThread";
 import { BrainPicker, type BrainSelection } from "./BrainPicker";
 import { ConversationList } from "./ConversationList";
 import {
@@ -45,7 +43,6 @@ interface ChatPanelProps {
 export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const chat = useChat();
   const { server } = useServer();
-  const messagesEndRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
 
   const [width, setWidth] = useState(DEFAULT_WIDTH);
@@ -84,11 +81,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   useEffect(() => {
     if (isOpen) chat.connect();
   }, [isOpen, chat.connect]);
-
-  // Auto-scroll on new messages in the active slot
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [chat.activeSlot?.messages]);
 
   // Resize drag handling
   const { onMouseDown: startDrag, isDragging } = useResizeDrag({
@@ -269,53 +261,22 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           </div>
         )}
 
-        {/* Permission request banner */}
-        {chat.permissionRequest && (
-          <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3">
-            <div className="flex items-start gap-2">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-yellow)]" />
-              <div className="flex-1 text-sm">
-                <p className="font-medium text-[var(--color-yellow)]">Confirm action</p>
-                <p className="mt-0.5 text-[var(--color-text-muted)]">
-                  {chat.permissionRequest.summary}
-                </p>
-                <div className="mt-2 flex gap-2">
-                  <button
-                    onClick={() =>
-                      chat.resolvePermission(chat.permissionRequest!.request_id, true)
-                    }
-                    className="rounded bg-[var(--color-green)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
-                  >
-                    Approve
-                  </button>
-                  <button
-                    onClick={() =>
-                      chat.resolvePermission(chat.permissionRequest!.request_id, false)
-                    }
-                    className="rounded bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
-                  >
-                    Reject
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* Switch failure — the header still shows whoever is actually answering */}
-        {switchError && (
-          <div className="flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-400">
-            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span className="flex-1">{switchError}</span>
-            <button onClick={() => setSwitchError(null)} title="Dismiss">
-              <X className="h-3 w-3" />
-            </button>
-          </div>
-        )}
-
-        {/* Messages area */}
-        <div className="flex-1 overflow-y-auto px-4 py-4">
-          {!activeSlot ? (
+        {/* The conversation — the same component the `/agents` workspace
+            renders, at a different width. */}
+        <ChatThread
+          slot={activeSlot}
+          agents={agents}
+          modes={modes}
+          isStreaming={isActiveStreaming}
+          permissionRequest={chat.permissionRequest}
+          onResolvePermission={chat.resolvePermission}
+          switchError={switchError}
+          onDismissSwitchError={() => setSwitchError(null)}
+          onSend={(text) =>
+            activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
+          }
+          onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
+          emptyState={
             <EmptyState
               agents={agents}
               customProviders={customProviders}
@@ -325,49 +286,8 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               defaultMode={defaultMode}
               onStart={handleNewSession}
             />
-          ) : activeSlot.messages.length === 0 ? (
-            <div className="flex h-full flex-col items-center justify-center text-center">
-              {(() => {
-                const ModeIcon = MODE_ICONS[activeSlot.info.mode] || MessageSquare;
-                return <ModeIcon className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />;
-              })()}
-              <p className="text-sm font-medium text-[var(--color-text)]">
-                {modes.find((m) => m.key === activeSlot.info.mode)?.label || "Assistant"}
-              </p>
-              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                {modes.find((m) => m.key === activeSlot.info.mode)?.description ||
-                  "Ask about your portfolio, prices, trades, or bot status."}
-              </p>
-              <p className="mt-2 flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] opacity-60">
-                {activeSlot.info.agent_slug && <Bot className="h-2.5 w-2.5" />}
-                {activeSlot.info.label && activeSlot.info.agent_slug
-                  ? activeSlot.info.label
-                  : resolveAgentLabel(activeSlot.info.agent_key, agents)}
-              </p>
-              {activeSlot.pending && (
-                <p className="mt-3 flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
-                  <Loader2 className="h-3 w-3 animate-spin" />
-                  Warming up — type away, it will be sent
-                </p>
-              )}
-            </div>
-          ) : (
-            activeSlot.messages.map((msg) => (
-              <ChatMessageView key={msg.id} message={msg} />
-            ))
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* Input */}
-        {activeSlot && (
-          <ChatInput
-            onSend={(text) => chat.sendMessage(activeSlot.info.slot_id, text)}
-            disabled={isActiveStreaming}
-            isStreaming={isActiveStreaming}
-            onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
-          />
-        )}
+          }
+        />
 
         {/* Conversation history — a slide-over, so the panel stays an overlay
             available on every page rather than becoming a route. */}
@@ -391,18 +311,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
       </div>
     </>
   );
-}
-
-/** Resolve a short label for an agent key */
-function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
-  const match = agents.find((a) => a.key === agentKey);
-  if (match) return match.label;
-  // Handle dynamic keys like "openrouter:anthropic/claude-3.5-sonnet"
-  if (agentKey.includes(":")) {
-    const [provider, model] = agentKey.split(":", 2);
-    return model || provider;
-  }
-  return agentKey;
 }
 
 /** Shorten agent label for tab display */
@@ -530,7 +438,7 @@ function EmptyState({
   const [selectedSlug, setSelectedSlug] = useState("");
 
   return (
-    <div className="flex h-full flex-col items-center justify-center text-center">
+    <div className="flex flex-1 flex-col items-center justify-center text-center">
       <MessageSquare className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
       <p className="text-sm text-[var(--color-text-muted)]">
         Start a new session to chat with the AI assistant.

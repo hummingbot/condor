@@ -10,11 +10,19 @@ interface ChatInputProps {
   disabled?: boolean;
   isStreaming?: boolean;
   onAbort?: () => void;
+  /** Take the caret on mount — the workspace lands the user in a composer. */
+  autoFocus?: boolean;
 }
 
 type RecordingState = "idle" | "recording" | "transcribing";
 
-export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  disabled,
+  isStreaming,
+  onAbort,
+  autoFocus,
+}: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -229,6 +237,7 @@ export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputP
           // Normal text input
           <textarea
             ref={textareaRef}
+            autoFocus={autoFocus}
             value={value}
             onChange={(e) => {
               setValue(e.target.value);

@@ -369,7 +369,7 @@ export interface AgentSummary {
   slug: string;
   name: string;
   description: string;
-  consultable: boolean;
+  /** Routing hint only — every Agent is consultable, delegable and loopable. */
   when_to_consult: string;
   agent_key: string;
   strategy_count: number;
@@ -455,7 +455,6 @@ export interface AgentDetail {
   agent_key: string;
   tools: string[];
   when_to_consult: string;
-  consultable: boolean;
   server_required: boolean;
   server_name: string;
   strategies: StrategySummary[];
@@ -1140,15 +1139,6 @@ export const api = {
       method: "DELETE",
     }),
 
-  consultAgent: (
-    slug: string,
-    data: { task: string; context?: string; chat_id?: number; server_name?: string },
-  ) =>
-    apiFetch<{ agent: string; answer: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/consult`,
-      { method: "POST", body: JSON.stringify(data) },
-    ),
-
   // ── Delegations (fire-and-forget background agent tasks) ──
 
   getDelegations: () =>
@@ -1168,6 +1158,13 @@ export const api = {
   getStrategy: (slug: string, sslug: string) =>
     apiFetch<StrategyDetail>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+    ),
+
+  /** Materialize the Agent's default playbook (idempotent) so it can be tuned/looped. */
+  createDefaultStrategy: (slug: string) =>
+    apiFetch<StrategySummary>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/default`,
+      { method: "POST" },
     ),
 
   createStrategy: (

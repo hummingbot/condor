@@ -9,15 +9,12 @@ import {
   MessageSquareText,
   Plus,
   ScrollText,
-  Send,
   Server,
   Trash2,
   Wrench,
   X,
 } from "lucide-react";
 import { useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
@@ -226,53 +223,6 @@ function CreateStrategyDialog({
   );
 }
 
-// ── Consult Panel ──
-
-function ConsultPanel({ slug, whenToConsult }: { slug: string; whenToConsult: string }) {
-  const [task, setTask] = useState("");
-  const consultMutation = useMutation({
-    mutationFn: () => api.consultAgent(slug, { task }),
-    onSuccess: () => setTask(""),
-  });
-
-  return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-      <h3 className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-        <MessageSquareText className="h-3.5 w-3.5" /> Consult
-      </h3>
-      {whenToConsult && (
-        <p className="mb-3 text-xs text-[var(--color-text-muted)]">{whenToConsult}</p>
-      )}
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={task}
-          onChange={(e) => setTask(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && task.trim()) consultMutation.mutate(); }}
-          placeholder="Ask this agent…"
-          className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
-        />
-        <button
-          onClick={() => consultMutation.mutate()}
-          disabled={!task.trim() || consultMutation.isPending}
-          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
-        >
-          <Send className="h-3.5 w-3.5" />
-          {consultMutation.isPending ? "…" : "Ask"}
-        </button>
-      </div>
-      {consultMutation.data && !consultMutation.isPending && (
-        <div className="chat-markdown mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-sm text-[var(--color-text)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{consultMutation.data.answer}</ReactMarkdown>
-        </div>
-      )}
-      {consultMutation.isError && (
-        <p className="mt-2 text-xs text-red-400">Consult failed.</p>
-      )}
-    </div>
-  );
-}
-
 // ── Agent Detail Page ──
 
 export function AgentDetail() {
@@ -303,6 +253,16 @@ export function AgentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       navigate("/agents");
+    },
+  });
+
+  // Every Agent is loopable. This brings its implicit default playbook on disk
+  // so the normal strategy UI (config, start, sessions) can drive the loop.
+  const createDefaultLoopMutation = useMutation({
+    mutationFn: () => api.createDefaultStrategy(slug!),
+    onSuccess: (strategy) => {
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      navigate(`/agents/${slug}/strategies/${strategy.slug}`);
     },
   });
 
@@ -405,11 +365,6 @@ export function AgentDetail() {
                   {agent.agent_key}
                 </span>
               )}
-              {agent.consultable && (
-                <span className="rounded border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 font-medium text-blue-400">
-                  consultable
-                </span>
-              )}
               {agent.tools && agent.tools.length > 0 && (
                 <span className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
                   <Wrench className="h-3 w-3" /> {agent.tools.length} tool{agent.tools.length !== 1 ? "s" : ""}
@@ -470,13 +425,6 @@ export function AgentDetail() {
         </div>
       </div>
 
-      {/* Consult panel (consultable agents) */}
-      {agent.consultable && (
-        <div className="mb-6">
-          <ConsultPanel slug={agent.slug} whenToConsult={agent.when_to_consult} />
-        </div>
-      )}
-
       {/* Strategies */}
       <div>
         <h2 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
@@ -486,19 +434,36 @@ export function AgentDetail() {
         {strategies.length === 0 ? (
           <div className="flex h-56 flex-col items-center justify-center rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/50">
             <CircleDot className="mb-3 h-9 w-9 text-[var(--color-text-muted)]/30" />
-            <p className="mb-1 text-sm font-medium text-[var(--color-text)]">No strategies yet</p>
-            <p className="mb-4 text-xs text-[var(--color-text-muted)]">
-              {agent.consultable
-                ? "This agent is consult-only. Add a strategy to make it loop."
-                : "Add a playbook strategy for this agent to loop."}
+            <p className="mb-1 text-sm font-medium text-[var(--color-text)]">
+              No strategies yet
             </p>
-            <button
-              onClick={() => setShowCreate(true)}
-              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white"
-            >
-              <Plus className="h-4 w-4" />
-              New Strategy
-            </button>
+            <p className="mb-4 max-w-md text-center text-xs text-[var(--color-text-muted)]">
+              This agent can already be consulted and delegated to. To let it run on a
+              loop, start from its default playbook — its own brain drives each tick —
+              or write a dedicated one.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => createDefaultLoopMutation.mutate()}
+                disabled={createDefaultLoopMutation.isPending}
+                className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                <CircleDot className="h-4 w-4" />
+                {createDefaultLoopMutation.isPending ? "Creating…" : "Use default loop"}
+              </button>
+              <button
+                onClick={() => setShowCreate(true)}
+                className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm font-medium text-[var(--color-text)]"
+              >
+                <Plus className="h-4 w-4" />
+                New Strategy
+              </button>
+            </div>
+            {createDefaultLoopMutation.isError && (
+              <p className="mt-3 text-xs text-[var(--color-red)]">
+                Could not create the default loop.
+              </p>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
