@@ -15,11 +15,11 @@ min_liquidity_usd: 50000
 min_chain_eligible_pairs: 5
 max_discovery_candidates: 100
 max_detailed_candidates: 40
-max_report_candidates: 15
+max_report_candidates: 3
 max_news_items: 40
 max_social_items: 60
 max_event_items: 20
-source_collection_budget_sec: 120
+source_collection_budget_sec: 60
 report_language: en
 report_timezone: UTC
 risk_limits:

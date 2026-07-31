@@ -1,4 +1,4 @@
-"""Collect bounded current news and primary-release metadata."""
+"""Private collector for bounded current news and primary-release metadata."""
 
 from __future__ import annotations
 
@@ -45,7 +45,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
         coverage=coverage,
     )
     return RoutineResult(
-        text=bundle_text(bundle),
+        text=bundle_text(bundle, config.run_id),
         table_data=bundle["items"][:20],
         table_columns=["published_at", "provider_id", "title", "url"],
     )

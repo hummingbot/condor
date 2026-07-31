@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import re
+from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from urllib.parse import quote, urljoin
@@ -26,21 +28,16 @@ async def collect_news(
     max_items: int,
 ) -> tuple[list[dict[str, Any]], list[FetchResult], dict[str, Any]]:
     cutoff = datetime.now(timezone.utc) - timedelta(hours=lookback_hours)
-    terms = query_terms(strategy_key, themes)
-    tasks = [
-        fetch_json(
-            "gdelt",
-            "https://api.gdeltproject.org/api/v2/doc/doc",
-            params={
-                "query": " OR ".join(f'"{term}"' for term in terms[:12]),
-                "mode": "ArtList",
-                "maxrecords": min(75, max_items * 2),
-                "format": "json",
-                "sort": "HybridRel",
-                "timespan": f"{lookback_hours}h",
-            },
+    terms = list(
+        dict.fromkeys(
+            query_terms(strategy_key, themes)
+            + [str(value).strip() for value in focus_assets if str(value).strip()]
         )
-    ]
+    )
+    # Publisher RSS and primary releases are the default news path. GDELT is
+    # intentionally omitted: its unauthenticated DOC endpoint repeatedly
+    # rate-limits this workload, while adding retry latency and duplicate news.
+    tasks = []
     for provider_id, url in feed_urls(scope):
         tasks.append(fetch_text(provider_id, url))
     for symbol in focus_tickers(focus_assets):
@@ -57,20 +54,42 @@ async def collect_news(
     for result in results:
         if result.status != "complete":
             continue
-        if result.provider_id == "gdelt":
-            items.extend(gdelt_items(result, cutoff))
-        elif result.provider_id == "sec":
+        if result.provider_id == "sec":
             items.extend(sec_items(result, cutoff))
         elif result.provider_id == "bea":
             items.extend(bea_items(result, cutoff))
         else:
             items.extend(rss_items(result, cutoff))
-    items.sort(key=lambda item: str(item.get("published_at") or ""), reverse=True)
-    items.sort(key=lambda item: item.get("source_class") != "official")
+    raw_retained_count = len(items)
+    items = relevant_items(items, terms=terms, scope=scope)
+    relevant_count = len(items)
+    items = deduplicate_news(items)
+    deduplicated_count = len(items)
+    items = balance_publishers(items, maximum=max_items)
     return (
-        items[:max_items],
+        items,
         results,
-        {"lookback_hours": lookback_hours, "query_terms": terms},
+        {
+            "lookback_hours": lookback_hours,
+            "query_terms": terms,
+            "aggregation_source": "publisher_rss_and_primary_releases",
+            "gdelt_omitted": "repeated_public_endpoint_rate_limits",
+            "raw_retained_count": raw_retained_count,
+            "relevance_retained_count": relevant_count,
+            "deduplicated_count": deduplicated_count,
+            "final_count": len(items),
+            "publisher_count": len(
+                {
+                    item.get("publisher") or item.get("provider_id")
+                    for item in items
+                    if item.get("publisher") or item.get("provider_id")
+                }
+            ),
+            "relevance_policy": (
+                "crypto_and_memecoin_require_term_match; "
+                "official_and_marketwide_tradfi_feeds_are_prequalified"
+            ),
+        },
     )
 
 
@@ -80,16 +99,35 @@ def query_terms(strategy_key: str, themes: list[str]) -> list[str]:
             "bitcoin",
             "ethereum",
             "crypto market",
+            "crypto",
             "stablecoin",
         ],
         "tradfi_market_intelligence": [
-            "US stocks",
+            "stocks",
+            "equities",
+            "S&P 500",
+            "Nasdaq",
+            "Dow",
             "Federal Reserve",
-            "Treasury yields",
+            "FOMC",
+            "Treasury",
+            "bond yields",
+            "inflation",
+            "employment",
+            "payrolls",
+            "GDP",
+            "oil",
+            "dollar",
+            "credit spreads",
             "earnings",
         ],
         "memecoin_market_intelligence": [
             "memecoin",
+            "meme coin",
+            "dogecoin",
+            "shiba",
+            "pepe",
+            "bonk",
             "Solana token",
             "Ethereum token",
             "Robinhood Chain",
@@ -104,7 +142,21 @@ def feed_urls(scope: str) -> list[tuple[str, str]]:
         ("decrypt_rss", "https://decrypt.co/feed"),
         ("cointelegraph_rss", "https://cointelegraph.com/rss"),
     ]
+    memecoin_search = [
+        (
+            "google_news_rss",
+            "https://news.google.com/rss/search?"
+            "q=memecoin%20OR%20Dogecoin%20OR%20PEPE%20OR%20BONK"
+            "%20when%3A2d%20-presale%20-%22price%20prediction%22"
+            "%20-%22next%20crypto%22"
+            "&hl=en-US&gl=US&ceid=US:en",
+        )
+    ]
     official = [
+        (
+            "marketwatch_rss",
+            "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+        ),
         (
             "federal_reserve",
             "https://www.federalreserve.gov/feeds/press_all.xml",
@@ -115,11 +167,185 @@ def feed_urls(scope: str) -> list[tuple[str, str]]:
         ("bea", "https://www.bea.gov/news/current-releases"),
         ("cftc", "https://www.cftc.gov/RSS/RSSGP/rssgp.xml"),
     ]
-    if scope in {"crypto", "memecoin"}:
+    if scope == "memecoin":
+        return crypto + memecoin_search
+    if scope == "crypto":
         return crypto
     if scope == "tradfi":
         return official
     return crypto + official
+
+
+def relevant_items(
+    items: list[dict[str, Any]],
+    *,
+    terms: list[str],
+    scope: str,
+) -> list[dict[str, Any]]:
+    """Apply declared query terms without discarding prequalified official news."""
+    output = []
+    for item in items:
+        text = f"{item.get('title') or ''} {item.get('summary') or ''}".casefold()
+        if item.get("provider_id") == "google_news_rss" and _is_promotional_news(text):
+            continue
+        if (
+            scope == "memecoin"
+            and item.get("provider_id") == "google_news_rss"
+            and not _has_memecoin_market_context(text)
+        ):
+            continue
+        if scope in {"tradfi", "both"} and _is_low_signal_tradfi_news(text):
+            continue
+        matched = [
+            term for term in terms if _term_matches(text, str(term).strip().casefold())
+        ]
+        prequalified = (
+            scope in {"tradfi", "both"}
+            and item.get("source_class") == "official"
+            and item.get("provider_id") in {"bls", "bea"}
+        )
+        if not prequalified and not matched:
+            continue
+        value = dict(item)
+        value["matched_terms"] = matched[:8]
+        value["relevance_score"] = len(matched)
+        value["relevance_basis"] = (
+            "prequalified_market_source" if prequalified else "query_term_match"
+        )
+        output.append(value)
+    return output
+
+
+def deduplicate_news(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one best representative for near-identical syndicated headlines."""
+    selected: dict[str, dict[str, Any]] = {}
+    for item in items:
+        fingerprint = _headline_fingerprint(str(item.get("title") or ""))
+        if not fingerprint:
+            continue
+        current = selected.get(fingerprint)
+        if current is None or _news_priority(item) > _news_priority(current):
+            selected[fingerprint] = item
+    return list(selected.values())
+
+
+def balance_publishers(
+    items: list[dict[str, Any]],
+    *,
+    maximum: int,
+) -> list[dict[str, Any]]:
+    """Round-robin retained publishers so one feed cannot dominate the digest."""
+    buckets: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for item in items:
+        buckets[
+            str(item.get("publisher") or item.get("provider_id") or "unknown")
+        ].append(item)
+    for rows in buckets.values():
+        rows.sort(key=_news_priority, reverse=True)
+    ordered = []
+    provider_order = sorted(
+        buckets,
+        key=lambda provider: _news_priority(buckets[provider][0]),
+        reverse=True,
+    )
+    while len(ordered) < maximum:
+        added = False
+        for provider in provider_order:
+            if buckets[provider]:
+                ordered.append(buckets[provider].pop(0))
+                added = True
+                if len(ordered) >= maximum:
+                    break
+        if not added:
+            break
+    return ordered
+
+
+def _term_matches(text: str, term: str) -> bool:
+    if not term:
+        return False
+    if re.fullmatch(r"[a-z0-9]{2,12}", term):
+        return (
+            re.search(rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])", text) is not None
+        )
+    return term in text
+
+
+def _headline_fingerprint(value: str) -> str:
+    normalized = re.sub(r"[^a-z0-9 ]+", " ", value.casefold())
+    stop = {"a", "an", "and", "for", "in", "of", "on", "the", "to", "with"}
+    words = [word for word in normalized.split() if word not in stop]
+    return " ".join(words[:18])
+
+
+def _is_promotional_news(value: str) -> bool:
+    markers = (
+        "best crypto to invest",
+        "next crypto to explode",
+        "presale",
+        "price prediction",
+        "top crypto to buy",
+        "100x",
+        "1000x",
+        "millionaire",
+        "sponsored",
+        "press release",
+        "blockdag",
+        "prediction market",
+        "tagged:",
+        "casino",
+        "giveaway",
+        "offering up to",
+    )
+    return any(marker in value for marker in markers)
+
+
+def _has_memecoin_market_context(value: str) -> bool:
+    """Reject name collisions such as pets or people named Pepe."""
+    markers = (
+        "altcoin",
+        "bitcoin",
+        "blockchain",
+        "bonk",
+        "coinmarketcap",
+        "coingecko",
+        "crypto",
+        "cryptocurrency",
+        "dexscreener",
+        "dogecoin",
+        "ethereum",
+        "exchange",
+        "liquidity",
+        "market cap",
+        "meme coin",
+        "memecoin",
+        "shib",
+        "solana",
+        "token",
+        "trading",
+        "wallet",
+    )
+    return any(marker in value for marker in markers)
+
+
+def _is_low_signal_tradfi_news(value: str) -> bool:
+    markers = (
+        "issues enforcement action with",
+        "issues enforcement actions with",
+        "enforcement action with former",
+        "enforcement actions with former",
+        "passport website",
+        "previous marriage get their fair share",
+    )
+    return any(marker in value for marker in markers)
+
+
+def _news_priority(item: dict[str, Any]) -> tuple[int, int, str]:
+    return (
+        int(item.get("source_class") == "official"),
+        int(item.get("relevance_score") or 0),
+        str(item.get("published_at") or ""),
+    )
 
 
 def gdelt_items(result: FetchResult, cutoff: datetime) -> list[dict[str, Any]]:
@@ -133,6 +359,10 @@ def gdelt_items(result: FetchResult, cutoff: datetime) -> list[dict[str, Any]]:
         if not title or not url.startswith(("http://", "https://")):
             continue
         published_at = iso(published)
+        publisher = clean_text(
+            article.get("domain") or article.get("source") or result.provider_id,
+            160,
+        )
         output.append(
             {
                 "evidence_id": evidence_id("gdelt", url, published_at),
@@ -142,6 +372,7 @@ def gdelt_items(result: FetchResult, cutoff: datetime) -> list[dict[str, Any]]:
                 "published_at": published_at,
                 "retrieved_at": result.retrieved_at,
                 "title": title,
+                "publisher": publisher or result.provider_id,
                 "summary": "",
                 "url": url,
                 "domain": clean_text(article.get("domain"), 120),
@@ -171,6 +402,11 @@ def rss_items(result: FetchResult, cutoff: datetime) -> list[dict[str, Any]]:
         if not title or not link.startswith(("http://", "https://")):
             continue
         published_at = iso(published)
+        publisher = clean_text(first_text(entry, ["source"]), 160)
+        if result.provider_id == "google_news_rss" and " - " in title:
+            headline, inferred_publisher = title.rsplit(" - ", 1)
+            title = clean_text(headline, 400)
+            publisher = publisher or clean_text(inferred_publisher, 160)
         output.append(
             {
                 "evidence_id": evidence_id(result.provider_id, link, published_at),
@@ -184,6 +420,7 @@ def rss_items(result: FetchResult, cutoff: datetime) -> list[dict[str, Any]]:
                 "published_at": published_at,
                 "retrieved_at": result.retrieved_at,
                 "title": title,
+                "publisher": publisher or result.provider_id,
                 "summary": clean_text(
                     first_text(entry, ["description", "summary", "content"]),
                     600,

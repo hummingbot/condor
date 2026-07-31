@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-REGISTRY_VERSION = "2026-07-31.1"
+REGISTRY_VERSION = "2026-07-31.2"
 REGISTRY_RETRIEVED_AT = "2026-07-31"
 REGISTRIES = {
     "liquid_crypto_pairs": {
@@ -17,6 +17,11 @@ REGISTRIES = {
         "source_url": "https://www.sec.gov/files/company_tickers.json",
         "retrieved_at": REGISTRY_RETRIEVED_AT,
         "maximum_accepted_age_days": 90,
+    },
+    "sp500_sample": {
+        "source_url": "https://www.ssga.com/us/en/intermediary/etfs/state-street-spdr-sp-500-etf-trust-spy",
+        "retrieved_at": REGISTRY_RETRIEVED_AT,
+        "maximum_accepted_age_days": 30,
     },
     "established_memecoins": {
         "source_url": "https://api.coingecko.com/api/v3/coins/list?include_platform=true",
@@ -58,27 +63,45 @@ TRADFI_SECTORS = [
     "XLU",
 ]
 TRADFI_PROXIES = ["TLT", "HYG", "GLD", "USO", "UUP"]
-TRADFI_LARGE_CAPS = [
+TRADFI_SP500_STOCKS = [
+    "NVDA",
     "AAPL",
     "MSFT",
-    "NVDA",
     "AMZN",
     "GOOGL",
+    "AVGO",
     "META",
     "TSLA",
+    "MU",
     "JPM",
     "XOM",
     "LLY",
 ]
+TRADFI_SP500_NAMES = {
+    "NVDA": "NVIDIA",
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+    "AMZN": "Amazon",
+    "GOOGL": "Alphabet",
+    "AVGO": "Broadcom",
+    "META": "Meta",
+    "TSLA": "Tesla",
+    "MU": "Micron",
+    "JPM": "JPMorgan",
+    "XOM": "Exxon Mobil",
+    "LLY": "Eli Lilly",
+}
 
 TICKER_TO_CIK = {
+    "NVDA": "0001045810",
     "AAPL": "0000320193",
     "MSFT": "0000789019",
-    "NVDA": "0001045810",
     "AMZN": "0001018724",
     "GOOGL": "0001652044",
+    "AVGO": "0001730168",
     "META": "0001326801",
     "TSLA": "0001318605",
+    "MU": "0000723125",
     "JPM": "0000019617",
     "XOM": "0000034088",
     "LLY": "0000059478",
@@ -90,36 +113,42 @@ ESTABLISHED_MEMECOINS: list[dict[str, str]] = [
         "chain": "dogecoin",
         "token_address": "native:DOGE",
         "cohort": "established",
+        "primary_meta": "dog",
     },
     {
         "symbol": "SHIB",
         "chain": "ethereum",
         "token_address": "0x95ad61b0a150d79219dcf64e1e6cc01f0b64c4ce",
         "cohort": "established",
+        "primary_meta": "dog",
     },
     {
         "symbol": "PEPE",
         "chain": "ethereum",
         "token_address": "0x6982508145454ce325ddbe47a25d4ec3d2311933",
         "cohort": "established",
+        "primary_meta": "frog",
     },
     {
         "symbol": "BONK",
         "chain": "solana",
         "token_address": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263",
         "cohort": "established",
+        "primary_meta": "dog",
     },
     {
         "symbol": "WIF",
         "chain": "solana",
         "token_address": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
         "cohort": "established",
+        "primary_meta": "dog",
     },
     {
         "symbol": "FLOKI",
         "chain": "ethereum",
         "token_address": "0xcf0c122c6b73ff809c693db761e7baebe62b6a2e",
         "cohort": "established",
+        "primary_meta": "dog",
     },
 ]
 
@@ -141,6 +170,27 @@ ROBINHOOD_CANONICAL_QUOTES = {
     "usdg": "0x5fc5360d0400a0fd4f2af552add042d716f1d168",
 }
 APPROVED_QUOTES["robinhood"] = set(ROBINHOOD_CANONICAL_QUOTES.values())
+
+MEMECOIN_INFRASTRUCTURE_SYMBOLS = {
+    "AAVE",
+    "BNB",
+    "BTC",
+    "DAI",
+    "ETH",
+    "FRAX",
+    "JUP",
+    "LINK",
+    "PUMP",
+    "RAY",
+    "SOL",
+    "UNI",
+    "USDC",
+    "USDG",
+    "USDT",
+    "WBTC",
+    "WETH",
+    "WSOL",
+}
 
 SUPPORTED_DISCOVERY_CHAINS = {"solana", "ethereum", "robinhood"}
 
@@ -185,7 +235,7 @@ def crypto_symbols(focus: list[str] | None = None) -> list[str]:
 
 
 def tradfi_symbols(focus: list[str] | None = None) -> list[str]:
-    symbols = TRADFI_BENCHMARKS + TRADFI_SECTORS + TRADFI_PROXIES + TRADFI_LARGE_CAPS
+    symbols = TRADFI_BENCHMARKS + TRADFI_SECTORS + TRADFI_PROXIES + TRADFI_SP500_STOCKS
     out = list(dict.fromkeys(symbols))
     for value in focus or []:
         symbol = value.strip().upper()

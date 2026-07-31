@@ -1,452 +1,603 @@
-"""Build the professional interactive Condor report from a validated package."""
+"""Render the compact, plain-English Market Reporter v3 report."""
 
 from __future__ import annotations
 
-import json
+import math
+from datetime import datetime
 from typing import Any
 
-from agents.market_reporter.routines._models import ReportPackage
-from agents.market_reporter.routines._providers import public_manifest
+from agents.market_reporter.routines._memecoin_catalog import (
+    MEMECOIN_META_LABELS,
+)
+from agents.market_reporter.routines._models import AnalysisCard, ReportPackage
 from condor.reports import ReportBuilder
 
-STANCE_LABELS = {
-    "bullish": "Bullish",
-    "cautiously_bullish": "Cautiously bullish",
+_STANCE_LABELS = {
+    "bullish": "Positive",
+    "cautiously_bullish": "Cautiously positive",
     "neutral": "Neutral",
-    "cautiously_bearish": "Cautiously bearish",
-    "bearish": "Bearish",
+    "cautiously_bearish": "Cautiously negative",
+    "bearish": "Negative",
     "mixed": "Mixed",
 }
+_STATE_LABELS = {
+    "priority_research": "Priority research",
+    "conditional_watch": "Watch if conditions improve",
+    "risk_watch": "Risk watch",
+    "avoid_for_now": "Avoid for now",
+}
+_DIRECTION_COLORS = {
+    "bullish": "#22c55e",
+    "bearish": "#ef4444",
+    "mixed": "#d4a845",
+    "unclear": "#94a3b8",
+    "Rising": "#22c55e",
+    "Falling": "#ef4444",
+    "Flat": "#94a3b8",
+    "Leader": "#22c55e",
+    "Laggard": "#ef4444",
+}
+_MEMECOIN_CHAINS = (
+    ("ethereum", "Ethereum"),
+    ("solana", "Solana"),
+    ("robinhood", "Robinhood Chain"),
+)
 
 
 async def render_report(package: ReportPackage) -> str:
+    """Build and save one deliberately small v3 report."""
     builder = ReportBuilder(package.metadata.title)
     builder.source("routine", "build_market_report").tags(
         ["market-intelligence", package.metadata.strategy_key, package.metadata.scope]
     )
     builder.manual_order()
 
-    summary = _summary_rows(package)
-    series = _series_rows(package)
-    candidates = _candidate_rows(package)
+    leaders = _leader_rows(package)
+    cross_market = _cross_market_rows(package)
+    drivers = _driver_rows(package)
+    meta_chain = _meta_chain_rows(package)
     evidence = _evidence_rows(package)
-    events = _event_rows(package)
-    token_rows = _token_rows(package)
-    theme_rows = _theme_rows(package)
-    provider_rows = _provider_rows(package)
-    coverage_rows = _coverage_rows(package)
-    strategy_rows = _strategy_rows(package)
-    chain_rows = _chain_rows(package)
 
-    _executive(builder, package)
-    if summary:
-        builder.dataset("market_summary", summary)
-    if series:
-        builder.dataset("market_series", series)
-    if candidates:
-        builder.dataset("research_candidates", candidates)
-    if evidence:
-        builder.dataset("evidence", evidence)
-    if events:
-        builder.dataset("events", events)
-    if token_rows:
-        builder.dataset("token_discovery", token_rows)
-    if theme_rows:
-        builder.dataset("themes", theme_rows)
-    if provider_rows:
-        builder.dataset("providers", provider_rows)
-    if coverage_rows:
-        builder.dataset("source_coverage", coverage_rows)
-    if strategy_rows:
-        builder.dataset("strategy_lens", strategy_rows)
-    if chain_rows:
-        builder.dataset("chain_coverage", chain_rows)
+    for name, rows in (
+        ("v3_leaders", leaders),
+        ("v3_drivers", drivers),
+        ("v3_evidence", evidence),
+    ):
+        if rows:
+            builder.dataset(name, rows)
+    for chain_key, _ in _MEMECOIN_CHAINS:
+        rows = [
+            row
+            for row in meta_chain
+            if row["chain_key"] == chain_key
+            and row["size_usd"] is not None
+            and row["size_usd"] > 0
+            and row["change_24h_pct"] is not None
+        ]
+        if rows:
+            builder.dataset(f"v3_metas_{chain_key}", rows)
 
-    _market_structure(builder, summary, series, strategy_rows)
-    _narratives(builder, theme_rows, evidence)
-    _candidate_section(builder, candidates, token_rows, chain_rows)
-    _events_and_risks(builder, package, events)
-    _methodology(builder, package, evidence, provider_rows, coverage_rows)
+    _market_section(
+        builder,
+        package,
+        leaders,
+        drivers,
+        meta_chain,
+        cross_market,
+    )
+    _events_section(builder, package)
+    _analysis_section(builder, package)
+    _audit_footer(builder, package, evidence)
     return await builder.save()
 
 
-def _executive(builder: ReportBuilder, package: ReportPackage) -> None:
-    view = package.market_views[0] if package.market_views else None
-    builder.section(
-        "01 / EXECUTIVE DASHBOARD",
-        f"As of {package.metadata.as_of_utc} · display timezone "
-        f"{package.metadata.report_timezone}",
-    )
-    builder.kpi(
-        "Market stance",
-        STANCE_LABELS.get(view.stance, "Unavailable") if view else "Unavailable",
-        trend=_trend(view.stance) if view else "neutral",
-    )
-    builder.kpi(
-        "Confidence",
-        view.confidence.title() if view else "Unavailable",
-    )
-    builder.kpi(
-        "Coverage",
-        package.coverage_assessment.grade.title(),
-        "truncated" if package.coverage_assessment.truncated else None,
-    )
-    builder.kpi("Research candidates", str(len(package.research_candidates)))
-    builder.kpi("Top risk", _top_risk(package))
-    if package.metadata.strategy_key == "memecoin_market_intelligence":
-        token_rows = _token_rows(package)
-        eligible = sum(row["eligibility"] == "eligible" for row in token_rows)
-        excluded = sum(row["eligibility"] == "excluded" for row in token_rows)
-        paid = sum(bool(row["paid_visibility"]) for row in token_rows)
-        builder.kpi("Eligible pairs", str(eligible))
-        builder.kpi("Excluded pairs", str(excluded))
-        builder.kpi(
-            "Paid visibility",
-            f"{(paid / len(token_rows) * 100):.1f}%" if token_rows else "Unavailable",
-        )
-    takeaways = "\n".join(f"- {value}" for value in package.executive_takeaways)
-    builder.markdown(f"### Key takeaways\n\n{takeaways}")
-
-
-def _market_structure(
-    builder: ReportBuilder,
-    summary: list[dict[str, Any]],
-    series: list[dict[str, Any]],
-    strategy_rows: list[dict[str, Any]],
-) -> None:
-    builder.section(
-        "02 / MARKET REGIME & STRUCTURE",
-        "Observed market metrics; direction and risk are written as text as well as color.",
-    )
-    if series:
-        builder.select_filter(
-            "series-symbol-filter",
-            "market_series",
-            "symbol",
-            label="Benchmark",
-        )
-        builder.range_filter(
-            "series-date-filter",
-            "market_series",
-            "timestamp",
-            label="Observation period",
-            value_type="date",
-        )
-        builder.chart(
-            "line",
-            "Benchmark close",
-            "market_series",
-            "timestamp",
-            "close",
-            color="symbol",
-            x_label="Date (source timezone shown in audit)",
-            y_label="Close price",
-            component_id="benchmark-close-chart",
-        )
-    else:
-        builder.markdown("- Benchmark time series unavailable for this evidence set.")
-    if summary:
-        builder.chart(
-            "scatter",
-            "Momentum versus realized volatility",
-            "market_summary",
-            "return_7d_pct",
-            "realized_volatility_20d_pct",
-            color="asset_class",
-            text="symbol",
-            x_label="7-day return (%)",
-            y_label="20-day realized volatility (%)",
-            component_id="momentum-volatility-chart",
-        )
-        builder.data_table(
-            "market_summary",
-            title="Market structure observations",
-            columns=[
-                "symbol",
-                "asset_class",
-                "last_price",
-                "return_7d_pct",
-                "return_30d_pct",
-                "rsi14",
-                "realized_volatility_20d_pct",
-                "source_time",
-            ],
-            component_id="market-summary-table",
-        )
-    else:
-        builder.markdown("- Market-summary observations are unavailable.")
-    if strategy_rows:
-        builder.data_table(
-            "strategy_lens",
-            title="Strategy-specific regime components",
-            columns=["block", "details"],
-            component_id="strategy-lens-table",
-        )
-
-
-def _narratives(
-    builder: ReportBuilder,
-    themes: list[dict[str, Any]],
-    evidence: list[dict[str, Any]],
-) -> None:
-    builder.section(
-        "03 / NEWS, NARRATIVES & ATTENTION",
-        "LLM interpretations remain separate from linked source observations.",
-    )
-    if themes:
-        builder.chart(
-            "treemap",
-            "Narrative map",
-            "themes",
-            "title",
-            "evidence_count",
-            color="direction_score",
-            value_label="Evidence count",
-            color_label="Direction score",
-            component_id="narrative-treemap",
-        )
-        builder.data_table(
-            "themes",
-            title="Theme interpretations",
-            component_id="theme-table",
-        )
-    else:
-        builder.markdown("- No narrative met the retained evidence threshold.")
-    if evidence:
-        builder.select_filter(
-            "evidence-family-filter",
-            "evidence",
-            "source_family",
-            label="Source family",
-        )
-        builder.data_table(
-            "evidence",
-            title="Linked evidence",
-            columns=[
-                "evidence_id",
-                "source_family",
-                "provider_id",
-                "source_time",
-                "title",
-                "url",
-            ],
-            component_id="evidence-table",
-        )
-    else:
-        builder.markdown("- No linked evidence was retained.")
-
-
-def _candidate_section(
-    builder: ReportBuilder,
-    candidates: list[dict[str, Any]],
-    tokens: list[dict[str, Any]],
-    chains: list[dict[str, Any]],
-) -> None:
-    builder.section(
-        "04 / RANKED RESEARCH CANDIDATES",
-        "Research priority only; not personalized buy or sell instructions.",
-    )
-    if candidates:
-        builder.select_filter(
-            "candidate-state-filter",
-            "research_candidates",
-            "candidate_state",
-            label="Research state",
-        )
-        builder.data_table(
-            "research_candidates",
-            title="Candidate theses, invalidations, and risks",
-            component_id="candidate-table",
-        )
-    else:
-        builder.markdown("- No candidate passed the active Strategy gates.")
-    if chains:
-        builder.chart(
-            "bar",
-            "Eligible pairs by chain",
-            "chain_coverage",
-            "chain",
-            "eligible",
-            color="maturity",
-            x_label="Chain",
-            y_label="Eligible pairs",
-            component_id="chain-coverage-chart",
-        )
-        builder.data_table(
-            "chain_coverage",
-            title="Chain cohorts and discovery coverage",
-            component_id="chain-coverage-table",
-        )
-    if tokens:
-        builder.select_filter(
-            "token-chain-filter",
-            "token_discovery",
-            "chain",
-            label="Chain cohort",
-        )
-        builder.chart(
-            "scatter",
-            "Memecoin liquidity versus turnover",
-            "token_discovery",
-            "liquidity_usd",
-            "volume_to_liquidity",
-            color="eligibility",
-            size="volume_24h_usd",
-            text="symbol",
-            x_label="Liquidity (USD)",
-            y_label="24h volume / liquidity",
-            x_scale="log",
-            component_id="token-liquidity-turnover-chart",
-        )
-        builder.chart(
-            "scatter",
-            "Memecoin pair age versus turnover",
-            "token_discovery",
-            "pair_age_hours",
-            "volume_to_liquidity",
-            color="eligibility",
-            size="liquidity_usd",
-            text="symbol",
-            x_label="Pair age (hours)",
-            y_label="24h volume / liquidity",
-            component_id="token-age-turnover-chart",
-        )
-        builder.data_table(
-            "token_discovery",
-            title="Exact token and pair evidence",
-            component_id="token-discovery-table",
-        )
-
-
-def _events_and_risks(
+def _market_section(
     builder: ReportBuilder,
     package: ReportPackage,
-    events: list[dict[str, Any]],
+    leaders: list[dict[str, Any]],
+    drivers: list[dict[str, Any]],
+    meta_chain: list[dict[str, Any]],
+    cross_market: list[dict[str, Any]],
 ) -> None:
     builder.section(
-        "05 / CATALYSTS, OPPORTUNITIES & RISKS",
-        "Verified events remain separate from inferred watch conditions.",
+        "Market snapshot and leaders",
+        "The broad picture first, followed by the data that supports it.",
     )
-    if events:
-        builder.range_filter(
-            "event-date-filter",
-            "events",
-            "event_time_utc",
-            label="Event window",
-            value_type="datetime",
-        )
-        builder.data_table(
-            "events",
-            title="Verified events and watch conditions",
-            component_id="event-table",
+    builder.markdown(
+        f"**Evidence cutoff:** {_display_time(package.metadata.as_of_utc)} · "
+        f"**Display timezone:** {_clean(package.metadata.report_timezone)} · "
+        f"**Primary time frame:** {_clean(package.metadata.near_horizon)}"
+    )
+    for metric in package.analysis_context.snapshot_metrics[:6]:
+        value, delta, trend = _kpi(metric)
+        builder.kpi(str(metric.get("label") or "Market metric"), value, delta, trend)
+
+    if package.market_view:
+        builder.markdown(
+            f"### Today’s read — {_clean(package.market_view.title)}\n\n"
+            f"{_clean(package.market_view.interpretation)}"
         )
     else:
-        builder.markdown("- No verified event or evidence-linked watch condition.")
-    builder.markdown(
-        "### Opportunities\n\n"
-        + _json_bullets(package.opportunities)
-        + "\n\n### Risks\n\n"
-        + _json_bullets(package.risks)
-        + "\n\n### Scenarios\n\n"
-        + _json_bullets(package.scenarios)
-    )
-
-
-def _methodology(
-    builder: ReportBuilder,
-    package: ReportPackage,
-    evidence: list[dict[str, Any]],
-    providers: list[dict[str, Any]],
-    coverage: list[dict[str, Any]],
-) -> None:
-    builder.section(
-        "06 / METHODOLOGY & AUDIT",
-        "Coverage, source versions, truncation, attribution, and limitations.",
-    )
-    manifest = package.evidence_manifest
-    builder.kpi(
-        "Provider manifest",
-        str(manifest.get("provider_manifest_version") or "Unavailable"),
-    )
-    builder.kpi(
-        "Identity registry",
-        str(manifest.get("identity_registry_version") or "Unavailable"),
-    )
-    builder.kpi("Retained evidence", str(len(evidence)))
-    if coverage:
-        builder.data_table(
-            "source_coverage",
-            title="Source coverage and truncation",
-            component_id="source-coverage-table",
+        builder.markdown(
+            "### Today’s read\n\n"
+            "The available data is too limited for a reliable market direction call."
         )
-    if providers:
-        builder.data_table(
-            "providers",
-            title="Provider attribution and operating contract",
-            component_id="provider-attribution-table",
+    if cross_market:
+        builder.markdown("**Cross-market anchors requested in this session:**")
+        builder.table(
+            cross_market,
+            ["Asset", "Market", "7d move", "30d move", "Last price"],
         )
-    limitations = "\n".join(f"- {value}" for value in package.data_limitations)
-    builder.markdown(
-        "### Coverage reason codes\n\n"
-        + "\n".join(f"- {value}" for value in package.coverage_assessment.reason_codes)
-        + "\n\n### Data limitations\n\n"
-        + (limitations or "- None declared")
-        + "\n\n### Disclaimer\n\n"
-        + package.metadata.disclaimer
-        + "\n\n### Artifact retention\n\n"
-        + "The report ID is immutable while retained. Retention duration is "
-        + "controlled by the current Condor report store and is not promised "
-        + "here. This artifact does not depend on prior report files."
-    )
 
-
-def _summary_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    rows = []
-    for bundle in package.source_bundles:
-        for item in bundle.get("items") or []:
-            metrics = item.get("metrics")
-            if not isinstance(metrics, dict) or not item.get("symbol"):
-                continue
-            rows.append(
-                {
-                    "symbol": item["symbol"],
-                    "asset_class": item.get("asset_class", ""),
-                    "source_time": item.get("source_time", ""),
-                    **metrics,
-                }
+    strategy = package.metadata.strategy_key
+    if strategy == "memecoin_market_intelligence":
+        _memecoin_charts(builder, meta_chain)
+        if meta_chain:
+            builder.table(
+                [
+                    {
+                        "Meta": row["meta"],
+                        "Chain": row["chain"],
+                        "Sampled assets": row["sampled_assets"],
+                        "Sampled market cap": _money(row["market_cap_usd"]),
+                        "24h turnover": _money(row["volume_24h_usd"]),
+                        "24h move": _percent(row["change_24h_pct"]),
+                        "Representatives": row["representatives"],
+                        "Coverage": row["coverage"],
+                    }
+                    for row in meta_chain[:18]
+                ],
+                [
+                    "Meta",
+                    "Chain",
+                    "Sampled assets",
+                    "Sampled market cap",
+                    "24h turnover",
+                    "24h move",
+                    "Representatives",
+                    "Coverage",
+                ],
             )
-    return rows
+    else:
+        if leaders:
+            builder.chart(
+                "horizontal_bar",
+                (
+                    "S&P 500 stock sample — seven-day leaders and laggards"
+                    if strategy == "tradfi_market_intelligence"
+                    else "Seven-day leaders and laggards"
+                ),
+                "v3_leaders",
+                "asset",
+                "return_7d_pct",
+                color="group",
+                color_map=_DIRECTION_COLORS,
+                cross_filter=False,
+                x_label="Seven-day return (%)",
+                category_order=[row["asset"] for row in leaders],
+                width=12,
+                height=340,
+                component_id="v3_leaders_chart",
+            )
+        if drivers:
+            builder.chart(
+                "horizontal_bar",
+                "Most important market drivers — research weight, not probability",
+                "v3_drivers",
+                "driver_axis_label",
+                "importance",
+                color="direction",
+                color_map=_DIRECTION_COLORS,
+                cross_filter=False,
+                x_label="Research importance (1–5)",
+                category_order=[row["driver_axis_label"] for row in drivers],
+                width=12,
+                height=320,
+                component_id="v3_drivers_chart",
+            )
+            builder.markdown(
+                "**Driver key and analysis:**\n\n"
+                + "\n".join(
+                    f"- **{row['short_label']} — {row['driver']} "
+                    f"({_plain_label(row['direction'])}):** "
+                    f"{row['explanation']}"
+                    for row in drivers[:5]
+                )
+            )
+        if leaders:
+            builder.table(
+                [
+                    {
+                        "Asset": row["asset"],
+                        "Group": row["group"],
+                        "7d move": _percent(row["return_7d_pct"]),
+                        "30d move": _percent(row.get("return_30d_pct")),
+                        "Last price": _compact_number(row.get("last_price")),
+                    }
+                    for row in leaders
+                ],
+                ["Asset", "Group", "7d move", "30d move", "Last price"],
+            )
 
 
-def _series_rows(package: ReportPackage) -> list[dict[str, Any]]:
+def _memecoin_charts(
+    builder: ReportBuilder,
+    meta_chain: list[dict[str, Any]],
+) -> None:
+    builder.markdown(
+        "**Chain theme maps:** each panel uses provider-categorized coins from the "
+        "bounded CoinGecko sample. Bar length is sampled market cap and color shows "
+        "the market-cap-weighted 24-hour direction. Theme memberships can overlap, "
+        "so compare themes within a panel and read each bar independently rather "
+        "than adding them together."
+    )
+    for chain_key, chain_label in _MEMECOIN_CHAINS:
+        chain_rows = [
+            row
+            for row in meta_chain
+            if row["chain_key"] == chain_key
+            and row["size_usd"] is not None
+            and row["size_usd"] > 0
+            and row["change_24h_pct"] is not None
+        ]
+        if not chain_rows:
+            builder.markdown(
+                f"### {chain_label}\n\n"
+                "No provider-categorized assets in the bounded sample have both "
+                "market-cap and 24-hour change data, so no zero or empty chart is "
+                "shown."
+            )
+            continue
+        builder.chart(
+            "horizontal_bar",
+            f"{chain_label} memecoin themes — sampled market cap and 24h direction",
+            f"v3_metas_{chain_key}",
+            "meta",
+            "size_usd",
+            color="direction",
+            color_map=_DIRECTION_COLORS,
+            cross_filter=False,
+            x_label="Sampled category market cap (USD)",
+            category_order=[row["meta"] for row in chain_rows],
+            width=12,
+            height=max(260, len(chain_rows) * 64),
+            component_id=f"v3_meta_{chain_key}_chart",
+        )
+
+
+def _events_section(builder: ReportBuilder, package: ReportPackage) -> None:
+    builder.section(
+        "Events that could move the market",
+        "Only verified, dated events selected by the analysis are shown.",
+    )
+    if package.event_outlook:
+        builder.markdown(_analysis_card(package.event_outlook, compact=True))
+    elif not package.event_impacts:
+        builder.markdown(
+            "No verified event has enough supporting data for a useful impact view."
+        )
+
+    event_lookup = {
+        str(event.get("evidence_id") or ""): event
+        for event in package.analysis_context.events
+    }
     rows = []
-    for bundle in package.source_bundles:
-        for item in bundle.get("items") or []:
-            rows.extend(item.get("series") or [])
-    return rows
-
-
-def _candidate_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    rows = []
-    for candidate in package.research_candidates:
-        identity = candidate.asset_identity
+    for impact in package.event_impacts[:5]:
+        event = event_lookup.get(impact.event_evidence_id)
+        if not event:
+            continue
         rows.append(
             {
-                "rank": candidate.rank,
-                "asset": identity.get("symbol")
-                or identity.get("token_address")
-                or identity.get("ticker"),
-                "chain": identity.get("chain_id"),
-                "contract": identity.get("token_address"),
-                "pair": identity.get("pair_address"),
-                "candidate_state": candidate.candidate_state,
-                "stance": STANCE_LABELS[candidate.stance],
-                "confidence": candidate.confidence,
-                "horizon": candidate.horizon,
-                "why_now": candidate.why_now,
-                "invalidation": "; ".join(candidate.invalidation_conditions),
-                "risks": "; ".join(candidate.key_risks),
-                "evidence_ids": ", ".join(candidate.supporting_evidence_ids),
+                "Date": _display_time(
+                    event.get("display_time") or event.get("event_time_utc")
+                ),
+                "Event": _clean(event.get("title")),
+                "Why it matters": _clean(impact.why_it_matters),
+                "Most affected": ", ".join(impact.most_affected),
+                "Watch for": _clean(impact.watch_for),
+                "Priority": impact.priority.title(),
+                "Source": (
+                    f"[{_plain_label(event.get('provider_id'))} official source]"
+                    f"({_clean(event.get('url'))})"
+                ),
+            }
+        )
+    if rows:
+        columns = [
+            "Date",
+            "Event",
+            "Why it matters",
+            "Most affected",
+            "Watch for",
+            "Priority",
+            "Source",
+        ]
+        builder.markdown(
+            "| " + " | ".join(columns) + " |\n"
+            "| "
+            + " | ".join("---" for _ in columns)
+            + " |\n"
+            + "\n".join(
+                "| "
+                + " | ".join(str(row[column]).replace("|", r"\|") for column in columns)
+                + " |"
+                for row in rows
+            )
+        )
+    elif package.event_impacts:
+        builder.markdown(
+            "The selected event notes could not be matched to the verified calendar."
+        )
+
+
+def _analysis_section(builder: ReportBuilder, package: ReportPackage) -> None:
+    builder.section(
+        "Analyst view and research highlights",
+        "What the evidence suggests, what to watch, and what would change the view.",
+    )
+    if package.market_view:
+        builder.markdown(_analysis_card(package.market_view))
+    if package.movers_view:
+        builder.markdown(_analysis_card(package.movers_view))
+    if not package.market_view and not package.movers_view:
+        builder.markdown(
+            "Coverage is too limited for a responsible analyst view. "
+            "Use the technical audit below to see what is missing."
+        )
+    headlines = _news_headlines(package)
+    if headlines:
+        builder.markdown(
+            "### News headlines\n\n"
+            "Recent English-language headlines retained for this market view:\n\n"
+            + "\n".join(_headline_bullet(row) for row in headlines)
+        )
+
+    items = _items_by_evidence(package)
+    fundamentals = {
+        str(item.get("symbol") or ""): item
+        for bundle in package.source_bundles
+        if bundle.get("source_type") == "fundamentals"
+        for item in bundle.get("items") or []
+        if item.get("symbol")
+    }
+    if package.research_highlights:
+        builder.markdown("### Research highlights")
+    for highlight in sorted(package.research_highlights, key=lambda row: row.rank)[:3]:
+        item = items.get(highlight.asset_evidence_id, {})
+        name, facts = _asset_facts(item, fundamentals)
+        fact_line = " · ".join(facts)
+        detail = f"\n\n**Observed data:** {fact_line}" if fact_line else ""
+        watch = "; ".join(highlight.invalidation_conditions)
+        builder.markdown(
+            f"#### {highlight.rank}. {_clean(name)} — "
+            f"{_STATE_LABELS[highlight.research_state]}\n\n"
+            f"**Why it matters now:** {_clean(highlight.why_now)}{detail}\n\n"
+            f"**Direction:** {_STANCE_LABELS[highlight.stance]} · "
+            f"**How sure:** {highlight.confidence.title()} — "
+            f"{_clean(highlight.confidence_reason)} · "
+            f"**Time frame:** {_clean(highlight.horizon)}\n\n"
+            f"**Main risk:** {_clean(highlight.main_risk)}\n\n"
+            f"**What would change this view:** {_clean(watch)}"
+        )
+
+
+def _audit_footer(
+    builder: ReportBuilder,
+    package: ReportPackage,
+    evidence: list[dict[str, Any]],
+) -> None:
+    coverage = package.coverage_assessment
+    builder.markdown(
+        "### Technical audit\n\n"
+        f"Coverage grade: **{coverage.grade.title()}** · "
+        f"maximum analysis confidence: **{coverage.confidence_cap.title()}**. "
+        "This area is for provenance and debugging; it is not part of the market view."
+    )
+    builder.markdown(f"*{_clean(package.metadata.disclaimer)}*")
+    coverage_rows = []
+    for row in package.analysis_context.coverage_summary:
+        notes = [*list(row.get("warnings") or []), *list(row.get("errors") or [])]
+        coverage_rows.append(
+            {
+                "Source": _plain_label(row.get("source_type")),
+                "Status": _plain_label(row.get("status")),
+                "Kept": row.get("retained_items", 0),
+                "Raw": row.get("raw_items", 0),
+                "Latest observation": _display_time(row.get("newest_source_time")),
+                "Notes": "; ".join(_clean(note) for note in notes[:2]) or "None",
+            }
+        )
+    if coverage_rows:
+        builder.table(
+            coverage_rows,
+            ["Source", "Status", "Kept", "Raw", "Latest observation", "Notes"],
+        )
+
+    limitations = list(
+        dict.fromkeys(
+            [
+                *package.data_limitations,
+                *package.analysis_context.data_limitations,
+            ]
+        )
+    )
+    if limitations:
+        builder.markdown(
+            "**Known data limits:**\n\n"
+            + "\n".join(f"- {_clean(value)}" for value in limitations[:8])
+        )
+    if evidence:
+        builder.data_table(
+            "v3_evidence",
+            columns=[
+                "evidence_id",
+                "source_type",
+                "provider",
+                "observed_at",
+                "item",
+                "url",
+            ],
+            title="Evidence audit",
+            searchable=True,
+            sortable=True,
+            page_size=15,
+            width=12,
+            component_id="v3_evidence_audit",
+        )
+
+
+def _leader_rows(package: ReportPackage) -> list[dict[str, Any]]:
+    if package.metadata.strategy_key == "tradfi_market_intelligence":
+        features = package.analysis_context.strategy_features
+        groups = (
+            ("Leader", features.get("stock_leaders") or []),
+            ("Laggard", features.get("stock_laggards") or []),
+        )
+    else:
+        assets = [
+            row
+            for row in package.analysis_context.market_snapshot.get("assets", [])
+            if row.get("asset_class") == "crypto"
+            and _finite(row.get("return_7d_pct")) is not None
+        ]
+        assets.sort(
+            key=lambda row: _finite(row.get("return_7d_pct")) or 0.0,
+            reverse=True,
+        )
+        groups = (
+            ("Leader", assets[:3]),
+            ("Laggard", list(reversed(assets[-3:]))),
+        )
+    rows = []
+    seen = set()
+    for group, values in groups:
+        for item in values[:3]:
+            symbol = _clean(item.get("symbol"))
+            change = _finite(item.get("return_7d_pct"))
+            if not symbol or change is None or symbol in seen:
+                continue
+            seen.add(symbol)
+            company_name = _clean(item.get("company_name"))
+            rows.append(
+                {
+                    "asset": (f"{company_name} ({symbol})" if company_name else symbol),
+                    "symbol": symbol,
+                    "group": group,
+                    "return_7d_pct": change,
+                    "return_30d_pct": _finite(item.get("return_30d_pct")),
+                    "last_price": _finite(item.get("last_price")),
+                }
+            )
+    return sorted(rows, key=lambda row: row["return_7d_pct"])
+
+
+def _cross_market_rows(package: ReportPackage) -> list[dict[str, Any]]:
+    if package.metadata.scope != "both":
+        return []
+    wanted = ("BTC", "ETH", "SPY", "QQQ")
+    by_symbol = {
+        str(row.get("symbol") or ""): row
+        for row in package.analysis_context.market_snapshot.get("assets", [])
+    }
+    rows = []
+    for symbol in wanted:
+        item = by_symbol.get(symbol)
+        if not item:
+            continue
+        rows.append(
+            {
+                "Asset": symbol,
+                "Market": "Crypto" if symbol in {"BTC", "ETH"} else "U.S. stocks",
+                "7d move": _percent(item.get("return_7d_pct")),
+                "30d move": _percent(item.get("return_30d_pct")),
+                "Last price": _compact_number(item.get("last_price")),
+            }
+        )
+    return rows
+
+
+def _driver_rows(package: ReportPackage) -> list[dict[str, Any]]:
+    if package.metadata.strategy_key == "memecoin_market_intelligence":
+        return []
+    ordered = sorted(
+        package.drivers,
+        key=lambda value: value.importance,
+        reverse=True,
+    )[:5]
+    return [
+        {
+            "driver": _clean(driver.title),
+            "short_label": _clean(driver.short_label),
+            "driver_axis_label": f"{_clean(driver.short_label)}\u2003\u2003",
+            "importance": driver.importance,
+            "direction": driver.direction,
+            "explanation": _clean(driver.explanation),
+        }
+        for driver in ordered
+    ]
+
+
+def _meta_chain_rows(package: ReportPackage) -> list[dict[str, Any]]:
+    if package.metadata.strategy_key != "memecoin_market_intelligence":
+        return []
+    chain_labels = dict(_MEMECOIN_CHAINS)
+    features = package.analysis_context.strategy_features
+    provider_rows = features.get("provider_meta_chain_samples") or []
+    source_rows = provider_rows or features.get("meta_chain_overview", [])
+    rows = []
+    for row in source_rows:
+        meta = MEMECOIN_META_LABELS.get(str(row.get("primary_meta") or "").casefold())
+        chain_key = str(row.get("chain") or "").casefold()
+        if not meta or chain_key not in chain_labels:
+            continue
+        provider_sample = bool(provider_rows)
+        change = _finite(
+            row.get("market_cap_weighted_change_24h_pct")
+            if provider_sample
+            else row.get("liquidity_weighted_change_24h_pct")
+        )
+        market_cap = _finite(
+            row.get("sample_market_cap_usd")
+            if provider_sample
+            else row.get("observed_market_cap_usd")
+        )
+        liquidity = _finite(row.get("observed_liquidity_usd"))
+        size_usd = market_cap if provider_sample else liquidity
+        rows.append(
+            {
+                "meta": meta,
+                "chain_key": chain_key,
+                "chain": chain_labels[chain_key],
+                "sampled_assets": int(
+                    (
+                        row.get("sampled_constituent_count")
+                        if provider_sample
+                        else row.get("eligible_pair_count")
+                    )
+                    or 0
+                ),
+                "market_cap_usd": market_cap,
+                "size_usd": size_usd,
+                "volume_24h_usd": _finite(
+                    row.get("sample_volume_24h_usd")
+                    if provider_sample
+                    else row.get("observed_volume_24h_usd")
+                ),
+                "change_24h_pct": change,
+                "direction": (
+                    "Rising"
+                    if change is not None and change > 0.1
+                    else "Falling" if change is not None and change < -0.1 else "Flat"
+                ),
+                "representatives": ", ".join(
+                    str(value) for value in row.get("representative_symbols") or []
+                )
+                or "Not identified",
+                "coverage": (
+                    "CoinGecko top categorized sample"
+                    if provider_sample
+                    else "Eligible exact-pair fallback"
+                ),
             }
         )
     return rows
@@ -455,173 +606,234 @@ def _candidate_rows(package: ReportPackage) -> list[dict[str, Any]]:
 def _evidence_rows(package: ReportPackage) -> list[dict[str, Any]]:
     rows = []
     for bundle in package.source_bundles:
+        source = _plain_label(bundle.get("source_type"))
         for item in bundle.get("items") or []:
+            evidence_id = item.get("evidence_id")
+            if not evidence_id:
+                continue
+            nested_market = item.get("market") or {}
             rows.append(
                 {
-                    "evidence_id": item.get("evidence_id"),
-                    "source_family": item.get("source_family")
-                    or bundle.get("source_type"),
-                    "provider_id": item.get("provider_id"),
-                    "source_time": item.get("source_time") or item.get("published_at"),
-                    "title": item.get("title")
+                    "evidence_id": evidence_id,
+                    "source_type": source,
+                    "provider": item.get("provider_id") or item.get("publisher") or "",
+                    "observed_at": item.get("source_time")
+                    or item.get("published_at")
+                    or item.get("event_time_utc")
+                    or "",
+                    "item": item.get("title")
+                    or item.get("name")
+                    or item.get("symbol")
+                    or nested_market.get("symbol")
                     or item.get("metric")
-                    or item.get("symbol"),
-                    "url": item.get("url"),
+                    or "Evidence item",
+                    "url": item.get("url") or "",
                 }
             )
     return rows
 
 
-def _event_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    return [
-        {
-            "event_time_utc": event.get("event_time_utc") or event.get("time") or "",
-            "title": event.get("title") or event.get("condition") or "",
-            "kind": (
-                "verified_event"
-                if event.get("verified_scheduled")
-                else "watch_condition"
-            ),
-            "url": event.get("url"),
-        }
-        for event in package.events_and_watch_conditions
-    ]
-
-
-def _token_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    rows = []
-    for bundle in package.source_bundles:
-        if bundle.get("source_type") != "token_discovery":
-            continue
-        for item in bundle.get("items") or []:
-            market = item.get("market") or {}
-            rows.append(
-                {
-                    "chain": item.get("chain_id"),
-                    "symbol": market.get("symbol"),
-                    "token_address": item.get("token_address"),
-                    "pair_address": item.get("pair_address"),
-                    "eligibility": item.get("eligibility"),
-                    "liquidity_usd": market.get("liquidity_usd"),
-                    "volume_24h_usd": market.get("volume_24h_usd"),
-                    "volume_to_liquidity": market.get("volume_to_liquidity"),
-                    "pair_age_hours": market.get("pair_age_hours"),
-                    "paid_visibility": item.get("paid_visibility"),
-                    "reason_codes": "; ".join(item.get("reason_codes") or []),
-                    "url": item.get("url"),
-                    "explorer_url": (item.get("robinhood_identity") or {}).get(
-                        "explorer_url"
-                    ),
-                }
-            )
-    return rows
-
-
-def _theme_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    rows = []
-    for theme in package.themes:
-        rows.append(
-            {
-                "title": theme.get("title") or theme.get("name") or "Theme",
-                "summary": theme.get("interpretation") or theme.get("summary") or "",
-                "evidence_count": max(
-                    1, len(theme.get("supporting_evidence_ids") or [])
-                ),
-                "direction_score": theme.get("direction_score", 0),
-            }
-        )
-    return rows
-
-
-def _provider_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    provider_ids = sorted(
-        {
-            str(item.get("provider_id"))
-            for bundle in package.source_bundles
-            for item in bundle.get("items") or []
-            if item.get("provider_id")
-        }
-    )
-    manifest = public_manifest(provider_ids)
-    return list(manifest["providers"].values())
-
-
-def _coverage_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    return [
-        {
-            "source_type": bundle.get("source_type"),
-            "status": bundle.get("status"),
-            "as_of_utc": bundle.get("as_of_utc"),
-            "raw_items": bundle.get("raw_item_count"),
-            "retained_items": bundle.get("retained_item_count"),
-            "truncation_reasons": "; ".join(bundle.get("truncation_reasons") or []),
-            "errors": "; ".join(bundle.get("errors") or []),
-        }
+def _items_by_evidence(package: ReportPackage) -> dict[str, dict[str, Any]]:
+    return {
+        str(item.get("evidence_id")): item
         for bundle in package.source_bundles
-    ]
+        for item in bundle.get("items") or []
+        if item.get("evidence_id")
+    }
 
 
-def _strategy_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    return [
-        {
-            "block": str(block).replace("_", " ").title(),
-            "details": json.dumps(value, ensure_ascii=False, default=str),
-        }
-        for block, value in package.strategy_payload.items()
-    ]
-
-
-def _chain_rows(package: ReportPackage) -> list[dict[str, Any]]:
-    discovery = next(
+def _asset_facts(
+    item: dict[str, Any],
+    fundamentals: dict[str, dict[str, Any]],
+) -> tuple[str, list[str]]:
+    market = item.get("market") or {}
+    metrics = item.get("metrics") or {}
+    name = (
+        item.get("name")
+        or item.get("symbol")
+        or market.get("name")
+        or market.get("symbol")
+        or "Selected asset"
+    )
+    facts = []
+    if item.get("chain_id"):
+        facts.append(f"Chain: {_plain_label(item.get('chain_id'))}")
+    for label, value, formatter in (
+        ("Last price", metrics.get("last_price"), _compact_number),
+        ("7d move", metrics.get("return_7d_pct"), _percent),
         (
-            bundle
-            for bundle in package.source_bundles
-            if bundle.get("source_type") == "token_discovery"
+            "Market cap",
+            market.get("market_cap_usd") or item.get("market_cap_usd"),
+            _money,
         ),
-        None,
+        (
+            "24h move",
+            market.get("price_change_24h_pct") or item.get("price_change_24h_pct"),
+            _percent,
+        ),
+        ("Liquidity", market.get("liquidity_usd"), _money),
+        (
+            "24h turnover",
+            market.get("volume_24h_usd") or item.get("volume_24h_usd"),
+            _money,
+        ),
+    ):
+        if _finite(value) is not None:
+            facts.append(f"{label}: {formatter(value)}")
+    fundamental = fundamentals.get(str(item.get("symbol") or ""))
+    if fundamental:
+        source_facts = fundamental.get("facts") or {}
+        for label, key in (
+            ("Revenue vs comparable period", "revenue"),
+            ("Net income vs comparable period", "net_income"),
+        ):
+            change = _finite(
+                ((source_facts.get(key) or {}).get("prior_comparable") or {}).get(
+                    "change_pct"
+                )
+            )
+            if change is not None:
+                facts.append(f"{label}: {_percent(change)}")
+    return _clean(name), facts[:5]
+
+
+def _analysis_card(card: AnalysisCard, *, compact: bool = False) -> str:
+    text = (
+        f"### {_clean(card.title)}\n\n"
+        f"**What we see:** {_clean(card.observation)}\n\n"
+        f"**Why it matters:** {_clean(card.interpretation)}\n\n"
+        f"**Direction:** {_STANCE_LABELS[card.stance]} · "
+        f"**How sure:** {card.confidence.title()} — "
+        f"{_clean(card.confidence_reason)} · "
+        f"**Time frame:** {_clean(card.horizon)}"
     )
-    counts = ((discovery or {}).get("coverage") or {}).get("chain_counts") or {}
-    return [
-        {
-            "chain": chain,
-            "maturity": "emerging" if chain == "robinhood" else "mature",
-            "discovery_coverage": (
-                "promotion_biased"
-                if chain == "robinhood"
-                else "organic_oriented_plus_attention"
-            ),
-            **values,
-        }
-        for chain, values in sorted(counts.items())
-        if isinstance(values, dict)
-    ]
-
-
-def _top_risk(package: ReportPackage) -> str:
-    if not package.risks:
-        return "No evidence-linked risk supplied"
-    risk = package.risks[0]
-    value = (
-        risk.get("observation")
-        or risk.get("title")
-        or risk.get("risk")
-        or risk.get("condition")
-        or "See risk register"
-    )
-    return str(value)[:100]
-
-
-def _json_bullets(values: list[dict[str, Any]]) -> str:
-    if not values:
-        return "- None supported by current evidence"
-    return "\n".join(
-        f"- {json.dumps(value, ensure_ascii=False, default=str)}" for value in values
+    if compact:
+        return text
+    return (
+        text
+        + "\n\n**Watch next:** "
+        + "; ".join(_clean(value) for value in card.what_to_watch)
+        + "\n\n**What would change this view:** "
+        + "; ".join(_clean(value) for value in card.invalidation_conditions)
     )
 
 
-def _trend(stance: str) -> str:
-    if stance in {"bullish", "cautiously_bullish"}:
-        return "up"
-    if stance in {"bearish", "cautiously_bearish"}:
-        return "down"
-    return "neutral"
+def _kpi(metric: dict[str, Any]) -> tuple[str, str | None, str]:
+    value = metric.get("value")
+    unit = str(metric.get("unit") or "")
+    if _finite(value) is not None:
+        if unit == "USD":
+            display = _money(value)
+        elif unit == "%":
+            display = _percent(value)
+        else:
+            display = f"{_compact_number(value)} {unit}".strip()
+    else:
+        display = _clean(value) or "Not available"
+
+    change = _finite(metric.get("change"))
+    if change is None:
+        return display, None, "neutral"
+    delta = _percent(change)
+    adverse = bool(metric.get("adverse_when_up"))
+    positive = change > 0
+    trend = "down" if positive == adverse else "up"
+    return display, delta, trend
+
+
+def _display_time(value: Any) -> str:
+    if not value:
+        return "Not provided"
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return _clean(value)
+    return parsed.strftime("%d %b %Y, %H:%M %Z").strip()
+
+
+def _money(value: Any) -> str:
+    number = _finite(value)
+    if number is None:
+        return "Not available"
+    absolute = abs(number)
+    for divisor, suffix in ((1e12, "T"), (1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if absolute >= divisor:
+            return f"${number / divisor:,.2f}{suffix}"
+    return f"${number:,.2f}"
+
+
+def _percent(value: Any) -> str:
+    number = _finite(value)
+    return "Not available" if number is None else f"{number:+.2f}%"
+
+
+def _compact_number(value: Any) -> str:
+    number = _finite(value)
+    if number is None:
+        return "Not available"
+    if abs(number) >= 1_000:
+        return f"{number:,.0f}"
+    if abs(number) >= 1:
+        return f"{number:,.2f}"
+    return f"{number:,.6f}".rstrip("0").rstrip(".")
+
+
+def _finite(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _plain_label(value: Any) -> str:
+    return _clean(value).replace("_", " ").title()
+
+
+def _clean(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+def _short_label(value: Any, maximum: int) -> str:
+    text = _clean(value)
+    if len(text) <= maximum:
+        return text
+    clipped = text[: maximum - 1].rsplit(" ", 1)[0]
+    if len(clipped) < maximum // 2:
+        clipped = text[: maximum - 1]
+    return f"{clipped}…"
+
+
+def _news_headlines(package: ReportPackage) -> list[dict[str, Any]]:
+    rows = []
+    seen = set()
+    for cluster in package.analysis_context.news_clusters:
+        for headline in cluster.get("highlights") or []:
+            evidence_id = str(headline.get("evidence_id") or "")
+            if not evidence_id or evidence_id in seen:
+                continue
+            seen.add(evidence_id)
+            rows.append(headline)
+            if len(rows) == 5:
+                return rows
+    return rows
+
+
+def _headline_bullet(row: dict[str, Any]) -> str:
+    title = _clean(row.get("title"))
+    url = _clean(row.get("url"))
+    linked_title = f"[{title}]({url})" if url.startswith("https://") else title
+    summary = _short_label(row.get("summary"), 220)
+    details = " · ".join(
+        value
+        for value in (
+            _plain_label(row.get("publisher")),
+            _display_time(row.get("published_at")),
+        )
+        if value
+    )
+    suffix = f" — {summary}" if summary else ""
+    attribution = f" ({details})" if details else ""
+    return f"- **{linked_title}**{suffix}{attribution}"

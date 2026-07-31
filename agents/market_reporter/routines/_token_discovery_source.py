@@ -1,6 +1,4 @@
-"""Build a bounded identity-safe Memecoin discovery universe."""
-
-from __future__ import annotations
+"""Private collector for a bounded identity-safe Memecoin discovery universe."""
 
 import asyncio
 from typing import Any, Literal
@@ -149,17 +147,56 @@ async def run(config: Config, context: Any) -> RoutineResult:
         + solana_results
         + gecko_detail_results
     )
+    successful_dexscreener = any(
+        result.provider_id == "dexscreener" and result.status == "complete"
+        for result in provider_results
+    )
+    optional_degradations = [
+        result
+        for result in provider_results
+        if result.status != "complete"
+        and (
+            result.provider_id
+            in {
+                "geckoterminal",
+                "solana_rpc",
+                "robinhood_blockscout",
+            }
+            or (result.provider_id == "dexscreener" and successful_dexscreener)
+        )
+    ]
+    if items and optional_degradations:
+        provider_results = [
+            result for result in provider_results if result not in optional_degradations
+        ]
+    coverage_payload = coverage(
+        items,
+        chains=config.chains,
+        registry_fresh=registry_fresh,
+    )
+    coverage_payload["optional_source_degradations"] = [
+        {
+            "provider_id": result.provider_id,
+            "error": result.error,
+            "status_code": result.status_code,
+        }
+        for result in optional_degradations
+    ]
+    optional_warnings = []
+    for result in optional_degradations:
+        label = (
+            "optional_request_degraded"
+            if result.provider_id == "dexscreener"
+            else "optional_source_unavailable"
+        )
+        optional_warnings.append(f"{label}:{result.provider_id}:{result.error}")
     bundle = finalize_bundle(
         source_type="token_discovery",
         strategy_key=config.strategy_key,
         scope=config.scope,
         items=items,
         provider_results=provider_results,
-        coverage=coverage(
-            items,
-            chains=config.chains,
-            registry_fresh=registry_fresh,
-        ),
+        coverage=coverage_payload,
         warnings=(
             ["robinhood_stock_token_registry_unavailable"]
             if "robinhood" in config.chains and not registry_fresh
@@ -170,7 +207,8 @@ async def run(config: Config, context: Any) -> RoutineResult:
             if not registry_is_current("approved_quotes")
             else []
         )
-        + ["geckoterminal_top_pool_scan_omitted_public_rate_budget"],
+        + ["geckoterminal_top_pool_scan_omitted_public_rate_budget"]
+        + optional_warnings,
     )
     table = [
         {
@@ -184,7 +222,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
         for item in bundle["items"]
     ]
     return RoutineResult(
-        text=bundle_text(bundle),
+        text=bundle_text(bundle, config.run_id),
         table_data=table,
         table_columns=[
             "chain",

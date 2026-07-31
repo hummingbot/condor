@@ -58,6 +58,19 @@ async def collect_dexscreener(
                 },
             )
             entry[feed_name] = True
+            description = str(row.get("description") or "").strip()
+            if description and not entry.get("provider_description"):
+                entry["provider_description"] = description[:1000]
+            links = [
+                str(link.get("url") or "")
+                for link in row.get("links") or []
+                if isinstance(link, dict)
+                and str(link.get("url") or "").startswith("https://")
+            ]
+            if links:
+                entry["provider_links"] = list(
+                    dict.fromkeys([*(entry.get("provider_links") or []), *links])
+                )[:8]
             if feed_name == "boost":
                 entry["paid_visibility"] = True
                 entry["boost_amount"] = row.get("amount")

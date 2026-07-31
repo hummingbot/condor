@@ -1,4 +1,4 @@
-"""Collect a transparent bounded sample of keyless public social discussion."""
+"""Private collector for a bounded sample of keyless public social discussion."""
 
 from __future__ import annotations
 
@@ -20,6 +20,9 @@ from agents.market_reporter.routines._models import BaseSourceConfig
 from routines.base import RoutineResult
 
 CATEGORY = "Market Reporter"
+BLUESKY_WHATS_HOT = (
+    "at://did:plc:z72i7hdynmk6r22z27h6tvur/" "app.bsky.feed.generator/whats-hot"
+)
 
 
 class Config(BaseSourceConfig):
@@ -34,8 +37,13 @@ async def run(config: Config, context: Any) -> RoutineResult:
     tasks = [
         fetch_json(
             "bluesky",
-            "https://public.api.bsky.app/xrpc/app.bsky.feed.searchPosts",
-            params={"q": " OR ".join(terms[:8]), "limit": min(100, config.max_items)},
+            "https://public.api.bsky.app/xrpc/app.bsky.feed.getFeed",
+            params={
+                "feed": BLUESKY_WHATS_HOT,
+                "limit": min(100, max(40, config.max_items)),
+            },
+            timeout=5,
+            retry=False,
         )
     ]
     for hashtag in _hashtags(config):
@@ -54,13 +62,23 @@ async def run(config: Config, context: Any) -> RoutineResult:
         if result.status != "complete":
             continue
         if result.provider_id == "bluesky":
-            items.extend(_bluesky_items(result))
+            items.extend(_bluesky_items(result, terms))
         else:
             items.extend(_mastodon_items(result))
     items.sort(key=lambda item: str(item.get("published_at") or ""), reverse=True)
     items = items[: config.max_items]
     warnings = []
     networks = {item["provider_id"] for item in items}
+    optional_degradations = [
+        result for result in results if items and result.status != "complete"
+    ]
+    provider_results = [
+        result for result in results if result not in optional_degradations
+    ]
+    warnings.extend(
+        f"optional_social_source_unavailable:" f"{result.provider_id}:{result.error}"
+        for result in optional_degradations
+    )
     if len(items) < 10:
         warnings.append("small_public_social_sample")
     if len(networks) < 2:
@@ -71,11 +89,20 @@ async def run(config: Config, context: Any) -> RoutineResult:
         strategy_key=config.strategy_key,
         scope=config.scope,
         items=items,
-        provider_results=results,
+        provider_results=provider_results,
         warnings=warnings,
         coverage={
             "query_terms": terms,
+            "bluesky_sampling": "public_whats_hot_feed_filtered_locally",
             "network_count": len(networks),
+            "optional_source_degradations": [
+                {
+                    "provider_id": result.provider_id,
+                    "error": result.error,
+                    "status_code": result.status_code,
+                }
+                for result in optional_degradations
+            ],
             "oldest_observation": min(
                 (str(item.get("published_at") or "") for item in items),
                 default="",
@@ -90,7 +117,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
         },
     )
     return RoutineResult(
-        text=bundle_text(bundle),
+        text=bundle_text(bundle, config.run_id),
         table_data=bundle["items"][:20],
         table_columns=[
             "published_at",
@@ -124,9 +151,14 @@ def _hashtags(config: Config) -> list[str]:
     }[config.strategy_key]
 
 
-def _bluesky_items(result: FetchResult) -> list[dict[str, Any]]:
+def _bluesky_items(
+    result: FetchResult,
+    terms: list[str],
+) -> list[dict[str, Any]]:
     output = []
-    for post in (result.data or {}).get("posts") or []:
+    lowered_terms = [term.casefold() for term in terms]
+    for feed_item in (result.data or {}).get("feed") or []:
+        post = feed_item.get("post") or {}
         record = post.get("record") or {}
         uri = str(post.get("uri") or "")
         handle = clean_text((post.get("author") or {}).get("handle"), 120)
@@ -135,6 +167,8 @@ def _bluesky_items(result: FetchResult) -> list[dict[str, Any]]:
         published = str(record.get("createdAt") or post.get("indexedAt") or "")
         excerpt = clean_text(record.get("text"), 280)
         if not uri or not handle or not excerpt:
+            continue
+        if not any(term in excerpt.casefold() for term in lowered_terms):
             continue
         output.append(
             {

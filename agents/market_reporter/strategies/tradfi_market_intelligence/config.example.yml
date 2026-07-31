@@ -9,8 +9,8 @@ medium_term_weeks: 6
 max_news_items: 60
 max_social_items: 40
 max_event_items: 40
-max_research_candidates: 8
-source_collection_budget_sec: 120
+max_research_candidates: 3
+source_collection_budget_sec: 60
 report_language: en
 report_timezone: America/New_York
 risk_limits:

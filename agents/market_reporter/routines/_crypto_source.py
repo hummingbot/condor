@@ -1,4 +1,4 @@
-"""Private Crypto market adapters for ``market_signal_source``."""
+"""Private Crypto market adapters for the concurrent data gatherer."""
 
 from __future__ import annotations
 
@@ -6,6 +6,11 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
+from agents.market_reporter.routines._crypto_catalog import (
+    MAX_DYNAMIC_SYMBOLS,
+    collect_catalog,
+    dynamic_symbols,
+)
 from agents.market_reporter.routines._crypto_metrics import (
     calculate_ohlcv_metrics,
     compact_series,
@@ -34,16 +39,28 @@ async def collect_crypto(
     focus_assets: list[str],
     history_days: int,
 ) -> tuple[list[dict[str, Any]], list[FetchResult], dict[str, Any]]:
-    symbols = ["BTC", "ETH"] if scope == "memecoin" else crypto_symbols(focus_assets)
+    catalog_items, catalog_results, catalog_coverage = await collect_catalog(
+        include_meta_categories=scope == "memecoin",
+    )
+    if scope == "memecoin":
+        candidate_symbols = ["BTC", "ETH"]
+    elif catalog_coverage["dynamic_universe_available"]:
+        candidate_symbols = dynamic_symbols(
+            catalog_items,
+            focus_assets,
+            maximum=MAX_DYNAMIC_SYMBOLS + 6,
+        )
+    else:
+        candidate_symbols = crypto_symbols(focus_assets)
     tasks = []
     meta = []
-    for symbol in symbols:
+    for symbol in candidate_symbols:
         tasks.append(
             fetch_json(
                 "binance_spot",
                 "https://api.binance.com/api/v3/klines",
                 params={
-                    "symbol": CRYPTO_UNIVERSE[symbol],
+                    "symbol": CRYPTO_UNIVERSE.get(symbol, f"{symbol}USDT"),
                     "interval": "1d",
                     "limit": history_days,
                 },
@@ -55,7 +72,7 @@ async def collect_crypto(
             fetch_json(
                 "binance_futures",
                 "https://fapi.binance.com/fapi/v1/premiumIndex",
-                params={"symbol": CRYPTO_UNIVERSE[symbol]},
+                params={"symbol": CRYPTO_UNIVERSE.get(symbol, f"{symbol}USDT")},
             )
         )
         meta.append(("funding", symbol))
@@ -63,7 +80,7 @@ async def collect_crypto(
             fetch_json(
                 "binance_futures",
                 "https://fapi.binance.com/fapi/v1/openInterest",
-                params={"symbol": CRYPTO_UNIVERSE[symbol]},
+                params={"symbol": CRYPTO_UNIVERSE.get(symbol, f"{symbol}USDT")},
             )
         )
         meta.append(("open_interest", symbol))
@@ -97,14 +114,16 @@ async def collect_crypto(
             ("defi_tvl", ""),
         ]
     )
-    results = list(await asyncio.gather(*tasks))
+    preliminary_results = catalog_results
+    gathered_results = list(await asyncio.gather(*tasks))
 
-    items = []
+    items = list(catalog_items)
     market_rows = []
     failed_spot_symbols = []
-    for (kind, symbol), result in zip(meta, results):
+    unusable_spot_symbols = []
+    for (kind, symbol), result in zip(meta, gathered_results):
         if result.status != "complete":
-            if kind == "ohlcv" and symbol in KRAKEN_PAIRS:
+            if kind == "ohlcv":
                 failed_spot_symbols.append(symbol)
             continue
         if kind == "ohlcv":
@@ -112,6 +131,8 @@ async def collect_crypto(
             if item:
                 items.append(item)
                 market_rows.append(item)
+            else:
+                unusable_spot_symbols.append(symbol)
         elif kind == "funding":
             items.append(_funding_item(symbol, result))
         elif kind == "open_interest":
@@ -130,7 +151,14 @@ async def collect_crypto(
             item = _defi_item(result)
             if item:
                 items.append(item)
-    if failed_spot_symbols:
+    fallback_symbols = [
+        symbol
+        for symbol in dict.fromkeys(failed_spot_symbols + unusable_spot_symbols)
+        if symbol in KRAKEN_PAIRS
+    ]
+    fallback_results: list[FetchResult] = []
+    fallback_success_symbols: set[str] = set()
+    if fallback_symbols:
         fallback_results = list(
             await asyncio.gather(
                 *[
@@ -143,21 +171,67 @@ async def collect_crypto(
                         },
                         retry=False,
                     )
-                    for symbol in failed_spot_symbols
+                    for symbol in fallback_symbols
                 ]
             )
         )
-        results.extend(fallback_results)
-        for symbol, result in zip(failed_spot_symbols, fallback_results):
+        for symbol, result in zip(fallback_symbols, fallback_results):
             if result.status != "complete":
                 continue
             item = _kraken_ohlcv_item(symbol, result, history_days)
             if item:
                 items.append(item)
                 market_rows.append(item)
+                fallback_success_symbols.add(symbol)
     symbols_present = {item.get("symbol") for item in market_rows}
-    required = set(CRYPTO_UNIVERSE)
+    selected_symbols = [
+        symbol for symbol in candidate_symbols if symbol in symbols_present
+    ][: (len(candidate_symbols) if scope == "memecoin" else MAX_DYNAMIC_SYMBOLS)]
+    required = set(selected_symbols)
+    unselected_market_evidence = {
+        str(item.get("evidence_id"))
+        for item in market_rows
+        if item.get("symbol") not in required
+    }
+    if unselected_market_evidence:
+        items = [
+            item
+            for item in items
+            if str(item.get("evidence_id")) not in unselected_market_evidence
+        ]
+        market_rows = [item for item in market_rows if item.get("symbol") in required]
+        symbols_present = {item.get("symbol") for item in market_rows}
     valid_market_rows = [item for item in market_rows if item.get("symbol") in required]
+    breadth_item = _breadth_item(valid_market_rows)
+    if breadth_item is not None:
+        items.append(breadth_item)
+    provider_results = list(preliminary_results)
+    for (kind, symbol), result in zip(meta, gathered_results):
+        if kind != "ohlcv":
+            provider_results.append(result)
+        elif symbol in required and symbol not in fallback_success_symbols:
+            provider_results.append(result)
+        elif symbol in {"BTC", "ETH"} and symbol not in fallback_success_symbols:
+            provider_results.append(result)
+    provider_results.extend(
+        result
+        for symbol, result in zip(fallback_symbols, fallback_results)
+        if symbol in required or symbol in {"BTC", "ETH"}
+    )
+    rejection_reasons = []
+    for symbol in candidate_symbols:
+        if symbol in required:
+            continue
+        reason = (
+            "primary_http_failure"
+            if symbol in failed_spot_symbols
+            else (
+                "stale_or_unparseable_history"
+                if symbol in unusable_spot_symbols
+                else "outside_bounded_technical_set"
+            )
+        )
+        rejection_reasons.append({"symbol": symbol, "reason": reason})
     derivative_observations = {
         (item.get("symbol"), item.get("metric"))
         for item in items
@@ -166,7 +240,21 @@ async def collect_crypto(
     coverage = {
         "valid_count": len(symbols_present & required),
         "configured_count": len(required),
-        "valid_pct": round(len(symbols_present & required) / len(required) * 100, 2),
+        "valid_pct": (
+            round(len(symbols_present & required) / len(required) * 100, 2)
+            if required
+            else 0
+        ),
+        "configured_symbols": selected_symbols,
+        "universe_source": (
+            "coinmarketcap_current_rankings"
+            if catalog_coverage["dynamic_universe_available"]
+            else "static_emergency_fallback"
+        ),
+        "catalog": catalog_coverage,
+        "spot_pair_selection": (
+            "current_rank_order_then_successful_bounded_primary_or_fallback_history"
+        ),
         "btc_eth_present": {"BTC", "ETH"}.issubset(symbols_present),
         "btc_eth_derivatives_count": len(
             {
@@ -176,7 +264,11 @@ async def collect_crypto(
             }
         ),
         "derivatives_venue_count": 1 if derivative_observations else 0,
-        "spot_fallback_used": bool(failed_spot_symbols),
+        "spot_fallback_used": bool(fallback_success_symbols & required),
+        "failed_primary_spot_symbols": sorted(set(failed_spot_symbols)),
+        "unusable_primary_spot_symbols": sorted(set(unusable_spot_symbols)),
+        "spot_selection_probe_count": len(candidate_symbols),
+        "spot_selection_rejections": rejection_reasons,
         "above_sma20_pct": (
             round(
                 sum(
@@ -204,7 +296,60 @@ async def collect_crypto(
             else None
         ),
     }
-    return items, results, coverage
+    return items, provider_results, coverage
+
+
+def _breadth_item(
+    market_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Create one auditable breadth observation from the retained technical set."""
+    if not market_rows:
+        return None
+    ordered = sorted(
+        market_rows,
+        key=lambda item: str(item.get("symbol") or ""),
+    )
+    symbols = [str(item.get("symbol") or "") for item in ordered]
+    source_times = [
+        str(item.get("source_time") or "")
+        for item in ordered
+        if item.get("source_time")
+    ]
+    if not source_times:
+        return None
+    above_sma20_count = sum(
+        (item.get("metrics") or {}).get("above_sma20") is True for item in ordered
+    )
+    above_sma50_count = sum(
+        (item.get("metrics") or {}).get("above_sma50") is True for item in ordered
+    )
+    count = len(ordered)
+    source_time = max(source_times)
+    return {
+        "evidence_id": evidence_id(
+            "binance_spot",
+            "liquid_crypto_breadth:" + ",".join(symbols),
+            source_time,
+        ),
+        "provider_id": "binance_spot",
+        "source_family": "derived_market",
+        "metric": "liquid_crypto_breadth",
+        "title": "Derived liquid-crypto technical breadth",
+        "source_time": source_time,
+        "configured_symbols": symbols,
+        "configured_count": count,
+        "above_sma20_count": above_sma20_count,
+        "above_sma20_pct": round(above_sma20_count / count * 100, 2),
+        "above_sma50_count": above_sma50_count,
+        "above_sma50_pct": round(above_sma50_count / count * 100, 2),
+        "underlying_evidence_ids": [
+            str(item.get("evidence_id")) for item in ordered if item.get("evidence_id")
+        ],
+        "derivation": (
+            "Count of retained fresh spot histories above their deterministic "
+            "20-day and 50-day simple moving averages."
+        ),
+    }
 
 
 def _ohlcv_item(
@@ -231,6 +376,8 @@ def _ohlcv_item(
     if not metrics:
         return None
     source_time = metrics["last_observation"]
+    if not _source_is_recent(source_time):
+        return None
     return {
         "evidence_id": evidence_id("binance_spot", symbol, source_time),
         "provider_id": "binance_spot",
@@ -277,6 +424,8 @@ def _kraken_ohlcv_item(
     if not metrics:
         return None
     source_time = metrics["last_observation"]
+    if not _source_is_recent(source_time):
+        return None
     return {
         "evidence_id": evidence_id("kraken", symbol, source_time),
         "provider_id": "kraken",
@@ -445,3 +594,14 @@ def _epoch(value: Any, *, milliseconds: bool = False) -> str:
         .isoformat()
         .replace("+00:00", "Z")
     )
+
+
+def _source_is_recent(value: str, *, maximum_age_days: int = 3) -> bool:
+    try:
+        observed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return False
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - observed.astimezone(timezone.utc)
+    return -86_400 <= age.total_seconds() <= maximum_age_days * 86_400

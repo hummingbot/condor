@@ -1,4 +1,4 @@
-"""Strict shared configs and typed report-package validation."""
+"""Strict source, digest, and report-package contracts for Market Reporter."""
 
 from __future__ import annotations
 
@@ -17,6 +17,15 @@ StrategyKey = Literal[
     "memecoin_market_intelligence",
 ]
 Scope = Literal["crypto", "tradfi", "both", "memecoin"]
+Stance = Literal[
+    "bullish",
+    "cautiously_bullish",
+    "neutral",
+    "cautiously_bearish",
+    "bearish",
+    "mixed",
+]
+Confidence = Literal["low", "moderate", "high"]
 
 
 class StrictModel(BaseModel):
@@ -26,6 +35,7 @@ class StrictModel(BaseModel):
 class BaseSourceConfig(StrictModel):
     strategy_key: StrategyKey
     scope: Scope
+    run_id: str | None = Field(default=None, min_length=1, max_length=160)
     focus_assets: list[str] = Field(default_factory=list, max_length=12)
     themes: list[str] = Field(default_factory=list, max_length=8)
     report_timezone: str = Field(default="UTC", min_length=1, max_length=64)
@@ -33,22 +43,12 @@ class BaseSourceConfig(StrictModel):
     @field_validator("focus_assets", "themes")
     @classmethod
     def bounded_strings(cls, values: list[str]) -> list[str]:
-        cleaned = []
-        for value in values:
-            item = re.sub(r"\s+", " ", str(value)).strip()
-            if not item or len(item) > 120:
-                raise ValueError("Context values must contain 1-120 characters")
-            if item not in cleaned:
-                cleaned.append(item)
-        return cleaned
+        return _bounded_strings(values)
 
     @field_validator("report_timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError("Unknown IANA timezone") from exc
+        _timezone(value)
         return value
 
     @model_validator(mode="after")
@@ -60,6 +60,12 @@ class BaseSourceConfig(StrictModel):
         }
         if self.scope not in allowed[self.strategy_key]:
             raise ValueError("Scope does not match the active Strategy")
+        if self.run_id is not None:
+            expected = (
+                rf"^market_reporter\.{re.escape(self.strategy_key)}_(?:e)?[1-9]\d*$"
+            )
+            if not re.fullmatch(expected, self.run_id):
+                raise ValueError("Run ID does not match the active Strategy")
         return self
 
 
@@ -84,10 +90,7 @@ class SessionResearchContext(StrictModel):
     @field_validator("report_timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError("Unknown IANA timezone") from exc
+        _timezone(value)
         return value
 
     @field_validator(
@@ -118,10 +121,7 @@ class ReportMetadata(StrictModel):
     @field_validator("report_timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
-        try:
-            ZoneInfo(value)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError("Unknown IANA timezone") from exc
+        _timezone(value)
         return value
 
     @field_validator("as_of_utc")
@@ -133,111 +133,295 @@ class ReportMetadata(StrictModel):
 
 class CoverageAssessment(StrictModel):
     grade: Literal["complete", "sufficient", "limited", "unavailable"]
-    confidence_cap: Literal["low", "moderate", "high"]
-    reason_codes: list[str] = Field(default_factory=list, max_length=24)
-    missing_sources: list[str] = Field(default_factory=list, max_length=16)
+    confidence_cap: Confidence
+    reason_codes: list[str] = Field(default_factory=list, max_length=16)
+    missing_sources: list[str] = Field(default_factory=list, max_length=8)
     truncated: bool = False
 
 
-class AnalysisItem(StrictModel):
-    title: str = Field(min_length=1, max_length=160)
-    observation: str = Field(min_length=1, max_length=1200)
-    interpretation: str = Field(min_length=1, max_length=1200)
-    stance: Literal[
-        "bullish",
-        "cautiously_bullish",
-        "neutral",
-        "cautiously_bearish",
-        "bearish",
-        "mixed",
-    ]
-    confidence: Literal["low", "moderate", "high"]
+class AnalysisContext(StrictModel):
+    """Bounded deterministic facts shared by the analyst and renderer."""
+
+    schema_version: Literal["2.0"] = "2.0"
+    strategy_key: StrategyKey
+    scope: Scope
+    as_of_utc: str
+    display_timezone: str
+    research_posture: Literal["conservative", "extreme_risk_research"]
+    coverage_assessment: CoverageAssessment
+    coverage_summary: list[dict[str, Any]] = Field(max_length=7)
+    snapshot_metrics: list[dict[str, Any]] = Field(max_length=6)
+    market_snapshot: dict[str, Any]
+    leaders_laggards: dict[str, Any]
+    news_clusters: list[dict[str, Any]] = Field(max_length=5)
+    social_attention: list[dict[str, Any]] = Field(max_length=5)
+    events: list[dict[str, Any]] = Field(max_length=8)
+    data_limitations: list[str] = Field(max_length=12)
+    evidence_lookup: dict[str, dict[str, Any]]
+    strategy_features: dict[str, Any]
+
+    @field_validator("as_of_utc")
+    @classmethod
+    def valid_as_of(cls, value: str) -> str:
+        _parse_timestamp(value, require_timezone=True)
+        return value
+
+    @field_validator("display_timezone")
+    @classmethod
+    def valid_display_timezone(cls, value: str) -> str:
+        _timezone(value)
+        return value
+
+
+class AnalysisCard(StrictModel):
+    title: str = Field(min_length=1, max_length=140)
+    observation: str = Field(min_length=1, max_length=900)
+    interpretation: str = Field(min_length=1, max_length=900)
+    stance: Stance
+    confidence: Confidence
+    confidence_reason: str = Field(min_length=1, max_length=320)
     horizon: str = Field(min_length=1, max_length=80)
-    supporting_evidence_ids: list[str] = Field(min_length=2, max_length=12)
-    contrary_evidence_ids: list[str] = Field(default_factory=list, max_length=8)
-    invalidation_conditions: list[str] = Field(default_factory=list, max_length=6)
+    what_to_watch: list[str] = Field(min_length=1, max_length=3)
+    invalidation_conditions: list[str] = Field(min_length=1, max_length=3)
+    supporting_evidence_ids: list[str] = Field(min_length=1, max_length=8)
+    contrary_evidence_ids: list[str] = Field(default_factory=list, max_length=4)
 
 
-class ResearchCandidate(StrictModel):
-    rank: int = Field(ge=1, le=100)
-    asset_identity: dict[str, Any]
-    candidate_state: Literal[
+class MarketDriver(StrictModel):
+    short_label: str = Field(min_length=1, max_length=40)
+    title: str = Field(min_length=1, max_length=120)
+    direction: Literal["bullish", "bearish", "mixed", "unclear"]
+    importance: int = Field(ge=1, le=5)
+    explanation: str = Field(min_length=1, max_length=500)
+    supporting_evidence_ids: list[str] = Field(min_length=1, max_length=8)
+    contrary_evidence_ids: list[str] = Field(default_factory=list, max_length=3)
+
+    @field_validator("short_label")
+    @classmethod
+    def one_to_three_word_label(cls, value: str) -> str:
+        label = " ".join(value.split())
+        if not 1 <= len(label.split()) <= 3:
+            raise ValueError("short_label must contain one to three words")
+        return label
+
+
+class EventImpact(StrictModel):
+    event_evidence_id: str = Field(min_length=1, max_length=96)
+    why_it_matters: str = Field(min_length=1, max_length=420)
+    most_affected: list[str] = Field(min_length=1, max_length=5)
+    priority: Literal["high", "medium", "watch"]
+    watch_for: str = Field(min_length=1, max_length=320)
+
+    @field_validator("most_affected", mode="before")
+    @classmethod
+    def normalize_most_affected(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip():
+            return [value.strip()]
+        return value
+
+
+class ResearchHighlight(StrictModel):
+    rank: int | None = Field(default=None, ge=1, le=3)
+    asset_evidence_id: str = Field(min_length=1, max_length=96)
+    research_state: Literal[
         "priority_research",
         "conditional_watch",
         "risk_watch",
         "avoid_for_now",
     ]
-    stance: Literal[
-        "bullish",
-        "cautiously_bullish",
-        "neutral",
-        "cautiously_bearish",
-        "bearish",
-        "mixed",
-    ]
-    confidence: Literal["low", "moderate", "high"]
+    why_now: str = Field(min_length=1, max_length=700)
+    main_risk: str = Field(min_length=1, max_length=500)
+    stance: Stance
+    confidence: Confidence
+    confidence_reason: str = Field(min_length=1, max_length=320)
     horizon: str = Field(min_length=1, max_length=80)
-    why_now: str = Field(min_length=1, max_length=1200)
-    supporting_evidence_ids: list[str] = Field(min_length=2, max_length=12)
-    contrary_evidence_ids: list[str] = Field(default_factory=list, max_length=8)
-    catalysts: list[str] = Field(default_factory=list, max_length=6)
-    invalidation_conditions: list[str] = Field(min_length=1, max_length=6)
-    key_risks: list[str] = Field(min_length=1, max_length=8)
-    dimension_assessments: dict[str, Any]
-    coverage_grade: Literal["complete", "sufficient", "limited", "unavailable"]
+    supporting_evidence_ids: list[str] = Field(min_length=1, max_length=8)
+    contrary_evidence_ids: list[str] = Field(default_factory=list, max_length=4)
+    invalidation_conditions: list[str] = Field(min_length=1, max_length=3)
 
 
-class ReportPackage(StrictModel):
-    schema_version: Literal["1.0"]
+class AnalyticalDigest(StrictModel):
+    """The small LLM-owned v3 analysis contract."""
+
+    market_view: AnalysisCard | None = None
+    movers_view: AnalysisCard | None = None
+    event_outlook: AnalysisCard | None = None
+    drivers: list[MarketDriver] = Field(default_factory=list, max_length=5)
+    event_impacts: list[EventImpact] = Field(default_factory=list, max_length=5)
+    research_highlights: list[ResearchHighlight] = Field(
+        default_factory=list, max_length=3
+    )
+    data_limitations: list[str] = Field(default_factory=list, max_length=3)
+
+    @model_validator(mode="after")
+    def assign_missing_research_ranks(self) -> "AnalyticalDigest":
+        for rank, highlight in enumerate(self.research_highlights, start=1):
+            if highlight.rank is None:
+                highlight.rank = rank
+        return self
+
+
+class ReportPackage(AnalyticalDigest):
+    schema_version: Literal["2.0"]
     metadata: ReportMetadata
     session_research_context: SessionResearchContext
     evidence_manifest: dict[str, Any]
     coverage_assessment: CoverageAssessment
     source_bundles: list[dict[str, Any]] = Field(min_length=1, max_length=7)
-    executive_takeaways: list[str] = Field(min_length=1, max_length=5)
-    market_views: list[AnalysisItem] = Field(default_factory=list, max_length=6)
-    market_structure: dict[str, Any]
-    sentiment_assessment: dict[str, Any]
-    themes: list[dict[str, Any]] = Field(default_factory=list, max_length=6)
-    research_candidates: list[ResearchCandidate] = Field(
-        default_factory=list, max_length=15
-    )
-    opportunities: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
-    risks: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
-    scenarios: list[dict[str, Any]] = Field(default_factory=list, max_length=3)
-    events_and_watch_conditions: list[dict[str, Any]] = Field(
-        default_factory=list, max_length=16
-    )
-    data_limitations: list[str] = Field(default_factory=list, max_length=16)
-    strategy_payload: dict[str, Any]
+    research_posture: Literal["conservative", "extreme_risk_research"]
+    analysis_context: AnalysisContext
 
     @model_validator(mode="after")
     def validate_package_contract(self) -> "ReportPackage":
-        if (
-            self.metadata.strategy_key
-            != self.session_research_context.selected_strategy_key
-        ):
+        strategy = self.metadata.strategy_key
+        if strategy != self.session_research_context.selected_strategy_key:
             raise ValueError("Metadata and session Strategy mismatch")
+        if strategy != self.analysis_context.strategy_key:
+            raise ValueError("Metadata and analysis-context Strategy mismatch")
+        if self.metadata.scope != self.analysis_context.scope:
+            raise ValueError("Metadata and analysis-context scope mismatch")
+        if self.metadata.as_of_utc != self.analysis_context.as_of_utc:
+            raise ValueError("Metadata and analysis-context as-of time mismatch")
         if (
             self.metadata.report_timezone
             != self.session_research_context.report_timezone
+            or self.metadata.report_timezone != self.analysis_context.display_timezone
         ):
-            raise ValueError("Metadata and session timezone mismatch")
+            raise ValueError("Report timezone mismatch")
+        if self.coverage_assessment != self.analysis_context.coverage_assessment:
+            raise ValueError("Coverage assessment is not deterministic")
+
         allowed_scopes = {
             "crypto_market_intelligence": {"crypto", "both"},
             "tradfi_market_intelligence": {"tradfi", "both"},
             "memecoin_market_intelligence": {"memecoin"},
         }
-        if self.metadata.scope not in allowed_scopes[self.metadata.strategy_key]:
+        if self.metadata.scope not in allowed_scopes[strategy]:
             raise ValueError("Report scope does not match Strategy")
-        if (self.metadata.scope == "both") != (
-            self.session_research_context.coverage_mode == "both"
-        ):
-            raise ValueError("Scope and session coverage mode mismatch")
 
+        expected_posture = (
+            "extreme_risk_research"
+            if strategy == "memecoin_market_intelligence"
+            else "conservative"
+        )
+        if self.research_posture != expected_posture:
+            raise ValueError("Research posture does not match Strategy")
+        if self.analysis_context.research_posture != expected_posture:
+            raise ValueError("Analysis-context posture does not match Strategy")
+        expected_mode = "both" if self.metadata.scope == "both" else "primary"
+        if self.session_research_context.coverage_mode != expected_mode:
+            raise ValueError("Coverage mode does not match report scope")
+
+        evidence, evidence_items = self._evidence()
+        required_source = (
+            "token_discovery"
+            if strategy == "memecoin_market_intelligence"
+            else "market"
+        )
+        for label, card in (
+            ("market view", self.market_view),
+            ("movers view", self.movers_view),
+        ):
+            if card is not None:
+                self._validate_card(card, label, evidence)
+                self._require_cross_bundle(
+                    card.supporting_evidence_ids, required_source, label, evidence
+                )
+        if self.event_outlook is not None:
+            self._validate_card(self.event_outlook, "event outlook", evidence)
+        if (
+            self.coverage_assessment.grade not in {"limited", "unavailable"}
+            and self.market_view is None
+        ):
+            raise ValueError("Usable coverage requires a market view")
+
+        cap = {"low": 0, "moderate": 1, "high": 2}[
+            self.coverage_assessment.confidence_cap
+        ]
+        cards = [
+            card
+            for card in (self.market_view, self.movers_view, self.event_outlook)
+            if card is not None
+        ]
+        if any(
+            {"low": 0, "moderate": 1, "high": 2}[card.confidence] > cap
+            for card in cards
+        ):
+            raise ValueError("Analysis confidence exceeds coverage cap")
+
+        selected_events = {
+            str(event.get("evidence_id") or "")
+            for event in self.analysis_context.events
+            if event.get("verified_scheduled") is True
+        }
+        impact_ids = [impact.event_evidence_id for impact in self.event_impacts]
+        if len(impact_ids) != len(set(impact_ids)):
+            raise ValueError("Event impacts must reference unique events")
+        if set(impact_ids) - selected_events:
+            raise ValueError("Event impact references an unselected event")
+        if self.event_outlook is not None:
+            outlook_event_ids = {
+                value
+                for value in self.event_outlook.supporting_evidence_ids
+                if value in selected_events
+            }
+            if not outlook_event_ids:
+                raise ValueError("Event outlook lacks a selected verified event")
+
+        if strategy == "memecoin_market_intelligence" and self.drivers:
+            raise ValueError(
+                "Memecoin reports use deterministic meta trends, not drivers"
+            )
+        for driver in self.drivers:
+            self._validate_refs(
+                driver.supporting_evidence_ids,
+                f"driver {driver.title}",
+                evidence,
+            )
+            self._validate_refs(
+                driver.contrary_evidence_ids,
+                f"driver {driver.title}",
+                evidence,
+            )
+        ranks = [highlight.rank for highlight in self.research_highlights]
+        if len(ranks) != len(set(ranks)):
+            raise ValueError("Research-highlight ranks must be unique")
+        for highlight in self.research_highlights:
+            self._validate_refs(
+                highlight.supporting_evidence_ids,
+                f"research highlight {highlight.rank}",
+                evidence,
+            )
+            self._validate_refs(
+                highlight.contrary_evidence_ids,
+                f"research highlight {highlight.rank}",
+                evidence,
+            )
+            source_types = {
+                evidence[value][0] for value in highlight.supporting_evidence_ids
+            }
+            if required_source not in source_types or len(source_types) < 2:
+                raise ValueError("Research highlight requires cross-bundle evidence")
+            if {"low": 0, "moderate": 1, "high": 2}[highlight.confidence] > cap:
+                raise ValueError("Research-highlight confidence exceeds coverage cap")
+            if highlight.asset_evidence_id not in evidence_items:
+                raise ValueError("Research-highlight asset evidence is unknown")
+            if highlight.asset_evidence_id not in highlight.supporting_evidence_ids:
+                raise ValueError("Asset evidence must support its research highlight")
+            if strategy == "memecoin_market_intelligence":
+                if evidence[highlight.asset_evidence_id][0] != "token_discovery":
+                    raise ValueError(
+                        "Memecoin highlight must select exact-pair evidence"
+                    )
+            elif evidence[highlight.asset_evidence_id][0] != "market":
+                raise ValueError("Research highlight must select market evidence")
+        return self
+
+    def _evidence(self) -> tuple[dict[str, tuple[str, str]], dict[str, dict[str, Any]]]:
         evidence: dict[str, tuple[str, str]] = {}
+        items: dict[str, dict[str, Any]] = {}
         source_types: set[str] = set()
-        allowed_source_types = {
+        allowed = {
             "news",
             "social",
             "market",
@@ -247,10 +431,8 @@ class ReportPackage(StrictModel):
         }
         for bundle in self.source_bundles:
             source_type = str(bundle.get("source_type") or "")
-            if not source_type or source_type in source_types:
-                raise ValueError("Source bundle types must be present and unique")
-            if source_type not in allowed_source_types:
-                raise ValueError("Unknown source bundle type")
+            if source_type not in allowed or source_type in source_types:
+                raise ValueError("Source bundle types must be valid and unique")
             source_types.add(source_type)
             if bundle.get("schema_version") != "1.0":
                 raise ValueError("Source bundle schema mismatch")
@@ -258,176 +440,66 @@ class ReportPackage(StrictModel):
                 raise ValueError("Source bundle status is invalid")
             if bundle.get("mutation") is not False:
                 raise ValueError("Source bundle must be read-only")
-            if bundle.get("strategy_key") != self.metadata.strategy_key:
-                raise ValueError("Source bundle Strategy mismatch")
-            if bundle.get("scope") != self.metadata.scope:
-                raise ValueError("Source bundle scope mismatch")
+            if (
+                bundle.get("strategy_key") != self.metadata.strategy_key
+                or bundle.get("scope") != self.metadata.scope
+            ):
+                raise ValueError("Source bundle identity mismatch")
             _parse_timestamp(str(bundle.get("as_of_utc") or ""), require_timezone=True)
-            items = bundle.get("items") or []
-            retained = int(bundle.get("retained_item_count") or 0)
-            raw = int(bundle.get("raw_item_count") or 0)
-            if retained != len(items) or raw < retained:
-                raise ValueError("Source bundle item counts are inconsistent")
-            if not isinstance(bundle.get("adapter_versions"), dict):
-                raise ValueError("Source bundle adapter versions are missing")
-            for item in items:
-                item_id = str(item.get("evidence_id") or "")
-                if item_id:
-                    if item_id in evidence:
-                        raise ValueError("Evidence IDs must be unique")
-                    evidence[item_id] = (
-                        source_type,
-                        str(item.get("source_family") or source_type),
-                    )
-                for timestamp_key in (
-                    "source_time",
-                    "published_at",
-                    "event_time_utc",
-                    "retrieved_at",
-                ):
-                    timestamp = item.get(timestamp_key)
-                    if timestamp:
-                        _parse_timestamp(str(timestamp))
+            bundle_items = bundle.get("items") or []
+            if int(bundle.get("retained_item_count") or 0) != len(bundle_items):
+                raise ValueError("Source bundle retained count is inconsistent")
+            if int(bundle.get("raw_item_count") or 0) < len(bundle_items):
+                raise ValueError("Source bundle raw count is inconsistent")
+            for item in bundle_items:
+                evidence_id = str(item.get("evidence_id") or "")
+                if not evidence_id:
+                    continue
+                if evidence_id in evidence:
+                    raise ValueError("Evidence IDs must be unique")
+                evidence[evidence_id] = (
+                    source_type,
+                    str(item.get("source_family") or source_type),
+                )
+                items[evidence_id] = item
         if not evidence:
             raise ValueError("Report contains no retained evidence")
+        return evidence, items
 
-        def validate_refs(refs: list[str], label: str) -> None:
-            missing = sorted(set(refs) - evidence.keys())
-            if missing:
-                raise ValueError(f"{label} references unknown evidence: {missing}")
+    @staticmethod
+    def _validate_refs(
+        refs: list[str],
+        label: str,
+        evidence: dict[str, tuple[str, str]],
+    ) -> None:
+        missing = sorted(set(refs) - evidence.keys())
+        if missing:
+            raise ValueError(f"{label} references unknown evidence: {missing}")
 
-        for view in self.market_views:
-            validate_refs(view.supporting_evidence_ids, view.title)
-            validate_refs(view.contrary_evidence_ids, view.title)
-            bundle_families = {
-                evidence[item][0] for item in view.supporting_evidence_ids
-            }
-            required_observation = (
-                "token_discovery"
-                if self.metadata.strategy_key == "memecoin_market_intelligence"
-                else "market"
-            )
-            if len(bundle_families) < 2 or required_observation not in bundle_families:
-                raise ValueError("Market views require two source families")
+    @classmethod
+    def _validate_card(
+        cls,
+        card: AnalysisCard,
+        label: str,
+        evidence: dict[str, tuple[str, str]],
+    ) -> None:
+        cls._validate_refs(card.supporting_evidence_ids, label, evidence)
+        cls._validate_refs(card.contrary_evidence_ids, label, evidence)
 
-        for collection_name, rows in (
-            ("theme", self.themes),
-            ("opportunity", self.opportunities),
-            ("risk", self.risks),
-            ("scenario", self.scenarios),
-            ("event or watch condition", self.events_and_watch_conditions),
-        ):
-            for index, row in enumerate(rows, start=1):
-                refs = row.get("supporting_evidence_ids") or row.get("evidence_ids")
-                if not isinstance(refs, list) or not refs:
-                    raise ValueError(f"{collection_name} {index} requires evidence IDs")
-                validate_refs(
-                    [str(value) for value in refs],
-                    f"{collection_name} {index}",
-                )
-
-        max_candidates = (
-            15 if self.metadata.strategy_key == "memecoin_market_intelligence" else 8
-        )
-        if len(self.research_candidates) > max_candidates:
-            raise ValueError("Too many research candidates for Strategy")
-        ranks = [candidate.rank for candidate in self.research_candidates]
-        if len(ranks) != len(set(ranks)):
-            raise ValueError("Candidate ranks must be unique")
-        for candidate in self.research_candidates:
-            validate_refs(
-                candidate.supporting_evidence_ids, f"candidate {candidate.rank}"
-            )
-            validate_refs(
-                candidate.contrary_evidence_ids, f"candidate {candidate.rank}"
-            )
-            bundle_families = {
-                evidence[item][0] for item in candidate.supporting_evidence_ids
-            }
-            required_observation = (
-                "token_discovery"
-                if self.metadata.strategy_key == "memecoin_market_intelligence"
-                else "market"
-            )
-            if len(bundle_families) < 2 or required_observation not in bundle_families:
-                raise ValueError("Candidates require two source families")
-            if self.metadata.strategy_key == "memecoin_market_intelligence":
-                identity = candidate.asset_identity
-                required = {
-                    "chain_id",
-                    "token_address",
-                    "pair_address",
-                    "quote_token_address",
-                    "cohort",
-                }
-                if not required.issubset(identity) or any(
-                    not str(identity.get(key) or "") for key in required
-                ):
-                    raise ValueError("Memecoin candidate identity is incomplete")
-                if (
-                    identity.get("cohort") != "established"
-                    and candidate.confidence == "high"
-                ):
-                    raise ValueError("Discovery candidates cannot have high confidence")
-                if (
-                    identity.get("cohort") != "established"
-                    and "week" in candidate.horizon.lower()
-                ):
-                    raise ValueError(
-                        "Discovery candidates cannot have an extended horizon"
-                    )
-            elif not str(
-                candidate.asset_identity.get("symbol")
-                or candidate.asset_identity.get("ticker")
-                or ""
-            ):
-                raise ValueError("Liquid-market candidate symbol is missing")
-
-        required_payloads = {
-            "crypto_market_intelligence": {
-                "benchmark_regime",
-                "breadth",
-                "liquidity",
-                "derivatives_positioning",
-                "narrative_rotation",
-            },
-            "tradfi_market_intelligence": {
-                "macro_regime",
-                "rates_credit_dollar",
-                "equity_breadth",
-                "sector_rotation",
-                "cftc_positioning",
-            },
-            "memecoin_market_intelligence": {
-                "broad_backdrop",
-                "established_basket",
-                "chain_cohorts",
-                "discovery_funnel",
-                "candidate_quality",
-                "exclusions",
-            },
-        }
-        missing_payloads = (
-            required_payloads[self.metadata.strategy_key] - self.strategy_payload.keys()
-        )
-        if missing_payloads:
-            raise ValueError(
-                f"Strategy payload is missing blocks: {sorted(missing_payloads)}"
-            )
-        cap_order = {"low": 0, "moderate": 1, "high": 2}
-        cap = cap_order[self.coverage_assessment.confidence_cap]
-        if any(cap_order[view.confidence] > cap for view in self.market_views):
-            raise ValueError("Market-view confidence exceeds the coverage cap")
-        if any(
-            cap_order[candidate.confidence] > cap
-            for candidate in self.research_candidates
-        ):
-            raise ValueError("Candidate confidence exceeds the coverage cap")
-        return self
+    @staticmethod
+    def _require_cross_bundle(
+        refs: list[str],
+        required_source: str,
+        label: str,
+        evidence: dict[str, tuple[str, str]],
+    ) -> None:
+        source_types = {evidence[value][0] for value in refs}
+        if required_source not in source_types or len(source_types) < 2:
+            raise ValueError(f"{label} requires cross-bundle evidence")
 
 
 def validate_safe_urls(value: Any) -> None:
-    """Recursively reject unsafe URL schemes and credential-bearing URLs."""
+    """Recursively reject unsafe or credential-bearing URLs."""
     if isinstance(value, dict):
         for key, item in value.items():
             if "url" in str(key).lower() and isinstance(item, str):
@@ -443,7 +515,7 @@ def validate_safe_urls(value: Any) -> None:
 
 
 def validate_finite_numbers(value: Any) -> None:
-    """Reject NaN and infinities anywhere inside the untyped digest sections."""
+    """Reject NaN and infinities anywhere in the package."""
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("Report package contains a non-finite number")
     if isinstance(value, dict):
@@ -463,6 +535,13 @@ def _bounded_strings(values: list[str]) -> list[str]:
         if item not in cleaned:
             cleaned.append(item)
     return cleaned
+
+
+def _timezone(value: str) -> ZoneInfo:
+    try:
+        return ZoneInfo(value)
+    except ZoneInfoNotFoundError as exc:
+        raise ValueError("Unknown IANA timezone") from exc
 
 
 def _parse_timestamp(value: str, *, require_timezone: bool = False) -> datetime:

@@ -6,7 +6,7 @@ from copy import deepcopy
 from typing import Any
 from urllib.parse import urlparse
 
-MANIFEST_VERSION = "2026-07-31.1"
+MANIFEST_VERSION = "2026-07-31.6"
 
 PROVIDERS: dict[str, dict[str, Any]] = {
     "gdelt": {
@@ -48,6 +48,26 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "max_bytes": 500_000,
         "attribution": "Cointelegraph RSS",
         "stability": "documented",
+    },
+    "marketwatch_rss": {
+        "family": "news",
+        "hosts": ["feeds.content.dowjones.io"],
+        "docs": "https://feeds.content.dowjones.io/public/rss/mw_topstories",
+        "auth": "keyless",
+        "timeout": 8,
+        "max_bytes": 500_000,
+        "attribution": "MarketWatch RSS",
+        "stability": "experimental",
+    },
+    "google_news_rss": {
+        "family": "news",
+        "hosts": ["news.google.com"],
+        "docs": "https://news.google.com/",
+        "auth": "keyless",
+        "timeout": 8,
+        "max_bytes": 750_000,
+        "attribution": "Google News RSS search",
+        "stability": "experimental",
     },
     "federal_reserve": {
         "family": "official",
@@ -102,11 +122,11 @@ PROVIDERS: dict[str, dict[str, Any]] = {
     "bluesky": {
         "family": "social",
         "hosts": ["public.api.bsky.app"],
-        "docs": "https://docs.bsky.app/docs/api/app-bsky-feed-search-posts",
+        "docs": "https://docs.bsky.app/docs/api/app-bsky-feed-get-feed",
         "auth": "keyless",
         "timeout": 8,
         "max_bytes": 1_000_000,
-        "attribution": "Bluesky public AppView",
+        "attribution": "Bluesky public What's Hot feed",
         "stability": "documented",
     },
     "mastodon": {
@@ -149,6 +169,27 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "attribution": "Kraken public market data",
         "stability": "documented",
     },
+    "coinmarketcap": {
+        "family": "market_catalog",
+        "hosts": ["pro-api.coinmarketcap.com"],
+        "docs": "https://coinmarketcap.com/api/documentation/pro-api-reference/keyless-public-api",
+        "auth": "keyless",
+        "timeout": 8,
+        "max_bytes": 3_000_000,
+        "attribution": "CoinMarketCap Keyless Public API",
+        "stability": "documented",
+    },
+    "coingecko": {
+        "family": "market_catalog",
+        "hosts": ["api.coingecko.com"],
+        "docs": "https://docs.coingecko.com/docs/keyless-public-api",
+        "auth": "optional_free_key",
+        "env": "COINGECKO_DEMO_API_KEY",
+        "timeout": 12,
+        "max_bytes": 4_000_000,
+        "attribution": "CoinGecko Keyless Public API",
+        "stability": "documented",
+    },
     "alternative_fng": {
         "family": "sentiment",
         "hosts": ["api.alternative.me"],
@@ -178,6 +219,26 @@ PROVIDERS: dict[str, dict[str, Any]] = {
         "max_bytes": 2_000_000,
         "attribution": "Stooq",
         "stability": "experimental",
+    },
+    "robinhood_equity": {
+        "family": "market",
+        "hosts": ["api.robinhood.com"],
+        "docs": "https://robinhood.com/us/en/support/articles/using-market-data/",
+        "auth": "keyless",
+        "timeout": 8,
+        "max_bytes": 3_000_000,
+        "attribution": "Robinhood public equity market data",
+        "stability": "experimental",
+    },
+    "fred_csv": {
+        "family": "macro",
+        "hosts": ["fred.stlouisfed.org"],
+        "docs": "https://fredhelp.stlouisfed.org/fred/data/downloading/using-the-download-data-link/",
+        "auth": "keyless",
+        "timeout": 8,
+        "max_bytes": 1_000_000,
+        "attribution": "Federal Reserve Bank of St. Louis FRED",
+        "stability": "documented",
     },
     "fred": {
         "family": "macro",
@@ -263,6 +324,7 @@ PROVIDERS: dict[str, dict[str, Any]] = {
 }
 
 _RATE_LIMITS = {
+    "coinmarketcap": "shared IP-based keyless rate pool; calls are bounded and never retried",
     "geckoterminal": "10 requests/minute public allowance",
     "dexscreener": "60 or 300 requests/minute by endpoint",
     "robinhood_registry": "60 requests/second documented limit",
@@ -272,6 +334,7 @@ _FRESHNESS = {
     "official": "provider publication cadence",
     "social": "current collection window",
     "market": "last completed daily observation",
+    "market_catalog": "current provider snapshot",
     "derivatives": "current public snapshot",
     "sentiment": "daily",
     "liquidity": "provider publication cadence",

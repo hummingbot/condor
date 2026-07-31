@@ -1,4 +1,4 @@
-"""Collect verified upcoming U.S. macro events from official calendars."""
+"""Private collector for verified upcoming U.S. macro events."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
         coverage={"future_days": config.future_days, "primary_sources_only": True},
     )
     return RoutineResult(
-        text=bundle_text(bundle),
+        text=bundle_text(bundle, config.run_id),
         table_data=bundle["items"],
         table_columns=["event_time_utc", "provider_id", "title", "url"],
     )

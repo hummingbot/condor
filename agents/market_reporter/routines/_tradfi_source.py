@@ -1,13 +1,12 @@
-"""Private TradFi market adapters for ``market_signal_source``."""
+"""Private TradFi market adapters for the concurrent data gatherer."""
 
 from __future__ import annotations
 
 import asyncio
 import csv
 import io
-import os
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 from xml.etree import ElementTree
 
@@ -19,8 +18,8 @@ from agents.market_reporter.routines._evidence import evidence_id, safe_float
 from agents.market_reporter.routines._http import FetchResult, fetch_json, fetch_text
 from agents.market_reporter.routines._identity import (
     TRADFI_BENCHMARKS,
-    TRADFI_LARGE_CAPS,
     TRADFI_SECTORS,
+    TRADFI_SP500_STOCKS,
     tradfi_symbols,
 )
 from agents.market_reporter.routines._tradfi_metrics import (
@@ -29,10 +28,14 @@ from agents.market_reporter.routines._tradfi_metrics import (
     treasury_curve,
 )
 
-FRED_SERIES = {
+FRED_CSV_SERIES = {
     "vix": "VIXCLS",
     "high_yield_spread": "BAMLH0A0HYM2",
     "broad_dollar": "DTWEXBGS",
+    "yield_3m": "DGS3MO",
+    "yield_2y": "DGS2",
+    "yield_10y": "DGS10",
+    "yield_30y": "DGS30",
 }
 
 
@@ -45,55 +48,50 @@ async def collect_tradfi(
     meta = []
     for symbol in tradfi_symbols(focus_assets):
         tasks.append(
-            fetch_text(
-                "stooq",
-                "https://stooq.com/q/d/l/",
-                params={"s": f"{symbol.lower()}.us", "i": "d"},
+            fetch_json(
+                "robinhood_equity",
+                f"https://api.robinhood.com/marketdata/historicals/{symbol}/",
+                params={
+                    "interval": "day",
+                    "span": "5year" if history_days > 250 else "year",
+                    "bounds": "regular",
+                },
+                retry=False,
             )
         )
         meta.append(("ohlcv", symbol))
-    tasks.extend(
-        [
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=max(90, history_days * 2))
+    for label, series_id in FRED_CSV_SERIES.items():
+        tasks.append(
             fetch_text(
-                "treasury",
-                "https://home.treasury.gov/resource-center/data-chart-center/interest-rates/pages/xml",
+                "fred_csv",
+                "https://fred.stlouisfed.org/graph/fredgraph.csv",
                 params={
-                    "data": "daily_treasury_yield_curve",
-                    "field_tdr_date_value": str(datetime.now(timezone.utc).year),
+                    "id": series_id,
+                    "cosd": start.isoformat(),
+                    "coed": today.isoformat(),
                 },
-            ),
-            fetch_text(
-                "cftc",
-                "https://www.cftc.gov/dea/newcot/FinFutWk.txt",
                 retry=False,
-            ),
-        ]
-    )
-    meta.extend([("treasury", ""), ("cftc", "")])
-    fred_key = os.environ.get("FRED_API_KEY", "").strip()
-    if fred_key:
-        for label, series_id in FRED_SERIES.items():
-            tasks.append(
-                fetch_json(
-                    "fred",
-                    "https://api.stlouisfed.org/fred/series/observations",
-                    params={
-                        "series_id": series_id,
-                        "api_key": fred_key,
-                        "file_type": "json",
-                        "sort_order": "desc",
-                        "limit": min(history_days, 365),
-                    },
-                    retry=False,
-                )
             )
-            meta.append(("fred", label))
+        )
+        meta.append(("fred_csv", label))
+    tasks.append(
+        fetch_text(
+            "cftc",
+            "https://www.cftc.gov/dea/newcot/FinFutWk.txt",
+            retry=False,
+        )
+    )
+    meta.append(("cftc", ""))
     results = list(await asyncio.gather(*tasks))
 
     items = []
     market_rows = []
-    warnings = [] if fred_key else ["fred_optional_key_not_configured"]
+    warnings = []
     normalized_results = list(results)
+    yield_points: dict[str, float | None] = {}
+    yield_times: dict[str, str] = {}
     for index, ((kind, identity), result) in enumerate(zip(meta, results)):
         if result.status != "complete":
             continue
@@ -108,24 +106,27 @@ async def collect_tradfi(
                     status="unavailable",
                     error="unparseable_ohlcv",
                 )
-                warnings.append(f"stooq_unparseable:{identity}")
-        elif kind == "treasury":
-            item = _treasury_item(result)
-            if item:
-                items.append(item)
-            else:
+                warnings.append(f"robinhood_equity_unparseable:{identity}")
+        elif kind == "fred_csv":
+            observations = _fred_csv_observations(result, identity)
+            if not observations:
                 normalized_results[index] = replace(
                     result,
                     status="unavailable",
-                    error="unparseable_treasury_curve",
+                    error="unparseable_fred_csv",
                 )
-                warnings.append("treasury_curve_unparseable")
+                warnings.append(f"fred_csv_unparseable:{identity}")
+                continue
+            if identity.startswith("yield_"):
+                tenor = identity.removeprefix("yield_")
+                yield_points[tenor] = observations[-1]["value"]
+                yield_times[tenor] = observations[-1]["date"]
+            else:
+                items.append(_fred_csv_item(identity, observations, result))
         elif kind == "cftc":
             items.extend(_cftc_items(result))
-        elif kind == "fred":
-            item = _fred_item(identity, result)
-            if item:
-                items.append(item)
+    if yield_points:
+        items.append(_fred_curve_item(yield_points, yield_times, results))
     symbols = {item.get("symbol") for item in market_rows}
     spy = next(
         (item for item in market_rows if item.get("symbol") == "SPY"),
@@ -137,6 +138,12 @@ async def collect_tradfi(
             item["metrics"].get("return_7d_pct"),
             spy_return,
         )
+    sector_breadth_item = _sector_breadth_item(market_rows)
+    if sector_breadth_item:
+        items.append(sector_breadth_item)
+    sp500_breadth_item = _sp500_sample_breadth_item(market_rows)
+    if sp500_breadth_item:
+        items.append(sp500_breadth_item)
     item_families = {item.get("source_family") for item in items}
     item_metrics = {item.get("metric") for item in items}
     cross_asset_components = set()
@@ -147,6 +154,7 @@ async def collect_tradfi(
     if "broad_dollar" in item_metrics or "UUP" in symbols:
         cross_asset_components.add("dollar")
     coverage = {
+        "spy_present": "SPY" in symbols,
         "spy_qqq_present": {"SPY", "QQQ"}.issubset(symbols),
         "sector_valid_count": len(set(TRADFI_SECTORS) & symbols),
         "sector_configured_count": len(TRADFI_SECTORS),
@@ -158,33 +166,154 @@ async def collect_tradfi(
         "sector_breadth": breadth_summary(
             [row for row in market_rows if row.get("symbol") in TRADFI_SECTORS]
         ),
-        "large_cap_breadth": breadth_summary(
-            [row for row in market_rows if row.get("symbol") in TRADFI_LARGE_CAPS]
+        "sp500_sample_valid_count": len(set(TRADFI_SP500_STOCKS) & symbols),
+        "sp500_sample_configured_count": len(TRADFI_SP500_STOCKS),
+        "sp500_stock_breadth": breadth_summary(
+            [row for row in market_rows if row.get("symbol") in TRADFI_SP500_STOCKS]
         ),
         "price_history_available": bool(market_rows),
         "price_provider_status": "available" if market_rows else "unavailable",
-        "keyless_mode": not bool(fred_key),
-        "fred_available": bool(fred_key),
+        "keyless_mode": True,
+        "fred_available": bool(
+            {"vix", "high_yield_spread", "broad_dollar"} & item_metrics
+        ),
+        "price_provider_id": "robinhood_equity",
+        "macro_provider_id": "fred_csv",
     }
     return items, normalized_results, coverage, warnings
+
+
+def _sector_breadth_item(
+    market_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Create one auditable aggregate from retained sector-ETF observations."""
+    sectors = sorted(
+        (
+            item
+            for item in market_rows
+            if str(item.get("symbol") or "") in TRADFI_SECTORS
+            and safe_float((item.get("metrics") or {}).get("return_7d_pct")) is not None
+        ),
+        key=lambda item: str(item.get("symbol") or ""),
+    )
+    if not sectors:
+        return None
+    positive = [
+        item
+        for item in sectors
+        if (safe_float((item.get("metrics") or {}).get("return_7d_pct")) or 0.0) > 0
+    ]
+    negative = [
+        item
+        for item in sectors
+        if (safe_float((item.get("metrics") or {}).get("return_7d_pct")) or 0.0) < 0
+    ]
+    source_time = max(
+        (str(item.get("source_time") or "") for item in sectors),
+        default="",
+    )
+    symbols = [str(item.get("symbol") or "") for item in sectors]
+    return {
+        "evidence_id": evidence_id(
+            "robinhood_equity",
+            "tradfi_sector_breadth:" + ",".join(symbols),
+            source_time,
+        ),
+        "provider_id": "robinhood_equity",
+        "source_family": "derived_market",
+        "metric": "tradfi_sector_breadth",
+        "title": "Derived U.S. sector-ETF seven-day breadth",
+        "source_time": source_time,
+        "configured_symbols": symbols,
+        "configured_count": len(TRADFI_SECTORS),
+        "observed_count": len(sectors),
+        "positive_7d_count": len(positive),
+        "positive_7d_pct": round(len(positive) / len(sectors) * 100, 2),
+        "positive_symbols": [str(item.get("symbol") or "") for item in positive],
+        "negative_7d_count": len(negative),
+        "negative_symbols": [str(item.get("symbol") or "") for item in negative],
+        "underlying_evidence_ids": [
+            str(item.get("evidence_id")) for item in sectors if item.get("evidence_id")
+        ],
+        "derivation": (
+            "Count of retained sector ETFs with a strictly positive deterministic "
+            "seven-day close-to-close return."
+        ),
+    }
+
+
+def _sp500_sample_breadth_item(
+    market_rows: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Summarize the observed representative S&P 500 stock sample."""
+    stocks = [
+        item
+        for item in market_rows
+        if str(item.get("symbol") or "") in TRADFI_SP500_STOCKS
+        and safe_float((item.get("metrics") or {}).get("return_7d_pct")) is not None
+    ]
+    if not stocks:
+        return None
+    positive = [
+        item
+        for item in stocks
+        if (safe_float((item.get("metrics") or {}).get("return_7d_pct")) or 0.0) > 0
+    ]
+    negative = [
+        item
+        for item in stocks
+        if (safe_float((item.get("metrics") or {}).get("return_7d_pct")) or 0.0) < 0
+    ]
+    source_time = max(
+        (str(item.get("source_time") or "") for item in stocks),
+        default="",
+    )
+    symbols = [str(item.get("symbol") or "") for item in stocks]
+    return {
+        "evidence_id": evidence_id(
+            "robinhood_equity",
+            "tradfi_sp500_sample_breadth:" + ",".join(symbols),
+            source_time,
+        ),
+        "provider_id": "robinhood_equity",
+        "source_family": "derived_market",
+        "metric": "tradfi_sp500_sample_breadth",
+        "title": "Representative S&P 500 stock-sample seven-day breadth",
+        "source_time": source_time,
+        "configured_symbols": list(TRADFI_SP500_STOCKS),
+        "configured_count": len(TRADFI_SP500_STOCKS),
+        "observed_count": len(stocks),
+        "positive_7d_count": len(positive),
+        "positive_7d_pct": round(len(positive) / len(stocks) * 100, 2),
+        "positive_symbols": [str(item.get("symbol") or "") for item in positive],
+        "negative_7d_count": len(negative),
+        "negative_symbols": [str(item.get("symbol") or "") for item in negative],
+        "underlying_evidence_ids": [
+            str(item.get("evidence_id")) for item in stocks if item.get("evidence_id")
+        ],
+        "derivation": (
+            "Count of retained representative S&P 500 stocks with a strictly "
+            "positive deterministic seven-day close-to-close return."
+        ),
+    }
 
 
 def _ohlcv_item(
     symbol: str, result: FetchResult, history_days: int
 ) -> dict[str, Any] | None:
     rows = []
-    for row in csv.DictReader(io.StringIO(result.text or "")):
-        close = safe_float(row.get("Close"))
+    for row in (result.data or {}).get("historicals") or []:
+        close = safe_float(row.get("close_price"))
         if close is None:
             continue
         rows.append(
             {
-                "timestamp": str(row.get("Date") or ""),
-                "open": safe_float(row.get("Open")),
-                "high": safe_float(row.get("High")),
-                "low": safe_float(row.get("Low")),
+                "timestamp": str(row.get("begins_at") or ""),
+                "open": safe_float(row.get("open_price")),
+                "high": safe_float(row.get("high_price")),
+                "low": safe_float(row.get("low_price")),
                 "close": close,
-                "volume": safe_float(row.get("Volume")) or 0.0,
+                "volume": safe_float(row.get("volume")) or 0.0,
             }
         )
     rows = rows[-history_days:]
@@ -193,8 +322,8 @@ def _ohlcv_item(
         return None
     source_time = metrics["last_observation"]
     return {
-        "evidence_id": evidence_id("stooq", symbol, source_time),
-        "provider_id": "stooq",
+        "evidence_id": evidence_id("robinhood_equity", symbol, source_time),
+        "provider_id": "robinhood_equity",
         "source_family": "market",
         "asset_class": "tradfi",
         "symbol": symbol,
@@ -262,38 +391,105 @@ def _cftc_items(result: FetchResult) -> list[dict[str, Any]]:
         ):
             continue
         source_time = row[2].strip()
+        asset_manager_net = _net(row[11], row[12])
+        leveraged_fund_net = _net(row[14], row[15])
         output.append(
             {
                 "evidence_id": evidence_id("cftc", name, source_time),
                 "provider_id": "cftc",
                 "source_family": "positioning",
+                "metric": "cftc_positioning",
+                "title": f"CFTC weekly positioning — {name[:160]}",
+                "symbol": name[:160],
                 "contract": name[:160],
                 "source_time": source_time,
                 "retrieved_at": result.retrieved_at,
-                "asset_manager_net": _net(row[11], row[12]),
-                "leveraged_fund_net": _net(row[14], row[15]),
+                "asset_manager_net": asset_manager_net,
+                "leveraged_fund_net": leveraged_fund_net,
+                "value": leveraged_fund_net,
+                "unit": "contracts_net",
                 "publication_lag": "weekly",
+                "url": result.url,
             }
         )
     return output[:20]
 
 
-def _fred_item(label: str, result: FetchResult) -> dict[str, Any] | None:
-    for observation in (result.data or {}).get("observations") or []:
-        value = safe_float(observation.get("value"))
-        if value is None:
+def _fred_csv_observations(
+    result: FetchResult,
+    label: str,
+) -> list[dict[str, Any]]:
+    rows = []
+    for row in csv.DictReader(io.StringIO(result.text or "")):
+        value = safe_float(
+            next((item for key, item in row.items() if key != "observation_date"), None)
+        )
+        observed = str(row.get("observation_date") or "")
+        if value is None or not observed:
             continue
-        source_time = str(observation.get("date") or "")
-        return {
-            "evidence_id": evidence_id("fred", label, source_time),
-            "provider_id": "fred",
-            "source_family": "macro",
-            "metric": label,
-            "source_time": source_time,
-            "retrieved_at": result.retrieved_at,
-            "value": value,
-        }
-    return None
+        rows.append({"date": observed, "value": value, "label": label})
+    return rows
+
+
+def _fred_csv_item(
+    label: str,
+    observations: list[dict[str, Any]],
+    result: FetchResult,
+) -> dict[str, Any]:
+    latest = observations[-1]
+    return {
+        "evidence_id": evidence_id("fred_csv", label, latest["date"]),
+        "provider_id": "fred_csv",
+        "source_family": "macro",
+        "metric": label,
+        "source_time": latest["date"],
+        "retrieved_at": result.retrieved_at,
+        "value": latest["value"],
+        "change_7d": _dated_change(observations, 7),
+        "change_30d": _dated_change(observations, 30),
+    }
+
+
+def _fred_curve_item(
+    points: dict[str, float | None],
+    source_times: dict[str, str],
+    results: list[FetchResult],
+) -> dict[str, Any]:
+    source_time = max(source_times.values(), default="")
+    retrieved_at = max(
+        (result.retrieved_at for result in results if result.provider_id == "fred_csv"),
+        default="",
+    )
+    return {
+        "evidence_id": evidence_id("fred_csv", "yield_curve", source_time),
+        "provider_id": "fred_csv",
+        "source_family": "macro",
+        "metric": "treasury_curve",
+        "source_time": source_time,
+        "retrieved_at": retrieved_at,
+        "point_source_times": source_times,
+        **treasury_curve(points),
+    }
+
+
+def _dated_change(observations: list[dict[str, Any]], days: int) -> float | None:
+    latest = observations[-1]
+    try:
+        cutoff = date.fromisoformat(latest["date"]) - timedelta(days=days)
+    except ValueError:
+        return None
+    prior = None
+    for row in reversed(observations[:-1]):
+        try:
+            observed = date.fromisoformat(row["date"])
+        except (TypeError, ValueError):
+            continue
+        if observed <= cutoff:
+            prior = row
+            break
+    if prior is None:
+        return None
+    return round(latest["value"] - prior["value"], 4)
 
 
 def _net(long_value: Any, short_value: Any) -> float | None:

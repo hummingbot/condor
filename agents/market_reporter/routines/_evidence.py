@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import secrets
+import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from html import unescape
 from typing import Any
@@ -13,6 +16,9 @@ from agents.market_reporter.routines._identity import REGISTRY_VERSION
 from agents.market_reporter.routines._providers import MANIFEST_VERSION
 
 ADAPTER_VERSION = "1.0"
+_CACHE_TTL_SECONDS = 1_800
+_BUNDLE_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+_SNAPSHOT_CACHE: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
 
 
 def utc_now() -> str:
@@ -131,8 +137,93 @@ def finalize_bundle(
     return envelope
 
 
-def bundle_text(bundle: dict[str, Any]) -> str:
+def bundle_text(bundle: dict[str, Any], run_id: str | None = None) -> str:
+    if run_id:
+        _expire_bundle_cache()
+        checksum = str(bundle.get("bundle_checksum") or "")
+        if not checksum:
+            raise ValueError("Source bundle checksum is missing")
+        _BUNDLE_CACHE[(run_id, checksum)] = (time.monotonic(), deepcopy(bundle))
     return canonical_json(bundle)
+
+
+def resolve_source_bundles(
+    run_id: str,
+    checksums: list[str],
+) -> list[dict[str, Any]]:
+    """Resolve exact current-run public evidence without an LLM JSON round trip."""
+    _expire_bundle_cache()
+    bundles = []
+    for checksum in checksums:
+        cached = _BUNDLE_CACHE.get((run_id, checksum))
+        if cached is None:
+            raise ValueError("Source bundle reference is unavailable for this run")
+        bundles.append(deepcopy(cached[1]))
+    return bundles
+
+
+def cache_evidence_snapshot(
+    run_id: str,
+    bundles: list[dict[str, Any]],
+    report_seed: dict[str, Any],
+) -> str:
+    """Cache one immutable current-run evidence set behind an opaque handle."""
+    _expire_bundle_cache()
+    if not run_id or not bundles:
+        raise ValueError("Evidence snapshot requires a run and source bundles")
+    checksums = []
+    for bundle in bundles:
+        checksum = str(bundle.get("bundle_checksum") or "")
+        if not checksum:
+            raise ValueError("Source bundle checksum is missing")
+        checksums.append(checksum)
+    token_material = canonical_json(
+        {
+            "run_id": run_id,
+            "checksums": checksums,
+            "nonce": secrets.token_hex(24),
+        }
+    )
+    snapshot_id = f"es_{hashlib.sha256(token_material.encode()).hexdigest()[:40]}"
+    for key in [key for key in _SNAPSHOT_CACHE if key[0] == run_id]:
+        _SNAPSHOT_CACHE.pop(key, None)
+    _SNAPSHOT_CACHE[(run_id, snapshot_id)] = (
+        time.monotonic(),
+        {
+            "schema_version": "1.0",
+            "source_bundles": deepcopy(bundles),
+            "report_seed": deepcopy(report_seed),
+        },
+    )
+    for key in [key for key in _BUNDLE_CACHE if key[0] == run_id]:
+        _BUNDLE_CACHE.pop(key, None)
+    return snapshot_id
+
+
+def resolve_evidence_snapshot(run_id: str, snapshot_id: str) -> dict[str, Any]:
+    """Resolve one exact current-run snapshot without an LLM evidence round trip."""
+    _expire_bundle_cache()
+    cached = _SNAPSHOT_CACHE.get((run_id, snapshot_id))
+    if cached is None:
+        raise ValueError("Evidence snapshot is unavailable for this run")
+    return deepcopy(cached[1])
+
+
+def clear_source_bundles(run_id: str) -> None:
+    for key in [key for key in _BUNDLE_CACHE if key[0] == run_id]:
+        _BUNDLE_CACHE.pop(key, None)
+    for key in [key for key in _SNAPSHOT_CACHE if key[0] == run_id]:
+        _SNAPSHOT_CACHE.pop(key, None)
+
+
+def _expire_bundle_cache() -> None:
+    cutoff = time.monotonic() - _CACHE_TTL_SECONDS
+    for key, (created_at, _) in list(_BUNDLE_CACHE.items()):
+        if created_at < cutoff:
+            _BUNDLE_CACHE.pop(key, None)
+    for key, (created_at, _) in list(_SNAPSHOT_CACHE.items()):
+        if created_at < cutoff:
+            _SNAPSHOT_CACHE.pop(key, None)
 
 
 def _freshness(item: dict[str, Any]) -> dict[str, Any]:

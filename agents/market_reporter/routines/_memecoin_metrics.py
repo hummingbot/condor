@@ -36,6 +36,7 @@ def normalize_dex_pair(raw: dict[str, Any], *, origin: str) -> dict[str, Any] | 
         sells = safe_float(h24.get("sells"))
         dex = str((relationships.get("dex") or {}).get("data", {}).get("id") or "")
         symbol = str(attributes.get("name") or "").split(" / ")[0]
+        name = symbol
         fdv = safe_float(attributes.get("fdv_usd"))
         market_cap = safe_float(attributes.get("market_cap_usd"))
         price_usd = safe_float(attributes.get("base_token_price_usd"))
@@ -55,6 +56,7 @@ def normalize_dex_pair(raw: dict[str, Any], *, origin: str) -> dict[str, Any] | 
         sells = safe_float(h24.get("sells"))
         dex = str(raw.get("dexId") or "")
         symbol = str(base.get("symbol") or "")
+        name = str(base.get("name") or symbol)
         fdv = safe_float(raw.get("fdv"))
         market_cap = safe_float(raw.get("marketCap"))
         price_usd = safe_float(raw.get("priceUsd"))
@@ -69,6 +71,7 @@ def normalize_dex_pair(raw: dict[str, Any], *, origin: str) -> dict[str, Any] | 
         "pair_address": normalize_address(network, pair_address),
         "quote_token_address": quote_address,
         "symbol": symbol[:32],
+        "name": name[:120],
         "dex": dex[:80],
         "pair_created_at": created_at,
         "liquidity_usd": liquidity,

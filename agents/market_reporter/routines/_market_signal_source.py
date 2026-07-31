@@ -1,4 +1,4 @@
-"""Produce deterministic cross-market metrics without selecting candidates."""
+"""Private collector for deterministic cross-market metrics."""
 
 from __future__ import annotations
 
@@ -54,6 +54,14 @@ async def run(config: Config, context: Any) -> RoutineResult:
         items.extend(crypto_items)
         provider_results.extend(crypto_results)
         coverage["crypto_universe"] = crypto_coverage
+        rejected = [
+            str(row.get("symbol"))
+            for row in crypto_coverage.get("spot_selection_rejections") or []
+            if row.get("reason")
+            in {"primary_http_failure", "stale_or_unparseable_history"}
+        ]
+        if rejected:
+            warnings.append("technical_universe_substitutions:" + ",".join(rejected))
     if tradfi_task is not None:
         tradfi_items, tradfi_results, tradfi_coverage, tradfi_warnings = collected[
             cursor
@@ -82,7 +90,7 @@ async def run(config: Config, context: Any) -> RoutineResult:
         for item in bundle["items"][:30]
     ]
     return RoutineResult(
-        text=bundle_text(bundle),
+        text=bundle_text(bundle, config.run_id),
         table_data=table,
         table_columns=["asset", "provider", "last_observation", "value"],
     )

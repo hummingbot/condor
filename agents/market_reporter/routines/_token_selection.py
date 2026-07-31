@@ -6,10 +6,14 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
+from agents.market_reporter.routines._crypto_catalog import primary_meta_for_asset
 from agents.market_reporter.routines._evidence import evidence_id, utc_now
 from agents.market_reporter.routines._identity import (
     APPROVED_QUOTES,
+    DEXSCREENER_CHAINS,
     ESTABLISHED_MEMECOINS,
+    GECKO_NETWORKS,
+    MEMECOIN_INFRASTRUCTURE_SYMBOLS,
     normalize_address,
     normalize_chain,
     registry_is_current,
@@ -115,25 +119,77 @@ def build_items(
         key = (chain, token)
         flags = promotion_flags.get(key, {})
         quality = add_quality_metrics(pair)
+        symbol = str(quality.get("symbol") or pair.get("symbol") or "").upper()
+        registry_entry = established.get(key)
+        primary_meta = (
+            registry_entry.get("primary_meta")
+            if registry_entry
+            else primary_meta_for_asset(
+                symbol,
+                str(pair.get("name") or ""),
+                description=str(flags.get("provider_description") or ""),
+            )
+        )
+        classification_source = (
+            "exact_established_contract"
+            if registry_entry
+            else "provider_name_or_description" if primary_meta else "unverified"
+        )
+        approved_base_addresses = {
+            normalize_address(chain, value)
+            for value in APPROVED_QUOTES.get(chain, set())
+        }
+        if (
+            symbol in MEMECOIN_INFRASTRUCTURE_SYMBOLS
+            or token in approved_base_addresses
+        ):
+            state = "excluded"
+            reasons = sorted(set(reasons + ["non_memecoin_infrastructure"]))
+        if not primary_meta:
+            state = "excluded"
+            reasons = sorted(set(reasons + ["memecoin_classification_unverified"]))
         origins = pair.get("discovery_origins") or [pair["discovery_origin"]]
-        source_time = str(pair.get("pair_created_at") or "")
+        pair_created_at = str(pair.get("pair_created_at") or "")
+        observation_time = utc_now()
+        provider_id = (
+            "geckoterminal"
+            if any(origin.startswith("organic_oriented") for origin in origins)
+            else "dexscreener"
+        )
+        if provider_id == "geckoterminal":
+            network = GECKO_NETWORKS[chain]
+            source_url = (
+                "https://api.geckoterminal.com/api/v2/networks/"
+                f"{network}/pools/{pair['pair_address']}"
+            )
+        else:
+            network = DEXSCREENER_CHAINS[chain]
+            source_url = (
+                "https://api.dexscreener.com/latest/dex/pairs/"
+                f"{network}/{pair['pair_address']}"
+            )
         item = {
             "evidence_id": evidence_id(
-                "dex_market", f"{chain}:{token}:{pair['pair_address']}", source_time
+                "dex_market",
+                f"{chain}:{token}:{pair['pair_address']}",
+                observation_time,
             ),
-            "provider_id": (
-                "geckoterminal"
-                if any(origin.startswith("organic_oriented") for origin in origins)
-                else "dexscreener"
-            ),
+            "provider_id": provider_id,
             "source_family": "token_discovery",
-            "source_time": source_time,
-            "observation_time": utc_now(),
+            "source_time": observation_time,
+            "observation_time": observation_time,
+            "pair_created_at": pair_created_at,
             "chain_id": chain,
             "token_address": token,
             "pair_address": pair["pair_address"],
             "quote_token_address": pair["quote_token_address"],
-            "cohort": established.get(key, {}).get("cohort", "discovery"),
+            "primary_meta": primary_meta,
+            "memecoin_classification": {
+                "status": "confirmed" if primary_meta else "unverified",
+                "source": classification_source,
+                "provider_description": flags.get("provider_description"),
+            },
+            "cohort": (registry_entry or {}).get("cohort", "discovery"),
             "eligibility": state,
             "reason_codes": reasons,
             "discovery_origins": origins,
@@ -142,7 +198,8 @@ def build_items(
             "observed_pair_count": pair.get("observed_pair_count", 1),
             "identity_conflict": pair.get("identity_conflict", False),
             "market": quality,
-            "url": f"https://dexscreener.com/{chain}/{pair['pair_address']}",
+            "url": source_url,
+            "display_url": f"https://dexscreener.com/{chain}/{pair['pair_address']}",
             "gecko_detail": gecko_details.get((chain, pair["pair_address"])),
         }
         if chain == "robinhood":
