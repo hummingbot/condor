@@ -27,6 +27,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from condor.agents.ownership import OwnedBot
 from condor.agents.sessions_index import (
     count_experiments,
     count_sessions,
@@ -123,7 +124,6 @@ class AgentSummary(BaseModel):
     slug: str
     name: str
     description: str
-    consultable: bool = False
     when_to_consult: str = ""
     agent_key: str = ""
     strategy_count: int = 0
@@ -188,7 +188,6 @@ class AgentDetail(BaseModel):
     agent_key: str = ""
     tools: list[str] = []
     when_to_consult: str = ""
-    consultable: bool = False
     server_required: bool = True
     server_name: str = ""
     strategies: list[StrategySummary] = []
@@ -385,38 +384,109 @@ def _session_start_epoch(strategy_dir: Path, num: int) -> float:
         return 0.0
 
 
+def _session_ownership(
+    strategy_dir: Path, default_config: dict | None, num: int
+) -> list[OwnedBot]:
+    """Bases a session owned and the instant it took each over, oldest first.
+
+    Two sources, in order:
+
+    1. ``{session_dir}/owned_bots.json`` — the ledger [[FEAT-017]] writes, which
+       knows both the bases (a session may operate several) and the exact takeover
+       instant, whether the bot was deployed here or adopted after a restart.
+    2. the legacy shim — a session predating the ledger resolves its single
+       ``bot_name`` as one owned bot ``since`` the session started, reproducing the
+       session-start tiling attribution used before the ledger existed.
+
+    Empty for direct-executor strategies, whose per-session executor attribution
+    already stands and must not be touched.
+    """
+    from condor.agents.ownership import read_owned
+
+    owned = read_owned(find_session_dir(strategy_dir, num))
+    if owned:
+        return owned
+    base = _session_bot_base(strategy_dir, default_config, num)
+    if not base:
+        return []
+    start = _session_start_epoch(strategy_dir, num)
+    return [OwnedBot(base=base, origin="legacy", since=start, last_seen=start)]
+
+
+def _owner_windows(
+    real_sessions: list, strategy_dir: Path, default_config: dict | None
+) -> dict[str, list[tuple[float, Any]]]:
+    """``{base: [(since, session), …]}`` — each base's owners, oldest takeover first.
+
+    The windows a base's owners occupy tile ``[since_i, since_{i+1})`` and the last
+    one runs to now, so slicing over them reproduces the bot's whole cumulative with
+    no gap and no double count. Keyed per base rather than globally per session
+    number: two bases handed over at different moments never share a timeline.
+    """
+    owners: dict[str, list[tuple[float, Any]]] = {}
+    for s in real_sessions:
+        for ob in _session_ownership(strategy_dir, default_config, s.session_num):
+            owners.setdefault(ob.base, []).append((ob.since, s))
+    for lst in owners.values():
+        lst.sort(key=lambda t: (t[0], t[1].session_num))
+    return owners
+
+
+def _current_owner_bases(
+    strategy_dir: Path,
+    default_config: dict | None,
+    session_nums: list[int],
+    num: int,
+) -> list[str]:
+    """Bases ``num`` is the CURRENT owner of — the last takeover by ``since``.
+
+    A bot's live open positions belong to whoever operates it now, so this is the
+    gate for merging them into one session's view. Same rule
+    :func:`_apply_bot_mode_pnl` applies to live unrealized PnL, kept here as one
+    lookup over the same windows so the rollup and the per-session detail can
+    never disagree about who holds the open book.
+    """
+    last: dict[str, tuple[float, int]] = {}
+    for n in session_nums:
+        for ob in _session_ownership(strategy_dir, default_config, n):
+            if last.get(ob.base, (float("-inf"), -1)) <= (ob.since, n):
+                last[ob.base] = (ob.since, n)
+    return sorted(base for base, (_, owner) in last.items() if owner == num)
+
+
 async def _apply_bot_mode_pnl(
     real_sessions: list, strategy_dir: Path, default_config: dict | None, client: Any
 ) -> None:
-    """Distribute each operated bot's PnL across session windows (bot-mode only).
+    """Distribute each owned bot's PnL across the sessions that operated it.
 
-    Realized PnL, volume and trade counts are attributed to whichever session was
-    operating during each slice of the bot's cumulative history; live unrealized
-    PnL and open positions go to the current operator (the latest session per bot
-    base). Session windows tile the timeline ``[start_N, start_{N+1})`` (last → now)
-    so every slice sums back to the bot's cumulative with no double counting.
+    One rule covers deploy and handover: every owned bot is attributed by slicing
+    its history over ``[since, next_owner.since or now)``, where ``since`` is the
+    takeover instant the ownership ledger recorded. A bot the session *deployed*
+    has no history before its ``since``, so the general rule already hands it the
+    whole instance — the exact case falls out instead of needing its own branch.
+
+    Live unrealized PnL, fees and open positions go to each base's LAST owner by
+    ``since`` — a lookup in the ledger where it used to be a ``max(session_num)``
+    guess, so a new session that never adopted the bot no longer inherits its
+    open book.
 
     Works uniformly for single- and multi-controller bots (history sums controllers
-    per instance) and for a strategy re-launched under several instances. Strategies
-    whose sessions resolve NO bot_name (direct-executor agents) are left untouched —
-    their per-session executor attribution already stands.
+    per instance) and for a base re-launched under several instances. Strategies
+    whose sessions own no bot (direct-executor agents) are left untouched.
     """
     from condor.fetchers.bot_performance import (
         bot_executor_rows,
         fetch_all_bot_performance,
         fetch_instance_history,
-        resolve_bot,
-        resolve_bot_instances,
+        partition_instances,
+        resolve_bots,
         slice_history,
     )
 
     if not client or not real_sessions:
         return
-    session_base = {
-        s.session_num: _session_bot_base(strategy_dir, default_config, s.session_num)
-        for s in real_sessions
-    }
-    bases = {b for b in session_base.values() if b}
+    owners = _owner_windows(real_sessions, strategy_dir, default_config)
+    bases = sorted(owners)
     if not bases:
         return  # direct-executor strategy — nothing to attribute
 
@@ -426,7 +496,7 @@ async def _apply_bot_mode_pnl(
         log.warning("bot perf fetch for %s failed: %s", strategy_dir.name, e)
         return
 
-    instances_by_base = {b: resolve_bot_instances(all_perf, b) for b in bases}
+    instances_by_base = partition_instances(all_perf, bases)
     all_instances = sorted({i for lst in instances_by_base.values() for i in lst})
     MAX_INSTANCES = 24
     if len(all_instances) > MAX_INSTANCES:
@@ -442,35 +512,26 @@ async def _apply_bot_mode_pnl(
         inst: await fetch_instance_history(client, inst) for inst in all_instances
     }
 
-    # Distribute realized/volume/trades per session window.
-    ordered = sorted(real_sessions, key=lambda s: s.session_num)
+    live = resolve_bots(all_perf, bases)
     now = time.time()
-    for i, s in enumerate(ordered):
-        base = session_base[s.session_num]
-        if not base:
-            continue
-        start = _session_start_epoch(strategy_dir, s.session_num)
-        end = (
-            _session_start_epoch(strategy_dir, ordered[i + 1].session_num)
-            if i + 1 < len(ordered)
-            else now
-        )
-        insts = [history[k] for k in instances_by_base[base] if k in history]
-        realized, volume, trades = slice_history(insts, start, end)
-        s.realized_pnl += realized
-        s.volume += volume
-        s.trade_count += int(round(trades))
-        s.total_pnl = s.realized_pnl + s.unrealized_pnl
-
-    # Live unrealized + open positions → the current operator per base.
     for base in bases:
-        bot = resolve_bot(all_perf, base)
+        window_owners = owners[base]
+        insts = [history[k] for k in instances_by_base.get(base, []) if k in history]
+
+        # Realized / volume / trades: one window per owner, tiling the timeline.
+        for i, (since, s) in enumerate(window_owners):
+            end = window_owners[i + 1][0] if i + 1 < len(window_owners) else now
+            realized, volume, trades = slice_history(insts, since, end)
+            s.realized_pnl += realized
+            s.volume += volume
+            s.trade_count += int(round(trades))
+            s.total_pnl = s.realized_pnl + s.unrealized_pnl
+
+        # Live unrealized + open positions → the base's current owner.
+        bot = live.get(base)
         if not bot:
             continue
-        ops = [s for s in real_sessions if session_base[s.session_num] == base]
-        if not ops:
-            continue
-        operator = max(ops, key=lambda s: s.session_num)
+        operator = window_owners[-1][1]
         b_rows = bot_executor_rows(bot)
         operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
         operator.fees += float(bot.get("cum_fees_quote", 0) or 0)
@@ -725,8 +786,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
                 slug=agent.slug,
                 name=agent.name,
                 description=agent.description,
-                consultable=agent.consultable,
-                when_to_consult=agent.when_to_consult,
+                when_to_consult=agent.consult_hint,
                 agent_key=agent.agent_key,
                 strategy_count=len(strat_summaries),
                 strategies=strat_summaries,
@@ -823,8 +883,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
         ),
         agent_key=agent.agent_key,
         tools=agent.tools,
-        when_to_consult=agent.when_to_consult,
-        consultable=agent.consultable,
+        when_to_consult=agent.consult_hint,
         server_required=agent.server_required,
         server_name=agent.server_name,
         strategies=strat_summaries,
@@ -855,8 +914,7 @@ async def create_agent(
         slug=agent.slug,
         name=agent.name,
         description=agent.description,
-        consultable=agent.consultable,
-        when_to_consult=agent.when_to_consult,
+        when_to_consult=agent.consult_hint,
         agent_key=agent.agent_key,
     )
 
@@ -1016,6 +1074,23 @@ async def create_strategy(
     )
 
 
+@router.post("/{slug}/strategies/default", response_model=StrategySummary)
+async def create_default_strategy(slug: str, user: WebUser = Depends(get_current_user)):
+    """Materialize this Agent's default playbook so it can be tuned and looped.
+
+    Every Agent is loopable — this just brings the implicit default playbook on
+    disk where the normal strategy UI (config, start, sessions) can reach it.
+    Idempotent: returns the existing one when it is already there.
+    """
+    _get_agent(slug)
+    strategy = _strategy_store().ensure_default(slug)
+    if strategy is None:
+        raise HTTPException(
+            status_code=500, detail=f"Could not create a default loop for '{slug}'"
+        )
+    return await _build_strategy_summary(strategy)
+
+
 @router.get("/{slug}/strategies/{sslug}", response_model=StrategyDetail)
 async def get_strategy(
     slug: str, sslug: str, user: WebUser = Depends(get_current_user)
@@ -1168,27 +1243,21 @@ async def get_session_executors(
                 agent_id=agent_id, session_num=session_num
             ).model_dump(),
         }
-    # Bot-mode: the session operates a named bot whose executors live in the bot
-    # container, not the agent_id-keyed table. Resolve the bot_name (per-session
-    # config wins, so runtime-named bots that record their name are picked up)
-    # and let fetch_agent_performance merge its live positions — but ONLY for the
-    # current operator (the latest session that deployed the live bot instance).
-    # A closed session shows only its own direct executors, never the live bot's
-    # open positions, which belong to whoever is running the shared bot now.
-    from condor.agents.sessions_index import enumerate_agent_ids
-
+    # Bot-mode: the session operates named bots whose executors live in the bot
+    # container, not the agent_id-keyed table. Merge the live positions of every
+    # base this session CURRENTLY owns — the same last-owner-by-`since` rule
+    # _apply_bot_mode_pnl uses, so the two views never disagree. A session that
+    # handed its bot over shows only its own direct executors; the live open book
+    # belongs to whoever operates the bot now.
     session_nums = [
         n
         for _, n, k in enumerate_agent_ids(_runkey(slug, sslug), strategy.dir)
         if k == "session"
     ]
-    is_operator = bool(session_nums) and session_num == max(session_nums)
-    bot_name = (
-        _session_bot_base(strategy.dir, strategy.default_config, session_num)
-        if is_operator
-        else ""
+    bot_names = _current_owner_bases(
+        strategy.dir, strategy.default_config, session_nums, session_num
     )
-    perf = await fetch_agent_performance(client, agent_id, bot_name=bot_name)
+    perf = await fetch_agent_performance(client, agent_id, bot_names=bot_names)
     model = AgentPerformanceModel(
         agent_id=agent_id,
         session_num=session_num,
@@ -1209,6 +1278,28 @@ async def get_session_executors(
 # ── Strategy lifecycle ──
 
 
+@router.post("/{slug}/start")
+async def start_agent_loop(
+    slug: str,
+    req: StartStrategyRequest,
+    user: WebUser = Depends(get_current_user),
+):
+    """Start this Agent's loop without naming a strategy.
+
+    Every Agent is loopable: one that owns a single playbook runs it, and one
+    that owns none runs the default playbook built from its identity (created
+    here on first start). Naming a strategy explicitly is the ``/{slug}/
+    strategies/{sslug}/start`` route.
+    """
+    agent = _get_agent(slug)
+    strategy = _strategy_store().resolve_for_loop(slug)
+    if strategy is None:
+        raise HTTPException(
+            status_code=500, detail=f"Could not resolve a loop for agent '{slug}'"
+        )
+    return await _start(agent, strategy, req, user.id)
+
+
 @router.post("/{slug}/strategies/{sslug}/start")
 async def start_strategy(
     slug: str,
@@ -1217,11 +1308,13 @@ async def start_strategy(
     user: WebUser = Depends(get_current_user),
 ):
     """Start a strategy (creates a new session under its Agent)."""
+    return await _start(_get_agent(slug), _get_strategy(slug, sslug), req, user.id)
+
+
+async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> dict:
+    """Spawn a TickEngine session for ``strategy`` under ``agent``."""
     from condor.agents.config import load_full_config
     from condor.agents.engine import TickEngine
-
-    agent = _get_agent(slug)
-    strategy = _get_strategy(slug, sslug)
 
     config_dict = load_full_config(strategy.dir, strategy.default_config)
     if req.config:
@@ -1240,11 +1333,12 @@ async def start_strategy(
         strategy=strategy,
         config=config_dict,
         chat_id=req.chat_id,
-        user_id=user.id,
+        user_id=user_id,
     )
     await new_engine.start()
     return {
         "started": True,
+        "strategy": strategy.slug,
         "agent_id": new_engine.agent_id,
         "session_num": new_engine.session_num,
     }
