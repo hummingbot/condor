@@ -44,9 +44,15 @@ Read every runtime value from `[CURRENT CONFIG]` — nothing below is hardcoded:
 `total_amount_quote` · `adverse_k` · `use_vol_clock` · `inventory_target_pct` · `inventory_band_pct` ·
 `hedge_enabled` · `frequency_sec` · `bot_name`
 
-**`bot_name` selects the execution path.** Non-empty → controller mode (tune the bot,
-never place individual orders). Empty → executor mode (place LIMIT ladders yourself).
-If you have not yet confirmed which is supported, read `xrpl_mm_feasibility` first.
+**`bot_name` selects the execution path — but controller mode is the default to try.**
+Non-empty → controller mode (tune the bot, never place individual orders). Empty → on the
+*first* tick of a run, attempt a controller deploy per `xrpl_mm_deploy` Phase 3 (a
+`pmm_simple` config — not `pmm_dynamic`) before ever placing an executor order. Only switch to
+executor mode, and journal why, if that attempt hits a real failure: a schema rejection, a
+deploy/status error, or the bot placing no orders on-ledger within a few ticks. Once a tick
+has recorded that verdict, keep using it for the rest of the run instead of retrying the
+controller deploy every tick — re-attempt only after the next Hummingbot/connector upgrade,
+or if explicitly asked to re-check.
 
 ## Each tick
 
@@ -145,4 +151,6 @@ learning. Do not loop retries within a tick.
 ## Rollout
 
 Ships as `execution_mode: dry_run`. Progress to `run_once`, then `loop` with a short
-`max_ticks`, only after `xrpl_mm_feasibility` has confirmed the execution path.
+`max_ticks`, only once the execution path is settled for this run — a controller deploy
+confirmed placing offers on-ledger, or a recorded controller failure that puts you in
+executor mode.

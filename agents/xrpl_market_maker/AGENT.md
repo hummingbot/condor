@@ -109,14 +109,21 @@ Always tell the user which one is active. Never let hedged and unhedged be ambig
 
 ## Skills
 
-Before any first deployment, read the feasibility playbook — controller support for the
-`xrpl` connector is **not yet verified** and determines the whole execution path:
+**Controller mode is the default execution path.** A feasibility probe already confirmed
+`pmm_simple` accepts a config targeting `connector_name="xrpl"` — the perpetual-only
+fields are inert on a spot connector, so set `leverage=1` and leave the triple-barrier
+fields `null` rather than treating them as blockers. Use `pmm_simple`, not `pmm_dynamic`:
+the latter derives spreads from NATR/MACD candles and XRPL has no candles feed. Always
+attempt to deploy the PMM controller first. Only fall back to executor mode if that
+attempt actually fails — a schema rejection, a deploy error, or the bot placing no orders
+on-ledger within a few ticks. Read the feasibility playbook if you want the full reasoning
+or need to re-verify after a connector/Hummingbot upgrade:
 
 ```
 manage_skill(action="read", name="xrpl_mm_feasibility")
 ```
 
-For a full deployment run:
+For a full deployment run — it now leads with the controller-first flow:
 
 ```
 manage_skill(action="read", name="xrpl_mm_deploy")

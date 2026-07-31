@@ -10,8 +10,9 @@ source: agent:xrpl_market_maker
 
 # XRPL Market Making — Feasibility Spike
 
-**Run this before the first deployment.** Its result decides the execution path, and the
-strategy behaves differently depending on the answer. Do not guess.
+**Read the verdict below before the first deployment.** It decides the execution path, and
+the strategy behaves differently depending on the answer. Do not guess — and do not assume
+the answer is still "unverified", it is not.
 
 ## Why this exists
 
@@ -27,7 +28,21 @@ Whether a PMM controller drives the `xrpl` connector is a question to **test**, 
 infer. The connector polls its user stream rather than pushing fills, which is the one
 genuine difference from the CEX connectors PMM controllers were built against.
 
-## Step 1 — Can a PMM controller target `xrpl`?
+## Current verdict — controller mode is the default
+
+Steps 1 and 2 have been run and they pass: `pmm_simple` accepts a saved config targeting
+`connector_name="xrpl"`. The stored config `xrpl_feasibility_probe` is that acceptance,
+kept as the record.
+
+So **attempt controller mode first**; executor mode is the fallback for an observed
+failure, not a coin-flip default. What the probe does *not* establish is that a deployed
+bot places offers on-ledger — `xrpl_mm_deploy` Phase 3 covers confirming that at deploy
+time, and the trading-rules limitation in Step 2 is a live caveat to hit first.
+
+Re-run the steps below to re-verify after any Hummingbot or connector upgrade, or when you
+need the full reasoning rather than the verdict.
+
+## Step 1 — Can a PMM controller target `xrpl`? (passes today)
 
 ```
 manage_controllers(action="list")
@@ -59,7 +74,7 @@ Still worth checking per candidate:
   is out while `pmm_simple` is fine.
 - Does it size orders against total balance? XRPL reserves make that wrong.
 
-## Step 2 — Dry-run a controller config
+## Step 2 — Dry-run a controller config (passes today)
 
 **Do not skip this step.** It is the only thing that actually answers Step 1; a schema
 read is evidence about defaults, not about `xrpl`. Upsert a config against `xrpl` and
@@ -70,7 +85,9 @@ manage_controllers(action="upsert", target="config", ...)
 ```
 
 A schema rejection here is a clean answer — record the exact error and move to Step 3.
-An acceptance is also a clean answer: controller mode is available.
+An acceptance is also a clean answer: controller mode is available. `xrpl_feasibility_probe`
+is the stored acceptance; inspect it with `manage_controllers(action="describe")` rather
+than re-deriving the field set.
 
 **Expect pair lookups to fail even when the controller is fine.** The API's shared
 keyless data connector is built with `trading_pairs=[]`, and the XRPL connector derives

@@ -10,8 +10,9 @@ source: agent:xrpl_market_maker
 
 # XRPL Maker Deploy Playbook
 
-Assumes `xrpl_mm_feasibility` has already run and the execution path is known. If it has
-not, read that skill first.
+The execution path defaults to **controller mode** — `xrpl_mm_feasibility` records why, and
+Phase 3 below confirms it at deploy time. Read that skill first only if you need the full
+reasoning, or are re-verifying after a Hummingbot/connector upgrade.
 
 ## Phase 1 — Preflight
 
@@ -59,9 +60,17 @@ reference means stale data far more often than it means opportunity.
 
 ## Phase 3 — Deploy
 
-### Controller mode (preferred, if feasibility confirmed it)
+**Always attempt controller mode first.** Executor mode is a fallback for when the
+controller attempt actually fails, not a coin-flip default — do not skip straight to
+executors just because feasibility was "unverified" for this pair/session.
 
-Remember there are **two config stores** and updating one does not update the other:
+### Controller mode (default — try this first)
+
+Use `pmm_simple` — `pmm_dynamic` needs a NATR/MACD candles feed that XRPL does not have.
+Its perpetual-flavoured defaults are inert on a spot connector, so set `leverage=1` and
+leave `stop_loss`/`take_profit`/`time_limit`/`trailing_stop` `null`; do not read those
+defaults as a rejection. Remember there are **two config stores** and updating one does
+not update the other:
 
 ```
 manage_controllers(action="upsert", target="config", ...)   # saved template
@@ -71,7 +80,19 @@ manage_bots(action="deploy", ...)                           # live bot
 Declare `max_global_drawdown_quote` within the session's risk limits on every deploy.
 Derive `bot_name` from the run key so restarts reattach to the same bot.
 
-### Executor mode (fallback)
+**Confirm it actually worked before trusting it** — a config that merely *saved* is not
+proof. Check `manage_bots(action="status")` and the on-ledger order book (Phase 4). Treat
+the attempt as failed, and fall through to executor mode, only when you see one of:
+
+- `manage_controllers(upsert)` rejects the config (schema validation error)
+- `manage_bots(deploy)` fails, or the bot's status comes back `stopped`/errored shortly after
+- The bot is running but places no orders on the XRPL ledger within a few ticks
+
+Journal whichever of these happened as a `category="execution"` learning — this is the
+feasibility answer for this session, not just a one-off glitch, so record it rather than
+silently falling back every time.
+
+### Executor mode (fallback — only after a real controller failure)
 
 Place laddered LIMIT / LIMIT_MAKER offers, passing `controller_id` as a **top-level**
 argument so PnL attributes to this agent:
