@@ -1,0 +1,172 @@
+import { useEffect, useRef } from "react";
+import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X, Zap } from "lucide-react";
+
+import type { ChatSlot } from "@/hooks/useChatSocket";
+import type { ChatAgentOption, ChatModeOption } from "@/lib/api";
+import { ChatInput } from "./ChatInput";
+import { ChatMessageView } from "./ChatMessage";
+
+const MODE_ICONS: Record<string, typeof Zap> = {
+  condor: Zap,
+  agent_builder: Brain,
+};
+
+/** Resolve a short label for an agent key. */
+export function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
+  const match = agents.find((a) => a.key === agentKey);
+  if (match) return match.label;
+  // Handle dynamic keys like "openrouter:anthropic/claude-3.5-sonnet"
+  if (agentKey.includes(":")) {
+    const [provider, model] = agentKey.split(":", 2);
+    return model || provider;
+  }
+  return agentKey;
+}
+
+/**
+ * The conversation itself, at any width.
+ *
+ * The 480 px overlay panel and the `/agents` workspace render this same
+ * component, so a tool call, a thought block or a handover divider can never
+ * look like two different things depending on where the user opened the chat.
+ * Everything around it — who is answering, which conversations exist — is the
+ * surface's business; this is only the transcript and the composer.
+ */
+export function ChatThread({
+  slot,
+  agents,
+  modes,
+  isStreaming,
+  permissionRequest,
+  onResolvePermission,
+  switchError,
+  onDismissSwitchError,
+  onSend,
+  onAbort,
+  emptyState,
+  columnClassName = "",
+  autoFocus = false,
+}: {
+  /** The conversation on screen, or null when there is none yet. */
+  slot: ChatSlot | null;
+  agents: ChatAgentOption[];
+  modes: ChatModeOption[];
+  isStreaming: boolean;
+  permissionRequest: { request_id: string; summary: string } | null;
+  onResolvePermission: (requestId: string, approved: boolean) => void;
+  switchError?: string | null;
+  onDismissSwitchError?: () => void;
+  onSend: (text: string) => void;
+  onAbort: () => void;
+  /** Rendered instead of a transcript when there is no slot. */
+  emptyState?: React.ReactNode;
+  /** Reading column for the messages, e.g. `mx-auto w-full max-w-3xl`. */
+  columnClassName?: string;
+  autoFocus?: boolean;
+}) {
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll on new messages in the slot on screen
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [slot?.messages]);
+
+  return (
+    <>
+      {/* Permission request banner */}
+      {permissionRequest && (
+        <div className="border-b border-amber-500/30 bg-amber-500/10 px-4 py-3">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-yellow)]" />
+            <div className="flex-1 text-sm">
+              <p className="font-medium text-[var(--color-yellow)]">Confirm action</p>
+              <p className="mt-0.5 text-[var(--color-text-muted)]">
+                {permissionRequest.summary}
+              </p>
+              <div className="mt-2 flex gap-2">
+                <button
+                  onClick={() => onResolvePermission(permissionRequest.request_id, true)}
+                  className="rounded bg-[var(--color-green)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
+                >
+                  Approve
+                </button>
+                <button
+                  onClick={() => onResolvePermission(permissionRequest.request_id, false)}
+                  className="rounded bg-[var(--color-red)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Switch failure — the header still shows whoever is actually answering */}
+      {switchError && (
+        <div className="flex items-start gap-2 border-b border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-400">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span className="flex-1">{switchError}</span>
+          <button onClick={onDismissSwitchError} title="Dismiss">
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
+
+      {/* Messages area */}
+      <div className="flex-1 overflow-y-auto px-4 py-4">
+        {/* `min-h-full` so an empty state can centre itself in the viewport
+            while a long transcript is still free to grow past it. */}
+        <div className={`flex min-h-full flex-col ${columnClassName}`}>
+          {!slot ? (
+            emptyState
+          ) : slot.messages.length === 0 ? (
+            <div className="flex flex-1 flex-col items-center justify-center text-center">
+              {(() => {
+                const ModeIcon = MODE_ICONS[slot.info.mode] || MessageSquare;
+                return (
+                  <ModeIcon className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
+                );
+              })()}
+              <p className="text-sm font-medium text-[var(--color-text)]">
+                {modes.find((m) => m.key === slot.info.mode)?.label || "Assistant"}
+              </p>
+              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                {modes.find((m) => m.key === slot.info.mode)?.description ||
+                  "Ask about your portfolio, prices, trades, or bot status."}
+              </p>
+              <p className="mt-2 flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] opacity-60">
+                {slot.info.agent_slug && <Bot className="h-2.5 w-2.5" />}
+                {slot.info.label && slot.info.agent_slug
+                  ? slot.info.label
+                  : resolveAgentLabel(slot.info.agent_key, agents)}
+              </p>
+              {slot.pending && (
+                <p className="mt-3 flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  Warming up — type away, it will be sent
+                </p>
+              )}
+            </div>
+          ) : (
+            slot.messages.map((msg) => <ChatMessageView key={msg.id} message={msg} />)
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+      </div>
+
+      {/* Input */}
+      {slot && (
+        <div className={columnClassName}>
+          <ChatInput
+            onSend={onSend}
+            disabled={isStreaming}
+            isStreaming={isStreaming}
+            onAbort={onAbort}
+            autoFocus={autoFocus}
+          />
+        </div>
+      )}
+    </>
+  );
+}
