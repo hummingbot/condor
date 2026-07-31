@@ -89,11 +89,18 @@ async def _create_tg_session(
     user_data: dict | None,
     extra_context: str = "",
     agent_slug: str = "",
+    conversation_id: str = "",
 ) -> SessionInfo:
     """Provision the session for a Telegram chat.
 
     An empty ``agent_key`` with ``agent_slug`` set lets the bound Agent's own
     configured model win; pass both to override it deliberately.
+
+    An empty ``conversation_id`` starts a fresh conversation — which is what
+    every call site here wants, since ``/agent → New session`` means a new
+    chat. Passing one resumes that transcript; the key ``tg:{chat_id}`` is
+    unchanged either way, so Telegram carries the conversation on the session
+    record rather than in the key.
     """
     return await runtime.create_session(
         SessionSpec(
@@ -105,6 +112,7 @@ async def _create_tg_session(
             platform="telegram",
             extra_context=extra_context,
             agent_slug=agent_slug,
+            conversation_id=conversation_id,
         ),
         permission_callback=permission_callback,
         user_data=user_data,

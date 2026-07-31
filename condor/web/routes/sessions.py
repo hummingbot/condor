@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field
 
 from condor.runtime import PromptRequest, SessionInfo, SessionKey, SessionSpec
 from condor.runtime import client as runtime
+from condor.runtime import conversations
 from condor.runtime.binding import UnknownAgent
 from condor.runtime.sse import SSE_HEADERS, event_stream
 from condor.web.auth import get_current_user
@@ -225,10 +226,27 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
     """Tear the session down and bring it back under the same key.
 
     ACP has no identity hot-swap, so switching who is answering means reaping
-    the subprocess and spawning a new one. The conversation is carried over
-    explicitly as a handoff note rather than by forking the ACP session.
+    the subprocess and spawning a new one. What carries over is the
+    conversation: ``switch`` keeps answering into the same transcript, which the
+    runtime replays into the new session's opening context, so the switch now
+    happens *inside* one conversation instead of ending it. ``new`` deliberately
+    does not — a new session is a new chat.
+
+    ``handoff`` stays on the wire for the shipped dashboard, appended after the
+    replay when a client still sends one.
     """
     from condor.preferences import load_user_data_for
+
+    switching = body.action == "switch"
+    if switching and info.conversation_id and body.agent_slug is not None:
+        # Recorded before the respawn so the divider lands between the two
+        # identities' turns rather than after the next answer.
+        conversations.record_system(
+            info.user_id,
+            info.conversation_id,
+            f"Switched to {body.agent_slug or 'the assistant'}",
+            kind="switch",
+        )
 
     # Unspecified fields keep their current value, so "new" is just a switch
     # to the same identity.
@@ -240,6 +258,7 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
         user_id=info.user_id,
         server_name=info.server_name,
         agent_slug=agent_slug,
+        conversation_id=info.conversation_id if switching else "",
         # Deferred so the new identity lands on the user's next prompt rather
         # than blocking this request on a model round trip.
         lazy_context=True,

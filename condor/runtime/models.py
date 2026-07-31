@@ -50,6 +50,11 @@ class SessionSpec(BaseModel):
         default="",
         description="Reserved: binds the session to a specific domain Agent.",
     )
+    conversation_id: str = Field(
+        default="",
+        description="Durable conversation this session answers into. Empty mints "
+        "a new one; a supplied id resumes that transcript.",
+    )
 
 
 class SessionInfo(BaseModel):
@@ -72,6 +77,10 @@ class SessionInfo(BaseModel):
     agent_slug: str = ""
     label: str = Field(
         default="Condor", description="Display name of whoever is answering."
+    )
+    conversation_id: str = Field(
+        default="",
+        description="Durable conversation behind this session. Survives it.",
     )
 
 

@@ -712,12 +712,16 @@ def main() -> None:
         # Stop all trading agents. Graceful stop, deliberately NOT the shutdown
         # sequence — winding down positions is an emergency action, not what a
         # restart should do. Each engine records its final state on the way out.
+        from condor.runtime.conversations import flush_all as flush_conversations
         from condor.runtime.loops import get_supervisor
         from condor.runtime.state import flush_all
 
         await get_supervisor().stop_all()
         # Writes are debounced, so force the last one out on a clean shutdown.
         flush_all()
+        # A prompt still streaming when the bot went down holds its turn in
+        # memory; write it out rather than losing the last thing that was said.
+        flush_conversations()
 
         # Stop WebSocket manager
         from condor.web.ws_manager import get_ws_manager

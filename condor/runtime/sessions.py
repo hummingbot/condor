@@ -22,7 +22,7 @@ from condor.acp.pydantic_ai_client import (
     is_pydantic_ai_model,
     model_prefix,
 )
-from condor.runtime import binding
+from condor.runtime import binding, conversations
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
@@ -64,6 +64,9 @@ class AgentSession:
     user_id: int | None = None
     agent_slug: str = ""
     label: str = "Condor"  # who is answering, for both UIs' headers
+    # The durable conversation this session answers into. The subprocess dies
+    # with the process; the transcript behind this id does not.
+    conversation_id: str = ""
     is_busy: bool = False
     pending_context: str | None = None  # Lazy context: injected on first prompt
     created_at: datetime = field(default_factory=_utcnow)
@@ -87,6 +90,7 @@ class AgentSession:
             last_prompt_at=self.last_prompt_at,
             agent_slug=self.agent_slug,
             label=self.label,
+            conversation_id=self.conversation_id,
         )
 
     async def prompt_stream(self, text: str):
@@ -161,18 +165,85 @@ class SessionLimitReached(RuntimeError):
     """Raised when a user already holds MAX_SESSIONS_PER_USER live sessions."""
 
 
-def _enforce_session_budget(user_id: int) -> None:
-    """Reap this user's dead sessions, then refuse if still at the cap."""
+async def _enforce_session_budget(user_id: int) -> None:
+    """Reap dead sessions, detach the least recently used idle one, then refuse.
+
+    Detaching used to be unthinkable — destroying a session destroyed the chat,
+    so the only safe answer was a wall the user did not understand. Now that
+    the conversation is durable (FEAT-015), the detached chat is fully
+    recoverable and reattaching costs one lazy spawn, so the cap behaves as an
+    LRU instead. Only when every session is *busy* is there nothing to give up.
+    """
     for raw_key, session in list(_sessions.items()):
         if session.user_id == user_id and not session.client.alive:
             _sessions.pop(raw_key, None)
 
-    live = sum(1 for s in _sessions.values() if s.user_id == user_id)
-    if live >= MAX_SESSIONS_PER_USER:
-        raise SessionLimitReached(
-            f"Max {MAX_SESSIONS_PER_USER} concurrent sessions reached. "
-            "Close one before starting another."
+    while True:
+        mine = [s for s in _sessions.values() if s.user_id == user_id]
+        if len(mine) < MAX_SESSIONS_PER_USER:
+            return
+
+        idle = [s for s in mine if not s.is_busy]
+        if not idle:
+            raise SessionLimitReached(
+                f"All {MAX_SESSIONS_PER_USER} of your sessions are busy. "
+                "Wait for one to finish, or cancel it."
+            )
+
+        victim = min(idle, key=lambda s: s.last_prompt_at or s.created_at)
+        log.info(
+            "Session budget reached for user %s: detaching idle session %s "
+            "(conversation %s is kept)",
+            user_id,
+            victim.key,
+            victim.conversation_id or "none",
         )
+        await _destroy_session_internal(victim.key)
+
+
+def _resolve_conversation(
+    spec: SessionSpec,
+    key: SessionKey,
+    *,
+    agent_key: str,
+    agent_slug: str,
+    server_name: str | None,
+) -> tuple[str, str]:
+    """Attach this session to a conversation. Returns ``(conv_id, replay)``.
+
+    A session without a ``user_id`` gets no conversation: the store is keyed by
+    owner, and a transcript nobody owns can neither be listed nor authorized.
+    Such a session behaves exactly as it did before this feature.
+    """
+    if not spec.user_id:
+        return "", ""
+
+    try:
+        if spec.conversation_id:
+            conversations.update_meta(
+                spec.user_id,
+                spec.conversation_id,
+                agent_key=agent_key,
+                agent_slug=agent_slug,
+                mode=spec.mode,
+                server_name=server_name,
+            )
+            return spec.conversation_id, conversations.replay_context(
+                spec.user_id, spec.conversation_id
+            )
+
+        meta = conversations.new_conversation(
+            spec.user_id,
+            key.surface,
+            agent_key=agent_key,
+            agent_slug=agent_slug,
+            mode=spec.mode,
+            server_name=server_name,
+        )
+        return meta.id, ""
+    except Exception:  # noqa: BLE001 - a chat must start even if recording fails
+        log.warning("Could not resolve conversation for %s", key, exc_info=True)
+        return "", ""
 
 
 async def get_or_create_session(
@@ -197,9 +268,18 @@ async def get_or_create_session(
     # An empty spec.agent_key means "whatever the binding resolves", so it must
     # not count as a mismatch — otherwise every bound call would respawn.
     same_model = not spec.agent_key or session and session.agent_key == spec.agent_key
+    # Likewise for the conversation: asking to resume a *different* transcript
+    # under the same key means a different chat, so the subprocess is replaced
+    # rather than silently answering the old one's context.
+    same_conversation = (
+        not spec.conversation_id
+        or session
+        and session.conversation_id == spec.conversation_id
+    )
     if (
         session
         and same_model
+        and same_conversation
         and session.agent_slug == spec.agent_slug
         and session.client.alive
     ):
@@ -211,7 +291,7 @@ async def get_or_create_session(
     elif spec.user_id:
         # Only a genuinely new key counts against the budget — replacing the
         # session behind an existing key is a swap, not an extra subprocess.
-        _enforce_session_budget(spec.user_id)
+        await _enforce_session_budget(spec.user_id)
 
     # MCP subprocess env expects a numeric chat id; surfaces without a chat
     # (web, mcp) fall back to the user id.
@@ -321,11 +401,6 @@ async def get_or_create_session(
                 platform=spec.platform,
                 server_name=spec.server_name,
             )
-        # Caller-supplied context (e.g. mode-specific assistant instructions)
-        # rides along as spec data, so no caller needs the live session object.
-        if spec.extra_context:
-            initial_context = f"{initial_context}\n\n{spec.extra_context}".strip()
-
         # Resolve the server name that was actually used for this session
         resolved_server = spec.server_name
         if not resolved_server and spec.user_id:
@@ -336,6 +411,27 @@ async def get_or_create_session(
                 cm = get_config_manager()
                 accessible = cm.get_accessible_servers(spec.user_id)
                 resolved_server = accessible[0] if accessible else None
+
+        # The durable conversation behind this session. An empty id mints a new
+        # one; a supplied id replays that transcript's tail into the opening
+        # context. That replay *is* the whole resume mechanism — ACP has no
+        # session/load, so a resumed agent is always a fresh brain that has read
+        # the conversation, never the old one woken up.
+        conversation_id, replay = _resolve_conversation(
+            spec,
+            key,
+            agent_key=agent_key,
+            agent_slug=bound.agent_slug,
+            server_name=bound.server_name or resolved_server,
+        )
+
+        # Caller-supplied context (e.g. mode-specific assistant instructions)
+        # rides along as spec data, so no caller needs the live session object.
+        initial_context = "\n\n".join(
+            part
+            for part in (initial_context, replay, spec.extra_context)
+            if part and part.strip()
+        ).strip()
 
         if initial_context and not spec.lazy_context:
             # Eager: send context now (blocks until agent processes it)
@@ -354,6 +450,7 @@ async def get_or_create_session(
             user_id=spec.user_id,
             agent_slug=bound.agent_slug,
             label=bound.label,
+            conversation_id=conversation_id,
             pending_context=initial_context or None,
         )
     except Exception:

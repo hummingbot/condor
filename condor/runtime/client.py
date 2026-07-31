@@ -16,6 +16,7 @@ import logging
 import os
 from typing import AsyncIterator
 
+from condor.runtime import conversations
 from condor.runtime.events import RuntimeEvent
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import PromptRequest, SessionInfo, SessionSpec
@@ -86,6 +87,10 @@ async def prompt(key: SessionKey, req: PromptRequest) -> AsyncIterator[RuntimeEv
     followed by a ``DONE`` — a consumer that stops only on ``DONE`` must never
     be left hanging by an exception.
 
+    Every turn is recorded here, on the one funnel every surface goes through,
+    so Telegram, the dashboard and MCP all get a durable transcript without any
+    per-surface work.
+
     ``req.image_b64``/``req.image_mime`` are accepted but not yet forwarded:
     the underlying ACP and Pydantic AI clients are text-only today.
     """
@@ -96,13 +101,26 @@ async def prompt(key: SessionKey, req: PromptRequest) -> AsyncIterator[RuntimeEv
         yield RuntimeEvent.done("no_session", session_key=raw_key)
         return
 
+    recorder = conversations.Recorder(
+        session.user_id, session.conversation_id, req.text
+    )
     try:
         async for event in session.prompt_stream(req.text):
-            yield RuntimeEvent.from_acp(event, session_key=raw_key)
+            runtime_event = RuntimeEvent.from_acp(event, session_key=raw_key)
+            recorder.observe(runtime_event)
+            yield runtime_event
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller as an event
         log.exception("Prompt failed for session %s", raw_key)
-        yield RuntimeEvent.error(str(exc), session_key=raw_key)
+        failure = RuntimeEvent.error(str(exc), session_key=raw_key)
+        recorder.observe(failure)
+        yield failure
         yield RuntimeEvent.done("error", session_key=raw_key)
+    finally:
+        # Not on DONE: the dashboard abandons this generator constantly (page
+        # reload, abort_prompt cancelling the task, WS disconnect), and an
+        # abandoned async generator only ever gets GeneratorExit. Losing the
+        # half-written reply is the bug this feature exists to fix.
+        recorder.flush()
 
 
 async def prompt_once(key: SessionKey, text: str) -> str:
