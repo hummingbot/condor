@@ -238,15 +238,6 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
     from condor.preferences import load_user_data_for
 
     switching = body.action == "switch"
-    if switching and info.conversation_id and body.agent_slug is not None:
-        # Recorded before the respawn so the divider lands between the two
-        # identities' turns rather than after the next answer.
-        conversations.record_system(
-            info.user_id,
-            info.conversation_id,
-            f"Switched to {body.agent_slug or 'the assistant'}",
-            kind="switch",
-        )
 
     # Unspecified fields keep their current value, so "new" is just a switch
     # to the same identity.
@@ -277,5 +268,18 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
     except Exception as exc:  # noqa: BLE001 - surfaced as an HTTP error
         log.exception("Failed to respawn session %s", key)
         raise HTTPException(status_code=400, detail=str(exc))
+
+    if switching and info.conversation_id and body.agent_slug is not None:
+        # The handover, marked in the transcript itself, so it reads as a
+        # divider between the two identities' turns rather than as a header
+        # that silently changed. Recorded after the respawn: nothing is
+        # appended in between, so the position is the same, and a switch that
+        # failed to spawn leaves no divider claiming it happened.
+        conversations.record_system(
+            info.user_id,
+            info.conversation_id,
+            f"Switched to {new_info.label}",
+            kind="switch",
+        )
 
     return {"ok": True, "session": new_info.model_dump(mode="json")}
