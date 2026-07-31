@@ -44,25 +44,39 @@ class ProviderRegistry:
     """Convenience wrapper used by TickEngine."""
 
     async def run_core_providers(
-        self, client: Any, config: dict, agent_id: str = ""
+        self,
+        client: Any,
+        config: dict,
+        agent_id: str = "",
+        bot_names: list[str] | None = None,
     ) -> dict[str, ProviderResult]:
-        """Run all core providers and return {name: ProviderResult} dict."""
+        """Run all core providers and return {name: ProviderResult} dict.
+
+        ``bot_names`` are the bases the session owns per its ownership ledger, so
+        a session operating several bots sees all of them in its core data.
+        """
         if not _REGISTRY:
             _auto_register()
 
         results: dict[str, ProviderResult] = {}
         for provider in list_core_providers():
             try:
-                result = await provider.execute(client, config, agent_id=agent_id)
+                result = await provider.execute(
+                    client, config, agent_id=agent_id, bot_names=bot_names
+                )
                 results[result.name] = result
             except Exception:
                 log.exception("Core provider %s failed", provider.name)
                 results[provider.name] = ProviderResult(
-                    name=provider.name, data={}, summary=f"(provider {provider.name} failed)"
+                    name=provider.name,
+                    data={},
+                    summary=f"(provider {provider.name} failed)",
                 )
         return results
 
-    async def run_provider(self, name: str, client: Any, config: dict) -> ProviderResult | None:
+    async def run_provider(
+        self, name: str, client: Any, config: dict
+    ) -> ProviderResult | None:
         """Run a single provider by name."""
         provider = get_provider(name)
         if not provider:
