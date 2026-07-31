@@ -90,6 +90,31 @@ def test_ledger_records_deploy_and_persists(tmp_path):
     assert data["bots"][f"{NS}-btc"]["since"] == 1000.0
 
 
+def test_read_owned_reads_the_ledger_without_instantiating_it(tmp_path):
+    """The read-only view PnL attribution (FEAT-018) uses, oldest takeover first."""
+    from condor.agents.ownership import read_owned
+
+    ledger = BotLedger(NS, tmp_path)
+    ledger.note_deploy(f"{NS}-eth", now=2000.0)
+    ledger.note_deploy(f"{NS}-btc", now=1000.0)
+
+    owned = read_owned(tmp_path)
+    assert [(b.base, b.since) for b in owned] == [
+        (f"{NS}-btc", 1000.0),
+        (f"{NS}-eth", 2000.0),
+    ]
+
+
+def test_read_owned_is_empty_without_a_ledger(tmp_path):
+    """A session predating the ledger reads as 'no evidence', not as an error."""
+    from condor.agents.ownership import read_owned
+
+    assert read_owned(tmp_path) == []
+    assert read_owned(None) == []
+    (tmp_path / "owned_bots.json").write_text("{not json")
+    assert read_owned(tmp_path) == []
+
+
 def test_ledger_round_trips_from_disk(tmp_path):
     first = BotLedger(NS, tmp_path)
     first.note_deploy(f"{NS}-btc", now=1000.0)
