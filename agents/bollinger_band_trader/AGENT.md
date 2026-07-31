@@ -5,6 +5,11 @@ description: Bollinger Band specialist — squeeze/expansion cycles, band-walk v
 agent_key: openrouter:nvidia/nemotron-3-super-120b-a12b:free
 tools:
 - manage_routines
+# The loop runtime instructs every tick to journal via trading_agent_journal_write.
+# Omitting these strips them from the toolset, so the tick calls a tool that does not
+# exist, burns its whole retry budget, and reports an error after doing all its work.
+- trading_agent_journal_write
+- trading_agent_journal_read
 - get_market_data
 - get_portfolio_overview
 - manage_executors

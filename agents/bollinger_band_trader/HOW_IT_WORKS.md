@@ -183,9 +183,32 @@ candle and produces duplicate signals rather than new information.
 ## Cost
 
 The routines are pure Python over candle data — no LLM tokens, no paid data. Only the
-agent's reasoning costs anything. At the default 15m tick with a compact model, a loop
-session runs at a few cents a day; most ticks resolve to HOLD after a single routine call,
-which is the cheapest possible path.
+agent's reasoning costs anything, and **that cost is much larger than it looks.**
+
+Measured on a real 19-tick session:
+
+| | |
+|---|---|
+| System prompt | ~5,600 tokens |
+| Tool schemas (25 tools, 2 MCP servers) | ~15,000 tokens |
+| Base, **resent on every model call** | ~20,600 tokens |
+| Round-trips per tick | 1–10 (a tick is an agentic loop, not one call) |
+| **Measured input per tick** | **~101,000 tokens** (range 20.8k–214.8k) |
+| Signal the model reasons over | **110 tokens** — the `band_state` output |
+
+So ~99.9% of what you pay for is overhead. On a Sonnet-class model that is ~$0.43/tick,
+or ~$41/day at a 15m cadence. On the free model this agent now defaults to it is $0.00.
+
+Two consequences worth internalising:
+
+- **Pick the model deliberately.** "Cheap Anthropic" is not cheap here: at ~101k
+  tokens/tick, Haiku-class runs ~$20/day. A free or sub-cent model is the sane default
+  for a loop whose ticks are overwhelmingly HOLD.
+- **The LLM is not doing the analysis.** `band_state` already emits `setup`, `bias`,
+  `entry`, `stop`, `target`, `rr` and the veto outcome; `band_trade_sizer` emits PASS/FAIL
+  and a ready payload. On a HOLD tick the model reads `no_trade` and writes a paragraph
+  meaning `no_trade`. Gating the model behind a verdict-changed check, or removing it from
+  the hot path entirely, removes most of the cost without changing behaviour.
 
 ## Known limitations
 
