@@ -390,7 +390,7 @@ function Hero({
           />
         </div>
 
-        <div className="mt-4 overflow-hidden rounded-xl border border-[var(--color-border)]">
+        <div className="mt-4">
           <ChatInput onSend={onAsk} autoFocus />
         </div>
 

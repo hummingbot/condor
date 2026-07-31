@@ -25,6 +25,10 @@ export function ChatInput({
 }: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // The box around the textarea is the affordance, so it has to know when the
+  // textarea has the caret. `:focus-within` would do it without state, but the
+  // recording and transcribing branches replace the textarea entirely.
+  const [focused, setFocused] = useState(false);
 
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [recordingDuration, setRecordingDuration] = useState(0);
@@ -209,11 +213,19 @@ export function ChatInput({
   const isTranscribing = recordingState === "transcribing";
 
   return (
-    <div className="border-t border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+    <div className="p-3">
       {voiceError && (
         <p className="mb-2 text-xs text-red-400">{voiceError}</p>
       )}
-      <div className="flex items-end gap-2">
+      {/* One composer chrome, owned here — the hero, the thread and the overlay
+          drawer all get this box, so they cannot drift into two shapes again. */}
+      <div
+        className={`flex items-end gap-2 rounded-xl border bg-[var(--color-surface)] px-2 py-1.5 transition-colors ${
+          focused
+            ? "border-[var(--color-primary)]/40 ring-1 ring-[var(--color-primary)]/20"
+            : "border-[var(--color-border)]"
+        }`}
+      >
         {isRecording ? (
           // Recording UI
           <div className="flex flex-1 items-center gap-3 rounded-lg border border-red-500/40 bg-red-500/5 px-3 py-2">
@@ -244,10 +256,12 @@ export function ChatInput({
               if (voiceError) setVoiceError(null);
             }}
             onKeyDown={handleKeyDown}
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
             placeholder="Ask Condor..."
             disabled={disabled}
             rows={1}
-            className="flex-1 resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-primary)] focus:outline-none disabled:opacity-50"
+            className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none disabled:opacity-50"
           />
         )}
 
