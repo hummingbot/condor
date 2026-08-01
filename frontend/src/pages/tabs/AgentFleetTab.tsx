@@ -14,19 +14,18 @@ import {
   Zap,
 } from "lucide-react";
 import { useMemo, useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { Link, useNavigate } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import { DelegationDetail } from "@/components/agent/DelegationDetail";
+import { DELEGATION_STATUS } from "@/components/agent/delegationStatus";
 import { AgentsTabSwitch, type AgentsTab } from "@/components/chat/AgentsTabSwitch";
 import { ModeBadge } from "@/components/agent/ModeBadge";
 import { StatusBadge } from "@/components/agent/StatusBadge";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import {
   type AgentSummary,
-  type Delegation,
   type RunningInstance,
   api,
 } from "@/lib/api";
@@ -323,16 +322,6 @@ function ActiveSessionsTable({ sessions }: { sessions: ActiveSession[] }) {
   );
 }
 
-const DELEGATION_STATUS: Record<
-  Delegation["status"],
-  { dot: string; text: string; label: string }
-> = {
-  running: { dot: "bg-emerald-400 shadow-[0_0_6px_theme(colors.emerald.400)]", text: "text-emerald-400", label: "RUNNING" },
-  done: { dot: "bg-sky-400", text: "text-sky-400", label: "DONE" },
-  error: { dot: "bg-red-400", text: "text-red-400", label: "ERROR" },
-  stopped: { dot: "bg-[var(--color-text-muted)]/50", text: "text-[var(--color-text-muted)]", label: "STOPPED" },
-};
-
 function BackgroundTasks() {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -373,7 +362,6 @@ function BackgroundTasks() {
         {ordered.map((d) => {
           const s = DELEGATION_STATUS[d.status];
           const isOpen = expanded === d.task_id;
-          const body = (d.status === "error" ? d.error : d.result)?.trim();
           return (
             <div
               key={d.task_id}
@@ -436,24 +424,7 @@ function BackgroundTasks() {
               </div>
               {isOpen && (
                 <div className="border-t border-[var(--color-border)]/40 px-3 py-2">
-                  <p className="mb-1 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
-                    {d.status === "error" ? "Error" : "Result"}
-                  </p>
-                  {d.status === "error" ? (
-                    // Errors are raw (stack traces / plain messages) — keep monospace.
-                    <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-red-300">
-                      {body || "(no output)"}
-                    </pre>
-                  ) : body ? (
-                    // A delegation result is the agent's narrative final answer — render markdown.
-                    <div className="chat-markdown max-h-64 overflow-auto text-xs text-[var(--color-text)]">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{body}</ReactMarkdown>
-                    </div>
-                  ) : (
-                    <p className="text-xs text-[var(--color-text-muted)]">
-                      {d.status === "running" ? "Running…" : "(no output)"}
-                    </p>
-                  )}
+                  <DelegationDetail delegation={d} />
                 </div>
               )}
             </div>
