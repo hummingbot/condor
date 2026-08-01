@@ -17,15 +17,22 @@ import type { Delegation } from "@/lib/api";
 export function DelegationDetail({
   delegation: d,
   showTask = false,
+  clamped,
 }: {
   delegation: Delegation;
   showTask?: boolean;
+  /**
+   * Bound the output's height. Defaults to "yes unless the task is shown",
+   * which is the list-row/standalone split — a caller that labels the task
+   * itself (the dock's sheet) sets it explicitly.
+   */
+  clamped?: boolean;
 }) {
   const s = DELEGATION_STATUS[d.status];
   const body = (d.status === "error" ? d.error : d.result)?.trim();
   // Inside a list row the output is clamped so one long result cannot bury the
   // rows below it; standalone it gets the room, and its container scrolls.
-  const clamp = showTask ? "" : "max-h-64 overflow-auto";
+  const clamp = (clamped ?? !showTask) ? "max-h-64 overflow-auto" : "";
 
   return (
     <div>

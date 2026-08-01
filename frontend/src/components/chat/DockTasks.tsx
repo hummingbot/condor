@@ -3,6 +3,7 @@ import { ArrowUpRight, Loader2, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { DelegationDetail } from "@/components/agent/DelegationDetail";
+import { DelegationTranscript } from "@/components/agent/DelegationTranscript";
 import {
   DELEGATION_STATUS,
   formatDelegationTime,
@@ -31,6 +32,7 @@ export function DockTasks({
 }) {
   const queryClient = useQueryClient();
   const [openId, setOpenId] = useState<string | null>(null);
+  const [view, setView] = useState<"transcript" | "result">("transcript");
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
 
   const mine = conversationId
@@ -84,7 +86,14 @@ export function DockTasks({
                 />
                 <button
                   type="button"
-                  onClick={() => setOpenId(d.task_id)}
+                  onClick={() => {
+                    setOpenId(d.task_id);
+                    // Follow the task: while it runs there is no result yet, so
+                    // the transcript *is* the view. Once it is finished the
+                    // answer is what the task was for, and the transcript is the
+                    // follow-up question.
+                    setView(d.status === "running" ? "transcript" : "result");
+                  }}
                   className="min-w-0 flex-1 text-left"
                   title={d.task}
                 >
@@ -147,7 +156,32 @@ export function DockTasks({
           subtitle={`${DELEGATION_STATUS[open.status].label.toLowerCase()} · ${formatDelegationTime(open)}`}
           onClose={() => setOpenId(null)}
         >
-          <DelegationDetail delegation={open} showTask />
+          {/* The ask belongs to both views, so it sits above the switch rather
+              than inside the one that happens to render it. */}
+          <p className="mb-3 whitespace-pre-wrap text-sm text-[var(--color-text)]">
+            {open.task}
+          </p>
+          <div className="mb-3 flex items-center gap-1 border-b border-[var(--color-border)]/50 pb-2">
+            {(["transcript", "result"] as const).map((id) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setView(id)}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-all ${
+                  view === id
+                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                }`}
+              >
+                {id}
+              </button>
+            ))}
+          </div>
+          {view === "transcript" ? (
+            <DelegationTranscript taskId={open.task_id} />
+          ) : (
+            <DelegationDetail delegation={open} clamped={false} />
+          )}
         </WorkspaceSheet>
       )}
     </>

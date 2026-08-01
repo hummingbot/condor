@@ -478,6 +478,23 @@ export interface Delegation {
   started_at: number;
 }
 
+// One entry of a delegation's session transcript. Mirrors the three shapes the
+// runner's event sink folds into `DelegateTask.events`; tool entries are patched
+// in place server-side, so `id` is stable across a status flip.
+export type DelegationEvent =
+  | { type: "thought"; text: string }
+  | { type: "text"; text: string }
+  | {
+      type: "tool";
+      id: string;
+      name: string;
+      status: string;
+      kind: string;
+      input: Record<string, unknown> | null;
+      /** Clipped at 2000 chars, the same boundary the on-disk transcript uses. */
+      output: string | null;
+    };
+
 // Strategy = a playbook that loops under an Agent. Holds the operational
 // history: sessions, experiments, live instances, config and learnings.
 export interface StrategyDetail {
@@ -1147,6 +1164,15 @@ export const api = {
 
   getDelegations: () =>
     apiFetch<{ delegations: Delegation[] }>("/api/v1/agents/delegations"),
+
+  /** The human-facing transcript. Separate from the (agent-facing) status route
+   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py. */
+  getDelegationEvents: (taskId: string) =>
+    apiFetch<{
+      task_id: string;
+      status: Delegation["status"];
+      events: DelegationEvent[];
+    }>(`/api/v1/agents/delegations/${encodeURIComponent(taskId)}/events`),
 
   stopDelegation: (taskId: string) =>
     apiFetch<{ task_id: string; status: string }>(
