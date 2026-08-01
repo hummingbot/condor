@@ -171,6 +171,11 @@ ACP_COMMANDS: dict[str, str] = {
     "gemini": "npx @google/gemini-cli --acp",
     "copilot": "npx @github/copilot --acp --stdio",
     "codex": "npx @agentclientprotocol/codex-acp",
+    # Native ACP support, no npm bridge needed (unlike codex above). Auth is
+    # the `grok` CLI's own cached login (~/.grok/auth.json, SuperGrok/grok.com
+    # OAuth) -- not xAI's metered api.x.ai surface.
+    "grok-build": "grok agent stdio",
+    "grok": "grok agent stdio",
 }
 
 # ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").

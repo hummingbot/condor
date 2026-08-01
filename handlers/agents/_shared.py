@@ -108,6 +108,7 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "gemini": {"label": "Gemini CLI"},
     "copilot": {"label": "GitHub Copilot CLI"},
     "codex": {"label": "ChatGPT Codex"},
+    "grok-build": {"label": "Grok Build"},
     "ollama:": {"label": "Ollama — Default Model"},
     "lmstudio:": {"label": "LM Studio — Default Model"},
     # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
