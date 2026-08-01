@@ -301,6 +301,12 @@ async def get_or_create_session(
     extra_env = {
         "CONDOR_CHAT_ID": str(effective_chat_id),
         "CONDOR_USER_ID": str(spec.user_id or effective_chat_id),
+        # Which session the MCP subprocess belongs to. The *conversation* id does
+        # not exist yet here (it is minted below, after the client is up), but the
+        # key does and is stable for the subprocess's whole life — so tools that
+        # need conversation provenance (delegate) post the key back and let the
+        # route resolve it where the truth lives.
+        "CONDOR_SESSION_KEY": raw_key,
     }
 
     # Who is answering: an assistant persona, or a bound domain Agent with its

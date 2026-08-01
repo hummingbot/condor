@@ -30,6 +30,9 @@ async def delegate(
                 "chat_id": settings.chat_id,
                 "user_id": settings.user_id,
                 "server_name": settings.active_server or None,
+                # Provenance: the route resolves this to the conversation that
+                # asked for the work, so the chat can watch what it started.
+                "session_key": settings.session_key,
             },
         )
         # Spell out how the user tracks this so the model never INVENTS a status

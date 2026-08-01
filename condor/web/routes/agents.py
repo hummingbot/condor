@@ -281,6 +281,9 @@ class DelegateRequest(BaseModel):
     user_id: int | None = None  # Accepted for compat but ignored (see handler)
     server_name: str | None = None
     timeout_s: int = 900
+    # Canonical key of the session asking for the work (posted by the condor MCP
+    # server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
+    session_key: str = ""
 
 
 # ── Stores / lookups ──
@@ -983,6 +986,30 @@ async def consult_agent(
 # ── Delegate (fire-and-forget background tasks) ──
 
 
+async def _conversation_for_session(session_key: str) -> str:
+    """Resolve a session key to the conversation currently on that session.
+
+    Answered here rather than cached at spawn because the conversation id does
+    not exist when the MCP subprocess starts (``sessions.get_or_create_session``
+    mints it after the client is up) — by delegate time it is settled.
+
+    A missing, malformed or dead key is not an error: it means "no conversation
+    behind this task", which is the truth for a consult- or tick-started
+    delegation and for anything predating this provenance.
+    """
+    if not session_key:
+        return ""
+    try:
+        from condor.runtime import client
+        from condor.runtime.keys import SessionKey
+
+        info = await client.get_info(SessionKey.parse(session_key))
+        return info.conversation_id if info else ""
+    except Exception:
+        log.debug("Could not resolve session key %r", session_key, exc_info=True)
+        return ""
+
+
 @router.post("/{slug}/delegate")
 async def delegate_agent(
     slug: str, req: DelegateRequest, user: WebUser = Depends(get_current_user)
@@ -1017,6 +1044,7 @@ async def delegate_agent(
         server_name=req.server_name,
         task=req.task,
         timeout_s=req.timeout_s,
+        conversation_id=await _conversation_for_session(req.session_key),
     )
     return {"task_id": dt.task_id, "status": dt.status}
 

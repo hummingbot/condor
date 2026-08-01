@@ -12,6 +12,9 @@ class Settings:
     bot_token: str
     agent_slug: str
     active_server: str
+    # Canonical key of the session that spawned this subprocess ("web:7:slot-1",
+    # "tg:42", …). Empty when the server runs outside a session.
+    session_key: str
 
 
 def _parse_settings() -> Settings:
@@ -21,6 +24,7 @@ def _parse_settings() -> Settings:
     parser.add_argument("--agent-slug", default=None)
     parser.add_argument("--bot-token", default=None)
     parser.add_argument("--server-name", default=None)
+    parser.add_argument("--session-key", default=None)
     args, _ = parser.parse_known_args()
 
     return Settings(
@@ -29,6 +33,7 @@ def _parse_settings() -> Settings:
         bot_token=args.bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         agent_slug=args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", ""),
         active_server=args.server_name or os.environ.get("CONDOR_SERVER_NAME", ""),
+        session_key=args.session_key or os.environ.get("CONDOR_SESSION_KEY", ""),
     )
 
 

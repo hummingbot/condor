@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -50,6 +51,13 @@ class DelegateTask:
     status: str = "running"  # running | done | error | stopped
     result: str = ""  # final answer text once done
     error: str = ""
+    # The conversation that started this task, when there was one. Empty for
+    # delegations with no conversation behind them (a consult, a tick engine, or
+    # anything started before provenance existed) -- honest rather than guessed.
+    conversation_id: str = ""
+    # Wall-clock start, so a watcher can show elapsed time without having been
+    # there when the task began.
+    started_at: float = field(default_factory=time.time)
     # Chronological session transcript: thoughts, tool calls, and text chunks as
     # they streamed from the agent. Populated live by the runner's event sink.
     events: list[dict] = field(default_factory=list, repr=False)
@@ -66,6 +74,8 @@ class DelegateTask:
             "status": self.status,
             "result": self.result,
             "error": self.error,
+            "conversation_id": self.conversation_id,
+            "started_at": self.started_at,
         }
 
 
@@ -86,6 +96,7 @@ async def start_delegation(
     task: str,
     bot=None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
+    conversation_id: str = "",
 ) -> DelegateTask:
     """Create a DelegateTask, spawn the detached runner, register it, return now.
 
@@ -100,6 +111,7 @@ async def start_delegation(
         chat_id=chat_id,
         server_name=server_name,
         task=task,
+        conversation_id=conversation_id,
     )
     _delegations[dt.task_id] = dt
     _record_delegation_status(dt)
@@ -135,6 +147,8 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
             agent_slug=dt.agent_slug,
             chat_id=dt.chat_id,
             user_id=dt.user_id,
+            conversation_id=dt.conversation_id,
+            started_at=dt.started_at,
         )
     except Exception:
         log.debug(

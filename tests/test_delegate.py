@@ -165,6 +165,78 @@ def test_stop_unknown_returns_false():
     assert asyncio.run(stop_delegation("nope-delegate-x")) is False
 
 
+def test_delegation_carries_conversation_provenance(tmp_path, monkeypatch):
+    """The conversation that started the task is stamped on it and on disk.
+
+    This is what lets a chat show *its own* delegations rather than everyone's
+    (FEAT-021): two web conversations by the same user produce byte-identical
+    delegation metadata otherwise.
+    """
+    import json
+
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    _write_agent(tmp_path, "scout")
+
+    async def fake_run(**kw):
+        return "ok"
+
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="scan",
+            bot=_FakeBot(),
+            conversation_id="conv-abc",
+        )
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+
+    assert dt.conversation_id == "conv-abc"
+    assert dt.to_dict()["conversation_id"] == "conv-abc"
+    # Elapsed time is computable by a watcher that arrived late.
+    assert dt.to_dict()["started_at"] > 0
+    # Survives on disk, so a restart-interrupted task keeps its provenance.
+    status = json.loads(
+        (tmp_path / "scout" / "delegations" / f"{dt.task_id}.status.json").read_text()
+    )
+    assert status["conversation_id"] == "conv-abc"
+
+
+def test_delegation_without_conversation_is_empty_not_error():
+    """A consult- or tick-started delegation has no conversation; that is honest."""
+    from condor.agents.delegate import DelegateTask
+
+    dt = DelegateTask(
+        task_id="x",
+        agent_slug="scout",
+        user_id=1,
+        chat_id=42,
+        server_name=None,
+        task="t",
+    )
+    assert dt.conversation_id == ""
+    assert dt.to_dict()["conversation_id"] == ""
+
+
+def test_session_key_resolution_never_raises():
+    """A missing/malformed/dead key resolves to "" -- never an exception.
+
+    The delegate route must not fail because provenance could not be resolved.
+    """
+    from condor.web.routes.agents import _conversation_for_session
+
+    assert asyncio.run(_conversation_for_session("")) == ""
+    assert asyncio.run(_conversation_for_session("not-a-key")) == ""
+    # Well-formed but no such session.
+    assert asyncio.run(_conversation_for_session("web:999999:ghost")) == ""
+
+
 def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
     """The runner feeds streamed events to an event_sink and the transcript
     captures reasoning, tool calls (input/output), and the final result."""

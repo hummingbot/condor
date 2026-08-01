@@ -25,6 +25,7 @@ class _FakeClient:
     """Stand-in for ACPClient that counts lifecycle calls instead of spawning."""
 
     def __init__(self, **kwargs):
+        self.kwargs = kwargs
         self.alive = True
         self.start_calls = 0
         self.stop_calls = 0
@@ -105,6 +106,22 @@ def test_create_reuses_alive_session(registry):
     assert _FakeClient.last.start_calls == 1
     assert _FakeClient.last.stop_calls == 0
     assert len(registry._sessions) == 1
+
+
+def test_session_key_reaches_the_subprocess_env(registry):
+    """The spawned client is told which session it belongs to (FEAT-021).
+
+    The MCP child inherits this env, and the condor server posts it back on
+    ``delegate(action="start")`` so a delegation can be attributed to the
+    conversation that asked for it. If it were missing the field would be
+    silently empty, which is why it is asserted at the spawn boundary.
+    """
+    key = SessionKey.web(42, "slot-1")
+
+    asyncio.run(runtime.create_session(_spec(key)))
+
+    env = _FakeClient.last.kwargs["extra_env"]
+    assert env["CONDOR_SESSION_KEY"] == str(key) == "web:42:slot-1"
 
 
 def test_create_replaces_on_agent_key_change(registry):

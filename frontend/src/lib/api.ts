@@ -472,6 +472,10 @@ export interface Delegation {
   status: "running" | "done" | "error" | "stopped";
   result: string;
   error: string;
+  /** The conversation that started this task; "" when there was none. */
+  conversation_id: string;
+  /** Wall-clock start (epoch seconds) — drives the elapsed time. */
+  started_at: number;
 }
 
 // Strategy = a playbook that loops under an Agent. Holds the operational
