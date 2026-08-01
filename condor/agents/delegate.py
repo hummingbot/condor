@@ -39,6 +39,11 @@ _delegations: dict[str, "DelegateTask"] = {}
 # Default per-task wall-clock budget; a hung ACP subprocess is cancelled after this.
 DEFAULT_TIMEOUT_S = 900
 
+# Ceiling on a single tool output wherever a transcript is *read* -- the on-disk
+# markdown and the wire projection share it so the two can never disagree about
+# where a huge output was cut. ``dt.events`` itself keeps the full output.
+MAX_TOOL_OUTPUT = 2000
+
 
 @dataclass
 class DelegateTask:
@@ -76,6 +81,11 @@ class DelegateTask:
             "error": self.error,
             "conversation_id": self.conversation_id,
             "started_at": self.started_at,
+            # NOTE: `events` is deliberately omitted. This dict is what the MCP
+            # `delegate` tool polls, so including the session stream would dump
+            # the whole untruncated reasoning + tool output into a *chat agent's*
+            # context on every check. The human-facing transcript is served
+            # separately by `events_for_wire` (FEAT-022).
         }
 
 
@@ -249,6 +259,51 @@ async def stop_delegation(task_id: str) -> bool:
     return True
 
 
+def _clip_output(value) -> str:
+    """Stringify a tool output, bounded at :data:`MAX_TOOL_OUTPUT`."""
+    out = str(value)
+    if len(out) > MAX_TOOL_OUTPUT:
+        return out[:MAX_TOOL_OUTPUT] + "\n… (truncated)"
+    return out
+
+
+def events_for_wire(events: list[dict]) -> list[dict]:
+    """Serializable copy of an event stream, with tool output bounded.
+
+    A *copy*, not the live list: the sink patches tool entries in place (see
+    :func:`condor.acp.client.fold_tool_call_event`), so handing the originals to
+    a serializer would race with a running delegation. Truncation reuses
+    :func:`_clip_output`, so what a reader sees on the wire is cut at exactly the
+    boundary the on-disk transcript uses.
+    """
+    import json
+
+    wire: list[dict] = []
+    for ev in list(events):  # snapshot: the sink may append while we iterate
+        kind = ev.get("type")
+        if kind in ("thought", "text"):
+            wire.append({"type": kind, "text": ev.get("text") or ""})
+        elif kind == "tool":
+            inp = ev.get("input")
+            out = ev.get("output")
+            wire.append(
+                {
+                    "type": "tool",
+                    # Stable across the fold's in-place patches -- the client
+                    # keys rows by it so an expanded row survives a status flip.
+                    "id": ev.get("id") or "",
+                    "name": ev.get("name") or "unknown",
+                    "status": ev.get("status") or "",
+                    "kind": ev.get("kind") or "",
+                    # A tool input can hold anything the agent passed; round-trip
+                    # it through JSON so the response can't fail to serialize.
+                    "input": json.loads(json.dumps(inp, default=str)) if inp else None,
+                    "output": _clip_output(out) if out else None,
+                }
+            )
+    return wire
+
+
 def _render_session(events: list[dict]) -> str:
     """Render the chronological session transcript (thoughts, tool calls, text)."""
     import json
@@ -280,10 +335,7 @@ def _render_session(events: list[dict]) -> str:
                 )
                 block.append(f"**Input:**\n```json\n{inp_str}\n```")
             if ev.get("output"):
-                out_str = str(ev["output"])
-                if len(out_str) > 2000:
-                    out_str = out_str[:2000] + "\n… (truncated)"
-                block.append(f"**Output:**\n```\n{out_str}\n```")
+                block.append(f"**Output:**\n```\n{_clip_output(ev['output'])}\n```")
             parts.append("\n".join(block))
     return "\n\n".join(parts)
 
