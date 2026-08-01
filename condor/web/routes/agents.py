@@ -849,6 +849,32 @@ async def get_delegation_status(
     return dt.to_dict()
 
 
+@router.get("/delegations/{task_id}/events")
+async def get_delegation_events(
+    task_id: str, user: WebUser = Depends(get_current_user)
+):
+    """Chronological session transcript for a delegation (this process).
+
+    Split from ``get_delegation_status`` on purpose: that route feeds the MCP
+    `delegate` tool -- an *agent* polling its own task, which must not be handed
+    the whole reasoning stream -- while this one feeds a *human* watching the
+    work happen. Same data, opposite appetites for verbosity.
+
+    ``status`` rides along so a client knows when to stop polling without a
+    second request.
+    """
+    from condor.agents.delegate import events_for_wire, get_delegation
+
+    dt = get_delegation(task_id)
+    if dt is None:
+        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
+    return {
+        "task_id": task_id,
+        "status": dt.status,
+        "events": events_for_wire(dt.events),
+    }
+
+
 @router.post("/delegations/{task_id}/stop")
 async def stop_delegation_route(
     task_id: str, user: WebUser = Depends(get_current_user)

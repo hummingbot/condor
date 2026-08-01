@@ -297,3 +297,245 @@ def test_delegation_persists_full_session_transcript(tmp_path, monkeypatch):
     assert "3 pools found" in text
     assert "**Tool calls:** 1" in text
     assert "Done: 3 pools." in text
+
+
+# ── The wire projection (FEAT-022) ──
+
+
+def test_events_for_wire_preserves_the_three_shapes():
+    """thought/text pass through; a tool keeps everything a transcript renders."""
+    from condor.agents.delegate import events_for_wire
+
+    events = [
+        {"type": "thought", "text": "let me look"},
+        {
+            "type": "tool",
+            "id": "t1",
+            "name": "get_market_data",
+            "status": "completed",
+            "kind": "other",
+            "input": {"connector": "binance"},
+            "output": "ok",
+        },
+        {"type": "text", "text": "done"},
+    ]
+
+    wire = events_for_wire(events)
+
+    assert [e["type"] for e in wire] == ["thought", "tool", "text"]
+    assert wire[0] == {"type": "thought", "text": "let me look"}
+    assert wire[2] == {"type": "text", "text": "done"}
+    assert wire[1] == {
+        "type": "tool",
+        "id": "t1",
+        "name": "get_market_data",
+        "status": "completed",
+        "kind": "other",
+        "input": {"connector": "binance"},
+        "output": "ok",
+    }
+
+
+def test_events_for_wire_handles_an_in_flight_tool_call():
+    """A call the fold has created but not yet patched has no input/output yet."""
+    from condor.agents.delegate import events_for_wire
+
+    wire = events_for_wire(
+        [{"type": "tool", "id": "t1", "name": "scan", "status": "in_progress"}]
+    )
+
+    assert wire[0]["status"] == "in_progress"
+    assert wire[0]["input"] is None
+    assert wire[0]["output"] is None
+    assert wire[0]["kind"] == ""
+
+
+def test_events_for_wire_clips_output_like_the_disk_transcript():
+    """The wire and the .md cut at the same boundary with the same marker."""
+    from condor.agents.delegate import MAX_TOOL_OUTPUT, _render_session, events_for_wire
+
+    huge = "x" * (MAX_TOOL_OUTPUT + 500)
+    events = [
+        {
+            "type": "tool",
+            "id": "t1",
+            "name": "scan",
+            "status": "completed",
+            "output": huge,
+        }
+    ]
+
+    clipped = events_for_wire(events)[0]["output"]
+
+    assert clipped == "x" * MAX_TOOL_OUTPUT + "\n… (truncated)"
+    # Same string the on-disk transcript embeds -- the two must never disagree.
+    assert clipped in _render_session(events)
+
+
+def test_events_for_wire_returns_a_copy():
+    """Serializing must not hand out the live entries the sink patches in place."""
+    from condor.agents.delegate import events_for_wire
+
+    events = [
+        {
+            "type": "tool",
+            "id": "t1",
+            "name": "scan",
+            "status": "in_progress",
+            "input": {"pair": "SOL-USDC"},
+        }
+    ]
+
+    wire = events_for_wire(events)
+    wire[0]["status"] = "completed"
+    wire[0]["input"]["pair"] = "MUTATED"
+    wire.append({"type": "text", "text": "injected"})
+
+    assert events[0]["status"] == "in_progress"
+    assert events[0]["input"] == {"pair": "SOL-USDC"}
+    assert len(events) == 1
+
+
+def test_events_for_wire_makes_input_json_safe():
+    """A tool input can hold anything; the response must still serialize."""
+    import json
+
+    from condor.agents.delegate import events_for_wire
+
+    class Opaque:
+        def __repr__(self):
+            return "<opaque>"
+
+    wire = events_for_wire(
+        [
+            {
+                "type": "tool",
+                "id": "t1",
+                "name": "scan",
+                "status": "completed",
+                "input": {"obj": Opaque()},
+            }
+        ]
+    )
+
+    assert json.dumps(wire)  # would raise if the projection leaked the object
+    assert wire[0]["input"] == {"obj": "<opaque>"}
+
+
+def test_to_dict_still_omits_events():
+    """The MCP tool's payload must not grow the session stream (FEAT-022 alt B)."""
+    from condor.agents.delegate import DelegateTask
+
+    dt = DelegateTask(
+        task_id="x",
+        agent_slug="scout",
+        user_id=1,
+        chat_id=42,
+        server_name=None,
+        task="t",
+    )
+    dt.events.append({"type": "text", "text": "noise"})
+
+    assert "events" not in dt.to_dict()
+
+
+def test_events_route_shows_a_running_delegation_live(tmp_path, monkeypatch):
+    """The point of the feature: two polls of a *running* task differ.
+
+    The first sees a tool call in flight; the second sees the same call (same
+    `id`, so the client updates the row instead of remounting it) completed with
+    its output — without the task having finished.
+    """
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    _write_agent(tmp_path, "scout")
+
+    from condor.acp.client import ThoughtChunk, ToolCallEvent, ToolCallUpdate
+    from condor.web.routes.agents import get_delegation_events
+
+    gate_started = asyncio.Event()
+    gate_release = asyncio.Event()
+
+    async def fake_run(*, event_sink, **kw):
+        event_sink(ThoughtChunk(text="scanning"))
+        event_sink(
+            ToolCallEvent(
+                tool_call_id="t1",
+                title="get_market_data",
+                status="in_progress",
+                kind="other",
+                input={"pair": "SOL-USDC"},
+            )
+        )
+        gate_started.set()
+        await gate_release.wait()  # hold the delegation open mid-flight
+        event_sink(
+            ToolCallUpdate(tool_call_id="t1", status="completed", output="3 pools")
+        )
+        return "done"
+
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="scan",
+            bot=_FakeBot(),
+        )
+        await gate_started.wait()
+        first = await get_delegation_events(dt.task_id)
+        gate_release.set()
+        await _drain(dt)
+        second = await get_delegation_events(dt.task_id)
+        return first, second
+
+    first, second = asyncio.run(scenario())
+
+    # Mid-flight: the task is running and the tool call is visibly in progress.
+    assert first["status"] == "running"
+    assert [e["type"] for e in first["events"]] == ["thought", "tool"]
+    assert first["events"][1]["status"] == "in_progress"
+    assert first["events"][1]["output"] is None
+
+    # Same call, patched in place -- the id is what keeps the row identity.
+    assert second["status"] == "done"
+    assert second["events"][1]["id"] == first["events"][1]["id"] == "t1"
+    assert second["events"][1]["status"] == "completed"
+    assert second["events"][1]["output"] == "3 pools"
+    # The earlier snapshot was a copy, so it did not mutate underneath us.
+    assert first["events"][1]["status"] == "in_progress"
+
+
+def test_events_route_404s_on_unknown_task():
+    from fastapi import HTTPException
+
+    from condor.web.routes.agents import get_delegation_events
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(get_delegation_events("nope-delegate-x"))
+    assert exc.value.status_code == 404
+
+
+def test_events_route_returns_status_alongside_the_transcript():
+    """`status` rides along so a poller knows when to stop without a 2nd request."""
+    from condor.agents.delegate import DelegateTask
+    from condor.web.routes.agents import get_delegation_events
+
+    dt = DelegateTask(
+        task_id="scout-delegate-abc",
+        agent_slug="scout",
+        user_id=1,
+        chat_id=42,
+        server_name=None,
+        task="t",
+    )
+    dt.events.append({"type": "thought", "text": "thinking"})
+    delegate_module._delegations[dt.task_id] = dt
+
+    payload = asyncio.run(get_delegation_events(dt.task_id))
+
+    assert payload["task_id"] == dt.task_id
+    assert payload["status"] == "running"
+    assert payload["events"] == [{"type": "thought", "text": "thinking"}]
