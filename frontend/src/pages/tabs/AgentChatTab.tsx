@@ -16,6 +16,7 @@ import { AgentsTabSwitch, type AgentsTab } from "@/components/chat/AgentsTabSwit
 import { BrainPicker, type BrainSelection } from "@/components/chat/BrainPicker";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatThread } from "@/components/chat/ChatThread";
+import { ContextDock } from "@/components/chat/ContextDock";
 import { ConversationList } from "@/components/chat/ConversationList";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
@@ -219,88 +220,99 @@ export function AgentChatTab({
         />
       </aside>
 
-      {/* ── Conversation ── */}
-      <div className="flex min-w-0 flex-1 flex-col">
-        {/* Who is answering */}
-        <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
-          <button
-            onClick={() => setRailOpen((v) => !v)}
-            className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] md:hidden"
-            title={railOpen ? "Hide conversations" : "Show conversations"}
-          >
-            {railOpen ? (
-              <PanelLeftClose className="h-4 w-4" />
-            ) : (
-              <PanelLeftOpen className="h-4 w-4" />
-            )}
-          </button>
-          {chat.isConnected && (
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-500" />
-          )}
-          {activeSlot ? (
-            <BrainPicker
-              agents={modelOptions}
-              customProviders={customProviders}
-              agentBindings={agentBindings}
-              selectedAgentKey={activeSlot.info.agent_key}
-              selectedAgentSlug={activeSlot.info.agent_slug || ""}
-              onSelect={handleSwitch}
-              variant="inline"
-              disabled={activeSlot.pending || isActiveStreaming}
-            />
-          ) : (
-            <span className="text-sm font-semibold">Chat</span>
-          )}
-          {activeSlot?.info.server_name && (
-            <div className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]">
-              <Server className="h-2.5 w-2.5" />
-              <span className="max-w-[120px] truncate">{activeSlot.info.server_name}</span>
-            </div>
-          )}
-          {/* Strategies, brain and routines stay on the agent's own page. */}
-          {boundAgent && (
-            <Link
-              to={`/agents/${boundAgent.slug}`}
-              className="ml-auto flex items-center gap-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
+      {/* ── Conversation, and what it set in motion ──
+          `relative` so the dock overlays the transcript below `xl` rather than
+          escaping to the page, the mirror of what the rail does below `md`. */}
+      <div className="relative flex min-w-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          {/* Who is answering */}
+          <div className="flex shrink-0 items-center gap-2 border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
+            <button
+              onClick={() => setRailOpen((v) => !v)}
+              className="rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] md:hidden"
+              title={railOpen ? "Hide conversations" : "Show conversations"}
             >
-              Manage
-              <ArrowUpRight className="h-3 w-3" />
-            </Link>
-          )}
+              {railOpen ? (
+                <PanelLeftClose className="h-4 w-4" />
+              ) : (
+                <PanelLeftOpen className="h-4 w-4" />
+              )}
+            </button>
+            {chat.isConnected && (
+              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-500" />
+            )}
+            {activeSlot ? (
+              <BrainPicker
+                agents={modelOptions}
+                customProviders={customProviders}
+                agentBindings={agentBindings}
+                selectedAgentKey={activeSlot.info.agent_key}
+                selectedAgentSlug={activeSlot.info.agent_slug || ""}
+                onSelect={handleSwitch}
+                variant="inline"
+                disabled={activeSlot.pending || isActiveStreaming}
+              />
+            ) : (
+              <span className="text-sm font-semibold">Chat</span>
+            )}
+            {activeSlot?.info.server_name && (
+              <div className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]">
+                <Server className="h-2.5 w-2.5" />
+                <span className="max-w-[120px] truncate">{activeSlot.info.server_name}</span>
+              </div>
+            )}
+            {/* Strategies, brain and routines stay on the agent's own page. */}
+            {boundAgent && (
+              <Link
+                to={`/agents/${boundAgent.slug}`}
+                className="ml-auto flex items-center gap-1 text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-primary)]"
+              >
+                Manage
+                <ArrowUpRight className="h-3 w-3" />
+              </Link>
+            )}
+          </div>
+
+          <ChatThread
+            slot={activeSlot}
+            agents={modelOptions}
+            modes={modes}
+            isStreaming={isActiveStreaming}
+            permissionRequest={chat.permissionRequest}
+            onResolvePermission={chat.resolvePermission}
+            switchError={switchError}
+            onDismissSwitchError={() => setSwitchError(null)}
+            onSend={(text) =>
+              activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
+            }
+            onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
+            columnClassName="mx-auto w-full max-w-3xl"
+            autoFocus
+            emptyState={
+              <Hero
+                agent={heroAgent}
+                modelOptions={modelOptions}
+                customProviders={customProviders}
+                agentBindings={agentBindings}
+                defaultAgent={defaultAgent}
+                onAsk={(text) => talkTo(heroAgent?.slug || "", text)}
+                onPickBrain={(sel) => {
+                  if (sel.agentSlug !== undefined) {
+                    setPendingAgent(
+                      agents.find((a) => a.slug === sel.agentSlug) || null,
+                    );
+                  }
+                }}
+              />
+            }
+          />
         </div>
 
-        <ChatThread
-          slot={activeSlot}
-          agents={modelOptions}
-          modes={modes}
-          isStreaming={isActiveStreaming}
-          permissionRequest={chat.permissionRequest}
-          onResolvePermission={chat.resolvePermission}
-          switchError={switchError}
-          onDismissSwitchError={() => setSwitchError(null)}
-          onSend={(text) =>
-            activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
-          }
-          onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
-          columnClassName="mx-auto w-full max-w-3xl"
-          autoFocus
-          emptyState={
-            <Hero
-              agent={heroAgent}
-              modelOptions={modelOptions}
-              customProviders={customProviders}
-              agentBindings={agentBindings}
-              defaultAgent={defaultAgent}
-              onAsk={(text) => talkTo(heroAgent?.slug || "", text)}
-              onPickBrain={(sel) => {
-                if (sel.agentSlug !== undefined) {
-                  setPendingAgent(
-                    agents.find((a) => a.slug === sel.agentSlug) || null,
-                  );
-                }
-              }}
-            />
-          }
+        <ContextDock
+          delegations={delegationData?.delegations ?? []}
+          conversationId={activeSlot?.info.conversation_id || ""}
+          agentSlug={activeSlot?.info.agent_slug || ""}
+          onOpenFleet={() => onTabChange("fleet")}
         />
       </div>
     </div>
