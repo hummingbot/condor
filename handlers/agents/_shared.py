@@ -628,12 +628,12 @@ def build_initial_context(
 
     # Agents index — domain Agents condor can consult (FEAT: coordinator model).
     # condor delegates domain work via consult(...) instead of holding the domain's
-    # tools/context itself. Inject only the index of *consultable* Agents; nothing
-    # when none exist.
+    # tools/context itself. EVERY agent is listed: one missing from this index can
+    # never be routed to. Nothing injected only when none exist.
     try:
         from condor.agents.agent import AgentStore
 
-        agents_index = AgentStore().list_consultable_index()
+        agents_index = AgentStore().list_index()
         if agents_index:
             sections.append(
                 "[AGENTS — consult these BEFORE doing domain work with raw tools]\n"
@@ -645,7 +645,7 @@ def build_initial_context(
                 f"{agents_index}"
             )
     except Exception:
-        pass  # Consultable agents are advisory — never block session start on them.
+        pass  # The agents index is advisory — never block session start on it.
 
     return "\n\n".join(sections)
 

@@ -18,20 +18,27 @@ plays. It is defined in `agents/{slug}/AGENT.md` (its brain/system prompt). Ther
 ONE kind of thing — an Agent. "Expert" is not a separate type; it's just an agent being
 consulted.
 
+**Every agent can do all three things from the moment it exists** — be consulted
+(`consult`), be delegated a background task (`delegate`), and run on a loop
+(`start_agent`). There is no capability flag, nothing to enable, and no such thing as a
+"consult-only" or "loop-only" agent. The layers below add *quality*, never capability.
+
 The whole point of this skill is to build the agent in the **smallest useful step first,
 then layer capability on only when the user wants it.** Do NOT front-load routines,
 strategies, executors, or model questions. The progression is:
 
 1. **Create the agent from just its role + what it's for.** Nothing else required. The
-   moment it exists it is already consultable.
+   moment it exists it can already be consulted, delegated to, and looped.
 2. **Consult it to prove it's alive.** Ask it something inside its specialty and show the
    answer. This is the agent working end-to-end.
 3. **Improve it with routines** — give it structured market data of its own. Define one,
    create it, run it, look at the output together. This is what turns a guessing LLM into
    a real specialist.
-4. **(Optional) Let it run on a loop** — a strategy the engine runs on a tick. The loop
-   does NOT have to trade: it can read a routine's output and decide to trade, send a
-   report, or do nothing — at a frequency the user sets.
+4. **(Optional) Give its loop a dedicated playbook** — a strategy the engine runs on a
+   tick. The agent can already loop without one (it ticks a default playbook driven by
+   its own brain); a strategy is how you make that loop specific and disciplined. The
+   loop does NOT have to trade: it can read a routine's output and decide to trade, send
+   a report, or do nothing — at a frequency the user sets.
 
 Each layer is independently valuable. Most agents are worth creating and consulting long
 before they ever get a routine, and many never need a loop at all.
@@ -41,7 +48,8 @@ agents/{slug}/
   AGENT.md                         # identity + role (the brain) — step 1
   routines/*.py                    # agent-scoped analysis scripts — step 3
   skills/{name}/SKILL.md           # the agent's own reusable playbooks
-  strategies/{slug}/strategy.md    # OPTIONAL loop playbook — step 4
+  strategies/{slug}/strategy.md    # OPTIONAL loop playbook — step 4 (a default
+                                   # one is created on first start if there is none)
   sessions/session_N/              # run journals/snapshots (created at runtime)
 ```
 
@@ -135,11 +143,14 @@ it, and consult it again to confirm it now reasons over that data. Repeat for ea
 routine the agent needs. **Stop here unless the user wants the agent to act on its own on
 a loop.**
 
-## Step 4 — (Optional) Let it run on a loop
+## Step 4 — (Optional) Give its loop a dedicated playbook
 
-Only if the user wants the agent to act autonomously: a **strategy** is the tick playbook
-the engine runs in a **session**. Make clear the loop does NOT have to trade — define the
-tick task however the user wants:
+Only if the user wants the agent to act autonomously. The agent can already loop without
+this step — `start_agent(strategy_id="<agent_slug>")` ticks a default playbook driven by
+its AGENT.md — but that default is deliberately generic. A **strategy** is the specific
+tick playbook the engine runs in a **session**, and it is what you want for anything that
+trades. Make clear the loop does NOT have to trade — define the tick task however the
+user wants:
 
 - read routine X's output and **decide whether to trade** (create/stop executors),
 - or just **send a report / notification**,
@@ -190,22 +201,23 @@ calls, risk rules respected. Don't go live until the user is satisfied.
 commands. Always include risk limits when a loop agent can trade.
 
 ## Monitoring existing agents
-1. `manage_trading_agent(action="list_agent_definitions")` — all agents + capabilities
-   (consultable, loopable, owned strategies). Only list that shows consult-only agents.
+1. `manage_trading_agent(action="list_agent_definitions")` — all agents, with their
+   routing hint and owned strategies. Only list that shows agents owning no strategy.
 2. `manage_trading_agent(action="list_agents")` — running loop instances.
 3. `manage_trading_agent(action="agent_status", agent_id=…)` — instance status.
 4. `trading_agent_journal_read(agent_id=…, section="summary"|"runs"|"run:N")`.
 
 ## Reference
 
-**Consultable rule:** `consultable = when_to_consult is set` — any model. The model only
-changes *how* the consult runs: a pydantic-ai key (`ollama:…`/`openai:…`/`groq:…`/
-`lmstudio:…`) enforces the `tools` allowlist; an ACP key (`claude-code`/`gemini`/
-`copilot`) runs unrestricted, with mutations still confirmation-gated. A `claude-code`
-loop agent is consultable too — set `when_to_consult` and it shows up for Condor.
+**Capability rule:** there isn't one. Every agent is consultable, delegable and loopable
+on any model; `when_to_consult` and owning a strategy are quality, not permission. The
+model only changes *how* a run executes: a pydantic-ai key (`ollama:…`/`openai:…`/
+`groq:…`/`lmstudio:…`) enforces the `tools` allowlist; an ACP key (`claude-code`/`gemini`/
+`copilot`) runs unrestricted, with mutations still confirmation-gated.
 
-**Writing the `when_to_consult` trigger:** Condor routes by matching the request
-against this string, so vague ones cause misses. Rules:
+**Writing the `when_to_consult` hint:** it never gates anything — it is how Condor
+*picks* this agent over another, and it falls back to the description when unset. A vague
+or missing one costs you routing accuracy, so write it well. Rules:
 - **Lead with the user's action, not the domain** — "When the user wants to deploy,
   tune, or stop an executor" matches an intent; "Executor expertise" matches nothing.
 - **Name the concrete verbs + nouns** the user would actually say (deploy/tune/stop,
