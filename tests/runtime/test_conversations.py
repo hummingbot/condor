@@ -17,8 +17,11 @@ from condor.runtime import PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import sessions as session_module
 from condor.runtime.conversations import (
+    REDACTED,
     REPLAY_HEADER,
     REPLAY_OMITTED,
+    TOOL_INPUT_MAX_CHARS,
+    TOOL_OUTPUT_MAX_CHARS,
     ConversationIdError,
     Recorder,
     TurnEntry,
@@ -344,12 +347,19 @@ def test_recorder_writes_two_turns_per_prompt(conv_root):
                 "tool_call_id": "t1",
                 "title": "get_portfolio_overview",
                 "status": "pending",
+                "kind": "mcp",
+                "input": {"account": "master"},
             },
         )
     )
     rec.observe(
         RuntimeEvent(
-            type="tool_update", data={"tool_call_id": "t1", "status": "completed"}
+            type="tool_update",
+            data={
+                "tool_call_id": "t1",
+                "status": "completed",
+                "output": "total: $50.00",
+            },
         )
     )
     rec.observe(RuntimeEvent(type="done", data={"stop_reason": "end_turn"}))
@@ -360,8 +370,166 @@ def test_recorder_writes_two_turns_per_prompt(conv_root):
     assert turns[0].role == "user" and turns[0].text == "how much cash?"
     assert turns[1].text == "You have $50.", "chunks are joined, not written per chunk"
     assert turns[1].tool_calls == [
-        {"id": "t1", "title": "get_portfolio_overview", "status": "completed"}
-    ]
+        {
+            "id": "t1",
+            "title": "get_portfolio_overview",
+            "status": "completed",
+            "kind": "mcp",
+            "input": {"account": "master"},
+            "output": "total: $50.00",
+        }
+    ], "the trajectory is what the tool was asked and what it answered"
+
+
+def test_recorder_keeps_tool_io_on_the_acp_path(conv_root):
+    """ACP: the call carries the input, a later update carries the output.
+
+    Mirrors ``RuntimeEvent.from_acp`` — ``tool_call`` has input/kind,
+    ``tool_call_update`` has the output — so this pins the shape the real
+    bridge produces, not an invented one.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "read the file")
+
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={
+                "tool_call_id": "call_9",
+                "title": "Read (config.py)",
+                "status": "in_progress",
+                "kind": "read",
+                "input": {"path": "config.py"},
+            },
+        )
+    )
+    rec.observe(
+        RuntimeEvent(
+            type="tool_update",
+            data={
+                "tool_call_id": "call_9",
+                "status": "completed",
+                "output": "PORT = 8080",
+            },
+        )
+    )
+    rec.flush()
+
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["kind"] == "read"
+    assert call["input"] == {"path": "config.py"}
+    assert call["output"] == "PORT = 8080"
+
+
+def test_recorder_keeps_tool_io_on_the_pydantic_ai_path(conv_root):
+    """pydantic-ai emits a bare "completed" first and the result after it.
+
+    ``prompt_stream`` yields ``ToolCallUpdate(status="completed")`` the moment
+    the call is issued and only learns the result on the next
+    ``ModelRequestNode``. The empty first update must not win.
+    """
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "what moved?")
+
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={
+                "tool_call_id": "toolu_1",
+                "title": "get_market_data",
+                "status": "in_progress",
+                "kind": "mcp",
+                "input": {"pair": "BTC-USDT"},
+            },
+        )
+    )
+    rec.observe(
+        RuntimeEvent(
+            type="tool_update", data={"tool_call_id": "toolu_1", "status": "completed"}
+        )
+    )
+    rec.observe(
+        RuntimeEvent(
+            type="tool_update",
+            data={
+                "tool_call_id": "toolu_1",
+                "status": "completed",
+                "output": "BTC-USDT +2.4%",
+            },
+        )
+    )
+    rec.flush()
+
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["output"] == "BTC-USDT +2.4%", "an empty update must not erase a result"
+
+
+def test_recorder_caps_tool_io(conv_root):
+    """A tool that returns a megabyte does not write a megabyte."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "dump everything")
+
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={
+                "tool_call_id": "big",
+                "title": "get_market_data",
+                "status": "in_progress",
+                "input": {"candles": ["x" * 200 for _ in range(500)]},
+            },
+        )
+    )
+    rec.observe(
+        RuntimeEvent(
+            type="tool_update",
+            data={
+                "tool_call_id": "big",
+                "status": "completed",
+                "output": "y" * 1_000_000,
+            },
+        )
+    )
+    rec.flush()
+
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert len(call["output"]) <= TOOL_OUTPUT_MAX_CHARS
+    assert "_clipped" in call["input"], "an oversized argument set stays a dict"
+    assert len(call["input"]["_clipped"]) <= TOOL_INPUT_MAX_CHARS
+
+    written = (conv_root / str(USER) / meta.id / "transcript.jsonl").read_text()
+    assert len(written) < 10_000, "the whole transcript stays small"
+
+
+def test_recorder_does_not_persist_credentials_from_tool_arguments(conv_root):
+    """``configure_server(password=…)`` is a real tool in the agents' toolset."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "connect the server")
+
+    rec.observe(
+        RuntimeEvent(
+            type="tool_call",
+            data={
+                "tool_call_id": "cfg",
+                "title": "configure_server",
+                "status": "in_progress",
+                "input": {
+                    "host": "localhost",
+                    "username": "admin",
+                    "password": "barabit",
+                    "nested": {"API_KEY": "sk-live-123"},
+                },
+            },
+        )
+    )
+    rec.flush()
+
+    raw = (conv_root / str(USER) / meta.id / "transcript.jsonl").read_text()
+    assert "barabit" not in raw and "sk-live-123" not in raw
+    call = read_transcript(USER, meta.id)[-1].tool_calls[0]
+    assert call["input"]["password"] == REDACTED
+    assert call["input"]["nested"]["API_KEY"] == REDACTED
+    assert call["input"]["host"] == "localhost", "only the secrets go"
 
 
 def test_recorder_stamps_the_assistant_turn_with_who_answered(conv_root):
