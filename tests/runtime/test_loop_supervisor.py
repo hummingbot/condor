@@ -30,7 +30,9 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 FOREIGN_BOOT = "00000000-dead-beef-0000-000000000000"
 
 
-def _fake_engine(session_dir: Path, agent_slug="brigado", sslug="mm", num=1, tick=0):
+def _fake_engine(
+    session_dir: Path, agent_slug="brigado", sslug="mm", num=1, tick=0, user_id=4242
+):
     """A stand-in with just the attributes the supervisor records."""
     return SimpleNamespace(
         agent_id=f"{agent_slug}.{sslug}_{num}",
@@ -39,6 +41,7 @@ def _fake_engine(session_dir: Path, agent_slug="brigado", sslug="mm", num=1, tic
         session_num=num,
         session_dir=session_dir,
         chat_id=555,
+        user_id=user_id,
         journal=SimpleNamespace(tick_count=tick),
         config={"restart_on_boot": False},
     )
@@ -54,28 +57,31 @@ def _seed_session(
     boot_id=FOREIGN_BOOT,
     tick=7,
     restart_on_boot=False,
+    user_id=4242,
 ) -> Path:
-    """Write a session dir with a status file, as a previous process would."""
+    """Write a session dir with a status file, as a previous process would.
+
+    ``user_id=None`` writes the pre-CORR-082 shape, which carried no owner.
+    """
     session_dir = (
         agents_root / agent_slug / "strategies" / sslug / "sessions" / f"session_{num}"
     )
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "journal.md").write_text("# Journal\n\n## Decisions\n\n")
-    (session_dir / "status.json").write_text(
-        json.dumps(
-            {
-                "state": state,
-                "boot_id": boot_id,
-                "agent_id": f"{agent_slug}.{sslug}_{num}",
-                "agent_slug": agent_slug,
-                "strategy_slug": sslug,
-                "session_num": num,
-                "chat_id": 555,
-                "tick": tick,
-                "restart_on_boot": restart_on_boot,
-            }
-        )
-    )
+    status = {
+        "state": state,
+        "boot_id": boot_id,
+        "agent_id": f"{agent_slug}.{sslug}_{num}",
+        "agent_slug": agent_slug,
+        "strategy_slug": sslug,
+        "session_num": num,
+        "chat_id": 555,
+        "tick": tick,
+        "restart_on_boot": restart_on_boot,
+    }
+    if user_id is not None:
+        status["user_id"] = user_id
+    (session_dir / "status.json").write_text(json.dumps(status))
     return session_dir
 
 
@@ -101,6 +107,8 @@ def test_status_file_transitions(tmp_path):
     assert final["state"] == LoopState.STOPPED
     assert final["boot_id"] == BOOT_ID
     assert final["session_num"] == 1
+    # The owner is recorded too: a restart cannot rebuild the run without it.
+    assert final["user_id"] == 4242
     assert supervisor.all() == {}
 
 
@@ -241,6 +249,122 @@ def test_reconcile_restart_failure_is_reported_not_fatal(tmp_path, monkeypatch):
     assert report.total == 1
     assert report.restarted == []
     assert any("config no longer valid" in e for e in report.errors)
+    assert read_status(session_dir)["state"] == LoopState.INTERRUPTED
+
+
+# ── The real restart path (CORR-082) ──
+#
+# Every test above monkeypatches ``_restart``, which is exactly why the missing
+# ``user_id`` argument went unnoticed: the real constructor was never called,
+# and reconcile_boot swallows the TypeError into report.errors, so the only
+# symptom was a "restart failed" line nobody read. These drive the real thing.
+
+
+def _seed_agent_and_strategy(
+    agents_root: Path, monkeypatch, *, agent_slug="brigado", sslug="mm", created_by=0
+):
+    """Create a real Agent + Strategy on disk, so the stores can load them back."""
+    from condor.agents import agent as agent_module
+    from condor.agents import strategy as strategy_module
+    from condor.agents.agent import AgentStore
+    from condor.agents.strategy import StrategyStore
+
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", agents_root)
+    monkeypatch.setattr(strategy_module, "_DATA_ROOT", agents_root)
+    AgentStore().create(name=agent_slug, created_by=created_by)
+    StrategyStore().create(agent_slug=agent_slug, name=sslug, created_by=created_by)
+
+
+def _run_real_restart(tmp_path, monkeypatch, supervisor):
+    """reconcile_boot with the genuine ``_restart``; only the tick body is inert."""
+    from condor.agents.engine import TickEngine
+
+    # The engine registers itself with the process-global supervisor on start().
+    monkeypatch.setattr("condor.runtime.loops._supervisor", supervisor)
+
+    ticked = []
+
+    async def _inert_loop(self):
+        ticked.append(self.agent_id)
+
+    monkeypatch.setattr(TickEngine, "_loop", _inert_loop)
+
+    async def _go():
+        report = await supervisor.reconcile_boot(agents_root=tmp_path)
+        await asyncio.sleep(0)  # let the inert tick task finish
+        return report
+
+    return asyncio.run(_go())
+
+
+def test_restart_rebuilds_the_engine_with_the_recorded_owner(tmp_path, monkeypatch):
+    """The opted-in run really restarts, under the same owner and chat."""
+    old_dir = _seed_session(tmp_path, restart_on_boot=True, user_id=4242)
+    _seed_agent_and_strategy(tmp_path, monkeypatch, created_by=999)
+    supervisor = LoopSupervisor()
+
+    report = _run_real_restart(tmp_path, monkeypatch, supervisor)
+
+    # No swallowed TypeError: the restart genuinely went through.
+    assert report.errors == []
+    assert len(report.restarted) == 1
+    assert report.interrupted[0].restarted is True
+
+    # A real engine is registered — same owner and chat, a NEW session number.
+    engines = list(supervisor.all().values())
+    assert len(engines) == 1
+    engine = engines[0]
+    assert engine.user_id == 4242
+    assert engine.chat_id == 555
+    assert engine.session_num == 2
+    assert engine.agent_id == "brigado.mm_2"
+
+    # The old session is closed history; the new one records the owner again,
+    # so the next boot can restart it too.
+    assert read_status(old_dir)["state"] == LoopState.INTERRUPTED
+    assert read_status(engine.session_dir)["user_id"] == 4242
+    assert read_status(engine.session_dir)["state"] == LoopState.RUNNING
+
+
+def test_restart_of_a_legacy_status_falls_back_to_the_creator(tmp_path, monkeypatch):
+    """A status file written before user_id existed still restarts, not crashes."""
+    _seed_session(tmp_path, restart_on_boot=True, user_id=None)
+    _seed_agent_and_strategy(tmp_path, monkeypatch, created_by=777)
+    supervisor = LoopSupervisor()
+
+    report = _run_real_restart(tmp_path, monkeypatch, supervisor)
+
+    assert report.errors == []
+    engine = next(iter(supervisor.all().values()))
+    # Not 0: user 0 owns no memory and no servers, so the run would come back
+    # silently degraded. The creator on disk is the same person in every path
+    # that can start a loop.
+    assert engine.user_id == 777
+
+
+def test_restart_without_any_known_owner_still_starts(tmp_path, monkeypatch):
+    """Nothing on disk knows the owner: restart degraded rather than not at all."""
+    _seed_session(tmp_path, restart_on_boot=True, user_id=None)
+    _seed_agent_and_strategy(tmp_path, monkeypatch, created_by=0)
+    supervisor = LoopSupervisor()
+
+    report = _run_real_restart(tmp_path, monkeypatch, supervisor)
+
+    assert report.errors == []
+    assert next(iter(supervisor.all().values())).user_id == 0
+
+
+def test_no_opt_in_means_the_real_restart_never_runs(tmp_path, monkeypatch):
+    """Still opt-in once _restart is real: interrupted, and no engine started."""
+    session_dir = _seed_session(tmp_path, restart_on_boot=False, user_id=4242)
+    _seed_agent_and_strategy(tmp_path, monkeypatch, created_by=999)
+    supervisor = LoopSupervisor()
+
+    report = _run_real_restart(tmp_path, monkeypatch, supervisor)
+
+    assert report.total == 1
+    assert report.restarted == []
+    assert supervisor.all() == {}
     assert read_status(session_dir)["state"] == LoopState.INTERRUPTED
 
 
