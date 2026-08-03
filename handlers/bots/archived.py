@@ -9,8 +9,9 @@ Provides:
 - Full report generation (JSON + PNG) saved locally
 """
 
+import asyncio
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
@@ -31,6 +32,11 @@ ARCHIVED_CACHE_TTL = 300  # 5 minutes
 
 # Pagination settings
 BOTS_PER_PAGE = 5
+
+# Upper bound on concurrent per-database backend calls. The archived set grows
+# by one every time a bot is stopped and is never pruned, so the fan-out is
+# bounded rather than unlimited to stay friendly to the API server.
+MAX_CONCURRENT_DB_FETCHES = 10
 
 
 # ============================================
@@ -65,6 +71,29 @@ def _get_db_path_by_index(
 # ============================================
 # DATA FETCHING
 # ============================================
+
+
+async def _gather_db_fetches(
+    fetch: Callable, client, databases: List[str]
+) -> List[Optional[Dict[str, Any]]]:
+    """Run ``fetch(client, db_path)`` for every database concurrently.
+
+    Concurrency is capped at ``MAX_CONCURRENT_DB_FETCHES``. Results come back
+    positionally aligned with ``databases`` so callers can zip them back, and a
+    fetch that blows up is reported as ``None`` — the same degraded value the
+    fetch helpers already return when they swallow an error, so one bad
+    database can never take down the whole page.
+    """
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_DB_FETCHES)
+
+    async def _bounded(db_path: str):
+        async with semaphore:
+            return await fetch(client, db_path)
+
+    results = await asyncio.gather(
+        *(_bounded(db_path) for db_path in databases), return_exceptions=True
+    )
+    return [None if isinstance(r, BaseException) else r for r in results]
 
 
 async def fetch_archived_databases(client) -> List[str]:
@@ -118,9 +147,9 @@ def is_database_healthy(status: Optional[Dict[str, Any]]) -> bool:
 
 async def get_healthy_databases(client, databases: List[str]) -> List[str]:
     """Filter databases to only include healthy ones."""
+    statuses = await _gather_db_fetches(fetch_database_status, client, databases)
     healthy = []
-    for db_path in databases:
-        status = await fetch_database_status(client, db_path)
+    for db_path, status in zip(databases, statuses):
         if is_database_healthy(status):
             healthy.append(db_path)
         else:
@@ -368,11 +397,14 @@ async def show_archived_menu(
             context.user_data, summaries_cache_key, ARCHIVED_CACHE_TTL
         )
         if all_summaries is None:
-            all_summaries = {}
-            for db_path in databases:
-                summary = await fetch_database_summary(client, db_path)
-                if summary:
-                    all_summaries[db_path] = summary
+            summaries = await _gather_db_fetches(
+                fetch_database_summary, client, databases
+            )
+            all_summaries = {
+                db_path: summary
+                for db_path, summary in zip(databases, summaries)
+                if summary
+            }
             set_cached(context.user_data, summaries_cache_key, all_summaries)
 
         context.user_data["archived_summaries"] = all_summaries
