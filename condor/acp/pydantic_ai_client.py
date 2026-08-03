@@ -219,8 +219,7 @@ async def healthcheck_local_backend(
 
     if resp.status_code in (401, 403):
         return (
-            f"the endpoint at {url} rejected the API key "
-            f"(HTTP {resp.status_code})."
+            f"the endpoint at {url} rejected the API key " f"(HTTP {resp.status_code})."
         )
     if resp.status_code != 200:
         return f"the model backend at {url} returned HTTP {resp.status_code}."
@@ -306,6 +305,123 @@ def _tool_args_to_dict(args: Any) -> dict | None:
     return None
 
 
+REFUSAL_PREFIX = "PERMISSION DENIED"
+
+
+def _refusal_text(tool_name: str, reason: str) -> str:
+    """The tool result a blocked call gets instead of running."""
+    detail = f": {reason}" if reason else ""
+    return (
+        f"{REFUSAL_PREFIX}: `{tool_name}` was blocked by the permission gate"
+        f"{detail}. The call did NOT execute and nothing changed. Do not retry "
+        f"it — tell the user it was refused, or choose a different action."
+    )
+
+
+class PermissionGate:
+    """Records the permission decision for every tool call before it runs.
+
+    ``prompt_stream`` observes a ``CallToolsNode`` *before* pydantic-graph
+    executes it (``pydantic_graph`` returns the node on one ``__anext__`` and
+    runs it on the next), so the decision for a call is always recorded ahead of
+    the ``call_tool`` that would execute it. The gated toolset then consumes
+    that decision at the point of execution.
+
+    The gate **fails closed**: only an explicitly recorded allow lets a call
+    through. A call that was never seen, one whose permission check raised, and
+    a replayed ``tool_call_id`` whose decision was already consumed are all
+    refused (SEC-080).
+    """
+
+    def __init__(self) -> None:
+        self._pending: list[dict[str, Any]] = []
+
+    def reset(self) -> None:
+        """Drop decisions from a previous turn."""
+        self._pending.clear()
+
+    def record(
+        self,
+        tool_call_id: str | None,
+        tool_name: str,
+        allowed: bool,
+        reason: str = "",
+    ) -> None:
+        self._pending.append(
+            {
+                "id": (tool_call_id or "").strip(),
+                "name": tool_name,
+                "allowed": allowed,
+                "reason": reason,
+                "used": False,
+            }
+        )
+
+    def consume(self, tool_call_id: str | None, tool_name: str) -> tuple[bool, str]:
+        """Take the decision for this call. Unknown calls are refused."""
+        call_id = (tool_call_id or "").strip()
+        if call_id:
+            for entry in self._pending:
+                if not entry["used"] and entry["id"] == call_id:
+                    entry["used"] = True
+                    return entry["allowed"], entry["reason"]
+        # Providers that omit tool_call_ids still need matching; fall back to
+        # the first undecided call of the same name, in emission order.
+        for entry in self._pending:
+            if not entry["used"] and entry["name"] == tool_name:
+                entry["used"] = True
+                return entry["allowed"], entry["reason"]
+        return False, "no permission decision was recorded for this call"
+
+
+_GATED_TOOLSET_CLS: Any = None
+
+
+def gated_toolset_cls() -> Any:
+    """The ``WrapperToolset`` subclass that enforces a ``PermissionGate``.
+
+    Built lazily and cached: importing this module must not require pydantic-ai,
+    which is why every other pydantic-ai import here is deferred too.
+    """
+    global _GATED_TOOLSET_CLS
+    if _GATED_TOOLSET_CLS is not None:
+        return _GATED_TOOLSET_CLS
+
+    from dataclasses import dataclass
+
+    from pydantic_ai.toolsets import WrapperToolset
+
+    @dataclass
+    class PermissionGatedToolset(WrapperToolset):
+        """Refuses a tool call the gate did not explicitly allow.
+
+        This is where a denial becomes real. The refusal is returned as the
+        tool's result (rather than raised) so the run stays well-formed and the
+        model is told, in-band, that the call was refused.
+        """
+
+        gate: PermissionGate | None = None
+
+        async def call_tool(
+            self, name: str, tool_args: dict, ctx: Any, tool: Any
+        ) -> Any:
+            gate = self.gate
+            if gate is None:
+                # A gated toolset without a gate is a wiring bug; refuse rather
+                # than silently running an unchecked call.
+                log.error("Permission gate missing for tool %s — refusing", name)
+                return _refusal_text(name, "permission gate unavailable")
+
+            allowed, reason = gate.consume(getattr(ctx, "tool_call_id", None), name)
+            if not allowed:
+                log.warning("Blocked tool call %s: %s", name, reason or "denied")
+                return _refusal_text(name, reason)
+            return await self.wrapped.call_tool(name, tool_args, ctx, tool)
+
+    _GATED_TOOLSET_CLS = PermissionGatedToolset
+    return _GATED_TOOLSET_CLS
+
+
 class PydanticAIClient:
     """Manages a pydantic-ai agent with MCP tool servers.
 
@@ -356,6 +472,9 @@ class PydanticAIClient:
         self.tool_filter_mode = tool_filter_mode or _infer_tool_filter_mode(model)
         self._mcp_servers: list[Any] = []
         self._agent: Any = None
+        # Carries each tool call's permission decision from prompt_stream (where
+        # it is taken) to the toolset (where the call would run). SEC-080.
+        self._permission_gate = PermissionGate()
         # Resolved in start() to the global semaphore for this server's base URL,
         # so all sessions sharing the same local inference server (e.g. LM Studio)
         # are serialized. Stays None for natively-resolved cloud providers
@@ -602,7 +721,9 @@ class PydanticAIClient:
 
         model = self._build_model()
         prepare = self._prepare_tools if self.allowed_tools else None
-        self._agent = Agent(model, toolsets=toolsets, prepare_tools=prepare)
+        self._agent = Agent(
+            model, toolsets=self._gate_toolsets(toolsets), prepare_tools=prepare
+        )
 
         # Resolve the global semaphore for this server's base URL so all client
         # instances targeting the same local inference server share one request
@@ -636,6 +757,19 @@ class PydanticAIClient:
             self.model_name,
             len(self._mcp_servers),
         )
+
+    def _gate_toolsets(self, toolsets: list) -> list:
+        """Wrap toolsets so a denied call never reaches the tool (SEC-080).
+
+        Only wraps when a ``permission_callback`` exists: with no callback there
+        is no decision to enforce, and a gate would refuse everything. Composes
+        with ``_prepare_tools``, which filters tool *definitions* and never sees
+        the toolset objects.
+        """
+        if self.permission_callback is None:
+            return toolsets
+        cls = gated_toolset_cls()
+        return [cls(ts, self._permission_gate) for ts in toolsets]
 
     async def _prepare_tools(self, ctx: Any, tool_defs: list) -> list:
         """Filter tools to ``self.allowed_tools`` before each run.
@@ -745,6 +879,12 @@ class PydanticAIClient:
                 from pydantic_ai.messages import TextPart, ToolCallPart, ToolReturnPart
                 from pydantic_graph import End
 
+                self._permission_gate.reset()
+                # tool_call_ids we refused: their synthetic refusal result must
+                # not be projected as a "completed" update over the "blocked"
+                # event the dashboard already received.
+                blocked_ids: set[str] = set()
+
                 async with self._agent.iter(
                     text, message_history=self._message_history
                 ) as run:
@@ -764,6 +904,8 @@ class PydanticAIClient:
                             if hasattr(node, "request") and node.request:
                                 for part in node.request.parts:
                                     if isinstance(part, ToolReturnPart):
+                                        if (part.tool_call_id or "") in blocked_ids:
+                                            continue
                                         content = part.content
                                         output_str = (
                                             content
@@ -802,15 +944,49 @@ class PydanticAIClient:
                                         # human decides — release it for the wait
                                         # so other sessions/ticks on this backend
                                         # aren't blocked (PERF-029).
-                                        async with self._release_request_slot():
-                                            result = await self.permission_callback(
-                                                tool_call_info, options
+                                        # Fail closed: only an explicit "selected"
+                                        # outcome allows the call. A check that
+                                        # raises or times out is a denial, never
+                                        # a pass (SEC-080).
+                                        reason = ""
+                                        try:
+                                            async with self._release_request_slot():
+                                                result = await self.permission_callback(
+                                                    tool_call_info, options
+                                                )
+                                            outcome = (
+                                                result.get("outcome", {})
+                                                if isinstance(result, dict)
+                                                else {}
                                             )
-                                        outcome = result.get("outcome", {})
-                                        if (
-                                            isinstance(outcome, dict)
-                                            and outcome.get("outcome") == "cancelled"
-                                        ):
+                                            approved = (
+                                                isinstance(outcome, dict)
+                                                and outcome.get("outcome") == "selected"
+                                            )
+                                            if not approved:
+                                                reason = "denied by the risk/confirmation gate"
+                                        except Exception as exc:
+                                            log.exception(
+                                                "Permission check failed for %s — "
+                                                "blocking the call",
+                                                tool_name,
+                                            )
+                                            approved = False
+                                            reason = f"permission check failed ({exc})"
+
+                                        # Record before the node runs: the tool
+                                        # executes on the next graph step, where
+                                        # the gated toolset consumes this.
+                                        self._permission_gate.record(
+                                            part.tool_call_id,
+                                            tool_name,
+                                            approved,
+                                            reason,
+                                        )
+
+                                        if not approved:
+                                            if part.tool_call_id:
+                                                blocked_ids.add(part.tool_call_id)
                                             yield ToolCallEvent(
                                                 tool_call_id=tool_id,
                                                 title=tool_name,
