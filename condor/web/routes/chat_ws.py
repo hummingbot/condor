@@ -470,7 +470,12 @@ async def _handle_send_message(
         return
 
     if info.is_busy:
-        await _send(ws, {"event": "error", "message": "Agent is busy"})
+        # Named, so the client can say so in the conversation it happened in.
+        # Unaddressed, this error is dropped on the floor and the message the
+        # user just sent sits there looking like it is still being answered.
+        await _send(
+            ws, {"event": "error", "slot_id": slot_id, "message": "Agent is busy"}
+        )
         return
 
     task_key = f"{user_id}:{slot_id}"
