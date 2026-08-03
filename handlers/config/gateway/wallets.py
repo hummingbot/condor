@@ -69,15 +69,12 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         elif not wallets_data:
             message_text = (
                 header + "_No wallets connected\\._\n\n"
-                "Add an existing wallet or create a new one\\."
+                "Add an existing wallet with its private key\\."
             )
             keyboard = [
                 [
                     InlineKeyboardButton(
                         "➕ Add Wallet", callback_data="gateway_wallet_add"
-                    ),
-                    InlineKeyboardButton(
-                        "🆕 Create Wallet", callback_data="gateway_wallet_create"
                     ),
                 ],
                 [
@@ -136,9 +133,6 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     InlineKeyboardButton(
                         "➕ Add Wallet", callback_data="gateway_wallet_add"
                     ),
-                    InlineKeyboardButton(
-                        "🆕 Create Wallet", callback_data="gateway_wallet_create"
-                    ),
                 ],
                 [
                     InlineKeyboardButton("🔄 Refresh", callback_data="gateway_wallets"),
@@ -178,11 +172,6 @@ async def handle_wallet_action(query, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if action_data == "add":
         await prompt_add_wallet_chain(query, context)
-    elif action_data == "create":
-        await prompt_create_wallet_chain(query, context)
-    elif action_data.startswith("create_chain_"):
-        chain = action_data.replace("create_chain_", "")
-        await create_wallet(query, context, chain)
     elif action_data == "remove":
         await prompt_remove_wallet_chain(query, context)
     elif action_data.startswith("view_"):
@@ -350,149 +339,6 @@ async def prompt_add_wallet_chain(query, context: ContextTypes.DEFAULT_TYPE) -> 
     except Exception as e:
         logger.error(f"Error prompting add wallet chain: {e}", exc_info=True)
         await query.answer(f"❌ Error: {str(e)[:100]}")
-
-
-async def prompt_create_wallet_chain(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Prompt user to select chain for creating a new wallet"""
-    try:
-        chat_id = query.message.chat_id
-        header, server_online, gateway_running = await build_config_message_header(
-            "🆕 Create Wallet",
-            include_gateway=True,
-            chat_id=chat_id,
-            user_data=context.user_data,
-        )
-
-        # Base blockchain chains (wallets are at blockchain level, not network level)
-        supported_chains = ["ethereum", "solana"]
-
-        message_text = (
-            header + "*Select Chain:*\n\n"
-            "_Choose which blockchain to create a new wallet for\\._\n\n"
-            "⚠️ *Note:* A new wallet with a fresh keypair will be generated\\. "
-            "Make sure to back up the private key from Gateway\\."
-        )
-
-        # Create chain buttons
-        chain_buttons = []
-        for chain in supported_chains:
-            chain_display = chain.replace("-", " ").title()
-            chain_icon = "🟣" if chain == "solana" else "🔵"
-            chain_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        f"{chain_icon} {chain_display}",
-                        callback_data=f"gateway_wallet_create_chain_{chain}",
-                    )
-                ]
-            )
-
-        keyboard = chain_buttons + [
-            [InlineKeyboardButton("« Back", callback_data="gateway_wallets")]
-        ]
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.message.edit_text(
-            message_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
-        await query.answer()
-
-    except Exception as e:
-        logger.error(f"Error prompting create wallet chain: {e}", exc_info=True)
-        await query.answer(f"❌ Error: {str(e)[:100]}")
-
-
-async def create_wallet(query, context: ContextTypes.DEFAULT_TYPE, chain: str) -> None:
-    """Create a new wallet on the specified chain via Gateway"""
-    try:
-        from config_manager import get_config_manager
-
-        await query.answer("Creating wallet...")
-
-        chat_id = query.message.chat_id
-        client = await get_config_manager().get_client_for_chat(
-            chat_id, preferred_server=get_active_server(context.user_data)
-        )
-
-        chain_escaped = escape_markdown_v2(chain.replace("-", " ").title())
-
-        # Show creating message
-        await query.message.edit_text(
-            f"⏳ *Creating {chain_escaped} Wallet*\n\n_Please wait\\.\\.\\._",
-            parse_mode="MarkdownV2",
-        )
-
-        # Create the wallet via Gateway API
-        response = await client.gateway.create_wallet(chain=chain, set_default=False)
-
-        # Extract address from response
-        address = response.get("address", "") if isinstance(response, dict) else ""
-
-        if not address:
-            raise ValueError("No address returned from wallet creation")
-
-        # Set default networks for the new wallet
-        default_networks = get_default_networks_for_chain(chain)
-        set_wallet_networks(context.user_data, address, default_networks)
-
-        # Store info for network selection flow
-        context.user_data["new_wallet_chain"] = chain
-        context.user_data["new_wallet_address"] = address
-        context.user_data["new_wallet_networks"] = list(default_networks)
-        context.user_data["new_wallet_message_id"] = query.message.message_id
-        context.user_data["new_wallet_chat_id"] = chat_id
-
-        # Show success message with network selection prompt
-        display_addr = (
-            address[:10] + "..." + address[-8:] if len(address) > 20 else address
-        )
-        addr_escaped = escape_markdown_v2(display_addr)
-
-        # Build network selection message
-        all_networks = get_all_networks_for_chain(chain)
-        network_buttons = []
-        for net in all_networks:
-            is_enabled = net in default_networks
-            status = "✅" if is_enabled else "⬜"
-            net_display = net.replace("-", " ").title()
-            button_text = f"{status} {net_display}"
-            network_buttons.append(
-                [
-                    InlineKeyboardButton(
-                        button_text, callback_data=f"gateway_wallet_new_toggle_{net}"
-                    )
-                ]
-            )
-
-        success_text = (
-            f"✅ *Wallet Created Successfully*\n\n"
-            f"`{addr_escaped}`\n\n"
-            f"*Select Networks:*\n"
-            f"_Choose which networks to enable for balance queries\\._"
-        )
-
-        keyboard = network_buttons + [
-            [
-                InlineKeyboardButton(
-                    "✓ Done", callback_data="gateway_wallet_new_net_done"
-                )
-            ]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        await query.message.edit_text(
-            success_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
-
-    except Exception as e:
-        logger.error(f"Error creating wallet: {e}", exc_info=True)
-        error_text = f"❌ Error creating wallet: {escape_markdown_v2(str(e))}"
-        keyboard = [[InlineKeyboardButton("« Back", callback_data="gateway_wallets")]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.message.edit_text(
-            error_text, parse_mode="MarkdownV2", reply_markup=reply_markup
-        )
 
 
 async def show_wallet_details(

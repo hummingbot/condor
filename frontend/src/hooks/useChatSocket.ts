@@ -51,6 +51,38 @@ function nextMsgId(): string {
   return `msg_${Date.now()}_${++msgIdCounter}`;
 }
 
+/**
+ * Where the next streamed fragment goes, or -1 for "open a new bubble".
+ *
+ * The bubble being streamed into only counts while it is still the *last*
+ * message. Anything appended after it — the next question, a handover divider —
+ * ends that turn as far as the transcript is concerned, whatever the wire says.
+ * Without this the id of a bubble whose `prompt_done` was missed (a WS drop
+ * mid-answer, a late chunk) keeps swallowing the next answer, and that answer
+ * renders *above* the question it answers.
+ */
+function streamTarget(msgs: ChatMessage[], curId: string | null): number {
+  if (!curId) return -1;
+  const last = msgs.length - 1;
+  return last >= 0 && msgs[last].id === curId ? last : -1;
+}
+
+/** Stop every tool call that is still spinning. A prompt that ended, ended. */
+function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
+  return msgs.map((m) =>
+    m.toolCalls.some((tc) => tc.status !== "completed" && tc.status !== "failed")
+      ? {
+          ...m,
+          toolCalls: m.toolCalls.map((tc) =>
+            tc.status === "completed" || tc.status === "failed"
+              ? tc
+              : { ...tc, status: "completed" },
+          ),
+        }
+      : m,
+  );
+}
+
 let clientRefCounter = 0;
 /** Local handle for a tab that has no conversation id yet. Echoed by the
  *  backend on `session_started`, which is how the two are reconciled. */
@@ -407,14 +439,13 @@ export function useChatSocket() {
             prev.map((s) => {
               if (s.info.slot_id !== slotId) return s;
               const msgs = [...s.messages];
-              const curId = currentAssistantMsg.current[slotId];
-              if (!curId) {
+              const idx = streamTarget(msgs, currentAssistantMsg.current[slotId]);
+              if (idx < 0) {
                 const id = nextMsgId();
                 currentAssistantMsg.current[slotId] = id;
                 msgs.push({ id, role: "assistant", text, toolCalls: [] });
               } else {
-                const idx = msgs.findIndex((m) => m.id === curId);
-                if (idx >= 0) msgs[idx] = { ...msgs[idx], text: msgs[idx].text + text };
+                msgs[idx] = { ...msgs[idx], text: msgs[idx].text + text };
               }
               return { ...s, messages: msgs };
             }),
@@ -430,18 +461,16 @@ export function useChatSocket() {
             prev.map((s) => {
               if (s.info.slot_id !== slotId) return s;
               const msgs = [...s.messages];
-              const curId = currentAssistantMsg.current[slotId];
-              if (!curId) {
+              const idx = streamTarget(msgs, currentAssistantMsg.current[slotId]);
+              if (idx < 0) {
                 const id = nextMsgId();
                 currentAssistantMsg.current[slotId] = id;
                 msgs.push({ id, role: "assistant", text: "", toolCalls: [], thought: text });
               } else {
-                const idx = msgs.findIndex((m) => m.id === curId);
-                if (idx >= 0)
-                  msgs[idx] = {
-                    ...msgs[idx],
-                    thought: (msgs[idx].thought || "") + text,
-                  };
+                msgs[idx] = {
+                  ...msgs[idx],
+                  thought: (msgs[idx].thought || "") + text,
+                };
               }
               return { ...s, messages: msgs };
             }),
@@ -461,18 +490,16 @@ export function useChatSocket() {
             prev.map((s) => {
               if (s.info.slot_id !== slotId) return s;
               const msgs = [...s.messages];
-              const curId = currentAssistantMsg.current[slotId];
-              if (!curId) {
+              const idx = streamTarget(msgs, currentAssistantMsg.current[slotId]);
+              if (idx < 0) {
                 const id = nextMsgId();
                 currentAssistantMsg.current[slotId] = id;
                 msgs.push({ id, role: "assistant", text: "", toolCalls: [tc] });
               } else {
-                const idx = msgs.findIndex((m) => m.id === curId);
-                if (idx >= 0)
-                  msgs[idx] = {
-                    ...msgs[idx],
-                    toolCalls: [...msgs[idx].toolCalls, tc],
-                  };
+                msgs[idx] = {
+                  ...msgs[idx],
+                  toolCalls: [...msgs[idx].toolCalls, tc],
+                };
               }
               return { ...s, messages: msgs };
             }),
@@ -488,10 +515,11 @@ export function useChatSocket() {
           setSlots((prev) =>
             prev.map((s) => {
               if (s.info.slot_id !== slotId) return s;
-              const curId = currentAssistantMsg.current[slotId];
-              if (!curId) return s;
+              // Addressed by the call's own id rather than by "whatever is
+              // streaming": a status that lands after the bubble stopped being
+              // current still belongs to the call it names.
               const msgs = s.messages.map((m) =>
-                m.id === curId
+                m.toolCalls.some((tc) => tc.tool_call_id === tcId)
                   ? {
                       ...m,
                       toolCalls: m.toolCalls.map((tc) =>
@@ -519,26 +547,11 @@ export function useChatSocket() {
           if (slotId) {
             // Mark any in-flight tool calls as completed so the spinner stops
             setSlots((prev) =>
-              prev.map((s) => {
-                if (s.info.slot_id !== slotId) return s;
-                const curId = currentAssistantMsg.current[slotId];
-                if (!curId) return s;
-                return {
-                  ...s,
-                  messages: s.messages.map((m) =>
-                    m.id === curId && m.toolCalls.some((tc) => tc.status !== "completed" && tc.status !== "failed")
-                      ? {
-                          ...m,
-                          toolCalls: m.toolCalls.map((tc) =>
-                            tc.status === "completed" || tc.status === "failed"
-                              ? tc
-                              : { ...tc, status: "completed" },
-                          ),
-                        }
-                      : m,
-                  ),
-                };
-              }),
+              prev.map((s) =>
+                s.info.slot_id === slotId
+                  ? { ...s, messages: settleToolCalls(s.messages) }
+                  : s,
+              ),
             );
             currentAssistantMsg.current[slotId] = null;
           }
@@ -588,8 +601,14 @@ export function useChatSocket() {
   const sendMessage = useCallback(
     (slotId: string, text: string) => {
       const id = nextMsgId();
+      // A question closes whatever bubble was open. The wire is supposed to say
+      // so with `prompt_done`, but that event can be missed (a WS drop
+      // mid-answer) — and a stale pointer would file the *next* answer into a
+      // bubble sitting above this message, reading as an answer given before it
+      // was asked.
+      currentAssistantMsg.current[slotId] = null;
       updateSlotMessages(slotId, (msgs) => [
-        ...msgs,
+        ...settleToolCalls(msgs),
         { id, role: "user" as const, text, toolCalls: [] },
       ]);
 
@@ -733,24 +752,11 @@ export function useChatSocket() {
       currentAssistantMsg.current[slotId] = null;
       // Mark any in-flight tool calls as completed
       setSlots((prev) =>
-        prev.map((s) => {
-          if (s.info.slot_id !== slotId) return s;
-          return {
-            ...s,
-            messages: s.messages.map((m) =>
-              m.toolCalls.some((tc) => tc.status !== "completed" && tc.status !== "failed")
-                ? {
-                    ...m,
-                    toolCalls: m.toolCalls.map((tc) =>
-                      tc.status === "completed" || tc.status === "failed"
-                        ? tc
-                        : { ...tc, status: "completed" },
-                    ),
-                  }
-                : m,
-            ),
-          };
-        }),
+        prev.map((s) =>
+          s.info.slot_id === slotId
+            ? { ...s, messages: settleToolCalls(s.messages) }
+            : s,
+        ),
       );
     },
     [send],
