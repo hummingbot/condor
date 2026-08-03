@@ -4,13 +4,21 @@ An **Agent** is a specialized domain agent with an identity, domain knowledge, a
 tool allowlist, an ``agent_key`` (its default model) and its own memory/skills
 store (FEAT-003, keyed by the directory slug — the "brain"). It replaces the old
 split between ``experts.py`` (consult-only) and the identity half of
-``strategy.py`` (loop-only). An Agent:
+``strategy.py`` (loop-only).
 
-- is **consultable** (CONSULT mode: run its own brain to completion → answer), and
-- **owns strategies** (RUN mode: each strategy is a *playbook* looped by ``TickEngine``).
+**Every Agent can do all three things, always** — there is no capability flag and
+nothing to opt into:
 
-Capabilities are **derived**, not flagged: an Agent with ``when_to_consult`` is
-consultable (on any model); an Agent with ≥1 strategy is loopeable; it can be both.
+- **consult** — run its brain to completion, human-gated, and return the answer,
+- **delegate** — the same run, detached and unattended, notifying when done,
+- **loop** — tick a playbook via ``TickEngine``. An Agent that has never been
+  given a bespoke playbook loops its *default* one, materialized on first start
+  from its own identity (see ``strategy.ensure_default``).
+
+``when_to_consult`` is therefore NOT a switch — it is an optional one-line routing
+hint for the coordinator's ``[AGENTS]`` index, falling back to ``description``
+then ``name`` (see :attr:`Agent.consult_hint`). An Agent missing it is still
+consulted, delegated to and looped exactly like every other.
 
 Disk layout::
 
@@ -51,7 +59,9 @@ class Agent:
     # Names match full (``mcp__condor__manage_skill``) or short (``manage_skill``).
     # Empty => UNRESTRICTED (all discovered tools, subject to tool_filter_mode).
     tools: list[str] = field(default_factory=list)
-    when_to_consult: str = ""  # empty => not offered as consultable
+    # Optional one-line routing hint ("when should condor pick this agent?").
+    # NOT a capability switch — see consult_hint and the module docstring.
+    when_to_consult: str = ""
     server_required: bool = True
     # Pin this agent to a specific hummingbot-api server. When set, the agent's
     # mcp-hummingbot subprocess is initialized against THIS server regardless of
@@ -74,15 +84,17 @@ class Agent:
         return self.agent_dir / "routines"
 
     @property
-    def consultable(self) -> bool:
-        """DERIVED capability: any Agent with a non-empty consult trigger.
+    def consult_hint(self) -> str:
+        """The one line that describes this Agent in the coordinator's index.
 
-        Consult works on any model — there is no separate "expert" kind of agent.
-        A pydantic-ai key runs the consult with the tool allowlist enforced; an
-        ACP key (claude-code/gemini/copilot) runs it unrestricted but with every
-        mutation still gated by the user's confirmation (see consult.py).
+        Every Agent is consultable on any model — a pydantic-ai key runs the
+        consult with the tool allowlist enforced, an ACP key (claude-code/gemini/
+        copilot) runs it unrestricted with mutations confirmation-gated (see
+        consult.py). So this never gates anything; it only helps condor *route*.
+        An Agent that never got an explicit ``when_to_consult`` still gets a
+        useful line from its description (or, failing that, its name).
         """
-        return bool(self.when_to_consult)
+        return self.when_to_consult or self.description or self.name
 
 
 def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
@@ -114,8 +126,9 @@ class AgentStore:
     """Discovery + CRUD for Agents under ``agents/*/AGENT.md``.
 
     Replaces ``ExpertStore`` and the identity half of ``StrategyStore``. There is
-    no ``role`` discriminator anymore: every directory with an ``AGENT.md`` is an
-    Agent; whether it is consultable/loopeable is derived from its definition.
+    no ``role`` discriminator and no capability flag: every directory with an
+    ``AGENT.md`` is an Agent, and every Agent can be consulted, delegated to and
+    looped.
     """
 
     def get(self, slug: str) -> Agent | None:
@@ -131,17 +144,15 @@ class AgentStore:
                 agents.append(a)
         return agents
 
-    def list_consultable_index(self) -> str:
-        """Injectable index — one line per *consultable* Agent (mirrors SKILLS).
+    def list_index(self) -> str:
+        """Injectable index — one line per Agent (mirrors SKILLS).
 
-        Empty string when none are consultable, so callers inject nothing.
+        EVERY Agent is listed. An agent missing from this index is invisible to
+        the coordinator, which means it can never be consulted or delegated to —
+        so filtering here was the same as deleting the agent. Empty string only
+        when no agents exist at all, so callers inject nothing.
         """
-        lines = [
-            f"- [{a.slug}] {a.when_to_consult or a.description}"
-            for a in self.list_all()
-            if a.consultable
-        ]
-        return "\n".join(lines)
+        return "\n".join(f"- [{a.slug}] {a.consult_hint}" for a in self.list_all())
 
     def create(
         self,

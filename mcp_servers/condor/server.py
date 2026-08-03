@@ -80,7 +80,7 @@ def _build_instructions() -> str:
     try:
         from condor.agents.agent import AgentStore
 
-        agents_index = AgentStore().list_consultable_index()
+        agents_index = AgentStore().list_index()
         if agents_index:
             sections.append("[AGENTS — consult for domain work]\n" + agents_index)
     except Exception:
@@ -326,23 +326,23 @@ async def manage_trading_agent(
     An *agent* (e.g. "executor_manager", "brigado") is an identity defined in
     agents/{slug}/AGENT.md — the primary artifact and the agent "brain". It is
     distinct from a *strategy* (a looping playbook it owns) and from a running
-    *instance*. Capability is DERIVED, not flagged: an agent with ``when_to_consult``
-    is consultable (on any model); an agent that owns ≥1 strategy is loopeable; it can
-    be both. Create the agent FIRST, then add its routines and (optionally) a strategy.
-    ``strategy_id`` is the opaque key returned by list_strategies/create_strategy
-    (form "agent_slug.strategy_slug").
+    *instance*. EVERY agent can be consulted (`consult`), delegated to (`delegate`)
+    and looped (`start_agent`) from the moment it is created — there is no
+    capability flag and nothing to enable. An agent that owns no strategy loops a
+    default playbook built from its own identity. Create the agent FIRST, then add
+    its routines and (optionally) a bespoke strategy. ``strategy_id`` is the opaque
+    key returned by list_strategies/create_strategy (form "agent_slug.strategy_slug").
 
     Actions -- Agents (identities):
     - "list_agent_definitions": List all agents (AGENT.md identities) with their
-      capabilities — consultable (can be used via the `consult` tool),
-      when_to_consult, loopable, owned strategies, agent_key, tools. Use this to
+      when_to_consult hint, owned strategies, agent_key and tools. Use this to
       answer "what agents exist?" — list_strategies and list_agents (instances) do
-      NOT show consult-only agents (those that own no loop strategy).
+      NOT show agents that own no loop strategy.
     - "create_agent": Create a new agent (AGENT.md identity + brain). Requires name.
       Optional: description, instructions (the AGENT.md body — identity + domain
       knowledge), agent_key, tools (tool-name allowlist for pydantic-ai consults),
-      when_to_consult (set it to make the agent consultable — recommended for every
-      agent), server_required. Returns agent_slug — use it for routines/strategies.
+      when_to_consult (routing hint), server_required. Returns agent_slug — use it
+      for routines/strategies.
     - "get_agent": Get full agent definition including the AGENT.md body (requires agent_slug)
     - "update_agent": Update an agent's AGENT.md / metadata (requires agent_slug, plus fields to change)
     - "delete_agent": Delete an agent (requires agent_slug; refuses if it still owns strategies)
@@ -356,7 +356,9 @@ async def manage_trading_agent(
 
     Actions -- Lifecycle:
     - "list_agents": List all running agent instances with status
-    - "start_agent": Start a new agent session (requires strategy_id, optional config overrides)
+    - "start_agent": Start a new agent session (requires strategy_id, optional config
+      overrides). strategy_id may also be a BARE AGENT SLUG — the agent then loops its
+      only strategy, or a default playbook created from its identity on first start.
     - "stop_agent": Stop a running agent, KEEPING its open positions (requires agent_id)
     - "shutdown_agent": Emergency stop that WINDS DOWN this session's positions/executors
       per its shutdown.md policy (closes perp, keeps spot by default) (requires agent_id)
@@ -377,7 +379,8 @@ async def manage_trading_agent(
     Args:
         action: The action to perform.
         agent_id: Agent instance ID (for lifecycle/monitoring/journal actions).
-        strategy_id: Strategy key "agent_slug.strategy_slug" (for strategy/routine/start actions).
+        strategy_id: Strategy key "agent_slug.strategy_slug" (for strategy/routine/start
+            actions). For start_agent a bare agent slug also works — see start_agent.
         agent_slug: Owning Agent slug — required for create_strategy and for the
             agent CRUD actions get_agent/update_agent/delete_agent.
         name: Agent name (create_agent), strategy name (create/update_strategy), or routine name (run_routine).
@@ -389,7 +392,7 @@ async def manage_trading_agent(
             For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
             execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
-        when_to_consult: Trigger describing when to consult the agent (create/update_agent). Set it to make the agent consultable — recommended for every agent, on any model.
+        when_to_consult: One-line hint describing when to route work to this agent (create/update_agent). Purely for routing — every agent is consultable with or without it; it falls back to the description.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
         server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
 

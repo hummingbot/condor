@@ -112,11 +112,11 @@ async def _run_agent_to_completion(
     store = AgentStore()
     agent = store.get(slug)
     if agent is None:
-        index = store.list_consultable_index()
+        index = store.list_index()
         available = f"\n\nAvailable agents:\n{index}" if index else ""
         return f"No agent named '{slug}' is available.{available}"
-    # Any Agent with a consult trigger is consultable — there is no separate
-    # "expert" kind. Only a pydantic-ai key has a local backend to preflight, so
+    # Every Agent is consultable — there is no separate "expert" kind and no
+    # capability gate. Only a pydantic-ai key has a local backend to preflight, so
     # a stopped Ollama/LM Studio fails fast with a clear reason (and falls back to
     # claude-code) instead of a deep httpx error mid-run. ACP keys (claude-code/
     # gemini/copilot) need no backend and route straight to the ACP client below.

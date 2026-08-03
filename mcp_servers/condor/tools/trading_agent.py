@@ -128,12 +128,13 @@ def _manage_strategy(
 
 
 def _list_agent_definitions() -> dict:
-    """List the Agent identities (agents/*/AGENT.md), with capabilities.
+    """List the Agent identities (agents/*/AGENT.md).
 
     An *agent* (e.g. ``executor_manager``, ``brigado``) is distinct from a
     *strategy* (a looping playbook it owns) and from a running *instance*. This
-    surfaces consult-only agents and loopable agents that ``list_strategies`` /
-    ``list_agents`` (instances) never show.
+    surfaces agents that ``list_strategies`` / ``list_agents`` (instances) never
+    show. No capability flags: every agent listed here can be consulted,
+    delegated to and looped.
     """
     from condor.agents.agent import AgentStore
     from condor.agents.strategy import StrategyStore
@@ -151,9 +152,7 @@ def _list_agent_definitions() -> dict:
                 "name": a.name,
                 "description": a.description,
                 "agent_key": a.agent_key,
-                "consultable": a.consultable,
-                "when_to_consult": a.when_to_consult,
-                "loopable": bool(owned),
+                "when_to_consult": a.consult_hint,
                 "strategies": owned,
                 "tools": a.tools,
             }
@@ -165,9 +164,10 @@ def _list_agent_definitions() -> dict:
 # Agent CRUD (the AGENT.md identity itself — the primary artifact)
 #
 # An Agent is the brain/identity. It is created FIRST; routines and strategies
-# are sub-resources that hang off an existing agent_slug. Capability is derived:
-# ``when_to_consult`` => consultable (on any model); ≥1 strategy => loopeable.
-# A bare agent (no trigger, no strategy) is a stub.
+# are sub-resources that hang off an existing agent_slug. There are no capability
+# flags: the moment an agent exists it can be consulted, delegated to and looped.
+# ``when_to_consult`` is a routing hint; a bespoke strategy is an optimization
+# over the default playbook every agent already loops.
 # ---------------------------------------------------------------------------
 
 
@@ -226,7 +226,6 @@ def _manage_agent(
             "name": agent.name,
             "agent_key": agent.agent_key,
             "agent_key_inherited": not agent_key and bool(resolved_key),
-            "consultable": agent.consultable,
         }
 
     if action == "get_agent":
@@ -245,7 +244,6 @@ def _manage_agent(
             "when_to_consult": a.when_to_consult,
             "server_required": a.server_required,
             "server_name": a.server_name,
-            "consultable": a.consultable,
             "created_by": a.created_by,
             "created_at": a.created_at,
         }
@@ -273,7 +271,7 @@ def _manage_agent(
         if server_name is not None:
             a.server_name = server_name
         store.update(a)
-        return {"updated": True, "agent_slug": a.slug, "consultable": a.consultable}
+        return {"updated": True, "agent_slug": a.slug}
 
     if action == "delete_agent":
         if not agent_slug:
@@ -362,9 +360,12 @@ async def _agent_lifecycle(
             from condor.agents.strategy import StrategyStore
 
             store = StrategyStore()
-            strategy = store.get_by_key(strategy_id)
+            # Accepts a composite key OR a bare agent slug: every agent is
+            # loopable, so a slug resolves to its only strategy or to a default
+            # playbook materialized from its identity on first start.
+            strategy = store.resolve_for_loop(strategy_id)
             if not strategy:
-                return {"error": f"Strategy '{strategy_id}' not found"}
+                return {"error": f"No strategy or agent matches '{strategy_id}'"}
 
             from condor.agents.config import load_full_config
             from config_manager import get_config_manager, get_effective_server
