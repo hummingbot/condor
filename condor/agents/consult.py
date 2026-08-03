@@ -159,25 +159,22 @@ async def _run_agent_to_completion(
     # agent_slug scopes the condor MCP tools' memory/skills to this Agent (its brain).
     from handlers.agents._shared import (
         build_agent_context,
-        build_mcp_servers_for_agent,
         build_mcp_servers_for_session,
         get_project_dir,
     )
 
     # A server pinned on the Agent itself wins over the ambient chat server; when
     # the agent isn't pinned, fall back to the caller's (chat's) resolved server.
+    # Passing server_name=None lets the builder resolve the chat's server.
+    # Serverless agents still need their own memory/skill scope — without
+    # agent_slug the condor MCP tools would target the CHAT's stores.
     effective_server = agent.server_name or server_name
-    if agent.server_required and effective_server:
-        mcp_servers = build_mcp_servers_for_agent(
-            effective_server,
-            user_id,
-            chat_id,
-            agent_slug=slug,
-        )
-    else:
-        # Serverless agents still need their own memory/skill scope — without
-        # agent_slug the condor MCP tools would target the CHAT's stores.
-        mcp_servers = build_mcp_servers_for_session(user_id, chat_id, agent_slug=slug)
+    mcp_servers = build_mcp_servers_for_session(
+        user_id,
+        chat_id,
+        server_name=effective_server if agent.server_required else None,
+        agent_slug=slug,
+    )
 
     # ``permission_callback`` is passed in: CONSULT routes dangerous-tool
     # confirmations to the user's Telegram chat; DELEGATE passes None so an ACP

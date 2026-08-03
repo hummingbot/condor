@@ -338,16 +338,18 @@ def build_mcp_servers_for_session(
     user_id: int,
     chat_id: int | str,
     user_data: dict | None = None,
-    execution_mode: str = "loop",
     server_name: str | None = None,
     agent_slug: str | None = None,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
-    Resolves the user's default Condor server and returns ACP-format mcpServers
-    that override the static .mcp.json entries by name.
-    Always includes the condor MCP server; hummingbot is added when a valid
-    server can be resolved for the user.
+    Returns ACP-format mcpServers that override the static .mcp.json entries by
+    name. Always includes the condor MCP server; hummingbot is added when a
+    valid server can be resolved for the user.
+
+    ``server_name`` pins the run to that Condor server (an Agent with
+    ``server_required``); when omitted, the chat's ambient server is resolved
+    from the user's preferences, then from the first accessible server.
 
     ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
     own stores (``agents/{slug}/``). Without it the tools target the chat
@@ -393,65 +395,6 @@ def build_mcp_servers_for_session(
             "agent will start without mcp-hummingbot",
             server_name,
             user_id,
-        )
-        return [condor]
-
-    api_url = f"http://{server['host']}:{server['port']}"
-
-    mcp_hummingbot = {
-        "name": "mcp-hummingbot",
-        "command": "uv",
-        "args": [
-            "run",
-            "python",
-            "-m",
-            "mcp_servers.hummingbot_api",
-            "--url",
-            api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
-            "--server-name",
-            server_name,
-        ],
-        "env": [],
-    }
-
-    return [mcp_hummingbot, condor]
-
-
-def build_mcp_servers_for_agent(
-    server_name: str,
-    user_id: int,
-    chat_id: int,
-    agent_slug: str | None = None,
-    execution_mode: str = "loop",
-) -> list[dict[str, Any]]:
-    """Build MCP server configs for a trading agent bound to a specific server.
-
-    Unlike build_mcp_servers_for_session(), this resolves the server by name
-    directly instead of using chat-based resolution.
-    Always includes the condor MCP server.
-    """
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-
-    condor = {
-        "name": "condor",
-        "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
-        "env": [],
-    }
-
-    server = cm.get_server(server_name)
-    if not server:
-        log.warning(
-            "Server '%s' not found in servers config — "
-            "trading agent will start without mcp-hummingbot",
-            server_name,
         )
         return [condor]
 
