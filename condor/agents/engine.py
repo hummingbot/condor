@@ -648,10 +648,11 @@ class TickEngine:
     def _journal_ownership_violations(self, tick_num: int) -> None:
         """Surface refused bot calls in the journal.
 
-        The permission callback can only allow or cancel — it cannot hand a
-        corrective message back to the model mid-tick (see
-        condor/acp/pydantic_ai_client.py). The correction reaches the agent here
-        and via the next tick's [CONTROLLER MODE] block.
+        The permission callback only allows or cancels. On the pydantic-ai path
+        the refused call now gets a refusal string as its tool result (SEC-080),
+        but on the ACP path the model still learns nothing mid-tick, so the
+        correction reaches the agent here and via the next tick's
+        [CONTROLLER MODE] block.
         """
         if not self.journal or self.ledger is None:
             return
