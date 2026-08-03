@@ -63,6 +63,43 @@ REPLAY_OMITTED = "(older turns omitted)"
 TITLE_MAX_CHARS = 80
 SNIPPET_MAX_CHARS = 160
 
+# Upper bounds on the tool IO kept per call, in characters. Load-bearing, not
+# defensive: a tool result is routinely a market-data dump, a whole portfolio
+# payload or a base64 image, and the transcript has no retention sweep — kept
+# verbatim, one turn could outweigh the entire conversation and slow every
+# read of the file. They live here, beside ``REPLAY_MAX_CHARS`` and for the
+# same reason, rather than in ``timeouts.py``: that policy is
+# deadlines-in-seconds parsed from ``CONDOR_TIMEOUT_*``, and a character count
+# would not survive its loader.
+TOOL_INPUT_MAX_CHARS = 1000
+TOOL_OUTPUT_MAX_CHARS = 2000
+
+# Argument names whose value must never reach disk. Tool arguments are written
+# by the model, and at least one tool in the agents' own toolset takes a
+# credential directly — mcp-hummingbot's ``configure_server(password=…)`` — so
+# a verbatim transcript would persist a plaintext password. Matched as a
+# substring of the lowered key, so ``api_key``, ``secretKey`` and
+# ``wallet_private_key`` all land on it.
+_SECRET_KEY_HINTS = (
+    "password",
+    "secret",
+    "token",
+    "api_key",
+    "apikey",
+    "private_key",
+    "privatekey",
+    "passphrase",
+    "credential",
+    "mnemonic",
+    "authorization",
+)
+REDACTED = "[redacted]"
+
+# Nesting past this is not walked. The payload comes from a tool call we do not
+# own, and ``observe()`` runs on the live event path with no guard around it —
+# unlike ``flush()``, a raise here would take down the prompt stream.
+_REDACT_MAX_DEPTH = 6
+
 # Recorders that have observed events but not yet written them. A prompt
 # generator abandoned by a page reload normally flushes through its own
 # ``finally``; this set is the shutdown backstop for one that never gets
@@ -90,6 +127,48 @@ def _validate(value: str) -> str:
 def _truncate(text: str, limit: int) -> str:
     flat = " ".join(str(text or "").split())
     return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"
+
+
+def _is_secret_key(key: str) -> bool:
+    lowered = str(key).lower()
+    return any(hint in lowered for hint in _SECRET_KEY_HINTS)
+
+
+def _redact(value, depth: int = 0):
+    """``value`` with every credential-looking entry replaced by a marker.
+
+    Redacts by key name, never by value: guessing which *string* is a secret
+    is how a redactor either misses one or mangles a trading pair. A key is a
+    contract the tool author wrote down; a value is not.
+    """
+    if depth >= _REDACT_MAX_DEPTH:
+        return "…"
+    if isinstance(value, dict):
+        return {
+            str(k): (REDACTED if _is_secret_key(k) else _redact(v, depth + 1))
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact(v, depth + 1) for v in value]
+    return value
+
+
+def _tool_input(raw, limit: int = TOOL_INPUT_MAX_CHARS) -> dict | None:
+    """A tool call's arguments as they go to disk: redacted and bounded.
+
+    Always a dict or ``None``, so a dataset consumer reading ``input`` sees one
+    shape. An argument set too large to keep whole collapses into a single
+    ``_clipped`` rendering rather than into a different type — the call is
+    still recorded as having had arguments, which is what the trajectory needs.
+    """
+    if not isinstance(raw, dict) or not raw:
+        return None
+    safe = _redact(raw)
+    try:
+        dumped = json.dumps(safe, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):  # a payload json cannot describe at all
+        dumped = str(safe)
+    return safe if len(dumped) <= limit else {"_clipped": _truncate(dumped, limit)}
 
 
 # ── Models ──
@@ -148,7 +227,10 @@ class TurnEntry(BaseModel):
     role: str = Field(description="user | assistant | system")
     text: str = ""
     thought: str = ""
-    tool_calls: list[dict] = Field(default_factory=list)
+    tool_calls: list[dict] = Field(
+        default_factory=list,
+        description="Per call: id, title, status, kind, input, output.",
+    )
     kind: str = Field(
         default="", description="System entries only: switch | error | delegation."
     )
@@ -476,12 +558,24 @@ class Recorder:
                 "id": call_id,
                 "title": str(event.field("title") or ""),
                 "status": str(event.field("status") or ""),
+                "kind": str(event.field("kind") or ""),
+                "input": _tool_input(event.field("input")),
+                "output": "",
             }
         elif event.type == EventType.TOOL_UPDATE:
             call_id = str(event.field("tool_call_id") or "")
             call = self._tools.get(call_id)
             if call:
                 call["status"] = str(event.field("status") or call["status"])
+                # Merge an output only when there is one. The pydantic-ai path
+                # emits a bare "completed" update the moment the call is issued
+                # and carries the real result on the following
+                # ``ModelRequestNode``; on ACP the order is the other way
+                # round. Either way a later empty value must not erase a
+                # result that already arrived.
+                output = _truncate(event.field("output") or "", TOOL_OUTPUT_MAX_CHARS)
+                if output:
+                    call["output"] = output
         elif event.type == EventType.ERROR:
             self._error = str(event.field("message", "") or "")
         elif event.type == EventType.DONE:
