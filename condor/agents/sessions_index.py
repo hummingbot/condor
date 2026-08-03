@@ -24,6 +24,8 @@ EXPERIMENT_DIRNAMES = ("dry_runs", "experiments")
 _SNAPSHOT_DIRNAMES = ("snapshots", "runs")
 
 _EXPERIMENT_FILE_RE = re.compile(r"experiment_(\d+)\.md")
+_SNAPSHOT_FILE_RE = re.compile(r"(?:snapshot|run)_(\d+)\.md")
+_SNAPSHOT_TITLE_RE = re.compile(r"^# (?:Snapshot|Tick) #\d+ — (.+)$", re.MULTILINE)
 
 
 def infer_latest_session_status(
@@ -190,6 +192,74 @@ def list_experiments(strategy_dir: Path) -> list[dict[str, Any]]:
             _experiment_info_cache[f] = (mtime, info)
         experiments.append(info)
     return experiments
+
+
+# Same idiom as _experiment_info_cache above, for the strictly worse case: a
+# session holds up to MAX_SNAPSHOTS (100) dumps, each embedding the full system
+# prompt and every tool call, and save_full_snapshot writes each file exactly
+# once. Keyed by path with (mtime, size) so a rewritten file re-parses anyway.
+_snapshot_info_cache: dict[Path, tuple[float, int, dict[str, Any]]] = {}
+
+
+def _parse_snapshot_file(f: Path, tick: int) -> dict[str, Any]:
+    """Summary fields of one snapshot: tick, timestamp, file.
+
+    The timestamp is the tail of the title line, which ``SNAPSHOT_TEMPLATE``
+    puts on line 1 — so the fast path reads only that line instead of pulling a
+    multi-hundred-KB dump into memory. A file whose first line is not the title
+    (legacy ``run_N.md`` layouts) falls back to scanning the rest, keeping the
+    parsed result identical to a whole-file search.
+    """
+    timestamp = ""
+    with f.open("r", errors="replace") as fh:
+        first = fh.readline()
+        m = _SNAPSHOT_TITLE_RE.match(first.rstrip("\n"))
+        if m is None:
+            m = _SNAPSHOT_TITLE_RE.search(first + fh.read())
+        if m:
+            timestamp = m.group(1)
+    return {"tick": tick, "timestamp": timestamp, "file": f.name}
+
+
+def list_session_snapshots(session_dir: Path) -> list[dict[str, Any]]:
+    """List a session's snapshots as dicts (tick, timestamp, file), newest first.
+
+    Only the first existing directory of ``_SNAPSHOT_DIRNAMES`` is read, so a
+    session that still has a legacy ``runs/`` dir keeps resolving there.
+    """
+    for dirname in _SNAPSHOT_DIRNAMES:
+        snap_dir = session_dir / dirname
+        if not snap_dir.exists():
+            continue
+        stated: list[tuple[Path, float, int]] = []
+        for f in snap_dir.glob("*.md"):
+            try:
+                st = f.stat()
+            except OSError:  # unlinked between glob and stat
+                continue
+            stated.append((f, st.st_mtime, st.st_size))
+        snapshots: list[dict[str, Any]] = []
+        live: set[Path] = set()
+        for f, mtime, size in sorted(stated, key=lambda x: x[1], reverse=True):
+            m = _SNAPSHOT_FILE_RE.match(f.name)
+            if not m:
+                continue
+            live.add(f)
+            cached = _snapshot_info_cache.get(f)
+            if cached is not None and cached[0] == mtime and cached[1] == size:
+                info = cached[2]
+            else:
+                info = _parse_snapshot_file(f, int(m.group(1)))
+                _snapshot_info_cache[f] = (mtime, size, info)
+            snapshots.append(info)
+        # _cleanup_old_snapshots unlinks the oldest files past MAX_SNAPSHOTS;
+        # drop their entries so the cache tracks the directory, not history.
+        for stale in [
+            p for p in _snapshot_info_cache if p.parent == snap_dir and p not in live
+        ]:
+            del _snapshot_info_cache[stale]
+        return snapshots
+    return []
 
 
 def enumerate_agent_ids(run_key: str, strategy_dir: Path) -> list[tuple[str, int, str]]:
