@@ -18,6 +18,11 @@ from condor.agents.delegate import (
     start_delegation,
     stop_delegation,
 )
+from condor.web.models import WebUser
+
+# The events route is ownership-gated (SEC-081), so calling it as a plain
+# function needs a caller. Every delegation built below is owned by user 1.
+_CALLER = WebUser(id=1, role="user")
 
 
 class _FakeBot:
@@ -485,10 +490,10 @@ def test_events_route_shows_a_running_delegation_live(tmp_path, monkeypatch):
             bot=_FakeBot(),
         )
         await gate_started.wait()
-        first = await get_delegation_events(dt.task_id)
+        first = await get_delegation_events(dt.task_id, user=_CALLER)
         gate_release.set()
         await _drain(dt)
-        second = await get_delegation_events(dt.task_id)
+        second = await get_delegation_events(dt.task_id, user=_CALLER)
         return first, second
 
     first, second = asyncio.run(scenario())
@@ -514,7 +519,7 @@ def test_events_route_404s_on_unknown_task():
     from condor.web.routes.agents import get_delegation_events
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(get_delegation_events("nope-delegate-x"))
+        asyncio.run(get_delegation_events("nope-delegate-x", user=_CALLER))
     assert exc.value.status_code == 404
 
 
@@ -534,7 +539,7 @@ def test_events_route_returns_status_alongside_the_transcript():
     dt.events.append({"type": "thought", "text": "thinking"})
     delegate_module._delegations[dt.task_id] = dt
 
-    payload = asyncio.run(get_delegation_events(dt.task_id))
+    payload = asyncio.run(get_delegation_events(dt.task_id, user=_CALLER))
 
     assert payload["task_id"] == dt.task_id
     assert payload["status"] == "running"
