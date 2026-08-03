@@ -844,6 +844,30 @@ def _aggregate_strategy_perf(strategies: list[StrategySummary]) -> dict[str, Any
 # slug="delegations" and 404.
 
 
+def _is_admin(user: WebUser) -> bool:
+    from config_manager import get_config_manager
+
+    return get_config_manager().is_admin(user.id)
+
+
+def _owned_delegation(task_id: str, user: WebUser):
+    """The delegation, or an error — admins see everything, everyone else only their own.
+
+    Same idiom as ``_require_ownership`` in ``sessions.py``: the caller is
+    compared against the record's own ``user_id``, which ``DelegateTask``
+    carries from the moment it is started. 403 rather than 404 on a foreign
+    task, matching ``conversations.py``.
+    """
+    from condor.agents.delegate import get_delegation
+
+    dt = get_delegation(task_id)
+    if dt is None:
+        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
+    if dt.user_id != user.id and not _is_admin(user):
+        raise HTTPException(status_code=403, detail="Not your delegation")
+    return dt
+
+
 @router.get("/delegations")
 async def list_delegations(user: WebUser = Depends(get_current_user)):
     """List in-flight and finished delegations (this process).
@@ -851,10 +875,19 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
     Returns the full record per task (status + result/error) so the dashboard can
     render an at-a-glance list without a follow-up fetch per row. The registry is
     in-memory and small (ephemeral, per-process), so the payload stays cheap.
+
+    Scoped to the caller's own delegations; admins get the whole registry.
     """
     from condor.agents.delegate import get_all_delegations
 
-    return {"delegations": [dt.to_dict() for dt in get_all_delegations().values()]}
+    visible = _is_admin(user)
+    return {
+        "delegations": [
+            dt.to_dict()
+            for dt in get_all_delegations().values()
+            if visible or dt.user_id == user.id
+        ]
+    }
 
 
 @router.get("/delegations/{task_id}")
@@ -862,12 +895,7 @@ async def get_delegation_status(
     task_id: str, user: WebUser = Depends(get_current_user)
 ):
     """Get a delegation's status + result/error."""
-    from condor.agents.delegate import get_delegation
-
-    dt = get_delegation(task_id)
-    if dt is None:
-        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
-    return dt.to_dict()
+    return _owned_delegation(task_id, user).to_dict()
 
 
 @router.get("/delegations/{task_id}/events")
@@ -884,11 +912,9 @@ async def get_delegation_events(
     ``status`` rides along so a client knows when to stop polling without a
     second request.
     """
-    from condor.agents.delegate import events_for_wire, get_delegation
+    from condor.agents.delegate import events_for_wire
 
-    dt = get_delegation(task_id)
-    if dt is None:
-        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
+    dt = _owned_delegation(task_id, user)
     return {
         "task_id": task_id,
         "status": dt.status,
@@ -901,10 +927,9 @@ async def stop_delegation_route(
     task_id: str, user: WebUser = Depends(get_current_user)
 ):
     """Cancel a running delegation (status -> stopped)."""
-    from condor.agents.delegate import get_delegation, stop_delegation
+    from condor.agents.delegate import stop_delegation
 
-    if get_delegation(task_id) is None:
-        raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
+    _owned_delegation(task_id, user)
     stopped = await stop_delegation(task_id)
     return {"stopped": stopped}
 
