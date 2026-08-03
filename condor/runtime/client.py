@@ -101,8 +101,16 @@ async def prompt(key: SessionKey, req: PromptRequest) -> AsyncIterator[RuntimeEv
         yield RuntimeEvent.done("no_session", session_key=raw_key)
         return
 
+    # Stamped from the live session, not from the conversation meta: the meta's
+    # agent_key/agent_slug are last-write-wins, so a chat that switches models
+    # mid-way would attribute its whole history to whatever answered last.
     recorder = conversations.Recorder(
-        session.user_id, session.conversation_id, req.text
+        session.user_id,
+        session.conversation_id,
+        req.text,
+        agent_key=session.agent_key,
+        agent_slug=session.agent_slug,
+        mode=session.mode,
     )
     try:
         async for event in session.prompt_stream(req.text):

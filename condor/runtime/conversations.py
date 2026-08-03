@@ -35,7 +35,7 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from condor.runtime.events import EventType
 from condor.runtime.models import DEFAULT_MODE
@@ -119,7 +119,24 @@ class ConversationMeta(BaseModel):
 
 
 class TurnEntry(BaseModel):
-    """One line of the transcript."""
+    """One line of the transcript.
+
+    The shape grows over time, so the line format is deliberately tolerant in
+    both directions: every field past ``role`` carries a default, so a line
+    written before a field existed still parses, and unknown keys are ignored,
+    so a line written by a newer build still loads here. Anything added later
+    must keep both halves of that bargain — optional, with a default that reads
+    as "not recorded" rather than as a real value.
+
+    The attribution fields say which brain produced the turn. They live on the
+    turn rather than only on ``ConversationMeta`` because the meta is
+    last-write-wins: a chat that switches models mid-way would otherwise
+    attribute its whole history to whatever answered last. Empty means
+    unattributed — turns written before this existed are left that way rather
+    than backfilled with a guess.
+    """
+
+    model_config = ConfigDict(extra="ignore")
 
     role: str = Field(description="user | assistant | system")
     text: str = ""
@@ -127,6 +144,9 @@ class TurnEntry(BaseModel):
     tool_calls: list[dict] = Field(default_factory=list)
     kind: str = Field(default="", description="System entries only: switch | error.")
     ts: float = Field(default_factory=time.time)
+    agent_key: str = Field(default="", description="Model that produced this turn.")
+    agent_slug: str = Field(default="", description="Bound Agent; '' = assistant.")
+    mode: str = Field(default="", description="Session mode that produced this turn.")
 
 
 # ── Paths ──
@@ -400,11 +420,25 @@ class Recorder:
     fix; it must not survive in a new form.
     """
 
-    def __init__(self, user_id: int | None, conv_id: str, user_text: str):
+    def __init__(
+        self,
+        user_id: int | None,
+        conv_id: str,
+        user_text: str,
+        *,
+        agent_key: str = "",
+        agent_slug: str = "",
+        mode: str = "",
+    ):
         self.enabled = bool(conv_id) and user_id is not None
         self.user_id = user_id
         self.conv_id = conv_id
         self._user_text = user_text
+        # Keyword-only and defaulted: a caller that does not know who answered
+        # records an unattributed turn instead of failing to record at all.
+        self._agent_key = agent_key
+        self._agent_slug = agent_slug
+        self._mode = mode
         self._text: list[str] = []
         self._thought: list[str] = []
         self._tools: dict[str, dict] = {}
@@ -436,6 +470,18 @@ class Recorder:
         elif event.type == EventType.ERROR:
             self._error = str(event.field("message", "") or "")
 
+    def _attribution(self) -> dict:
+        """What this recorder knows about who produced the turn.
+
+        One place for the fields a turn is stamped with, so a later field joins
+        the record without touching every ``TurnEntry`` construction here.
+        """
+        return {
+            "agent_key": self._agent_key,
+            "agent_slug": self._agent_slug,
+            "mode": self._mode,
+        }
+
     def flush(self) -> None:
         """Write the user turn and the accumulated assistant turn. Idempotent.
 
@@ -462,6 +508,7 @@ class Recorder:
                         text=text,
                         thought="".join(self._thought),
                         tool_calls=tools,
+                        **self._attribution(),
                     ),
                 )
             elif self._error:
