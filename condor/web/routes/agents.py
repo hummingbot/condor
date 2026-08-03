@@ -17,6 +17,7 @@ stays shared at ``agents/{slug}/``.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -52,6 +53,12 @@ _PERF_TTL = 30.0  # seconds
 # fetched successfully, with open_count == 0, and not in controller mode land
 # here; everything else keeps flowing through the 30s TTL path above.
 _CLOSED_PERF_CACHE: dict[str, Any] = {}
+
+# Upper bound on concurrent per-instance history calls against one API server.
+# The fan-out is bounded rather than unlimited so a strategy owning many bot
+# instances never bursts the whole cap at the backend at once (same bound
+# handlers/bots/archived.py and routines/archived_analyzer.py already use).
+MAX_CONCURRENT_HISTORY_FETCHES = 10
 
 
 def _cache_get(key: str) -> Any | None:
@@ -511,8 +518,24 @@ async def _apply_bot_mode_pnl(
             MAX_INSTANCES,
         )
         all_instances = all_instances[-MAX_INSTANCES:]
+    # One round-trip per instance, fanned out concurrently instead of walked one
+    # at a time, capped so the API server never sees more than
+    # MAX_CONCURRENT_HISTORY_FETCHES in flight. Results come back positionally
+    # aligned with all_instances, and a fetch that raises is normalized to the
+    # empty list fetch_instance_history already returns on API error — one bad
+    # instance degrades exactly as before instead of losing the whole rollup.
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_HISTORY_FETCHES)
+
+    async def _bounded_history(instance_name: str):
+        async with semaphore:
+            return await fetch_instance_history(client, instance_name)
+
+    histories = await asyncio.gather(
+        *(_bounded_history(inst) for inst in all_instances), return_exceptions=True
+    )
     history = {
-        inst: await fetch_instance_history(client, inst) for inst in all_instances
+        inst: [] if isinstance(rows, BaseException) else rows
+        for inst, rows in zip(all_instances, histories)
     }
 
     live = resolve_bots(all_perf, bases)
@@ -759,8 +782,6 @@ async def _build_strategy_summary(strategy) -> StrategySummary:
 @router.get("", response_model=list[AgentSummary])
 async def list_agents(user: WebUser = Depends(get_current_user)):
     """List all Agents, each with its strategies and their status."""
-    import asyncio as _asyncio
-
     agents = _agent_store().list_all()
     store = _strategy_store()
 
@@ -774,7 +795,7 @@ async def list_agents(user: WebUser = Depends(get_current_user)):
             coros.append(_build_strategy_summary(strategy))
             owners.append(agent.slug)
 
-    summaries = await _asyncio.gather(*coros, return_exceptions=True)
+    summaries = await asyncio.gather(*coros, return_exceptions=True)
 
     by_agent: dict[str, list[StrategySummary]] = {agent.slug: [] for agent in agents}
     for owner_slug, summary in zip(owners, summaries):
@@ -893,9 +914,7 @@ async def get_agent(slug: str, user: WebUser = Depends(get_current_user)):
     """Get Agent detail + its strategies."""
     agent = _get_agent(slug)
     strategies = _strategy_store().list(slug)
-    import asyncio as _asyncio
-
-    summaries = await _asyncio.gather(
+    summaries = await asyncio.gather(
         *[_build_strategy_summary(s) for s in strategies],
         return_exceptions=True,
     )
@@ -1082,10 +1101,8 @@ async def delegate_agent(
 async def list_strategies(slug: str, user: WebUser = Depends(get_current_user)):
     """List strategies owned by an Agent with status/perf."""
     _get_agent(slug)
-    import asyncio as _asyncio
-
     strategies = _strategy_store().list(slug)
-    summaries = await _asyncio.gather(
+    summaries = await asyncio.gather(
         *[_build_strategy_summary(s) for s in strategies],
         return_exceptions=True,
     )
