@@ -87,10 +87,7 @@ def _resolve_assistant(spec: SessionSpec, user_data: dict | None) -> SessionBind
 def _resolve_agent(spec: SessionSpec, user_data: dict | None) -> SessionBinding:
     """A domain Agent answers: its model, its tools, its store."""
     from condor.agents.agent import AgentStore
-    from handlers.agents._shared import (
-        build_mcp_servers_for_agent,
-        build_mcp_servers_for_session,
-    )
+    from handlers.agents._shared import build_mcp_servers_for_session
 
     agent = AgentStore().get(spec.agent_slug)
     if agent is None:
@@ -103,22 +100,17 @@ def _resolve_agent(spec: SessionSpec, user_data: dict | None) -> SessionBinding:
     # A server pinned on the Agent wins over the chat's ambient server.
     effective_server = agent.server_name or spec.server_name or ""
 
-    if agent.server_required and effective_server:
-        mcp_servers = build_mcp_servers_for_agent(
-            effective_server,
-            spec.user_id or 0,
-            spec.chat_id or spec.user_id or 0,
-            agent_slug=agent.slug,
-        )
-    else:
-        # Serverless agents still need their own scope — without agent_slug the
-        # condor MCP tools would target the CHAT's memory and skills.
-        mcp_servers = build_mcp_servers_for_session(
-            spec.user_id or 0,
-            spec.chat_id or spec.user_id or 0,
-            user_data,
-            agent_slug=agent.slug,
-        )
+    # A pinned server short-circuits resolution; None lets the builder fall back
+    # to the chat's ambient server. Serverless agents still need their own scope
+    # — without agent_slug the condor MCP tools would target the CHAT's memory
+    # and skills.
+    mcp_servers = build_mcp_servers_for_session(
+        spec.user_id or 0,
+        spec.chat_id or spec.user_id or 0,
+        user_data,
+        server_name=effective_server if agent.server_required else None,
+        agent_slug=agent.slug,
+    )
 
     return SessionBinding(
         label=agent.name or agent.slug,

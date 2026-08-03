@@ -684,29 +684,19 @@ class TickEngine:
         two points), avoiding a redundant per-tick journal re-parse.
         """
         from handlers.agents._shared import (
-            build_mcp_servers_for_agent,
             build_mcp_servers_for_session,
             get_project_dir,
         )
 
         mode = self.config.get("execution_mode", "loop")
 
-        server_name = self.config.get("server_name")
-        if server_name:
-            mcp_servers = build_mcp_servers_for_agent(
-                server_name,
-                self.user_id,
-                self.chat_id,
-                agent_slug=self.agent.slug,
-                execution_mode=mode,
-            )
-        else:
-            mcp_servers = build_mcp_servers_for_session(
-                self.user_id,
-                self.chat_id,
-                execution_mode=mode,
-                agent_slug=self.agent.slug,
-            )
+        # A configured server pins the toolset; None falls back to the chat's.
+        mcp_servers = build_mcp_servers_for_session(
+            self.user_id,
+            self.chat_id,
+            server_name=self.config.get("server_name"),
+            agent_slug=self.agent.slug,
+        )
         permission_cb = auto_approve_with_risk_check(
             self.risk, risk_state, execution_mode=mode, ledger=self.ledger
         )
