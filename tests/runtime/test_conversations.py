@@ -178,6 +178,33 @@ def test_a_corrupt_line_is_skipped_not_fatal(conv_root):
     assert [t.text for t in turns] == ["one", "two"]
 
 
+def test_a_line_from_another_version_of_the_shape_still_parses(conv_root):
+    """The transcript is append-only on disk, so the shape must age in both
+    directions: a line written before the attribution fields existed reads back
+    unattributed, and a line carrying a key this build does not know is kept
+    rather than dropped."""
+    meta = new_conversation(USER, WEB)
+    path = conv_root / str(USER) / meta.id / "transcript.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps({"role": "assistant", "text": "older build"}) + "\n")
+        fh.write(
+            json.dumps(
+                {"role": "assistant", "text": "newer build", "not_a_field_yet": "x"}
+            )
+            + "\n"
+        )
+
+    turns = read_transcript(USER, meta.id)
+    assert [t.text for t in turns] == ["older build", "newer build"]
+    old = turns[0]
+    assert (old.agent_key, old.agent_slug, old.mode) == (
+        "",
+        "",
+        "",
+    ), "an unattributed turn stays empty rather than being backfilled with a guess"
+
+
 def test_read_transcript_returns_the_tail(conv_root):
     meta = new_conversation(USER, WEB)
     for i in range(10):
@@ -332,6 +359,39 @@ def test_recorder_writes_two_turns_per_prompt(conv_root):
     assert turns[1].tool_calls == [
         {"id": "t1", "title": "get_portfolio_overview", "status": "completed"}
     ]
+
+
+def test_recorder_stamps_the_assistant_turn_with_who_answered(conv_root):
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(
+        USER,
+        meta.id,
+        "hi",
+        agent_key="gemini",
+        agent_slug="brigado",
+        mode="condor",
+    )
+    rec.observe(RuntimeEvent(type="text", data={"text": "hello"}))
+    rec.flush()
+
+    turns = read_transcript(USER, meta.id)
+    assert (turns[1].agent_key, turns[1].agent_slug, turns[1].mode) == (
+        "gemini",
+        "brigado",
+        "condor",
+    )
+
+
+def test_recorder_without_attribution_records_an_unattributed_turn(conv_root):
+    """The positional call still works, and records rather than guessing."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "hi")
+    rec.observe(RuntimeEvent(type="text", data={"text": "hello"}))
+    rec.flush()
+
+    turns = read_transcript(USER, meta.id)
+    assert turns[1].text == "hello"
+    assert (turns[1].agent_key, turns[1].agent_slug, turns[1].mode) == ("", "", "")
 
 
 def test_recorder_flush_is_idempotent(conv_root):
@@ -590,6 +650,65 @@ def test_meta_follows_the_model_that_answered_last(registry):
 
     info = asyncio.run(scenario())
     assert get_conversation(USER, info.conversation_id).agent_key == "gemini"
+
+
+@pytest.fixture
+def bound_agent(tmp_path, monkeypatch):
+    """An agents/ tree with one serverless Agent answering over ACP."""
+    from condor.agents import agent as agent_module
+    from condor.agents.agent import AgentStore
+
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    return AgentStore().create(
+        name="Brigado",
+        description="Domain agent",
+        instructions="You are Brigado.",
+        agent_key="claude-code",
+        server_required=False,
+    )
+
+
+def test_each_turn_keeps_the_agent_that_answered_it(registry, bound_agent):
+    """The reason attribution lives on the turn: the meta cannot hold it.
+
+    Same conversation, assistant first and a bound Agent after. The meta only
+    remembers the last one; the transcript remembers both, in order.
+    """
+    key = SessionKey.telegram(USER)
+
+    async def scenario():
+        info = await runtime.create_session(
+            SessionSpec(
+                key=str(key), agent_key="claude-code", chat_id=USER, user_id=USER
+            )
+        )
+        await _chat(key, "assistant, hello")
+        # The real switch path (routes/sessions.py _respawn): same key, same
+        # conversation, new binding.
+        await runtime.create_session(
+            SessionSpec(
+                key=str(key),
+                agent_key="",
+                agent_slug=bound_agent.slug,
+                chat_id=USER,
+                user_id=USER,
+                lazy_context=True,
+                conversation_id=info.conversation_id,
+            )
+        )
+        await _chat(key, "brigado, hello")
+        return info
+
+    info = asyncio.run(scenario())
+
+    replies = [
+        t for t in read_transcript(USER, info.conversation_id) if t.role == "assistant"
+    ]
+    assert [t.agent_slug for t in replies] == ["", bound_agent.slug]
+    assert [t.agent_key for t in replies] == ["claude-code", "claude-code"]
+    assert (
+        get_conversation(USER, info.conversation_id).agent_slug == bound_agent.slug
+    ), "the meta is still last-write-wins; only the turns hold the history"
 
 
 # ── Session budget as an LRU ──
