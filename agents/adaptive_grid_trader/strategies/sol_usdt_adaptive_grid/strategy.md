@@ -84,18 +84,17 @@ The running grid's PnL is real market feedback. Use it as a **confirming signal*
 
 ## Stale Grid Detection (Layer 2 — step 4 check)
 
-A grid that has outlived its `time_limit` AND stopped filling orders is dead weight occupying budget. Detect and recycle it.
+A grid that has stopped filling orders is dead weight occupying budget. Detect and recycle it regardless of age.
 
 **Definition of stale:** ALL of these must be true:
-1. Grid age > `time_limit` (43200s / 12h for this envelope)
-2. Executor `filled_amount_quote` (or volume) has been **unchanged for 3+ consecutive ticks**
-3. Grid still has active open orders (it didn't naturally close)
+1. Executor `filled_amount_quote` (or volume) has been **unchanged for 3+ consecutive ticks**
+2. Grid still has active open orders (it didn't naturally close)
 
 **Action when stale detected:**
 1. Teardown the grid (stop, keep_position=False, verify flat)
 2. Re-run baseline check (step 1) if older than 6h
 3. Redeploy with fresh range centered on **current price** using standard ATR/D math
-4. Journal: `stale_recycle: true, ticks_stagnant: N, old_volume: $X, reason: "past time_limit + no fills"`
+4. Journal: `stale_recycle: true, ticks_stagnant: N, old_volume: $X, reason: "no fills 3+ ticks"`
 
 **Key rules:**
 - Stale detection does NOT require a direction change — same direction redeploy is fine if baseline still agrees
@@ -175,7 +174,7 @@ Optional `mode_read: SHRUG (...)` = unreadable path already folded into ONEWAY �
 
 ### 4. Decide
 **Priority order for running grids (check top-down, first match wins):**
-1. **Stale?** age > time_limit AND filled_amount unchanged 3+ ticks → teardown + redeploy (see Stale Grid Detection)
+1. **Stale?** filled_amount unchanged 3+ ticks → teardown + redeploy (see Stale Grid Detection)
 2. **Profit threshold?** net_pnl_quote ≥ 2% of leg budget ($1.80 one-sided / $0.90 per TWO_SIDED leg) → teardown + realize + redeploy (see Profit-Taking Rule)
 3. **PnL flip?** rules 1/2 from PnL modifier → teardown + flip
 4. **Standard Layer 2:** keep / flip if both 4h+1d opposite + ≥3h
@@ -192,7 +191,7 @@ stop keep_position=False; both legs if two-sided; verify flat; notify if orphan 
 liquidation_guard skill; $90 one-sided / $45 per leg; per_level ≥7.
 
 ### 7. Deploy grid_executor
-total_amount_quote 90 (or 45×2 if two_sided_allowed YES only); min_order 7; max_open_orders 12; activation_bounds 0.002; TP≥0.001; stop_loss 0.10; time_limit 43200; keep_position false; controller_id = this session agent_id.
+total_amount_quote 90 (or 45×2 if two_sided_allowed YES only); min_order 7; max_open_orders 12; activation_bounds 0.002; TP≥0.001; stop_loss 0.10; time_limit 43200; keep_position false; **leverage: 5** (must be in executor config — defaults to 10x if omitted); controller_id = this session agent_id.
 
 ### 8. Journal
 entry_path, mode (HEDGE|ONEWAY), mode_read if present, two_sided_allowed, baseline, 4h/1d, liq_guard, **net_pnl_quote, pnl_trend, filled_amount_quote** (always), **pnl_flip / stale_recycle / profit_take** (if triggered).
