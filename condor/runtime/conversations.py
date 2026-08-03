@@ -149,7 +149,9 @@ class TurnEntry(BaseModel):
     text: str = ""
     thought: str = ""
     tool_calls: list[dict] = Field(default_factory=list)
-    kind: str = Field(default="", description="System entries only: switch | error.")
+    kind: str = Field(
+        default="", description="System entries only: switch | error | delegation."
+    )
     ts: float = Field(default_factory=time.time)
     agent_key: str = Field(default="", description="Model that produced this turn.")
     agent_slug: str = Field(default="", description="Bound Agent; '' = assistant.")

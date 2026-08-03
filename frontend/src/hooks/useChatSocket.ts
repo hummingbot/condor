@@ -17,7 +17,7 @@ export interface ChatMessage {
   text: string;
   toolCalls: ToolCall[];
   thought?: string;
-  /** System messages only: "switch" | "error". */
+  /** System messages only: "switch" | "error" | "delegation". */
   kind?: string;
 }
 

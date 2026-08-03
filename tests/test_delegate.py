@@ -181,6 +181,9 @@ def test_delegation_carries_conversation_provenance(tmp_path, monkeypatch):
 
     monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
     _write_agent(tmp_path, "scout")
+    # The task now writes its outcome back to the conversation (ARCH-087), so
+    # keep that write inside tmp_path rather than in the real store.
+    _isolate_conversations(tmp_path, monkeypatch)
 
     async def fake_run(**kw):
         return "ok"
@@ -227,6 +230,158 @@ def test_delegation_without_conversation_is_empty_not_error():
     )
     assert dt.conversation_id == ""
     assert dt.to_dict()["conversation_id"] == ""
+
+
+def _isolate_conversations(tmp_path, monkeypatch):
+    """Point the conversation store at a throwaway dir and return its reader."""
+    from condor.runtime import conversations
+
+    monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
+    return conversations
+
+
+def _run_delegation(monkeypatch, *, conversation_id, result=None, boom=None):
+    """Drive one delegation to completion and return (task, bot)."""
+
+    async def fake_run(**kw):
+        if boom is not None:
+            raise RuntimeError(boom)
+        return result
+
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", fake_run)
+    bot = _FakeBot()
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="scan",
+            bot=bot,
+            conversation_id=conversation_id,
+        )
+        await _drain(dt)
+        return dt
+
+    return asyncio.run(scenario()), bot
+
+
+def test_completed_delegation_lands_in_its_conversation(tmp_path, monkeypatch):
+    """The answer reaches the chat that asked for it, not just Telegram (ARCH-087).
+
+    Without this the conversation ends on "I started a background task" and the
+    resumed session replays that same unanswered story.
+    """
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    _write_agent(tmp_path / "agents", "scout")
+    conversations = _isolate_conversations(tmp_path, monkeypatch)
+    meta = conversations.new_conversation(1, "web")
+
+    dt, bot = _run_delegation(
+        monkeypatch, conversation_id=meta.id, result="3 pools worth watching"
+    )
+
+    turns = conversations.read_transcript(1, meta.id)
+    system = [t for t in turns if t.role == "system"]
+    assert len(system) == 1
+    assert system[0].kind == "delegation"
+    assert "3 pools worth watching" in system[0].text
+    # One helper, one story: the transcript line IS the Telegram text.
+    assert system[0].text == bot.messages[-1]
+    # A system note replays as a parenthetical, not as the agent's own words.
+    assert f"({system[0].text})" in conversations.replay_context(1, meta.id)
+    assert dt.status == "done"
+
+
+def test_delegation_without_conversation_records_nothing(tmp_path, monkeypatch):
+    """A consult- or tick-started task has no conversation: no write, no raise."""
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    _write_agent(tmp_path / "agents", "scout")
+    _isolate_conversations(tmp_path, monkeypatch)
+
+    dt, bot = _run_delegation(monkeypatch, conversation_id="", result="ok")
+
+    assert dt.status == "done"
+    assert bot.messages  # still notified
+    assert not (tmp_path / "conversations").exists()
+
+
+def test_failed_delegation_records_the_same_failure_it_pushes(tmp_path, monkeypatch):
+    """An error is reported to the conversation exactly as it is to the chat."""
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    _write_agent(tmp_path / "agents", "scout")
+    conversations = _isolate_conversations(tmp_path, monkeypatch)
+    meta = conversations.new_conversation(1, "web")
+
+    dt, bot = _run_delegation(
+        monkeypatch, conversation_id=meta.id, boom="model exploded"
+    )
+
+    assert dt.status == "error"
+    system = [
+        t for t in conversations.read_transcript(1, meta.id) if t.role == "system"
+    ]
+    assert len(system) == 1
+    assert system[0].kind == "delegation"
+    assert "model exploded" in system[0].text
+    assert system[0].text == bot.messages[-1]
+
+
+def test_stopped_delegation_records_nothing(tmp_path, monkeypatch):
+    """A cancelled task stays silent in the transcript, as it does in the chat."""
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path / "agents")
+    _write_agent(tmp_path / "agents", "scout")
+    conversations = _isolate_conversations(tmp_path, monkeypatch)
+    meta = conversations.new_conversation(1, "web")
+
+    async def hang(**kw):
+        await asyncio.sleep(60)
+
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", hang)
+    bot = _FakeBot()
+
+    async def scenario():
+        dt = await start_delegation(
+            agent_slug="scout",
+            user_id=1,
+            chat_id=42,
+            server_name=None,
+            task="scan",
+            bot=bot,
+            conversation_id=meta.id,
+        )
+        await asyncio.sleep(0)
+        await stop_delegation(dt.task_id)
+        await _drain(dt)
+        return dt
+
+    dt = asyncio.run(scenario())
+
+    assert dt.status == "stopped"
+    assert not bot.messages
+    assert [
+        t for t in conversations.read_transcript(1, meta.id) if t.role == "system"
+    ] == []
+
+
+def test_completion_text_clips_a_long_result(tmp_path, monkeypatch):
+    """The shared helper truncates, so a huge answer cannot bloat the replay."""
+    from condor.agents.delegate import DelegateTask, _completion_text
+
+    dt = DelegateTask(
+        task_id="x",
+        agent_slug="scout",
+        user_id=1,
+        chat_id=42,
+        server_name=None,
+        task="t",
+        status="done",
+        result="y" * 5000,
+    )
+    text = _completion_text(dt)
+    assert text.endswith("…")
+    assert len(text) < 1600
 
 
 def test_session_key_resolution_never_raises():

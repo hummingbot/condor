@@ -31,6 +31,20 @@ export const ChatMessageView = memo(function ChatMessageView({
 }: {
   message: ChatMessageType;
 }) {
+  // A delegation's outcome is the answer to something asked minutes ago, so it
+  // is prose, not a label: the divider treatment (uppercase, nowrap, 10px)
+  // would render it as one unreadable line. It stays visibly not-the-agent's
+  // own words — an inset note, no avatar — while still being readable.
+  if (message.role === "system" && message.kind === "delegation") {
+    return (
+      <div className="my-3 flex justify-start">
+        <div className="chat-markdown max-w-[85%] rounded-xl border border-dashed border-[var(--color-border)] px-3.5 py-2 text-sm text-[var(--color-text-muted)]">
+          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+        </div>
+      </div>
+    );
+  }
+
   // A handover is not a bubble. Rendering it as a divider is what makes the
   // switch visible in the scrollback instead of implied by a header that
   // silently changed.

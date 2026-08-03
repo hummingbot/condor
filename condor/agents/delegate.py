@@ -243,6 +243,7 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
             log.exception("Failed to persist delegation transcript for %s", dt.task_id)
         _record_delegation_status(dt)
         if dt.status != "stopped":
+            _record_completion_turn(dt)
             try:
                 await _notify_done(dt, bot)
             except Exception:
@@ -374,6 +375,54 @@ def _persist_transcript(dt: DelegateTask) -> None:
     (delegations_dir / f"{dt.task_id}.md").write_text(content)
 
 
+def _completion_text(dt: DelegateTask) -> str:
+    """The one-line outcome of a finished delegation.
+
+    Single source for both places the outcome is announced -- the chat push and
+    the conversation transcript -- so the two can never tell the user different
+    stories about the same task. The result is clipped here, not by the caller:
+    a long answer must not bloat a transcript that is replayed into the next
+    session's context.
+    """
+    if dt.status == "error":
+        return f"❌ Delegated task {dt.task_id} failed: {dt.error}"
+
+    snippet = (dt.result or "").strip()
+    if len(snippet) > 1500:
+        snippet = snippet[:1500] + "…"
+    return f"✅ Delegated task {dt.task_id} done\n\n{snippet}".rstrip()
+
+
+def _record_completion_turn(dt: DelegateTask) -> None:
+    """Write the outcome back to the conversation that asked for it.
+
+    Without this the chat that started the task ends on "I started a background
+    task" and never learns the answer -- and ``replay_context`` tells the next
+    session the same false story. Recorded as a ``system`` turn so the replay
+    reads it as a parenthetical note rather than as the agent's own words.
+
+    A delegation with no conversation behind it (consult- or tick-started) is a
+    no-op: ``record_system`` already ignores an empty id. Imported lazily like
+    the rest of this module's runtime touchpoints, and never allowed to raise --
+    a failed note must not cost the user their notification.
+    """
+    if not dt.conversation_id:
+        return
+    try:
+        from condor.runtime.conversations import record_system
+
+        record_system(
+            dt.user_id, dt.conversation_id, _completion_text(dt), kind="delegation"
+        )
+    except Exception:
+        log.debug(
+            "Could not record delegation %s in conversation %s",
+            dt.task_id,
+            dt.conversation_id,
+            exc_info=True,
+        )
+
+
 async def _notify_done(dt: DelegateTask, bot) -> None:
     """Notify the user the delegation finished.
 
@@ -384,13 +433,7 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
     if not dt.chat_id:
         return
 
-    if dt.status == "error":
-        text = f"❌ Delegated task {dt.task_id} failed: {dt.error}"
-    else:
-        snippet = (dt.result or "").strip()
-        if len(snippet) > 1500:
-            snippet = snippet[:1500] + "…"
-        text = f"✅ Delegated task {dt.task_id} done\n\n{snippet}".rstrip()
+    text = _completion_text(dt)
 
     target = bot
     if target is None:
