@@ -126,6 +126,11 @@ class LoopSupervisor:
             strategy_slug=engine.strategy.slug,
             session_num=engine.session_num,
             chat_id=getattr(engine, "chat_id", None),
+            # The owner is part of the run's identity, not decoration: a restart
+            # needs it to rebuild the same memory/skill scope and the same
+            # accessible-servers fallback. Without it here there is nothing to
+            # restore from, and _restart cannot construct an engine at all.
+            user_id=getattr(engine, "user_id", 0),
             tick=getattr(journal, "tick_count", 0) if journal else 0,
             restart_on_boot=bool(engine.config.get("restart_on_boot", False)),
         )
@@ -287,6 +292,33 @@ class LoopSupervisor:
 
         write_status(session_dir, state=LoopState.INTERRUPTED, boot_id=BOOT_ID)
 
+    @staticmethod
+    def _owner_of(status: dict, agent, strategy) -> int:
+        """Who this run belongs to, for a session written by any build.
+
+        Sessions recorded before ``record`` persisted ``user_id`` have no owner
+        in their status file. Restarting those as user 0 would be worse than
+        useless — it silently scopes the run to a user that owns no memory and
+        no servers — so we fall back to the creator recorded in the strategy's
+        (then the agent's) frontmatter, which is the same person in every path
+        that can start a loop. 0 only survives when nothing on disk knows, and
+        it is never fatal: the restart still happens, degraded and logged.
+        """
+        user_id = int(status.get("user_id") or 0)
+        if user_id:
+            return user_id
+
+        fallback = int(
+            getattr(strategy, "created_by", 0) or getattr(agent, "created_by", 0) or 0
+        )
+        log.warning(
+            "Status file for %s has no user_id (written before it was recorded); "
+            "restarting as user %s from the creator on disk",
+            status.get("agent_id", "?"),
+            fallback,
+        )
+        return fallback
+
     async def _restart(self, status: dict) -> bool:
         """Start a fresh session for an opted-in run. Returns True if started."""
         from condor.agents.agent import AgentStore
@@ -313,6 +345,7 @@ class LoopSupervisor:
             strategy=strategy,
             config=config,
             chat_id=status.get("chat_id") or 0,
+            user_id=self._owner_of(status, agent, strategy),
         )
         await engine.start()
         log.info("Restarted %s as session %s", engine.agent_id, engine.session_num)
