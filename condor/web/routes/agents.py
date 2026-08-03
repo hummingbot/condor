@@ -20,7 +20,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -37,6 +36,7 @@ from condor.agents.sessions_index import (
     find_session_dir,
     infer_latest_session_status,
     list_experiments,
+    list_session_snapshots,
     list_sessions,
 )
 from condor.web.auth import get_current_user
@@ -1652,28 +1652,8 @@ async def list_snapshots(
     if not session_dir:
         raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
 
-    snapshots = []
-    for snap_dir_name in ("snapshots", "runs"):
-        snap_dir = session_dir / snap_dir_name
-        if not snap_dir.exists():
-            continue
-        for f in sorted(
-            snap_dir.glob("*.md"), key=lambda x: x.stat().st_mtime, reverse=True
-        ):
-            m = re.match(r"(?:snapshot|run)_(\d+)\.md", f.name)
-            if m:
-                tick = int(m.group(1))
-                content = f.read_text()
-                ts_match = re.search(
-                    r"^# (?:Snapshot|Tick) #\d+ — (.+)$", content, re.MULTILINE
-                )
-                timestamp = ts_match.group(1) if ts_match else ""
-                snapshots.append(
-                    SnapshotSummary(tick=tick, timestamp=timestamp, file=f.name)
-                )
-        break
-
-    return {"snapshots": [s.model_dump() for s in snapshots]}
+    snapshots = list_session_snapshots(session_dir)
+    return {"snapshots": [SnapshotSummary(**s).model_dump() for s in snapshots]}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/snapshots/{tick}")
