@@ -41,6 +41,17 @@ def _compute_atr(candles: list, period: int) -> float:
     return sum(recent_trs) / len(recent_trs)
 
 
+def _price_slope_pct(closes: list, lookback: int = 48) -> float:
+    """Return % change of close over the last `lookback` candles (or all available).
+    Positive = price rising, negative = price falling."""
+    n = min(lookback, len(closes))
+    if n < 2:
+        return 0.0
+    start = closes[-n]
+    end = closes[-1]
+    return ((end - start) / start * 100) if start else 0.0
+
+
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     client = await get_client(context._chat_id, context=context)
     if not client:
@@ -96,24 +107,73 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         trend_strength = "weak"
         ema20_val = ema50_val = 0.0
         sep_vs_atr = 0.0
+        price_slope = 0.0
+        price_vs_emas = "—"
     else:
         ema20_val = ema20_series[-1]
         ema50_val = ema50_series[-1]
         separation = ema20_val - ema50_val
         sep_vs_atr = abs(separation) / atr if atr > 0 else 0.0
 
+        # --- Price slope over last 48h (2 days) ---
+        price_slope = _price_slope_pct(closes, 48)
+
+        # --- Price position relative to EMAs ---
+        price_below_both = current_price < ema20_val and current_price < ema50_val
+        price_above_both = current_price > ema20_val and current_price > ema50_val
+        if price_below_both:
+            price_vs_emas = "BELOW_BOTH"
+        elif price_above_both:
+            price_vs_emas = "ABOVE_BOTH"
+        else:
+            price_vs_emas = "BETWEEN"
+
+        # --- Price-action override (checked first) ---
+        # Strong price slope + price on one side of both EMAs = directional
+        # regardless of EMA ordering. This catches trends early during EMA
+        # crossovers where lagging EMAs would say NEUTRAL.
+        price_action_override = None
+        if price_below_both and price_slope < -1.0:
+            price_action_override = "BEARISH"
+        elif price_above_both and price_slope > 1.0:
+            price_action_override = "BULLISH"
+
+        # --- Trend direction ---
+        # EMA separation threshold 0.15x ATR (was 0.3x): calls directional
+        # sooner so the baseline doesn't lag behind obvious moves.
+        # Micro-slope uses 6-candle lookback (was 3) for stability.
         if ema20_val > ema50_val:
-            rising = len(ema20_series) >= 3 and ema20_series[-1] > ema20_series[-3]
-            trend_direction = "BULLISH" if rising else "NEUTRAL"
+            if sep_vs_atr >= 0.15:
+                trend_direction = "BULLISH"
+            else:
+                rising = len(ema20_series) >= 6 and ema20_series[-1] > ema20_series[-6]
+                trend_direction = "BULLISH" if rising else "NEUTRAL"
         elif ema20_val < ema50_val:
-            falling = len(ema20_series) >= 3 and ema20_series[-1] < ema20_series[-3]
-            trend_direction = "BEARISH" if falling else "NEUTRAL"
+            if sep_vs_atr >= 0.15:
+                trend_direction = "BEARISH"
+            else:
+                falling = len(ema20_series) >= 6 and ema20_series[-1] < ema20_series[-6]
+                trend_direction = "BEARISH" if falling else "NEUTRAL"
         else:
             trend_direction = "NEUTRAL"
 
-        if sep_vs_atr < 0.5:
+        # Apply price-action override if EMA-based logic said NEUTRAL
+        if trend_direction == "NEUTRAL" and price_action_override:
+            trend_direction = price_action_override
+
+        # --- Soft price-vs-EMA nudge for remaining NEUTRAL ---
+        # Lower threshold (0.25% slope, was 0.5%) so mild downtrends
+        # with price below both EMAs still register as directional.
+        if trend_direction == "NEUTRAL":
+            if price_below_both and price_slope < -0.25:
+                trend_direction = "BEARISH"
+            elif price_above_both and price_slope > 0.25:
+                trend_direction = "BULLISH"
+
+        # --- Strength ---
+        if sep_vs_atr < 0.15:
             trend_strength = "weak"
-        elif sep_vs_atr < 1.5:
+        elif sep_vs_atr < 0.8:
             trend_strength = "moderate"
         else:
             trend_strength = "strong"
@@ -129,7 +189,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
         builder.section(
             "7-Day Market Snapshot",
-            f"{config.trading_pair} on {config.connector_name}  |  {len(records)} × 1h candles",
+            f"{config.trading_pair} on {config.connector_name}  |  {len(records)} x 1h candles",
         )
         builder.kpi("Current Price", f"${current_price:,.2f}")
         builder.kpi("7D High", f"${seven_d_high:,.2f}")
@@ -138,15 +198,17 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
         builder.section(
             "Volatility — ATR",
-            f"Average True Range over last {config.atr_period} × 1h candles",
+            f"Average True Range over last {config.atr_period} x 1h candles",
         )
         builder.kpi("ATR (1h)", f"${atr:,.2f}")
         builder.kpi("ATR % of Price", f"{atr_pct:.3f}%")
 
-        builder.section("Trend", "EMA20 vs EMA50 on 1h closes")
+        builder.section("Trend", "EMA20 vs EMA50 on 1h closes + price slope")
         builder.kpi("EMA20", f"${ema20_val:,.2f}")
         builder.kpi("EMA50", f"${ema50_val:,.2f}")
-        builder.kpi("EMA Sep / ATR", f"{sep_vs_atr:.2f}×")
+        builder.kpi("EMA Sep / ATR", f"{sep_vs_atr:.2f}x")
+        builder.kpi("Price vs EMAs", price_vs_emas)
+        builder.kpi("48h Price Slope", f"{price_slope:+.2f}%")
         builder.kpi("Trend Direction", trend_direction)
         builder.kpi("Trend Strength", trend_strength)
 
@@ -160,7 +222,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"7D Baseline — {config.trading_pair}\n"
         f"Price: ${current_price:,.2f}  |  High: ${seven_d_high:,.2f}  |  Low: ${seven_d_low:,.2f}\n"
         f"Range: {range_pct:.2f}%  |  ATR(1h,{config.atr_period}): ${atr:,.2f} ({atr_pct:.3f}%)\n"
-        f"Trend: {trend_direction} / {trend_strength}  |  EMA20: ${ema20_val:,.2f}  |  EMA50: ${ema50_val:,.2f}"
+        f"Trend: {trend_direction} / {trend_strength}  |  EMA20: ${ema20_val:,.2f}  |  EMA50: ${ema50_val:,.2f}\n"
+        f"Price vs EMAs: {price_vs_emas}  |  48h Slope: {price_slope:+.2f}%"
     )
     if report_id:
         summary += f"\nReport: {report_id}"
