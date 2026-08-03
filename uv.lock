@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -640,7 +640,7 @@ requires-dist = [
     { name = "fastapi" },
     { name = "faster-whisper" },
     { name = "geckoterminal-py" },
-    { name = "hummingbot-api-client", specifier = "==1.5.3" },
+    { name = "hummingbot-api-client", specifier = "==1.5.4" },
     { name = "isort", marker = "extra == 'dev'" },
     { name = "kaleido" },
     { name = "markdown", specifier = ">=3.10.2" },
@@ -1492,14 +1492,14 @@ wheels = [
 
 [[package]]
 name = "hummingbot-api-client"
-version = "1.5.3"
+version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/13/c8/5c6c94f2a1498aa4b356d8a0e034b344085ec1a6bde58c4e04a993c871c5/hummingbot_api_client-1.5.3.tar.gz", hash = "sha256:2f5c7f4d57a151a6b529b58f18b735d31bb9f0858428d2141dfc1e743302b06c", size = 39417, upload-time = "2026-05-26T02:46:07.675Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/dd/14/3c46874d911e1507b35e0da8f9c13d493bbfac61c4cfd418c5dc487ecf48/hummingbot_api_client-1.5.4.tar.gz", hash = "sha256:95a1f69373abc12d9ef060c99cc3bca398f1464f48f5d67d7dcc20c26dfa21b9", size = 39022, upload-time = "2026-08-03T19:38:48.211Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bb/05/f83142ff1bea7dd057f6bcfa523fee33cd973bac1d6afa1f8e42a35f5de2/hummingbot_api_client-1.5.3-py3-none-any.whl", hash = "sha256:856812ab1a28881b0b5bd36e2f783a07db0f38fa694c83ed263038fdc12ec730", size = 46555, upload-time = "2026-05-26T02:46:06.034Z" },
+    { url = "https://files.pythonhosted.org/packages/7d/10/f7e8bb33cb16ee2beac6f04b4dfc18a982a33bb5e0671afd5e6c055bdc62/hummingbot_api_client-1.5.4-py3-none-any.whl", hash = "sha256:a2afd101624f4ae00d44eaae37422b10171ab5a24745f723ef0774aa3a03a566", size = 46147, upload-time = "2026-08-03T19:38:47.056Z" },
 ]
 
 [[package]]
