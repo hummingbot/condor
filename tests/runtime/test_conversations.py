@@ -203,6 +203,9 @@ def test_a_line_from_another_version_of_the_shape_still_parses(conv_root):
         "",
         "",
     ), "an unattributed turn stays empty rather than being backfilled with a guess"
+    assert (
+        old.stop_reason == ""
+    ), "a line written before stop_reason existed still reads"
 
 
 def test_read_transcript_returns_the_tail(conv_root):
@@ -413,6 +416,22 @@ def test_recorder_keeps_a_partial_reply(conv_root):
 
     turns = read_transcript(USER, meta.id)
     assert turns[1].text == "It works by "
+    assert (
+        turns[1].stop_reason == ""
+    ), "an abandoned stream reports no ending, and the turn says so"
+
+
+@pytest.mark.parametrize("reason", ["end_turn", "cancelled", "timeout", "error"])
+def test_recorder_records_how_the_stream_ended(conv_root, reason):
+    """A truncated answer has to be tellable from a finished one on disk."""
+    meta = new_conversation(USER, WEB)
+    rec = Recorder(USER, meta.id, "explain the strategy")
+    rec.observe(RuntimeEvent(type="text", data={"text": "It works by "}))
+    rec.observe(RuntimeEvent(type="done", data={"stop_reason": reason}))
+    rec.flush()
+
+    turns = read_transcript(USER, meta.id)
+    assert turns[1].stop_reason == reason
 
 
 def test_recorder_records_the_user_turn_even_with_no_reply(conv_root):

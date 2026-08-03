@@ -134,6 +134,13 @@ class TurnEntry(BaseModel):
     attribute its whole history to whatever answered last. Empty means
     unattributed — turns written before this existed are left that way rather
     than backfilled with a guess.
+
+    ``stop_reason`` says how the stream ended, so a truncated answer can be
+    told apart from a finished one: a reply cut short by a cancel, a timeout or
+    a backend error otherwise lands on disk looking exactly like a complete
+    one. Empty means the stream never reported an ending — the abandoned
+    generator (page reload, WS disconnect), and every turn written before this
+    field existed.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -147,6 +154,9 @@ class TurnEntry(BaseModel):
     agent_key: str = Field(default="", description="Model that produced this turn.")
     agent_slug: str = Field(default="", description="Bound Agent; '' = assistant.")
     mode: str = Field(default="", description="Session mode that produced this turn.")
+    stop_reason: str = Field(
+        default="", description="Assistant turns: how the stream ended; '' = unknown."
+    )
 
 
 # ── Paths ──
@@ -443,6 +453,9 @@ class Recorder:
         self._thought: list[str] = []
         self._tools: dict[str, dict] = {}
         self._error = ""
+        # Stays empty unless a DONE arrives: an abandoned generator never
+        # reports an ending, and "unknown" is the honest record of that.
+        self._stop = ""
         self._flushed = False
         if self.enabled:
             _live_recorders.add(self)
@@ -469,6 +482,8 @@ class Recorder:
                 call["status"] = str(event.field("status") or call["status"])
         elif event.type == EventType.ERROR:
             self._error = str(event.field("message", "") or "")
+        elif event.type == EventType.DONE:
+            self._stop = event.stop_reason
 
     def _attribution(self) -> dict:
         """What this recorder knows about who produced the turn.
@@ -508,6 +523,7 @@ class Recorder:
                         text=text,
                         thought="".join(self._thought),
                         tool_calls=tools,
+                        stop_reason=self._stop,
                         **self._attribution(),
                     ),
                 )
