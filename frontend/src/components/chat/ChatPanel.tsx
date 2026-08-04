@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
   Bot,
   Brain,
   History,
@@ -247,6 +248,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 modes={modes}
                 isActive={slot.info.slot_id === chat.activeSlotId}
                 isStreaming={slot.info.slot_id === chat.streamingSlotId}
+                // A confirmation is only answerable from the conversation that
+                // raised it, so the tab is where a request in a background chat
+                // becomes visible at all.
+                needsApproval={Boolean(chat.permissionRequests[slot.info.slot_id])}
                 onClick={() => chat.setActiveSlotId(slot.info.slot_id)}
                 onClose={() => chat.destroySession(slot.info.slot_id)}
               />
@@ -489,6 +494,7 @@ function SessionTab({
   modes,
   isActive,
   isStreaming,
+  needsApproval,
   onClick,
   onClose,
 }: {
@@ -497,6 +503,8 @@ function SessionTab({
   modes: ChatModeOption[];
   isActive: boolean;
   isStreaming: boolean;
+  /** This conversation is holding a tool call that is waiting on the user. */
+  needsApproval?: boolean;
   onClick: () => void;
   onClose: () => void;
 }) {
@@ -531,6 +539,12 @@ function SessionTab({
           <span className="text-[var(--color-text-muted)]"> · {slot.info.server_name}</span>
         )}
       </span>
+      {needsApproval && (
+        <AlertTriangle
+          className="h-3 w-3 shrink-0 text-[var(--color-yellow)]"
+          aria-label="Waiting for your approval"
+        />
+      )}
       {(isStreaming || slot.pending) && (
         <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--color-primary)]" />
       )}
