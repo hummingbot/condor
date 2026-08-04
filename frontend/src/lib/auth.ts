@@ -7,6 +7,7 @@ import {
 } from "react";
 
 import { TOKEN_KEY, authHeaders } from "./auth-token";
+import { queryClient } from "./queryClient";
 
 export interface User {
   id: number;
@@ -24,6 +25,9 @@ export interface AuthState {
 }
 
 const USER_KEY = "condor_user";
+
+/** Selected Hummingbot API server. Session state: cleared on logout. */
+export const SERVER_KEY = "condor_selected_server";
 
 export const AuthContext = createContext<AuthState>({
   user: null,
@@ -66,6 +70,12 @@ export function useAuthState(): AuthState {
   const logout = useCallback(() => {
     localStorage.removeItem(TOKEN_KEY);
     localStorage.removeItem(USER_KEY);
+    localStorage.removeItem(SERVER_KEY);
+    // Every cached response belongs to the session that fetched it. Logging out
+    // is a pure client-side transition (no page reload), so without this the
+    // next user to log in renders the previous user's portfolio, bots, API keys
+    // and conversations straight from the cache.
+    queryClient.clear();
     setToken(null);
     setUser(null);
   }, []);
