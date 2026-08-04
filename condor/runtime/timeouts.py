@@ -28,6 +28,9 @@ class TimeoutPolicy:
     prompt_lock: int = 30
     # Wall-clock budget for a single prompt. Kills runaway agent turns.
     prompt_overall: int = 1800
+    # How long to wait for an agent to confirm session/cancel before falling
+    # back to cancelling the request locally.
+    prompt_cancel: int = 2
     # How long a human has to answer a dangerous-tool confirmation.
     confirmation: int = 120
     # Keepalive cadence on an SSE stream, so proxies and clients see traffic.

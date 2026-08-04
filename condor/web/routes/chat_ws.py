@@ -526,9 +526,12 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
         await _send(ws, {"event": "error", "message": "No slot_id"})
         return
 
-    # Abort the ACP-level prompt so stale events don't leak into the next message.
-    # runtime.abort() sets an event flag that makes the prompt stream break out
-    # on the next iteration, triggering its finally block to release the lock.
+    # Stop generation at the agent, not just here: runtime.abort() sends ACP's
+    # session/cancel and waits (bounded) for the agent to settle the turn, so
+    # the model's context ends where the user's screen did. It also sets the
+    # event flag that makes the prompt stream break out on the next iteration,
+    # triggering its finally block to release the lock. The frontend resets
+    # optimistically, so this await costs the user nothing visible.
     session_key = _session_key(user_id, slot_id)
     await runtime.abort(session_key)
 

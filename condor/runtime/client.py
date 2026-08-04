@@ -148,7 +148,7 @@ async def abort(key: SessionKey) -> bool:
     session = _local().get_session(key)
     if session is None:
         return False
-    session.abort()
+    await session.abort()
     return True
 
 
