@@ -92,7 +92,7 @@ export function AgentChatTab({
   }, [chat.connect]);
 
   const activeSlot = chat.activeSlot;
-  const isActiveStreaming = chat.streamingSlotId === chat.activeSlotId;
+  const isActiveStreaming = chat.isSlotStreaming(chat.activeSlotId);
 
   /**
    * Talk to someone.
