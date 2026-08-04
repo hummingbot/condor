@@ -1,10 +1,13 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X, Zap } from "lucide-react";
 
 import type { ChatSlot } from "@/hooks/useChatSocket";
 import type { ChatAgentOption, ChatModeOption } from "@/lib/api";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
+
+/** How close to the end still counts as "following the answer", in pixels. */
+const NEAR_BOTTOM_PX = 80;
 
 const MODE_ICONS: Record<string, typeof Zap> = {
   condor: Zap,
@@ -73,11 +76,66 @@ export function ChatThread({
   autoFocus?: boolean;
 }) {
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollAreaRef = useRef<HTMLDivElement>(null);
+  const scrollFrameRef = useRef<number | null>(null);
 
-  // Auto-scroll on new messages in the slot on screen
+  /**
+   * Scroll the transcript to its end, at most once per animation frame.
+   *
+   * Streaming replaces the messages array on every chunk, so an ungated
+   * `scrollIntoView` runs once per token: each call restarts the browser's
+   * smooth-scroll animation from wherever the last one got to and forces a
+   * synchronous layout of the whole transcript, which is what makes a long
+   * answer stutter. Holding a single frame handle and cancelling the pending
+   * one collapses a burst of chunks into the one scroll that matters.
+   *
+   * `force` is for the discrete events — a new message, a different
+   * conversation — that should always land at the bottom. Everything else is
+   * gated on the viewport already being near the end, so a user who scrolled
+   * back to re-read an earlier answer is not dragged down by the next token.
+   */
+  const scrollToBottom = useCallback((behavior: ScrollBehavior, force: boolean) => {
+    if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    scrollFrameRef.current = requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const area = scrollAreaRef.current;
+      if (!force && area) {
+        const distanceFromBottom = area.scrollHeight - area.scrollTop - area.clientHeight;
+        if (distanceFromBottom > NEAR_BOTTOM_PX) return;
+      }
+      messagesEndRef.current?.scrollIntoView({ behavior });
+    });
+  }, []);
+
+  const slotId = slot?.info.slot_id;
+  const messageCount = slot?.messages.length ?? 0;
+  // Seeded empty rather than with the current values, so the first run after
+  // mount counts as a slot change: a transcript that is already on screen when
+  // this mounts still opens at its end.
+  const prevSlotIdRef = useRef<string | undefined>(undefined);
+  const prevCountRef = useRef(0);
+
+  // Auto-scroll on new messages in the slot on screen, and follow a streaming
+  // answer while the user is watching its end. A chunk only ever rewrites the
+  // last bubble — tool calls and thoughts attach to it too — so the message
+  // count moving is the honest signal for "something new arrived".
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [slot?.messages]);
+    const slotChanged = prevSlotIdRef.current !== slotId;
+    const countChanged = prevCountRef.current !== messageCount;
+    prevSlotIdRef.current = slotId;
+    prevCountRef.current = messageCount;
+    // A freshly selected transcript opens at its end, without animating
+    // through everything above it.
+    if (slotChanged) scrollToBottom("auto", true);
+    else if (countChanged) scrollToBottom("smooth", true);
+    else scrollToBottom("auto", false);
+  }, [slotId, messageCount, slot?.messages, scrollToBottom]);
+
+  useEffect(() => {
+    return () => {
+      if (scrollFrameRef.current !== null) cancelAnimationFrame(scrollFrameRef.current);
+    };
+  }, []);
 
   return (
     <>
@@ -122,7 +180,7 @@ export function ChatThread({
       )}
 
       {/* Messages area */}
-      <div className="flex-1 overflow-y-auto px-4 py-4">
+      <div ref={scrollAreaRef} className="flex-1 overflow-y-auto px-4 py-4">
         {/* `min-h-full` so an empty state can centre itself in the viewport
             while a long transcript is still free to grow past it. */}
         <div className={`flex min-h-full flex-col ${columnClassName}`}>
