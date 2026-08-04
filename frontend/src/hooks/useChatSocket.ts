@@ -96,6 +96,31 @@ function streamTarget(msgs: ChatMessage[], curId: string | null): number {
   return last >= 0 && msgs[last].id === curId ? last : -1;
 }
 
+/**
+ * Fold one fragment into the slot's open bubble, opening one if needed.
+ *
+ * Returns the new message list. `assign` is handed the id of a bubble that had
+ * to be opened, which is what makes the next fragment continue this one rather
+ * than open another.
+ */
+function foldIntoStream(
+  msgs: ChatMessage[],
+  curId: string | null,
+  patch: (m: ChatMessage) => ChatMessage,
+  assign: (id: string) => void,
+): ChatMessage[] {
+  const out = [...msgs];
+  const idx = streamTarget(out, curId);
+  if (idx < 0) {
+    const id = nextMsgId();
+    assign(id);
+    out.push(patch({ id, role: "assistant", text: "", toolCalls: [] }));
+  } else {
+    out[idx] = patch(out[idx]);
+  }
+  return out;
+}
+
 /** Stop every tool call that is still spinning. A prompt that ended, ended. */
 function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
   return msgs.map((m) =>
@@ -152,6 +177,15 @@ function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
   });
   return messages;
 }
+
+/**
+ * How long streamed fragments accumulate before they are committed together.
+ *
+ * 50ms caps the chat's commit rate at 20/sec against a wire that delivers
+ * 50-200 frames/sec, and is short enough that the text still reads as arriving
+ * continuously.
+ */
+const FLUSH_INTERVAL_MS = 50;
 
 export function useChatSocket() {
   const { token, user } = useAuth();
@@ -234,36 +268,137 @@ export function useChatSocket() {
     });
   }, []);
 
+  // ── Streamed fragments are coalesced, not committed one per frame ──
+  //
+  // ACP emits one WS frame per model chunk, so an answer arrives at 50-200
+  // frames/sec. Committing each one re-runs remark over the *entire*
+  // accumulated bubble — one answer of length n costing O(n²) of parse work —
+  // and re-renders every consumer of the chat context at that same rate. Text
+  // and thought fragments accumulate here instead, keyed by slot, and land in
+  // a single `setSlots` per window: the buffer-in-a-ref idiom `unsent` and
+  // `outbox` already use in this file.
+  //
+  // Keyed by slot rather than kept as one buffer because the socket
+  // multiplexes concurrent prompts across every open tab; a shared buffer
+  // would file one conversation's tokens into another's bubble.
+  const pendingChunks = useRef<Record<string, { text: string; thought: string }>>(
+    {},
+  );
+  const flushTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+
   /**
-   * Fold one streamed fragment into the slot's open bubble.
+   * Commit every buffered fragment, for every slot, in one pass.
    *
-   * Every streaming event lands here, so the transcript's core invariant is
-   * stated once: `streamTarget` decides whether the fragment continues the
-   * bubble in progress or opens a new one, the new bubble's id becomes this
-   * slot's current one, and the slot counts as streaming from its first
-   * fragment. Callers supply only `patch` — how their own field grows — and a
-   * fragment that opens a bubble is that same patch applied to an empty one.
+   * Safe to call at any point: it no-ops on an empty buffer and cancels the
+   * open window, so the next fragment starts a fresh one. Every path that ends
+   * a turn or appends anything else to a transcript calls it *first* —
+   * buffered text has to reach its bubble before a user message, an error or a
+   * handover divider takes over as the last message, or the fold would file it
+   * into a new bubble sitting below them.
+   *
+   * `endedSlot` closes that slot's turn, which is why the pointer reset lives
+   * here rather than in the callers: `setSlots` runs its updater when React
+   * renders, long after the caller returned, so a caller that cleared the
+   * pointer on its own line would have already cleared it by the time the fold
+   * looked. The tail would open a stray bubble under the answer it belongs to,
+   * and leave the pointer aimed at that stray — which the *next* answer would
+   * then continue.
+   */
+  const flushChunks = useCallback((endedSlot?: string) => {
+    clearTimeout(flushTimer.current);
+    flushTimer.current = undefined;
+    const pending = pendingChunks.current;
+    const hasPending = Object.keys(pending).length > 0;
+    // Snapshotted before the reset below so the fold reads where the tail
+    // belonged, not where the pointer ended up. A plain object copy is enough:
+    // the updater must not depend on anything that can move under it.
+    const pointers = hasPending ? { ...currentAssistantMsg.current } : null;
+    if (endedSlot) currentAssistantMsg.current[endedSlot] = null;
+    if (!pointers) return;
+    // Drained before the updater runs, so a re-invoked updater (StrictMode,
+    // concurrent rendering) replays the same fragments instead of appending
+    // whatever has arrived since.
+    pendingChunks.current = {};
+    setSlots((prev) =>
+      prev.map((s) => {
+        const slot = s.info.slot_id;
+        const buf = pending[slot];
+        if (!buf) return s;
+        return {
+          ...s,
+          messages: foldIntoStream(
+            s.messages,
+            pointers[slot] ?? null,
+            (m) => ({
+              ...m,
+              text: m.text + buf.text,
+              // Left alone when nothing was buffered, so a bubble with no
+              // reasoning keeps `thought` undefined rather than gaining "".
+              thought: buf.thought ? (m.thought || "") + buf.thought : m.thought,
+            }),
+            // A bubble opened to hold the tail of a turn that is already over
+            // must not become the pointer, or the next answer continues it.
+            (id) => {
+              if (slot !== endedSlot) currentAssistantMsg.current[slot] = id;
+            },
+          ),
+        };
+      }),
+    );
+  }, []);
+
+  /** Accumulate one streamed fragment. The commit happens on the next flush. */
+  const bufferChunk = useCallback(
+    (slotId: string, field: "text" | "thought", chunk: string) => {
+      const buf = (pendingChunks.current[slotId] ||= { text: "", thought: "" });
+      buf[field] += chunk;
+      // The live signal is deliberately *not* deferred with the text: the
+      // spinner, the locked composer and the auto-expanding thinking block all
+      // key off it and should react to the first fragment. `startStreaming`
+      // collapses to a no-op once the slot is marked, so this stays free.
+      startStreaming(slotId);
+      // Only the first fragment of a window arms the timer; the rest ride it.
+      if (flushTimer.current === undefined) {
+        // Wrapped rather than passed by reference: `setTimeout` hands its
+        // callback arguments, and a stray one would read as `endedSlot`.
+        flushTimer.current = setTimeout(() => flushChunks(), FLUSH_INTERVAL_MS);
+      }
+    },
+    [flushChunks, startStreaming],
+  );
+
+  /**
+   * Fold one streamed *event* into the slot's open bubble, immediately.
+   *
+   * The low-frequency half of the stream — a tool call is not what makes the
+   * transcript expensive, and deferring it would only delay the spinner.
+   * `streamTarget` decides whether it continues the bubble in progress or
+   * opens a new one, the new bubble's id becomes this slot's current one, and
+   * the slot counts as streaming from its first fragment.
    */
   const appendToStream = useCallback(
     (slotId: string, patch: (m: ChatMessage) => ChatMessage) => {
+      // Whatever is buffered was received before this event and has to land
+      // before it, or the two arrive in the transcript out of order.
+      flushChunks();
       setSlots((prev) =>
-        prev.map((s) => {
-          if (s.info.slot_id !== slotId) return s;
-          const msgs = [...s.messages];
-          const idx = streamTarget(msgs, currentAssistantMsg.current[slotId]);
-          if (idx < 0) {
-            const id = nextMsgId();
-            currentAssistantMsg.current[slotId] = id;
-            msgs.push(patch({ id, role: "assistant", text: "", toolCalls: [] }));
-          } else {
-            msgs[idx] = patch(msgs[idx]);
-          }
-          return { ...s, messages: msgs };
-        }),
+        prev.map((s) =>
+          s.info.slot_id === slotId
+            ? {
+                ...s,
+                messages: foldIntoStream(
+                  s.messages,
+                  currentAssistantMsg.current[slotId],
+                  patch,
+                  (id) => (currentAssistantMsg.current[slotId] = id),
+                ),
+              }
+            : s,
+        ),
       );
       startStreaming(slotId);
     },
-    [startStreaming],
+    [flushChunks, startStreaming],
   );
 
   // Actions asked for before the socket was open. "Chat" on an agent's page
@@ -557,6 +692,12 @@ export function useChatSocket() {
         case "session_destroyed": {
           const destroyedId = data.slot_id as string;
           hydratedSlots.current.delete(destroyedId);
+          // Dropped rather than flushed: the slot is being removed, so its
+          // tail has nowhere to land, and `setSlots(remaining)` below replaces
+          // the state outright — a flush queued alongside it would be
+          // discarded anyway. Other slots keep their buffers and their open
+          // window; those flush onto the reduced list a moment later.
+          delete pendingChunks.current[destroyedId];
           // The agent that was waiting on this is gone, so its approval is
           // moot — and keeping it would strand an entry under a slot that no
           // longer has a tab to answer from.
@@ -589,18 +730,13 @@ export function useChatSocket() {
 
         case "text_chunk": {
           if (!slotId) break;
-          const text = data.text as string;
-          appendToStream(slotId, (m) => ({ ...m, text: m.text + text }));
+          bufferChunk(slotId, "text", data.text as string);
           break;
         }
 
         case "thought_chunk": {
           if (!slotId) break;
-          const text = data.text as string;
-          appendToStream(slotId, (m) => ({
-            ...m,
-            thought: (m.thought || "") + text,
-          }));
+          bufferChunk(slotId, "thought", data.text as string);
           break;
         }
 
@@ -663,6 +799,12 @@ export function useChatSocket() {
 
         case "prompt_done":
           if (slotId) {
+            // The tail of the answer is still buffered when the prompt ends
+            // inside an open window, so this is what guarantees the last
+            // tokens land — and it closes the turn, which used to be a
+            // separate line here. Both updaters are queued in this same batch,
+            // so the settle below sees the flushed transcript.
+            flushChunks(slotId);
             // Mark any in-flight tool calls as completed so the spinner stops
             setSlots((prev) =>
               prev.map((s) =>
@@ -671,7 +813,6 @@ export function useChatSocket() {
                   : s,
               ),
             );
-            currentAssistantMsg.current[slotId] = null;
             // Only this conversation ended. Another tab may still be
             // mid-answer, and its composer stays locked until its own turn is
             // done.
@@ -683,10 +824,10 @@ export function useChatSocket() {
           // A spawn that failed names the optimistic tab it could not fill;
           // everything else names the slot it was streaming into.
           const errSlotId = (data.client_ref as string) || slotId || null;
-          // Reset current assistant message so next response creates a new bubble
-          if (errSlotId) {
-            currentAssistantMsg.current[errSlotId] = null;
-          }
+          // Whatever streamed before the failure belongs in its own bubble,
+          // above the error bubble appended below — and the turn is over, so
+          // the next response starts a new bubble.
+          flushChunks(errSlotId || undefined);
           // Show error as a system message in the chat
           const errMsg = (data.message as string) || "Unknown error";
           if (errSlotId) {
@@ -716,18 +857,30 @@ export function useChatSocket() {
           break;
       }
     },
-    [appendToStream, hydrateSlot, prewarmLatest, send, stopStreaming],
+    [
+      appendToStream,
+      bufferChunk,
+      flushChunks,
+      hydrateSlot,
+      prewarmLatest,
+      send,
+      stopStreaming,
+    ],
   );
 
   const sendMessage = useCallback(
     (slotId: string, text: string) => {
       const id = nextMsgId();
-      // A question closes whatever bubble was open. The wire is supposed to say
-      // so with `prompt_done`, but that event can be missed (a WS drop
+      // Anything still buffered was said before this question and has to be
+      // committed above it — once the user's bubble is last, the tail would
+      // land in a new assistant bubble *below* the question.
+      //
+      // The same call closes whatever bubble was open. The wire is supposed to
+      // say so with `prompt_done`, but that event can be missed (a WS drop
       // mid-answer) — and a stale pointer would file the *next* answer into a
-      // bubble sitting above this message, reading as an answer given before it
-      // was asked.
-      currentAssistantMsg.current[slotId] = null;
+      // bubble sitting above this message, reading as an answer given before
+      // it was asked.
+      flushChunks(slotId);
       updateSlotMessages(slotId, (msgs) => [
         ...settleToolCalls(msgs),
         { id, role: "user" as const, text, toolCalls: [] },
@@ -749,7 +902,7 @@ export function useChatSocket() {
 
       send({ action: "send_message", slot_id: slotId, text: wireText });
     },
-    [send, updateSlotMessages],
+    [flushChunks, send, updateSlotMessages],
   );
 
   /**
@@ -807,6 +960,9 @@ export function useChatSocket() {
         agent_slug: selection.agentSlug,
         agent_key: selection.agentKey,
       });
+      // The outgoing brain's last words belong above the divider that retires
+      // it, not in a new bubble underneath it.
+      flushChunks();
       setSlots((prev) =>
         prev.map((s) => {
           if (s.info.slot_id !== slotId) return s;
@@ -842,7 +998,7 @@ export function useChatSocket() {
         }),
       );
     },
-    [user],
+    [flushChunks, user],
   );
 
   /**
@@ -859,6 +1015,9 @@ export function useChatSocket() {
       if (!user) return;
       const key = `web:${user.id}:${slotId}`;
       const { session } = await api.switchSession(key, { server_name: serverName });
+      // Same ordering rule as the brain switch: buffered text first, divider
+      // after it.
+      flushChunks();
       setSlots((prev) =>
         prev.map((s) => {
           if (s.info.slot_id !== slotId) return s;
@@ -887,13 +1046,17 @@ export function useChatSocket() {
         }),
       );
     },
-    [user],
+    [flushChunks, user],
   );
 
   const destroySession = useCallback(
     (slotId: string) => {
       currentAssistantMsg.current[slotId] = null;
       delete outbox.current[slotId];
+      // The tab is going away, so its tail has nowhere to land — and with the
+      // pointer above cleared, flushing it would only open a fresh bubble in a
+      // conversation the user just closed.
+      delete pendingChunks.current[slotId];
       // A new chat closed before its conversation was minted has no id the
       // backend knows, so there is nothing to ask it to destroy. (A pending
       // *resume* does have one, and destroy_session waits for its spawn.)
@@ -916,11 +1079,13 @@ export function useChatSocket() {
   const abortPrompt = useCallback(
     (slotId: string) => {
       send({ action: "abort_prompt", slot_id: slotId });
+      // What already arrived is part of the transcript even though the user
+      // stopped the rest of it; the turn ends with it.
+      flushChunks(slotId);
       // Immediately reset this slot's streaming state so the UI doesn't get
       // stuck if the backend's prompt_done event is lost or delayed. Aborting
       // one conversation says nothing about the others.
       stopStreaming(slotId);
-      currentAssistantMsg.current[slotId] = null;
       // Mark any in-flight tool calls as completed
       setSlots((prev) =>
         prev.map((s) =>
@@ -930,7 +1095,7 @@ export function useChatSocket() {
         ),
       );
     },
-    [send, stopStreaming],
+    [flushChunks, send, stopStreaming],
   );
 
   const resolvePermission = useCallback(
@@ -957,6 +1122,14 @@ export function useChatSocket() {
     return () => {
       shouldConnect.current = false;
       closeSocket();
+      // Cancelled, not flushed. There is no state left to flush into — this
+      // hook owns the slots and they go with it — and a timer surviving the
+      // unmount would be a `setSlots` on a dead tree. Nothing is actually
+      // lost: the backend records every turn (FEAT-015), so a remount
+      // re-hydrates the transcript from the server rather than from here.
+      clearTimeout(flushTimer.current);
+      flushTimer.current = undefined;
+      pendingChunks.current = {};
     };
   }, [closeSocket]);
 

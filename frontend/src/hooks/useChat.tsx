@@ -61,10 +61,11 @@ const FALLBACK: SessionOptions = {
 /**
  * Who can answer, and on what.
  *
- * `/sessions/options` is `/chat/options` plus the domain Agents a session can
- * be bound to, which is what the picker's "Agents" section is. It is a
- * near-static payload every chat surface needs, so it goes through react-query
- * on one key: fetched once, shared by the panel and the workspace.
+ * `/sessions/options` carries the picker whole: the agents and custom
+ * providers that can answer, the domain Agents a session can be bound to —
+ * that is the "Agents" section — and the modes. It is a near-static payload
+ * every chat surface needs, so it goes through react-query on one key: fetched
+ * once, shared by the panel and the workspace.
  */
 export function useSessionOptions(enabled = true): SessionOptions {
   const { data } = useQuery({
