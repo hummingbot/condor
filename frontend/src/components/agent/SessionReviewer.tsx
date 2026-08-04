@@ -143,6 +143,14 @@ export function SessionReviewer({
 
   const isExperiment = selectedKind === "experiment";
 
+  // `controllerIds` streams the executors of the instances running *now*, which
+  // belong to the newest session. Any older session must not absorb them, so
+  // only the newest one is flagged live.
+  const isLiveSession = useMemo(() => {
+    if (isExperiment || sessions.length === 0) return false;
+    return selectedNum === Math.max(...sessions.map((s) => s.number));
+  }, [isExperiment, sessions, selectedNum]);
+
   // Journal data (for sessions)
   const { data: journalData } = useQuery({
     queryKey: ["strategy", slug, sslug, "session", selectedNum, "journal"],
@@ -539,6 +547,7 @@ export function SessionReviewer({
                       controllerIds={controllerIds}
                       onSnapshotClick={handleSnapshotClick}
                       sessionSummary={parsedJournal.summary}
+                      isLiveSession={isLiveSession}
                     />
                     <SessionOverview journal={parsedJournal} perf={sessionPerf} />
                   </div>

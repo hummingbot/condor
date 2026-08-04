@@ -117,6 +117,7 @@ export function SessionExecutors({
   controllerIds,
   onSnapshotClick,
   sessionSummary,
+  isLiveSession = false,
 }: {
   slug: string;
   sslug: string;
@@ -125,6 +126,9 @@ export function SessionExecutors({
   controllerIds?: string[];
   onSnapshotClick?: (tick: number) => void;
   sessionSummary?: { status: string; lastTick: number; lastAction: string };
+  /** True only for the session currently running: lets the WS contribute
+   *  executors the session REST endpoint hasn't recorded yet. */
+  isLiveSession?: boolean;
 }) {
   // REST data (fallback + historical executors)
   const { data: sessionDetail } = useQuery({
@@ -141,19 +145,25 @@ export function SessionExecutors({
     controllerIds || [],
   );
 
-  // Merge: prefer WS data for matching IDs, keep REST for historical
+  // Merge: id-keyed upsert — the WS refreshes rows this session already owns and
+  // never invents new ones. `wsExecutors` belongs to the *running* instances, so
+  // appending it to a finished session would credit it with another session's
+  // PnL, volume and fees. Only the live session takes the unmatched WS rows, and
+  // only to show executors the REST endpoint hasn't recorded yet.
   const executorInfos = useMemo(() => {
     const restInfos = restExecutors.map(agentRowToExecutorInfo);
     if (wsExecutors.length === 0) return restInfos;
 
     const wsMap = new Map(wsExecutors.map((ex) => [ex.id, ex]));
     const merged = restInfos.map((ex) => wsMap.get(ex.id) ?? ex);
+    if (!isLiveSession) return merged;
+
     const restIds = new Set(restInfos.map((ex) => ex.id));
     for (const ex of wsExecutors) {
       if (!restIds.has(ex.id)) merged.push(ex);
     }
     return merged;
-  }, [restExecutors, wsExecutors]);
+  }, [restExecutors, wsExecutors, isLiveSession]);
 
   // Currency conversion
   const quoteCurrencies = useMemo(
