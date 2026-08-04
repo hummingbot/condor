@@ -155,6 +155,19 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
     return None
 
 
+def _slot_of(session_key: str) -> str:
+    """The slot a registry entry belongs to, or "" if the key is not canonical.
+
+    Never raises: a confirmation that cannot be attributed is still worth
+    delivering unaddressed, which is what the dashboard did for all of them
+    before this became a field.
+    """
+    try:
+        return SessionKey.parse(session_key).slot
+    except ValueError:
+        return ""
+
+
 async def _send(ws: WebSocket, event: dict) -> None:
     """Send a JSON event to the client, ignoring closed connections."""
     try:
@@ -180,6 +193,12 @@ class WebSocketChannel:
             self._ws,
             {
                 "event": "permission_request",
+                # Addressed like every other chat event (CORR-101). One socket
+                # carries every conversation this user has open, so without the
+                # slot the dashboard can only render the approval in whichever
+                # one is on screen — and a click meant for one agent, on one
+                # trading server, authorizes a live tool call in another.
+                "slot_id": _slot_of(pending.session_key),
                 "request_id": pending.id,
                 "summary": pending.summary,
             },

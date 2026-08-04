@@ -47,6 +47,22 @@ export interface SlotInfo {
   last_prompt_at?: string | null;
 }
 
+/** A tool call waiting for the user to approve or reject it. */
+export interface PermissionRequest {
+  request_id: string;
+  summary: string;
+}
+
+/**
+ * Bucket for a request the backend did not stamp with a slot.
+ *
+ * Only an older server does that. Its requests are shown in whichever
+ * conversation is active — the pre-CORR-101 behaviour — so a dashboard running
+ * ahead of its backend still lets the user answer rather than silently
+ * swallowing the approval until it times out.
+ */
+const UNATTRIBUTED = "";
+
 export interface ChatSlot {
   info: SlotInfo;
   messages: ChatMessage[];
@@ -173,10 +189,13 @@ export function useChatSocket() {
   const slotsRef = useRef<ChatSlot[]>([]);
   const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
   const [streamingSlotId, setStreamingSlotId] = useState<string | null>(null);
-  const [permissionRequest, setPermissionRequest] = useState<{
-    request_id: string;
-    summary: string;
-  } | null>(null);
+  // Keyed by the conversation that raised it, like every other per-slot piece
+  // of state here. As a single scalar this was both misattributed — the banner
+  // rendered in whatever tab was open — and lossy: a second confirmation
+  // overwrote the first, which then went unanswered until its TTL denied it.
+  const [permissionRequests, setPermissionRequests] = useState<
+    Record<string, PermissionRequest>
+  >({});
 
   // Helpers to update a specific slot's messages
   const updateSlotMessages = useCallback(
@@ -483,6 +502,15 @@ export function useChatSocket() {
         case "session_destroyed": {
           const destroyedId = data.slot_id as string;
           hydratedSlots.current.delete(destroyedId);
+          // The agent that was waiting on this is gone, so its approval is
+          // moot — and keeping it would strand an entry under a slot that no
+          // longer has a tab to answer from.
+          setPermissionRequests((prev) => {
+            if (!(destroyedId in prev)) return prev;
+            const next = { ...prev };
+            delete next[destroyedId];
+            return next;
+          });
           // Compute the slots that remain after removal once, outside any
           // updater, so both setters below stay pure (safe under StrictMode /
           // concurrent rendering, which may invoke updaters more than once).
@@ -604,12 +632,20 @@ export function useChatSocket() {
           break;
         }
 
-        case "permission_request":
-          setPermissionRequest({
-            request_id: data.request_id as string,
-            summary: data.summary as string,
-          });
+        case "permission_request": {
+          // Filed under the conversation that asked, so it is only answerable
+          // from there. Concurrent requests from two slots coexist instead of
+          // clobbering each other.
+          const askingSlot = slotId || UNATTRIBUTED;
+          setPermissionRequests((prev) => ({
+            ...prev,
+            [askingSlot]: {
+              request_id: data.request_id as string,
+              summary: data.summary as string,
+            },
+          }));
           break;
+        }
 
         case "prompt_done":
           if (slotId) {
@@ -882,7 +918,17 @@ export function useChatSocket() {
   const resolvePermission = useCallback(
     (requestId: string, approved: boolean) => {
       send({ action: "resolve_permission", request_id: requestId, approved });
-      setPermissionRequest(null);
+      // Only the request just answered is dropped. Clearing the whole map
+      // would discard a confirmation another conversation is still waiting
+      // on, leaving that agent stalled until its TTL denies it.
+      setPermissionRequests((prev) => {
+        const entries = Object.entries(prev).filter(
+          ([, req]) => req.request_id !== requestId,
+        );
+        return entries.length === Object.keys(prev).length
+          ? prev
+          : Object.fromEntries(entries);
+      });
     },
     [send],
   );
@@ -902,6 +948,13 @@ export function useChatSocket() {
 
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;
   const isStreaming = streamingSlotId !== null;
+  // What the conversation on screen is being asked to approve — and nothing
+  // else. A request raised elsewhere stays in the map, where the tab strip
+  // badges it, so it is visible without being answerable from the wrong chat.
+  const permissionRequest =
+    (activeSlotId ? permissionRequests[activeSlotId] : undefined) ||
+    permissionRequests[UNATTRIBUTED] ||
+    null;
 
   return {
     isConnected,
@@ -912,6 +965,7 @@ export function useChatSocket() {
     isStreaming,
     streamingSlotId,
     permissionRequest,
+    permissionRequests,
     connect,
     disconnect,
     sendMessage,
