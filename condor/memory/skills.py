@@ -116,8 +116,12 @@ class SkillStore:
         self.skills_dir = builtin_skills_root(agent_slug)
         # Read-only base layer: Condor's ``shared: true`` playbooks, which every
         # agent inherits. The chat IS the publisher, so it inherits nothing (it
-        # already reads that dir as ``skills_dir``).
-        self.inherited_dir = builtin_skills_root(None) if agent_slug else None
+        # already reads that dir as ``skills_dir``) — compared by resolved dir
+        # rather than by slug because ``None`` and ``"condor"`` are both the chat
+        # (FEAT-033), and inheriting from itself would list every shared playbook
+        # twice.
+        chat_dir = builtin_skills_root(None)
+        self.inherited_dir = None if self.skills_dir == chat_dir else chat_dir
 
     # -- resolution --------------------------------------------------------
 

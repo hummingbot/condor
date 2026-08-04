@@ -56,7 +56,7 @@ def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
             return assistant_routines_dir(strategy_id)
         return None
 
-    return assistant_routines_dir(settings.agent_slug or None)
+    return assistant_routines_dir(settings.specialist_slug or None)
 
 
 def _resolve_routine(name: str):
@@ -72,10 +72,11 @@ def _resolve_routine(name: str):
         discover_routines_from_path,
     )
 
-    if settings.agent_slug:
-        own_dir = assistant_routines_dir(settings.agent_slug)
+    slug = settings.specialist_slug
+    if slug:
+        own_dir = assistant_routines_dir(slug)
         if own_dir.exists():
-            own = discover_routines_from_path(own_dir, agent_slug=settings.agent_slug)
+            own = discover_routines_from_path(own_dir, agent_slug=slug)
             return own.get(name)
         return None
 
@@ -88,7 +89,7 @@ def list_routines(strategy_id: str | None = None) -> dict:
     result = []
 
     # Agent/expert MCP: ONLY its own routines, isolated from the general library.
-    if settings.agent_slug:
+    if settings.specialist_slug:
         own_dir = _get_agent_routines_dir(None)
         if own_dir and own_dir.exists():
             for name, routine in sorted(discover_routines_from_path(own_dir).items()):
@@ -98,7 +99,7 @@ def list_routines(strategy_id: str | None = None) -> dict:
                         "description": routine.description,
                         "type": "continuous" if routine.is_continuous else "one-shot",
                         "scope": "agent",
-                        "agent": settings.agent_slug,
+                        "agent": settings.specialist_slug,
                     }
                 )
         return {"routines": result}
@@ -201,7 +202,7 @@ def _resolve_with_owner(name: str, strategy_id: str | None):
             if found:
                 return found, owner
 
-    return _resolve_routine(name), owner or settings.agent_slug or "condor"
+    return _resolve_routine(name), owner or settings.specialist_slug or "condor"
 
 
 def _store_name(routine, fallback: str) -> str:
@@ -330,7 +331,7 @@ async def start_routine(name: str, config: dict | None) -> dict:
                 "routine_name": _store_name(routine, name),
                 "server_name": settings.active_server,
                 "config": config or {},
-                "attribute_to": settings.agent_slug or "condor",
+                "attribute_to": settings.specialist_slug or "condor",
             },
         )
     except APIError as e:
