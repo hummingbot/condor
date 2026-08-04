@@ -234,6 +234,38 @@ export function useChatSocket() {
     });
   }, []);
 
+  /**
+   * Fold one streamed fragment into the slot's open bubble.
+   *
+   * Every streaming event lands here, so the transcript's core invariant is
+   * stated once: `streamTarget` decides whether the fragment continues the
+   * bubble in progress or opens a new one, the new bubble's id becomes this
+   * slot's current one, and the slot counts as streaming from its first
+   * fragment. Callers supply only `patch` — how their own field grows — and a
+   * fragment that opens a bubble is that same patch applied to an empty one.
+   */
+  const appendToStream = useCallback(
+    (slotId: string, patch: (m: ChatMessage) => ChatMessage) => {
+      setSlots((prev) =>
+        prev.map((s) => {
+          if (s.info.slot_id !== slotId) return s;
+          const msgs = [...s.messages];
+          const idx = streamTarget(msgs, currentAssistantMsg.current[slotId]);
+          if (idx < 0) {
+            const id = nextMsgId();
+            currentAssistantMsg.current[slotId] = id;
+            msgs.push(patch({ id, role: "assistant", text: "", toolCalls: [] }));
+          } else {
+            msgs[idx] = patch(msgs[idx]);
+          }
+          return { ...s, messages: msgs };
+        }),
+      );
+      startStreaming(slotId);
+    },
+    [startStreaming],
+  );
+
   // Actions asked for before the socket was open. "Chat" on an agent's page
   // opens the panel and starts a session in the same click, so the first frame
   // routinely predates the connection. Capped, because a socket that never
@@ -558,47 +590,17 @@ export function useChatSocket() {
         case "text_chunk": {
           if (!slotId) break;
           const text = data.text as string;
-          setSlots((prev) =>
-            prev.map((s) => {
-              if (s.info.slot_id !== slotId) return s;
-              const msgs = [...s.messages];
-              const idx = streamTarget(msgs, currentAssistantMsg.current[slotId]);
-              if (idx < 0) {
-                const id = nextMsgId();
-                currentAssistantMsg.current[slotId] = id;
-                msgs.push({ id, role: "assistant", text, toolCalls: [] });
-              } else {
-                msgs[idx] = { ...msgs[idx], text: msgs[idx].text + text };
-              }
-              return { ...s, messages: msgs };
-            }),
-          );
-          startStreaming(slotId);
+          appendToStream(slotId, (m) => ({ ...m, text: m.text + text }));
           break;
         }
 
         case "thought_chunk": {
           if (!slotId) break;
           const text = data.text as string;
-          setSlots((prev) =>
-            prev.map((s) => {
-              if (s.info.slot_id !== slotId) return s;
-              const msgs = [...s.messages];
-              const idx = streamTarget(msgs, currentAssistantMsg.current[slotId]);
-              if (idx < 0) {
-                const id = nextMsgId();
-                currentAssistantMsg.current[slotId] = id;
-                msgs.push({ id, role: "assistant", text: "", toolCalls: [], thought: text });
-              } else {
-                msgs[idx] = {
-                  ...msgs[idx],
-                  thought: (msgs[idx].thought || "") + text,
-                };
-              }
-              return { ...s, messages: msgs };
-            }),
-          );
-          startStreaming(slotId);
+          appendToStream(slotId, (m) => ({
+            ...m,
+            thought: (m.thought || "") + text,
+          }));
           break;
         }
 
@@ -609,25 +611,10 @@ export function useChatSocket() {
             title: data.title as string,
             status: data.status as string,
           };
-          setSlots((prev) =>
-            prev.map((s) => {
-              if (s.info.slot_id !== slotId) return s;
-              const msgs = [...s.messages];
-              const idx = streamTarget(msgs, currentAssistantMsg.current[slotId]);
-              if (idx < 0) {
-                const id = nextMsgId();
-                currentAssistantMsg.current[slotId] = id;
-                msgs.push({ id, role: "assistant", text: "", toolCalls: [tc] });
-              } else {
-                msgs[idx] = {
-                  ...msgs[idx],
-                  toolCalls: [...msgs[idx].toolCalls, tc],
-                };
-              }
-              return { ...s, messages: msgs };
-            }),
-          );
-          startStreaming(slotId);
+          appendToStream(slotId, (m) => ({
+            ...m,
+            toolCalls: [...m.toolCalls, tc],
+          }));
           break;
         }
 
@@ -729,7 +716,7 @@ export function useChatSocket() {
           break;
       }
     },
-    [hydrateSlot, prewarmLatest, send, startStreaming, stopStreaming],
+    [appendToStream, hydrateSlot, prewarmLatest, send, stopStreaming],
   );
 
   const sendMessage = useCallback(
