@@ -103,7 +103,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   };
 
   const activeSlot = chat.activeSlot;
-  const isActiveStreaming = chat.streamingSlotId === chat.activeSlotId;
+  const isActiveStreaming = chat.isSlotStreaming(chat.activeSlotId);
 
   // Resolve effective selections for the new-session menu
   const effectiveAgent = selectedAgent || defaultAgent;
@@ -247,7 +247,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 agents={agents}
                 modes={modes}
                 isActive={slot.info.slot_id === chat.activeSlotId}
-                isStreaming={slot.info.slot_id === chat.streamingSlotId}
+                isStreaming={chat.isSlotStreaming(slot.info.slot_id)}
                 // A confirmation is only answerable from the conversation that
                 // raised it, so the tab is where a request in a background chat
                 // becomes visible at all.

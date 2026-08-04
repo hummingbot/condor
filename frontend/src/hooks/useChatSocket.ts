@@ -189,7 +189,12 @@ export function useChatSocket() {
   // current list synchronously without closing over stale state.
   const slotsRef = useRef<ChatSlot[]>([]);
   const [activeSlotId, setActiveSlotId] = useState<string | null>(null);
-  const [streamingSlotId, setStreamingSlotId] = useState<string | null>(null);
+  // Which conversations are mid-answer, keyed by slot like every other per-slot
+  // piece of state here. The socket multiplexes concurrent prompts across every
+  // open tab, so as a single scalar this was cross-talk: whichever slot finished
+  // first cleared it for all of them, stopping the other tabs' spinners and
+  // re-enabling their composer and brain picker underneath a live prompt.
+  const [streamingSlots, setStreamingSlots] = useState<Record<string, true>>({});
   // Keyed by the conversation that raised it, like every other per-slot piece
   // of state here. As a single scalar this was both misattributed — the banner
   // rendered in whatever tab was open — and lossy: a second confirmation
@@ -211,6 +216,23 @@ export function useChatSocket() {
     },
     [],
   );
+
+  // A slot is streaming from its first fragment until its prompt ends. Both
+  // helpers return the previous object when nothing changes: chunks arrive
+  // rapid-fire, and a fresh object per chunk would re-render every consumer.
+  const startStreaming = useCallback((slotId: string) => {
+    setStreamingSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
+  }, []);
+
+  /** End streaming for *one* conversation. Never for the others. */
+  const stopStreaming = useCallback((slotId: string) => {
+    setStreamingSlots((prev) => {
+      if (!(slotId in prev)) return prev;
+      const next = { ...prev };
+      delete next[slotId];
+      return next;
+    });
+  }, []);
 
   // Actions asked for before the socket was open. "Chat" on an agent's page
   // opens the panel and starts a session in the same click, so the first frame
@@ -512,6 +534,10 @@ export function useChatSocket() {
             delete next[destroyedId];
             return next;
           });
+          // Same reason: a slot reaped mid-answer never gets its `prompt_done`,
+          // and an entry under a tab that no longer exists would keep the
+          // "something is streaming" flag true forever.
+          stopStreaming(destroyedId);
           // Compute the slots that remain after removal once, outside any
           // updater, so both setters below stay pure (safe under StrictMode /
           // concurrent rendering, which may invoke updaters more than once).
@@ -547,7 +573,7 @@ export function useChatSocket() {
               return { ...s, messages: msgs };
             }),
           );
-          setStreamingSlotId(slotId);
+          startStreaming(slotId);
           break;
         }
 
@@ -572,7 +598,7 @@ export function useChatSocket() {
               return { ...s, messages: msgs };
             }),
           );
-          setStreamingSlotId(slotId);
+          startStreaming(slotId);
           break;
         }
 
@@ -601,7 +627,7 @@ export function useChatSocket() {
               return { ...s, messages: msgs };
             }),
           );
-          setStreamingSlotId(slotId);
+          startStreaming(slotId);
           break;
         }
 
@@ -659,8 +685,11 @@ export function useChatSocket() {
               ),
             );
             currentAssistantMsg.current[slotId] = null;
+            // Only this conversation ended. Another tab may still be
+            // mid-answer, and its composer stays locked until its own turn is
+            // done.
+            stopStreaming(slotId);
           }
-          setStreamingSlotId(null);
           break;
 
         case "error": {
@@ -691,8 +720,8 @@ export function useChatSocket() {
                 };
               }),
             );
+            stopStreaming(errSlotId);
           }
-          setStreamingSlotId(null);
           break;
         }
 
@@ -700,7 +729,7 @@ export function useChatSocket() {
           break;
       }
     },
-    [hydrateSlot, prewarmLatest, send],
+    [hydrateSlot, prewarmLatest, send, startStreaming, stopStreaming],
   );
 
   const sendMessage = useCallback(
@@ -900,9 +929,10 @@ export function useChatSocket() {
   const abortPrompt = useCallback(
     (slotId: string) => {
       send({ action: "abort_prompt", slot_id: slotId });
-      // Immediately reset streaming state so the UI doesn't get stuck
-      // if the backend's prompt_done event is lost or delayed
-      setStreamingSlotId(null);
+      // Immediately reset this slot's streaming state so the UI doesn't get
+      // stuck if the backend's prompt_done event is lost or delayed. Aborting
+      // one conversation says nothing about the others.
+      stopStreaming(slotId);
       currentAssistantMsg.current[slotId] = null;
       // Mark any in-flight tool calls as completed
       setSlots((prev) =>
@@ -913,7 +943,7 @@ export function useChatSocket() {
         ),
       );
     },
-    [send],
+    [send, stopStreaming],
   );
 
   const resolvePermission = useCallback(
@@ -948,7 +978,13 @@ export function useChatSocket() {
   }, [slots]);
 
   const activeSlot = slots.find((s) => s.info.slot_id === activeSlotId) || null;
-  const isStreaming = streamingSlotId !== null;
+  /** Is *this* conversation mid-answer? The only question a consumer should ask. */
+  const isSlotStreaming = useCallback(
+    (slotId: string | null | undefined) => !!slotId && slotId in streamingSlots,
+    [streamingSlots],
+  );
+  /** Any conversation at all, for chrome that is not tied to one tab. */
+  const isStreaming = Object.keys(streamingSlots).length > 0;
   // What the conversation on screen is being asked to approve — and nothing
   // else. A request raised elsewhere stays in the map, where the tab strip
   // badges it, so it is visible without being answerable from the wrong chat.
@@ -964,7 +1000,8 @@ export function useChatSocket() {
     activeSlotId,
     setActiveSlotId,
     isStreaming,
-    streamingSlotId,
+    streamingSlots,
+    isSlotStreaming,
     permissionRequest,
     permissionRequests,
     connect,
