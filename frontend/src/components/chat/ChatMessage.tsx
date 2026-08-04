@@ -1,7 +1,7 @@
 import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ChevronDown, ChevronRight, User, Bot } from "lucide-react";
+import { ChevronDown, ChevronRight, Square, User, Bot } from "lucide-react";
 import type { ChatMessage as ChatMessageType } from "@/hooks/useChatSocket";
 import { useLiveDisclosure } from "@/hooks/useLiveDisclosure";
 import { ToolCallStatus } from "./ToolCallStatus";
@@ -104,6 +104,16 @@ export const ChatMessageView = memo(function ChatMessageView({
           {!message.text && message.toolCalls.length === 0 && !message.thought && (
             <div className="rounded-2xl rounded-tl-sm bg-[var(--color-surface-hover)] px-3.5 py-2 text-sm text-[var(--color-text-muted)]">
               ...
+            </div>
+          )}
+          {/* The user redirected the agent here. Subdued on purpose: the
+              partial is still worth reading and its context carried into the
+              next turn, so this is a seam, not a failure. */}
+          {message.interrupted && (
+            <div className="mt-1 flex items-center gap-1.5 text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+              <Square className="h-2.5 w-2.5" />
+              <span className="whitespace-nowrap">Interrupted</span>
+              <div className="h-px flex-1 bg-[var(--color-border)]" />
             </div>
           )}
         </div>

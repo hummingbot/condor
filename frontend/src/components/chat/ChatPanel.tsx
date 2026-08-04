@@ -219,6 +219,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           slot={activeSlot}
           agents={agents}
           isStreaming={isActiveStreaming}
+          isQueued={chat.isSlotQueued(chat.activeSlotId)}
           permissionRequest={chat.permissionRequest}
           onResolvePermission={chat.resolvePermission}
           switchError={switchError}

@@ -292,26 +292,32 @@ export function ChatInput({
           </button>
         )}
 
-        {/* Send / Stop button */}
-        {isStreaming ? (
+        {/* Stop — only while an answer is in flight. It stays even though the
+            composer is now live, because stopping without redirecting is still
+            a thing users want (and Esc does the same). */}
+        {isStreaming && (
           <button
             onClick={onAbort}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500 text-white transition-opacity hover:opacity-90"
             title="Stop generation (Esc)"
+            aria-label="Stop generation"
           >
             <Square className="h-3.5 w-3.5" />
           </button>
-        ) : (
-          <button
-            onClick={handleSubmit}
-            disabled={disabled || !value.trim() || isRecording || isTranscribing}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-            title="Send message"
-            aria-label="Send message"
-          >
-            <Send className="h-4 w-4" />
-          </button>
         )}
+
+        {/* Send — enabled mid-answer, because that is the whole feature. The
+            tooltip says what it will do before the user finds out: sending
+            discards the answer in flight and redirects the same session. */}
+        <button
+          onClick={handleSubmit}
+          disabled={disabled || !value.trim() || isRecording || isTranscribing}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+          title={isStreaming ? "Send — interrupts the current answer" : "Send message"}
+          aria-label="Send message"
+        >
+          <Send className="h-4 w-4" />
+        </button>
       </div>
     </div>
   );
