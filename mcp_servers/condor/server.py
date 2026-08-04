@@ -115,10 +115,16 @@ def _build_instructions() -> str:
     strongest frame Condor controls — which is why a subprocess launched with
     ``--agent-slug`` must read its own identity here and not the coordinator's
     (FEAT-025).
+
+    The chat's own subprocess now carries ``--agent-slug condor`` (FEAT-033), so
+    the branch reads ``specialist_slug``: keyed on the raw slug it would serve
+    Condor the specialist framing — including ``identity_header``'s "You are NOT
+    Condor", which would be false — and nothing would error, the answers would
+    just quietly get worse.
     """
     from mcp_servers.condor.settings import settings
 
-    slug = settings.agent_slug or ""
+    slug = settings.specialist_slug
     agent = None
     if slug:
         try:

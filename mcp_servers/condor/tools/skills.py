@@ -37,7 +37,7 @@ def _resolve_agent_slug(strategy_id: str | None) -> tuple[str | None, bool]:
             return strategy_id, True
         return None, False
 
-    return (settings.agent_slug or None), True
+    return (settings.specialist_slug or None), True
 
 
 async def manage_skill(
