@@ -123,8 +123,10 @@ def test_instructions_bound_assert_identity_and_drop_self(three_agents, monkeypa
     assert "- [backpack_mm]" not in text
     assert "[PEER AGENTS — consult for work outside your domain]" in text
     assert "- [brigado] BRL market making" in text
-    # Routine authoring still leaves the agent.
-    assert "`routine_builder` agent" in text
+    # FEAT-031: routine authoring stays with the agent — it inherits the cookbook.
+    assert "ROUTINE AUTHORING IS YOURS" in text
+    assert "routine_cookbook" in text
+    assert "`routine_builder` agent" not in text
 
 
 def test_instructions_never_tell_routine_builder_to_consult_itself(
@@ -134,6 +136,12 @@ def test_instructions_never_tell_routine_builder_to_consult_itself(
     assert "- [routine_builder]" not in text
     assert "ROUTINE AUTHORING IS YOURS" in text
     assert "MUST go through the `routine_builder` agent" not in text
+
+
+def test_chat_routing_still_delegates_routine_authoring(three_agents, monkeypatch):
+    """FEAT-031 flips the AGENT-side rule only; the chat still routes authoring."""
+    text = _instructions(monkeypatch, "")
+    assert "MUST go through the `routine_builder` agent" in text
 
 
 def test_unknown_slug_degrades_to_the_coordinator_text(three_agents, monkeypatch):

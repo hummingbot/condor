@@ -60,25 +60,23 @@ def _agent_base(slug: str, name: str) -> str:
     """Routing rules for a subprocess launched AS an Agent (``--agent-slug``).
 
     Same three-tier priority, read from the specialist's seat: its skills are
-    its own playbooks, routine authoring still belongs to ``routine_builder``
-    (unless it IS ``routine_builder``), and consulting is for work outside its
-    domain — never for itself.
+    its own playbooks (plus the ones Condor publishes), routine authoring is its
+    own work, and consulting is for work outside its domain — never for itself.
     """
     from condor.agents.agent import identity_header
 
+    # FEAT-031: authoring is the agent's own work now that `routine_cookbook` is
+    # inherited from Condor's library — the knowledge that used to justify the
+    # `routine_builder` round-trip travels with the agent. The chat's routing
+    # (``_chat_base``) is deliberately unchanged.
     routines_rule = (
-        "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
-        "design a routine MUST go through the `routine_builder` agent "
-        '(`consult(agent="routine_builder", ...)` for inline work, '
-        '`delegate(action="start", agent="routine_builder", ...)` for background). '
-        "It is the single entry point for routine authoring — do NOT write routine "
-        "code yourself and do NOT hand-roll it with raw `manage_routines` "
-        "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
-        '— for that just call `manage_routines(action="run", name="...")`.)\n'
-        if slug != "routine_builder"
-        else "- ROUTINE AUTHORING IS YOURS: you are the single entry point for "
-        "creating, editing, fixing and debugging routines. Do that work here — "
-        "never hand it to another agent.\n"
+        "- ROUTINE AUTHORING IS YOURS: creating, editing, fixing and debugging "
+        "your own routines is your work — do NOT hand it to another agent. Read "
+        '`manage_skill(action="read", name="routine_cookbook")` FIRST (and the '
+        "companion file for what the routine does), create it into your own dir "
+        'with `manage_routines(action="create_routine", name="...", code="...")`, '
+        'then TEST it with `manage_routines(action="run", name="...")` and fix '
+        "until the output is clean before reporting.\n"
     )
     return (
         f"{identity_header(slug, name)}\n\n"
@@ -554,6 +552,7 @@ async def manage_skill(
     strategy_id: str | None = None,
     file: str | None = None,
     content: str | None = None,
+    shared: bool | None = None,
 ) -> dict:
     """Manage your SKILLS — playbooks (know-how) you can follow and refine.
 
@@ -579,11 +578,18 @@ async def manage_skill(
     slug and stays inside the skill folder. ("write_file" only touches companion
     files — edit the playbook body itself with "edit".)
 
-    Skills are scoped per-assistant: a launched agent reads/writes ONLY its own
+    Skills are scoped per-assistant: a launched agent WRITES only to its own
     library. From the chat you can target a specific agent's local skill library
     with strategy_id (an "agent_slug.strategy_slug" key, or a bare agent slug) —
     use this to author or inspect an agent's skills while building it. Without
     strategy_id the current assistant's library is used.
+
+    An agent also READS the playbooks Condor publishes: a chat skill created with
+    shared=True appears in every agent's index as if it were its own (marked
+    `inherited` on read) — that is how a playbook like `routine_cookbook` reaches
+    every agent. Inherited skills are read-only: to specialize one, "create" a
+    local skill with the SAME name and it shadows the published one. Publish
+    deliberately — a shared skill lands in every agent's context.
 
     Actions:
     - "read": Get a full playbook + routine validation + companion `files` (requires name).
@@ -608,6 +614,9 @@ async def manage_skill(
             authoring). Composite "agent_slug.strategy_slug" key or bare agent slug.
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
+        shared: Publish this playbook to every agent (create/edit). Only honored
+            in Condor's own library — ignored when targeting an agent's. Omit to
+            leave publication unchanged.
 
     Returns:
         Action-specific result dict.
@@ -624,6 +633,7 @@ async def manage_skill(
         strategy_id=strategy_id,
         file=file,
         content=content,
+        shared=shared,
     )
 
 

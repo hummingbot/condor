@@ -59,6 +59,9 @@ SKILLS & ROUTINES:
 - A skill may reference a routine (shown as "→ routine: <name>"); run it with
   manage_routines(action="run", name="...", config={...}). manage_routines(action="list")
   to discover routines; routines tagged "agent" are local to your strategy.
+- Before AUTHORING a routine (create/edit/fix), read the routine_cookbook playbook
+  with manage_skill(action="read", name="routine_cookbook") and follow it — then
+  test what you wrote with manage_routines(action="run", ...) before relying on it.
 - Skills are read-only playbooks shipped with this agent — follow them, you can't
   create or edit them. Operational facts you learn go to [LEARNINGS] (journal).
 
