@@ -742,6 +742,8 @@ export interface SessionInfo {
   surface: string;
   slot: string;
   server_name: string | null;
+  /** The bound Agent pinned this server; the chat cannot change it. */
+  server_pinned: boolean;
   is_busy: boolean;
   alive: boolean;
   created_at: string;
@@ -807,6 +809,9 @@ export interface SwitchSessionRequest {
   agent_slug?: string;
   mode?: string;
   agent_key?: string;
+  /** Move the conversation to this server. Also a respawn — the server is
+   *  baked into the MCP subprocess at spawn. */
+  server_name?: string;
   /** Short recap carried into the new session — the subprocess is replaced. */
   handoff?: string;
 }
@@ -1154,6 +1159,17 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ content }),
     }),
+
+  /** Set or clear the Agent's server pin. An empty `server_name` clears it,
+   *  so the Agent follows whatever server the chat is pointed at. */
+  updateAgentConfig: (
+    slug: string,
+    data: { server_name?: string; server_required?: boolean },
+  ) =>
+    apiFetch<{ updated: boolean; server_name: string; server_required: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/config`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    ),
 
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {

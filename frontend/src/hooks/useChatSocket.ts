@@ -29,6 +29,12 @@ export interface SlotInfo {
   mode: string;
   is_busy?: boolean;
   server_name?: string;
+  /**
+   * The bound Agent's front matter chose the server, so it is not the chat's
+   * to change — the chip locks instead of offering a picker that would be
+   * overruled at spawn.
+   */
+  server_pinned?: boolean;
   /** Bound domain Agent, or "" for the plain assistant. */
   agent_slug?: string;
   /** Display name of whoever is answering. */
@@ -388,6 +394,7 @@ export function useChatSocket() {
             agent_key: data.agent_key as string,
             mode: data.mode as string,
             server_name: (data.server_name as string) || undefined,
+            server_pinned: Boolean(data.server_pinned),
             agent_slug: (data.agent_slug as string) || "",
             label: (data.label as string) || undefined,
           };
@@ -708,7 +715,11 @@ export function useChatSocket() {
             ...s.info,
             agent_key: session.agent_key,
             mode: session.mode,
+            // A brain switch can move the server too: binding to an Agent that
+            // pins one overrides the chat's ambient choice, and unbinding
+            // hands it back. Both are read off the respawned session.
             server_name: session.server_name || undefined,
+            server_pinned: session.server_pinned,
             agent_slug: session.agent_slug,
             label: session.label,
           };
@@ -724,6 +735,51 @@ export function useChatSocket() {
                 id: nextMsgId(),
                 role: "system" as const,
                 text: `Switched to ${session.label}`,
+                kind: "switch",
+                toolCalls: [],
+              },
+            ],
+          };
+        }),
+      );
+    },
+    [user],
+  );
+
+  /**
+   * Move this conversation to another server, mid-chat.
+   *
+   * The same trade as a brain switch, for the same reason: the server is baked
+   * into the MCP subprocess's args at spawn, so repointing it means reaping the
+   * process and replaying the transcript into its replacement. The divider is
+   * appended locally because the scrollback is not re-hydrated after a switch —
+   * the backend records the same line in the transcript, so a reload agrees.
+   */
+  const switchServer = useCallback(
+    async (slotId: string, serverName: string) => {
+      if (!user) return;
+      const key = `web:${user.id}:${slotId}`;
+      const { session } = await api.switchSession(key, { server_name: serverName });
+      setSlots((prev) =>
+        prev.map((s) => {
+          if (s.info.slot_id !== slotId) return s;
+          const info: SlotInfo = {
+            ...s.info,
+            server_name: session.server_name || undefined,
+            server_pinned: session.server_pinned,
+          };
+          // Only an actual move divides the scrollback. A pinned Agent ignores
+          // the request, and a divider claiming otherwise would be a lie.
+          if (session.server_name === s.info.server_name) return { ...s, info };
+          return {
+            ...s,
+            info,
+            messages: [
+              ...s.messages,
+              {
+                id: nextMsgId(),
+                role: "system" as const,
+                text: `Now using server ${session.server_name}`,
                 kind: "switch",
                 toolCalls: [],
               },
@@ -814,6 +870,7 @@ export function useChatSocket() {
     startSession,
     resumeConversation,
     switchBrain,
+    switchServer,
     destroySession,
     abortPrompt,
     resolvePermission,

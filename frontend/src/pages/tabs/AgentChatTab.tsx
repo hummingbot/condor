@@ -6,7 +6,6 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
-  Server,
   Zap,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -19,6 +18,7 @@ import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
 import { ConversationList } from "@/components/chat/ConversationList";
+import { SessionServerChip } from "@/components/chat/SessionServerChip";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
 import { api, type AgentSummary } from "@/lib/api";
@@ -286,11 +286,15 @@ export function AgentChatTab({
             ) : (
               <span className="text-sm font-semibold">Chat</span>
             )}
-            {activeSlot?.info.server_name && (
-              <div className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface-hover)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)]">
-                <Server className="h-2.5 w-2.5" />
-                <span className="max-w-[120px] truncate">{activeSlot.info.server_name}</span>
-              </div>
+            {activeSlot && (
+              <SessionServerChip
+                serverName={activeSlot.info.server_name}
+                pinned={activeSlot.info.server_pinned}
+                agentSlug={activeSlot.info.agent_slug}
+                label={activeSlot.info.label}
+                disabled={activeSlot.pending || isActiveStreaming}
+                onSelect={(name) => chat.switchServer(activeSlot.info.slot_id, name)}
+              />
             )}
             {/* Strategies, brain and routines stay on the agent's own page. */}
             {boundAgent && (

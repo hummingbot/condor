@@ -7,7 +7,6 @@ import {
   MessageSquare,
   Minus,
   Plus,
-  Server,
   X,
   Zap,
 } from "lucide-react";
@@ -16,6 +15,7 @@ import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { ChatThread, resolveAgentLabel } from "./ChatThread";
 import { BrainPicker, type BrainSelection } from "./BrainPicker";
 import { ConversationList } from "./ConversationList";
+import { SessionServerChip } from "./SessionServerChip";
 import {
   type AgentBindingOption,
   type ChatAgentOption,
@@ -177,12 +177,16 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               </>
             )}
           </div>
-          {/* Active session server indicator */}
-          {activeSlot?.info.server_name && (
-            <div className="flex items-center gap-1 rounded bg-[var(--color-surface-hover)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] border border-[var(--color-border)]">
-              <Server className="h-2.5 w-2.5" />
-              <span className="truncate max-w-[80px]">{activeSlot.info.server_name}</span>
-            </div>
+          {/* Which account this chat trades on, and whether it can be moved */}
+          {activeSlot && (
+            <SessionServerChip
+              serverName={activeSlot.info.server_name}
+              pinned={activeSlot.info.server_pinned}
+              agentSlug={activeSlot.info.agent_slug}
+              label={activeSlot.info.label}
+              disabled={activeSlot.pending || isActiveStreaming}
+              onSelect={(name) => chat.switchServer(activeSlot.info.slot_id, name)}
+            />
           )}
           <div className="flex items-center gap-1">
             <button
