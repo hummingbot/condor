@@ -687,6 +687,16 @@ export function ReportBrowser({
           </div>
         </div>
 
+        {/* Schedule failure — surfaced outside the collapsible panels so it is
+            always visible after a failed ScheduleDropdown action (CORR-097) */}
+        {scheduleMutation.isError && (
+          <div className="border-b border-[var(--color-border)] bg-[var(--color-red)]/5 px-4 py-2">
+            <p className="text-xs text-[var(--color-red)]">
+              Could not schedule {activeSource.replace(/_/g, " ")}: {(scheduleMutation.error as Error).message}
+            </p>
+          </div>
+        )}
+
         {/* Config panel (collapsible) */}
         {showConfigPanel && activeRoutine && (
           <div className="border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3">
