@@ -15,8 +15,8 @@ import { type ChatSlot } from "@/hooks/useChatSocket";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { ChatThread, resolveAgentLabel } from "./ChatThread";
 import { BrainPicker, type BrainSelection } from "./BrainPicker";
+import { ChatSessionIdentity } from "./ChatSessionIdentity";
 import { ConversationList } from "./ConversationList";
-import { SessionServerChip } from "./SessionServerChip";
 import {
   type AgentBindingOption,
   type ChatAgentOption,
@@ -25,6 +25,7 @@ import {
 } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
+import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 
 const MIN_WIDTH = 360;
 const MAX_WIDTH = 1200;
@@ -48,7 +49,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const [width, setWidth] = useState(DEFAULT_WIDTH);
   const [showNewMenu, setShowNewMenu] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  const [switchError, setSwitchError] = useState<string | null>(null);
+  const { switchBrain, switchError, dismissSwitchError } = useBrainSwitch();
 
   // Chat options, shared with the `/agents` workspace on one query key: the
   // panel only asks for them once it has been opened.
@@ -113,14 +114,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   // question from its selected row, so the two views stay consistent.
   const effectiveSlug = activeSlot?.info.agent_slug ?? selectedSlug;
 
-  const handleSwitch = (selection: BrainSelection) => {
-    if (!chat.activeSlotId) return;
-    setSwitchError(null);
-    chat
-      .switchBrain(chat.activeSlotId, selection)
-      .catch((e: Error) => setSwitchError(e.message || "Could not switch"));
-  };
-
   // Both views of one list, keyed the same way: the tabs are the conversations
   // attached right now, the drawer is all of them.
   const liveIds = new Set(
@@ -153,42 +146,25 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
           <div className="flex min-w-0 items-center gap-2">
             <MessageSquare className="h-4 w-4 shrink-0 text-[var(--color-primary)]" />
-            {chat.isConnected && (
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-500" />
-            )}
-            {/* Who is answering. One picker, because the user is asking one
-                question — a bound Agent brings its own model. */}
-            {activeSlot ? (
-              <BrainPicker
-                agents={agents}
-                customProviders={customProviders}
-                agentBindings={agentBindings}
-                selectedAgentKey={activeSlot.info.agent_key}
-                selectedAgentSlug={activeSlot.info.agent_slug || ""}
-                onSelect={handleSwitch}
-                variant="inline"
-                disabled={activeSlot.pending || isActiveStreaming}
-              />
-            ) : (
-              <>
-                <span className="text-sm font-semibold whitespace-nowrap">Agent</span>
-                <kbd className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--color-text-muted)] border border-[var(--color-border)]">
-                  ⌘K
-                </kbd>
-              </>
-            )}
-          </div>
-          {/* Which account this chat trades on, and whether it can be moved */}
-          {activeSlot && (
-            <SessionServerChip
-              serverName={activeSlot.info.server_name}
-              pinned={activeSlot.info.server_pinned}
-              agentSlug={activeSlot.info.agent_slug}
-              label={activeSlot.info.label}
-              disabled={activeSlot.pending || isActiveStreaming}
-              onSelect={(name) => chat.switchServer(activeSlot.info.slot_id, name)}
+            {/* Who is answering and where it runs — the same strip the
+                `/agents` workspace shows. */}
+            <ChatSessionIdentity
+              slot={activeSlot}
+              agents={agents}
+              customProviders={customProviders}
+              agentBindings={agentBindings}
+              isStreaming={isActiveStreaming}
+              onSelectBrain={switchBrain}
+              placeholder={
+                <>
+                  <span className="text-sm font-semibold whitespace-nowrap">Agent</span>
+                  <kbd className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium tracking-wide text-[var(--color-text-muted)] border border-[var(--color-border)]">
+                    ⌘K
+                  </kbd>
+                </>
+              }
             />
-          )}
+          </div>
           <div className="flex items-center gap-1">
             <button
               onClick={() => setShowHistory(true)}
@@ -269,7 +245,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           permissionRequest={chat.permissionRequest}
           onResolvePermission={chat.resolvePermission}
           switchError={switchError}
-          onDismissSwitchError={() => setSwitchError(null)}
+          onDismissSwitchError={dismissSwitchError}
           onSend={(text) =>
             activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
           }

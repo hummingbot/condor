@@ -13,11 +13,17 @@ export function WorkspaceSheet({
   title,
   subtitle,
   onClose,
+  bleed = false,
   children,
 }: {
   title: string;
   subtitle?: string;
   onClose: () => void;
+  /**
+   * Give the body the whole sheet — no padding, no scroll of its own. For
+   * content that brings its own page, i.e. a report's iframe.
+   */
+  bleed?: boolean;
   children: React.ReactNode;
 }) {
   useEscapeKey(true, onClose);
@@ -25,7 +31,13 @@ export function WorkspaceSheet({
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-      <div className="relative z-10 flex h-[90vh] w-[95vw] max-w-5xl flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl">
+      {/* Prose reads badly past a measure, so text stops at `5xl`. A report was
+          laid out for a page of its own and gets the whole window. */}
+      <div
+        className={`relative z-10 flex h-[90vh] w-[95vw] flex-col rounded-xl border border-[var(--color-border)] bg-[var(--color-bg)] shadow-2xl ${
+          bleed ? "" : "max-w-5xl"
+        }`}
+      >
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-[var(--color-border)] px-6 py-3">
           <div className="min-w-0">
             <h2 className="truncate text-sm font-semibold text-[var(--color-text)]">
@@ -45,7 +57,15 @@ export function WorkspaceSheet({
             <X className="h-4 w-4" />
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto px-6 py-4">{children}</div>
+        <div
+          className={
+            bleed
+              ? "flex min-h-0 flex-1 flex-col overflow-hidden"
+              : "min-h-0 flex-1 overflow-auto px-6 py-4"
+          }
+        >
+          {children}
+        </div>
       </div>
     </div>
   );

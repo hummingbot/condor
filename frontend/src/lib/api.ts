@@ -552,6 +552,8 @@ export interface RoutineInstance {
   last_run_at: number | null;
   last_result: string | null;
   last_duration: number | null;
+  /** The report the last run rendered, if it rendered one. */
+  report_id?: string | null;
   run_count: number;
   has_result?: boolean;
   result_text?: string;
@@ -621,6 +623,8 @@ export interface ReportSummary {
   source_type: string;
   source_name: string;
   tags: string[];
+  /** Producing assistant — "" on reports written before attribution existed. */
+  agent?: string;
 }
 
 export interface ReportsListResponse {
@@ -1386,16 +1390,20 @@ export const api = {
 
   // ── Reports ──
 
-  getReports: (params?: { source_type?: string; tag?: string; search?: string; limit?: number; offset?: number }) => {
+  getReports: (params?: { source_type?: string; tag?: string; search?: string; agent?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     if (params?.source_type) qs.set("source_type", params.source_type);
     if (params?.tag) qs.set("tag", params.tag);
     if (params?.search) qs.set("search", params.search);
+    if (params?.agent) qs.set("agent", params.agent);
     if (params?.limit) qs.set("limit", String(params.limit));
     if (params?.offset) qs.set("offset", String(params.offset));
     const q = qs.toString();
     return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
   },
+
+  getReport: (id: string) =>
+    apiFetch<ReportSummary>(`/api/v1/reports/${encodeURIComponent(id)}`),
 
   getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
 
