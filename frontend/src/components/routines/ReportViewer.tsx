@@ -173,7 +173,7 @@ export function ReportViewer({
 
       {/* iframe */}
       <div className="relative flex-1">
-        <ReportFrame filename={report.filename} title={report.title} />
+        <ReportFrame reportId={report.id} title={report.title} />
         {/* Fullscreen chevron overlays */}
         {fullscreen && hasPrev && (
           <button

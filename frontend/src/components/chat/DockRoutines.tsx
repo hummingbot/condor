@@ -240,7 +240,7 @@ function ReportSheet({
       bleed
     >
       <ReportFrame
-        filename={report.filename}
+        reportId={report.id}
         title={report.title}
         className="min-h-0 flex-1"
       />
@@ -322,7 +322,7 @@ function RoutineRunSheet({
 
       {showReport ? (
         <ReportFrame
-          filename={report.filename}
+          reportId={report.id}
           title={report.title}
           className="min-h-0 flex-1"
         />

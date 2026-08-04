@@ -1,4 +1,4 @@
-import { authHeaders } from "./auth-token";
+import { authFetch, authHeaders } from "./auth-token";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
@@ -1406,6 +1406,19 @@ export const api = {
     apiFetch<ReportSummary>(`/api/v1/reports/${encodeURIComponent(id)}`),
 
   getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
+
+  /**
+   * A report's rendered HTML body.
+   *
+   * Report bodies are authenticated (SEC-112), and an iframe `src` cannot carry
+   * an Authorization header — so callers fetch the HTML here and hand it to the
+   * iframe as `srcDoc`, keeping the token in a header instead of the URL.
+   */
+  getReportHtml: async (id: string): Promise<string> => {
+    const res = await authFetch(`/api/v1/reports/${encodeURIComponent(id)}/html`);
+    if (!res.ok) throw new Error(`Failed to load report (${res.status})`);
+    return res.text();
+  },
 
   deleteReport: (id: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/reports/${encodeURIComponent(id)}`, { method: "DELETE" }),
