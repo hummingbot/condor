@@ -1,9 +1,31 @@
-"""Routine discovery, execution, and CRUD operations."""
+"""Routine discovery, execution, and CRUD operations.
+
+Discovery and CRUD are local — this subprocess can read the same files the main
+process does. Execution is not: a routine *run* is a live object (an instance in
+``RoutineStore``, an asyncio task, post-run hooks) that must outlive the MCP
+subprocess to show up in the dashboard and be stoppable from it. So run/start/
+stop/list_instances delegate to the main process over ``call_main_api``, the
+same crossing ``consult`` and ``delegate`` already make.
+"""
 
 import asyncio
+import time
 from pathlib import Path
 
+from mcp_servers.condor.condor_client import call_main_api
+from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
+
+# Wall-clock budget for a delegated one-shot run, unchanged from when the tool
+# executed the routine itself, and the granularity we poll the run with.
+_RUN_BUDGET = 120.0
+_POLL_INTERVAL = 1.0
+
+_NO_SERVER = (
+    "No active server is selected for this session, so the run cannot be "
+    "registered. Ask the user to select a server (/servers in Telegram, or the "
+    "server selector in the dashboard) and try again."
+)
 
 
 def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
@@ -143,105 +165,147 @@ def describe_routine(name: str) -> dict:
     }
 
 
-class MCPContext:
-    """Minimal mock context for routine execution."""
+def _owner_of(strategy_id: str) -> str | None:
+    """The agent slug that owns a strategy key, or a bare agent slug as given."""
+    from condor.agents.agent import AgentStore
+    from condor.agents.strategy import StrategyStore
 
-    def __init__(self):
-        self._chat_id = settings.chat_id
-        self._user_id = settings.user_id
-        self._user_data: dict = {}
-        # Use the HTTP fallback bot from routine_store so messages are delivered
-        from condor.routine_store import _http_bot
+    s = StrategyStore().get_by_key(strategy_id)
+    if s:
+        return s.agent_slug
+    # Expert-first flow: the id is already a bare agent slug, no strategy yet.
+    if AgentStore().get(strategy_id):
+        return strategy_id
+    return None
 
-        self.bot = _http_bot
-        self.application = None
 
-    @property
-    def user_data(self):
-        return self._user_data
+def _resolve_with_owner(name: str, strategy_id: str | None):
+    """Resolve a routine plus the assistant its reports belong to.
+
+    Attribution follows the run context, not the routine file: an explicit
+    strategy resolves to its owning agent (the bare slug, the canonical unit
+    shared with the web/Telegram runner's ``_agent_of``), else the running
+    assistant, else the chat ``condor``. It therefore differs from
+    ``_agent_of`` exactly when an agent runs a routine from the general
+    library — which is why it is sent to the store rather than re-derived there.
+    """
+    owner = _owner_of(strategy_id) if strategy_id else None
+    if owner:
+        from routines.base import assistant_routines_dir, discover_routines_from_path
+
+        routines_dir = assistant_routines_dir(owner)
+        if routines_dir.exists():
+            found = discover_routines_from_path(routines_dir, agent_slug=owner).get(
+                name
+            )
+            if found:
+                return found, owner
+
+    return _resolve_routine(name), owner or settings.agent_slug or "condor"
+
+
+def _store_name(routine, fallback: str) -> str:
+    """The name the main-process store — and the chat dock — knows a routine by.
+
+    Agent-local routines are registered as ``{slug}/{name}``: that is what
+    ``RoutineStore._resolve_routine`` splits on and what ``DockRoutines``
+    filters the agent's panel by. The general library keeps its bare name.
+    """
+    rname = getattr(routine, "name", "") or fallback
+    src = getattr(routine, "source", "global") or "global"
+    if src.startswith("agent:"):
+        return f"{src.split(':', 1)[1]}/{rname}"
+    return rname
+
+
+async def _poll_until_done(instance_id: str) -> dict | None:
+    """Follow a delegated run until it leaves ``running``. None on timeout."""
+    deadline = time.monotonic() + _RUN_BUDGET
+    while time.monotonic() < deadline:
+        await asyncio.sleep(_POLL_INTERVAL)
+        inst = await call_main_api("GET", f"/routines/instances/{instance_id}")
+        if isinstance(inst, dict) and inst.get("status") != "running":
+            return inst
+    return None
 
 
 async def run_routine(
     name: str, config: dict | None, strategy_id: str | None = None
 ) -> dict:
-    """Execute a one-shot routine and return its result."""
-    routine = None
+    """Run a one-shot routine in the main process and return its result.
 
-    if strategy_id:
-        routines_dir = _get_agent_routines_dir(strategy_id)
-        if routines_dir and routines_dir.exists():
-            from routines.base import discover_routines_from_path
-
-            agent_routines = discover_routines_from_path(routines_dir)
-            routine = agent_routines.get(name)
-
-    if not routine:
-        routine = _resolve_routine(name)
-
+    Resolution and config validation stay here — this is the code that knows
+    about ``strategy_id`` and agent-local dirs, and a bad config field must fail
+    fast with a useful message instead of arriving as a 404 from the API. The
+    execution itself is delegated so the run is a real instance: it shows up in
+    the dock while it runs, fires its post-run hooks, and keeps its result.
+    """
+    routine, agent = _resolve_with_owner(name, strategy_id)
     if not routine:
         return {"error": f"Routine '{name}' not found"}
 
     if routine.is_continuous:
         return {
-            "error": f"Routine '{name}' is continuous and cannot be run via MCP. "
-            "Use the Telegram /routines command to start/stop continuous routines."
+            "error": f"Routine '{name}' is continuous — use action='start' to run "
+            "it in the background, and action='stop' with its instance_id to end it."
         }
 
     try:
-        config_obj = routine.config_class(**(config or {}))
+        routine.config_class(**(config or {}))
     except Exception as e:
         return {"error": f"Invalid config: {e}"}
 
-    context = MCPContext()
-
-    # Attribute the report to its producer: an explicit strategy's owning agent
-    # (the bare agent slug, the canonical attribution unit shared with the
-    # web/Telegram runner's _agent_of and the agent index), else the run context
-    # (Agent consult -> its slug; chat condor -> "condor").
-    agent = settings.agent_slug or "condor"
-    if strategy_id:
-        from condor.agents.strategy import StrategyStore
-
-        s = StrategyStore().get_by_key(strategy_id)
-        if s:
-            agent = s.agent_slug
-        else:
-            from condor.agents.agent import AgentStore
-
-            if AgentStore().get(strategy_id):
-                # bare agent slug (expert-first flow): attribute to the agent
-                agent = strategy_id
+    if not settings.active_server:
+        return {"error": _NO_SERVER}
 
     try:
-        from condor.reports import attribute_to
-
-        with attribute_to(agent):
-            result = await asyncio.wait_for(
-                routine.run_fn(config_obj, context), timeout=120
-            )
-        from routines.base import normalize_result
-
-        nr = normalize_result(result)
-        return {
-            "name": name,
-            "result": {
-                "text": nr.text,
-                "table_data": nr.table_data,
-                "table_columns": nr.table_columns,
-                "chart_image": (
-                    "(PNG bytes, view via dashboard)" if nr.chart_image else None
-                ),
-                "sections": nr.sections,
+        started = await call_main_api(
+            "POST",
+            "/routines/run",
+            {
+                "routine_name": _store_name(routine, name),
+                "server_name": settings.active_server,
+                "config": config or {},
+                "attribute_to": agent,
             },
+        )
+        instance_id = started.get("instance_id") if isinstance(started, dict) else None
+        if not instance_id:
+            return {"error": f"Routine '{name}' did not start: {started}"}
+
+        inst = await _poll_until_done(instance_id)
+    except APIError as e:
+        return {"error": f"Routine '{name}' could not be run: {e}"}
+
+    if inst is None:
+        return {
+            "error": f"Routine '{name}' timed out after {int(_RUN_BUDGET)}s "
+            "(it may still be running — check the dashboard)",
+            "instance_id": instance_id,
         }
-    except asyncio.TimeoutError:
-        return {"error": f"Routine '{name}' timed out after 120s"}
-    except Exception as e:
-        return {"error": f"Routine '{name}' failed: {e}"}
+    if inst.get("error"):
+        return {
+            "error": f"Routine '{name}' failed: {inst['error']}",
+            "instance_id": instance_id,
+        }
+
+    return {
+        "name": name,
+        "instance_id": instance_id,
+        "result": {
+            "text": inst.get("result_text") or inst.get("last_result") or "",
+            "table_data": inst.get("table_data"),
+            "table_columns": inst.get("table_columns"),
+            "chart_image": (
+                "(PNG bytes, view via dashboard)" if inst.get("has_chart") else None
+            ),
+            "sections": inst.get("sections"),
+        },
+    }
 
 
 async def start_routine(name: str, config: dict | None) -> dict:
-    """Start a continuous routine as a background task."""
+    """Start a continuous routine in the main process, so it can be stopped there."""
     routine = _resolve_routine(name)
     if not routine:
         return {"error": f"Routine '{name}' not found"}
@@ -250,38 +314,47 @@ async def start_routine(name: str, config: dict | None) -> dict:
             "error": f"Routine '{name}' is not continuous — use action='run' instead"
         }
 
-    from condor.routine_store import get_routine_store
-
-    store = get_routine_store()
     try:
-        instance_id = await store.start_continuous(
-            routine_name=name,
-            config=config or {},
-            server_name=settings.active_server,
-            user_id=settings.chat_id,
-        )
-        return {"started": True, "instance_id": instance_id, "routine": name}
+        routine.config_class(**(config or {}))
     except Exception as e:
-        return {"error": f"Failed to start: {e}"}
+        return {"error": f"Invalid config: {e}"}
+
+    if not settings.active_server:
+        return {"error": _NO_SERVER}
+
+    try:
+        data = await call_main_api(
+            "POST",
+            "/routines/start",
+            {
+                "routine_name": _store_name(routine, name),
+                "server_name": settings.active_server,
+                "config": config or {},
+                "attribute_to": settings.agent_slug or "condor",
+            },
+        )
+    except APIError as e:
+        return {"error": f"Failed to start '{name}': {e}"}
+
+    instance_id = data.get("instance_id") if isinstance(data, dict) else None
+    return {"started": True, "instance_id": instance_id, "routine": name}
 
 
-def stop_routine(instance_id: str) -> dict:
+async def stop_routine(instance_id: str) -> dict:
     """Stop a running routine instance."""
-    from condor.routine_store import get_routine_store
-
-    store = get_routine_store()
-    stopped = store.stop(instance_id)
-    if stopped:
-        return {"stopped": True, "instance_id": instance_id}
-    return {"error": f"Instance '{instance_id}' not found or already stopped"}
+    try:
+        await call_main_api("POST", f"/routines/instances/{instance_id}/stop")
+    except APIError as e:
+        return {"error": f"Could not stop instance '{instance_id}': {e}"}
+    return {"stopped": True, "instance_id": instance_id}
 
 
-def list_instances() -> dict:
+async def list_instances() -> dict:
     """List all running/scheduled routine instances."""
-    from condor.routine_store import get_routine_store
-
-    store = get_routine_store()
-    instances = store.list_instances()
+    try:
+        instances = await call_main_api("GET", "/routines/instances")
+    except APIError as e:
+        return {"error": f"Could not list instances: {e}"}
     return {"instances": instances}
 
 
@@ -448,7 +521,7 @@ async def manage_routines(
     if action == "stop":
         if not name:
             return {"error": "instance_id is required (pass as name)"}
-        return stop_routine(name)
+        return await stop_routine(name)
     if action == "list_instances":
-        return list_instances()
+        return await list_instances()
     return {"error": f"Unknown action: {action}"}
