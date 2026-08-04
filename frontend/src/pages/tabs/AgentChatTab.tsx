@@ -64,6 +64,13 @@ export function AgentChatTab({
   const [railOpen, setRailOpen] = useState(false);
   /** The rail row selected while no session exists yet, to colour the hero. */
   const [pendingAgent, setPendingAgent] = useState<AgentSummary | null>(null);
+  /**
+   * The model picked before there is a session to switch. The hero's picker is
+   * the only model control on this screen, so what it says has to be what the
+   * next `start_session` carries — otherwise the pick is silently dropped.
+   * `null` means "never touched it", which is what falls back to `defaultAgent`.
+   */
+  const [pendingAgentKey, setPendingAgentKey] = useState<string | null>(null);
 
   // Same keys and intervals the fleet tab uses, so react-query dedupes rather
   // than polling `/agents` twice.
@@ -111,7 +118,7 @@ export function AgentChatTab({
       }
     }
     const slotId = chat.startSession(
-      defaultAgent,
+      pendingAgentKey ?? defaultAgent,
       defaultMode,
       server || undefined,
       agentSlug || undefined,
@@ -330,9 +337,13 @@ export function AgentChatTab({
                 modelOptions={modelOptions}
                 customProviders={customProviders}
                 agentBindings={agentBindings}
-                defaultAgent={defaultAgent}
+                selectedKey={pendingAgentKey ?? defaultAgent}
                 onAsk={(text) => talkTo(heroAgent?.slug || "", { text })}
                 onPickBrain={(sel) => {
+                  // The two fields are orthogonal — the picker names whichever
+                  // one the user changed — so binding an Agent leaves the model
+                  // alone, and vice versa.
+                  if (sel.agentKey !== undefined) setPendingAgentKey(sel.agentKey);
                   if (sel.agentSlug !== undefined) {
                     setPendingAgent(
                       agents.find((a) => a.slug === sel.agentSlug) || null,
@@ -438,7 +449,7 @@ function Hero({
   modelOptions,
   customProviders,
   agentBindings,
-  defaultAgent,
+  selectedKey,
   onAsk,
   onPickBrain,
 }: {
@@ -446,11 +457,12 @@ function Hero({
   modelOptions: ReturnType<typeof useSessionOptions>["agents"];
   customProviders: ReturnType<typeof useSessionOptions>["customProviders"];
   agentBindings: ReturnType<typeof useSessionOptions>["agentBindings"];
-  defaultAgent: string;
+  /** The model the next session starts on — owned by the tab, not by the hero,
+   *  because the tab is what calls `startSession`. */
+  selectedKey: string;
   onAsk: (text: string) => void;
   onPickBrain: (selection: BrainSelection) => void;
 }) {
-  const [selectedKey, setSelectedKey] = useState(defaultAgent);
   const starters = agent ? AGENT_STARTERS : CONDOR_STARTERS;
 
   return (
@@ -471,10 +483,7 @@ function Hero({
             agentBindings={agentBindings}
             selectedAgentKey={selectedKey}
             selectedAgentSlug={agent?.slug || ""}
-            onSelect={(sel) => {
-              if (sel.agentKey !== undefined) setSelectedKey(sel.agentKey);
-              onPickBrain(sel);
-            }}
+            onSelect={onPickBrain}
             variant="inline"
           />
         </div>
