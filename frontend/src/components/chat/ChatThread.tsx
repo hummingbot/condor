@@ -44,6 +44,7 @@ export function ChatThread({
   onSend,
   onAbort,
   emptyState,
+  boundAgent,
   columnClassName = "",
   autoFocus = false,
 }: {
@@ -60,6 +61,13 @@ export function ChatThread({
   onAbort: () => void;
   /** Rendered instead of a transcript when there is no slot. */
   emptyState?: React.ReactNode;
+  /**
+   * The domain Agent this conversation is bound to, when the surface knows it.
+   * A bound chat opens under that agent's name, not the mode's — the user
+   * picked Backpack MM, so "Condor / General trading assistant" would name the
+   * wrong counterpart.
+   */
+  boundAgent?: { name: string; description?: string };
   /** Reading column for the messages, e.g. `mx-auto w-full max-w-3xl`. */
   columnClassName?: string;
   autoFocus?: boolean;
@@ -123,24 +131,37 @@ export function ChatThread({
           ) : slot.messages.length === 0 ? (
             <div className="flex flex-1 flex-col items-center justify-center text-center">
               {(() => {
-                const ModeIcon = MODE_ICONS[slot.info.mode] || MessageSquare;
+                // Who the user is about to talk to. A bound agent answers as
+                // itself, so it names the screen and the mode name — "Condor"
+                // — drops out entirely; only the brain stays in the footnote.
+                const bound = slot.info.agent_slug
+                  ? {
+                      name: boundAgent?.name || slot.info.label || slot.info.agent_slug,
+                      description: boundAgent?.description,
+                    }
+                  : null;
+                const mode = modes.find((m) => m.key === slot.info.mode);
+                const Icon = bound ? Bot : MODE_ICONS[slot.info.mode] || MessageSquare;
+                const brain = resolveAgentLabel(slot.info.agent_key, agents);
                 return (
-                  <ModeIcon className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
+                  <>
+                    <Icon className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
+                    <p className="text-sm font-medium text-[var(--color-text)]">
+                      {bound ? bound.name : mode?.label || "Assistant"}
+                    </p>
+                    <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+                      {bound
+                        ? bound.description || `Ask ${bound.name} anything.`
+                        : mode?.description ||
+                          "Ask about your portfolio, prices, trades, or bot status."}
+                    </p>
+                    <p className="mt-2 flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] opacity-60">
+                      <Brain className="h-2.5 w-2.5" />
+                      {brain}
+                    </p>
+                  </>
                 );
               })()}
-              <p className="text-sm font-medium text-[var(--color-text)]">
-                {modes.find((m) => m.key === slot.info.mode)?.label || "Assistant"}
-              </p>
-              <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-                {modes.find((m) => m.key === slot.info.mode)?.description ||
-                  "Ask about your portfolio, prices, trades, or bot status."}
-              </p>
-              <p className="mt-2 flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] opacity-60">
-                {slot.info.agent_slug && <Bot className="h-2.5 w-2.5" />}
-                {slot.info.label && slot.info.agent_slug
-                  ? slot.info.label
-                  : resolveAgentLabel(slot.info.agent_key, agents)}
-              </p>
               {slot.pending && (
                 <p className="mt-3 flex items-center gap-1.5 text-[10px] text-[var(--color-text-muted)]">
                   <Loader2 className="h-3 w-3 animate-spin" />
