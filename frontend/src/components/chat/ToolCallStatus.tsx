@@ -1,6 +1,6 @@
-import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Loader2, X } from "lucide-react";
 import type { ToolCall } from "@/hooks/useChatSocket";
+import { useLiveDisclosure } from "@/hooks/useLiveDisclosure";
 import { formatToolName, toolCallState } from "@/lib/formatters";
 
 /** The one tool-call status icon. Shared so the completed/failed/pending
@@ -26,17 +26,29 @@ export function ToolCallStatusIcon({
   }
 }
 
-export function ToolCallStatus({ toolCalls }: { toolCalls: ToolCall[] }) {
-  const [expanded, setExpanded] = useState(false);
+export function ToolCallStatus({
+  toolCalls,
+  live = false,
+}: {
+  toolCalls: ToolCall[];
+  /** Whether the bubble these calls belong to is the one still streaming. */
+  live?: boolean;
+}) {
+  // Computed above the empty-list early return so the hook below always runs;
+  // `every` on an empty list is `true`, which reads correctly as "not running".
+  const allDone = toolCalls.every((tc) => toolCallState(tc.status) !== "pending");
+  // Both inputs are required, not just `allDone`. A prompt that was abandoned
+  // mid-tool persists its non-terminal status, so a replayed transcript can
+  // contain a call that still looks pending forever; gating on the bubble
+  // actually streaming keeps history collapsed regardless.
+  const { expanded, toggle } = useLiveDisclosure(live && !allDone);
 
   if (toolCalls.length === 0) return null;
-
-  const allDone = toolCalls.every((tc) => toolCallState(tc.status) !== "pending");
 
   return (
     <div className="my-1.5">
       <button
-        onClick={() => setExpanded(!expanded)}
+        onClick={toggle}
         className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
       >
         {expanded ? (
