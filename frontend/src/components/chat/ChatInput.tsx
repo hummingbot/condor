@@ -12,6 +12,8 @@ interface ChatInputProps {
   onAbort?: () => void;
   /** Take the caret on mount — the workspace lands the user in a composer. */
   autoFocus?: boolean;
+  /** Who the user is writing to. Defaults to Condor, the chat assistant. */
+  placeholder?: string;
 }
 
 type RecordingState = "idle" | "recording" | "transcribing";
@@ -22,6 +24,7 @@ export function ChatInput({
   isStreaming,
   onAbort,
   autoFocus,
+  placeholder = "Ask Condor...",
 }: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -258,7 +261,7 @@ export function ChatInput({
             onKeyDown={handleKeyDown}
             onFocus={() => setFocused(true)}
             onBlur={() => setFocused(false)}
-            placeholder="Ask Condor..."
+            placeholder={placeholder}
             disabled={disabled}
             rows={1}
             className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none disabled:opacity-50"
