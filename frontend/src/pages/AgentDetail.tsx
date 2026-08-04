@@ -222,6 +222,95 @@ function CreateStrategyDialog({
   );
 }
 
+// ── Server pin ──
+
+/**
+ * Which server this Agent's tools trade on, wherever it runs.
+ *
+ * A pin beats the chat's ambient selection everywhere the Agent is used —
+ * chatted, consulted or looped — so it is the Agent's decision, and this is the
+ * page that owns it. Before this it could only be changed by hand-editing
+ * AGENT.md front matter, which is why a locked chat chip links here.
+ */
+function ServerPinPicker({ slug, serverName }: { slug: string; serverName: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+
+  const { data: servers } = useQuery({
+    queryKey: ["servers"],
+    queryFn: api.getServers,
+    enabled: open,
+  });
+
+  const pin = useMutation({
+    mutationFn: (name: string) => api.updateAgentConfig(slug, { server_name: name }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+  });
+
+  const choose = (name: string) => {
+    setOpen(false);
+    if (name !== serverName) pin.mutate(name);
+  };
+
+  return (
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        disabled={pin.isPending}
+        title={
+          serverName
+            ? `Pinned to ${serverName} — every run uses this server`
+            : "No pin: follows whichever server the chat is on"
+        }
+        className={`flex items-center gap-1 rounded border px-2.5 py-1 transition-colors disabled:opacity-50 ${
+          serverName
+            ? "border-emerald-500/30 bg-emerald-500/10 font-mono text-emerald-400 hover:border-emerald-500/60"
+            : "border-dashed border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)]"
+        }`}
+      >
+        <Server className="h-3 w-3" /> {serverName || "No server pin"}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-50 mt-1 min-w-[220px] rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
+            <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+              Pin to server
+            </div>
+            {(servers ?? []).map((s) => (
+              <button
+                key={s.name}
+                onClick={() => choose(s.name)}
+                className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                  s.name === serverName
+                    ? "font-medium text-[var(--color-primary)]"
+                    : "text-[var(--color-text)]"
+                }`}
+              >
+                <CircleDot
+                  className={`h-2.5 w-2.5 shrink-0 ${
+                    s.online ? "text-[var(--color-green)]" : "text-[var(--color-text-muted)]"
+                  }`}
+                />
+                <span className="truncate">{s.name}</span>
+              </button>
+            ))}
+            <button
+              onClick={() => choose("")}
+              className={`mt-0.5 w-full border-t border-[var(--color-border)] px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                serverName ? "text-[var(--color-text)]" : "font-medium text-[var(--color-primary)]"
+              }`}
+            >
+              No pin — follow the chat's selection
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 // ── Agent Detail Page ──
 
 export function AgentDetail() {
@@ -369,14 +458,7 @@ export function AgentDetail() {
                   <Wrench className="h-3 w-3" /> {agent.tools.length} tool{agent.tools.length !== 1 ? "s" : ""}
                 </span>
               )}
-              {agent.server_name && (
-                <span
-                  className="flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 font-mono text-emerald-400"
-                  title="Pinned Hummingbot API server"
-                >
-                  <Server className="h-3 w-3" /> {agent.server_name}
-                </span>
-              )}
+              <ServerPinPicker slug={agent.slug} serverName={agent.server_name} />
             </div>
           </div>
           <div className="flex items-center gap-2">
