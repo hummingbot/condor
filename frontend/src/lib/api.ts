@@ -1572,9 +1572,6 @@ export const api = {
 
   // ── Chat ──
 
-  getChatOptions: () =>
-    apiFetch<ChatOptionsResponse>("/api/v1/chat/options"),
-
   getOpenRouterModels: () =>
     apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
 

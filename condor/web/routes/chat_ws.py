@@ -25,13 +25,7 @@ from condor.runtime.events import RuntimeEvent
 from condor.runtime.timeouts import TIMEOUTS
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
-from handlers.agents._shared import (
-    AGENT_MODES,
-    AGENT_OPTIONS,
-    DEFAULT_AGENT,
-    DEFAULT_MODE,
-    load_assistant,
-)
+from handlers.agents._shared import DEFAULT_AGENT, DEFAULT_MODE, load_assistant
 from handlers.agents.openrouter_models import fetch_models
 
 log = logging.getLogger(__name__)
@@ -603,46 +597,7 @@ async def _handle_resolve_permission(user_id: int, msg: dict) -> None:
     )
 
 
-# ── REST endpoint for chat options ──
-
-
-@router.get("/chat/options")
-async def get_chat_options(user: WebUser = Depends(get_current_user)):
-    """Return available agent models and modes.
-
-    Every entry carries a ``picker`` flag. Picker sentinels ("openrouter:",
-    "custom:") are not startable agent keys — they stand for "open a model
-    list" — so a client must render them as a drill-down, never as a
-    selectable model. The flag is sent explicitly because the shape of the key
-    doesn't tell you: "ollama:" and "lmstudio:" also end in a colon but are
-    real keys meaning "that backend's default model".
-
-    The user's saved custom endpoints come back separately, with their models
-    resolved on demand via /settings/custom-providers/{name}/models.
-    """
-    from condor.preferences import get_custom_providers, load_user_data_for
-
-    providers = get_custom_providers(load_user_data_for(user.id))
-    return {
-        "agents": [
-            {"key": k, "label": v["label"], "picker": bool(v.get("picker"))}
-            for k, v in AGENT_OPTIONS.items()
-        ],
-        "custom_providers": [
-            {
-                "name": p["name"],
-                "base_url": p["base_url"],
-                "has_key": bool(p.get("api_key")),
-            }
-            for p in providers
-        ],
-        "modes": [
-            {"key": k, "label": v["label"], "description": v["description"]}
-            for k, v in AGENT_MODES.items()
-        ],
-        "default_agent": DEFAULT_AGENT,
-        "default_mode": DEFAULT_MODE,
-    }
+# ── REST endpoint for OpenRouter models ──
 
 
 @router.get("/chat/openrouter/models")
