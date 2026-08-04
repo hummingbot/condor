@@ -22,7 +22,7 @@ import { ConversationList } from "@/components/chat/ConversationList";
 import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
-import { api, type AgentSummary } from "@/lib/api";
+import { api, CHAT_SLUG, type AgentSummary } from "@/lib/api";
 
 /** Openers offered when nothing is bound, and when something is. */
 const CONDOR_STARTERS = [
@@ -153,7 +153,15 @@ export function AgentChatTab({
     : undefined;
   const heroAgent = activeSlot ? undefined : pendingAgent;
 
-  const liveAgents = agents.filter((a) => deriveAgentStatus(a) === "running");
+  // Condor is in the registry like every other Agent (FEAT-033), but it is not
+  // a specialist you bind: you get it by binding nothing, which is what the
+  // empty slug means everywhere else here. So it is lifted out of the list and
+  // rendered once, at the top, as the row it has always been — reading its name
+  // and description off its own AGENT.md rather than repeating them here.
+  const condor = agents.find((a) => a.slug === CHAT_SLUG);
+  const specialists = agents.filter((a) => a.slug !== CHAT_SLUG);
+
+  const liveAgents = specialists.filter((a) => deriveAgentStatus(a) === "running");
   const runningTasks = (delegationData?.delegations ?? []).filter(
     (d) => d.status === "running",
   ).length;
@@ -194,20 +202,21 @@ export function AgentChatTab({
             Agents
           </div>
           <RailRow
-            label="Condor"
+            label={condor?.name || "Condor"}
             icon={<MessageSquare className="h-3 w-3 shrink-0" />}
             active={!!activeSlot && !activeSlot.info.agent_slug}
+            title={condor?.description || "General trading assistant"}
             onClick={() => {
               setPendingAgent(null);
               talkTo("");
             }}
-            newTitle="New chat with Condor"
+            newTitle={`New chat with ${condor?.name || "Condor"}`}
             onNew={() => {
               setPendingAgent(null);
               talkTo("", { intent: "fresh" });
             }}
           />
-          {agents.map((agent) => (
+          {specialists.map((agent) => (
             <RailRow
               key={agent.slug}
               label={agent.name}

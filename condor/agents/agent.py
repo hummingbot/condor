@@ -189,6 +189,21 @@ class AgentStore:
                 agents.append(a)
         return agents
 
+    def list_specialists(self) -> list[Agent]:
+        """Every Agent a chat can *bind* to — the registry minus the coordinator.
+
+        Binding is what names a specialist; Condor is who answers when nothing
+        is bound (FEAT-033), so a picker that also offered it would show one
+        identity twice — and picking that second entry would bind the chat to
+        the coordinator as if it were a specialist, flipping what ``is_agent``
+        means for the session.
+
+        Not a filter in the sense :meth:`list_index` forbids: nothing is hidden
+        here. The coordinator is reached by binding nothing, which every picker
+        already offers as its first row.
+        """
+        return [a for a in self.list_all() if a.slug != CHAT_SLUG]
+
     def list_index(self, exclude: str | Iterable[str] = "") -> str:
         """Injectable index — one line per Agent (mirrors SKILLS).
 

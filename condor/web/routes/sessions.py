@@ -106,6 +106,10 @@ async def session_options(user: WebUser = Depends(get_current_user)):
         "servers": cm.get_accessible_servers(user.id),
         # Every Agent is chattable for the same reason it is consultable: it has
         # an identity and a toolset. No separate flag (FEAT-004 rule).
+        #
+        # Condor is the exception the picker already has a row for: it answers
+        # when nothing is bound, so `list_specialists` leaves it out rather than
+        # offering the same identity twice.
         "agent_bindings": [
             {
                 "slug": a.slug,
@@ -113,7 +117,7 @@ async def session_options(user: WebUser = Depends(get_current_user)):
                 "description": a.description,
                 "when_to_consult": a.when_to_consult,
             }
-            for a in AgentStore().list_all()
+            for a in AgentStore().list_specialists()
         ],
         "default_agent": DEFAULT_AGENT,
     }

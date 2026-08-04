@@ -1340,7 +1340,9 @@ async def _handle_talk_to(
 
     query = update.callback_query
     session = await get_session(update.effective_chat.id)
-    agents = AgentStore().list_all()
+    # The coordinator is the keyboard's own first row, so listing it here too
+    # would offer Condor twice (FEAT-033 put it in the registry).
+    agents = AgentStore().list_specialists()
 
     if not agents:
         await query.message.edit_text(
@@ -1351,7 +1353,7 @@ async def _handle_talk_to(
         return
 
     # Indices are resolved against this snapshot, so the pick handler must
-    # re-read the same ordering (AgentStore.list_all is directory order).
+    # re-read the same list (AgentStore.list_specialists is directory order).
     await query.message.edit_text(
         "Who do you want to talk to?\n\n"
         "A domain Agent answers with its own identity, tools and memory. "
@@ -1380,7 +1382,9 @@ async def _handle_talk_pick(
     agent_slug = ""
     label = "Condor"
     if index >= 0:
-        agents = AgentStore().list_all()
+        # Same list the keyboard was built from — the indices in callback_data
+        # are positions in it, so the two must not diverge.
+        agents = AgentStore().list_specialists()
         if index >= len(agents):
             await query.message.edit_text("That agent no longer exists.")
             return
