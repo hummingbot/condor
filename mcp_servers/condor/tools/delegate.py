@@ -20,6 +20,20 @@ async def delegate(
     action = (action or "").lower()
 
     if action == "start":
+        # Hard stop, not a prompt rule (FEAT-032): a background worker runs with
+        # auto-approved tools, so a worker that can start delegations is unbounded
+        # fan-out. The instructions say the same thing; this is what enforces it.
+        if settings.delegate_worker:
+            return {
+                "error": (
+                    "Nested delegation refused: you ARE a background delegation "
+                    "worker, started to finish one task unattended. Starting "
+                    "another detached agent from here would fan out unbounded "
+                    "work with auto-approved tools and nobody watching. Do the "
+                    "task in this session and report the result. (Polling an "
+                    'existing delegation with action="get"/"list" is allowed.)'
+                )
+            }
         if not agent or not task:
             return {"error": "agent and task are required to start a delegation"}
         result = await call_main_api(

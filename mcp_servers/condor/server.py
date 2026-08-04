@@ -22,8 +22,63 @@ from mcp_servers.condor.tools import (
 )
 
 
+_CHAT_ROUTINES_RULE = (
+    "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
+    "design a routine MUST go through the `routine_builder` agent "
+    '(`consult(agent="routine_builder", ...)` for inline work, '
+    '`delegate(action="start", agent="routine_builder", ...)` for background). '
+    "It is the single entry point for routine authoring — do NOT write routine "
+    "code yourself and do NOT hand-roll it with raw `manage_routines` "
+    "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
+    '— for that just call `manage_routines(action="run", name="...")`.)\n'
+)
+
+# The worker IS Condor — same agent record, same tools — so the routing text is
+# the coordinator's, with exactly one branch swapped: authoring is the reason it
+# was started, so it does the work instead of handing it on (FEAT-032).
+_WORKER_ROUTINES_RULE = (
+    "- ROUTINE AUTHORING IS YOURS: creating, editing, fixing and debugging "
+    "routines is the work you were started for — do NOT hand it to anyone else. "
+    'Read `manage_skill(action="read", name="routine_cookbook")` FIRST (and the '
+    "companion file for what the routine does), create it into the GLOBAL "
+    'routine library with `manage_routines(action="create_routine", name="...", '
+    'code="...")` — no `strategy_id`, so the user and the chat can see it — then '
+    'TEST it with `manage_routines(action="run", name="...")` and fix it until '
+    "the output is clean BEFORE reporting. Reporting an untested routine is a "
+    "failed delegation. (RUNNING an existing routine is not authoring — for that "
+    'just call `manage_routines(action="run", name="...")`.)\n'
+)
+
+
 def _chat_base() -> str:
     """Routing rules for the Condor coordinator — the unbound chat assistant."""
+    return _coordinator_base(_CHAT_ROUTINES_RULE)
+
+
+def _worker_base() -> str:
+    """Routing rules for a BACKGROUND Condor worker (``--delegate-worker``).
+
+    The chat and the worker resolve the same agent record (FEAT-033), so this is
+    ``_chat_base()`` with the routines branch swapped for "authoring is yours",
+    plus the framing that makes an unattended session behave: it has no user to
+    ask, and it must not fan out into more delegations. The no-delegation line is
+    a courtesy — the actual stop is in ``tools/delegate.py``, because a prompt is
+    not a guard.
+    """
+    return (
+        "You are a BACKGROUND WORKER instance of Condor: a detached session that "
+        "`delegate` started to carry ONE task to completion, unattended. There is "
+        "no user in the loop to ask — make the reasonable call, do the work "
+        "yourself, and report what you actually did and verified.\n"
+        "You must NEVER start another delegation: "
+        '`delegate(action="start", ...)` is refused for you in code. Finish the '
+        "task in this session (polling with "
+        '`delegate(action="get"/"list")` is fine).\n\n'
+    ) + _coordinator_base(_WORKER_ROUTINES_RULE)
+
+
+def _coordinator_base(routines_rule: str) -> str:
+    """The coordinator routing text, parameterized on its ROUTINES branch."""
     return (
         "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
         "routine) and consultable **domain agents** on top of these tools.\n\n"
@@ -40,14 +95,7 @@ def _chat_base() -> str:
         "For a long, one-off task you want run in the background until done (it pings "
         'the user when finished), use `delegate(action="start", agent="<slug>", '
         'task="...")` instead and poll with `delegate(action="get", task_id="...")`.\n'
-        "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
-        "design a routine MUST go through the `routine_builder` agent "
-        '(`consult(agent="routine_builder", ...)` for inline work, '
-        '`delegate(action="start", agent="routine_builder", ...)` for background). '
-        "It is the single entry point for routine authoring — do NOT write routine "
-        "code yourself and do NOT hand-roll it with raw `manage_routines` "
-        "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
-        '— for that just call `manage_routines(action="run", name="...")`.)\n'
+        f"{routines_rule}"
         "- Only fall back to raw tools when nothing matches.\n"
         "Anti-pattern: answering a domain request (deploy/tune an executor, analyze "
         "logs, author a routine) with a chain of raw `mcp-hummingbot`/`manage_*` "
@@ -121,6 +169,11 @@ def _build_instructions() -> str:
     Condor the specialist framing — including ``identity_header``'s "You are NOT
     Condor", which would be false — and nothing would error, the answers would
     just quietly get worse.
+
+    A third seat exists for the same record: ``--delegate-worker`` (FEAT-032)
+    marks the detached Condor that ``delegate`` starts to author a routine. It
+    reads ``_worker_base`` — the coordinator text with authoring made its own job
+    and delegation closed off.
     """
     from mcp_servers.condor.settings import settings
 
@@ -134,7 +187,15 @@ def _build_instructions() -> str:
         except Exception:
             pass  # Unknown/unreadable slug degrades to the coordinator text.
 
-    sections = [_agent_base(slug, agent.name) if agent else _chat_base()]
+    if agent:
+        base = _agent_base(slug, agent.name)
+    elif settings.delegate_worker:
+        # Same record as the chat, different seat (FEAT-032): a specialist already
+        # reads `_agent_base`, so the flag only ever re-frames Condor itself.
+        base = _worker_base()
+    else:
+        base = _chat_base()
+    sections = [base]
     try:
         from condor.memory import SkillStore
 

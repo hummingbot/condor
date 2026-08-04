@@ -221,6 +221,7 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
                 context="",
                 permission_callback=None,  # unattended -> ACP auto-approves
                 event_sink=_make_event_sink(dt),
+                delegate_worker=True,  # background seat: worker framing, no recursion
             ),
             timeout=timeout_s,
         )

@@ -95,6 +95,7 @@ async def _run_agent_to_completion(
     context: str = "",
     permission_callback=None,
     event_sink=None,
+    delegate_worker: bool = False,
 ) -> str:
     """Load the Agent ``slug``, run its brain to completion on ``task``, return text.
 
@@ -108,6 +109,12 @@ async def _run_agent_to_completion(
     :data:`condor.acp.client.ACPEvent` (thoughts, tool calls, text) as they arrive,
     so a caller can persist the full session transcript. When ``None`` (CONSULT's
     path) the cheaper one-shot ``client.prompt()`` is used and behavior is unchanged.
+
+    ``delegate_worker`` is DELEGATE's flag (FEAT-032). It only bites when the
+    delegated agent IS Condor: chat and background worker are then the same record
+    and the subprocess needs telling which one it is. A specialist already reads
+    its own ``_agent_base`` framing — and is explicitly invited there to delegate
+    long work onward — so its delegations are left exactly as they were.
     """
     store = AgentStore()
     agent = store.get(slug)
@@ -169,11 +176,14 @@ async def _run_agent_to_completion(
     # Serverless agents still need their own memory/skill scope — without
     # agent_slug the condor MCP tools would target the CHAT's stores.
     effective_server = agent.server_name or server_name
+    from condor.memory.paths import CHAT_SLUG
+
     mcp_servers = build_mcp_servers_for_session(
         user_id,
         chat_id,
         server_name=effective_server if agent.server_required else None,
         agent_slug=slug,
+        delegate_worker=delegate_worker and slug == CHAT_SLUG,
     )
 
     # ``permission_callback`` is passed in: CONSULT routes dangerous-tool
