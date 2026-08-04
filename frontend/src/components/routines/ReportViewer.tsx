@@ -7,10 +7,10 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
+import { ReportFrame } from "@/components/routines/ReportFrame";
 import { type ReportSummary } from "@/lib/api";
-import { useTheme } from "@/hooks/useTheme";
 
 interface ReportViewerProps {
   report: ReportSummary;
@@ -36,8 +36,6 @@ export function ReportViewer({
 }: ReportViewerProps) {
   const [fullscreen, setFullscreen] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const iframeRef = useRef<HTMLIFrameElement>(null);
-  const { theme } = useTheme();
 
   const currentIndex = reports.findIndex((r) => r.id === report.id);
   const hasPrev = currentIndex > 0;
@@ -62,17 +60,6 @@ export function ReportViewer({
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, [goPrev, goNext, fullscreen, allowFullscreen]);
-
-  useEffect(() => {
-    const iframe = iframeRef.current;
-    if (!iframe) return;
-    const sendTheme = () => {
-      iframe.contentWindow?.postMessage({ type: "set-theme", theme }, "*");
-    };
-    iframe.addEventListener("load", sendTheme);
-    sendTheme();
-    return () => iframe.removeEventListener("load", sendTheme);
-  }, [theme, report]);
 
   return (
     <div
@@ -186,13 +173,7 @@ export function ReportViewer({
 
       {/* iframe */}
       <div className="relative flex-1">
-        <iframe
-          ref={iframeRef}
-          src={`/reports/${report.filename}`}
-          className="h-full w-full border-0"
-          title={report.title}
-          sandbox="allow-scripts allow-popups allow-downloads"
-        />
+        <ReportFrame filename={report.filename} title={report.title} />
         {/* Fullscreen chevron overlays */}
         {fullscreen && hasPrev && (
           <button

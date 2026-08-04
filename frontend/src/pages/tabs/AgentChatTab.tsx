@@ -15,10 +15,11 @@ import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { AgentsTabSwitch, type AgentsTab } from "@/components/chat/AgentsTabSwitch";
 import { BrainPicker, type BrainSelection } from "@/components/chat/BrainPicker";
 import { ChatInput } from "@/components/chat/ChatInput";
+import { ChatSessionIdentity } from "@/components/chat/ChatSessionIdentity";
 import { ChatThread } from "@/components/chat/ChatThread";
 import { ContextDock } from "@/components/chat/ContextDock";
 import { ConversationList } from "@/components/chat/ConversationList";
-import { SessionServerChip } from "@/components/chat/SessionServerChip";
+import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 import { useChat, useSessionOptions } from "@/hooks/useChat";
 import { useServer } from "@/hooks/useServer";
 import { api, type AgentSummary } from "@/lib/api";
@@ -60,7 +61,7 @@ export function AgentChatTab({
     defaultMode,
   } = useSessionOptions();
 
-  const [switchError, setSwitchError] = useState<string | null>(null);
+  const { switchBrain, switchError, dismissSwitchError } = useBrainSwitch();
   const [railOpen, setRailOpen] = useState(false);
   /** The rail row selected while no session exists yet, to colour the hero. */
   const [pendingAgent, setPendingAgent] = useState<AgentSummary | null>(null);
@@ -145,14 +146,6 @@ export function AgentChatTab({
     setSearchParams({}, { replace: true });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [agentParam]);
-
-  const handleSwitch = (selection: BrainSelection) => {
-    if (!chat.activeSlotId) return;
-    setSwitchError(null);
-    chat
-      .switchBrain(chat.activeSlotId, selection)
-      .catch((e: Error) => setSwitchError(e.message || "Could not switch"));
-  };
 
   const liveIds = new Set(
     chat.slots.map((s) => s.info.conversation_id || s.info.slot_id),
@@ -276,33 +269,17 @@ export function AgentChatTab({
                 <PanelLeftOpen className="h-4 w-4" />
               )}
             </button>
-            {chat.isConnected && (
-              <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-green-500" />
-            )}
-            {activeSlot ? (
-              <BrainPicker
-                agents={modelOptions}
-                customProviders={customProviders}
-                agentBindings={agentBindings}
-                selectedAgentKey={activeSlot.info.agent_key}
-                selectedAgentSlug={activeSlot.info.agent_slug || ""}
-                onSelect={handleSwitch}
-                variant="inline"
-                disabled={activeSlot.pending || isActiveStreaming}
-              />
-            ) : (
-              <span className="text-sm font-semibold">Chat</span>
-            )}
-            {activeSlot && (
-              <SessionServerChip
-                serverName={activeSlot.info.server_name}
-                pinned={activeSlot.info.server_pinned}
-                agentSlug={activeSlot.info.agent_slug}
-                label={activeSlot.info.label}
-                disabled={activeSlot.pending || isActiveStreaming}
-                onSelect={(name) => chat.switchServer(activeSlot.info.slot_id, name)}
-              />
-            )}
+            {/* Who is answering and where it runs — the same strip the overlay
+                panel shows. */}
+            <ChatSessionIdentity
+              slot={activeSlot}
+              agents={modelOptions}
+              customProviders={customProviders}
+              agentBindings={agentBindings}
+              isStreaming={isActiveStreaming}
+              onSelectBrain={switchBrain}
+              placeholder={<span className="text-sm font-semibold">Chat</span>}
+            />
             {/* Strategies, brain and routines stay on the agent's own page. */}
             {boundAgent && (
               <Link
@@ -323,7 +300,7 @@ export function AgentChatTab({
             permissionRequest={chat.permissionRequest}
             onResolvePermission={chat.resolvePermission}
             switchError={switchError}
-            onDismissSwitchError={() => setSwitchError(null)}
+            onDismissSwitchError={dismissSwitchError}
             onSend={(text) =>
               activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
             }
