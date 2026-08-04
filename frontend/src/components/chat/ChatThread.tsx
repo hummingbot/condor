@@ -228,7 +228,16 @@ export function ChatThread({
               )}
             </div>
           ) : (
-            slot.messages.map((msg) => <ChatMessageView key={msg.id} message={msg} />)
+            // Chunks only ever land in the last bubble, so that is the one
+            // whose thinking and tool blocks are still being written — and
+            // `isStreaming` is already scoped to the slot on screen.
+            slot.messages.map((msg, i) => (
+              <ChatMessageView
+                key={msg.id}
+                message={msg}
+                live={isStreaming && i === slot.messages.length - 1}
+              />
+            ))
           )}
           <div ref={messagesEndRef} />
         </div>
