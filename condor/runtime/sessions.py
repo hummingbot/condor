@@ -149,18 +149,23 @@ class AgentSession:
             self.is_busy = False
             self._lock.release()
 
-    def abort(self) -> None:
-        """Abort the current in-flight prompt.
+    async def abort(self) -> None:
+        """Abort the current in-flight prompt, at the agent.
 
         Sets the abort event so prompt_stream breaks out on the next iteration,
-        which triggers its finally block to properly release the lock.
-        Also cancels the ACP-level request future and drains the event queue
-        so the next prompt starts clean.
+        which triggers its finally block to properly release the lock. Then
+        awaits the client's own cancel: for ACP that is a ``session/cancel``
+        the agent answers, so generation actually stops and its context ends
+        where the transcript does. Awaiting is the honest signature — Stop now
+        costs a bounded wait (``TIMEOUTS.prompt_cancel``) instead of returning
+        instantly on a promise it could not keep.
+
+        Abort is a session-level concept: prompts driven straight at a client
+        (consult, the strategy engine) run outside this lock and outside this.
         """
         # Signal prompt_stream to stop iterating
         self._abort_event.set()
-        if isinstance(self.client, ACPClient):
-            self.client.abort_prompt()
+        await self.client.abort_prompt()
         log.info("Session %s: prompt aborted", self.key)
 
 

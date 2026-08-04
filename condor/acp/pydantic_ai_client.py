@@ -491,6 +491,10 @@ class PydanticAIClient:
         # the model sees prior turns. A fresh client is created per session/tick,
         # so history is reset by recreating the client rather than in-place.
         self._message_history: list = []
+        # Set by abort_prompt(); the node loop reads it between graph steps.
+        # There is no protocol to notify here (the "agent" is a library call),
+        # so cancelling the run *is* the cancel.
+        self._abort_requested = False
 
     def _build_model(self) -> Any:
         """Build the pydantic-ai model object with sensible defaults.
@@ -856,6 +860,17 @@ class PydanticAIClient:
                 chunks.append(event.text)
         return "".join(chunks)
 
+    async def abort_prompt(self) -> None:
+        """Stop the in-flight run at the next graph step.
+
+        The ACP counterpart notifies the agent over the wire; here the run is a
+        library call, so the flag the node loop checks is the whole mechanism.
+        A step already in flight (a model call, a tool) still finishes — but the
+        partial turn is committed to the history either way, so the model's
+        context ends where the user's screen did.
+        """
+        self._abort_requested = True
+
     async def prompt_stream(self, text: str) -> AsyncIterator[ACPEvent]:
         """Send a prompt and yield ACPEvents as they arrive.
 
@@ -873,6 +888,8 @@ class PydanticAIClient:
         # run in parallel; nullcontext() makes the guard a no-op for them.
         async with self._request_semaphore or contextlib.nullcontext():
             start_time = time.monotonic()
+            self._abort_requested = False
+            aborted = False
 
             try:
                 from pydantic_ai.agent import CallToolsNode, ModelRequestNode
@@ -889,6 +906,10 @@ class PydanticAIClient:
                     text, message_history=self._message_history
                 ) as run:
                     async for node in run:
+                        if self._abort_requested:
+                            aborted = True
+                            break
+
                         if isinstance(node, End):
                             # Final result -- extract text from the result
                             if hasattr(node, "data") and node.data:
@@ -1010,11 +1031,16 @@ class PydanticAIClient:
                                     )
 
                     # Accumulate messages so the next prompt_stream() call sees
-                    # this turn's context via message_history.
+                    # this turn's context via message_history. An aborted run
+                    # has no result, but its partial turn must land here too:
+                    # skipping it is what makes the model answer the follow-up
+                    # as though it had finished a turn the user never saw.
                     if run.result is not None:
                         self._message_history.extend(run.result.new_messages())
+                    elif aborted:
+                        self._message_history.extend(run.new_messages())
 
-                yield PromptDone(stop_reason="end_turn")
+                yield PromptDone(stop_reason="cancelled" if aborted else "end_turn")
 
             except asyncio.TimeoutError:
                 yield PromptDone(stop_reason="timeout")

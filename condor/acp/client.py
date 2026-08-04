@@ -576,24 +576,97 @@ class ACPClient:
 
     # --- Prompt ---
 
-    def abort_prompt(self) -> None:
-        """Cancel the in-flight prompt request and drain the event queue.
-
-        The ACP subprocess will keep running (there's no protocol-level cancel),
-        but the next prompt_stream call will start clean.
-        """
-        if self._current_req_id is not None:
-            future = self._peer._pending.pop(self._current_req_id, None)
-            if future and not future.done():
-                future.cancel()
-            self._current_req_id = None
-        # Drain the queue so stale events don't leak into the next prompt
+    def _drain_events(self) -> None:
+        """Empty the event queue so stale events don't leak into the next prompt."""
         while True:
             try:
                 self._event_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
-        log.debug("ACP prompt aborted, queue drained")
+
+    def _cancel_locally(self, req_id: int) -> None:
+        """Fallback cancel: drop the pending future and clear the queue.
+
+        Used when the agent does not honour ``session/cancel``. Clearing
+        ``_current_req_id`` before cancelling the future makes ``_on_response``
+        discard a late reply, so the queue we drain here stays drained.
+        """
+        future = self._peer._pending.pop(req_id, None)
+        self._current_req_id = None
+        if future and not future.done():
+            future.cancel()
+        self._drain_events()
+        # The consumer of prompt_stream is parked on the queue; hand it a
+        # terminal event so the turn ends now rather than at the next heartbeat.
+        self._event_queue.put_nowait(PromptDone(stop_reason="cancelled"))
+
+    async def abort_prompt(self) -> None:
+        """Cancel the in-flight prompt at the agent, not just locally.
+
+        Sends ACP's ``session/cancel`` and waits for the agent to settle the
+        pending ``session/prompt`` with stopReason ``"cancelled"``, so the
+        model's context ends where the user's screen ended. Falls back to a
+        local cancel+drain when the agent does not answer within
+        ``TIMEOUTS.prompt_cancel`` — an agent that ignores the notification
+        must not hang the caller.
+        """
+        # Imported here, not at module scope: condor.runtime.events imports
+        # condor.acp, so a top-level import would close the cycle.
+        from condor.runtime.timeouts import TIMEOUTS
+
+        req_id = self._current_req_id
+        if req_id is None:
+            return
+
+        future = self._peer._pending.get(req_id)
+        if future is None or future.done() or not self.alive:
+            self._cancel_locally(req_id)
+            return
+
+        try:
+            assert self._process and self._process.stdin
+            await self._peer.send_notification(
+                "session/cancel",
+                {"sessionId": self._session_id},
+                self._process.stdin,
+            )
+        except Exception as exc:  # noqa: BLE001 - a dead pipe means fall back
+            log.warning(
+                "ACP session/cancel could not be sent (%s), cancelling locally", exc
+            )
+            self._cancel_locally(req_id)
+            return
+
+        try:
+            # Shielded: the timeout must not cancel the future itself, since
+            # _on_response is what turns the agent's reply into a PromptDone.
+            await asyncio.wait_for(
+                asyncio.shield(future), timeout=TIMEOUTS.prompt_cancel
+            )
+        except asyncio.TimeoutError:
+            log.warning(
+                "Agent did not answer session/cancel in %ss — cancelling locally. "
+                "It may still be generating.",
+                TIMEOUTS.prompt_cancel,
+            )
+            self._cancel_locally(req_id)
+            return
+        except asyncio.CancelledError:
+            # Only ours to absorb when the *request* died (e.g. the read loop
+            # tore down every pending future). A cancellation aimed at this
+            # task belongs to the caller.
+            if not future.cancelled():
+                raise
+            self._cancel_locally(req_id)
+            return
+        except Exception:
+            # The agent failed the request instead of cancelling it; _on_response
+            # already mapped that onto a PromptDone.
+            pass
+
+        if self._current_req_id == req_id:
+            self._current_req_id = None
+        log.debug("ACP prompt cancelled at the agent")
 
     async def prompt(self, text: str) -> str:
         """One-shot prompt: send text, collect all agent message chunks, return joined."""
