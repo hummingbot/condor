@@ -365,6 +365,16 @@ export interface StrategySummary {
   instances: RunningInstance[];
 }
 
+/**
+ * The coordinator's slug — the Agent you get by binding none.
+ *
+ * Condor lives in the same registry as every specialist (FEAT-033), so it
+ * comes back from `/agents` like the rest. But a chat is *with* Condor
+ * precisely when `agent_slug` is empty, so any list of specialists to bind has
+ * to lift it out or offer the same identity twice.
+ */
+export const CHAT_SLUG = "condor";
+
 export interface AgentSummary {
   slug: string;
   name: string;

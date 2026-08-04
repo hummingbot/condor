@@ -27,6 +27,18 @@ export interface ChatMessage {
    * complete answer that simply stopped making sense.
    */
   interrupted?: boolean;
+  /**
+   * This bubble is the one the current turn is still being written into.
+   *
+   * The flag lives in the transcript rather than in a ref beside it because
+   * *every* decision about where a fragment goes is then made from the state
+   * the fragment is folded into, inside the same updater. A pointer held
+   * outside React had to be written when the updater ran and read when the
+   * caller ran — two different moments — and any gap between them (a commit
+   * that had not happened yet, an updater React re-ran) split one answer
+   * across several bubbles.
+   */
+  open?: boolean;
 }
 
 export interface SlotInfo {
@@ -90,40 +102,54 @@ function nextMsgId(): string {
  * Where the next streamed fragment goes, or -1 for "open a new bubble".
  *
  * The bubble being streamed into only counts while it is still the *last*
- * message. Anything appended after it — the next question, a handover divider —
- * ends that turn as far as the transcript is concerned, whatever the wire says.
- * Without this the id of a bubble whose `prompt_done` was missed (a WS drop
- * mid-answer, a late chunk) keeps swallowing the next answer, and that answer
- * renders *above* the question it answers.
+ * message and its turn has not ended. Anything appended after it — the next
+ * question, a handover divider — ends that turn as far as the transcript is
+ * concerned, whatever the wire says. Without the position check a bubble whose
+ * `prompt_done` was missed (a WS drop mid-answer, a late chunk) keeps
+ * swallowing the next answer, and that answer renders *above* the question it
+ * answers.
  */
-function streamTarget(msgs: ChatMessage[], curId: string | null): number {
-  if (!curId) return -1;
+function streamTarget(msgs: ChatMessage[]): number {
   const last = msgs.length - 1;
-  return last >= 0 && msgs[last].id === curId ? last : -1;
+  return last >= 0 && msgs[last].open ? last : -1;
 }
 
 /**
  * Fold one fragment into the slot's open bubble, opening one if needed.
  *
- * Returns the new message list. `assign` is handed the id of a bubble that had
- * to be opened, which is what makes the next fragment continue this one rather
- * than open another.
+ * A pure function of the list it is handed: the bubble a fragment continues is
+ * the one the list itself marks as open, so nothing outside React has to
+ * remember which bubble that was between two commits.
  */
 function foldIntoStream(
   msgs: ChatMessage[],
-  curId: string | null,
   patch: (m: ChatMessage) => ChatMessage,
-  assign: (id: string) => void,
 ): ChatMessage[] {
   const out = [...msgs];
-  const idx = streamTarget(out, curId);
+  const idx = streamTarget(out);
   if (idx < 0) {
-    const id = nextMsgId();
-    assign(id);
-    out.push(patch({ id, role: "assistant", text: "", toolCalls: [] }));
+    out.push(
+      patch({ id: nextMsgId(), role: "assistant", text: "", toolCalls: [], open: true }),
+    );
   } else {
     out[idx] = patch(out[idx]);
   }
+  return out;
+}
+
+/**
+ * End the turn: whatever is on screen is what was said.
+ *
+ * Only the last message can be open — a bubble stops being foldable the moment
+ * anything is appended after it — so closing it is enough, and returning the
+ * same array when there is nothing to close keeps a `prompt_done` for an idle
+ * slot from re-rendering the transcript.
+ */
+function closeStream(msgs: ChatMessage[]): ChatMessage[] {
+  const last = msgs.length - 1;
+  if (last < 0 || !msgs[last].open) return msgs;
+  const out = [...msgs];
+  out[last] = { ...out[last], open: false };
   return out;
 }
 
@@ -210,8 +236,8 @@ export function useChatSocket() {
   // down must not be hammered once per interval by every open tab.
   const reconnectDelay = useRef(1000);
   const MAX_RECONNECT_DELAY = 30000;
-  // Track current assistant message per slot
-  const currentAssistantMsg = useRef<Record<string, string | null>>({});
+  // Which bubble a slot is streaming into is not tracked here: it is the
+  // `open` message in the slot's own transcript. See `foldIntoStream`.
   // Conversations already fetched, so a WS reconnect doesn't re-hydrate a slot
   // that is mid-answer and clobber the streaming bubble.
   const hydratedSlots = useRef<Set<string>>(new Set());
@@ -324,25 +350,20 @@ export function useChatSocket() {
    * handover divider takes over as the last message, or the fold would file it
    * into a new bubble sitting below them.
    *
-   * `endedSlot` closes that slot's turn, which is why the pointer reset lives
-   * here rather than in the callers: `setSlots` runs its updater when React
-   * renders, long after the caller returned, so a caller that cleared the
-   * pointer on its own line would have already cleared it by the time the fold
-   * looked. The tail would open a stray bubble under the answer it belongs to,
-   * and leave the pointer aimed at that stray — which the *next* answer would
-   * then continue.
+   * `endedSlot` closes that slot's turn in the same updater that lands its
+   * tail, and that ordering is the whole point: the tail belongs to the answer
+   * above it, and the next answer must not continue the bubble it landed in.
+   * Both facts are decided from the transcript being written, so no window
+   * exists in which a fragment can be filed against a bubble that no longer
+   * is — or is not yet — the open one.
    */
   const flushChunks = useCallback((endedSlot?: string) => {
     clearTimeout(flushTimer.current);
     flushTimer.current = undefined;
     const pending = pendingChunks.current;
     const hasPending = Object.keys(pending).length > 0;
-    // Snapshotted before the reset below so the fold reads where the tail
-    // belonged, not where the pointer ended up. A plain object copy is enough:
-    // the updater must not depend on anything that can move under it.
-    const pointers = hasPending ? { ...currentAssistantMsg.current } : null;
-    if (endedSlot) currentAssistantMsg.current[endedSlot] = null;
-    if (!pointers) return;
+    // A turn that ends still has to be closed, even with nothing buffered.
+    if (!hasPending && !endedSlot) return;
     // Drained before the updater runs, so a re-invoked updater (StrictMode,
     // concurrent rendering) replays the same fragments instead of appending
     // whatever has arrived since.
@@ -351,26 +372,20 @@ export function useChatSocket() {
       prev.map((s) => {
         const slot = s.info.slot_id;
         const buf = pending[slot];
-        if (!buf) return s;
-        return {
-          ...s,
-          messages: foldIntoStream(
-            s.messages,
-            pointers[slot] ?? null,
-            (m) => ({
-              ...m,
-              text: m.text + buf.text,
-              // Left alone when nothing was buffered, so a bubble with no
-              // reasoning keeps `thought` undefined rather than gaining "".
-              thought: buf.thought ? (m.thought || "") + buf.thought : m.thought,
-            }),
-            // A bubble opened to hold the tail of a turn that is already over
-            // must not become the pointer, or the next answer continues it.
-            (id) => {
-              if (slot !== endedSlot) currentAssistantMsg.current[slot] = id;
-            },
-          ),
-        };
+        const ends = slot === endedSlot;
+        if (!buf && !ends) return s;
+        let messages = s.messages;
+        if (buf) {
+          messages = foldIntoStream(messages, (m) => ({
+            ...m,
+            text: m.text + buf.text,
+            // Left alone when nothing was buffered, so a bubble with no
+            // reasoning keeps `thought` undefined rather than gaining "".
+            thought: buf.thought ? (m.thought || "") + buf.thought : m.thought,
+          }));
+        }
+        if (ends) messages = closeStream(messages);
+        return messages === s.messages ? s : { ...s, messages };
       }),
     );
   }, []);
@@ -401,8 +416,7 @@ export function useChatSocket() {
    * The low-frequency half of the stream — a tool call is not what makes the
    * transcript expensive, and deferring it would only delay the spinner.
    * `streamTarget` decides whether it continues the bubble in progress or
-   * opens a new one, the new bubble's id becomes this slot's current one, and
-   * the slot counts as streaming from its first fragment.
+   * opens a new one, and the slot counts as streaming from its first fragment.
    */
   const appendToStream = useCallback(
     (slotId: string, patch: (m: ChatMessage) => ChatMessage) => {
@@ -412,15 +426,7 @@ export function useChatSocket() {
       setSlots((prev) =>
         prev.map((s) =>
           s.info.slot_id === slotId
-            ? {
-                ...s,
-                messages: foldIntoStream(
-                  s.messages,
-                  currentAssistantMsg.current[slotId],
-                  patch,
-                  (id) => (currentAssistantMsg.current[slotId] = id),
-                ),
-              }
+            ? { ...s, messages: foldIntoStream(s.messages, patch) }
             : s,
         ),
       );
@@ -935,9 +941,9 @@ export function useChatSocket() {
       //
       // The same call closes whatever bubble was open. The wire is supposed to
       // say so with `prompt_done`, but that event can be missed (a WS drop
-      // mid-answer) — and a stale pointer would file the *next* answer into a
-      // bubble sitting above this message, reading as an answer given before
-      // it was asked.
+      // mid-answer) — and a bubble left open would swallow the *next* answer
+      // into a bubble sitting above this message, reading as an answer given
+      // before it was asked.
       flushChunks(slotId);
       updateSlotMessages(slotId, (msgs) => [
         ...settleToolCalls(msgs),
@@ -1106,11 +1112,9 @@ export function useChatSocket() {
 
   const destroySession = useCallback(
     (slotId: string) => {
-      currentAssistantMsg.current[slotId] = null;
       delete outbox.current[slotId];
-      // The tab is going away, so its tail has nowhere to land — and with the
-      // pointer above cleared, flushing it would only open a fresh bubble in a
-      // conversation the user just closed.
+      // The tab is going away, so its tail has nowhere to land: flushing it
+      // would only write into a conversation the user just closed.
       delete pendingChunks.current[slotId];
       // A new chat closed before its conversation was minted has no id the
       // backend knows, so there is nothing to ask it to destroy. (A pending
