@@ -337,12 +337,17 @@ class ACPClient:
         permission_callback: PermissionCallback | None = None,
         extra_env: dict[str, str] | None = None,
         model: str | None = None,
+        system_prompt: str = "",
     ):
         self.command = command
         self.working_dir = working_dir or os.getcwd()
         self.mcp_servers: list[dict[str, Any]] = mcp_servers or []
         self.permission_callback = permission_callback
         self.extra_env = extra_env
+        # Text APPENDED to the host's own system prompt (see start()). The only
+        # true system-level channel an ACP session has — everything else Condor
+        # sends arrives as a user turn and loses the argument (FEAT-025).
+        self.system_prompt = system_prompt
         # Requested model preference (e.g. "sonnet"); selected over the ACP
         # protocol after session/new since the bridge ignores ANTHROPIC_MODEL.
         self.model = model
@@ -360,6 +365,29 @@ class ACPClient:
         )
 
     # --- Lifecycle ---
+
+    def _session_new_params(self) -> dict[str, Any]:
+        """Params for the ``session/new`` handshake.
+
+        ``claude-agent-acp`` reads ``_meta.systemPrompt`` here and forwards it to
+        the agent SDK: a bare string REPLACES the host preset, ``{"append": …}``
+        adds to it. We append, so a bound Agent keeps Claude Code's tool
+        discipline and only gains its own identity.
+
+        This is the channel that decides *who the model thinks it is*. An MCP
+        server's ``instructions`` do reach the model and it follows the routing
+        rules in them, but they read as guidance from a tool server, not as
+        identity — with them alone a bound Agent still answers "I'm Claude Code"
+        (FEAT-025, measured both ways against bridge 0.21.0). A bridge that
+        ignores ``_meta`` simply drops it; the handshake is unaffected.
+        """
+        params: dict[str, Any] = {
+            "cwd": self.working_dir,
+            "mcpServers": self.mcp_servers,
+        }
+        if self.system_prompt:
+            params["_meta"] = {"systemPrompt": {"append": self.system_prompt}}
+        return params
 
     async def start(self) -> None:
         """Spawn subprocess, run ACP handshake (initialize + session/new)."""
@@ -392,7 +420,7 @@ class ACPClient:
             )
             result = await self._peer.send_request(
                 "session/new",
-                {"cwd": self.working_dir, "mcpServers": self.mcp_servers},
+                self._session_new_params(),
                 self._process.stdin,
             )
         except Exception:

@@ -22,17 +22,9 @@ from mcp_servers.condor.tools import (
 )
 
 
-def _build_instructions() -> str:
-    """Server-level instructions surfaced to the MCP host on connect.
-
-    An external MCP client (Claude Code, Cursor, …) only receives a flat list of
-    tool names — it never sees Condor's skills/agents indexes, which are injected
-    only into the in-bot `/agent` brain prompt. Without this, the host reaches for
-    whatever obvious tool is in scope (e.g. a raw `manage_bots`) instead of the
-    matching Condor playbook. We embed the live indexes here so any host can route
-    a request to the right skill/agent. Built once at import; cheap and read-only.
-    """
-    base = (
+def _chat_base() -> str:
+    """Routing rules for the Condor coordinator — the unbound chat assistant."""
+    return (
         "Condor exposes reusable **skills** (playbooks, some linked to a runnable "
         "routine) and consultable **domain agents** on top of these tools.\n\n"
         "ROUTING RULE — before handling a request with raw tools (including tools "
@@ -63,14 +55,88 @@ def _build_instructions() -> str:
         'Discover more anytime with `manage_skill(action="list")`.'
     )
 
-    sections = [base]
+
+def _agent_base(slug: str, name: str) -> str:
+    """Routing rules for a subprocess launched AS an Agent (``--agent-slug``).
+
+    Same three-tier priority, read from the specialist's seat: its skills are
+    its own playbooks, routine authoring still belongs to ``routine_builder``
+    (unless it IS ``routine_builder``), and consulting is for work outside its
+    domain — never for itself.
+    """
+    from condor.agents.agent import identity_header
+
+    routines_rule = (
+        "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
+        "design a routine MUST go through the `routine_builder` agent "
+        '(`consult(agent="routine_builder", ...)` for inline work, '
+        '`delegate(action="start", agent="routine_builder", ...)` for background). '
+        "It is the single entry point for routine authoring — do NOT write routine "
+        "code yourself and do NOT hand-roll it with raw `manage_routines` "
+        "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
+        '— for that just call `manage_routines(action="run", name="...")`.)\n'
+        if slug != "routine_builder"
+        else "- ROUTINE AUTHORING IS YOURS: you are the single entry point for "
+        "creating, editing, fixing and debugging routines. Do that work here — "
+        "never hand it to another agent.\n"
+    )
+    return (
+        f"{identity_header(slug, name)}\n\n"
+        "ROUTING RULE — you are the specialist, so domain work is yours to do. "
+        "Before reaching for raw tools (including tools from other connected MCP "
+        "servers such as mcp-hummingbot):\n"
+        "- Your own SKILLS below are playbooks YOU follow: read one with "
+        '`manage_skill(action="read", name="<name>")` and follow its steps. When '
+        'it links a routine (shown as "→ routine: X"), run that routine via '
+        '`manage_routines(action="run", name="X", config={})` instead of '
+        "reimplementing it by hand.\n"
+        f"{routines_rule}"
+        "- You MAY consult a PEER agent listed below for work outside your own "
+        'domain (`consult(agent="<slug>", task="...", context="...")`, or '
+        '`delegate(action="start", agent="<slug>", task="...")` for a long '
+        "background task). Say plainly that you are handing it over rather than "
+        "answering outside your competence.\n"
+        "- Only fall back to raw tools when nothing matches.\n"
+        'Discover your own playbooks anytime with `manage_skill(action="list")`.'
+    )
+
+
+def _build_instructions() -> str:
+    """Server-level instructions surfaced to the MCP host on connect.
+
+    An external MCP client (Claude Code, Cursor, …) only receives a flat list of
+    tool names — it never sees Condor's skills/agents indexes, which are injected
+    only into the in-bot `/agent` brain prompt. Without this, the host reaches for
+    whatever obvious tool is in scope (e.g. a raw `manage_bots`) instead of the
+    matching Condor playbook. We embed the live indexes here so any host can route
+    a request to the right skill/agent. Built once at import; cheap and read-only.
+
+    One rule governs all three sections: **this text describes the assistant this
+    subprocess belongs to**. Under ACP v1 there is no system-prompt channel
+    (`session/new` carries only cwd + mcpServers), so these instructions are the
+    strongest frame Condor controls — which is why a subprocess launched with
+    ``--agent-slug`` must read its own identity here and not the coordinator's
+    (FEAT-025).
+    """
+    from mcp_servers.condor.settings import settings
+
+    slug = settings.agent_slug or ""
+    agent = None
+    if slug:
+        try:
+            from condor.agents.agent import AgentStore
+
+            agent = AgentStore().get(slug)
+        except Exception:
+            pass  # Unknown/unreadable slug degrades to the coordinator text.
+
+    sections = [_agent_base(slug, agent.name) if agent else _chat_base()]
     try:
         from condor.memory import SkillStore
-        from mcp_servers.condor.settings import settings
 
         # Scope to the launched assistant: an agent subprocess (--agent-slug) must
         # advertise ITS OWN skills here, not the chat condor's global library.
-        skills_index = SkillStore(settings.agent_slug or None).list_index()
+        skills_index = SkillStore(slug or None).list_index()
         if skills_index:
             sections.append(
                 "[SKILLS — read the playbook before a matching flow]\n" + skills_index
@@ -80,9 +146,16 @@ def _build_instructions() -> str:
     try:
         from condor.agents.agent import AgentStore
 
-        agents_index = AgentStore().list_index()
+        # Self is excluded only when we actually resolved it: an agent told it can
+        # consult itself is exactly the bug this fixes.
+        agents_index = AgentStore().list_index(exclude=agent.slug if agent else "")
         if agents_index:
-            sections.append("[AGENTS — consult for domain work]\n" + agents_index)
+            header = (
+                "[PEER AGENTS — consult for work outside your domain]"
+                if agent
+                else "[AGENTS — consult for domain work]"
+            )
+            sections.append(f"{header}\n{agents_index}")
     except Exception:
         pass
 

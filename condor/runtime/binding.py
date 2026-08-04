@@ -124,13 +124,23 @@ def _resolve_agent(spec: SessionSpec, user_data: dict | None) -> SessionBinding:
     )
 
 
-def agent_identity_context(agent_slug: str, user_id: int, instructions: str) -> str:
+def agent_identity_context(
+    agent_slug: str, user_id: int, instructions: str, label: str = ""
+) -> str:
     """Identity + domain memory/skills the bound Agent opens the chat with.
 
     Mirrors ``build_agent_context`` (used by consult) minus the consult request,
     so a chatted Agent starts from the same self-knowledge a consulted one does.
+
+    Leads with :func:`~condor.agents.agent.identity_header` — the same line the
+    condor MCP server puts in the system prompt — because AGENT.md describes the
+    domain but never says which agent this is (FEAT-025).
     """
-    sections: list[str] = [instructions] if instructions else []
+    from condor.agents.agent import identity_header
+
+    sections: list[str] = [identity_header(agent_slug, label)]
+    if instructions:
+        sections.append(instructions)
 
     try:
         from condor.memory import MemoryStore
