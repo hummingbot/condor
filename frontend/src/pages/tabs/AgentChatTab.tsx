@@ -5,6 +5,7 @@ import {
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
+  Plus,
   Server,
   Zap,
 } from "lucide-react";
@@ -29,6 +30,9 @@ const CONDOR_STARTERS = [
   "Any positions at risk?",
 ];
 const AGENT_STARTERS = ["What are you working on?", "Review your last session"];
+
+/** Go to my conversation with them, or start another one regardless. */
+type TalkIntent = "focus" | "fresh";
 
 /**
  * The chat workspace — what `/agents` opens on.
@@ -84,15 +88,27 @@ export function AgentChatTab({
   const isActiveStreaming = chat.streamingSlotId === chat.activeSlotId;
 
   /**
-   * Talk to someone: focus their live conversation if there is one, else spawn
-   * exactly one session already bound to them.
+   * Talk to someone.
+   *
+   * `"focus"` is the contact-list gesture — go to my conversation with them,
+   * starting one only if none is live. `"fresh"` skips the lookup and always
+   * spawns, which is the only way to get a second chat with the same agent.
+   * Nothing spawns that the user did not ask for either way, so the per-user
+   * session cap stays a non-issue.
    */
-  const talkTo = (agentSlug: string, initialText?: string) => {
-    const live = chat.slots.find((s) => (s.info.agent_slug || "") === agentSlug);
-    if (live) {
-      chat.setActiveSlotId(live.info.slot_id);
-      if (initialText) chat.sendMessage(live.info.slot_id, initialText);
-      return;
+  const talkTo = (
+    agentSlug: string,
+    opts?: { intent?: TalkIntent; text?: string },
+  ) => {
+    if ((opts?.intent ?? "focus") === "focus") {
+      const live = chat.slots.find(
+        (s) => (s.info.agent_slug || "") === agentSlug,
+      );
+      if (live) {
+        chat.setActiveSlotId(live.info.slot_id);
+        if (opts?.text) chat.sendMessage(live.info.slot_id, opts.text);
+        return;
+      }
     }
     const slotId = chat.startSession(
       defaultAgent,
@@ -102,8 +118,14 @@ export function AgentChatTab({
     );
     // The tab is on screen before the spawn is; the outbox flushes this the
     // moment the session lands, which is what makes a new chat feel warm.
-    if (initialText) chat.sendMessage(slotId, initialText);
+    if (opts?.text) chat.sendMessage(slotId, opts.text);
   };
+
+  /**
+   * Who "New chat" means: the conversation you are in, or — before there is
+   * one — the rail row you highlighted. Both are what the user is pointing at.
+   */
+  const selectedSlug = activeSlot?.info.agent_slug ?? pendingAgent?.slug ?? "";
 
   // "Chat" on an agent's detail page arrives as `?agent=<slug>`: focus or start
   // that conversation once, then drop the param so a reload is not a respawn.
@@ -182,6 +204,11 @@ export function AgentChatTab({
               setPendingAgent(null);
               talkTo("");
             }}
+            newTitle="New chat with Condor"
+            onNew={() => {
+              setPendingAgent(null);
+              talkTo("", { intent: "fresh" });
+            }}
           />
           {agents.map((agent) => (
             <RailRow
@@ -195,6 +222,11 @@ export function AgentChatTab({
                 setPendingAgent(agent);
                 talkTo(agent.slug);
               }}
+              newTitle={`New chat with ${agent.name}`}
+              onNew={() => {
+                setPendingAgent(agent);
+                talkTo(agent.slug, { intent: "fresh" });
+              }}
             />
           ))}
         </div>
@@ -204,10 +236,9 @@ export function AgentChatTab({
           variant="inline"
           liveIds={liveIds}
           activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
-          onNew={() => {
-            setPendingAgent(null);
-            chat.startSession(defaultAgent, defaultMode, server || undefined);
-          }}
+          // "New chat" means a fresh one with whoever is selected — Condor
+          // only when Condor is who you are pointing at.
+          onNew={() => talkTo(selectedSlug, { intent: "fresh" })}
           onOpen={(meta) => {
             setRailOpen(false);
             chat.resumeConversation(meta.id, {
@@ -295,7 +326,7 @@ export function AgentChatTab({
                 customProviders={customProviders}
                 agentBindings={agentBindings}
                 defaultAgent={defaultAgent}
-                onAsk={(text) => talkTo(heroAgent?.slug || "", text)}
+                onAsk={(text) => talkTo(heroAgent?.slug || "", { text })}
                 onPickBrain={(sel) => {
                   if (sel.agentSlug !== undefined) {
                     setPendingAgent(
@@ -328,6 +359,8 @@ function RailRow({
   active,
   title,
   onClick,
+  onNew,
+  newTitle,
 }: {
   label: string;
   icon: React.ReactNode;
@@ -335,12 +368,15 @@ function RailRow({
   active?: boolean;
   title?: string;
   onClick: () => void;
+  /** Start a *second* conversation with this row, rather than focusing one. */
+  onNew?: () => void;
+  newTitle?: string;
 }) {
   return (
     <button
       onClick={onClick}
       title={title}
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
+      className={`group flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors ${
         active
           ? "bg-[var(--color-primary)]/10 text-[var(--color-primary)]"
           : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
@@ -353,6 +389,32 @@ function RailRow({
           className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
           title="Loop running"
         />
+      )}
+      {onNew && (
+        // A span, not a button: this sits inside the row's own button. Below
+        // `md` the rail is a touch overlay where hover does not exist, so the
+        // `+` stays visible there and only hides behind hover on the desktop
+        // rail. The same shape the panel's session tabs use to close.
+        <span
+          role="button"
+          tabIndex={0}
+          aria-label={newTitle}
+          title={newTitle}
+          onClick={(e) => {
+            e.stopPropagation();
+            onNew();
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              e.stopPropagation();
+              onNew();
+            }
+          }}
+          className="shrink-0 rounded p-0.5 text-[var(--color-text-muted)] transition-opacity hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] focus-visible:opacity-100 group-focus-within:opacity-100 md:opacity-0 md:group-hover:opacity-100"
+        >
+          <Plus className="h-3 w-3" />
+        </span>
       )}
     </button>
   );
