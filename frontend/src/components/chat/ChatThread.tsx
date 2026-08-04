@@ -34,6 +34,7 @@ export function ChatThread({
   slot,
   agents,
   isStreaming,
+  isQueued = false,
   permissionRequest,
   onResolvePermission,
   switchError,
@@ -49,6 +50,12 @@ export function ChatThread({
   slot: ChatSlot | null;
   agents: ChatAgentOption[];
   isStreaming: boolean;
+  /**
+   * The turn was accepted but has not started — it is waiting behind the one
+   * in front of it. Shown rather than hidden: a queued message that looked
+   * identical to a dropped one is the bug this replaces.
+   */
+  isQueued?: boolean;
   permissionRequest: { request_id: string; summary: string } | null;
   onResolvePermission: (requestId: string, approved: boolean) => void;
   switchError?: string | null;
@@ -229,6 +236,12 @@ export function ChatThread({
               />
             ))
           )}
+          {isQueued && (
+            <div className="mb-3 flex items-center gap-1.5 pl-8 text-[11px] text-[var(--color-text-muted)]">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Waiting its turn
+            </div>
+          )}
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -238,7 +251,10 @@ export function ChatThread({
         <div className={columnClassName}>
           <ChatInput
             onSend={onSend}
-            disabled={isStreaming}
+            // Deliberately not `disabled={isStreaming}`. The composer stays
+            // live while the agent answers: sending mid-answer is how the user
+            // redirects it, and a dead input was the reason the correction had
+            // nowhere to go (FEAT-030).
             isStreaming={isStreaming}
             onAbort={onAbort}
             autoFocus={autoFocus}

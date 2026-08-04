@@ -20,6 +20,13 @@ export interface ChatMessage {
   thought?: string;
   /** System messages only: "switch" | "error" | "delegation". */
   kind?: string;
+  /**
+   * The user redirected the agent while this answer was being written. The
+   * partial stays on screen — its context survives into the next turn, so
+   * nothing is actually lost — but it is marked so it does not read as a
+   * complete answer that simply stopped making sense.
+   */
+  interrupted?: boolean;
 }
 
 export interface SlotInfo {
@@ -228,6 +235,10 @@ export function useChatSocket() {
   // first cleared it for all of them, stopping the other tabs' spinners and
   // re-enabling their composer and brain picker underneath a live prompt.
   const [streamingSlots, setStreamingSlots] = useState<Record<string, true>>({});
+  // Conversations whose turn has been accepted but has not started — it is
+  // waiting behind the one in front of it. Keyed by slot like everything else
+  // here, and short-lived: the first fragment of the answer clears it.
+  const [queuedSlots, setQueuedSlots] = useState<Record<string, true>>({});
   // Keyed by the conversation that raised it, like every other per-slot piece
   // of state here. As a single scalar this was both misattributed — the banner
   // rendered in whatever tab was open — and lossy: a second confirmation
@@ -253,19 +264,37 @@ export function useChatSocket() {
   // A slot is streaming from its first fragment until its prompt ends. Both
   // helpers return the previous object when nothing changes: chunks arrive
   // rapid-fire, and a fresh object per chunk would re-render every consumer.
-  const startStreaming = useCallback((slotId: string) => {
-    setStreamingSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
-  }, []);
-
-  /** End streaming for *one* conversation. Never for the others. */
-  const stopStreaming = useCallback((slotId: string) => {
-    setStreamingSlots((prev) => {
+  const clearQueued = useCallback((slotId: string) => {
+    setQueuedSlots((prev) => {
       if (!(slotId in prev)) return prev;
       const next = { ...prev };
       delete next[slotId];
       return next;
     });
   }, []);
+
+  const startStreaming = useCallback(
+    (slotId: string) => {
+      setStreamingSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
+      // The wait is over the moment the answer starts arriving.
+      clearQueued(slotId);
+    },
+    [clearQueued],
+  );
+
+  /** End streaming for *one* conversation. Never for the others. */
+  const stopStreaming = useCallback(
+    (slotId: string) => {
+      setStreamingSlots((prev) => {
+        if (!(slotId in prev)) return prev;
+        const next = { ...prev };
+        delete next[slotId];
+        return next;
+      });
+      clearQueued(slotId);
+    },
+    [clearQueued],
+  );
 
   // ── Streamed fragments are coalesced, not committed one per frame ──
   //
@@ -793,6 +822,39 @@ export function useChatSocket() {
           break;
         }
 
+        case "prompt_interrupted": {
+          // The user redirected the agent. Whatever had streamed so far is
+          // committed and marked, rather than left looking like a finished
+          // answer that trailed off — the alternative the old dead composer
+          // avoided by never letting this happen at all.
+          if (!slotId) break;
+          flushChunks(slotId);
+          setSlots((prev) =>
+            prev.map((s) => {
+              if (s.info.slot_id !== slotId) return s;
+              const msgs = settleToolCalls(s.messages);
+              // The partial is the last thing the agent said. The user's new
+              // message is already below it — `sendMessage` appended it before
+              // the wire even carried it — so this walks back to find it.
+              const idx = msgs.map((m) => m.role).lastIndexOf("assistant");
+              if (idx < 0) return { ...s, messages: msgs };
+              const marked = [...msgs];
+              marked[idx] = { ...marked[idx], interrupted: true };
+              return { ...s, messages: marked };
+            }),
+          );
+          stopStreaming(slotId);
+          break;
+        }
+
+        case "queued": {
+          // Accepted, not started. Saying so is the difference between "the
+          // dashboard ate my message" and "it is next in line".
+          if (!slotId) break;
+          setQueuedSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
+          break;
+        }
+
         case "prompt_done":
           if (slotId) {
             // The tail of the answer is still buffered when the prompt ends
@@ -1138,6 +1200,11 @@ export function useChatSocket() {
   );
   /** Any conversation at all, for chrome that is not tied to one tab. */
   const isStreaming = Object.keys(streamingSlots).length > 0;
+  /** Is *this* conversation waiting for the turn ahead of it to finish? */
+  const isSlotQueued = useCallback(
+    (slotId: string | null | undefined) => !!slotId && slotId in queuedSlots,
+    [queuedSlots],
+  );
   // What the conversation on screen is being asked to approve — and nothing
   // else. A request raised elsewhere stays in the map, where the tab strip
   // badges it, so it is visible without being answerable from the wrong chat.
@@ -1155,6 +1222,7 @@ export function useChatSocket() {
     isStreaming,
     streamingSlots,
     isSlotStreaming,
+    isSlotQueued,
     permissionRequest,
     permissionRequests,
     connect,
