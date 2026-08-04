@@ -90,6 +90,12 @@ async def _get_user_sessions(user_id: int) -> list[dict]:
             # than the model it happens to run on.
             "agent_slug": info.agent_slug,
             "label": info.label,
+            # Recency, so a reconnecting client can land on the conversation
+            # its user was last in instead of on whatever this list yields
+            # first. Null until the session has been prompted once.
+            "last_prompt_at": (
+                info.last_prompt_at.isoformat() if info.last_prompt_at else None
+            ),
         }
         for info in await runtime.list_sessions(user_id)
         if info.surface == WEB and info.alive

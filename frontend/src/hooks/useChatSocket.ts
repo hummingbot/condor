@@ -33,6 +33,12 @@ export interface SlotInfo {
   agent_slug?: string;
   /** Display name of whoever is answering. */
   label?: string;
+  /**
+   * ISO timestamp of the last turn, or null for a session never prompted.
+   * Only the roster carries it — it is what makes a reload land on the
+   * conversation you were last in.
+   */
+  last_prompt_at?: string | null;
 }
 
 export interface ChatSlot {
@@ -354,7 +360,16 @@ export function useChatSocket() {
             });
             setActiveSlotId((prev) => {
               if (prev && (known.has(prev) || pendingIds.has(prev))) return prev;
-              return sessions[0].slot_id;
+              // Land on the conversation with the most recent turn rather than
+              // on whatever the roster lists first — server order is not
+              // recency, and the oldest chat is rarely the one you meant.
+              // Comparing the ISO strings is enough; they are all UTC. The
+              // roster itself is left in place: slot order is tab order, and
+              // reordering tabs on every reconnect would be its own annoyance.
+              const latest = sessions.reduce((best, s) =>
+                (s.last_prompt_at || "") > (best.last_prompt_at || "") ? s : best,
+              );
+              return latest.slot_id;
             });
             for (const info of sessions) {
               void hydrateSlot(info.conversation_id || info.slot_id, info.slot_id);
