@@ -80,13 +80,10 @@ async def fetch_rates(
     if not trading_pairs:
         return {}
 
-    body: Dict[str, Any] = {"trading_pairs": trading_pairs}
-    if connector_name:
-        body["connector"] = connector_name
-
     try:
-        # No client-lib method for this endpoint yet — call it directly.
-        result = await client.market_data._post("/market-data/rates", json=body)
+        result = await client.market_data.get_rates(
+            trading_pairs, connector=connector_name or None
+        )
     except Exception as e:
         if strict:
             raise
@@ -188,10 +185,7 @@ async def fetch_ticker_pool(client, **_kw) -> Dict[str, Any]:
     """
     empty: Dict[str, Any] = {"connectors": {}, "prices": {}, "updated_at": {}}
     try:
-        # No client-lib method for this endpoint yet — call it directly.
-        result = await client.market_data._get(
-            "/market-data/tickers", params={"refresh": "false"}
-        )
+        result = await client.market_data.get_tickers()
     except Exception as e:
         error_str = str(e)
         if "404" in error_str or "not found" in error_str.lower():
@@ -238,11 +232,7 @@ async def fetch_tickers(client, connector_name: str = "", **_kw) -> Dict[str, An
         return {"tickers": {}, "updated_at": None}
 
     try:
-        # No client-lib method for this endpoint yet — call it directly.
-        result = await client.market_data._get(
-            "/market-data/tickers",
-            params={"connectors": connector_name, "refresh": "false"},
-        )
+        result = await client.market_data.get_tickers(connector_name)
     except Exception as e:
         error_str = str(e)
         if "404" in error_str or "not found" in error_str.lower():

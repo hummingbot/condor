@@ -321,6 +321,7 @@ export function AgentChatTab({
               activeSlot && chat.sendMessage(activeSlot.info.slot_id, text)
             }
             onAbort={() => chat.activeSlotId && chat.abortPrompt(chat.activeSlotId)}
+            boundAgent={boundAgent}
             columnClassName="mx-auto w-full max-w-3xl"
             autoFocus
             emptyState={
