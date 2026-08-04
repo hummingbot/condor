@@ -1636,15 +1636,17 @@ async def agent_message_handler(
             await update.message.reply_text(f"Failed to start agent: {e}")
             return
 
-    # Check if busy
+    # Busy is an acknowledgement, not a refusal. The message really is queued
+    # now: `on_busy="queue"` below lets it block on the session lock, which is
+    # FIFO, so several messages sent mid-answer are answered in the order they
+    # were sent. Telegram has no Stop button and no live composer, so silently
+    # killing a running answer because someone sent a second thought would be
+    # hostile — the dashboard steers, this waits.
     if session.is_busy:
         await update.message.reply_text(
-            r"⏳ Still working on the previous request\.\.\."
-            "\n"
-            r"Your message will be queued — or wait for it to finish\.",
+            r"⏳ Queued\. It will run when the current answer finishes\.",
             parse_mode="MarkdownV2",
         )
-        return
 
     prefix = ""
 
@@ -1672,7 +1674,9 @@ async def agent_message_handler(
 
     last_event = None
     try:
-        async for event in runtime.prompt(_tg_key(chat_id), PromptRequest(text=text)):
+        async for event in runtime.prompt(
+            _tg_key(chat_id), PromptRequest(text=text), on_busy="queue"
+        ):
             await streamer.process_event(event)
             last_event = event
     except Exception as e:
