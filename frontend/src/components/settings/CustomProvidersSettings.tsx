@@ -26,8 +26,10 @@ export function CustomProvidersSettings() {
 
   const invalidate = () => {
     qc.invalidateQueries({ queryKey: ["custom-providers"] });
-    // The chat model dropdown reads the same list
-    qc.invalidateQueries({ queryKey: ["chat-options"] });
+    // The chat model dropdown reads the same list through `useSessionOptions`,
+    // which caches with `staleTime: Infinity` — without this it would never
+    // pick up an added or forgotten endpoint short of a page reload.
+    qc.invalidateQueries({ queryKey: ["session-options"] });
   };
 
   const remove = useMutation({
