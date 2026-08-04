@@ -3,13 +3,11 @@ import {
   Activity,
   AlertTriangle,
   Camera,
-  Check,
   ChevronDown,
   ChevronLeft,
   ChevronRight,
   FlaskConical,
   LayoutList,
-  Loader2,
   X,
   Zap,
 } from "lucide-react";
@@ -24,6 +22,7 @@ import {
   SessionSnapshots,
 } from "@/components/agent/AgentSessionContent";
 import { MODE_STYLES } from "@/components/agent/modeStyles";
+import { ToolCallStatusIcon } from "@/components/chat/ToolCallStatus";
 import { type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
 import { formatCurrencyPnl, formatDateTime, formatToolName } from "@/lib/formatters";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
@@ -455,13 +454,7 @@ export function SessionReviewer({
                     <div className="space-y-1.5">
                       {parsedSnapshot.toolCalls.map((tc, i) => (
                         <div key={i} className="flex items-center gap-2 rounded-md bg-[var(--color-bg)]/50 px-3 py-2 text-xs">
-                          {tc.status === "completed" ? (
-                            <Check className="h-3.5 w-3.5 shrink-0 text-emerald-400" />
-                          ) : tc.status === "failed" ? (
-                            <X className="h-3.5 w-3.5 shrink-0 text-red-400" />
-                          ) : (
-                            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-[var(--color-text-muted)]" />
-                          )}
+                          <ToolCallStatusIcon status={tc.status} size="h-3.5 w-3.5" />
                           <span className="font-medium capitalize text-[var(--color-text)]">{formatToolName(tc.name)}</span>
                           <span className="ml-auto font-mono text-[10px] text-[var(--color-text-muted)]/60">{tc.name}</span>
                         </div>

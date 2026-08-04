@@ -1,24 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
-import { Check, ChevronDown, ChevronRight, Loader2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { ToolCallStatusIcon } from "@/components/chat/ToolCallStatus";
 import { type DelegationEvent, api } from "@/lib/api";
 import { formatToolName } from "@/lib/formatters";
-
-function StatusIcon({ status }: { status: string }) {
-  switch (status) {
-    case "completed":
-      return <Check className="h-3 w-3 shrink-0 text-green-500" />;
-    case "failed":
-      return <X className="h-3 w-3 shrink-0 text-red-500" />;
-    default:
-      return (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-[var(--color-text-muted)]" />
-      );
-  }
-}
 
 /** Reasoning, collapsed by default — it is context, not the answer. */
 function ThoughtRow({ text }: { text: string }) {
@@ -71,7 +59,7 @@ function ToolRow({
         ) : (
           <span className="h-3 w-3" />
         )}
-        <StatusIcon status={event.status} />
+        <ToolCallStatusIcon status={event.status} />
         <span className="font-mono">{formatToolName(event.name)}</span>
       </button>
       {expanded && (

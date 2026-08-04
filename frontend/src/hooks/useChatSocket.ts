@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type ConversationTurn } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+import { toolCallState } from "@/lib/formatters";
 import { getViewContext } from "@/lib/viewContext";
 import { WS_AUTH_SUBPROTOCOL } from "@/lib/websocket";
 
@@ -98,13 +99,13 @@ function streamTarget(msgs: ChatMessage[], curId: string | null): number {
 /** Stop every tool call that is still spinning. A prompt that ended, ended. */
 function settleToolCalls(msgs: ChatMessage[]): ChatMessage[] {
   return msgs.map((m) =>
-    m.toolCalls.some((tc) => tc.status !== "completed" && tc.status !== "failed")
+    m.toolCalls.some((tc) => toolCallState(tc.status) === "pending")
       ? {
           ...m,
           toolCalls: m.toolCalls.map((tc) =>
-            tc.status === "completed" || tc.status === "failed"
-              ? tc
-              : { ...tc, status: "completed" },
+            toolCallState(tc.status) === "pending"
+              ? { ...tc, status: "completed" }
+              : tc,
           ),
         }
       : m,

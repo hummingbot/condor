@@ -7,6 +7,19 @@ export function formatToolName(title: string): string {
   return name.replace(/_/g, " ");
 }
 
+/** Classify an ACP tool-call status into the three states the UI renders.
+ *
+ *  The wire vocabulary is `pending | in_progress | completed | failed` — it
+ *  comes straight off the ACP `tool_call`/`tool_call_update` stream (see the
+ *  `ToolCallEvent` dataclass in condor/acp/client.py) and is what the journal
+ *  writes as `### N. name (status)` for parse-agent.ts to read back. Anything
+ *  that is not a terminal `completed`/`failed` is still in flight. */
+export function toolCallState(status: string): "ok" | "error" | "pending" {
+  if (status === "completed") return "ok";
+  if (status === "failed") return "error";
+  return "pending";
+}
+
 /** Escape a string for safe interpolation into innerHTML. */
 export function escapeHtml(val: string): string {
   return val
