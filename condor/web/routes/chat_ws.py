@@ -86,6 +86,10 @@ async def _get_user_sessions(user_id: int) -> list[dict]:
             "mode": info.mode,
             "is_busy": info.is_busy,
             "server_name": info.server_name,
+            # ...and whether it is the chat's to change. A pinned server is
+            # the Agent's decision, so the chip locks instead of offering a
+            # picker that could not take effect.
+            "server_pinned": info.server_pinned,
             # Who is answering, so the header can name a bound Agent rather
             # than the model it happens to run on.
             "agent_slug": info.agent_slug,
@@ -414,6 +418,7 @@ async def _start(
                 "agent_key": info.agent_key,
                 "mode": mode,
                 "server_name": info.server_name,
+                "server_pinned": info.server_pinned,
                 "restored": restored,
                 "agent_slug": info.agent_slug,
                 "label": info.label,
