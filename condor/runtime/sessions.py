@@ -62,6 +62,9 @@ class AgentSession:
     client: ACPClient | PydanticAIClient
     mode: str = "condor"  # "condor", "agent_builder"
     server_name: str | None = None  # Which Condor server this session uses
+    # ...and whether the bound Agent chose it. A pinned server is not the
+    # chat's to change; an ambient one is.
+    server_pinned: bool = False
     user_id: int | None = None
     agent_slug: str = ""
     label: str = "Condor"  # who is answering, for both UIs' headers
@@ -85,6 +88,7 @@ class AgentSession:
             surface=self.key.surface,
             slot=self.key.slot,
             server_name=self.server_name,
+            server_pinned=self.server_pinned,
             is_busy=self.is_busy,
             alive=bool(self.client.alive),
             created_at=self.created_at,
@@ -463,6 +467,7 @@ async def get_or_create_session(
             client=client,
             mode=spec.mode,
             server_name=bound.server_name or resolved_server,
+            server_pinned=bound.server_pinned,
             user_id=spec.user_id,
             agent_slug=bound.agent_slug,
             label=bound.label,

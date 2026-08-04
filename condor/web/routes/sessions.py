@@ -196,6 +196,12 @@ class SessionAction(BaseModel):
     agent_slug: str | None = None
     mode: str | None = None
     agent_key: str | None = None
+    server_name: str | None = Field(
+        default=None,
+        description="Move the conversation to this Hummingbot API server. The "
+        "server is baked into the MCP subprocess at spawn, so this is a "
+        "respawn like any other switch. None keeps the current one.",
+    )
     handoff: str = Field(
         default="",
         description="Short recap of the conversation so far, carried into the "
@@ -239,6 +245,15 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
 
     switching = body.action == "switch"
 
+    # The new session's tools are built against this server's credentials, so
+    # gate it exactly like consult/delegate do — otherwise a switch would be a
+    # way to reach a server the caller was never granted (IDOR). Checked before
+    # the teardown, so a refused switch leaves the session running as it was.
+    if body.server_name and not get_config_manager().has_server_access(
+        info.user_id or 0, body.server_name
+    ):
+        raise HTTPException(status_code=403, detail="No access")
+
     # Unspecified fields keep their current value, so "new" is just a switch
     # to the same identity.
     agent_slug = info.agent_slug if body.agent_slug is None else body.agent_slug
@@ -247,7 +262,9 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
         agent_key=body.agent_key if body.agent_key is not None else info.agent_key,
         mode=body.mode or info.mode,
         user_id=info.user_id,
-        server_name=info.server_name,
+        # A pinned Agent still wins inside binding._resolve_agent — resolution
+        # lives in one place, so nothing is special-cased here.
+        server_name=info.server_name if body.server_name is None else body.server_name,
         agent_slug=agent_slug,
         conversation_id=info.conversation_id if switching else "",
         # Deferred so the new identity lands on the user's next prompt rather
@@ -268,6 +285,26 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
     except Exception as exc:  # noqa: BLE001 - surfaced as an HTTP error
         log.exception("Failed to respawn session %s", key)
         raise HTTPException(status_code=400, detail=str(exc))
+
+    if switching and info.conversation_id and body.server_name is not None:
+        # The conversation, not the subprocess, is what a reload comes back to
+        # (chat_ws resumes from ``conv.server_name``), so a switch that only
+        # touched the live session would be undone by the next page load.
+        conversations.update_meta(
+            info.user_id,
+            info.conversation_id,
+            server_name=new_info.server_name,
+        )
+        # Tool results before and after this line came from different accounts.
+        # Only mark it when the effective server actually moved: a pinned Agent
+        # ignores the request, and a divider claiming otherwise would lie.
+        if new_info.server_name != info.server_name:
+            conversations.record_system(
+                info.user_id,
+                info.conversation_id,
+                f"Now using server {new_info.server_name}",
+                kind="switch",
+            )
 
     if switching and info.conversation_id and body.agent_slug is not None:
         # The handover, marked in the transcript itself, so it reads as a

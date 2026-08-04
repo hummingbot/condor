@@ -70,6 +70,11 @@ class SessionInfo(BaseModel):
     surface: str = Field(default="", description="Originating frontend: tg/web/mcp.")
     slot: str = Field(default="", description="Web slot id; empty on other surfaces.")
     server_name: str | None = None
+    server_pinned: bool = Field(
+        default=False,
+        description="The bound Agent pins this server; the chat's ambient "
+        "selection is overridden and cannot be changed here.",
+    )
     is_busy: bool = False
     alive: bool = False
     created_at: datetime = Field(default_factory=_utcnow)

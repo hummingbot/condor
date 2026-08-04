@@ -41,6 +41,10 @@ class SessionBinding:
     instructions: str = ""
     tools: list[str] = field(default_factory=list)
     server_name: str = ""
+    # The Agent's front matter chose this server, so the chat's ambient
+    # selection was overridden and cannot be changed from the chat. Only the
+    # Agent path can set it: an assistant's ``server_name`` *is* the ambient one.
+    server_pinned: bool = False
     mcp_env: dict[str, str] = field(default_factory=dict)
     mcp_servers: list[dict] = field(default_factory=list)
 
@@ -119,6 +123,7 @@ def _resolve_agent(spec: SessionSpec, user_data: dict | None) -> SessionBinding:
         instructions=agent.instructions,
         tools=list(agent.tools),
         server_name=effective_server,
+        server_pinned=bool(agent.server_name),
         mcp_env={AGENT_SLUG_ENV: agent.slug},
         mcp_servers=mcp_servers,
     )
