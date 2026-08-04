@@ -124,7 +124,10 @@ specialty needs (a band scanner, a regime classifier, an inventory snapshot). Of
 as the upgrade, then guide the user through it one routine at a time:
 
 1. **Define** — agree on what this routine should output and why the agent needs it.
-2. **Create** — write it with the `routine_builder` skill for the API. Routines live at
+2. **Create** — hand the writing to a background worker
+   (`delegate(action="start", agent="condor", task="...")`); it follows the
+   `routine_cookbook` playbook and tests the routine before reporting. Tell it the
+   target agent so it passes the right `strategy_id`. Routines live at
    the agent level and are shared across consults and any future loop. Pass the **agent
    slug** as `strategy_id` (it accepts a bare agent slug or `agent_slug.strategy_slug`):
    ```

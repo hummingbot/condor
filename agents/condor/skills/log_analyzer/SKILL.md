@@ -88,8 +88,10 @@ For "watch the logs" / live monitoring, build a **continuous routine**
 keeps a `seen` set of pattern fingerprints, and alerts via
 `context.bot.send_message` only on **new or spiking** patterns (don't re-report
 the same steady error every tick). Use a `LiveReport` to keep one always-current
-incident board. Use the `routine_builder` skill for the mechanics; reuse the
-`logs_summary` normalization/clustering logic as the core.
+incident board. Hand the build to a background worker
+(`delegate(action="start", agent="condor", task="...")`) — it follows the
+`routine_cookbook` playbook — and tell it to reuse the `logs_summary`
+normalization/clustering logic as the core.
 
 ## Triage reference (common Hummingbot patterns)
 
@@ -116,7 +118,8 @@ incident board. Use the `routine_builder` skill for the mechanics; reuse the
 
 - Be direct and concise. Run `logs_summary` first for any summary/triage ask;
   only hand-roll analysis when the routine's output isn't enough.
-- One routine per task; if you build a real-time watcher, test it before handing
-  it over (use `routine_builder`).
+- One routine per task; a real-time watcher must be tested before it is handed
+  over — the background worker does that as part of the job, so wait for its
+  report rather than announcing an untested watcher.
 - Diagnosis is the deliverable — the counts are evidence, the cause + fix is the
   answer.

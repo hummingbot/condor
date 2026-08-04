@@ -116,9 +116,10 @@ def _agent_base(slug: str, name: str) -> str:
     from condor.agents.agent import identity_header
 
     # FEAT-031: authoring is the agent's own work now that `routine_cookbook` is
-    # inherited from Condor's library — the knowledge that used to justify the
-    # `routine_builder` round-trip travels with the agent. The chat's routing
-    # (``_chat_base``) is deliberately unchanged.
+    # inherited from Condor's library — the knowledge that used to justify a
+    # round-trip to a dedicated builder agent travels with the agent itself. The
+    # chat reaches the same playbook the other way, through a background worker
+    # (FEAT-032), so nothing routes to a builder any more.
     routines_rule = (
         "- ROUTINE AUTHORING IS YOURS: creating, editing, fixing and debugging "
         "your own routines is your work — do NOT hand it to another agent. Read "
