@@ -48,9 +48,13 @@ check (it costs one glance at your injected indexes, not a tool call):
 3. **Else** — and only else — use raw tools directly.
 
 Routines are special: any request to **create, edit, fix, or debug** a routine MUST
-go through `consult(agent="routine_builder", ...)` — never hand-write routine code or
-call `manage_routines(create_routine/edit_routine)` yourself. (Just *running* an
-existing routine is not authoring: `manage_routines(action="run", name="...")`.)
+go to a background worker — `delegate(action="start", agent="condor", task="...")`.
+That is *you*, in a detached session: it returns a task_id at once (say so — the
+user is pinged when it lands), reads the `routine_cookbook` playbook, writes the
+routine into the global library and tests it before reporting. Never hand-write
+routine code or call `manage_routines(create_routine/edit_routine)` yourself. (Just
+*running* an existing routine is not authoring: `manage_routines(action="run",
+name="...")`.)
 
 Prefer one consult or one skill-driven flow over a long chain of low-level tool calls.
 Example — DON'T answer "deploy a grid executor" with five raw `manage_executors`/
