@@ -110,7 +110,6 @@ async def prompt(key: SessionKey, req: PromptRequest) -> AsyncIterator[RuntimeEv
         req.text,
         agent_key=session.agent_key,
         agent_slug=session.agent_slug,
-        mode=session.mode,
     )
     try:
         async for event in session.prompt_stream(req.text):

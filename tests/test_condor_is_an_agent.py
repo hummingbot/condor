@@ -114,3 +114,143 @@ def test_settings_specialist_slug_only_names_specialists():
     assert _settings("").specialist_slug == ""
     assert _settings(CHAT_SLUG).specialist_slug == ""
     assert _settings("brigado").specialist_slug == "brigado"
+
+
+# ── One registry, one loader ──
+
+
+def test_condor_is_a_real_record_in_the_agent_store():
+    """Not a fixture: the shipped repo must actually load Condor as an agent."""
+    agent = AgentStore().get(CHAT_SLUG)
+    assert agent is not None
+    assert agent.name == "Condor"
+    assert agent.agent_dir == _REPO_ROOT / "agents" / CHAT_SLUG
+    assert agent.instructions, "AGENT.md body is the chat's system prompt"
+    # Not consulted by specialists: it is the coordinator, not a domain expert.
+    assert agent.when_to_consult == ""
+
+
+def test_the_assistants_tree_is_gone():
+    assert not (_REPO_ROOT / "assistants").exists()
+
+
+def test_the_chats_store_and_skills_moved_with_it():
+    from condor.memory.paths import builtin_skills_root, store_root
+
+    home = _REPO_ROOT / "agents" / CHAT_SLUG
+    assert store_root(42) == home / "store" / "user_42"
+    assert store_root(42, CHAT_SLUG) == store_root(42, None)
+    assert builtin_skills_root() == home / "skills"
+    # The shipped library came across intact rather than being re-created empty.
+    assert (home / "skills" / "routine_cookbook" / "SKILL.md").exists()
+
+
+def test_the_chat_inherits_nothing_from_itself(tmp_path, monkeypatch):
+    """``SkillStore("condor")`` is the chat, so it must not shadow itself.
+
+    Inheritance (FEAT-031) reads Condor's shared playbooks into every agent's
+    library. Resolved by slug rather than by directory, the chat would inherit
+    from its own dir and list every shared playbook twice.
+    """
+    from condor.memory import paths as paths_module
+    from condor.memory.skills import SkillStore
+
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    d = tmp_path / "agents" / CHAT_SLUG / "skills" / "published"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: published\nwhen_to_use: always\nshared: true\n---\n\nSteps.\n"
+    )
+
+    assert SkillStore(None).inherited_dir is None
+    assert SkillStore(CHAT_SLUG).inherited_dir is None
+    assert SkillStore(CHAT_SLUG).list_index().count("[published]") == 1
+
+
+def test_memory_index_lists_the_chat_first_as_the_chat(tmp_path, monkeypatch):
+    from condor.memory import paths as paths_module
+    from condor.memory.paths import iter_user_stores
+
+    monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
+    for slug in (CHAT_SLUG, "brigado"):
+        (tmp_path / "agents" / slug / "store" / "user_7").mkdir(parents=True)
+
+    found = iter_user_stores(7)
+    assert [(label, slug) for label, slug, _ in found] == [
+        (f"{CHAT_SLUG} (chat)", None),
+        ("brigado", "brigado"),
+    ]
+
+
+# ── The coordinator is not a peer ──
+
+
+def test_a_specialist_is_offered_neither_itself_nor_condor(registry, monkeypatch):
+    _write_agent(registry, "other", name="Other", when_to_consult="Other work")
+    text = _instructions(monkeypatch, "brigado")
+    assert "- [brigado]" not in text
+    assert f"- [{CHAT_SLUG}]" not in text
+    assert "- [other] Other work" in text
+
+
+def test_the_chat_is_not_offered_itself_either(registry, monkeypatch):
+    """Condor must not appear in its own [AGENTS] index — on either channel."""
+    text = _instructions(monkeypatch, "")
+    assert f"- [{CHAT_SLUG}]" not in text
+    assert "- [brigado] BRL market making" in text
+
+    # The opening context injects the same index through its own call.
+    index = AgentStore().list_index(exclude={CHAT_SLUG})
+    assert f"- [{CHAT_SLUG}]" not in index
+    assert "- [brigado] BRL market making" in index
+
+
+def test_excluding_by_string_still_drops_exactly_that_slug(registry):
+    """The set form is additive; the old single-slug call is unchanged."""
+    index = AgentStore().list_index(exclude="brigado")
+    assert "- [brigado]" not in index
+    assert f"- [{CHAT_SLUG}]" in index, "a bare exclude hides nothing else"
+
+
+def test_the_reserved_slug_cannot_be_created_or_deleted(registry):
+    store = AgentStore()
+    with pytest.raises(ValueError, match="reserved"):
+        store.create(name="Condor")
+    with pytest.raises(ValueError, match="cannot be deleted"):
+        store.delete(CHAT_SLUG)
+    # Still there afterwards.
+    assert store.get(CHAT_SLUG) is not None
+
+
+def test_identity_header_does_not_contradict_itself_for_condor():
+    from condor.agents.agent import identity_header
+
+    header = identity_header(CHAT_SLUG, "Condor")
+    assert "You ARE Condor" in header
+    assert "You are NOT Condor" not in header
+    assert "coordinator" in header
+
+
+# ── The mode axis is gone, and its leftovers are tolerated ──
+
+
+def test_no_mode_survives_on_the_session_boundary():
+    from condor.runtime.models import SessionInfo, SessionSpec
+
+    assert "mode" not in SessionSpec.model_fields
+    assert "mode" not in SessionInfo.model_fields
+
+
+def test_a_record_written_before_the_mode_axis_died_still_loads():
+    """Stale `mode` keys are ignored, never fatal: they are on disk already."""
+    from condor.runtime.conversations import ConversationMeta, TurnEntry
+    from condor.runtime.models import SessionSpec
+
+    spec = SessionSpec(key="tg:42", agent_key="claude-code", mode="condor")
+    assert spec.key == "tg:42"
+
+    meta = ConversationMeta(id="abc", user_id=7, mode="agent_builder")
+    assert meta.id == "abc"
+
+    turn = TurnEntry(role="assistant", text="hi", mode="condor")
+    assert turn.text == "hi"

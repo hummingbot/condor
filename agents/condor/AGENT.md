@@ -1,5 +1,5 @@
 ---
-label: Condor
+name: Condor
 description: General trading assistant
 agent_key: claude-acp:sonnet
 ---

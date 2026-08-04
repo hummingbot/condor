@@ -1,18 +1,13 @@
 import { useCallback, useEffect, useRef } from "react";
-import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X, Zap } from "lucide-react";
+import { AlertTriangle, Bot, Brain, Loader2, MessageSquare, X } from "lucide-react";
 
 import type { ChatSlot } from "@/hooks/useChatSocket";
-import type { ChatAgentOption, ChatModeOption } from "@/lib/api";
+import type { ChatAgentOption } from "@/lib/api";
 import { ChatInput } from "./ChatInput";
 import { ChatMessageView } from "./ChatMessage";
 
 /** How close to the end still counts as "following the answer", in pixels. */
 const NEAR_BOTTOM_PX = 80;
-
-const MODE_ICONS: Record<string, typeof Zap> = {
-  condor: Zap,
-  agent_builder: Brain,
-};
 
 /** Resolve a short label for an agent key. */
 export function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): string {
@@ -38,7 +33,6 @@ export function resolveAgentLabel(agentKey: string, agents: ChatAgentOption[]): 
 export function ChatThread({
   slot,
   agents,
-  modes,
   isStreaming,
   permissionRequest,
   onResolvePermission,
@@ -54,7 +48,6 @@ export function ChatThread({
   /** The conversation on screen, or null when there is none yet. */
   slot: ChatSlot | null;
   agents: ChatAgentOption[];
-  modes: ChatModeOption[];
   isStreaming: boolean;
   permissionRequest: { request_id: string; summary: string } | null;
   onResolvePermission: (requestId: string, approved: boolean) => void;
@@ -66,9 +59,8 @@ export function ChatThread({
   emptyState?: React.ReactNode;
   /**
    * The domain Agent this conversation is bound to, when the surface knows it.
-   * A bound chat opens under that agent's name, not the mode's — the user
-   * picked Backpack MM, so "Condor / General trading assistant" would name the
-   * wrong counterpart.
+   * A bound chat opens under that agent's name — the user picked Backpack MM,
+   * so "Condor / General trading assistant" would name the wrong counterpart.
    */
   boundAgent?: { name: string; description?: string };
   /** Reading column for the messages, e.g. `mx-auto w-full max-w-3xl`. */
@@ -190,28 +182,26 @@ export function ChatThread({
             <div className="flex flex-1 flex-col items-center justify-center text-center">
               {(() => {
                 // Who the user is about to talk to. A bound agent answers as
-                // itself, so it names the screen and the mode name — "Condor"
-                // — drops out entirely; only the brain stays in the footnote.
+                // itself, so it names the screen; only the brain stays in the
+                // footnote.
                 const bound = slot.info.agent_slug
                   ? {
                       name: boundAgent?.name || slot.info.label || slot.info.agent_slug,
                       description: boundAgent?.description,
                     }
                   : null;
-                const mode = modes.find((m) => m.key === slot.info.mode);
-                const Icon = bound ? Bot : MODE_ICONS[slot.info.mode] || MessageSquare;
+                const Icon = bound ? Bot : MessageSquare;
                 const brain = resolveAgentLabel(slot.info.agent_key, agents);
                 return (
                   <>
                     <Icon className="mb-3 h-10 w-10 text-[var(--color-text-muted)] opacity-30" />
                     <p className="text-sm font-medium text-[var(--color-text)]">
-                      {bound ? bound.name : mode?.label || "Assistant"}
+                      {bound ? bound.name : "Assistant"}
                     </p>
                     <p className="mt-1 text-xs text-[var(--color-text-muted)]">
                       {bound
                         ? bound.description || `Ask ${bound.name} anything.`
-                        : mode?.description ||
-                          "Ask about your portfolio, prices, trades, or bot status."}
+                        : "Ask about your portfolio, prices, trades, or bot status."}
                     </p>
                     <p className="mt-2 flex items-center gap-1 text-[10px] text-[var(--color-text-muted)] opacity-60">
                       <Brain className="h-2.5 w-2.5" />

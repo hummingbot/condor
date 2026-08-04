@@ -25,7 +25,7 @@ from condor.runtime.events import RuntimeEvent
 from condor.runtime.timeouts import TIMEOUTS
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
-from handlers.agents._shared import DEFAULT_AGENT, DEFAULT_MODE, load_assistant
+from handlers.agents._shared import DEFAULT_AGENT
 from handlers.agents.openrouter_models import fetch_models
 
 log = logging.getLogger(__name__)
@@ -77,7 +77,6 @@ async def _get_user_sessions(user_id: int) -> list[dict]:
             "slot_id": info.slot,
             "conversation_id": info.conversation_id,
             "agent_key": info.agent_key,
-            "mode": info.mode,
             "is_busy": info.is_busy,
             "server_name": info.server_name,
             # ...and whether it is the chat's to change. A pinned server is
@@ -286,7 +285,6 @@ async def _handle_start_session(
 ) -> None:
     """Open a chat on a brand new conversation."""
     agent_key = msg.get("agent_key", DEFAULT_AGENT)
-    mode = msg.get("mode", DEFAULT_MODE)
     server_name = msg.get("server_name")  # From frontend's selected server
     # A dashboard chat can be born already bound to a domain Agent. Without
     # this, "Chat" on an agent's page would have to start-then-switch, which
@@ -301,7 +299,6 @@ async def _handle_start_session(
         WEB,
         agent_key=agent_key,
         agent_slug=agent_slug,
-        mode=mode,
         server_name=server_name,
     )
     await _start(
@@ -309,7 +306,6 @@ async def _handle_start_session(
         user_id,
         conv.id,
         agent_key,
-        mode,
         server_name,
         restored=False,
         agent_slug=agent_slug,
@@ -343,7 +339,6 @@ async def _handle_resume_conversation(
         user_id,
         conv.id,
         msg.get("agent_key") or conv.agent_key or DEFAULT_AGENT,
-        msg.get("mode") or conv.mode or DEFAULT_MODE,
         msg.get("server_name") or conv.server_name,
         restored=True,
         agent_slug=conv.agent_slug,
@@ -356,7 +351,6 @@ async def _start(
     user_id: int,
     conversation_id: str,
     agent_key: str,
-    mode: str,
     server_name: str | None,
     *,
     restored: bool,
@@ -397,21 +391,15 @@ async def _start(
     # behind a "custom@<endpoint>:<model>" agent key.
     from condor.preferences import load_user_data_for
 
-    # Mode-specific assistant context (e.g. agent_builder instructions) travels
-    # as spec data rather than by mutating the live session after creation.
-    mode_context = load_assistant(mode) if mode != DEFAULT_MODE else ""
-
     try:
         info = await runtime.create_session(
             SessionSpec(
                 key=str(session_key),
                 agent_key=agent_key,
-                mode=mode,
                 user_id=user_id,
                 platform="web",
                 lazy_context=True,  # Don't block — inject context on first message
                 server_name=server_name,
-                extra_context=mode_context or "",
                 agent_slug=agent_slug,
                 conversation_id=conversation_id,
             ),
@@ -429,7 +417,6 @@ async def _start(
                 "slot_id": slot_id,
                 "conversation_id": conversation_id,
                 "agent_key": info.agent_key,
-                "mode": mode,
                 "server_name": info.server_name,
                 "server_pinned": info.server_pinned,
                 "restored": restored,

@@ -43,15 +43,13 @@ def _write_skill(
     references_routine=None,
     shared=False,
 ):
-    """Author a builtin SKILL.md under the right assistant home.
+    """Author a builtin SKILL.md under the right agent home.
 
     ``shared`` publishes a chat playbook to every agent (FEAT-031); it is the
-    frontmatter flag, so it is only meaningful under ``assistants/condor``.
+    frontmatter flag, so it is only meaningful under ``agents/condor``, which is
+    where a falsy ``agent_slug`` writes (FEAT-033).
     """
-    if agent_slug:
-        base = root / "agents" / agent_slug / "skills"
-    else:
-        base = root / "assistants" / "condor" / "skills"
+    base = root / "agents" / (agent_slug or "condor") / "skills"
     d = base / slug
     d.mkdir(parents=True, exist_ok=True)
     fm = [

@@ -60,7 +60,6 @@ class AgentSession:
     key: SessionKey
     agent_key: str  # "claude-code", "gemini", "codex", "copilot", "ollama:model", "lmstudio:model", etc.
     client: ACPClient | PydanticAIClient
-    mode: str = "condor"  # "condor", "agent_builder"
     server_name: str | None = None  # Which Condor server this session uses
     # ...and whether the bound Agent chose it. A pinned server is not the
     # chat's to change; an ambient one is.
@@ -83,7 +82,6 @@ class AgentSession:
         return SessionInfo(
             key=str(self.key),
             agent_key=self.agent_key,
-            mode=self.mode,
             user_id=self.user_id,
             surface=self.key.surface,
             slot=self.key.slot,
@@ -230,7 +228,6 @@ def _resolve_conversation(
                 spec.conversation_id,
                 agent_key=agent_key,
                 agent_slug=agent_slug,
-                mode=spec.mode,
                 server_name=server_name,
             )
             return spec.conversation_id, conversations.replay_context(
@@ -242,7 +239,6 @@ def _resolve_conversation(
             key.surface,
             agent_key=agent_key,
             agent_slug=agent_slug,
-            mode=spec.mode,
             server_name=server_name,
         )
         return meta.id, ""
@@ -314,8 +310,8 @@ async def get_or_create_session(
         "CONDOR_SESSION_KEY": raw_key,
     }
 
-    # Who is answering: an assistant persona, or a bound domain Agent with its
-    # own model, tool allowlist, server pin and memory scope. Raises UnknownAgent
+    # Who is answering: the bound Agent, or Condor when none is named — with
+    # its model, tool allowlist, server pin and memory scope. Raises UnknownAgent
     # before anything is spawned, so a bad slug cannot orphan a subprocess.
     bound = binding.resolve(spec, user_data)
     extra_env.update(bound.mcp_env)
@@ -404,9 +400,9 @@ async def get_or_create_session(
     await client.start()
 
     try:
-        # Build initial context about server and permissions. A bound Agent
-        # opens with its OWN identity and domain memory instead of the chat
-        # assistant's — that is what makes it a different brain, not a skin.
+        # Build initial context about server and permissions. A bound
+        # specialist opens with its OWN identity and domain memory instead of
+        # the chat's — that is what makes it a different brain, not a skin.
         initial_context = ""
         if bound.is_agent and spec.user_id:
             initial_context = binding.agent_identity_context(
@@ -441,12 +437,12 @@ async def get_or_create_session(
             spec,
             key,
             agent_key=agent_key,
-            agent_slug=bound.agent_slug,
+            agent_slug=bound.specialist_slug,
             server_name=bound.server_name or resolved_server,
         )
 
-        # Caller-supplied context (e.g. mode-specific assistant instructions)
-        # rides along as spec data, so no caller needs the live session object.
+        # Caller-supplied context (e.g. a switch handoff recap) rides along as
+        # spec data, so no caller needs the live session object.
         initial_context = "\n\n".join(
             part
             for part in (initial_context, replay, spec.extra_context)
@@ -465,11 +461,10 @@ async def get_or_create_session(
             key=key,
             agent_key=agent_key,
             client=client,
-            mode=spec.mode,
             server_name=bound.server_name or resolved_server,
             server_pinned=bound.server_pinned,
             user_id=spec.user_id,
-            agent_slug=bound.agent_slug,
+            agent_slug=bound.specialist_slug,
             label=bound.label,
             conversation_id=conversation_id,
             pending_context=initial_context or None,

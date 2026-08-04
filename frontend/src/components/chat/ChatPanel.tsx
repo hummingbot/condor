@@ -2,7 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   Bot,
-  Brain,
   History,
   Loader2,
   MessageSquare,
@@ -20,7 +19,6 @@ import { ConversationList } from "./ConversationList";
 import {
   type AgentBindingOption,
   type ChatAgentOption,
-  type ChatModeOption,
   type CustomProvider,
 } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
@@ -30,11 +28,6 @@ import { useBrainSwitch } from "@/hooks/useBrainSwitch";
 const MIN_WIDTH = 360;
 const MAX_WIDTH = 1200;
 const DEFAULT_WIDTH = 480;
-
-const MODE_ICONS: Record<string, typeof Zap> = {
-  condor: Zap,
-  agent_builder: Brain,
-};
 
 interface ChatPanelProps {
   isOpen: boolean;
@@ -53,18 +46,11 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
   // Chat options, shared with the `/agents` workspace on one query key: the
   // panel only asks for them once it has been opened.
-  const {
-    agents,
-    customProviders,
-    agentBindings,
-    modes,
-    defaultAgent,
-    defaultMode,
-  } = useSessionOptions(isOpen);
+  const { agents, customProviders, agentBindings, defaultAgent } =
+    useSessionOptions(isOpen);
 
   const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedSlug, setSelectedSlug] = useState("");
-  const [selectedMode, setSelectedMode] = useState<string | null>(null);
 
   // Keyboard shortcut: Cmd+K (Mac) / Ctrl+K (other) to toggle panel
   useEffect(() => {
@@ -93,14 +79,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
     direction: "inverted",
   });
 
-  const handleNewSession = (agentKey: string, mode: string, agentSlug?: string) => {
+  const handleNewSession = (agentKey: string, agentSlug?: string) => {
     onToggle(true);
-    chat.startSession(agentKey, mode, server || undefined, agentSlug);
+    chat.startSession(agentKey, server || undefined, agentSlug);
     setShowNewMenu(false);
     setShowHistory(false);
     setSelectedAgent(null);
     setSelectedSlug("");
-    setSelectedMode(null);
   };
 
   const activeSlot = chat.activeSlot;
@@ -108,7 +93,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
 
   // Resolve effective selections for the new-session menu
   const effectiveAgent = selectedAgent || defaultAgent;
-  const effectiveMode = selectedMode || defaultMode;
   // Who a new chat is with: the conversation you are in, else whoever the
   // new-session menu has picked. The workspace's rail answers the same
   // question from its selected row, so the two views stay consistent.
@@ -187,18 +171,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                   agents={agents}
                   customProviders={customProviders}
                   agentBindings={agentBindings}
-                  modes={modes}
                   selectedAgent={effectiveAgent}
                   selectedAgentSlug={selectedSlug}
-                  selectedMode={effectiveMode}
                   onSelectBrain={(sel) => {
                     if (sel.agentSlug !== undefined) setSelectedSlug(sel.agentSlug);
                     if (sel.agentKey !== undefined) setSelectedAgent(sel.agentKey);
                   }}
-                  onSelectMode={setSelectedMode}
-                  onStart={(agent, mode) =>
-                    handleNewSession(agent, mode, selectedSlug || undefined)
-                  }
+                  onStart={(agent) => handleNewSession(agent, selectedSlug || undefined)}
                   onClose={() => setShowNewMenu(false)}
                 />
               )}
@@ -221,7 +200,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                 key={slot.info.slot_id}
                 slot={slot}
                 agents={agents}
-                modes={modes}
                 isActive={slot.info.slot_id === chat.activeSlotId}
                 isStreaming={chat.isSlotStreaming(slot.info.slot_id)}
                 // A confirmation is only answerable from the conversation that
@@ -240,7 +218,6 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
         <ChatThread
           slot={activeSlot}
           agents={agents}
-          modes={modes}
           isStreaming={isActiveStreaming}
           permissionRequest={chat.permissionRequest}
           onResolvePermission={chat.resolvePermission}
@@ -255,9 +232,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
               agents={agents}
               customProviders={customProviders}
               agentBindings={agentBindings}
-              modes={modes}
               defaultAgent={defaultAgent}
-              defaultMode={defaultMode}
               onStart={handleNewSession}
             />
           }
@@ -269,17 +244,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           <ConversationList
             liveIds={liveIds}
             activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
-            onNew={() =>
-              handleNewSession(
-                effectiveAgent,
-                effectiveMode,
-                effectiveSlug || undefined,
-              )
-            }
+            onNew={() => handleNewSession(effectiveAgent, effectiveSlug || undefined)}
             onOpen={(meta) => {
               chat.resumeConversation(meta.id, {
                 agent_key: meta.agent_key,
-                mode: meta.mode,
                 server_name: meta.server_name || undefined,
                 agent_slug: meta.agent_slug,
               });
@@ -312,29 +280,21 @@ function NewSessionMenu({
   agents,
   customProviders = [],
   agentBindings = [],
-  modes,
   selectedAgent,
   selectedAgentSlug,
-  selectedMode,
   onSelectBrain,
-  onSelectMode,
   onStart,
   onClose,
 }: {
   agents: ChatAgentOption[];
   customProviders?: CustomProvider[];
   agentBindings?: AgentBindingOption[];
-  modes: ChatModeOption[];
   selectedAgent: string;
   selectedAgentSlug: string;
-  selectedMode: string;
   onSelectBrain: (selection: BrainSelection) => void;
-  onSelectMode: (key: string) => void;
-  onStart: (agent: string, mode: string) => void;
+  onStart: (agent: string) => void;
   onClose: () => void;
 }) {
-  const ModeIcon = MODE_ICONS[selectedMode] || Zap;
-
   return (
     <>
       <div className="fixed inset-0 z-50" onClick={onClose} />
@@ -357,37 +317,13 @@ function NewSessionMenu({
           </div>
         </div>
 
-        {/* Mode buttons */}
-        <div className="px-3 pt-2 pb-1">
-          <label className="text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
-            Mode
-          </label>
-        </div>
-        {modes.map(({ key, label }) => {
-          const Icon = MODE_ICONS[key] || Zap;
-          return (
-            <button
-              key={key}
-              onClick={() => onSelectMode(key)}
-              className={`flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--color-surface-hover)] ${
-                key === selectedMode
-                  ? "text-[var(--color-primary)]"
-                  : "text-[var(--color-text)]"
-              }`}
-            >
-              <Icon className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
-              {label}
-            </button>
-          );
-        })}
-
         {/* Start button */}
         <div className="mt-1 border-t border-[var(--color-border)] px-3 pt-2 pb-2">
           <button
-            onClick={() => onStart(selectedAgent, selectedMode)}
+            onClick={() => onStart(selectedAgent)}
             className="flex w-full items-center justify-center gap-2 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--color-primary)]/80"
           >
-            <ModeIcon className="h-3.5 w-3.5" />
+            <Zap className="h-3.5 w-3.5" />
             Start Session
           </button>
         </div>
@@ -402,17 +338,14 @@ function EmptyState({
   agents,
   customProviders = [],
   agentBindings = [],
-  modes,
   defaultAgent,
   onStart,
 }: {
   agents: ChatAgentOption[];
   customProviders?: CustomProvider[];
   agentBindings?: AgentBindingOption[];
-  modes: ChatModeOption[];
   defaultAgent: string;
-  defaultMode?: string;
-  onStart: (agent: string, mode: string, agentSlug?: string) => void;
+  onStart: (agent: string, agentSlug?: string) => void;
 }) {
   const [selectedAgent, setSelectedAgent] = useState(defaultAgent);
   const [selectedSlug, setSelectedSlug] = useState("");
@@ -442,21 +375,14 @@ function EmptyState({
         </div>
       )}
 
-      {/* Mode buttons */}
       <div className="mt-2 flex gap-2">
-        {modes.map(({ key, label }) => {
-          const Icon = MODE_ICONS[key] || Zap;
-          return (
-            <button
-              key={key}
-              onClick={() => onStart(selectedAgent, key, selectedSlug || undefined)}
-              className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-            >
-              <Icon className="h-3.5 w-3.5 text-[var(--color-primary)]" />
-              {label}
-            </button>
-          );
-        })}
+        <button
+          onClick={() => onStart(selectedAgent, selectedSlug || undefined)}
+          className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+        >
+          <Zap className="h-3.5 w-3.5 text-[var(--color-primary)]" />
+          Start Session
+        </button>
       </div>
     </div>
   );
@@ -467,7 +393,6 @@ function EmptyState({
 function SessionTab({
   slot,
   agents,
-  modes,
   isActive,
   isStreaming,
   needsApproval,
@@ -476,7 +401,6 @@ function SessionTab({
 }: {
   slot: ChatSlot;
   agents: ChatAgentOption[];
-  modes: ChatModeOption[];
   isActive: boolean;
   isStreaming: boolean;
   /** This conversation is holding a tool call that is waiting on the user. */
@@ -484,14 +408,12 @@ function SessionTab({
   onClick: () => void;
   onClose: () => void;
 }) {
-  const modeLabel =
-    modes.find((m) => m.key === slot.info.mode)?.label || slot.info.mode;
   // A bound Agent names the tab; only an unbound one falls back to the model,
   // which is the same rule the header's picker follows.
   const agentShort = slot.info.agent_slug
     ? slot.info.label || slot.info.agent_slug
     : shortAgentLabel(slot.info.agent_key, agents);
-  const ModeIcon = slot.info.agent_slug ? Bot : MODE_ICONS[slot.info.mode] || Zap;
+  const TabIcon = slot.info.agent_slug ? Bot : Zap;
 
   return (
     <button
@@ -505,12 +427,9 @@ function SessionTab({
       {isActive && (
         <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-[var(--color-primary)]" />
       )}
-      <ModeIcon className="h-3 w-3 shrink-0" />
+      <TabIcon className="h-3 w-3 shrink-0" />
       <span className="max-w-[140px] truncate">
-        {slot.info.agent_slug ? agentShort : modeLabel}
-        {!slot.info.agent_slug && (
-          <span className="text-[var(--color-text-muted)]"> · {agentShort}</span>
-        )}
+        {agentShort}
         {slot.info.server_name && (
           <span className="text-[var(--color-text-muted)]"> · {slot.info.server_name}</span>
         )}

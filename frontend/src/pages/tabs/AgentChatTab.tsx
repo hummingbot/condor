@@ -56,9 +56,7 @@ export function AgentChatTab({
     agents: modelOptions,
     customProviders,
     agentBindings,
-    modes,
     defaultAgent,
-    defaultMode,
   } = useSessionOptions();
 
   const { switchBrain, switchError, dismissSwitchError } = useBrainSwitch();
@@ -120,7 +118,6 @@ export function AgentChatTab({
     }
     const slotId = chat.startSession(
       pendingAgentKey ?? defaultAgent,
-      defaultMode,
       server || undefined,
       agentSlug || undefined,
     );
@@ -243,7 +240,6 @@ export function AgentChatTab({
             setRailOpen(false);
             chat.resumeConversation(meta.id, {
               agent_key: meta.agent_key,
-              mode: meta.mode,
               server_name: meta.server_name || undefined,
               agent_slug: meta.agent_slug,
             });
@@ -295,7 +291,6 @@ export function AgentChatTab({
           <ChatThread
             slot={activeSlot}
             agents={modelOptions}
-            modes={modes}
             isStreaming={isActiveStreaming}
             permissionRequest={chat.permissionRequest}
             onResolvePermission={chat.resolvePermission}

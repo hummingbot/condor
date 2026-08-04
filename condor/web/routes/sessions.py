@@ -76,22 +76,17 @@ async def list_sessions(user: WebUser = Depends(get_current_user)):
 
 @router.get("/options")
 async def session_options(user: WebUser = Depends(get_current_user)):
-    """Agents, modes and servers a session can be started with.
+    """Agents and servers a session can be started with.
 
-    Sole owner of this payload: agents, custom providers and modes, plus the
-    caller's accessible servers. ``picker`` marks sentinel keys like
+    Sole owner of this payload: agents, custom providers and bindable Agents,
+    plus the caller's accessible servers. ``picker`` marks sentinel keys like
     "openrouter:" that open a model list rather than naming a startable model —
     the key's shape does not tell you, since "ollama:" also ends in a colon but
     is a real key.
     """
     from condor.agents.agent import AgentStore
     from condor.preferences import get_custom_providers, load_user_data_for
-    from handlers.agents._shared import (
-        AGENT_MODES,
-        AGENT_OPTIONS,
-        DEFAULT_AGENT,
-        DEFAULT_MODE,
-    )
+    from handlers.agents._shared import AGENT_OPTIONS, DEFAULT_AGENT
 
     cm = get_config_manager()
     providers = get_custom_providers(load_user_data_for(user.id))
@@ -108,10 +103,6 @@ async def session_options(user: WebUser = Depends(get_current_user)):
             }
             for p in providers
         ],
-        "modes": [
-            {"key": k, "label": v["label"], "description": v["description"]}
-            for k, v in AGENT_MODES.items()
-        ],
         "servers": cm.get_accessible_servers(user.id),
         # Every Agent is chattable for the same reason it is consultable: it has
         # an identity and a toolset. No separate flag (FEAT-004 rule).
@@ -125,7 +116,6 @@ async def session_options(user: WebUser = Depends(get_current_user)):
             for a in AgentStore().list_all()
         ],
         "default_agent": DEFAULT_AGENT,
-        "default_mode": DEFAULT_MODE,
     }
 
 
@@ -194,7 +184,6 @@ class SessionAction(BaseModel):
 
     action: str
     agent_slug: str | None = None
-    mode: str | None = None
     agent_key: str | None = None
     server_name: str | None = Field(
         default=None,
@@ -260,7 +249,6 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
     spec = SessionSpec(
         key=str(key),
         agent_key=body.agent_key if body.agent_key is not None else info.agent_key,
-        mode=body.mode or info.mode,
         user_id=info.user_id,
         # A pinned Agent still wins inside binding._resolve_agent — resolution
         # lives in one place, so nothing is special-cased here.

@@ -34,12 +34,7 @@ CHAT_SLUG = "condor"
 
 def assistant_home(agent_slug: str | None = None) -> Path:
     """``agents/<slug>``; a falsy slug resolves the default agent (Condor)."""
-    slug = agent_slug or CHAT_SLUG
-    if slug == CHAT_SLUG:
-        # TEMPORARY (FEAT-033 step 1): Condor still lives under assistants/.
-        # The move lands in the next step and deletes this branch.
-        return _PROJECT_ROOT / "assistants" / CHAT_SLUG
-    return _PROJECT_ROOT / "agents" / slug
+    return _PROJECT_ROOT / "agents" / (agent_slug or CHAT_SLUG)
 
 
 def store_root(user_id: int, agent_slug: str | None = None) -> Path:

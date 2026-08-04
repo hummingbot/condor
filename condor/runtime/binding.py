@@ -1,15 +1,15 @@
 """Resolve *who* is answering a session.
 
-A session has two orthogonal dimensions:
+A session has exactly one identity dimension: ``agent_slug``, naming a directory
+under ``agents/``. Empty means Condor — the **default** agent (``CHAT_SLUG``),
+not the absence of one (FEAT-033). Whoever it names supplies the identity, the
+model, the toolset, the server pin and the memory scope. Everything that needs
+to know which brain is on the other end asks this module, so an Agent behaves
+the same whether it is consulted once, looped, or chatted with.
 
-* ``mode``       — the assistant persona (``assistants/{name}``), e.g. the
-  ``condor`` coordinator.
-* ``agent_slug`` — a domain Agent (``agents/{slug}``), e.g. ``brigado``.
-
-A session carries at most one of each, and when ``agent_slug`` is set it wins
-for identity, tools, server pin and memory scope. Everything that needs to know
-which brain is on the other end asks this module, so an Agent behaves the same
-whether it is consulted once, looped, or chatted with.
+There used to be a second dimension — a ``mode`` selecting an assistant persona
+under ``assistants/`` — but it had a single value from FEAT-004 onward and no
+reader: it is gone.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from condor.memory.paths import CHAT_SLUG
 from condor.runtime.models import SessionSpec
 
 log = logging.getLogger(__name__)
@@ -50,52 +51,53 @@ class SessionBinding:
 
     @property
     def is_agent(self) -> bool:
-        return bool(self.agent_slug)
+        """A **specialist** is bound — i.e. someone other than the coordinator.
+
+        Every session resolves an agent now, so "has an agent_slug" no longer
+        separates anything. What the callers of this actually branch on is
+        whether the answering brain is a specialist: whether to assert a
+        separate identity at system level, open with domain memory instead of
+        the chat's, and lock the server chip. Condor is none of those.
+        """
+        return bool(self.agent_slug) and self.agent_slug != CHAT_SLUG
+
+    @property
+    def specialist_slug(self) -> str:
+        """``agent_slug`` to *record and show*: empty when Condor answers.
+
+        The full slug goes down to the MCP subprocess (it scopes the stores),
+        but everything user-facing and everything persisted keeps the older,
+        narrower meaning: ``""`` is the default chat. Widening it would rewrite
+        the session-reuse check (an unbound spec would never match its own live
+        session and would respawn on every prompt), the conversation records and
+        the dashboard's "a specialist is answering" indicator, none of which
+        this feature set out to change.
+        """
+        return self.agent_slug if self.is_agent else ""
 
 
 def resolve(
     spec: SessionSpec,
     user_data: dict | None = None,
 ) -> SessionBinding:
-    """Resolve the binding for ``spec``.
+    """Resolve the binding for ``spec``: one path, one registry.
 
-    This is the only place the assistant-vs-Agent branch exists. Callers get a
-    fully resolved toolset and identity and never re-derive either.
+    An empty ``agent_slug`` is not "no agent" — it is the default one, Condor.
+    Callers get a fully resolved toolset and identity and never re-derive either.
     """
-    if spec.agent_slug:
-        return _resolve_agent(spec, user_data)
-    return _resolve_assistant(spec, user_data)
-
-
-def _resolve_assistant(spec: SessionSpec, user_data: dict | None) -> SessionBinding:
-    """Today's path: an assistant persona with the chat's ambient toolset."""
+    from condor.agents.agent import Agent, AgentStore
     from handlers.agents._shared import build_mcp_servers_for_session
 
-    mcp_servers: list[dict] = []
-    if spec.user_id:
-        mcp_servers = build_mcp_servers_for_session(
-            spec.user_id,
-            spec.chat_id,
-            user_data,
-            server_name=spec.server_name,
-        )
-
-    return SessionBinding(
-        label="Condor",
-        agent_key=spec.agent_key,
-        server_name=spec.server_name or "",
-        mcp_servers=mcp_servers,
-    )
-
-
-def _resolve_agent(spec: SessionSpec, user_data: dict | None) -> SessionBinding:
-    """A domain Agent answers: its model, its tools, its store."""
-    from condor.agents.agent import AgentStore
-    from handlers.agents._shared import build_mcp_servers_for_session
-
-    agent = AgentStore().get(spec.agent_slug)
+    slug = spec.agent_slug or CHAT_SLUG
+    agent = AgentStore().get(slug)
     if agent is None:
-        raise UnknownAgent(f"No agent named '{spec.agent_slug}'")
+        if spec.agent_slug:
+            raise UnknownAgent(f"No agent named '{slug}'")
+        # The default agent is the fallback, so it cannot fail closed: an
+        # unreadable agents/condor/AGENT.md would take every chat down with it.
+        # A bare record is exactly what the chat ran on before it had one.
+        agent = Agent(slug=CHAT_SLUG, name="Condor")
+        log.warning("No %s/AGENT.md — the chat starts without instructions", CHAT_SLUG)
 
     # An explicit model on the spec beats the Agent's configured default: the
     # user picking a model in the UI is a deliberate override.
@@ -105,9 +107,11 @@ def _resolve_agent(spec: SessionSpec, user_data: dict | None) -> SessionBinding:
     effective_server = agent.server_name or spec.server_name or ""
 
     # A pinned server short-circuits resolution; None lets the builder fall back
-    # to the chat's ambient server. Serverless agents still need their own scope
-    # — without agent_slug the condor MCP tools would target the CHAT's memory
-    # and skills.
+    # to the ambient server. The slug always goes down to the subprocess, for
+    # Condor too: it scopes manage_memory/manage_skill to whoever is answering,
+    # and a specialist launched without it would read and write the CHAT's store.
+    # What the slug must NOT decide down there is identity or routine scope —
+    # see ``Settings.specialist_slug``.
     mcp_servers = build_mcp_servers_for_session(
         spec.user_id or 0,
         spec.chat_id or spec.user_id or 0,

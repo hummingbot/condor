@@ -23,8 +23,8 @@ Layout on disk — keyed by the assistant only (``agent_slug``), via
             SKILL.md         # frontmatter + steps
             <companion>.md   # optional attached reference files (templates, etc.)
 
-where ``{assistant_home}`` is ``assistants/condor`` for the chat (``agent_slug``
-None) or ``agents/<slug>`` for a trading agent / domain expert.
+where ``{assistant_home}`` is ``agents/<slug>`` — ``agents/condor`` for the chat,
+which a falsy ``agent_slug`` resolves (FEAT-033).
 
 A skill folder may bundle **companion files** beside its ``SKILL.md`` — e.g.
 config templates the playbook links. These implement *progressive disclosure*:

@@ -6,7 +6,6 @@ import {
   api,
   type AgentBindingOption,
   type ChatAgentOption,
-  type ChatModeOption,
   type CustomProvider,
 } from "@/lib/api";
 
@@ -40,9 +39,7 @@ export interface SessionOptions {
   agents: ChatAgentOption[];
   customProviders: CustomProvider[];
   agentBindings: AgentBindingOption[];
-  modes: ChatModeOption[];
   defaultAgent: string;
-  defaultMode: string;
 }
 
 /** What the picker falls back to when `/sessions/options` cannot be read. */
@@ -50,20 +47,15 @@ const FALLBACK: SessionOptions = {
   agents: [{ key: "claude-code", label: "Claude Code" }],
   customProviders: [],
   agentBindings: [],
-  modes: [
-    { key: "condor", label: "Condor", description: "" },
-    { key: "agent_builder", label: "Agent Builder", description: "" },
-  ],
   defaultAgent: "claude-code",
-  defaultMode: "condor",
 };
 
 /**
  * Who can answer, and on what.
  *
  * `/sessions/options` carries the picker whole: the agents and custom
- * providers that can answer, the domain Agents a session can be bound to —
- * that is the "Agents" section — and the modes. It is a near-static payload
+ * providers that can answer, and the domain Agents a session can be bound to —
+ * that is the "Agents" section. It is a near-static payload
  * every chat surface needs, so it goes through react-query on one key: fetched
  * once, shared by the panel and the workspace.
  */
@@ -80,8 +72,6 @@ export function useSessionOptions(enabled = true): SessionOptions {
     agents: data.agents,
     customProviders: data.custom_providers ?? [],
     agentBindings: data.agent_bindings ?? [],
-    modes: data.modes,
     defaultAgent: data.default_agent,
-    defaultMode: data.default_mode,
   };
 }
