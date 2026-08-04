@@ -1,16 +1,28 @@
 import { useState } from "react";
 import { Check, ChevronDown, ChevronRight, Loader2, X } from "lucide-react";
 import type { ToolCall } from "@/hooks/useChatSocket";
-import { formatToolName } from "@/lib/formatters";
+import { formatToolName, toolCallState } from "@/lib/formatters";
 
-function StatusIcon({ status }: { status: string }) {
-  switch (status) {
-    case "completed":
-      return <Check className="h-3 w-3 text-green-500" />;
-    case "failed":
-      return <X className="h-3 w-3 text-red-500" />;
+/** The one tool-call status icon. Shared so the completed/failed/pending
+ *  mapping is not re-derived per call site; `size` tunes the glyph only. */
+export function ToolCallStatusIcon({
+  status,
+  size = "h-3 w-3",
+}: {
+  status: string;
+  size?: string;
+}) {
+  switch (toolCallState(status)) {
+    case "ok":
+      return <Check className={`${size} shrink-0 text-[var(--color-green)]`} />;
+    case "error":
+      return <X className={`${size} shrink-0 text-[var(--color-red)]`} />;
     default:
-      return <Loader2 className="h-3 w-3 animate-spin text-[var(--color-text-muted)]" />;
+      return (
+        <Loader2
+          className={`${size} shrink-0 animate-spin text-[var(--color-text-muted)]`}
+        />
+      );
   }
 }
 
@@ -19,9 +31,7 @@ export function ToolCallStatus({ toolCalls }: { toolCalls: ToolCall[] }) {
 
   if (toolCalls.length === 0) return null;
 
-  const allDone = toolCalls.every(
-    (tc) => tc.status === "completed" || tc.status === "failed",
-  );
+  const allDone = toolCalls.every((tc) => toolCallState(tc.status) !== "pending");
 
   return (
     <div className="my-1.5">
@@ -50,7 +60,7 @@ export function ToolCallStatus({ toolCalls }: { toolCalls: ToolCall[] }) {
               key={tc.tool_call_id}
               className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)]"
             >
-              <StatusIcon status={tc.status} />
+              <ToolCallStatusIcon status={tc.status} />
               <span className="font-mono">{formatToolName(tc.title)}</span>
             </div>
           ))}

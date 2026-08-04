@@ -12,7 +12,7 @@ import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
-import { formatCompactUsd, formatCurrencyPnl } from "@/lib/formatters";
+import { formatCompactUsd, formatCurrencyPnl, toolCallState } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
 import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/executor/ExecutorTable";
 
@@ -618,9 +618,13 @@ function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug
 export function ToolCallChip({ tc }: { tc: import("@/lib/parse-agent").ToolCall }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = tc.input || tc.output;
-  const isOk = tc.status === "success" || tc.status === "completed";
-  const isErr = tc.status === "error";
-  const dotColor = isOk ? "bg-emerald-400" : isErr ? "bg-red-400" : "bg-[var(--color-text-muted)]";
+  const state = toolCallState(tc.status);
+  const dotColor =
+    state === "ok"
+      ? "bg-[var(--color-green)]"
+      : state === "error"
+        ? "bg-[var(--color-red)]"
+        : "bg-[var(--color-text-muted)]";
 
   const shortName = tc.name.replace(/^mcp__\w+__/, "");
 
