@@ -140,6 +140,19 @@ export function useChatSocket() {
   const { token, user } = useAuth();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // Whether this hook still wants a socket. `close()` is asynchronous, so the
+  // cleanup that cancels the pending retry cannot also stop the `onclose` that
+  // is about to fire: without this flag that handler re-arms the very reconnect
+  // we just cancelled, and an unmounted hook keeps rebuilding a socket — with
+  // the logged-out session's JWT — every few seconds for the life of the tab.
+  const shouldConnect = useRef(false);
+  // JWT the live socket was opened with, so a token change rebinds instead of
+  // riding on a connection authenticated as the previous session.
+  const socketToken = useRef<string | null>(null);
+  // Backoff for the retry, same shape as `CondorWebSocket`: a server that is
+  // down must not be hammered once per interval by every open tab.
+  const reconnectDelay = useRef(1000);
+  const MAX_RECONNECT_DELAY = 30000;
   // Track current assistant message per slot
   const currentAssistantMsg = useRef<Record<string, string | null>>({});
   // Conversations already fetched, so a WS reconnect doesn't re-hydrate a slot
@@ -194,9 +207,32 @@ export function useChatSocket() {
     if (unsent.current.length < MAX_UNSENT) unsent.current.push(msg);
   }, []);
 
+  // Drop the current socket without letting its asynchronous `onclose` speak
+  // for a connection we already decided to abandon.
+  const closeSocket = useCallback(() => {
+    clearTimeout(reconnectTimer.current);
+    const ws = wsRef.current;
+    wsRef.current = null;
+    socketToken.current = null;
+    ws?.close();
+  }, []);
+
   const connect = useCallback(() => {
     if (!token) return;
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    shouldConnect.current = true;
+
+    const live = wsRef.current;
+    if (
+      live &&
+      socketToken.current === token &&
+      (live.readyState === WebSocket.OPEN ||
+        live.readyState === WebSocket.CONNECTING)
+    ) {
+      return;
+    }
+    // Either the socket is gone/closing, or it carries a stale token: in both
+    // cases the old one is replaced rather than reused.
+    closeSocket();
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = import.meta.env.DEV ? "localhost:8088" : window.location.host;
@@ -206,16 +242,27 @@ export function useChatSocket() {
     // the URL query string, so it never leaks via proxy logs or history.
     const ws = new WebSocket(url, [WS_AUTH_SUBPROTOCOL, token]);
     wsRef.current = ws;
+    socketToken.current = token;
 
     ws.onopen = () => {
+      reconnectDelay.current = 1000;
       setIsConnected(true);
       const queued = unsent.current;
       unsent.current = [];
       for (const msg of queued) ws.send(JSON.stringify(msg));
     };
     ws.onclose = () => {
+      // A socket we replaced or closed on purpose still fires `onclose`, long
+      // after the hook moved on. Only the one that is currently the hook's
+      // socket may report the connection down or ask for another attempt.
+      if (wsRef.current !== ws) return;
       setIsConnected(false);
-      reconnectTimer.current = setTimeout(() => connect(), 3000);
+      if (!shouldConnect.current) return;
+      reconnectTimer.current = setTimeout(() => connect(), reconnectDelay.current);
+      reconnectDelay.current = Math.min(
+        reconnectDelay.current * 2,
+        MAX_RECONNECT_DELAY,
+      );
     };
     ws.onmessage = (ev) => {
       try {
@@ -224,14 +271,13 @@ export function useChatSocket() {
         /* ignore */
       }
     };
-  }, [token]);
+  }, [token, closeSocket]);
 
   const disconnect = useCallback(() => {
-    clearTimeout(reconnectTimer.current);
-    wsRef.current?.close();
-    wsRef.current = null;
+    shouldConnect.current = false;
+    closeSocket();
     setIsConnected(false);
-  }, []);
+  }, [closeSocket]);
 
   // Pull a slot's transcript from the server and drop it into the slot. Only
   // ever runs once per slot: the WS is authoritative for anything after.
@@ -841,12 +887,14 @@ export function useChatSocket() {
     [send],
   );
 
+  // Unmounting the tree that hosts the provider — logging out is the one that
+  // matters — must end the connection for good, not just until the next retry.
   useEffect(() => {
     return () => {
-      clearTimeout(reconnectTimer.current);
-      wsRef.current?.close();
+      shouldConnect.current = false;
+      closeSocket();
     };
-  }, []);
+  }, [closeSocket]);
 
   useEffect(() => {
     slotsRef.current = slots;
