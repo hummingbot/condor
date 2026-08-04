@@ -9,7 +9,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-import condor.reports as report_storage
 from condor.web.routes import (
     agents,
     archived,
@@ -85,25 +84,11 @@ def create_app() -> FastAPI:
     app.include_router(conversations.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
 
-    # ── Serve report HTML files ──
-    reports_dir = Path(report_storage.CHARTS_DIR)
-    reports_dir.mkdir(exist_ok=True)
-    reports_root = reports_dir.resolve()
-
-    @app.get("/reports/{filename:path}", include_in_schema=False)
-    async def serve_report(filename: str):
-        path = (reports_root / filename).resolve()
-        try:
-            path.relative_to(reports_root)
-        except ValueError as exc:
-            raise HTTPException(404, "Report not found") from exc
-        if path.suffix.lower() != ".html" or not path.is_file():
-            raise HTTPException(404, "Report not found")
-        return FileResponse(
-            path,
-            media_type="text/html",
-            headers={"Cache-Control": "no-cache"},
-        )
+    # Report bodies are NOT mounted here. They used to be served by an
+    # unauthenticated ``/reports/{filename:path}`` route, which made every
+    # report — portfolio value, PnL, positions — readable by anyone who could
+    # guess a filename. They now go through the authenticated
+    # ``GET /api/v1/reports/{report_id}/html`` handler instead (SEC-112).
 
     # ── Serve built frontend (production) ──
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
@@ -122,11 +107,17 @@ def create_app() -> FastAPI:
             running ahead of the backend would otherwise get 200 HTML where it
             expects JSON, and surface the version skew as an opaque parse error
             instead of a missing route.
+
+            ``/reports/`` is a real 404 too. It once served report bodies with no
+            auth (SEC-112); a stale link to it must fail loudly rather than fall
+            through to the SPA shell and look like it still works.
             """
             if full_path.startswith("api/"):
                 raise HTTPException(
                     status_code=404, detail=f"No such API route: /{full_path}"
                 )
+            if full_path.startswith("reports/"):
+                raise HTTPException(status_code=404, detail="Report not found")
             if full_path:
                 try:
                     candidate = (dist / full_path).resolve()
