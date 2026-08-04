@@ -15,6 +15,12 @@ class Settings:
     # Canonical key of the session that spawned this subprocess ("web:7:slot-1",
     # "tg:42", …). Empty when the server runs outside a session.
     session_key: str
+    # True when this subprocess belongs to a *background Condor worker* — the
+    # detached session `delegate` starts to author a routine (FEAT-032). The chat
+    # and the worker are the same agent record, so this flag is the only thing
+    # that tells them apart: it selects the worker framing in ``_build_instructions``
+    # and makes ``delegate(action="start")`` refuse to recurse.
+    delegate_worker: bool = False
 
     @property
     def specialist_slug(self) -> str:
@@ -41,6 +47,7 @@ def _parse_settings() -> Settings:
     parser.add_argument("--bot-token", default=None)
     parser.add_argument("--server-name", default=None)
     parser.add_argument("--session-key", default=None)
+    parser.add_argument("--delegate-worker", action="store_true", default=False)
     args, _ = parser.parse_known_args()
 
     return Settings(
@@ -58,6 +65,10 @@ def _parse_settings() -> Settings:
         agent_slug=args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", ""),
         active_server=args.server_name or os.environ.get("CONDOR_SERVER_NAME", ""),
         session_key=args.session_key or os.environ.get("CONDOR_SESSION_KEY", ""),
+        delegate_worker=(
+            args.delegate_worker
+            or os.environ.get("CONDOR_DELEGATE_WORKER", "") == "1"
+        ),
     )
 
 

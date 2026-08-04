@@ -210,8 +210,14 @@ def _condor_mcp_args(
     user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
+    delegate_worker: bool = False,
 ) -> list[str]:
-    """Build CLI args for the condor MCP subprocess."""
+    """Build CLI args for the condor MCP subprocess.
+
+    ``delegate_worker`` marks a *background Condor worker* — the detached session
+    ``delegate`` starts (FEAT-032). The chat and that worker share one agent
+    record, so the flag is what tells the subprocess which seat it is sitting in.
+    """
     import os
 
     # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
@@ -229,6 +235,8 @@ def _condor_mcp_args(
         args.extend(["--agent-slug", agent_slug])
     if server_name:
         args.extend(["--server-name", server_name])
+    if delegate_worker:
+        args.append("--delegate-worker")
     return args
 
 
@@ -238,6 +246,7 @@ def build_mcp_servers_for_session(
     user_data: dict | None = None,
     server_name: str | None = None,
     agent_slug: str | None = None,
+    delegate_worker: bool = False,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
@@ -253,8 +262,11 @@ def build_mcp_servers_for_session(
     own stores (``agents/{slug}/``). Without it the tools target the chat
     condor's stores — correct for chat sessions, wrong for an Agent run: a
     serverless consult/tick would silently read and write the CHAT's memory
-    and skills instead of the Agent's own (e.g. routine_builder unable to
-    find its routine_cookbook skill).
+    and skills instead of the Agent's own (e.g. an agent unable to find its
+    inherited ``routine_cookbook`` skill).
+
+    ``delegate_worker`` marks a background Condor delegation (FEAT-032) so the
+    subprocess picks up the worker framing and refuses to delegate again.
     """
     from config_manager import get_config_manager, get_effective_server
 
@@ -273,7 +285,13 @@ def build_mcp_servers_for_session(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
+        + _condor_mcp_args(
+            chat_id,
+            user_id,
+            agent_slug,
+            server_name=server_name,
+            delegate_worker=delegate_worker,
+        ),
         "env": [],
     }
 
