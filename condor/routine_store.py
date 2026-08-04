@@ -299,6 +299,7 @@ class RoutineStore:
             "last_run_at": None,
             "last_result": None,
             "last_duration": None,
+            "report_id": None,
             "run_count": 0,
             **extra,
         }
@@ -365,6 +366,11 @@ class RoutineStore:
                     "last_run_at": time.time(),
                     "last_result": result.text[:500],
                     "last_duration": duration,
+                    # The run's report is what a reader wants to open; the text
+                    # is only what the caller (or the LLM) was handed back. A
+                    # run that rendered nothing keeps the previous run's report
+                    # out of the record.
+                    "report_id": report_id,
                     "run_count": self._instances[instance_id].get("run_count", 0) + 1,
                     "error": error_msg,
                 }
