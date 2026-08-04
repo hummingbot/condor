@@ -42,10 +42,28 @@ _active_prompt_tasks: dict[str, asyncio.Task] = {}
 # not-yet-registered session as "ended".
 _pending_spawns: dict[str, asyncio.Task] = {}
 
+# One gate per slot, keyed like _active_prompt_tasks. Every WS action is
+# fire-and-forget, so two `send_message` frames for the same conversation run
+# concurrently: without this, #2 registers itself in _active_prompt_tasks while
+# #1 is still being cancelled, a later Stop cancels the wrong task and #1's is
+# never reaped. Held only across *taking over the slot* — deciding to steer,
+# stopping the turn ahead, claiming the task entry — never across the answer
+# itself, which would turn steering into queueing.
+_slot_gates: dict[str, asyncio.Lock] = {}
+
 
 def _session_key(user_id: int, slot_id: str) -> SessionKey:
     """Build the canonical runtime key for one web chat slot."""
     return SessionKey.web(user_id, slot_id)
+
+
+def _slot_gate(task_key: str) -> asyncio.Lock:
+    """The gate serialising takeovers of one slot, created on first use."""
+    gate = _slot_gates.get(task_key)
+    if gate is None:
+        gate = asyncio.Lock()
+        _slot_gates[task_key] = gate
+    return gate
 
 
 async def _await_spawn(user_id: int, slot_id: str) -> None:
@@ -133,6 +151,8 @@ def _to_ws_message(event: RuntimeEvent, slot_id: str) -> dict | None:
             "slot_id": slot_id,
             "elapsed_seconds": event.field("elapsed_seconds"),
         }
+    if event.type == EventType.QUEUED:
+        return {"event": "queued", "slot_id": slot_id}
     if event.type == EventType.DONE:
         return {
             "event": "prompt_done",
@@ -462,40 +482,56 @@ async def _handle_send_message(
     await _await_spawn(user_id, slot_id)
 
     session_key = _session_key(user_id, slot_id)
-    info = await runtime.get_info(session_key)
-
-    if info is None or not info.alive:
-        # Session died — clean up and notify frontend
-        await runtime.destroy(session_key)
-        await _send(
-            ws,
-            {
-                "event": "error",
-                "slot_id": slot_id,
-                "message": "Session ended. Start a new one.",
-            },
-        )
-        await _send(
-            ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": True}
-        )
-        return
-
-    if info.is_busy:
-        # Named, so the client can say so in the conversation it happened in.
-        # Unaddressed, this error is dropped on the floor and the message the
-        # user just sent sits there looking like it is still being answered.
-        await _send(
-            ws, {"event": "error", "slot_id": slot_id, "message": "Agent is busy"}
-        )
-        return
-
     task_key = f"{user_id}:{slot_id}"
     task = asyncio.current_task()
-    if task:
-        _active_prompt_tasks[task_key] = task
+    stream = None
 
+    gate = _slot_gate(task_key)
+    await gate.acquire()
+    gate_held = True
     try:
-        async for event in runtime.prompt(session_key, PromptRequest(text=text)):
+        info = await runtime.get_info(session_key)
+
+        if info is None or not info.alive:
+            # Session died — clean up and notify frontend
+            await runtime.destroy(session_key)
+            await _send(
+                ws,
+                {
+                    "event": "error",
+                    "slot_id": slot_id,
+                    "message": "Session ended. Start a new one.",
+                },
+            )
+            await _send(
+                ws,
+                {"event": "session_destroyed", "slot_id": slot_id, "had_session": True},
+            )
+            return
+
+        # This turn owns the slot from here on, so a Stop that arrives next
+        # cancels *this* task and not the one it is replacing.
+        if task:
+            _active_prompt_tasks[task_key] = task
+
+        # Busy is no longer a refusal: the composer stays live and sending is
+        # how the user redirects an answer that is heading the wrong way.
+        stream = runtime.prompt(session_key, PromptRequest(text=text), on_busy="steer")
+
+        if info.is_busy:
+            # Said before the stream starts, so the partial answer on screen is
+            # marked interrupted instead of being left looking finished.
+            await _send(ws, {"event": "prompt_interrupted", "slot_id": slot_id})
+            # One pull, still under the gate: in the steer path the runtime
+            # stops the turn ahead and *then* yields QUEUED, so this is bounded
+            # by TIMEOUTS.prompt_cancel and is exactly the window a third
+            # message must not race through.
+            await _pump_one(ws, stream, slot_id)
+
+        gate.release()
+        gate_held = False
+
+        async for event in stream:
             message = _to_ws_message(event, slot_id)
             if message:
                 await _send(ws, message)
@@ -517,7 +553,24 @@ async def _handle_send_message(
             ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "error"}
         )
     finally:
-        _active_prompt_tasks.pop(task_key, None)
+        if gate_held:
+            gate.release()
+        # Only if it is still ours. A turn that was steered aside must not reap
+        # the entry belonging to the turn that replaced it — that is the race
+        # that left Stop cancelling the wrong task.
+        if _active_prompt_tasks.get(task_key) is task:
+            _active_prompt_tasks.pop(task_key, None)
+
+
+async def _pump_one(ws: WebSocket, stream, slot_id: str) -> None:
+    """Forward exactly one event from a prompt stream, if it has one."""
+    try:
+        event = await stream.__anext__()
+    except StopAsyncIteration:
+        return
+    message = _to_ws_message(event, slot_id)
+    if message:
+        await _send(ws, message)
 
 
 async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
@@ -533,23 +586,33 @@ async def _handle_abort_prompt(ws: WebSocket, user_id: int, msg: dict) -> None:
     # triggering its finally block to release the lock. The frontend resets
     # optimistically, so this await costs the user nothing visible.
     session_key = _session_key(user_id, slot_id)
-    await runtime.abort(session_key)
-
     task_key = f"{user_id}:{slot_id}"
-    task = _active_prompt_tasks.get(task_key)
-    if task and not task.done():
-        task.cancel()
-        # Wait briefly for the task to finish so the lock is released
-        # before the next message can acquire it.
-        try:
-            await asyncio.wait_for(asyncio.shield(task), timeout=3)
-        except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
-            pass
-    else:
-        # No active task to cancel — send prompt_done directly so the frontend resets
-        await _send(
-            ws, {"event": "prompt_done", "slot_id": slot_id, "stop_reason": "cancelled"}
-        )
+
+    # Same gate the send path takes, so a Stop landing between two sends cannot
+    # interleave with a takeover and cancel a task that is already being
+    # replaced — or worse, the one replacing it.
+    async with _slot_gate(task_key):
+        await runtime.abort(session_key)
+
+        task = _active_prompt_tasks.get(task_key)
+        if task and not task.done():
+            task.cancel()
+            # Wait briefly for the task to finish so the lock is released
+            # before the next message can acquire it.
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout=3)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                pass
+        else:
+            # No active task to cancel — send prompt_done directly so the frontend resets
+            await _send(
+                ws,
+                {
+                    "event": "prompt_done",
+                    "slot_id": slot_id,
+                    "stop_reason": "cancelled",
+                },
+            )
 
 
 async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> None:
@@ -568,6 +631,10 @@ async def _handle_destroy_session(ws: WebSocket, user_id: int, msg: dict) -> Non
     # Clean up active prompt task to prevent memory leaks
     task_key = f"{user_id}:{slot_id}"
     _active_prompt_tasks.pop(task_key, None)
+    # The gate goes with the slot. A waiter still holds the object it is queued
+    # on, so dropping the entry only means the next send for a *new* session
+    # under this key starts with a fresh one.
+    _slot_gates.pop(task_key, None)
 
     await _send(
         ws, {"event": "session_destroyed", "slot_id": slot_id, "had_session": destroyed}
