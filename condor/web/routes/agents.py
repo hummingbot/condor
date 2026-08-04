@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from condor.agents.ownership import OwnedBot
 from condor.agents.sessions_index import (
@@ -235,6 +235,21 @@ class CreateAgentRequest(BaseModel):
 
 class UpdateAgentMdRequest(BaseModel):
     content: str
+
+
+class AgentConfigRequest(BaseModel):
+    """The few front-matter fields worth a control instead of a text editor.
+
+    Every field is optional and ``None`` means "leave it alone", so a caller
+    that only wants to move the server pin does not have to restate the rest.
+    """
+
+    server_required: bool | None = None
+    server_name: str | None = Field(
+        default=None,
+        description="Pin the Agent to this Hummingbot API server. Empty string "
+        "clears the pin and lets it follow the chat's ambient selection.",
+    )
 
 
 class CreateStrategyRequest(BaseModel):
@@ -1000,6 +1015,40 @@ async def update_agent_md(
     agent = _get_agent(slug)
     (agent.agent_dir / "AGENT.md").write_text(req.content)
     return {"updated": True}
+
+
+@router.patch("/{slug}/config")
+async def update_agent_config(
+    slug: str, req: AgentConfigRequest, user: WebUser = Depends(get_current_user)
+):
+    """Set the Agent's server pin without hand-editing front matter.
+
+    ``AgentStore.update`` re-renders the whole front matter, so this is the same
+    write the MCP ``manage_trading_agent`` tool already performs — the web layer
+    simply had no door to it, which is why the UI could only offer a text editor.
+    """
+    from config_manager import get_config_manager
+
+    agent = _get_agent(slug)
+
+    # A pin decides which account the Agent's tools trade on, so it is gated
+    # like every other server-scoped write. An empty string clears the pin and
+    # needs no access at all.
+    if req.server_name and not get_config_manager().has_server_access(
+        user.id, req.server_name
+    ):
+        raise HTTPException(status_code=403, detail="No access")
+
+    if req.server_name is not None:
+        agent.server_name = req.server_name
+    if req.server_required is not None:
+        agent.server_required = req.server_required
+    _agent_store().update(agent)
+    return {
+        "updated": True,
+        "server_name": agent.server_name,
+        "server_required": agent.server_required,
+    }
 
 
 @router.delete("/{slug}")
