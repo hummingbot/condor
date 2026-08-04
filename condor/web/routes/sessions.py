@@ -78,11 +78,11 @@ async def list_sessions(user: WebUser = Depends(get_current_user)):
 async def session_options(user: WebUser = Depends(get_current_user)):
     """Agents, modes and servers a session can be started with.
 
-    Payload mirrors the older ``/chat/options`` (which stays for the shipped
-    dashboard) and adds the caller's accessible servers. ``picker`` marks
-    sentinel keys like "openrouter:" that open a model list rather than naming
-    a startable model — the key's shape does not tell you, since "ollama:" also
-    ends in a colon but is a real key.
+    Sole owner of this payload: agents, custom providers and modes, plus the
+    caller's accessible servers. ``picker`` marks sentinel keys like
+    "openrouter:" that open a model list rather than naming a startable model —
+    the key's shape does not tell you, since "ollama:" also ends in a colon but
+    is a real key.
     """
     from condor.agents.agent import AgentStore
     from condor.preferences import get_custom_providers, load_user_data_for
