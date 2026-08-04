@@ -191,6 +191,26 @@ class ConfirmationRegistry:
             and (user_id is None or p.user_id == user_id)
         ]
 
+    def deny_pending_for_session(self, session_key: str) -> int:
+        """Deny every request this session is still waiting on. Returns how many.
+
+        Used when a turn is interrupted mid-tool-call: the agent is holding a
+        dialog for work the user just abandoned, and nobody is going to answer
+        it. Without this the interrupted turn keeps its confirmation alive until
+        the TTL denies it, which also stops it noticing the cancel that
+        interrupted it.
+        """
+        denied = 0
+        for pending in list(self._entries.values()):
+            if pending.session_key != session_key:
+                continue
+            if pending.status is not ConfirmationStatus.PENDING:
+                continue
+            pending.status = ConfirmationStatus.DENIED
+            pending._event.set()
+            denied += 1
+        return denied
+
     def discard(self, confirmation_id: str) -> None:
         """Drop a finished entry once its waiter has consumed the outcome."""
         self._entries.pop(confirmation_id, None)

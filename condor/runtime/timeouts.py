@@ -26,6 +26,10 @@ class TimeoutPolicy:
     # How long to wait for a session's prompt lock before giving up. Guards
     # against a stuck previous prompt blocking the chat forever.
     prompt_lock: int = 30
+    # How long a deliberately queued message waits for its turn. Longer than
+    # prompt_lock, which guards against a *stuck* prompt rather than a busy
+    # one: a message waiting behind a five-minute answer is not a fault.
+    prompt_queue: int = 900
     # Wall-clock budget for a single prompt. Kills runaway agent turns.
     prompt_overall: int = 1800
     # How long to wait for an agent to confirm session/cancel before falling

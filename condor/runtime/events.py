@@ -42,6 +42,10 @@ class EventType(str, Enum):
     HEARTBEAT = "heartbeat"
     ERROR = "error"
     DONE = "done"
+    # The turn was accepted but has not started: it is waiting behind the one
+    # in front of it. Emitted only when a caller opted into waiting, so a
+    # surface can say "waiting its turn" instead of showing a dead composer.
+    QUEUED = "queued"
 
 
 def serialize(value: Any) -> Any:
@@ -140,6 +144,11 @@ class RuntimeEvent(BaseModel):
         return cls(
             type=EventType.ERROR, session_key=session_key, data={"message": message}
         )
+
+    @classmethod
+    def queued(cls, session_key: str = "") -> "RuntimeEvent":
+        """This turn is waiting for the one ahead of it to finish."""
+        return cls(type=EventType.QUEUED, session_key=session_key, data={})
 
     @classmethod
     def done(
