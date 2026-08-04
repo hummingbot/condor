@@ -24,13 +24,15 @@ from mcp_servers.condor.tools import (
 
 _CHAT_ROUTINES_RULE = (
     "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
-    "design a routine MUST go through the `routine_builder` agent "
-    '(`consult(agent="routine_builder", ...)` for inline work, '
-    '`delegate(action="start", agent="routine_builder", ...)` for background). '
-    "It is the single entry point for routine authoring — do NOT write routine "
-    "code yourself and do NOT hand-roll it with raw `manage_routines` "
-    "create_routine/edit_routine. (RUNNING an existing routine is not authoring "
-    '— for that just call `manage_routines(action="run", name="...")`.)\n'
+    "design a routine MUST go to a background Condor worker — "
+    '`delegate(action="start", agent="condor", task="build a routine that …")`. '
+    "It returns a task_id immediately (you are NOT blocked), reads the "
+    "`routine_cookbook` playbook, writes and TESTS the routine, and pings the "
+    "user with the result. Tell the user it is running in the background. Do NOT "
+    "write routine code yourself and do NOT hand-roll it with raw "
+    "`manage_routines` create_routine/edit_routine. (RUNNING an existing routine "
+    'is not authoring — for that just call `manage_routines(action="run", '
+    'name="...")`.)\n'
 )
 
 # The worker IS Condor — same agent record, same tools — so the routing text is

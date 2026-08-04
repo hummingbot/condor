@@ -41,9 +41,9 @@ def three_agents(tmp_path, monkeypatch):
     )
     _write_agent(
         tmp_path,
-        "routine_builder",
-        name="Routine Builder",
-        when_to_consult="Author routines",
+        "executor_manager",
+        name="Executor Manager",
+        when_to_consult="Deploy and tune executors",
     )
     return tmp_path
 
@@ -57,12 +57,12 @@ def test_list_index_excludes_only_the_named_slug(three_agents):
     # Every OTHER agent is still there: filtering for any other reason would be
     # the same as deleting them.
     assert "- [brigado] BRL market making" in index
-    assert "- [routine_builder] Author routines" in index
+    assert "- [executor_manager] Deploy and tune executors" in index
 
 
 def test_list_index_default_lists_everyone(three_agents):
     index = AgentStore().list_index()
-    for slug in ("backpack_mm", "brigado", "routine_builder"):
+    for slug in ("backpack_mm", "brigado", "executor_manager"):
         assert f"- [{slug}]" in index
 
 
@@ -112,7 +112,7 @@ def test_instructions_unbound_are_the_coordinator_text(three_agents, monkeypatch
     assert text.startswith("Condor exposes reusable **skills**")
     assert "[AGENTS — consult for domain work]" in text
     # The full roster, self included — the coordinator has no self to exclude.
-    for slug in ("backpack_mm", "brigado", "routine_builder"):
+    for slug in ("backpack_mm", "brigado", "executor_manager"):
         assert f"- [{slug}]" in text
 
 
@@ -126,22 +126,20 @@ def test_instructions_bound_assert_identity_and_drop_self(three_agents, monkeypa
     # FEAT-031: routine authoring stays with the agent — it inherits the cookbook.
     assert "ROUTINE AUTHORING IS YOURS" in text
     assert "routine_cookbook" in text
-    assert "`routine_builder` agent" not in text
+    # And never routed back out to a builder agent — that agent is gone (FEAT-032).
+    assert "routine_builder" not in text
 
 
-def test_instructions_never_tell_routine_builder_to_consult_itself(
-    three_agents, monkeypatch
-):
-    text = _instructions(monkeypatch, "routine_builder")
-    assert "- [routine_builder]" not in text
-    assert "ROUTINE AUTHORING IS YOURS" in text
-    assert "MUST go through the `routine_builder` agent" not in text
+def test_chat_routes_authoring_to_a_background_condor(three_agents, monkeypatch):
+    """FEAT-032: the chat hands authoring to a detached worker, not to an agent.
 
-
-def test_chat_routing_still_delegates_routine_authoring(three_agents, monkeypatch):
-    """FEAT-031 flips the AGENT-side rule only; the chat still routes authoring."""
+    It must not block on the cookbook (664 lines it would have to read) and it
+    must not write the routine itself — but *running* one is still just a call.
+    """
     text = _instructions(monkeypatch, "")
-    assert "MUST go through the `routine_builder` agent" in text
+    assert 'delegate(action="start", agent="condor"' in text
+    assert "routine_builder" not in text
+    assert "RUNNING an existing routine is not authoring" in text
 
 
 def test_unknown_slug_degrades_to_the_coordinator_text(three_agents, monkeypatch):
