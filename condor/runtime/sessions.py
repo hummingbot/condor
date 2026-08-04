@@ -22,6 +22,7 @@ from condor.acp.pydantic_ai_client import (
     is_pydantic_ai_model,
     model_prefix,
 )
+from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
@@ -385,6 +386,15 @@ async def get_or_create_session(
             permission_callback=permission_callback,
             extra_env={**extra_env, **model_env},
             model=model_pref,
+            # Who this brain IS, at system level. The opening context below is a
+            # user turn: it is read once and then loses to the host's own system
+            # prompt, which is why a bound Agent kept answering as Condor
+            # (FEAT-025). This is the one channel that outranks it.
+            system_prompt=(
+                agent_identity_header(bound.agent_slug, bound.label)
+                if bound.is_agent
+                else ""
+            ),
         )
 
     await client.start()
@@ -396,7 +406,7 @@ async def get_or_create_session(
         initial_context = ""
         if bound.is_agent and spec.user_id:
             initial_context = binding.agent_identity_context(
-                bound.agent_slug, spec.user_id, bound.instructions
+                bound.agent_slug, spec.user_id, bound.instructions, bound.label
             )
         elif spec.user_id:
             initial_context = build_initial_context(

@@ -97,6 +97,32 @@ class Agent:
         return self.when_to_consult or self.description or self.name
 
 
+def identity_header(slug: str, name: str = "") -> str:
+    """The first thing a bound Agent's brain reads: *which* assistant it is.
+
+    An Agent's AGENT.md says what it knows ("You are a specialist in …") but
+    never that it IS this agent and is NOT Condor, the chat assistant. Without
+    that line the model reads the coordinator framing it also receives and
+    answers in the third person about itself, offering to consult itself
+    (FEAT-025). Shared verbatim by the condor MCP server's instructions (the
+    only system-level channel ACP v1 gives us) and by the session's opening
+    context, so the two framings can never drift apart.
+
+    Takes the slug/name rather than an :class:`Agent` because the MCP
+    subprocess and the runtime reach it from opposite sides — one has settings,
+    the other a resolved binding — and neither should re-read AGENT.md for a
+    single line.
+    """
+    label = name or slug
+    return (
+        f'You ARE the "{label}" agent (slug: `{slug}`) running inside Condor. '
+        "You are NOT Condor, the chat assistant — Condor is a different "
+        f"assistant that can consult you. Answer in the first person as {label}: "
+        f"never describe {label} in the third person, and never consult or "
+        f"delegate to `{slug}`, because that is you."
+    )
+
+
 def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
     """Load an Agent from ``<agent_dir>/AGENT.md`` (any dir with the file)."""
     path = agent_dir / "AGENT.md"
@@ -144,15 +170,24 @@ class AgentStore:
                 agents.append(a)
         return agents
 
-    def list_index(self) -> str:
+    def list_index(self, exclude: str = "") -> str:
         """Injectable index — one line per Agent (mirrors SKILLS).
 
         EVERY Agent is listed. An agent missing from this index is invisible to
         the coordinator, which means it can never be consulted or delegated to —
         so filtering here was the same as deleting the agent. Empty string only
         when no agents exist at all, so callers inject nothing.
+
+        ``exclude`` drops exactly ONE slug: the assistant this index is being
+        injected INTO, which must not be told to consult itself (FEAT-025).
+        Filtering for any other reason is still forbidden, which is why the
+        argument is single-purpose rather than a predicate.
         """
-        return "\n".join(f"- [{a.slug}] {a.consult_hint}" for a in self.list_all())
+        return "\n".join(
+            f"- [{a.slug}] {a.consult_hint}"
+            for a in self.list_all()
+            if a.slug != exclude
+        )
 
     def create(
         self,
