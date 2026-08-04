@@ -149,10 +149,13 @@ def _build_instructions() -> str:
         pass  # Advisory — never block server startup on index assembly.
     try:
         from condor.agents.agent import AgentStore
+        from condor.memory.paths import CHAT_SLUG
 
-        # Self is excluded only when we actually resolved it: an agent told it can
-        # consult itself is exactly the bug this fixes.
-        agents_index = AgentStore().list_index(exclude=agent.slug if agent else "")
+        # Never a peer of itself (the bug this fixes), and never a peer of the
+        # coordinator: Condor is in the registry now (FEAT-033), and a
+        # specialist offered it could consult back into the chat.
+        exclude = {CHAT_SLUG} | ({agent.slug} if agent else set())
+        agents_index = AgentStore().list_index(exclude=exclude)
         if agents_index:
             header = (
                 "[PEER AGENTS — consult for work outside your domain]"

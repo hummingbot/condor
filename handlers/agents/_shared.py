@@ -4,101 +4,22 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from condor.memory.paths import CHAT_SLUG
+
 log = logging.getLogger(__name__)
 
-# -- Assistant prompt loader (auto-discovery from assistants/ folder) --
 
-_ASSISTANTS_DIR = Path(__file__).parent.parent.parent / "assistants"
-_assistant_cache: dict[str, tuple[dict[str, str], str]] = {}
+def _chat_agent():
+    """The default agent's record — Condor's ``agents/condor/AGENT.md``.
 
-
-def _parse_assistant(path: Path) -> tuple[dict[str, str], str]:
-    """Parse an assistant .md file, extracting YAML frontmatter and body.
-
-    Frontmatter format (between --- lines):
-        label: Display Name
-        description: Short description
-
-    Returns (metadata_dict, body_text).
+    There is one loader and one frontmatter schema (FEAT-033): the chat is read
+    by ``AgentStore`` exactly like a specialist is. Returns ``None`` only if the
+    file is missing or unreadable, which callers treat as "no instructions"
+    rather than as a startup failure.
     """
-    raw = path.read_text(encoding="utf-8").strip()
-    meta: dict[str, str] = {}
-    body = raw
+    from condor.agents.agent import AgentStore
 
-    if raw.startswith("---"):
-        parts = raw.split("---", 2)
-        if len(parts) >= 3:
-            for line in parts[1].strip().splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    meta[k.strip()] = v.strip()
-            body = parts[2].strip()
-
-    # Fallback: derive label from filename
-    if "label" not in meta:
-        meta["label"] = path.stem.replace("_", " ").title()
-    if "description" not in meta:
-        meta["description"] = ""
-
-    return meta, body
-
-
-def load_assistant(name: str) -> str:
-    """Load an assistant prompt body from assistants/{name}.md. Cached."""
-    meta, body = _load_assistant_full(name)
-    return body
-
-
-def _assistant_path(name: str) -> Path | None:
-    """Resolve an assistant's definition file.
-
-    Supports both the flat form (``assistants/{name}.md``) and the folder form
-    (``assistants/{name}/AGENT.md``, FEAT-003), where the assistant's store is
-    co-located under ``assistants/{name}/store/``. Flat form wins if both exist.
-    """
-    flat = _ASSISTANTS_DIR / f"{name}.md"
-    if flat.exists():
-        return flat
-    folder = _ASSISTANTS_DIR / name / "AGENT.md"
-    if folder.exists():
-        return folder
-    return None
-
-
-def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
-    """Load metadata + body for an assistant. Cached after first read."""
-    if name in _assistant_cache:
-        return _assistant_cache[name]
-    path = _assistant_path(name)
-    if path is None:
-        log.warning("Assistant prompt not found: %s", _ASSISTANTS_DIR / name)
-        return {"label": name, "description": ""}, ""
-    result = _parse_assistant(path)
-    _assistant_cache[name] = result
-    return result
-
-
-def discover_assistants() -> dict[str, dict[str, str]]:
-    """Auto-discover all assistants from ``assistants/``.
-
-    Picks up both ``assistants/{name}.md`` (flat) and ``assistants/{name}/AGENT.md``
-    (folder form, FEAT-003). Returns dict like:
-    {"condor": {"label": "Condor", "description": "..."}, ...}
-    """
-    result: dict[str, dict[str, str]] = {}
-    if not _ASSISTANTS_DIR.exists():
-        return result
-    # Flat form: assistants/{name}.md
-    names = [path.stem for path in sorted(_ASSISTANTS_DIR.glob("*.md"))]
-    # Folder form (FEAT-003): assistants/{name}/AGENT.md
-    names += [path.parent.name for path in sorted(_ASSISTANTS_DIR.glob("*/AGENT.md"))]
-    for name in dict.fromkeys(names):  # dedupe, preserve order
-        meta, _ = _load_assistant_full(name)
-        result[name] = {
-            "label": meta["label"],
-            "description": meta.get("description", ""),
-        }
-    return result
+    return AgentStore().get(CHAT_SLUG)
 
 
 AGENT_OPTIONS: dict[str, dict[str, Any]] = {
@@ -132,7 +53,7 @@ def selectable_agent_options() -> dict[str, dict[str, Any]]:
 def _default_agent() -> str:
     """Resolve the fallback agent_key for users who haven't picked a model.
 
-    Precedence: ``CONDOR_DEFAULT_AGENT`` env > condor ``AGENT.md`` frontmatter
+    Precedence: ``CONDOR_DEFAULT_AGENT`` env > Condor's ``AGENT.md`` frontmatter
     ``agent_key`` > ``"claude-code"``. A user's own /agent → Change LLM choice
     (``agent_llm``) still overrides this at runtime; this is only the default.
     Examples for the frontmatter / env: ``claude-code``, ``claude-acp:opus``,
@@ -140,37 +61,15 @@ def _default_agent() -> str:
     """
     import os
 
-    meta, _ = _load_assistant_full("condor")
+    agent = _chat_agent()
     return (
-        os.environ.get("CONDOR_DEFAULT_AGENT") or meta.get("agent_key") or "claude-code"
+        os.environ.get("CONDOR_DEFAULT_AGENT")
+        or (agent.agent_key if agent else "")
+        or "claude-code"
     )
 
 
 DEFAULT_AGENT = _default_agent()
-
-# -- Agent modes (auto-discovered) --
-
-AGENT_MODES = discover_assistants()
-DEFAULT_MODE = "condor"
-
-
-def normalize_mode(mode: str | None) -> str:
-    """Coerce a persisted ``agent_mode`` to a currently-valid one.
-
-    FEAT-004 collapsed the old multi-mode setup ('trading'/'agent_builder') into
-    the single 'condor' mode. Stale pickled ``user_data`` may still hold a mode
-    that is no longer in ``AGENT_MODES``; left as-is it would surface a raw broken
-    label or start a non-existent mode. Anything unknown falls back to
-    ``DEFAULT_MODE``.
-    """
-    return mode if mode in AGENT_MODES else DEFAULT_MODE
-
-
-def reload_assistants() -> None:
-    """Re-scan assistants/ folder. Call after adding/removing .md files."""
-    _assistant_cache.clear()
-    AGENT_MODES.clear()
-    AGENT_MODES.update(discover_assistants())
 
 
 # -- Compact prompt templates --
@@ -218,13 +117,12 @@ _TELEGRAM_FORMATTING = (
 
 
 def _build_system_prompt(platform: str = "telegram") -> str:
-    """Build the system prompt by combining the assistant .md with platform formatting rules."""
-    assistant_content = load_assistant("condor")
-    formatting = _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
+    """Condor's own AGENT.md plus the platform's formatting rules."""
+    agent = _chat_agent()
     return (
         "[System context -- do not repeat this to the user]\n\n"
-        f"{assistant_content}\n\n"
-        f"{formatting}"
+        f"{agent.instructions if agent else ''}\n\n"
+        f"{_WEB_FORMATTING if platform == 'web' else _TELEGRAM_FORMATTING}"
     )
 
 
@@ -441,7 +339,7 @@ def build_initial_context(
 
     cm = get_config_manager()
 
-    # Build system prompt from assistants/ .md + platform formatting
+    # System prompt: Condor's own AGENT.md + platform formatting
     system_prompt = _build_system_prompt(platform)
     sections: list[str] = [system_prompt]
 
@@ -576,7 +474,8 @@ def build_initial_context(
     try:
         from condor.agents.agent import AgentStore
 
-        agents_index = AgentStore().list_index()
+        # The coordinator is not among its own consultees (FEAT-033).
+        agents_index = AgentStore().list_index(exclude={CHAT_SLUG})
         if agents_index:
             sections.append(
                 "[AGENTS — consult these BEFORE doing domain work with raw tools]\n"

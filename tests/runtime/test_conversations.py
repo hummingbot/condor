@@ -201,8 +201,7 @@ def test_a_line_from_another_version_of_the_shape_still_parses(conv_root):
     turns = read_transcript(USER, meta.id)
     assert [t.text for t in turns] == ["older build", "newer build"]
     old = turns[0]
-    assert (old.agent_key, old.agent_slug, old.mode) == (
-        "",
+    assert (old.agent_key, old.agent_slug) == (
         "",
         "",
     ), "an unattributed turn stays empty rather than being backfilled with a guess"
@@ -540,17 +539,12 @@ def test_recorder_stamps_the_assistant_turn_with_who_answered(conv_root):
         "hi",
         agent_key="gemini",
         agent_slug="brigado",
-        mode="condor",
     )
     rec.observe(RuntimeEvent(type="text", data={"text": "hello"}))
     rec.flush()
 
     turns = read_transcript(USER, meta.id)
-    assert (turns[1].agent_key, turns[1].agent_slug, turns[1].mode) == (
-        "gemini",
-        "brigado",
-        "condor",
-    )
+    assert (turns[1].agent_key, turns[1].agent_slug) == ("gemini", "brigado")
 
 
 def test_recorder_without_attribution_records_an_unattributed_turn(conv_root):
@@ -562,7 +556,7 @@ def test_recorder_without_attribution_records_an_unattributed_turn(conv_root):
 
     turns = read_transcript(USER, meta.id)
     assert turns[1].text == "hello"
-    assert (turns[1].agent_key, turns[1].agent_slug, turns[1].mode) == ("", "", "")
+    assert (turns[1].agent_key, turns[1].agent_slug) == ("", "")
 
 
 def test_recorder_flush_is_idempotent(conv_root):

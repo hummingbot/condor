@@ -27,7 +27,6 @@ export interface SlotInfo {
   /** Durable conversation behind the slot. Same value as slot_id for web. */
   conversation_id?: string;
   agent_key: string;
-  mode: string;
   is_busy?: boolean;
   server_name?: string;
   /**
@@ -540,7 +539,6 @@ export function useChatSocket() {
             slot_id: conversationId,
             conversation_id: conversationId,
             agent_key: meta?.agent_key || "",
-            mode: meta?.mode || "",
             server_name: meta?.server_name,
             agent_slug: meta?.agent_slug,
             label: meta?.label,
@@ -578,7 +576,6 @@ export function useChatSocket() {
         if (!latest || slotsRef.current.length > 0) return;
         resumeConversation(latest.id, {
           agent_key: latest.agent_key,
-          mode: latest.mode,
           server_name: latest.server_name || undefined,
           agent_slug: latest.agent_slug,
         });
@@ -647,7 +644,6 @@ export function useChatSocket() {
             slot_id: data.slot_id as string,
             conversation_id: (data.conversation_id as string) || undefined,
             agent_key: data.agent_key as string,
-            mode: data.mode as string,
             server_name: (data.server_name as string) || undefined,
             server_pinned: Boolean(data.server_pinned),
             agent_slug: (data.agent_slug as string) || "",
@@ -914,13 +910,12 @@ export function useChatSocket() {
    * there eagerly rather than left for `sendMessage` to miss.
    */
   const startSession = useCallback(
-    (agentKey: string, mode: string, serverName?: string, agentSlug?: string): string => {
+    (agentKey: string, serverName?: string, agentSlug?: string): string => {
       const ref = nextClientRef();
       const slot: ChatSlot = {
         info: {
           slot_id: ref,
           agent_key: agentKey,
-          mode,
           server_name: serverName,
           agent_slug: agentSlug || "",
         },
@@ -935,7 +930,6 @@ export function useChatSocket() {
       send({
         action: "start_session",
         agent_key: agentKey,
-        mode,
         server_name: serverName,
         agent_slug: agentSlug,
         client_ref: ref,
@@ -969,7 +963,6 @@ export function useChatSocket() {
           const info: SlotInfo = {
             ...s.info,
             agent_key: session.agent_key,
-            mode: session.mode,
             // A brain switch can move the server too: binding to an Agent that
             // pins one overrides the chat's ambient choice, and unbinding
             // hands it back. Both are read off the respawned session.

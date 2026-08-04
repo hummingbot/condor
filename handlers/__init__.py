@@ -148,7 +148,10 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("archived_total_count", None)
 
     # Agent states — only clear transient UI states, NOT session/preference state.
-    # agent_llm, agent_mode are persistent user preferences (always-on agent).
+    # agent_llm is a persistent user preference (always-on agent). A stale
+    # agent_mode may still sit in pickled user_data; nothing reads it since the
+    # persona axis was deleted (FEAT-033), so it is left alone rather than
+    # migrated.
     # agent_state is no longer used for routing (agent is the default fallback).
     context.user_data.pop("agent_compact_custom", None)
     context.user_data.pop("agent_chat_target", None)

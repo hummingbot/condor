@@ -16,10 +16,6 @@ from pydantic import BaseModel, Field
 # the whole boundary from one place; the definition lives in events.py.
 from condor.runtime.events import EventType, RuntimeEvent  # noqa: F401
 
-# Default conversational mode. Mirrors handlers.agents._shared.DEFAULT_MODE but
-# is duplicated here so the boundary models stay free of handler imports.
-DEFAULT_MODE = "condor"
-
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -30,7 +26,6 @@ class SessionSpec(BaseModel):
 
     key: str = Field(description="Canonical SessionKey string, e.g. 'tg:12345'")
     agent_key: str = Field(description="LLM/agent identifier, e.g. 'claude-code'")
-    mode: str = DEFAULT_MODE
     user_id: int | None = None
     chat_id: int | None = Field(
         default=None,
@@ -44,11 +39,12 @@ class SessionSpec(BaseModel):
     )
     extra_context: str = Field(
         default="",
-        description="Appended to the initial context, e.g. mode-specific instructions.",
+        description="Appended to the initial context, e.g. a caller's handoff recap.",
     )
     agent_slug: str = Field(
         default="",
-        description="Reserved: binds the session to a specific domain Agent.",
+        description="Binds the session to a specific Agent. Empty resolves the "
+        "default one, Condor — not the absence of an agent (FEAT-033).",
     )
     conversation_id: str = Field(
         default="",
@@ -62,7 +58,6 @@ class SessionInfo(BaseModel):
 
     key: str
     agent_key: str
-    mode: str = DEFAULT_MODE
     user_id: int | None = Field(
         default=None,
         description="Owning Condor user. Authorization compares against this.",

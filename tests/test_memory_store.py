@@ -14,7 +14,7 @@ def memory_root(tmp_path, monkeypatch):
     """Point the project root at a tmp dir so stores resolve under it."""
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
     # The chat store (agent_slug=None) is what these per-user tests exercise.
-    return tmp_path / "assistants" / "condor" / "store"
+    return tmp_path / "agents" / "condor" / "store"
 
 
 def test_write_list_read_roundtrip(memory_root):
@@ -254,7 +254,7 @@ def test_resolver_distinct_roots_per_assistant(tmp_path, monkeypatch):
     grid = store_root(42, "grid_scalper")
     ema = store_root(42, "ema_trend_follower")
     assert chat != grid != ema
-    assert chat == tmp_path / "assistants" / "condor" / "store" / "user_42"
+    assert chat == tmp_path / "agents" / "condor" / "store" / "user_42"
     assert grid == tmp_path / "agents" / "grid_scalper" / "store" / "user_42"
     # Same (slug, user) is stable across calls.
     assert store_root(42, "grid_scalper") == grid

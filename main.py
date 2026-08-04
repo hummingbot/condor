@@ -597,18 +597,19 @@ async def watch_and_reload(application: Application) -> None:
 
     handlers_path = Path(__file__).parent / "handlers"
     routines_path = Path(__file__).parent / "routines"
-    assistants_path = Path(__file__).parent / "assistants"
+    # ``agents/`` is deliberately NOT watched: AgentStore reads AGENT.md from
+    # disk on every call, so there is no cache to bust (the assistant cache that
+    # justified watching it is gone with FEAT-033), while agents write journals
+    # and strategy state under the same tree — watching it would thrash reloads.
     watch_paths = [handlers_path, routines_path]
-    if assistants_path.exists():
-        watch_paths.append(assistants_path)
     logger.info(f"👀 Watching for changes in: {', '.join(str(p) for p in watch_paths)}")
 
     class _ReloadFilter(DefaultFilter):
-        """Ignore per-assistant runtime stores (FEAT-003).
+        """Ignore per-agent runtime stores (FEAT-003).
 
-        ``assistants/{name}/store/`` is co-located with the watched assistant
-        definitions, so without this every chat memory/skill write would thrash
-        a full handler reload. AGENT.md / *.md changes still trigger reloads.
+        A store can sit under a watched tree (an agent-owned ``routines/`` dir
+        next to its ``store/``), so without this every memory/skill write would
+        thrash a full handler reload.
         """
 
         def __call__(self, change, path: str) -> bool:
@@ -619,12 +620,6 @@ async def watch_and_reload(application: Application) -> None:
     async for changes in awatch(*watch_paths, watch_filter=_ReloadFilter()):
         logger.info(f"📝 Detected changes: {changes}")
         try:
-            # Reload assistants if any .md file in assistants/ changed
-            if any(str(assistants_path) in str(path) for _, path in changes):
-                from handlers.agents._shared import reload_assistants
-
-                reload_assistants()
-                logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
             register_handlers(application)
             # Refresh the Telegram command menus too, so a newly added/removed

@@ -38,7 +38,6 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field
 
 from condor.runtime.events import EventType
-from condor.runtime.models import DEFAULT_MODE
 from condor.runtime.registry_file import read_status, write_status
 
 log = logging.getLogger(__name__)
@@ -181,6 +180,10 @@ class ConversationMeta(BaseModel):
     from disk as a Unix float rather than the ISO string we wrote. Pydantic
     reads both as an aware UTC datetime, and "last write" is exactly the
     semantic the list ordering wants.
+
+    Extra keys on disk are ignored (pydantic's default), so a meta written
+    before a field was dropped — ``mode``, retired with the persona axis in
+    FEAT-033 — still loads instead of failing the whole conversation list.
     """
 
     id: str
@@ -188,8 +191,9 @@ class ConversationMeta(BaseModel):
     surface: str = Field(default="", description="Where it was born: tg/web/mcp.")
     title: str = ""
     agent_key: str = Field(default="", description="Last model used.")
-    agent_slug: str = Field(default="", description="Last bound Agent; '' = assistant.")
-    mode: str = DEFAULT_MODE
+    agent_slug: str = Field(
+        default="", description="Last bound Agent; '' = the default one, Condor."
+    )
     server_name: str | None = None
     created_at: datetime = Field(default_factory=_utcnow)
     updated_at: datetime = Field(default_factory=_utcnow)
@@ -236,8 +240,9 @@ class TurnEntry(BaseModel):
     )
     ts: float = Field(default_factory=time.time)
     agent_key: str = Field(default="", description="Model that produced this turn.")
-    agent_slug: str = Field(default="", description="Bound Agent; '' = assistant.")
-    mode: str = Field(default="", description="Session mode that produced this turn.")
+    agent_slug: str = Field(
+        default="", description="Bound Agent; '' = the default one, Condor."
+    )
     stop_reason: str = Field(
         default="", description="Assistant turns: how the stream ended; '' = unknown."
     )
@@ -274,7 +279,6 @@ def new_conversation(
     *,
     agent_key: str = "",
     agent_slug: str = "",
-    mode: str = DEFAULT_MODE,
     server_name: str | None = None,
 ) -> ConversationMeta:
     """Mint an empty conversation and persist its meta."""
@@ -285,7 +289,6 @@ def new_conversation(
         surface=surface,
         agent_key=agent_key,
         agent_slug=agent_slug,
-        mode=mode,
         server_name=server_name,
         created_at=now,
         updated_at=now,
@@ -522,7 +525,6 @@ class Recorder:
         *,
         agent_key: str = "",
         agent_slug: str = "",
-        mode: str = "",
     ):
         self.enabled = bool(conv_id) and user_id is not None
         self.user_id = user_id
@@ -532,7 +534,6 @@ class Recorder:
         # records an unattributed turn instead of failing to record at all.
         self._agent_key = agent_key
         self._agent_slug = agent_slug
-        self._mode = mode
         self._text: list[str] = []
         self._thought: list[str] = []
         self._tools: dict[str, dict] = {}
@@ -590,7 +591,6 @@ class Recorder:
         return {
             "agent_key": self._agent_key,
             "agent_slug": self._agent_slug,
-            "mode": self._mode,
         }
 
     def flush(self) -> None:

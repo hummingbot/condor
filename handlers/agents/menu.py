@@ -8,13 +8,13 @@ from telegram.ext import ContextTypes
 from condor.runtime import SessionKey
 from condor.runtime import client as runtime
 
-from ._shared import AGENT_MODES, AGENT_OPTIONS, DEFAULT_AGENT, normalize_mode
+from ._shared import AGENT_OPTIONS, DEFAULT_AGENT
 from .custom_models import format_model_label
 
 log = logging.getLogger(__name__)
 
 
-def _active_session_keyboard(mode: str) -> InlineKeyboardMarkup:
+def _active_session_keyboard() -> InlineKeyboardMarkup:
     """Build keyboard for active session."""
     rows = [
         [
@@ -418,11 +418,11 @@ def _custom_picker_keyboard(
     return InlineKeyboardMarkup(keyboard)
 
 
-def _no_session_keyboard(mode: str) -> InlineKeyboardMarkup:
+def _no_session_keyboard() -> InlineKeyboardMarkup:
     """Build keyboard when no session is active."""
     rows = [
         [
-            InlineKeyboardButton("Start", callback_data=f"agent:mode:{mode}"),
+            InlineKeyboardButton("Start", callback_data="agent:start"),
             InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
         ],
         [InlineKeyboardButton("Close", callback_data="agent:close")],
@@ -452,39 +452,28 @@ async def show_agent_menu(
     session = await runtime.get_info(SessionKey.telegram(chat_id))
 
     if session and session.alive:
-        mode_label = AGENT_MODES.get(session.mode, {}).get("label", session.mode)
         agent_label = AGENT_OPTIONS.get(session.agent_key, {}).get(
             "label", session.agent_key
         )
         status = "busy" if session.is_busy else "ready"
-        # A bound domain Agent replaces the assistant persona on the header:
-        # it is a different brain, not a different mode.
-        who = (
-            f"Talking to: {session.label}"
-            if session.agent_slug
-            else (f"Mode: {mode_label}")
-        )
         lines = [
-            who,
+            f"Talking to: {session.label}",
             f"LLM: {agent_label}",
             f"Status: {status}",
             "\nSend a message to chat, or use the buttons below.",
         ]
         text = "\n".join(lines)
-        keyboard = _active_session_keyboard(session.mode)
+        keyboard = _active_session_keyboard()
     else:
         # No session — show options to start or change settings
         agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
-        mode = normalize_mode(context.user_data.get("agent_mode"))
-        mode_label = AGENT_MODES.get(mode, {}).get("label", mode)
         llm_label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
         text = (
             f"No active session\n"
-            f"Mode: {mode_label}\n"
             f"LLM: {llm_label}\n\n"
             "Start a session or adjust settings below."
         )
-        keyboard = _no_session_keyboard(mode)
+        keyboard = _no_session_keyboard()
 
     message = update.message or (
         update.callback_query.message if update.callback_query else None

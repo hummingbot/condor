@@ -30,15 +30,23 @@ Disk layout::
 
 An Agent may be **authored in the repo** (e.g. ``executor_manager``) or **created
 at runtime**; either way ``AgentStore`` can create/update/delete it.
+
+``condor`` is one of these directories (FEAT-033) — the **default** agent, the
+one answering when no specialist is bound. What makes it default is that a falsy
+``agent_slug`` resolves to it, not a different kind of record. Its slug is
+reserved (``create``/``delete`` refuse it) and it is excluded from the peer
+indexes, because a coordinator is not a peer.
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from condor.memory.paths import CHAT_SLUG
 from condor.memory.store import _parse_frontmatter
 
 from .strategy import _render_frontmatter, _slugify
@@ -112,8 +120,19 @@ def identity_header(slug: str, name: str = "") -> str:
     subprocess and the runtime reach it from opposite sides — one has settings,
     the other a resolved binding — and neither should re-read AGENT.md for a
     single line.
+
+    Condor is an agent like any other now (FEAT-033), so it can reach here — and
+    the specialist text would be self-contradictory for it ("You ARE Condor …
+    You are NOT Condor"). It gets the coordinator's framing instead.
     """
     label = name or slug
+    if slug == CHAT_SLUG:
+        return (
+            "You ARE Condor (slug: `condor`), the chat assistant the user talks "
+            "to. You are the coordinator, not a specialist: domain work goes to "
+            "the agents listed for you, and their answers come back through you. "
+            "Never consult or delegate to `condor`, because that is you."
+        )
     return (
         f'You ARE the "{label}" agent (slug: `{slug}`) running inside Condor. '
         "You are NOT Condor, the chat assistant — Condor is a different "
@@ -170,23 +189,30 @@ class AgentStore:
                 agents.append(a)
         return agents
 
-    def list_index(self, exclude: str = "") -> str:
+    def list_index(self, exclude: str | Iterable[str] = "") -> str:
         """Injectable index — one line per Agent (mirrors SKILLS).
 
-        EVERY Agent is listed. An agent missing from this index is invisible to
-        the coordinator, which means it can never be consulted or delegated to —
-        so filtering here was the same as deleting the agent. Empty string only
-        when no agents exist at all, so callers inject nothing.
+        EVERY consultable Agent is listed. An agent missing from this index is
+        invisible to whoever reads it, which means it can never be consulted or
+        delegated to — so filtering here is the same as deleting the agent.
+        Empty string only when no agents exist at all, so callers inject nothing.
 
-        ``exclude`` drops exactly ONE slug: the assistant this index is being
-        injected INTO, which must not be told to consult itself (FEAT-025).
-        Filtering for any other reason is still forbidden, which is why the
-        argument is single-purpose rather than a predicate.
+        ``exclude`` drops slugs that are not *peers* of the reader, and nothing
+        else — the rule is still "never filter to hide an agent":
+
+        - the reader itself, which must not be told to consult itself (FEAT-025);
+        - ``condor``, which is an agent now (FEAT-033) but is the coordinator,
+          not a peer. A specialist offered Condor could consult back into the
+          chat, with auto-approved tools on the delegate path.
+
+        Callers pass a set of both. Filtering for any other reason stays
+        forbidden, which is why this takes slugs rather than a predicate.
         """
+        dropped = {exclude} if isinstance(exclude, str) else set(exclude)
         return "\n".join(
             f"- [{a.slug}] {a.consult_hint}"
             for a in self.list_all()
-            if a.slug != exclude
+            if a.slug not in dropped
         )
 
     def create(
@@ -201,8 +227,16 @@ class AgentStore:
         server_name: str = "",
         created_by: int = 0,
     ) -> Agent:
+        slug = _slugify(name)
+        if slug == CHAT_SLUG:
+            # Reserved: `condor` names the default agent. The separate trees used
+            # to make the collision impossible by construction (FEAT-003); with
+            # one registry it takes one rule (FEAT-033).
+            raise ValueError(
+                f"'{CHAT_SLUG}' is reserved for the default agent — pick another name"
+            )
         agent = Agent(
-            slug=_slugify(name),
+            slug=slug,
             name=name,
             description=description,
             instructions=instructions,
@@ -221,6 +255,12 @@ class AgentStore:
         self._save(agent)
 
     def delete(self, slug: str) -> bool:
+        if slug == CHAT_SLUG:
+            # Same reservation as `create`: deleting the default agent's AGENT.md
+            # would leave every unbound session without instructions or a model.
+            raise ValueError(
+                f"'{CHAT_SLUG}' is the default agent and cannot be deleted"
+            )
         agent_dir = _DATA_ROOT / slug
         path = agent_dir / "AGENT.md"
         if not path.exists():

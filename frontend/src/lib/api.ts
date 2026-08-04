@@ -694,12 +694,6 @@ export interface ChatAgentOption {
   picker?: boolean;
 }
 
-export interface ChatModeOption {
-  key: string;
-  label: string;
-  description: string;
-}
-
 /** A saved OpenAI-compatible endpoint (Venice AI, Together, local vLLM, ...). */
 export interface CustomProvider {
   name: string;
@@ -710,9 +704,7 @@ export interface CustomProvider {
 export interface ChatOptionsResponse {
   agents: ChatAgentOption[];
   custom_providers: CustomProvider[];
-  modes: ChatModeOption[];
   default_agent: string;
-  default_mode: string;
 }
 
 export interface OpenRouterModelOption {
@@ -740,7 +732,6 @@ export interface SessionOptionsResponse extends ChatOptionsResponse {
 export interface SessionInfo {
   key: string;
   agent_key: string;
-  mode: string;
   user_id: number | null;
   /** Originating frontend: "tg" | "web" | "mcp". */
   surface: string;
@@ -763,7 +754,6 @@ export interface SessionInfo {
 export interface CreateSessionRequest {
   key: string;
   agent_key: string;
-  mode?: string;
   server_name?: string | null;
   agent_slug?: string;
   lazy_context?: boolean;
@@ -785,7 +775,6 @@ export interface ConversationMeta {
   title: string;
   agent_key: string;
   agent_slug: string;
-  mode: string;
   server_name: string | null;
   created_at: string;
   updated_at: string;
@@ -811,7 +800,6 @@ export interface ConversationDetail {
 
 export interface SwitchSessionRequest {
   agent_slug?: string;
-  mode?: string;
   agent_key?: string;
   /** Move the conversation to this server. Also a respawn — the server is
    *  baked into the MCP subprocess at spawn. */

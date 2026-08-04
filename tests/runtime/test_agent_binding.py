@@ -85,8 +85,15 @@ def _spec(**kwargs) -> SessionSpec:
 # ── Resolution ──
 
 
-def test_resolve_assistant_path_unchanged(monkeypatch):
-    """With no agent_slug, resolution is today's assistant path."""
+def test_resolve_unbound_session_is_the_default_agent(monkeypatch):
+    """No agent_slug resolves Condor — the default agent, not "no agent".
+
+    Condor is an ordinary record under ``agents/`` now (FEAT-033), so the chat
+    gets its instructions and store scope through the same path a specialist
+    does. What it must NOT gain is specialist status: ``is_agent`` stays False
+    (no separate identity asserted at system level, no server pin), and the
+    slug that gets recorded and shown stays empty.
+    """
     captured = {}
 
     def fake_session_servers(user_id, chat_id, user_data=None, **kw):
@@ -100,13 +107,35 @@ def test_resolve_assistant_path_unchanged(monkeypatch):
     bound = binding.resolve(_spec(agent_key="claude-code"))
 
     assert bound.is_agent is False
-    assert bound.agent_slug == ""
+    assert bound.specialist_slug == ""
+    assert bound.agent_slug == "condor"
     assert bound.label == "Condor"
     assert bound.agent_key == "claude-code"
     assert bound.tools == []
-    # No agent scoping leaks into the plain path.
-    assert bound.mcp_env == {}
+    # The subprocess still learns who it is: that is what scopes its stores.
+    assert bound.mcp_env == {AGENT_SLUG_ENV: "condor"}
+    assert captured["args"][2]["agent_slug"] == "condor"
     assert captured["args"][0] == 42
+
+
+def test_a_missing_default_record_still_starts_the_chat(monkeypatch, tmp_path):
+    """An unreadable agents/condor/AGENT.md degrades; it does not fail closed."""
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setattr(
+        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **kw: []
+    )
+
+    bound = binding.resolve(_spec(agent_key="claude-code"))
+
+    assert bound.label == "Condor"
+    assert bound.instructions == ""
+    assert bound.is_agent is False
+
+
+def test_a_named_agent_that_does_not_exist_still_raises(monkeypatch, tmp_path):
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    with pytest.raises(UnknownAgent):
+        binding.resolve(_spec(agent_slug="ghost"))
 
 
 def test_resolve_agent_sets_memory_scope(agents_root, monkeypatch):
