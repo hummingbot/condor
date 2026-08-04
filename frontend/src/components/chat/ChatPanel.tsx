@@ -107,6 +107,10 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   // Resolve effective selections for the new-session menu
   const effectiveAgent = selectedAgent || defaultAgent;
   const effectiveMode = selectedMode || defaultMode;
+  // Who a new chat is with: the conversation you are in, else whoever the
+  // new-session menu has picked. The workspace's rail answers the same
+  // question from its selected row, so the two views stay consistent.
+  const effectiveSlug = activeSlot?.info.agent_slug ?? selectedSlug;
 
   const handleSwitch = (selection: BrainSelection) => {
     if (!chat.activeSlotId) return;
@@ -280,7 +284,13 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           <ConversationList
             liveIds={liveIds}
             activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
-            onNew={() => handleNewSession(effectiveAgent, effectiveMode)}
+            onNew={() =>
+              handleNewSession(
+                effectiveAgent,
+                effectiveMode,
+                effectiveSlug || undefined,
+              )
+            }
             onOpen={(meta) => {
               chat.resumeConversation(meta.id, {
                 agent_key: meta.agent_key,
