@@ -66,8 +66,7 @@ def _parse_settings() -> Settings:
         active_server=args.server_name or os.environ.get("CONDOR_SERVER_NAME", ""),
         session_key=args.session_key or os.environ.get("CONDOR_SESSION_KEY", ""),
         delegate_worker=(
-            args.delegate_worker
-            or os.environ.get("CONDOR_DELEGATE_WORKER", "") == "1"
+            args.delegate_worker or os.environ.get("CONDOR_DELEGATE_WORKER", "") == "1"
         ),
     )
 

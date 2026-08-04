@@ -696,8 +696,8 @@ def test_consult_forces_caller_user_id(monkeypatch):
 def test_session_mcp_servers_carry_agent_slug(monkeypatch):
     """Serverless agent runs (consult/tick without server_name) must scope the
     condor MCP tools to the agent's own memory/skills via --agent-slug —
-    without it, routine_builder-style agents silently read/write the CHAT's
-    stores (e.g. 'routine_cookbook not found')."""
+    without it, an agent silently reads/writes the CHAT's stores (e.g. its
+    routines land in the global library instead of its own dir)."""
     import config_manager
     from handlers.agents._shared import build_mcp_servers_for_session
 
@@ -711,11 +711,11 @@ def test_session_mcp_servers_carry_agent_slug(monkeypatch):
     monkeypatch.setattr(config_manager, "get_config_manager", lambda: _NoServers())
     monkeypatch.setattr(config_manager, "get_effective_server", lambda *a, **k: None)
 
-    servers = build_mcp_servers_for_session(42, 42, agent_slug="routine_builder")
+    servers = build_mcp_servers_for_session(42, 42, agent_slug="backpack_mm")
     condor = next(s for s in servers if s["name"] == "condor")
     args = condor["args"]
     assert "--agent-slug" in args
-    assert args[args.index("--agent-slug") + 1] == "routine_builder"
+    assert args[args.index("--agent-slug") + 1] == "backpack_mm"
 
     # Chat sessions (no agent_slug) keep the chat scope: no --agent-slug arg.
     servers = build_mcp_servers_for_session(42, 42)
