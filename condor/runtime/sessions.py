@@ -96,12 +96,20 @@ class AgentSession:
             conversation_id=self.conversation_id,
         )
 
-    async def prompt_stream(self, text: str):
+    async def prompt_stream(self, text: str, *, lock_timeout: float | None = None):
         """Stream a prompt, managing the busy flag and lock.
 
-        Includes a lock-acquisition timeout (PROMPT_LOCK_TIMEOUT) to avoid
-        waiting forever when a previous prompt is stuck, and an overall
-        wall-clock timeout (PROMPT_OVERALL_TIMEOUT) to kill runaway prompts.
+        The lock *is* the queue: ``asyncio.Lock`` is FIFO, so several prompts
+        on one session are answered in the order they were sent. Includes a
+        lock-acquisition timeout to avoid waiting forever when a previous
+        prompt is stuck, and an overall wall-clock timeout
+        (PROMPT_OVERALL_TIMEOUT) to kill runaway prompts.
+
+        ``lock_timeout`` defaults to PROMPT_LOCK_TIMEOUT, which guards against a
+        *stuck* prompt. A caller that is deliberately waiting its turn passes a
+        longer one (``TIMEOUTS.prompt_queue``), or a message queued behind a
+        long answer would be failed as "not responding" for doing exactly what
+        it was asked to do.
         """
         # Consume pending context on first prompt (lazy injection)
         if self.pending_context:
@@ -109,12 +117,10 @@ class AgentSession:
             self.pending_context = None
             text = f"{ctx}\n\n---\n\nUser message:\n{text}"
 
-        # Clear abort flag for this new prompt
-        self._abort_event.clear()
-
         # Acquire lock with timeout -- prevents infinite wait when previous prompt is stuck
+        lock_deadline = PROMPT_LOCK_TIMEOUT if lock_timeout is None else lock_timeout
         try:
-            await asyncio.wait_for(self._lock.acquire(), timeout=PROMPT_LOCK_TIMEOUT)
+            await asyncio.wait_for(self._lock.acquire(), timeout=lock_deadline)
         except asyncio.TimeoutError:
             log.warning("Lock acquisition timed out for session %s", self.key)
             # Force-clear busy flag if subprocess is dead (stuck state recovery)
@@ -123,6 +129,11 @@ class AgentSession:
             raise RuntimeError(
                 "Agent is busy and not responding. Try /agent → New Session."
             )
+
+        # Cleared *after* the lock, not before: a prompt waiting its turn used
+        # to clear the flag out from under the turn ahead of it, so a Stop
+        # landing on that turn was swallowed by the message queued behind it.
+        self._abort_event.clear()
 
         self.is_busy = True
         self.last_prompt_at = _utcnow()
