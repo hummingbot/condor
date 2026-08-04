@@ -164,6 +164,10 @@ export function ChatThread({
             isStreaming={isStreaming}
             onAbort={onAbort}
             autoFocus={autoFocus}
+            // The composer names whoever is bound: a chat with Backpack MM is
+            // not a chat with Condor, and the placeholder was the last place
+            // the UI still said otherwise (FEAT-025).
+            placeholder={`Ask ${(slot.info.agent_slug && slot.info.label) || "Condor"}...`}
           />
         </div>
       )}
