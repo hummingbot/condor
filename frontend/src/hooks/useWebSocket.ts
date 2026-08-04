@@ -50,8 +50,9 @@ export function useCondorWebSocket(
     const ws = new CondorWebSocket(token);
     wsRef.current = ws;
 
-    // Wire candle store singleton to this WS instance
-    candleStore.setWs(ws);
+    // Offer this WS to the candle store singleton. Several hook instances
+    // coexist; the store keeps whichever provider it already has.
+    candleStore.attachWs(ws);
 
     ws.onMessage((channel, data) => {
       const prefix = channel.split(":")[0];
@@ -202,7 +203,8 @@ export function useCondorWebSocket(
     ws.connect();
 
     return () => {
-      candleStore.setWs(null);
+      // Only detaches if this instance is the store's live provider.
+      candleStore.detachWs(ws);
       ws.disconnect();
       wsRef.current = null;
       prevChannelsRef.current = new Set();
