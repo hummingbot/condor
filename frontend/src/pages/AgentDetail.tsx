@@ -3,11 +3,11 @@ import {
   AlertCircle,
   ArrowLeft,
   Brain,
-  ChevronRight,
   CircleDot,
   FileText,
   MessageSquareText,
   Plus,
+  Repeat,
   ScrollText,
   Server,
   Trash2,
@@ -18,102 +18,12 @@ import { useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
-import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { StatusBadge } from "@/components/agent/StatusBadge";
+import { EntityCard } from "@/components/agent/EntityCard";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { type StrategySummary, api } from "@/lib/api";
-import { formatCurrencyPnl } from "@/lib/formatters";
-
-// ── Strategy Card ──
-
-function StrategyCard({
-  agentSlug,
-  strategy,
-  onDelete,
-}: {
-  agentSlug: string;
-  strategy: StrategySummary;
-  onDelete: () => void;
-}) {
-  const navigate = useNavigate();
-  const totalPnl = strategy.total_pnl ?? 0;
-  const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const dayPnl = strategy.daily_pnl ?? 0;
-  const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const status = deriveAgentStatus(strategy);
-  const isLive = status === "running";
-
-  return (
-    <button
-      onClick={() => navigate(`/agents/${agentSlug}/strategies/${strategy.slug}`)}
-      className={`group relative w-full rounded-lg border text-left transition-all duration-200 hover:border-[var(--color-primary)]/40 hover:shadow-lg ${
-        isLive
-          ? "border-emerald-500/20 bg-emerald-500/[0.03]"
-          : "border-[var(--color-border)] bg-[var(--color-surface)]"
-      }`}
-    >
-      <div className="p-4">
-        <div className="mb-3 flex items-start justify-between">
-          <h3 className="text-sm font-semibold text-[var(--color-text)]">{strategy.name}</h3>
-          <div className="flex items-center gap-2">
-            <StatusBadge status={status} />
-            {strategy.status !== "running" && (
-              <div
-                aria-label="Delete strategy"
-                className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
-                onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onDelete(); } }}
-                role="button"
-                tabIndex={0}
-              >
-                <span className="flex h-7 w-7 items-center justify-center rounded-md border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {strategy.description && (
-          <p className="mb-3 text-xs text-[var(--color-text-muted)] line-clamp-2">
-            {strategy.description}
-          </p>
-        )}
-
-        <div className="grid grid-cols-4 gap-2 border-t border-[var(--color-border)]/50 pt-3">
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
-            <span className={`text-sm font-mono font-semibold ${totalPnlColor}`}>
-              {formatCurrencyPnl(totalPnl)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Session</span>
-            <span className={`text-sm font-mono ${dayPnlColor}`}>
-              {formatCurrencyPnl(dayPnl)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{strategy.open_positions ?? 0}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Sessions</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{strategy.session_count}</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center justify-end border-t border-[var(--color-border)]/30 px-4 py-2 text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100">
-        <span className="text-[11px]">Open</span>
-        <ChevronRight className="h-3.5 w-3.5" />
-      </div>
-    </button>
-  );
-}
 
 // ── Create Strategy Dialog ──
 
@@ -549,10 +459,12 @@ export function AgentDetail() {
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {strategies.map((strategy) => (
-              <StrategyCard
+              <EntityCard
                 key={strategy.slug}
-                agentSlug={agent.slug}
-                strategy={strategy}
+                entity={strategy}
+                icon={Repeat}
+                deleteLabel="Delete strategy"
+                onClick={() => navigate(`/agents/${agent.slug}/strategies/${strategy.slug}`)}
                 onDelete={() => setDeleteStrategy(strategy)}
               />
             ))}
