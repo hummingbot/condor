@@ -67,8 +67,6 @@ class CandleStore {
 
   private ws: CondorWebSocket | null = null;
   private wsCleanup: (() => void) | null = null;
-  /** Every socket currently offering itself as a candle provider */
-  private providers = new Set<CondorWebSocket>();
   /** Tracks insertion order for LRU eviction */
   private accessOrder: string[] = [];
 
@@ -79,28 +77,24 @@ class CandleStore {
   // ── WS wiring ──
 
   /**
-   * Offer a socket as the candle provider. The first one in wins: a later
-   * socket is remembered as a standby but does not steal the channel
-   * subscriptions from the live provider.
+   * Bind a socket as the candle provider.
+   *
+   * There is only ever one candle-carrying socket in the app — `shared-socket.ts`
+   * refcounts a single connection — so this is called once when that connection
+   * opens and there is no contest to arbitrate. The defensive rebind covers the
+   * one case that does produce a second socket: a token change, which closes the
+   * old connection and opens a new one.
    */
   attachWs(ws: CondorWebSocket): void {
-    this.providers.add(ws);
-    if (this.ws) return;
+    if (this.ws === ws) return;
+    if (this.ws) this._unbindWs();
     this._bindWs(ws);
   }
 
-  /**
-   * Withdraw a socket. No-op unless it is the live provider — one consumer
-   * unmounting must not detach a socket it does not own. When the live
-   * provider goes, a standby (if any) is promoted so candles keep flowing.
-   */
+  /** Unbind the provider. Called when the shared socket's last reference goes. */
   detachWs(ws: CondorWebSocket): void {
-    this.providers.delete(ws);
     if (this.ws !== ws) return;
-
     this._unbindWs();
-    const next = this.providers.values().next();
-    if (!next.done) this._bindWs(next.value);
   }
 
   private _unbindWs(): void {
@@ -136,7 +130,7 @@ class CandleStore {
     // Re-subscribe active channels to trigger a fresh snapshot now that the
     // message handler is registered. The WS onopen re-subscribe may have fired
     // before we bound to it, so the initial snapshot would have been missed —
-    // and a freshly promoted standby has never seen these channels at all.
+    // and a socket replacing a closed one has never seen these channels at all.
     for (const [key, sub] of this.subscriptions) {
       if (sub.refCount > 0) {
         ws.subscribe(key);
