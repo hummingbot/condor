@@ -44,24 +44,18 @@ def _validate_config_against_template(
         if key not in template_fields:
             unknown_fields.append(f"  - {key}")
 
-    errors: list[str] = []
     if missing_fields:
-        errors.append(
-            "Missing required fields (no default value in schema):\n" + "\n".join(missing_fields)
-        )
-    if unknown_fields:
-        errors.append(
-            "Unknown fields not in controller schema (possible typos):\n" + "\n".join(unknown_fields)
-        )
-
-    if errors:
         raise ValueError(
             "Config validation failed against controller template schema.\n\n"
-            + "\n\n".join(errors)
+            "Missing required fields (no default value in schema):\n" + "\n".join(missing_fields)
             + "\n\nUse manage_controllers(action='describe', controller_name='"
             + str(config_data.get("controller_name", "..."))
             + "') to see all available parameters and their defaults."
         )
+    # Note: unknown_fields are NOT raised as an error — the template returned by the
+    # backend only includes base-class fields and misses controller-specific params
+    # (e.g. ema_fast, ema_slow on EmaTrendV1Config). The backend's own
+    # validate_controller_config call below is the authoritative check.
 
 
 async def manage_controllers(
