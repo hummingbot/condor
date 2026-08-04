@@ -67,6 +67,8 @@ class CandleStore {
 
   private ws: CondorWebSocket | null = null;
   private wsCleanup: (() => void) | null = null;
+  /** Every socket currently offering itself as a candle provider */
+  private providers = new Set<CondorWebSocket>();
   /** Tracks insertion order for LRU eviction */
   private accessOrder: string[] = [];
 
@@ -76,14 +78,41 @@ class CandleStore {
 
   // ── WS wiring ──
 
-  setWs(ws: CondorWebSocket | null): void {
-    // Tear down previous handler
+  /**
+   * Offer a socket as the candle provider. The first one in wins: a later
+   * socket is remembered as a standby but does not steal the channel
+   * subscriptions from the live provider.
+   */
+  attachWs(ws: CondorWebSocket): void {
+    this.providers.add(ws);
+    if (this.ws) return;
+    this._bindWs(ws);
+  }
+
+  /**
+   * Withdraw a socket. No-op unless it is the live provider — one consumer
+   * unmounting must not detach a socket it does not own. When the live
+   * provider goes, a standby (if any) is promoted so candles keep flowing.
+   */
+  detachWs(ws: CondorWebSocket): void {
+    this.providers.delete(ws);
+    if (this.ws !== ws) return;
+
+    this._unbindWs();
+    const next = this.providers.values().next();
+    if (!next.done) this._bindWs(next.value);
+  }
+
+  private _unbindWs(): void {
     if (this.wsCleanup) {
       this.wsCleanup();
       this.wsCleanup = null;
     }
+    this.ws = null;
+  }
+
+  private _bindWs(ws: CondorWebSocket): void {
     this.ws = ws;
-    if (!ws) return;
 
     this.wsCleanup = ws.onMessage((channel: string, data: unknown) => {
       if (!channel.startsWith("candles:")) return;
@@ -106,7 +135,8 @@ class CandleStore {
 
     // Re-subscribe active channels to trigger a fresh snapshot now that the
     // message handler is registered. The WS onopen re-subscribe may have fired
-    // before setWs was called, so the initial snapshot would have been missed.
+    // before we bound to it, so the initial snapshot would have been missed —
+    // and a freshly promoted standby has never seen these channels at all.
     for (const [key, sub] of this.subscriptions) {
       if (sub.refCount > 0) {
         ws.subscribe(key);

@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 
-import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api, type ExecutorInfo } from "@/lib/api";
 import {
   computeMultiOverlays,
@@ -85,9 +84,8 @@ export function ExecutorChart({
   // Determine if any executor is active (for WS subscription)
   const hasActive = executors.some((ex) => isActive(ex.status));
 
-  // WS for non-candle updates (candle streams managed by candleStore)
-  const channels = useMemo(() => [] as string[], []);
-  useCondorWebSocket(channels, server);
+  // No WS here: this chart is REST-only. Its candle data comes from the query
+  // below, and the parent view owns the socket for live executor updates.
 
   // Pad time range for candle fetch. The window is part of the cache key: the
   // same market charted over another range (another session) must not reuse it.
