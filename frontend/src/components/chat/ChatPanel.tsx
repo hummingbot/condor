@@ -91,12 +91,19 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
   const activeSlot = chat.activeSlot;
   const isActiveStreaming = chat.isSlotStreaming(chat.activeSlotId);
 
-  // Resolve effective selections for the new-session menu
-  const effectiveAgent = selectedAgent || defaultAgent;
   // Who a new chat is with: the conversation you are in, else whoever the
   // new-session menu has picked. The workspace's rail answers the same
   // question from its selected row, so the two views stay consistent.
   const effectiveSlug = activeSlot?.info.agent_slug ?? selectedSlug;
+  /**
+   * Which model a new chat starts on, given who it is with.
+   *
+   * `null` is "the user never touched the picker", and that must go on the
+   * wire as `""` whenever an Agent is bound — the empty key is what asks it
+   * for its own model. Naming `defaultAgent` there would look like a
+   * deliberate override and silently run the Agent on Condor's model.
+   */
+  const keyFor = (slug: string) => selectedAgent ?? (slug ? "" : defaultAgent);
 
   // Both views of one list, keyed the same way: the tabs are the conversations
   // attached right now, the drawer is all of them.
@@ -171,7 +178,7 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
                   agents={agents}
                   customProviders={customProviders}
                   agentBindings={agentBindings}
-                  selectedAgent={effectiveAgent}
+                  selectedAgent={keyFor(selectedSlug)}
                   selectedAgentSlug={selectedSlug}
                   onSelectBrain={(sel) => {
                     if (sel.agentSlug !== undefined) setSelectedSlug(sel.agentSlug);
@@ -245,7 +252,9 @@ export function ChatPanel({ isOpen, onToggle }: ChatPanelProps) {
           <ConversationList
             liveIds={liveIds}
             activeId={activeSlot?.info.conversation_id || chat.activeSlotId}
-            onNew={() => handleNewSession(effectiveAgent, effectiveSlug || undefined)}
+            onNew={() =>
+              handleNewSession(keyFor(effectiveSlug), effectiveSlug || undefined)
+            }
             onOpen={(meta) => {
               chat.resumeConversation(meta.id, {
                 agent_key: meta.agent_key,
@@ -348,8 +357,12 @@ function EmptyState({
   defaultAgent: string;
   onStart: (agent: string, agentSlug?: string) => void;
 }) {
-  const [selectedAgent, setSelectedAgent] = useState(defaultAgent);
+  // `null` = never touched, which becomes `""` once an Agent is bound so it
+  // answers on its own model. Seeding this with `defaultAgent` was precisely
+  // the silent override.
+  const [selectedAgent, setSelectedAgent] = useState<string | null>(null);
   const [selectedSlug, setSelectedSlug] = useState("");
+  const agentKey = selectedAgent ?? (selectedSlug ? "" : defaultAgent);
 
   return (
     <div className="flex flex-1 flex-col items-center justify-center text-center">
@@ -365,7 +378,7 @@ function EmptyState({
             agents={agents}
             customProviders={customProviders}
             agentBindings={agentBindings}
-            selectedAgentKey={selectedAgent}
+            selectedAgentKey={agentKey}
             selectedAgentSlug={selectedSlug}
             onSelect={(sel) => {
               if (sel.agentSlug !== undefined) setSelectedSlug(sel.agentSlug);
@@ -378,7 +391,7 @@ function EmptyState({
 
       <div className="mt-2 flex gap-2">
         <button
-          onClick={() => onStart(selectedAgent, selectedSlug || undefined)}
+          onClick={() => onStart(agentKey, selectedSlug || undefined)}
           className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
         >
           <Zap className="h-3.5 w-3.5 text-[var(--color-primary)]" />

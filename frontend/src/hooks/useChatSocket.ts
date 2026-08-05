@@ -573,7 +573,11 @@ export function useChatSocket() {
           info: {
             slot_id: conversationId,
             conversation_id: conversationId,
-            agent_key: meta?.agent_key || "",
+            // The record's key is a log of what answered last, so for a bound
+            // conversation it is not what is about to: the server resolves the
+            // Agent's *current* model. `""` lets the picker fall back to that
+            // rather than flashing a model the resume will not use.
+            agent_key: meta?.agent_slug ? "" : meta?.agent_key || "",
             server_name: meta?.server_name,
             agent_slug: meta?.agent_slug,
             label: meta?.label,

@@ -117,7 +117,11 @@ export function AgentChatTab({
       }
     }
     const slotId = chat.startSession(
-      pendingAgentKey ?? defaultAgent,
+      // `""` asks whoever is bound for their own model; only an unbound chat
+      // needs a model named. Volunteering `defaultAgent` here is what used to
+      // claim an override the user never made, so a bound Agent ran on
+      // Condor's model instead of its own.
+      pendingAgentKey ?? (agentSlug ? "" : defaultAgent),
       server || undefined,
       agentSlug || undefined,
     );

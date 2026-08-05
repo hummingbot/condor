@@ -22,10 +22,12 @@ import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { DelegationHistory } from "@/components/agent/DelegationHistory";
 import { EntityCard } from "@/components/agent/EntityCard";
+import { BrainPicker } from "@/components/chat/BrainPicker";
 import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
+import { useSessionOptions } from "@/hooks/useChat";
 import { type StrategySummary, api } from "@/lib/api";
 
 // ── Create Strategy Dialog ──
@@ -224,6 +226,41 @@ function ServerPinPicker({ slug, serverName }: { slug: string; serverName: strin
   );
 }
 
+/**
+ * Which model this Agent answers on, wherever it runs.
+ *
+ * The chat's picker writes the same field through the same endpoint, so the
+ * two doors cannot disagree — and hand-editing front matter stops being the
+ * only way to move an Agent's brain. `BrainPicker` is reused rather than
+ * reimplemented so this offers exactly the model list the chat does,
+ * OpenRouter and custom endpoints included; `agentBindings` is left empty
+ * because the identity is already decided — this page *is* the Agent.
+ */
+function ModelPicker({ slug, agentKey }: { slug: string; agentKey: string }) {
+  const queryClient = useQueryClient();
+  const { agents, customProviders } = useSessionOptions();
+
+  const pick = useMutation({
+    mutationFn: (key: string) => api.updateAgentConfig(slug, { agent_key: key }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+  });
+
+  return (
+    <BrainPicker
+      agents={agents}
+      customProviders={customProviders}
+      selectedAgentKey={agentKey}
+      onSelect={(sel) => {
+        if (sel.agentKey !== undefined && sel.agentKey !== agentKey) {
+          pick.mutate(sel.agentKey);
+        }
+      }}
+      variant="inline"
+      disabled={pick.isPending}
+    />
+  );
+}
+
 // ── Agent Detail Page ──
 
 export function AgentDetail() {
@@ -362,11 +399,7 @@ export function AgentDetail() {
               <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 font-mono">
                 {agent.slug}
               </span>
-              {agent.agent_key && (
-                <span className="rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 font-mono text-[var(--color-primary)]">
-                  {agent.agent_key}
-                </span>
-              )}
+              <ModelPicker slug={agent.slug} agentKey={agent.agent_key} />
               {agent.tools && agent.tools.length > 0 && (
                 <span className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
                   <Wrench className="h-3 w-3" /> {agent.tools.length} tool{agent.tools.length !== 1 ? "s" : ""}

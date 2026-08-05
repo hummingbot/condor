@@ -749,6 +749,8 @@ export interface AgentBindingOption {
   name: string;
   description: string;
   when_to_consult: string;
+  /** The model it answers on unless the user overrides one — its own default. */
+  agent_key: string;
 }
 
 export interface SessionOptionsResponse extends ChatOptionsResponse {
@@ -1180,16 +1182,22 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
-  /** Set or clear the Agent's server pin. An empty `server_name` clears it,
-   *  so the Agent follows whatever server the chat is pointed at. */
+  /** Set or clear the Agent's server pin and model. An empty `server_name`
+   *  clears the pin, so the Agent follows whatever server the chat is pointed
+   *  at; an empty `agent_key` clears the model, falling back to the chat's. */
   updateAgentConfig: (
     slug: string,
-    data: { server_name?: string; server_required?: boolean },
+    data: { server_name?: string; server_required?: boolean; agent_key?: string },
   ) =>
-    apiFetch<{ updated: boolean; server_name: string; server_required: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/config`,
-      { method: "PATCH", body: JSON.stringify(data) },
-    ),
+    apiFetch<{
+      updated: boolean;
+      server_name: string;
+      server_required: boolean;
+      agent_key: string;
+    }>(`/api/v1/agents/${encodeURIComponent(slug)}/config`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
 
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
