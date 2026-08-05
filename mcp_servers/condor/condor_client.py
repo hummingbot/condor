@@ -24,11 +24,11 @@ async def call_main_api(
     """
     from condor.runtime.timeouts import TIMEOUTS
     from condor.web.auth import create_jwt
-    from utils.config import WEB_PORT
+    from utils.config import BIND_HOST, BIND_PORT 
 
     if timeout is None:
         timeout = TIMEOUTS.mcp_call
-    url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"
+    url = f"http://{BIND_HOST}:{BIND_PORT}/api/v1{path}"
     token = create_jwt(settings.user_id, role="user")
     headers = {"Authorization": f"Bearer {token}"}
 
