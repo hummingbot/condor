@@ -264,6 +264,7 @@ async def delegate(
     agent: str = "",
     task: str = "",
     task_id: str = "",
+    on_complete: str = "notify",
 ) -> dict:
     """Delegate a one-off task to a background agent instance.
 
@@ -292,11 +293,18 @@ async def delegate(
         agent: Agent slug to delegate to (for start).
         task: The one-off task, in plain language (for start).
         task_id: Delegation id returned by start (for get/stop).
+        on_complete: What this conversation gets when the task ends (for start).
+            "notify" (default) pings the user with the result and nothing else —
+            the result is FOR THE HUMAN. "resume" additionally hands the result
+            back to you in a new turn of THIS conversation, so use it when you
+            intend to do something with the result yourself ("research X, then
+            draft the summary"). With "resume" you must end your turn after
+            starting the task: you will be woken with the answer.
 
     Returns:
         Action-specific result dict.
     """
-    return await delegate_tool.delegate(action, agent, task, task_id)
+    return await delegate_tool.delegate(action, agent, task, task_id, on_complete)
 
 
 @mcp.tool()

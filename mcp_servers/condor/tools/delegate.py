@@ -10,11 +10,18 @@ from mcp_servers.condor.condor_client import call_main_api
 from mcp_servers.condor.settings import settings
 
 
+# What the asking conversation gets when the task ends. Spelled out here rather
+# than imported from ``condor.agents.delegate``: this runs in the MCP subprocess,
+# which deliberately talks to the main process over HTTP and never imports it.
+ON_COMPLETE_CHOICES = ("notify", "resume")
+
+
 async def delegate(
     action: str,
     agent: str = "",
     task: str = "",
     task_id: str = "",
+    on_complete: str = "notify",
 ) -> dict:
     """Dispatch a delegate action (start | list | get | stop)."""
     action = (action or "").lower()
@@ -36,6 +43,16 @@ async def delegate(
             }
         if not agent or not task:
             return {"error": "agent and task are required to start a delegation"}
+        on_complete = (on_complete or "notify").lower()
+        if on_complete not in ON_COMPLETE_CHOICES:
+            # An error, not a silent default: a model that meant "resume" and
+            # got "notify" would wait forever for a turn that never comes.
+            return {
+                "error": (
+                    f"on_complete must be one of {list(ON_COMPLETE_CHOICES)}, "
+                    f"got '{on_complete}'"
+                )
+            }
         result = await call_main_api(
             "POST",
             f"/agents/{agent}/delegate",
@@ -47,6 +64,7 @@ async def delegate(
                 # Provenance: the route resolves this to the conversation that
                 # asked for the work, so the chat can watch what it started.
                 "session_key": settings.session_key,
+                "on_complete": on_complete,
             },
         )
         # Spell out how the user tracks this so the model never INVENTS a status
@@ -60,6 +78,14 @@ async def delegate(
                 'with delegate(action="get", task_id="<id>"). Do NOT invent any '
                 "other status command (e.g. there is no /task command)."
             )
+            if on_complete == "resume":
+                # Said explicitly so the model ends its turn instead of
+                # burning it polling for a result that will be handed to it.
+                result["next_steps"] += (
+                    " You asked to be resumed: when the task finishes this "
+                    "conversation gets a new turn carrying the result, so end "
+                    "your turn now and continue then — do not poll or wait."
+                )
         return result
 
     if action == "list":

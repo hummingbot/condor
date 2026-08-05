@@ -166,6 +166,10 @@ async def prompt(
         req.text,
         agent_key=session.agent_key,
         agent_slug=session.agent_slug,
+        # Empty for a turn the user typed; set when something else drove it
+        # (a background task waking the chat), so the opening line is recorded
+        # as a system note rather than as the user's words.
+        user_kind=req.user_kind,
     )
     try:
         async for event in session.prompt_stream(req.text, lock_timeout=lock_timeout):

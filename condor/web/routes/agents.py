@@ -306,6 +306,9 @@ class DelegateRequest(BaseModel):
     # Canonical key of the session asking for the work (posted by the condor MCP
     # server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
     session_key: str = ""
+    # "notify" (push + transcript note) or "resume" (additionally wake the
+    # asking conversation with the result). See FEAT-034.
+    on_complete: str = "notify"
 
 
 # ── Stores / lookups ──
@@ -1139,12 +1142,17 @@ async def delegate_agent(
     auto-approve) until done, then notifies the user. The async sibling of
     ``/consult``.
     """
-    from condor.agents.delegate import start_delegation
+    from condor.agents.delegate import ON_COMPLETE_CHOICES, start_delegation
     from config_manager import get_config_manager
 
     _get_agent(slug)
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
+    if req.on_complete not in ON_COMPLETE_CHOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"on_complete must be one of {list(ON_COMPLETE_CHOICES)}",
+        )
 
     # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
     # to ``server_name``'s live credentials, so refuse a server the caller can't access.
@@ -1164,6 +1172,8 @@ async def delegate_agent(
         task=req.task,
         timeout_s=req.timeout_s,
         conversation_id=await _conversation_for_session(req.session_key),
+        session_key=req.session_key,
+        on_complete=req.on_complete,
     )
     return {"task_id": dt.task_id, "status": dt.status}
 

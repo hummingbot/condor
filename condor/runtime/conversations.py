@@ -236,7 +236,8 @@ class TurnEntry(BaseModel):
         description="Per call: id, title, status, kind, input, output.",
     )
     kind: str = Field(
-        default="", description="System entries only: switch | error | delegation."
+        default="",
+        description="System entries only: switch | error | delegation | resume.",
     )
     ts: float = Field(default_factory=time.time)
     agent_key: str = Field(default="", description="Model that produced this turn.")
@@ -525,11 +526,17 @@ class Recorder:
         *,
         agent_key: str = "",
         agent_slug: str = "",
+        user_kind: str = "",
     ):
         self.enabled = bool(conv_id) and user_id is not None
         self.user_id = user_id
         self.conv_id = conv_id
         self._user_text = user_text
+        # A turn nobody typed (a background task waking the chat, FEAT-034) is
+        # recorded as a system entry of this kind. Recording it as ``user``
+        # would put words in the user's mouth, and ``_render_turn`` would then
+        # replay them to the next session as something they said.
+        self._user_kind = user_kind
         # Keyword-only and defaulted: a caller that does not know who answered
         # records an unattributed turn instead of failing to record at all.
         self._agent_key = agent_key
@@ -605,9 +612,12 @@ class Recorder:
         _live_recorders.discard(self)
 
         try:
-            append_turn(
-                self.user_id, self.conv_id, TurnEntry(role="user", text=self._user_text)
+            opening = (
+                TurnEntry(role="system", text=self._user_text, kind=self._user_kind)
+                if self._user_kind
+                else TurnEntry(role="user", text=self._user_text)
             )
+            append_turn(self.user_id, self.conv_id, opening)
             text = "".join(self._text)
             tools = list(self._tools.values())
             if text or tools or self._thought:
