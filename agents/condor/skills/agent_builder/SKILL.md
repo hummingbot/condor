@@ -127,11 +127,10 @@ as the upgrade, then guide the user through it one routine at a time:
 2. **Create** — hand the writing to a background worker
    (`delegate(action="start", agent="condor", task="...")`); it follows the
    `routine_cookbook` playbook and tests the routine before reporting. Tell it the
-   target agent so it passes the right `strategy_id`. Routines live at
-   the agent level and are shared across consults and any future loop. Pass the **agent
-   slug** as `strategy_id` (it accepts a bare agent slug or `agent_slug.strategy_slug`):
+   target agent so it passes the right `agent`. Routines live at the agent level
+   and are shared across consults and any future loop — pass the **agent slug**:
    ```
-   manage_routines(action="create_routine", strategy_id="<agent_slug>",
+   manage_routines(action="create_routine", agent="<agent_slug>",
                    name="band_scanner", code="<python>")
    ```
 3. **Analyze the output** — run it and read it together; iterate until it's clean and
@@ -282,6 +281,9 @@ it into a questionnaire — it's the easiest thing to change later.
 enforced on pydantic-ai consults and loops (empty = unrestricted; not enforceable on ACP
 keys). An agent keeps its own domain memory (`manage_memory`) and reusable playbooks
 (`manage_skill`/`agents/{slug}/skills/`) — the agent OWNS skills; it is not itself a skill.
+A new agent also reads the **shared** library (`agents/_shared/skills/`) from birth, so it
+gets `routine_cookbook` and friends for free — write only what is specific to its domain,
+and target it explicitly with `manage_skill(..., agent="<slug>")`.
 
 **Editing & deleting:** read the current brain with `get_agent(agent_slug=…)`, edit with
 `update_agent(agent_slug=…, instructions=…)`. `delete_agent` refuses while the agent still
