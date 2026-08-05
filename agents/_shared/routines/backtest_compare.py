@@ -472,42 +472,39 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     metrics_rows = _metrics_rows(runs)
     close_rows = _close_type_rows(runs)
 
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder(title=f"Backtest Comparison ({len(runs)} runs)")
-        builder.source("routine", "backtest_compare").tags(["backtest", "compare"])
+    builder = ReportBuilder(title=f"Backtest Comparison ({len(runs)} runs)")
+    builder.source("routine", "backtest_compare").tags(["backtest", "compare"])
 
-        winner = runs[0]
-        builder.kpi(
-            "Best Net PnL",
-            _usd(winner.metrics.get("net_pnl_quote")),
-            delta=winner.config_id or winner.task_id,
-            trend=(
-                "up" if float(winner.metrics.get("net_pnl_quote") or 0) >= 0 else "down"
-            ),
+    winner = runs[0]
+    builder.kpi(
+        "Best Net PnL",
+        _usd(winner.metrics.get("net_pnl_quote")),
+        delta=winner.config_id or winner.task_id,
+        trend=(
+            "up" if float(winner.metrics.get("net_pnl_quote") or 0) >= 0 else "down"
+        ),
+    )
+    builder.markdown(
+        "\n".join(
+            f"- `{r.task_id}` — **{r.label}** @ {r.resolution or '?'} "
+            f"— {_usd(r.metrics.get('net_pnl_quote'))} ({_pct(r.metrics.get('net_pnl'))})"
+            for r in runs
         )
-        builder.markdown(
-            "\n".join(
-                f"- `{r.task_id}` — **{r.label}** @ {r.resolution or '?'} "
-                f"— {_usd(r.metrics.get('net_pnl_quote'))} ({_pct(r.metrics.get('net_pnl'))})"
-                for r in runs
-            )
-        )
+    )
 
-        builder.section("Equity Curves", "Cumulative PnL for every compared run.")
-        builder.plotly(_equity_figure(runs, config.normalize_time))
+    builder.section("Equity Curves", "Cumulative PnL for every compared run.")
+    builder.plotly(_equity_figure(runs, config.normalize_time))
 
-        builder.section("Metrics", "★ marks the best value in each column.")
-        builder.table(metrics_rows, columns=["Run"] + [c[0] for c in METRIC_COLUMNS])
+    builder.section("Metrics", "★ marks the best value in each column.")
+    builder.table(metrics_rows, columns=["Run"] + [c[0] for c in METRIC_COLUMNS])
 
-        if close_rows:
-            builder.section("Close Types", "Executor close reasons per run.")
-            builder.table(close_rows, columns=list(close_rows[0].keys()))
+    if close_rows:
+        builder.section("Close Types", "Executor close reasons per run.")
+        builder.table(close_rows, columns=list(close_rows[0].keys()))
 
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}", exc_info=True)
+    await builder.save()
 
     return RoutineResult(
         text=text,

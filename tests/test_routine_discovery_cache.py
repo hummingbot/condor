@@ -148,9 +148,19 @@ class TestDiscoverRoutines:
         assert isinstance(result, dict)
 
     def test_force_reload_still_reimports_all(self, monkeypatch):
-        warm = discover_routines()  # warm
-        if not warm:
+        # Only the chat's OWN library is imported as the ``routines`` package and so
+        # goes through importlib.reload; the shared half discover_routines merges in
+        # (FEAT-038) is exec_module'd from its file, and is counted separately in
+        # test_shared_routines.py.
+        own = {
+            p.stem
+            for p in Path(base.__file__).parent.glob("*.py")
+            if p.stem not in ("__init__", "base")
+        }
+        if not own:
             return  # nothing in routines/ to assert on
+
+        discover_routines()  # warm
 
         calls = []
         real_reload = base.importlib.reload
@@ -161,7 +171,7 @@ class TestDiscoverRoutines:
         )
         discover_routines(force_reload=True)
 
-        assert len(calls) == len(warm)
+        assert len(calls) == len(own)
 
 
 class TestRoutineStoreResolve:

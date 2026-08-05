@@ -7,17 +7,19 @@ best-per-column ranking without touching disk.
 
 import pytest
 
-from routines.backtest_compare import (
-    MAX_CURVE_POINTS,
-    Run,
-    _best_task_ids,
-    _build_curve,
-    _downsample,
-    _metrics_rows,
-    _pct,
-    _resolve_ids,
-    _usd,
-)
+from tests.conftest import load_shared_routine
+
+_compare = load_shared_routine("backtest_compare")
+
+MAX_CURVE_POINTS = _compare.MAX_CURVE_POINTS
+Run = _compare.Run
+_best_task_ids = _compare._best_task_ids
+_build_curve = _compare._build_curve
+_downsample = _compare._downsample
+_metrics_rows = _compare._metrics_rows
+_pct = _compare._pct
+_resolve_ids = _compare._resolve_ids
+_usd = _compare._usd
 
 
 class FakeStore:

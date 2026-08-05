@@ -23,8 +23,10 @@ import pytest
 import condor.backtest_store as store_mod
 import condor.backtesting as core
 import condor.reports as reports_mod
-import routines.backtest_chart as bc
 from condor.backtest_store import BacktestStore
+from tests.conftest import load_shared_routine
+
+bc = load_shared_routine("backtest_chart")
 
 CONFIG_NAME = "ema_eth_20_100"
 SERVER = "srv-a"
@@ -200,6 +202,23 @@ def _completed(task_id="task-1") -> FakeClient:
     return FakeClient(FakeBacktesting(task_id, [_envelope(task_id)]))
 
 
+# ── One surface, reachable from every seat ────────────────────────────────────
+
+
+def test_both_routines_are_published_to_every_assistant():
+    """Deleting the MCP tools is only safe because agents resolve these."""
+    from routines.base import assistant_routines, discover_routines
+
+    chat = discover_routines(force_reload=True)
+    agent = assistant_routines("directional_trader", force_reload=True)
+
+    for name in ("backtest_chart", "backtest_compare"):
+        # The chat's catalog and /routines are unchanged: bare name, general library.
+        assert chat[name].source == "global"
+        assert agent[name].source == "global"
+    assert chat["backtest_chart"].category == "Bot Analysis"
+
+
 # ── One coercion ──────────────────────────────────────────────────────────────
 
 
@@ -252,7 +271,7 @@ def test_a_stored_run_re_renders_with_its_original_parameters(routine):
 
 def test_backtest_compare_picks_up_routine_runs(store, routine):
     """The whole point of saving: ranking saved runs now sees them."""
-    import routines.backtest_compare as cmp
+    cmp = load_shared_routine("backtest_compare")
 
     routine(_completed("task-1"))
     routine(_completed("task-2"))
