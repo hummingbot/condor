@@ -260,7 +260,7 @@ def choose(env: dict[str, str]) -> tuple[str, dict[str, str]] | None:
     options = menu_options()
     default = current_default(env)
     while True:
-        print("\nWhich AI brain should Condor use by default?\n")
+        print("\nWhich AI model should Condor use by default?\n")
         for i, (key, label) in enumerate(options, 1):
             state, detail = detect(key.partition(":")[0], env)
             marker = "  ← current default" if key == default else ""
