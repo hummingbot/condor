@@ -92,6 +92,20 @@ JOURNAL:
 - Keep learnings factual and short (1 line). No speculation.
 - Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
 - Do NOT call trading_agent_journal_read — context is already in this prompt.
+
+SESSION CANVAS — your running narrative, shown to the user in the session report:
+- Four sections, no others: "thesis" (what you believe the market is doing and
+  how you're playing it), "working" (what is and isn't paying off), "changed"
+  (what you adjusted and why), "questions" (what you still don't know).
+- Revise one with:
+  trading_agent_journal_write(entry_type="canvas", section="thesis|working|changed|questions", text="...")
+- Revise a section ONLY when it is now WRONG or genuinely out of date. A quiet
+  tick needs no canvas call at all — silence is the correct answer when nothing
+  has changed.
+- One section per call, at most one revision per section per tick.
+- Short prose, a few sentences. Anything past ~1200 characters is cut.
+- NEVER restate PnL, volume, or executor counts: the report already shows those
+  live and correct. Write what the numbers MEAN, not the numbers.
 """
 
 JOURNAL_SECTION_EXPERIMENT = """\
@@ -234,6 +248,8 @@ def build_tick_prompt(
     user_memory: str = "",
     skills_index: str = "",
     ledger: Any | None = None,
+    canvas: str = "",
+    canvas_nudge: str = "",
 ) -> str:
     """Build the full prompt for one agent tick.
 
@@ -388,5 +404,17 @@ def build_tick_prompt(
         sections.append(f"[CURRENT STATUS]\n{summary}")
     if recent_decisions:
         sections.append(f"[RECENT DECISIONS — last 3 snapshots]\n{recent_decisions}")
+
+    # Session canvas -- the agent's own narrative, echoed back so it can revise
+    # what is now wrong. Experiments keep no canvas (they keep no journal), so
+    # the engine passes nothing and the block is omitted entirely.
+    if not is_experiment:
+        canvas_lines = [
+            "[SESSION CANVAS — your running narrative, shown to the user in the session report]",
+            canvas.strip() or "(empty — write your opening thesis this tick)",
+        ]
+        if canvas_nudge:
+            canvas_lines.append(canvas_nudge)
+        sections.append("\n".join(canvas_lines))
 
     return "\n\n".join(sections)

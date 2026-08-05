@@ -792,26 +792,35 @@ async def trading_agent_journal_write(
     risk_note: str = "",
     tick: int = 0,
     category: str = "",
+    section: str = "",
 ) -> dict:
     """Write to the trading agent's journal. Keep entries SHORT (one line).
 
     Args:
         agent_id: The trading agent instance ID.
-        entry_type: "action", "learning", or "state".
+        entry_type: "action", "learning", "state", or "canvas".
             - "action": What you did this tick (auto-trimmed to last 10).
             - "learning": A new insight. Duplicates are auto-filtered. Only write
               if this is genuinely new and not already in learnings (max 20).
             - "state": Overwrite the current state snapshot (e.g. price, position, grids).
-        text: The entry content. Keep it to ONE short line.
+            - "canvas": Revise ONE section of your session canvas — the running
+              narrative shown to the user in the session report. Requires
+              `section`. Only revise a section when it is now wrong; a quiet
+              tick needs no canvas call.
+        text: The entry content. Keep it to ONE short line (a canvas section may
+            be a short paragraph, truncated past ~1200 chars).
         reasoning: One-sentence reasoning (for actions only).
         risk_note: Optional risk note (for actions only).
-        tick: Current tick number (for actions only).
+        tick: Current tick number (for actions and canvas revisions).
         category: Learning category: "market" (observations, patterns, volatility)
             or "execution" (errors, fills, timing). Only used when entry_type="learning".
             Defaults to "market".
+        section: Which canvas section to replace — "thesis", "working",
+            "changed", or "questions". Only used when entry_type="canvas".
 
     Returns:
-        {"written": true}
+        {"written": true} — or {"skipped": "..."} in dry-run / run-once mode,
+        which keep no journal.
     """
     return trading_agent.journal_write(
         agent_id,
@@ -821,6 +830,7 @@ async def trading_agent_journal_write(
         risk_note,
         tick,
         category,
+        section,
     )
 
 
