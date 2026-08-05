@@ -868,8 +868,24 @@ def _is_admin(user: WebUser) -> bool:
     return get_config_manager().is_admin(user.id)
 
 
-def _owned_delegation(task_id: str, user: WebUser):
-    """The delegation, or an error — admins see everything, everyone else only their own.
+def _can_see_delegation(record: dict, user: WebUser) -> bool:
+    """Admins see everything; everyone else only what they started.
+
+    A record whose ``user_id`` was never written (a transcript from before the
+    status file carried one) belongs to nobody and is therefore admin-only —
+    unowned must not mean unguarded.
+    """
+    return _is_admin(user) or (
+        bool(record.get("user_id")) and record["user_id"] == user.id
+    )
+
+
+def _visible_record(task_id: str, user: WebUser) -> dict:
+    """A delegation record: live if this process still holds it, else from disk.
+
+    The fallback is what makes every read route work for a task that outlived
+    the process that ran it (FEAT-035) — the registry stays the authority for
+    anything running *now*, and history answers for everything else.
 
     Same idiom as ``_require_ownership`` in ``sessions.py``: the caller is
     compared against the record's own ``user_id``, which ``DelegateTask``
@@ -877,13 +893,15 @@ def _owned_delegation(task_id: str, user: WebUser):
     task, matching ``conversations.py``.
     """
     from condor.agents.delegate import get_delegation
+    from condor.agents.delegation_history import read_history
 
     dt = get_delegation(task_id)
-    if dt is None:
+    record = dt.to_dict() if dt is not None else read_history(task_id)
+    if record is None:
         raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
-    if dt.user_id != user.id and not _is_admin(user):
+    if not _can_see_delegation(record, user):
         raise HTTPException(status_code=403, detail="Not your delegation")
-    return dt
+    return record
 
 
 @router.get("/delegations")
@@ -908,12 +926,54 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
     }
 
 
+@router.get("/delegations/history")
+async def list_delegation_history(
+    agent: str | None = None,
+    limit: int = 100,
+    user: WebUser = Depends(get_current_user),
+):
+    """Every delegation ever recorded, newest first — across restarts (FEAT-035).
+
+    Registered above ``/delegations/{task_id}`` so the literal path wins, for the
+    same reason the whole block sits above ``/{slug}``.
+
+    Returns *summary* rows: the bodies (``result``/``error``) are dropped, since
+    a hundred rows must not ship a hundred answers — a row that gets opened
+    fetches itself from ``/delegations/{task_id}``. Live tasks are included from
+    the registry (and shadow their own on-disk copy), so this list is complete on
+    its own rather than only telling half the story.
+    """
+    from condor.agents.delegate import get_all_delegations
+    from condor.agents.delegation_history import list_history
+
+    live = {
+        dt.task_id: dt.to_dict()
+        for dt in get_all_delegations().values()
+        if agent in (None, dt.agent_slug)
+    }
+    records = [
+        r
+        for r in list_history(agent_slug=agent, limit=limit)
+        if r["task_id"] not in live
+    ]
+    records.extend(live.values())
+    records.sort(key=lambda r: r.get("started_at") or 0.0, reverse=True)
+
+    return {
+        "delegations": [
+            {k: v for k, v in r.items() if k not in ("result", "error")}
+            for r in records[:limit]
+            if _can_see_delegation(r, user)
+        ]
+    }
+
+
 @router.get("/delegations/{task_id}")
 async def get_delegation_status(
     task_id: str, user: WebUser = Depends(get_current_user)
 ):
-    """Get a delegation's status + result/error."""
-    return _owned_delegation(task_id, user).to_dict()
+    """Get a delegation's status + result/error, live or from disk."""
+    return _visible_record(task_id, user)
 
 
 @router.get("/delegations/{task_id}/events")
@@ -929,14 +989,27 @@ async def get_delegation_events(
 
     ``status`` rides along so a client knows when to stop polling without a
     second request.
-    """
-    from condor.agents.delegate import events_for_wire
 
-    dt = _owned_delegation(task_id, user)
+    Once the process that ran it is gone the events come from the sidecar on
+    disk, in the same projection — so a finished delegation renders exactly like
+    a running one. Records older than that sidecar have only their markdown
+    transcript, returned in ``markdown`` for the client to render instead.
+    """
+    from condor.agents.delegate import events_for_wire, get_delegation
+    from condor.agents.delegation_history import read_history_events
+
+    record = _visible_record(task_id, user)
+    dt = get_delegation(task_id)
+    if dt is not None:
+        events, markdown = events_for_wire(dt.events), ""
+    else:
+        events, markdown = read_history_events(task_id)
+
     return {
         "task_id": task_id,
-        "status": dt.status,
-        "events": events_for_wire(dt.events),
+        "status": record["status"],
+        "events": events,
+        "markdown": markdown,
     }
 
 
@@ -944,10 +1017,15 @@ async def get_delegation_events(
 async def stop_delegation_route(
     task_id: str, user: WebUser = Depends(get_current_user)
 ):
-    """Cancel a running delegation (status -> stopped)."""
+    """Cancel a running delegation (status -> stopped).
+
+    Gated on the record rather than the live object so stopping something this
+    process no longer holds answers ``stopped: false`` — the honest outcome —
+    instead of a 404 that reads like the task never existed.
+    """
     from condor.agents.delegate import stop_delegation
 
-    _owned_delegation(task_id, user)
+    _visible_record(task_id, user)
     stopped = await stop_delegation(task_id)
     return {"stopped": stopped}
 

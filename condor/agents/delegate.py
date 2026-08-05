@@ -161,12 +161,21 @@ def _delegation_status_name(task_id: str) -> str:
     return f"{task_id}.status.json"
 
 
+TERMINAL_STATES = ("done", "error", "stopped")
+
+
 def _record_delegation_status(dt: "DelegateTask") -> None:
-    """Persist this delegation's state next to its transcript.
+    """Persist this delegation's *record* next to its transcript.
 
     Written at start (not only at the end) precisely so a task the process dies
     on leaves something to reconcile — a transcript is only written when the
     task finishes.
+
+    It carries the whole record, not just the state, because this file is what
+    :mod:`condor.agents.delegation_history` rebuilds a row from once the
+    in-memory registry is gone (FEAT-035). ``write_status`` merges, so the
+    fields the start-time write cannot know (result, tool count, end time)
+    simply arrive with the final write.
     """
     try:
         from condor.agents.agent import AgentStore
@@ -177,6 +186,7 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
             return
         delegations_dir = agent.agent_dir / "delegations"
         delegations_dir.mkdir(parents=True, exist_ok=True)
+        extra = {"ended_at": time.time()} if dt.status in TERMINAL_STATES else {}
         write_status(
             delegations_dir,
             _delegation_status_name(dt.task_id),
@@ -189,6 +199,12 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
             session_key=dt.session_key,
             on_complete=dt.on_complete,
             started_at=dt.started_at,
+            task=dt.task,
+            server_name=dt.server_name,
+            result=dt.result,
+            error=dt.error,
+            tool_count=sum(1 for e in dt.events if e.get("type") == "tool"),
+            **extra,
         )
     except Exception:
         log.debug(
@@ -379,6 +395,10 @@ def _render_session(events: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _events_sidecar_name(task_id: str) -> str:
+    return f"{task_id}.events.json"
+
+
 def _persist_transcript(dt: DelegateTask) -> None:
     """Write a session transcript under agents/{slug}/delegations/{task_id}.md.
 
@@ -386,7 +406,15 @@ def _persist_transcript(dt: DelegateTask) -> None:
     heavyweight ``sessions/`` tree -- a delegate has no ticks to journal. Captures
     the full session: the agent's reasoning, every tool call (with input/output),
     and the final result, so nothing about *how* the task was solved is lost.
+
+    A ``{task_id}.events.json`` sidecar goes out alongside it (FEAT-035): the
+    markdown is for a human reading the repo, the JSON is what lets the dashboard
+    render a finished delegation with the same collapsible transcript it shows
+    while the task is running. Both are projections of the same ``dt.events``
+    through the same output bound, so they cannot drift apart.
     """
+    import json
+
     from condor.agents.agent import AgentStore
 
     agent = AgentStore().get(dt.agent_slug)
@@ -411,6 +439,9 @@ def _persist_transcript(dt: DelegateTask) -> None:
         f"{body or '(none)'}\n"
     )
     (delegations_dir / f"{dt.task_id}.md").write_text(content)
+    (delegations_dir / _events_sidecar_name(dt.task_id)).write_text(
+        json.dumps({"events": events_for_wire(dt.events)}, indent=2)
+    )
 
 
 def _completion_text(dt: DelegateTask) -> str:
