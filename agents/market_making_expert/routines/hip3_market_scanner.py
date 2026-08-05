@@ -1,4 +1,5 @@
 """HIP-3 market scanner — ranks xyz-issuer perps for volume-farming market-making."""
+
 import asyncio
 import logging
 import math
@@ -17,22 +18,44 @@ HL_URL = "https://api.hyperliquid.xyz/info"
 
 class Config(BaseModel):
     """Scan all markets of a HIP-3 builder issuer and return a shortlist for volume-farming MM."""
-    issuer: str = Field(default="xyz", description="HIP-3 builder issuer slug (e.g. 'xyz')")
-    min_spread_bps: float = Field(default=3.0, description="Minimum impact spread in bps")
-    max_daily_drift_pct: float = Field(default=3.0, description="Maximum daily price drift %")
-    min_oi_notional: float = Field(default=1_000_000.0, description="Minimum open interest in USD")
-    min_book_depth_usd: float = Field(default=10_000.0, description="Min resting book notional within depth_within_bps, per side (liquidity filter)")
-    depth_within_bps: float = Field(default=10.0, description="Band (bps from mid) over which book depth is measured")
-    depth_check_top_k: int = Field(default=12, description="How many top-scored survivors to depth-check via l2Book (bounds API calls)")
+
+    issuer: str = Field(
+        default="xyz", description="HIP-3 builder issuer slug (e.g. 'xyz')"
+    )
+    min_spread_bps: float = Field(
+        default=3.0, description="Minimum impact spread in bps"
+    )
+    max_daily_drift_pct: float = Field(
+        default=3.0, description="Maximum daily price drift %"
+    )
+    min_oi_notional: float = Field(
+        default=1_000_000.0, description="Minimum open interest in USD"
+    )
+    min_book_depth_usd: float = Field(
+        default=10_000.0,
+        description="Min resting book notional within depth_within_bps, per side (liquidity filter)",
+    )
+    depth_within_bps: float = Field(
+        default=10.0,
+        description="Band (bps from mid) over which book depth is measured",
+    )
+    depth_check_top_k: int = Field(
+        default=12,
+        description="How many top-scored survivors to depth-check via l2Book (bounds API calls)",
+    )
     top_n: int = Field(default=5, description="Number of top markets to return")
-    all_in_fee_bps_roundtrip: float = Field(default=2.6, description="Informational: total roundtrip fee in bps (~1.3bps/side)")
+    all_in_fee_bps_roundtrip: float = Field(
+        default=2.6,
+        description="Informational: total roundtrip fee in bps (~1.3bps/side)",
+    )
 
 
 async def _fetch_book_depth(session, coin, ctx_mid, within_bps):
     """Return (bid_depth_usd, ask_depth_usd) resting within `within_bps` of mid. (0,0) on failure/empty."""
     try:
         async with session.post(
-            HL_URL, json={"type": "l2Book", "coin": coin},
+            HL_URL,
+            json={"type": "l2Book", "coin": coin},
             timeout=aiohttp.ClientTimeout(total=10),
         ) as resp:
             if resp.status != 200:
@@ -42,7 +65,8 @@ async def _fetch_book_depth(session, coin, ctx_mid, within_bps):
         if not levels or len(levels) != 2 or not levels[0] or not levels[1]:
             return 0.0, 0.0  # empty book = closed / illiquid
         bids, asks = levels[0], levels[1]
-        best_bid = float(bids[0]["px"]); best_ask = float(asks[0]["px"])
+        best_bid = float(bids[0]["px"])
+        best_ask = float(asks[0]["px"])
         mid = (best_bid + best_ask) / 2 or ctx_mid
         if mid <= 0:
             return 0.0, 0.0
@@ -50,7 +74,8 @@ async def _fetch_book_depth(session, coin, ctx_mid, within_bps):
         def _side(side_levels, is_bid):
             tot = 0.0
             for lvl in side_levels:
-                px = float(lvl["px"]); sz = float(lvl["sz"])
+                px = float(lvl["px"])
+                sz = float(lvl["sz"])
                 off = (mid - px) / mid * 1e4 if is_bid else (px - mid) / mid * 1e4
                 if off > within_bps:
                     break
@@ -95,8 +120,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     markets = []
     for asset, ctx in zip(universe, ctxs):
         try:
-            name = asset.get("name", "")           # e.g. "xyz:SMSN" (l2Book coin)
-            pair = name.upper() + "-USD"            # e.g. "XYZ:SMSN-USD" (trading_pair)
+            name = asset.get("name", "")  # e.g. "xyz:SMSN" (l2Book coin)
+            pair = name.upper() + "-USD"  # e.g. "XYZ:SMSN-USD" (trading_pair)
 
             mid_raw = ctx.get("midPx")
             mark_raw = ctx.get("markPx")
@@ -109,9 +134,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             prev = float(prev_raw) if prev_raw else 0.0
 
             open_market = (
-                mid > 0
-                and isinstance(impact_pxs, list)
-                and len(impact_pxs) == 2
+                mid > 0 and isinstance(impact_pxs, list) and len(impact_pxs) == 2
             )
 
             spread_bps = None
@@ -126,20 +149,22 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             daily_drift_pct = abs(mark / prev - 1) * 100 if prev else 999.0
             oi_notional = float(ctx.get("openInterest", 0) or 0) * mark
 
-            markets.append({
-                "pair": pair,
-                "coin": name,
-                "volume": volume,
-                "mid": mid,
-                "mark": mark,
-                "spread_bps": spread_bps,
-                "daily_drift_pct": daily_drift_pct,
-                "oi_notional": oi_notional,
-                "book_depth_usd": None,
-                "open_market": open_market,
-                "maxLeverage": int(asset.get("maxLeverage", 0)),
-                "funding": ctx.get("funding", "N/A"),
-            })
+            markets.append(
+                {
+                    "pair": pair,
+                    "coin": name,
+                    "volume": volume,
+                    "mid": mid,
+                    "mark": mark,
+                    "spread_bps": spread_bps,
+                    "daily_drift_pct": daily_drift_pct,
+                    "oi_notional": oi_notional,
+                    "book_depth_usd": None,
+                    "open_market": open_market,
+                    "maxLeverage": int(asset.get("maxLeverage", 0)),
+                    "funding": ctx.get("funding", "N/A"),
+                }
+            )
         except Exception as e:
             logger.warning(f"Error processing market {asset.get('name', '?')}: {e}")
 
@@ -147,7 +172,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # ── 3. Pre-filters (open / spread / drift / OI) ───────────────────────────
     prelim = [
-        m for m in markets
+        m
+        for m in markets
         if (
             m["open_market"]
             and m["spread_bps"] is not None
@@ -172,10 +198,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     if candidates:
         try:
             async with aiohttp.ClientSession() as session:
-                depths = await asyncio.gather(*[
-                    _fetch_book_depth(session, m["coin"], m["mid"], config.depth_within_bps)
-                    for m in candidates
-                ])
+                depths = await asyncio.gather(
+                    *[
+                        _fetch_book_depth(
+                            session, m["coin"], m["mid"], config.depth_within_bps
+                        )
+                        for m in candidates
+                    ]
+                )
             for m, (bid_d, ask_d) in zip(candidates, depths):
                 # Require BOTH sides liquid for two-sided MM → use the weaker side.
                 m["book_depth_usd"] = min(bid_d, ask_d)
@@ -183,7 +213,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             logger.warning(f"Depth-check batch failed: {e}")
 
     survivors = [
-        m for m in candidates
+        m
+        for m in candidates
         if m["book_depth_usd"] is not None
         and m["book_depth_usd"] >= config.min_book_depth_usd
     ]
@@ -209,7 +240,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     def _mrow(rank, m, note=""):
         spd = f"{m['spread_bps']:.2f}" if m["spread_bps"] is not None else "N/A"
-        dep = f"${m['book_depth_usd']:,.0f}" if m.get("book_depth_usd") is not None else "n/a"
+        dep = (
+            f"${m['book_depth_usd']:,.0f}"
+            if m.get("book_depth_usd") is not None
+            else "n/a"
+        )
         flag = f" [{note}]" if note else ""
         score_str = f" | Score={m['score']:.3f}" if "score" in m else ""
         return (
@@ -231,44 +266,59 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     summary = "\n".join(lines)
 
     # ── 8. Persistent report ──────────────────────────────────────────────────
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder(f"HIP-3 Scanner: {issuer_upper}")
-        builder.source("routine", "hip3_market_scanner").tags(
-            ["market-making", "hip3", issuer, "scanner"]
-        )
-        builder.kpi("Markets Scanned", str(total_markets))
-        builder.kpi("Survivors", str(len(survivors)))
-        builder.kpi("Top Pick", top_pick)
-        builder.kpi("Fee RT", f"{config.all_in_fee_bps_roundtrip}bps")
+    builder = ReportBuilder(f"HIP-3 Scanner: {issuer_upper}")
+    builder.source("routine", "hip3_market_scanner").tags(
+        ["market-making", "hip3", issuer, "scanner"]
+    )
+    builder.kpi("Markets Scanned", str(total_markets))
+    builder.kpi("Survivors", str(len(survivors)))
+    builder.kpi("Top Pick", top_pick)
+    builder.kpi("Fee RT", f"{config.all_in_fee_bps_roundtrip}bps")
 
-        display_list = shortlist if not no_survivors else fallback
-        note_col = "Score" if not no_survivors else "Note"
-        table_rows = []
-        for rank, m in enumerate(display_list, 1):
-            table_rows.append({
+    display_list = shortlist if not no_survivors else fallback
+    note_col = "Score" if not no_survivors else "Note"
+    table_rows = []
+    for rank, m in enumerate(display_list, 1):
+        table_rows.append(
+            {
                 "Rank": rank,
                 "Pair": m["pair"],
                 "24h Vol ($)": f"${m['volume']:,.0f}",
-                "Spread (bps)": f"{m['spread_bps']:.2f}" if m["spread_bps"] is not None else "N/A",
+                "Spread (bps)": (
+                    f"{m['spread_bps']:.2f}" if m["spread_bps"] is not None else "N/A"
+                ),
                 "Drift %": f"{m['daily_drift_pct']:.2f}%",
-                "Depth/side ($)": f"${m['book_depth_usd']:,.0f}" if m.get("book_depth_usd") is not None else "n/a",
+                "Depth/side ($)": (
+                    f"${m['book_depth_usd']:,.0f}"
+                    if m.get("book_depth_usd") is not None
+                    else "n/a"
+                ),
                 "OI ($)": f"${m['oi_notional']:,.0f}",
                 "MaxLev": m["maxLeverage"],
                 note_col: f"{m['score']:.3f}" if "score" in m else "NO FILTER PASS",
-            })
+            }
+        )
 
-        if table_rows:
-            builder.table(
-                table_rows,
-                ["Rank", "Pair", "24h Vol ($)", "Spread (bps)", "Drift %", "Depth/side ($)", "OI ($)", "MaxLev", note_col],
-            )
+    if table_rows:
+        builder.table(
+            table_rows,
+            [
+                "Rank",
+                "Pair",
+                "24h Vol ($)",
+                "Spread (bps)",
+                "Drift %",
+                "Depth/side ($)",
+                "OI ($)",
+                "MaxLev",
+                note_col,
+            ],
+        )
 
-        builder.markdown(summary)
-        builder.manual_order()
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    builder.markdown(summary)
+    builder.manual_order()
+    await builder.save()
 
     return summary
