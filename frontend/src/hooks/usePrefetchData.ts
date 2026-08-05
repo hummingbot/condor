@@ -3,6 +3,7 @@ import { useEffect } from "react";
 
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
+import { candlesQuery } from "@/lib/queryClient";
 
 const GRID_STORAGE_KEY = "condor_grid_defaults";
 const DEFAULT_CONNECTOR = "binance_perpetual";
@@ -80,12 +81,26 @@ export function usePrefetchData() {
       })
       .catch(() => {});
 
-    // Prefetch candles for the default trade pair
-    const startTime = Math.floor(Date.now() / 1000) - defaults.lookback;
+    // Prefetch candles for the default trade pair. The key carries this
+    // window, so it only ever serves a chart asking for the same range.
+    const candles = candlesQuery(
+      server,
+      defaults.connector,
+      defaults.pair,
+      defaults.interval,
+      Math.floor(Date.now() / 1000) - defaults.lookback,
+    );
     queryClient.prefetchQuery({
-      queryKey: ["candles", server, defaults.connector, defaults.pair, defaults.interval],
+      queryKey: candles.queryKey,
       queryFn: () =>
-        api.getCandles(server, defaults.connector, defaults.pair, defaults.interval, 5000, startTime),
+        api.getCandles(
+          server,
+          defaults.connector,
+          defaults.pair,
+          defaults.interval,
+          5000,
+          candles.startTime,
+        ),
     });
 
     // Prefetch settings data so Settings page loads instantly

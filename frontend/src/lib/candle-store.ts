@@ -76,14 +76,37 @@ class CandleStore {
 
   // ── WS wiring ──
 
-  setWs(ws: CondorWebSocket | null): void {
-    // Tear down previous handler
+  /**
+   * Bind a socket as the candle provider.
+   *
+   * There is only ever one candle-carrying socket in the app — `shared-socket.ts`
+   * refcounts a single connection — so this is called once when that connection
+   * opens and there is no contest to arbitrate. The defensive rebind covers the
+   * one case that does produce a second socket: a token change, which closes the
+   * old connection and opens a new one.
+   */
+  attachWs(ws: CondorWebSocket): void {
+    if (this.ws === ws) return;
+    if (this.ws) this._unbindWs();
+    this._bindWs(ws);
+  }
+
+  /** Unbind the provider. Called when the shared socket's last reference goes. */
+  detachWs(ws: CondorWebSocket): void {
+    if (this.ws !== ws) return;
+    this._unbindWs();
+  }
+
+  private _unbindWs(): void {
     if (this.wsCleanup) {
       this.wsCleanup();
       this.wsCleanup = null;
     }
+    this.ws = null;
+  }
+
+  private _bindWs(ws: CondorWebSocket): void {
     this.ws = ws;
-    if (!ws) return;
 
     this.wsCleanup = ws.onMessage((channel: string, data: unknown) => {
       if (!channel.startsWith("candles:")) return;
@@ -106,7 +129,8 @@ class CandleStore {
 
     // Re-subscribe active channels to trigger a fresh snapshot now that the
     // message handler is registered. The WS onopen re-subscribe may have fired
-    // before setWs was called, so the initial snapshot would have been missed.
+    // before we bound to it, so the initial snapshot would have been missed —
+    // and a socket replacing a closed one has never seen these channels at all.
     for (const [key, sub] of this.subscriptions) {
       if (sub.refCount > 0) {
         ws.subscribe(key);

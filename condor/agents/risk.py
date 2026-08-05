@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .ownership import BotLedger
 
 log = logging.getLogger(__name__)
 
@@ -212,8 +215,15 @@ def auto_approve_with_risk_check(
     risk_engine: RiskEngine,
     risk_state: RiskState,
     execution_mode: str = "loop",
+    ledger: "BotLedger | None" = None,
 ):
-    """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones."""
+    """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
+
+    ``ledger`` (FEAT-017) scopes bot ownership: with one, a ``manage_bots`` action
+    that deploys or mutates a bot outside the session's namespace is cancelled and
+    recorded. ``None`` (consults, delegations, chat, executor-mode agents) keeps
+    today's behavior exactly.
+    """
     from handlers.agents._shared import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
@@ -265,10 +275,36 @@ def auto_approve_with_risk_check(
             # Bot deploys place real capital via controllers — bound the loss
             # (declared drawdown kill switch) since the amount isn't in the call
             if tool_name == "manage_bots":
+                # Ownership first: an agent may only touch bots in its own
+                # namespace. Read-only actions (status/logs/get_config) are not
+                # in DANGEROUS_BOT_ACTIONS, so it still sees the whole fleet.
+                if ledger is not None:
+                    input_data = tool_call.get("input", {})
+                    action = input_data.get("action", "")
+                    if action in DANGEROUS_BOT_ACTIONS:
+                        bot_name = input_data.get("bot_name", "") or ""
+                        if not ledger.owns(bot_name):
+                            log.warning(
+                                "Ownership: blocked manage_bots(%s) on '%s' "
+                                "(namespace %s)",
+                                action,
+                                bot_name,
+                                ledger.namespace,
+                            )
+                            ledger.note_violation(bot_name, action)
+                            return {"outcome": {"outcome": "cancelled"}}
+
                 allowed, reason = risk_engine.check_bot_action(tool_call)
                 if not allowed:
                     log.warning("Risk engine blocked tool call: %s", reason)
                     return {"outcome": {"outcome": "cancelled"}}
+
+                # Recorded only once the call is actually going through, so a
+                # risk-rejected deploy never lands in the ledger.
+                if ledger is not None:
+                    input_data = tool_call.get("input", {})
+                    if input_data.get("action", "") == "deploy":
+                        ledger.note_deploy(input_data.get("bot_name", "") or "")
 
             # Block direct order placement entirely
             if tool_name == "place_order":

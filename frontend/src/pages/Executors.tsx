@@ -425,7 +425,7 @@ export function Executors() {
     () => executors.map((ex) => ex.trading_pair?.split("-")[1] || "USDT"),
     [executors],
   );
-  const { convert, formatPnlValue, formatValue, formatValueDetailed, currencySymbol } = useRates(quoteCurrencies);
+  const { convert, formatPnlValue, formatValue, formatValueDetailed, resolvedSymbol: currencySymbol } = useRates(quoteCurrencies);
 
   const executorTypes = useMemo(() => {
     const types = new Set(executors.map((ex) => ex.type));

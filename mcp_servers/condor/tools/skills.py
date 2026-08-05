@@ -37,7 +37,7 @@ def _resolve_agent_slug(strategy_id: str | None) -> tuple[str | None, bool]:
             return strategy_id, True
         return None, False
 
-    return (settings.agent_slug or None), True
+    return (settings.specialist_slug or None), True
 
 
 async def manage_skill(
@@ -52,9 +52,10 @@ async def manage_skill(
     strategy_id: str | None = None,
     file: str | None = None,
     content: str | None = None,
+    shared: bool | None = None,
 ) -> dict:
-    agent_slug, ok = _resolve_agent_slug(strategy_id)
-    if strategy_id and not ok:
+    agent_slug, resolved = _resolve_agent_slug(strategy_id)
+    if strategy_id and not resolved:
         return {"error": f"No strategy or agent found for strategy_id '{strategy_id}'"}
     store = SkillStore(agent_slug)
     source = f"agent:{agent_slug}" if agent_slug else "chat"
@@ -71,6 +72,7 @@ async def manage_skill(
             body,
             references_routine=references_routine,
             source=source,
+            shared=shared,
         )
 
     elif action == "read":
@@ -113,6 +115,8 @@ async def manage_skill(
             fields["body"] = body
         if references_routine is not None:
             fields["references_routine"] = references_routine
+        if shared is not None:
+            fields["shared"] = shared
         if not fields:
             return {"error": "provide at least one field to edit"}
         return store.edit(name, **fields)
@@ -120,8 +124,10 @@ async def manage_skill(
     elif action == "delete":
         if not name:
             return {"error": "name is required for delete"}
-        ok = store.delete(name)
-        if not ok:
+        deleted = store.delete(name)
+        if isinstance(deleted, dict):  # inherited (read-only) — carries the fix
+            return deleted
+        if not deleted:
             return {"error": f"Skill '{name}' not found"}
         return {"deleted": True, "name": name}
 

@@ -37,6 +37,10 @@ class RunRequestV2(BaseModel):
     routine_name: str
     server_name: str
     config: dict = {}
+    # Which assistant produced this run's reports. Empty (the dashboard's own
+    # calls) derives it from the routine's source; the MCP runner sends it
+    # because it knows which agent asked — see RoutineStore._execute_and_record.
+    attribute_to: str = ""
 
 
 class ScheduleRequestV2(BaseModel):
@@ -160,6 +164,35 @@ async def run_routine_v2(
             config=body.config,
             server_name=body.server_name,
             user_id=user.id,
+            agent=body.attribute_to,
+        )
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    return {"instance_id": instance_id}
+
+
+@router.post("/start")
+async def start_continuous_v2(
+    body: RunRequestV2,
+    user: WebUser = Depends(get_current_user),
+):
+    """Start a continuous routine in this process. Returns instance_id.
+
+    The counterpart of ``/run`` for continuous routines: it exists so a routine
+    an agent starts from chat lives in the main process's store — visible in the
+    dashboard and stoppable from it — instead of dying with the MCP subprocess.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, body.server_name):
+        raise HTTPException(status_code=403, detail="No access")
+    store = get_routine_store()
+    try:
+        instance_id = await store.start_continuous(
+            routine_name=body.routine_name,
+            config=body.config,
+            server_name=body.server_name,
+            user_id=user.id,
+            agent=body.attribute_to,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))

@@ -59,6 +59,9 @@ SKILLS & ROUTINES:
 - A skill may reference a routine (shown as "→ routine: <name>"); run it with
   manage_routines(action="run", name="...", config={...}). manage_routines(action="list")
   to discover routines; routines tagged "agent" are local to your strategy.
+- Before AUTHORING a routine (create/edit/fix), read the routine_cookbook playbook
+  with manage_skill(action="read", name="routine_cookbook") and follow it — then
+  test what you wrote with manage_routines(action="run", ...) before relying on it.
 - Skills are read-only playbooks shipped with this agent — follow them, you can't
   create or edit them. Operational facts you learn go to [LEARNINGS] (journal).
 
@@ -156,6 +159,66 @@ def _build_routines_section(strategy: Strategy) -> str:
     return "\n".join(lines)
 
 
+def _build_controller_mode_section(bot_name: str, ledger: Any | None) -> str:
+    """The [CONTROLLER MODE] block, generated from the session's bot ledger.
+
+    Without a ledger (executor-mode callers, tests) this is the plain statement of
+    the bot the agent operates. With one, it also states the namespace rule the
+    permission callback enforces, the bots already owned, and any call refused so
+    far — the only channel that guard has to teach, since it can merely cancel.
+    """
+    lines = [
+        "[CONTROLLER MODE]",
+        f"You operate the Hummingbot bot '{bot_name}'. Steer its controllers "
+        "instead of creating standalone executors:",
+        '- Check current state first: manage_bots(action="status").',
+        "- Define/update controller config templates with manage_controllers.",
+        f"- Apply them with manage_bots: deploy if '{bot_name}' is not running, "
+        "otherwise update_config / start_controllers / stop_controllers.",
+    ]
+
+    if ledger is not None:
+        ns = ledger.namespace
+        lines += [
+            "",
+            "OWNERSHIP — enforced at the tool call, not by convention:",
+            f"- You may deploy or mutate ONLY bots named '{ns}' or '{ns}-<tag>' "
+            f"(e.g. '{ns}-btc'). Any other bot_name in a manage_bots deploy / "
+            "stop_bot / start_controllers / stop_controllers / update_config call "
+            "is REFUSED and recorded — the call simply does not happen.",
+            "- Read-only actions (status, logs, get_config) are never restricted: "
+            "you can still inspect the whole fleet.",
+            f"- Open a second book by deploying '{ns}-<tag>'; every bot in the "
+            "namespace rolls up to this session.",
+        ]
+        for extra in ledger.declared:
+            lines.append(
+                f"- Legacy name '{extra}' is also yours (configured before this "
+                "convention)."
+            )
+        owned = ledger.owned()
+        if owned:
+            lines.append(
+                "- Bots you own right now: "
+                + ", ".join(f"{b.base} ({b.origin})" for b in owned)
+            )
+        else:
+            lines.append("- You own no bot yet this session.")
+        recent = ledger.violations[-3:]
+        if recent:
+            lines.append(
+                "- REFUSED so far: "
+                + ", ".join(f"{v['action']} on '{v['name']}'" for v in recent)
+                + " — use a name inside your namespace instead."
+            )
+
+    lines.append(
+        "Do NOT create standalone executors unless the strategy instructions "
+        "explicitly tell you to. The bot's PnL is attributed to you automatically."
+    )
+    return "\n".join(lines)
+
+
 def build_tick_prompt(
     agent: Agent,
     strategy: Strategy,
@@ -170,6 +233,7 @@ def build_tick_prompt(
     cached_routines_section: str | None = None,
     user_memory: str = "",
     skills_index: str = "",
+    ledger: Any | None = None,
 ) -> str:
     """Build the full prompt for one agent tick.
 
@@ -284,17 +348,7 @@ def build_tick_prompt(
     # spawning standalone executors. Triggered solely by a non-empty bot_name.
     bot_name = config.get("bot_name", "")
     if bot_name:
-        sections.append(
-            "[CONTROLLER MODE]\n"
-            f"You operate the Hummingbot bot '{bot_name}'. Steer its controllers "
-            "instead of creating standalone executors:\n"
-            '- Check current state first: manage_bots(action="status").\n'
-            "- Define/update controller config templates with manage_controllers.\n"
-            f"- Apply them with manage_bots: deploy if '{bot_name}' is not running, "
-            "otherwise update_config / start_controllers / stop_controllers.\n"
-            "Do NOT create standalone executors unless the strategy instructions "
-            "explicitly tell you to. The bot's PnL is attributed to you automatically."
-        )
+        sections.append(_build_controller_mode_section(bot_name, ledger))
 
     # Risk state
     rs = risk_state

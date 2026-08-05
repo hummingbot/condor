@@ -29,6 +29,11 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["bots"])
 
+# Per-call budget for the optional enrichment fetches on the bots page. The
+# page renders without them (no age / config / DB perf), so a slow server
+# should cost us those columns, never the whole response.
+ENRICHMENT_TIMEOUT = 15.0
+
 # ── Transitional state store ──
 # Tracks bots/controllers that have been sent a stop command but haven't
 # finished shutting down yet. Auto-expires after TTL seconds.
@@ -203,6 +208,28 @@ def _extract_perf_snapshots(result: Any) -> list[dict]:
     return []
 
 
+def _collect_bot_runs(result: Any, runs: dict[str, str]) -> None:
+    """Merge a bot-runs API response into ``runs`` (bot_name -> deployed_at)."""
+    if not isinstance(result, dict):
+        return
+    runs_data = result.get("data", result)
+    if isinstance(runs_data, dict):
+        for bot_name, run_info in runs_data.items():
+            if isinstance(run_info, dict):
+                deployed = run_info.get("deployed_at") or run_info.get("created_at")
+                if deployed:
+                    runs[bot_name] = str(deployed)
+            elif isinstance(run_info, str):
+                runs[bot_name] = run_info
+    elif isinstance(runs_data, list):
+        for run in runs_data:
+            if isinstance(run, dict):
+                bn = run.get("bot_name", "")
+                deployed = run.get("deployed_at") or run.get("created_at")
+                if bn and deployed:
+                    runs[bn] = str(deployed)
+
+
 @router.get("/servers/{name}/bots", response_model=BotsPageResponse)
 async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
     cm = get_config_manager()
@@ -269,32 +296,46 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
             return configs_map
 
         async def _fetch_bot_runs() -> dict[str, str]:
+            """Deployed-at timestamps keyed by bot name, for the Age column.
+
+            Filtered to DEPLOYED on purpose: the unfiltered listing also returns
+            ARCHIVED runs, each carrying a multi-KB ``final_status`` blob. On a
+            remote server that is a multi-MB, multi-minute response that stalls
+            the whole page (brigado: 4.5 MB / 274s unfiltered vs 121 KB / 5s
+            filtered), leaving every bot without an age.
+            """
             runs: dict[str, str] = {}
             try:
-                runs_result = await client.bot_orchestration.get_bot_runs()
-                if isinstance(runs_result, dict):
-                    runs_data = runs_result.get("data", runs_result)
-                    if isinstance(runs_data, dict):
-                        for bot_name, run_info in runs_data.items():
-                            if isinstance(run_info, dict):
-                                deployed = run_info.get("deployed_at") or run_info.get(
-                                    "created_at"
-                                )
-                                if deployed:
-                                    runs[bot_name] = str(deployed)
-                            elif isinstance(run_info, str):
-                                runs[bot_name] = run_info
-                    elif isinstance(runs_data, list):
-                        for run in runs_data:
-                            if isinstance(run, dict):
-                                bn = run.get("bot_name", "")
-                                deployed = run.get("deployed_at") or run.get(
-                                    "created_at"
-                                )
-                                if bn and deployed:
-                                    runs[bn] = str(deployed)
+                _collect_bot_runs(
+                    await client.bot_orchestration.get_bot_runs(
+                        deployment_status="DEPLOYED"
+                    ),
+                    runs,
+                )
             except Exception:
-                pass
+                logger.debug("Bot runs not available for '%s'", name)
+
+            # Any active bot the filtered listing missed gets a targeted lookup
+            # (~1 KB each) rather than falling back to the unfiltered listing.
+            missing = [
+                bn
+                for b in bots_list
+                if (bn := b.get("bot_name", "")) and bn not in runs
+            ]
+            if missing:
+
+                async def _get_one_run(bn: str):
+                    try:
+                        _collect_bot_runs(
+                            await client.bot_orchestration.get_bot_runs(
+                                bot_name=bn, limit=1
+                            ),
+                            runs,
+                        )
+                    except Exception:
+                        pass
+
+                await asyncio.gather(*[_get_one_run(bn) for bn in missing])
             return runs
 
         async def _fetch_latest_perf() -> dict[str, dict]:
@@ -315,8 +356,27 @@ async def list_bots(name: str, user: WebUser = Depends(get_current_user)):
                 )
             return perf_map
 
+        async def _with_timeout(coro, label: str, default: Any) -> Any:
+            """Cap one enrichment call so a slow server degrades instead of hanging.
+
+            Each fetcher gets its own budget: one slow endpoint must not cost us
+            the other two.
+            """
+            try:
+                return await asyncio.wait_for(coro, timeout=ENRICHMENT_TIMEOUT)
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "Enrichment '%s' timed out after %.0fs for server '%s'",
+                    label,
+                    ENRICHMENT_TIMEOUT,
+                    name,
+                )
+                return default
+
         ctrl_configs, bot_runs, latest_perf = await asyncio.gather(
-            _fetch_ctrl_configs(), _fetch_bot_runs(), _fetch_latest_perf()
+            _with_timeout(_fetch_ctrl_configs(), "controller configs", {}),
+            _with_timeout(_fetch_bot_runs(), "bot runs", {}),
+            _with_timeout(_fetch_latest_perf(), "latest performance", {}),
         )
 
     page = build_bots_page(

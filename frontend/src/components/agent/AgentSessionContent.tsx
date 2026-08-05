@@ -12,7 +12,7 @@ import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
 import { groupExecutorsByMarket } from "@/lib/executor-overlays";
 import { type ParsedJournal, type ParsedSnapshot, parseSnapshot } from "@/lib/parse-agent";
-import { formatCompactUsd, formatCurrencyPnl } from "@/lib/formatters";
+import { formatCompactUsd, formatCurrencyPnl, toolCallState } from "@/lib/formatters";
 import { useRates } from "@/hooks/useRates";
 import { DetailPanel, ExecutorTable, type SortDir, type SortKey } from "@/components/executor/ExecutorTable";
 
@@ -117,6 +117,7 @@ export function SessionExecutors({
   controllerIds,
   onSnapshotClick,
   sessionSummary,
+  isLiveSession = false,
 }: {
   slug: string;
   sslug: string;
@@ -125,6 +126,9 @@ export function SessionExecutors({
   controllerIds?: string[];
   onSnapshotClick?: (tick: number) => void;
   sessionSummary?: { status: string; lastTick: number; lastAction: string };
+  /** True only for the session currently running: lets the WS contribute
+   *  executors the session REST endpoint hasn't recorded yet. */
+  isLiveSession?: boolean;
 }) {
   // REST data (fallback + historical executors)
   const { data: sessionDetail } = useQuery({
@@ -141,19 +145,25 @@ export function SessionExecutors({
     controllerIds || [],
   );
 
-  // Merge: prefer WS data for matching IDs, keep REST for historical
+  // Merge: id-keyed upsert — the WS refreshes rows this session already owns and
+  // never invents new ones. `wsExecutors` belongs to the *running* instances, so
+  // appending it to a finished session would credit it with another session's
+  // PnL, volume and fees. Only the live session takes the unmatched WS rows, and
+  // only to show executors the REST endpoint hasn't recorded yet.
   const executorInfos = useMemo(() => {
     const restInfos = restExecutors.map(agentRowToExecutorInfo);
     if (wsExecutors.length === 0) return restInfos;
 
     const wsMap = new Map(wsExecutors.map((ex) => [ex.id, ex]));
     const merged = restInfos.map((ex) => wsMap.get(ex.id) ?? ex);
+    if (!isLiveSession) return merged;
+
     const restIds = new Set(restInfos.map((ex) => ex.id));
     for (const ex of wsExecutors) {
       if (!restIds.has(ex.id)) merged.push(ex);
     }
     return merged;
-  }, [restExecutors, wsExecutors]);
+  }, [restExecutors, wsExecutors, isLiveSession]);
 
   // Currency conversion
   const quoteCurrencies = useMemo(
@@ -608,9 +618,13 @@ function SnapshotDetail({ slug, sslug, sessionNum, tick }: { slug: string; sslug
 export function ToolCallChip({ tc }: { tc: import("@/lib/parse-agent").ToolCall }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = tc.input || tc.output;
-  const isOk = tc.status === "success" || tc.status === "completed";
-  const isErr = tc.status === "error";
-  const dotColor = isOk ? "bg-emerald-400" : isErr ? "bg-red-400" : "bg-[var(--color-text-muted)]";
+  const state = toolCallState(tc.status);
+  const dotColor =
+    state === "ok"
+      ? "bg-[var(--color-green)]"
+      : state === "error"
+        ? "bg-[var(--color-red)]"
+        : "bg-[var(--color-text-muted)]";
 
   const shortName = tc.name.replace(/^mcp__\w+__/, "");
 

@@ -10,12 +10,12 @@ from mcp_servers.condor.settings import settings
 
 
 def _source() -> str:
-    return f"agent:{settings.agent_slug}" if settings.agent_slug else "chat"
+    return f"agent:{settings.specialist_slug}" if settings.specialist_slug else "chat"
 
 
 def _store() -> MemoryStore:
     # agent_slug selects this assistant's store (FEAT-003); empty -> chat condor.
-    return MemoryStore(settings.user_id, settings.agent_slug or None)
+    return MemoryStore(settings.user_id, settings.specialist_slug or None)
 
 
 async def manage_memory(

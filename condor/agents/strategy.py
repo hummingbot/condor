@@ -17,6 +17,8 @@ Each strategy is a tick-loop playbook that lives **under its owning Agent**, as
 
 A strategy is identified by the pair ``(agent_slug, slug)``; its opaque composite
 key ``"{agent_slug}.{slug}"`` is what MCP tools pass around as ``strategy_id``.
+Authoring one is optional: an Agent that owns none still loops, on the *default*
+playbook :func:`StrategyStore.ensure_default` materializes from its identity.
 The Agent's memory/skills/routines (the "brain") are shared across all of its
 strategies and its consults — they live one level up, at
 ``agents/{agent_slug}/``.
@@ -37,6 +39,27 @@ import yaml
 log = logging.getLogger(__name__)
 
 _DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
+
+# Every Agent is loopable — one that was never given a bespoke playbook loops
+# this one, created on its first start (see ``StrategyStore.ensure_default``).
+DEFAULT_STRATEGY_NAME = "Default"
+DEFAULT_STRATEGY_SLUG = "default"
+
+_DEFAULT_STRATEGY_BODY = """\
+Run one tick of your own domain loop. There is no bespoke playbook here on
+purpose — your AGENT.md identity *is* the playbook.
+
+Each tick:
+
+1. Refresh your read of the market with your own routines and tools.
+2. Decide what, if anything, this tick calls for — inside your domain and inside
+   the configured risk limits.
+3. Act on it, or explicitly decide to do nothing. Both are valid outcomes.
+4. Journal the decision and the reasoning behind it.
+
+Prefer doing nothing over acting on a weak read. When you want a tighter, more
+specific loop, write a dedicated strategy under this agent and run that instead.
+"""
 
 
 def _slugify(name: str) -> str:
@@ -204,6 +227,48 @@ class StrategyStore:
         if not parts:
             return None
         return self.get(parts[0], parts[1])
+
+    def ensure_default(self, agent_slug: str) -> Strategy | None:
+        """Return this Agent's default playbook, creating it on first use.
+
+        This is what makes *every* Agent loopable: authoring a strategy by hand
+        is an optimization, not a prerequisite. Returns None only when no such
+        Agent exists.
+        """
+        existing = self.get(agent_slug, DEFAULT_STRATEGY_SLUG)
+        if existing is not None:
+            return existing
+
+        from .agent import AgentStore  # local: agent.py imports from this module
+
+        agent = AgentStore().get(agent_slug)
+        if agent is None:
+            return None
+        log.info("Materializing default strategy for agent %s", agent_slug)
+        return self.create(
+            agent_slug=agent_slug,
+            name=DEFAULT_STRATEGY_NAME,
+            description=f"Default loop — {agent.name}'s own identity is the playbook.",
+            instructions=_DEFAULT_STRATEGY_BODY,
+            created_by=agent.created_by,
+        )
+
+    def resolve_for_loop(self, key: str) -> Strategy | None:
+        """Resolve what to loop from ``key``, materializing a default if needed.
+
+        ``key`` is either an explicit composite ``"{agent_slug}.{strategy_slug}"``
+        or a **bare agent slug** — the same leniency ``manage_routines`` and
+        ``manage_skill`` already grant. A bare slug resolves to the agent's only
+        playbook when it has exactly one, and otherwise to its default one
+        (created here if this is the first start). Returns None when neither a
+        strategy nor an agent matches.
+        """
+        if "." in key:
+            return self.get_by_key(key)
+        owned = self.list(key)
+        if len(owned) == 1:
+            return owned[0]
+        return self.ensure_default(key)
 
     def list(self, agent_slug: str) -> list[Strategy]:
         strategies: list[Strategy] = []

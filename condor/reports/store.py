@@ -59,12 +59,23 @@ def attribute_to(agent: str | None):
 
 
 def get_report_raw_html(report_id: str) -> tuple[str, str] | None:
-    """Return the report's raw HTML and filename exactly as saved on disk."""
+    """Return the report's raw HTML and filename exactly as saved on disk.
+
+    The filename is never taken from the caller — it is read from the index
+    entry for ``report_id`` — but the entry is still treated as untrusted:
+    the resolved path must stay inside the reports directory and must be an
+    ``.html`` file. This is what keeps the authenticated HTML route
+    (``GET /api/v1/reports/{id}/html``) from being turned into an arbitrary
+    file reader by a poisoned or hand-edited index.
+    """
     entry = get_report(report_id)
     if not entry:
         return None
-    path = _charts_dir() / entry["filename"]
-    if not path.exists():
+    charts_dir = _charts_dir().resolve()
+    path = (charts_dir / entry["filename"]).resolve()
+    if not path.is_relative_to(charts_dir):
+        return None
+    if path.suffix.lower() != ".html" or not path.is_file():
         return None
     return path.read_text(encoding="utf-8"), entry["filename"]
 

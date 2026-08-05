@@ -8,6 +8,7 @@ import {
   getOverlayTimeRange,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
+import { MANY_EXECUTORS_THRESHOLD, computeVolumeBuckets } from "@/lib/executor-volume";
 import { tsToSeconds } from "@/lib/formatters";
 import { getThemeColors } from "@/lib/theme-colors";
 
@@ -65,45 +66,6 @@ function computePnlEvolution(executors: ExecutorInfo[]): PnlEvolutionPoint[] {
       cumFees: -cumFees,
     };
   });
-}
-
-// ── Buy/Sell volume per candle bucket ──
-
-interface VolumeBucket {
-  time: number;
-  buyVol: number;
-  sellVol: number;
-  buyCount: number;
-  sellCount: number;
-}
-
-function computeVolumeBuckets(executors: ExecutorInfo[], intervalSec: number): VolumeBucket[] {
-  const buckets = new Map<number, VolumeBucket>();
-
-  for (const e of executors) {
-    const t = tsToSeconds(e.timestamp);
-    if (t <= 0) continue;
-
-    // Floor to candle bucket boundary
-    const bucket = Math.floor(t / intervalSec) * intervalSec;
-    const isBuy = e.side?.toUpperCase() === "BUY";
-    const vol = e.volume > 0 ? e.volume : 0;
-
-    let b = buckets.get(bucket);
-    if (!b) {
-      b = { time: bucket, buyVol: 0, sellVol: 0, buyCount: 0, sellCount: 0 };
-      buckets.set(bucket, b);
-    }
-    if (isBuy) {
-      b.buyVol += vol;
-      b.buyCount++;
-    } else {
-      b.sellVol += vol;
-      b.sellCount++;
-    }
-  }
-
-  return Array.from(buckets.values()).sort((a, b) => a.time - b.time);
 }
 
 // ── Position held resampled to candle intervals ──
@@ -253,7 +215,7 @@ export function ArchivedPerformanceCharts({
     [executors, intervalSec],
   );
 
-  const isManyExecutors = executors.length > 15;
+  const isManyExecutors = executors.length > MANY_EXECUTORS_THRESHOLD;
 
   const { data: candles } = useQuery({
     queryKey: ["archived-candles", server, connector, tradingPair, fetchStart, fetchEnd, interval],

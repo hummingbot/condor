@@ -8,15 +8,7 @@ import time
 from telegram import Bot
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
-from condor.acp import (
-    ACPEvent,
-    Heartbeat,
-    PromptDone,
-    TextChunk,
-    ThoughtChunk,
-    ToolCallEvent,
-    ToolCallUpdate,
-)
+from condor.runtime.events import EventType, RuntimeEvent
 
 log = logging.getLogger(__name__)
 
@@ -94,7 +86,7 @@ def _split_text(text: str, max_len: int) -> list[str]:
 
 
 class TelegramStreamer:
-    """Streams ACPEvents by editing a placeholder Telegram message."""
+    """Streams RuntimeEvents by editing a placeholder Telegram message."""
 
     def __init__(self, bot: Bot, chat_id: int, message_id: int, prefix: str = ""):
         self._bot = bot
@@ -115,38 +107,50 @@ class TelegramStreamer:
 
     # --- Event processing ---
 
-    async def process_event(self, event: ACPEvent) -> None:
-        if isinstance(event, TextChunk):
+    async def process_event(self, event: RuntimeEvent) -> None:
+        if event.type == EventType.TEXT:
             self._buffer += event.text
             self._needs_edit = True
-        elif isinstance(event, ThoughtChunk):
+        elif event.type == EventType.THOUGHT:
             self._thoughts += event.text
             self._needs_edit = True
-        elif isinstance(event, ToolCallEvent):
-            self._active_tools[event.tool_call_id] = self._format_tool_title(event.title)
-            self._tool_start_times[event.tool_call_id] = time.monotonic()
+        elif event.type == EventType.TOOL_CALL:
+            tc_id = event.field("tool_call_id")
+            self._active_tools[tc_id] = self._format_tool_title(
+                event.field("title") or "tool"
+            )
+            self._tool_start_times[tc_id] = time.monotonic()
             self._needs_edit = True
-        elif isinstance(event, ToolCallUpdate):
+        elif event.type == EventType.TOOL_UPDATE:
             self._handle_tool_update(event)
-        elif isinstance(event, Heartbeat):
+        elif event.type == EventType.HEARTBEAT:
             self._needs_edit = True
-        elif isinstance(event, PromptDone):
+        elif event.type == EventType.ERROR:
+            # Surface the failure in the message body rather than silently
+            # ending the turn; DONE always follows, which stops the loop.
+            self._buffer += f"\n\n{event.field('message', 'Stream error')}"
+            self._needs_edit = True
+        elif event.type == EventType.DONE:
             self._stop_reason = event.stop_reason
             self._done = True
 
-    def _handle_tool_update(self, event: ToolCallUpdate) -> None:
-        tc_id = event.tool_call_id
-        if event.status in ("completed", "failed"):
-            title = self._active_tools.pop(tc_id, self._format_tool_title(event.title or "tool"))
-            icon = TOOL_DONE if event.status == "completed" else TOOL_FAILED
+    def _handle_tool_update(self, event: RuntimeEvent) -> None:
+        tc_id = event.field("tool_call_id")
+        status = event.field("status")
+        title = event.field("title")
+        if status in ("completed", "failed"):
+            label = self._active_tools.pop(
+                tc_id, self._format_tool_title(title or "tool")
+            )
+            icon = TOOL_DONE if status == "completed" else TOOL_FAILED
             elapsed = ""
             start = self._tool_start_times.pop(tc_id, None)
             if start is not None:
                 elapsed = f" ({self._format_elapsed(time.monotonic() - start)})"
-            self._finished_tools.append(f"{icon} {title}{elapsed}")
+            self._finished_tools.append(f"{icon} {label}{elapsed}")
             self._needs_edit = True
-        elif event.title and tc_id in self._active_tools:
-            self._active_tools[tc_id] = self._format_tool_title(event.title)
+        elif title and tc_id in self._active_tools:
+            self._active_tools[tc_id] = self._format_tool_title(title)
             self._needs_edit = True
 
     # --- Edit loop ---
@@ -268,7 +272,9 @@ class TelegramStreamer:
 
     # --- Telegram I/O ---
 
-    async def _edit(self, message_id: int, text: str, parse_mode: str | None = None) -> None:
+    async def _edit(
+        self, message_id: int, text: str, parse_mode: str | None = None
+    ) -> None:
         try:
             await self._bot.edit_message_text(
                 chat_id=self._chat_id,
@@ -314,7 +320,8 @@ class TelegramStreamer:
             await asyncio.sleep(e.retry_after)
             try:
                 msg = await self._bot.send_message(
-                    chat_id=self._chat_id, text=text,
+                    chat_id=self._chat_id,
+                    text=text,
                 )
                 return msg.message_id
             except Exception:

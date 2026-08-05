@@ -4,7 +4,8 @@ Backs the agent_builder skill's model recommendation: instead of guessing or
 hardcoding a default, the assistant asks what the operator has actually
 configured — installed ACP CLI bridges, cloud API keys present in the
 environment, reachable local model servers (Ollama / LM Studio) with the models
-they have loaded, and (only when an OpenRouter key is set) the tool-capable
+they have loaded, their own saved OpenAI-compatible endpoints (Venice, Together,
+a self-hosted vLLM…), and (only when an OpenRouter key is set) the tool-capable
 OpenRouter catalog, cheapest first.
 
 Read-only and side-effect-free. NEVER returns a key value — only whether each
@@ -155,6 +156,46 @@ async def _openrouter(query: str, limit: int) -> dict:
     }
 
 
+async def _custom_endpoints() -> list[dict]:
+    """The user's own saved OpenAI-compatible endpoints and the models they serve.
+
+    These are the strongest signal in the whole report: the operator added each
+    one deliberately and Condor validated it reachable at save time. Models are
+    re-fetched here so a stale endpoint shows up as ``reachable: false`` rather
+    than being recommended and failing on the first consult.
+    """
+    from condor.preferences import get_custom_providers, load_user_data_for
+    from handlers.agents.custom_models import CustomProviderError, fetch_models
+    from mcp_servers.condor.settings import settings
+
+    try:
+        providers = get_custom_providers(load_user_data_for(settings.user_id))
+    except Exception:
+        return []
+
+    out: list[dict] = []
+    for provider in providers:
+        entry = {
+            "name": provider["name"],
+            "base_url": provider["base_url"],
+            "reachable": False,
+            "models": [],
+        }
+        try:
+            _, models = await fetch_models(
+                provider["base_url"], provider.get("api_key", "")
+            )
+            entry["reachable"] = True
+            entry["models"] = [
+                {"agent_key": f"custom@{provider['name']}:{m}", "model": m}
+                for m in models
+            ]
+        except CustomProviderError:
+            pass  # endpoint down or key rejected — report it, don't raise
+        out.append(entry)
+    return out
+
+
 async def get_available_models(
     openrouter_query: str = "", openrouter_limit: int = 20
 ) -> dict:
@@ -165,6 +206,7 @@ async def get_available_models(
     return {
         "acp_clis": _acp_clis(),
         "cloud_keys": cloud_keys,
+        "custom_endpoints": await _custom_endpoints(),
         "local": await _local_servers(),
         "openrouter": await _openrouter(openrouter_query, openrouter_limit),
     }

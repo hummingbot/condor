@@ -22,8 +22,9 @@ import { NoServerCard } from "@/components/NoServerCard";
 import { useBacktest } from "@/hooks/useBacktest";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
-import type { BacktestData, ExecutorData } from "@/lib/backtest";
+import type { BacktestData, CandleData, ExecutorData } from "@/lib/backtest";
 import { extractResults } from "@/lib/backtest";
+import { MANY_EXECUTORS_THRESHOLD, computeVolumeBuckets } from "@/lib/executor-volume";
 import { formatPct, formatPnl, formatUsd, pnlColor, tsToSeconds } from "@/lib/formatters";
 
 // -- Helpers --
@@ -122,6 +123,16 @@ function executorLineStyle(
   return { color, lineWidth: 2, lineStyle: LineStyle.Solid };
 }
 
+/** Candle spacing in seconds, used to bucket executor volume onto the price chart. */
+function candleIntervalSeconds(candles: CandleData[]): number {
+  let smallest = Infinity;
+  for (let i = 1; i < candles.length; i++) {
+    const delta = tsToSeconds(candles[i].time) - tsToSeconds(candles[i - 1].time);
+    if (delta > 0 && delta < smallest) smallest = delta;
+  }
+  return Number.isFinite(smallest) ? smallest : 60;
+}
+
 // -- Backtest Chart --
 
 function BacktestChart({ data }: { data: BacktestData }) {
@@ -133,6 +144,23 @@ function BacktestChart({ data }: { data: BacktestData }) {
 
   const hasPositionHeld = data.positionHeldTimeseries.length > 0;
   const hasPnl = data.pnlTimeseries.length > 0 || data.executors.length > 0;
+
+  // Above the threshold, per-executor line segments are replaced by an
+  // aggregated buy/sell volume histogram: the number of series on the price
+  // chart stops scaling with data.executors.length (2 instead of N).
+  const isManyExecutors = data.executors.length > MANY_EXECUTORS_THRESHOLD;
+  const volumeBuckets = useMemo(() => {
+    if (!isManyExecutors) return [];
+    const intervalSec = candleIntervalSeconds(data.candles);
+    return computeVolumeBuckets(
+      data.executors.map((ex) => ({
+        timestamp: ex.timestamp,
+        side: ex.side,
+        volume: ex.filledAmountQuote,
+      })),
+      intervalSec,
+    );
+  }, [isManyExecutors, data.executors, data.candles]);
 
   // Compute final values for badges
   const finalPnl = data.pnlTimeseries.length > 0
@@ -190,40 +218,85 @@ function BacktestChart({ data }: { data: BacktestData }) {
       })));
 
       // Executor overlays
-      for (const ex of data.executors) {
-        if (!ex.timestamp || !ex.closeTimestamp) continue;
-        const entryT = ts(ex.timestamp);
-        const exitT = ts(ex.closeTimestamp);
-        const wasFilled = ex.filledAmountQuote > 0;
+      if (isManyExecutors) {
+        // HIGH-FREQUENCY MODE: two aggregated volume series instead of one
+        // line series per executor, so the cost is bounded by the number of
+        // candle buckets rather than by the number of executors.
+        if (volumeBuckets.length > 0) {
+          const buyVolSeries = priceChart.addSeries(mod.HistogramSeries, {
+            color: "#26a69a60",
+            priceLineVisible: false,
+            lastValueVisible: false,
+            priceScaleId: "vol",
+            priceFormat: {
+              type: "custom",
+              formatter: (v: number) => `$${Math.abs(v).toFixed(0)}`,
+            },
+          });
+          buyVolSeries.setData(
+            volumeBuckets
+              .filter((b) => b.buyVol > 0)
+              .map((b) => ({ time: ts(b.time), value: b.buyVol, color: "#26a69a60" })),
+          );
 
-        if (wasFilled && ex.entryPrice > 0) {
-          const exitP = ex.closePrice > 0 ? ex.closePrice : ex.entryPrice;
-          const style = executorLineStyle(ex, mod.LineStyle);
-          const seg = priceChart.addSeries(mod.LineSeries, {
-            color: style.color,
-            lineWidth: style.lineWidth as 1 | 2 | 3 | 4,
-            lineStyle: style.lineStyle,
+          // Sell volume mirrored below the axis
+          const sellVolSeries = priceChart.addSeries(mod.HistogramSeries, {
+            color: "#ef535060",
             priceLineVisible: false,
             lastValueVisible: false,
-            crosshairMarkerVisible: false,
+            priceScaleId: "vol",
           });
-          seg.setData([
-            { time: entryT, value: ex.entryPrice },
-            { time: exitT, value: exitP },
-          ]);
-        } else if (ex.entryPrice > 0) {
-          const seg = priceChart.addSeries(mod.LineSeries, {
-            color: "rgba(255,255,255,0.4)",
-            lineWidth: 1,
-            lineStyle: mod.LineStyle.Dashed,
-            priceLineVisible: false,
-            lastValueVisible: false,
-            crosshairMarkerVisible: false,
-          });
-          seg.setData([
-            { time: entryT, value: ex.entryPrice },
-            { time: exitT, value: ex.entryPrice },
-          ]);
+          sellVolSeries.setData(
+            volumeBuckets
+              .filter((b) => b.sellVol > 0)
+              .map((b) => ({ time: ts(b.time), value: -b.sellVol, color: "#ef535060" })),
+          );
+
+          // Keep the histogram to the bottom fifth so it doesn't crowd price
+          try {
+            priceChart.priceScale("vol").applyOptions({
+              scaleMargins: { top: 0.8, bottom: 0 },
+              borderVisible: false,
+            });
+          } catch { /* ok */ }
+        }
+      } else {
+        // LOW-FREQUENCY MODE: one line segment per executor
+        for (const ex of data.executors) {
+          if (!ex.timestamp || !ex.closeTimestamp) continue;
+          const entryT = ts(ex.timestamp);
+          const exitT = ts(ex.closeTimestamp);
+          const wasFilled = ex.filledAmountQuote > 0;
+
+          if (wasFilled && ex.entryPrice > 0) {
+            const exitP = ex.closePrice > 0 ? ex.closePrice : ex.entryPrice;
+            const style = executorLineStyle(ex, mod.LineStyle);
+            const seg = priceChart.addSeries(mod.LineSeries, {
+              color: style.color,
+              lineWidth: style.lineWidth as 1 | 2 | 3 | 4,
+              lineStyle: style.lineStyle,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              crosshairMarkerVisible: false,
+            });
+            seg.setData([
+              { time: entryT, value: ex.entryPrice },
+              { time: exitT, value: exitP },
+            ]);
+          } else if (ex.entryPrice > 0) {
+            const seg = priceChart.addSeries(mod.LineSeries, {
+              color: "rgba(255,255,255,0.4)",
+              lineWidth: 1,
+              lineStyle: mod.LineStyle.Dashed,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              crosshairMarkerVisible: false,
+            });
+            seg.setData([
+              { time: entryT, value: ex.entryPrice },
+              { time: exitT, value: ex.entryPrice },
+            ]);
+          }
         }
       }
 
@@ -381,7 +454,7 @@ function BacktestChart({ data }: { data: BacktestData }) {
       // newer run that already swapped in its own array isn't clobbered.
       if (chartsRef.current === charts) chartsRef.current = [];
     };
-  }, [data, theme, hasPnl, hasPositionHeld]);
+  }, [data, theme, hasPnl, hasPositionHeld, isManyExecutors, volumeBuckets]);
 
   return (
     <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-0">
@@ -392,6 +465,11 @@ function BacktestChart({ data }: { data: BacktestData }) {
             Price &amp; Executors
           </h4>
           <span className="text-[10px] text-[var(--color-text-muted)] opacity-60">USD</span>
+          {isManyExecutors && (
+            <span className="text-[10px] text-[var(--color-text-muted)] opacity-60">
+              · {data.executors.length} executors — showing buy/sell volume
+            </span>
+          )}
         </div>
         {data.pnlTimeseries.length > 0 && (
           <div className="flex gap-3 text-[10px]">

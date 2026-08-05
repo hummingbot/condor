@@ -12,7 +12,15 @@ class PositionsProvider(BaseProvider):
     name = "positions"
     is_core = True
 
-    async def execute(self, client: Any, config: dict, agent_id: str = "") -> ProviderResult:
+    async def execute(
+        self,
+        client: Any,
+        config: dict,
+        agent_id: str = "",
+        bot_names: list[str] | None = None,
+    ) -> ProviderResult:
+        # bot_names is part of the provider contract but irrelevant here: positions
+        # are queried by controller_id, not by bot.
         try:
             result = await client.executors.get_positions_summary(
                 controller_id=agent_id or None,
@@ -24,7 +32,9 @@ class PositionsProvider(BaseProvider):
                 summary=f"Positions Summary: failed to fetch ({e})",
             )
 
-        positions = result.get("positions", result) if isinstance(result, dict) else result
+        positions = (
+            result.get("positions", result) if isinstance(result, dict) else result
+        )
         if not isinstance(positions, list):
             positions = [positions] if positions else []
 
@@ -36,7 +46,11 @@ class PositionsProvider(BaseProvider):
                 summary=f"Positions Summary{label}: no open positions",
             )
 
-        lines = [f"Positions Summary ({len(positions)})" + (f" [agent: {agent_id}]" if agent_id else "") + ":"]
+        lines = [
+            f"Positions Summary ({len(positions)})"
+            + (f" [agent: {agent_id}]" if agent_id else "")
+            + ":"
+        ]
         for pos in positions:
             connector = pos.get("connector_name", "?")
             pair = pos.get("trading_pair", "?")
@@ -51,8 +65,15 @@ class PositionsProvider(BaseProvider):
                 current_f = f"${float(current):,.4f}" if current else "?"
                 pnl_f = f"${float(pnl):+.2f}" if pnl else "$0.00"
             except (ValueError, TypeError):
-                amount_f, entry_f, current_f, pnl_f = str(amount), str(entry), str(current), str(pnl)
-            lines.append(f"  {connector} {pair} {side} | amt={amount_f} entry={entry_f} now={current_f} pnl={pnl_f}")
+                amount_f, entry_f, current_f, pnl_f = (
+                    str(amount),
+                    str(entry),
+                    str(current),
+                    str(pnl),
+                )
+            lines.append(
+                f"  {connector} {pair} {side} | amt={amount_f} entry={entry_f} now={current_f} pnl={pnl_f}"
+            )
 
         return ProviderResult(
             name=self.name,

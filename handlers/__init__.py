@@ -2,6 +2,7 @@
 Command handlers for Condor Telegram bot
 """
 
+from telegram import Update
 from telegram.ext import ContextTypes
 
 
@@ -147,10 +148,25 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("archived_total_count", None)
 
     # Agent states — only clear transient UI states, NOT session/preference state.
-    # agent_llm, agent_mode are persistent user preferences (always-on agent).
+    # agent_llm is a persistent user preference (always-on agent). A stale
+    # agent_mode may still sit in pickled user_data; nothing reads it since the
+    # persona axis was deleted (FEAT-033), so it is left alone rather than
+    # migrated.
     # agent_state is no longer used for routing (agent is the default fallback).
     context.user_data.pop("agent_compact_custom", None)
     context.user_data.pop("agent_chat_target", None)
+
+    # Agent — armed text-input modes. These make the next plain message mean
+    # something other than "talk to the agent", so a stale one silently eats
+    # the user's next message (and, worse, re-arms itself on a parse failure).
+    context.user_data.pop("_openrouter_typing_slug", None)
+    context.user_data.pop("_openrouter_typed_slug", None)
+    context.user_data.pop("_custom_typing_url", None)
+    context.user_data.pop("_custom_typing_key", None)
+    context.user_data.pop("_custom_typing_search", None)
+    context.user_data.pop("_custom_pending_url", None)
+    context.user_data.pop("_custom_pending_name", None)
+    context.user_data.pop("_custom_rekey_provider", None)
 
     # Routines states
     context.user_data.pop("routines_state", None)
@@ -208,3 +224,22 @@ def clear_all_input_states(context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("portfolio_connector_keys", None)
     context.user_data.pop("portfolio_view_mode", None)
     context.user_data.pop("_portfolio_refresh", None)
+
+
+async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /cancel — abandon any in-progress input flow.
+
+    Several flows arm a "your next message is the answer" mode and tell the
+    user to send /cancel to back out. That only works if something actually
+    handles the command: the unified text handler is registered with
+    ``~filters.COMMAND``, so without this a typed /cancel matches no handler
+    at all and is silently dropped, leaving the user stuck in the flow.
+    """
+    from utils.auth import restricted
+
+    @restricted
+    async def _cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        clear_all_input_states(context)
+        await update.message.reply_text("Cancelled.")
+
+    await _cancel(update, context)

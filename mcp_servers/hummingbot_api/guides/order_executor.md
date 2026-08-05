@@ -34,3 +34,9 @@ Closest executor to a plain BUY/SELL order but with strategy options.
 - `leverage`: Leverage multiplier (default: 1)
 - `position_action`: 'OPEN' or 'CLOSE' (default: 'OPEN', useful for perpetuals in HEDGE mode)
 - `level_id`: Optional identifier tag
+
+**Solana / Jupiter: `executed_amount_base` is the amount REQUESTED, not received.**
+Slippage and fees mean the wallet gets slightly less (observed −0.06% to −0.44%).
+Never feed it straight into a downstream call that must spend those tokens (e.g. an
+LP open's `base_amount`) — apply a haircut (`× 0.995`) or read the true post-swap
+wallet balance.

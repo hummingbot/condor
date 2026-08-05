@@ -141,16 +141,18 @@ async def show_bots_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         bots_data = await client.bot_orchestration.get_active_bots_status()
 
-        # Fetch bot runs to get deployment times
+        # Fetch bot runs to get deployment times. Filter DEPLOYED server-side:
+        # ARCHIVED runs each carry a multi-KB final_status blob, so the
+        # unfiltered listing is a multi-MB, multi-minute download on a remote
+        # server — and we discard those rows anyway.
         bot_runs_map = {}
         try:
-            bot_runs_data = await client.bot_orchestration.get_bot_runs()
+            bot_runs_data = await client.bot_orchestration.get_bot_runs(
+                deployment_status="DEPLOYED"
+            )
             if isinstance(bot_runs_data, dict) and "data" in bot_runs_data:
                 for run in bot_runs_data.get("data", []):
-                    # Only include DEPLOYED bots (not ARCHIVED)
-                    if run.get("deployment_status") == "DEPLOYED" and run.get(
-                        "deployed_at"
-                    ):
+                    if run.get("deployed_at"):
                         bot_runs_map[run.get("bot_name")] = run.get("deployed_at")
         except Exception as e:
             logger.debug(f"Could not fetch bot runs for uptime: {e}")

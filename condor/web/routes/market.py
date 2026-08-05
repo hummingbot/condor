@@ -34,6 +34,9 @@ from condor.web.models import (
     MarketPriceResponse,
     OrderBookLevel,
     OrderBookResponse,
+    RatesResponse,
+    TickerItem,
+    TickersResponse,
     TradingRuleItem,
     TradingRulesResponse,
     WebUser,
@@ -118,27 +121,29 @@ async def get_price(
     raise HTTPException(status_code=502, detail="Unexpected response format")
 
 
-@router.post("/servers/{name}/rate-oracle/rates")
-async def get_rate_oracle_rates(
+@router.post("/servers/{name}/market/rates", response_model=RatesResponse)
+async def get_rates(
     name: str,
     body: dict,
     user: WebUser = Depends(get_current_user),
 ):
+    """Cross-rates resolved from Condor's cached ticker pool (replaces the rate oracle)."""
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
-    trading_pairs = body.get("trading_pairs", [])
+    trading_pairs = body.get("trading_pairs") or []
     if not trading_pairs:
-        return {"rates": {}}
+        return RatesResponse(rates={})
 
-    client = await cm.get_client(name)
+    from condor.market_rates import get_rates as resolve
+
     try:
-        result = await client.rate_oracle.get_rates(trading_pairs=trading_pairs)
+        rates = await resolve(name, trading_pairs, connector=body.get("connector"))
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    return result
+    return RatesResponse(rates=rates)
 
 
 @router.get("/servers/{name}/market/trading-rules", response_model=TradingRulesResponse)
@@ -178,6 +183,42 @@ async def get_trading_rules(
                 )
             )
     return TradingRulesResponse(connector=connector, rules=rules)
+
+
+@router.get("/servers/{name}/market/tickers", response_model=TickersResponse)
+async def get_tickers(
+    name: str,
+    connector: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    """24h tickers for a connector, sorted by USD volume (highest first)."""
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from condor.market_rates import get_connector_tickers
+
+    try:
+        result = await get_connector_tickers(name, connector)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    if not isinstance(result, dict):
+        return TickersResponse(connector=connector, tickers=[])
+
+    tickers = [
+        TickerItem(trading_pair=pair, **data)
+        for pair, data in (result.get("tickers") or {}).items()
+        if isinstance(data, dict)
+    ]
+    # Unpriced quotes sort last rather than mixing in at zero volume.
+    tickers.sort(
+        key=lambda t: (t.usd_volume is not None, t.usd_volume or 0), reverse=True
+    )
+
+    return TickersResponse(
+        connector=connector, tickers=tickers, updated_at=result.get("updated_at")
+    )
 
 
 @router.get("/servers/{name}/market/order-book", response_model=OrderBookResponse)

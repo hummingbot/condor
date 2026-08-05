@@ -28,13 +28,21 @@ class AgentPerformance:
     open_count: int = 0
     closed_count: int = 0
     executors: list[dict[str, Any]] = field(default_factory=list)
-    # Controller-mode attribution: when the agent operates a named bot, the bot's
-    # aggregate PnL is merged into the totals above and surfaced here for transparency.
-    bot_name: str = ""
+    # Controller-mode attribution: each bot the agent operates has its aggregate
+    # PnL merged into the totals above, and its resolved instance name surfaced
+    # here for transparency. A session can own several bots ([[FEAT-018]]), so this
+    # is a list; the merge is plain addition over disjoint sets and needs no
+    # de-duplication as long as the bases are disjoint (see ``resolve_bots``).
+    bot_names: list[str] = field(default_factory=list)
     controllers: list[dict[str, Any]] = field(default_factory=list)
 
+    @property
+    def bot_name(self) -> str:
+        """The first operated bot — wire compat for single-bot consumers."""
+        return self.bot_names[0] if self.bot_names else ""
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {**asdict(self), "bot_name": self.bot_name}
 
 
 def _extract_executors_list(result: Any) -> list[dict]:
@@ -118,17 +126,21 @@ def _executor_row(ex: dict) -> dict[str, Any]:
 
 
 async def fetch_agent_performance(
-    client: Any, agent_id: str, bot_name: str = ""
+    client: Any, agent_id: str, bot_names: list[str] | None = None
 ) -> AgentPerformance:
     """Fetch authoritative performance for a single ``agent_id``.
 
-    When ``bot_name`` is given, the agent is in controller mode: the named bot's
+    When ``bot_names`` is given, the agent is in controller mode: each named bot's
     aggregate PnL is merged into the returned totals (see
     :func:`fetch_agent_performance_batch`).
     """
-    bot_names = {agent_id: bot_name} if bot_name else None
-    batch = await fetch_agent_performance_batch(client, [agent_id], bot_names)
-    return batch.get(agent_id, AgentPerformance(agent_id=agent_id, bot_name=bot_name))
+    names = [b for b in (bot_names or []) if b]
+    batch = await fetch_agent_performance_batch(
+        client, [agent_id], {agent_id: names} if names else None
+    )
+    return batch.get(
+        agent_id, AgentPerformance(agent_id=agent_id, bot_names=list(names))
+    )
 
 
 def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
@@ -139,6 +151,10 @@ def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
     de-duplication. The bot's open positions are surfaced as executor-like rows so
     bot-mode agents show live positions in both the executors tab and the agent's
     own core-data view, which otherwise only see the (empty) ``agent_id`` table.
+
+    Additive in the bot dimension too: folding several owned bots in turn
+    accumulates rather than overwrites, so a session operating two bots reports
+    their sum and both controller breakdowns.
     """
     from condor.fetchers.bot_performance import bot_executor_rows
 
@@ -147,8 +163,7 @@ def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
     perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
     perf.volume += float(bot.get("volume_traded", 0) or 0)
     perf.fees += float(bot.get("cum_fees_quote", 0) or 0)
-    perf.bot_name = bot.get("bot_name", perf.bot_name)
-    perf.controllers = bot.get("controllers", [])
+    perf.controllers = perf.controllers + list(bot.get("controllers", []))
 
     rows = bot_executor_rows(bot)
     perf.executors = perf.executors + rows
@@ -197,14 +212,14 @@ def _build_perf_from_rows(
 async def fetch_agent_performance_batch(
     client: Any,
     agent_ids: list[str],
-    bot_names: dict[str, str] | None = None,
+    bot_names: dict[str, list[str]] | None = None,
     failed_ids: set[str] | None = None,
 ) -> dict[str, AgentPerformance]:
     """Batched multi-agent fetch via a single cursor-paginated executor search.
 
-    ``bot_names`` maps ``agent_id -> bot_name`` for agents running in controller
-    mode; each such agent's bot aggregate (one shared snapshot fetch for the whole
-    batch) is merged into its executor-derived totals.
+    ``bot_names`` maps ``agent_id -> the bases it owns`` for agents running in
+    controller mode; each such agent's bot aggregates (one shared snapshot fetch
+    for the whole batch) are merged into its executor-derived totals.
 
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
     search raised — their entries may be partial/empty. This lets callers avoid
@@ -261,13 +276,17 @@ async def fetch_agent_performance_batch(
     for aid, rows in zip(agent_ids, rows_lists):
         out[aid] = _build_perf_from_rows(aid, rows)
 
-    # Controller mode: merge each agent's bot aggregate. One snapshot fetch is
+    # Controller mode: merge each agent's bot aggregates. One snapshot fetch is
     # shared across the whole batch since the API returns all bots at once.
-    wanted = {bn for bn in (bot_names or {}).values() if bn}
+    wanted = {
+        aid: [b for b in bases if b]
+        for aid, bases in (bot_names or {}).items()
+        if aid in out and any(bases)
+    }
     if wanted:
         from condor.fetchers.bot_performance import (
             fetch_all_bot_performance,
-            resolve_bot,
+            resolve_bots,
         )
 
         try:
@@ -275,11 +294,16 @@ async def fetch_agent_performance_batch(
         except Exception as e:
             log.warning("fetch_all_bot_performance failed: %s", e)
             all_bot_perf = {}
-        for aid, bn in (bot_names or {}).items():
-            if not bn or aid not in out:
-                continue
-            out[aid].bot_name = bn
-            bot = resolve_bot(all_bot_perf, bn)
-            if bot:
-                _merge_bot_perf(out[aid], bot)
+        for aid, bases in wanted.items():
+            # Resolved per agent over ALL its bases at once, so an owned parent
+            # never resolves to a tagged sibling's instance and no bot is merged
+            # into the same agent twice.
+            live = resolve_bots(all_bot_perf, bases)
+            for base in bases:
+                bot = live.get(base)
+                # An unresolved base (never deployed, or no snapshot yet) still
+                # names the bot the agent operates, as the single-bot path did.
+                out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)
+                if bot:
+                    _merge_bot_perf(out[aid], bot)
     return out

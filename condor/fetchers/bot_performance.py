@@ -164,6 +164,52 @@ def resolve_bot_instances(all_bot_perf: dict[str, dict], bot_name: str) -> list[
     return sorted(names, key=lambda k: (str(all_bot_perf[k].get("timestamp", "")), k))
 
 
+def partition_instances(
+    all_bot_perf: dict[str, dict], bases: list[str]
+) -> dict[str, list[str]]:
+    """Assign every deployed instance to the LONGEST owned base that prefixes it.
+
+    :func:`resolve_bot_instances` cannot tell a *tag* from a *deploy timestamp*, so
+    asked one base at a time a parent swallows its tagged siblings:
+    ``brigado-ema_trend`` prefix-matches ``brigado-ema_trend-btc-20260731-101500``
+    as readily as ``brigado-ema_trend-btc`` does. Deciding over ALL owned bases at
+    once settles it — that instance lands on ``…-btc``, the longest base that
+    prefixes it — so each instance's PnL is counted under exactly one base and a
+    session operating several bots gets a truthful sum.
+
+    Returns one entry per base (possibly empty), each instance list ordered oldest
+    first like :func:`resolve_bot_instances`.
+    """
+    out: dict[str, list[str]] = {b: [] for b in bases if b}
+    if not all_bot_perf or not out:
+        return out
+    longest_first = sorted(out, key=len, reverse=True)
+    for name in all_bot_perf:
+        for base in longest_first:
+            if name == base or name.startswith(f"{base}-"):
+                out[base].append(name)
+                break
+    for names in out.values():
+        names.sort(key=lambda k: (str(all_bot_perf[k].get("timestamp", "")), k))
+    return out
+
+
+def resolve_bots(all_bot_perf: dict[str, dict], bases: list[str]) -> dict[str, dict]:
+    """Live aggregate per base — :func:`resolve_bot`, but partition-aware.
+
+    Same resolution rule (the exact name if deployed under it, else the freshest
+    instance) applied within each base's own partition, so an owned parent never
+    resolves to a sibling's instance and two owned bases never hand back the same
+    aggregate twice. Bases with no deployed instance are absent from the result.
+    """
+    out: dict[str, dict] = {}
+    for base, insts in partition_instances(all_bot_perf, bases).items():
+        if not insts:
+            continue
+        out[base] = all_bot_perf[base if base in insts else insts[-1]]
+    return out
+
+
 # Only genuine round-trip position closes count as "trades". Everything else in
 # close_type_counts is churn or non-trades: EARLY_STOP is pmm order re-quoting
 # (thousands per session), POSITION_HOLD is a fill that built a still-open position,
