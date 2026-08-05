@@ -3,6 +3,7 @@ import {
   Brain,
   Check,
   CircleDot,
+  History,
   Loader2,
   Pause,
   Plus,
@@ -17,6 +18,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
 import { DelegationDetail } from "@/components/agent/DelegationDetail";
+import { DelegationHistory } from "@/components/agent/DelegationHistory";
 import { DELEGATION_STATUS } from "@/components/agent/delegationStatus";
 import { EntityCard } from "@/components/agent/EntityCard";
 import { AgentsTabSwitch, type AgentsTab } from "@/components/chat/AgentsTabSwitch";
@@ -238,6 +240,7 @@ function BackgroundTasks() {
   const queryClient = useQueryClient();
   const [expanded, setExpanded] = useState<string | null>(null);
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
+  const [showHistory, setShowHistory] = useState(false);
 
   const { data } = useQuery({
     queryKey: ["delegations"],
@@ -254,7 +257,6 @@ function BackgroundTasks() {
   });
 
   const delegations = data?.delegations ?? [];
-  if (delegations.length === 0) return null;
 
   // Running first, then the rest in insertion order.
   const ordered = [...delegations].sort(
@@ -262,6 +264,8 @@ function BackgroundTasks() {
   );
   const runningCount = delegations.filter((d) => d.status === "running").length;
 
+  // The card used to disappear when the registry was empty — which is the state
+  // right after every restart, and reads as "there is nowhere to see this".
   return (
     <div className="mb-6 rounded-lg border border-sky-500/20 bg-[var(--color-surface)] p-4">
       <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-sky-400">
@@ -269,7 +273,39 @@ function BackgroundTasks() {
         {runningCount > 0 && (
           <span className="text-emerald-400">· {runningCount} running</span>
         )}
+        <button
+          type="button"
+          onClick={() => setShowHistory((v) => !v)}
+          className={`ml-auto flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-semibold tracking-wider transition-colors ${
+            showHistory
+              ? "bg-sky-500/15 text-sky-400"
+              : "text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          }`}
+        >
+          <History className="h-3 w-3" /> History
+        </button>
       </h3>
+
+      {showHistory && (
+        <div className="mb-3 rounded-md border border-[var(--color-border)]/60 bg-[var(--color-bg)]/40 px-3 py-1">
+          <DelegationHistory />
+        </div>
+      )}
+
+      {delegations.length === 0 && !showHistory && (
+        <p className="text-xs text-[var(--color-text-muted)]">
+          No background tasks running.{" "}
+          <button
+            type="button"
+            onClick={() => setShowHistory(true)}
+            className="text-[var(--color-primary)] hover:underline"
+          >
+            See what has run before
+          </button>
+          .
+        </p>
+      )}
+
       <div className="space-y-2">
         {ordered.map((d) => {
           const s = DELEGATION_STATUS[d.status];

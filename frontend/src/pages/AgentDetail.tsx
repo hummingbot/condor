@@ -5,6 +5,7 @@ import {
   Brain,
   CircleDot,
   FileText,
+  History,
   MessageSquareText,
   Plus,
   Repeat,
@@ -19,7 +20,9 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
+import { DelegationHistory } from "@/components/agent/DelegationHistory";
 import { EntityCard } from "@/components/agent/EntityCard";
+import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
@@ -236,6 +239,7 @@ export function AgentDetail() {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteStrategy, setDeleteStrategy] = useState<StrategySummary | null>(null);
   const [showRoutinesBrowser, setShowRoutinesBrowser] = useState(false);
+  const [showDelegations, setShowDelegations] = useState(false);
 
   // Routine instances for ReportBrowser (routines live at the agent level,
   // shared across all of this agent's strategies)
@@ -389,6 +393,14 @@ export function AgentDetail() {
               <span className="hidden sm:inline">Routines</span>
             </button>
             <button
+              onClick={() => setShowDelegations(true)}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+              title="Background tasks delegated to this agent"
+            >
+              <History className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Delegations</span>
+            </button>
+            <button
               onClick={() => setShowBrainModal(true)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
               title="Agent brain (AGENT.md)"
@@ -471,6 +483,18 @@ export function AgentDetail() {
           </div>
         )}
       </div>
+
+      {/* Everything this agent was ever asked to do in the background — this
+          run's tasks and every earlier one, read back from disk. */}
+      {showDelegations && (
+        <WorkspaceSheet
+          title={`Delegations — ${agent.name}`}
+          subtitle="Background tasks handed to this agent"
+          onClose={() => setShowDelegations(false)}
+        >
+          <DelegationHistory agent={agent.slug} />
+        </WorkspaceSheet>
+      )}
 
       {/* Routines ReportBrowser (full-screen overlay, filtered to this agent) */}
       {showRoutinesBrowser && (

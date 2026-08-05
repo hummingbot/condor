@@ -470,8 +470,21 @@ export interface AgentDetail {
   strategies: StrategySummary[];
 }
 
+// How a delegation ended. `running`…`stopped` come from the live registry;
+// `interrupted` is a task whose process died mid-flight, and `unknown` a
+// transcript too old to say — both only ever arrive from history.
+export type DelegationStatus =
+  | "running"
+  | "done"
+  | "error"
+  | "stopped"
+  | "interrupted"
+  | "unknown";
+
 // Delegation = a fire-and-forget background task handed to a detached Agent
-// instance (DELEGATE mode). Ephemeral + in-process; status drives the UI.
+// instance (DELEGATE mode). The registry is in-process, but the record outlives
+// it on disk — so this shape also comes back from history (FEAT-035), where
+// `ended_at`/`tool_count` are known and the live registry has nothing to say.
 export interface Delegation {
   task_id: string;
   agent: string;
@@ -479,14 +492,19 @@ export interface Delegation {
   chat_id: number;
   server_name: string | null;
   task: string;
-  status: "running" | "done" | "error" | "stopped";
+  status: DelegationStatus;
   result: string;
   error: string;
   /** The conversation that started this task; "" when there was none. */
   conversation_id: string;
   /** Wall-clock start (epoch seconds) — drives the elapsed time. */
   started_at: number;
+  ended_at?: number;
+  tool_count?: number;
 }
+
+/** A history row: the record minus the bodies, which the sheet fetches on open. */
+export type DelegationSummary = Omit<Delegation, "result" | "error">;
 
 // One entry of a delegation's session transcript. Mirrors the three shapes the
 // runner's event sink folds into `DelegateTask.events`; tool entries are patched
@@ -1183,13 +1201,30 @@ export const api = {
   getDelegations: () =>
     apiFetch<{ delegations: Delegation[] }>("/api/v1/agents/delegations"),
 
+  /** Every delegation ever recorded, newest first — live ones included, and the
+   *  ones whose process is long gone. Optionally scoped to one agent. */
+  getDelegationHistory: (agent?: string, limit = 100) =>
+    apiFetch<{ delegations: DelegationSummary[] }>(
+      `/api/v1/agents/delegations/history?limit=${limit}` +
+        (agent ? `&agent=${encodeURIComponent(agent)}` : ""),
+    ),
+
+  /** One delegation's full record, from the registry or from disk. */
+  getDelegation: (taskId: string) =>
+    apiFetch<Delegation>(
+      `/api/v1/agents/delegations/${encodeURIComponent(taskId)}`,
+    ),
+
   /** The human-facing transcript. Separate from the (agent-facing) status route
-   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py. */
+   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py.
+   *  `markdown` is the fallback for records written before the events sidecar:
+   *  no structured events, just the transcript as it was rendered to disk. */
   getDelegationEvents: (taskId: string) =>
     apiFetch<{
       task_id: string;
-      status: Delegation["status"];
+      status: DelegationStatus;
       events: DelegationEvent[];
+      markdown: string;
     }>(`/api/v1/agents/delegations/${encodeURIComponent(taskId)}/events`),
 
   stopDelegation: (taskId: string) =>
