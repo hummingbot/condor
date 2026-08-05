@@ -105,7 +105,7 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
-# Quick localhost API probe — avoid hanging Step 2 when port 8000 is slow/unreachable
+# Quick localhost API probe — avoid hanging Step 3 when port 8000 is slow/unreachable
 api_health_check() {
     curl -sf --connect-timeout 3 --max-time 5 http://localhost:8000/docs >/dev/null 2>&1
 }
@@ -580,9 +580,27 @@ fi
 
 echo ""
 
-# ── Step 2: Hummingbot API ──────────────────────────
+# ── Step 2: AI Brain (LLM) ──────────────────────────
 
-echo -e "${BOLD}Step 2: Hummingbot API${RESET}"
+echo -e "${BOLD}Step 2: AI Brain (LLM)${RESET}"
+echo ""
+
+# The wizard writes CONDOR_DEFAULT_AGENT (and, for OpenRouter, the API key)
+# to .env. `uv run` syncs project deps on first use — the same sync
+# `make install` performs right after this script, just earlier.
+if (: </dev/tty) 2>/dev/null; then
+    uv run python -m condor.setup_llm < /dev/tty || \
+        msg_warn "Brain selection did not complete -- run 'uv run python -m condor.setup_llm' to pick one later"
+else
+    msg_info "No terminal available -- skipping brain selection (run 'uv run python -m condor.setup_llm' later)"
+    uv run python -m condor.setup_llm --status || true
+fi
+
+echo ""
+
+# ── Step 3: Hummingbot API ──────────────────────────
+
+echo -e "${BOLD}Step 3: Hummingbot API${RESET}"
 echo ""
 
 hb_api_deployed=false
@@ -925,9 +943,9 @@ fi
 
 echo ""
 
-# ── Step 3: Create/Update config.yml ─────────────────
+# ── Step 4: Create/Update config.yml ─────────────────
 
-echo -e "${BOLD}Step 3: Configuration Files${RESET}"
+echo -e "${BOLD}Step 4: Configuration Files${RESET}"
 echo ""
 
 # Get current date
@@ -1036,13 +1054,13 @@ fi
 
 echo ""
 
-# ── Step 4: Data directory ──────────────────────────
+# ── Step 5: Data directory ──────────────────────────
 
 if [ ! -d "$DATA_DIR" ]; then
     mkdir -p "$DATA_DIR"
 fi
 
-# ── Step 5: Summary ────────────────────────────────
+# ── Step 6: Summary ────────────────────────────────
 
 # Source nvm to make node/npm available in current shell
 if [ -s "$HOME/.nvm/nvm.sh" ]; then
@@ -1061,6 +1079,8 @@ echo -e "    • typescript: $(command_exists tsc && tsc --version 2>/dev/null |
 echo ""
 echo -e "  ${BOLD}Configuration:${RESET}"
 echo -e "    • Telegram:   $([ -n "${TELEGRAM_TOKEN:-}" ] && echo 'configured' || echo 'not set')"
+brain_choice=$(grep "^CONDOR_DEFAULT_AGENT=" "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
+echo -e "    • AI brain:   ${brain_choice:-claude-code (default)}"
 echo ""
 echo -e "  ${BOLD}Next steps:${RESET}"
 echo -e "  ${BOLD}make install${RESET}      Install Python dependencies"
