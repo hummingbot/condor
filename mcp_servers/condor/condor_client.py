@@ -22,9 +22,9 @@ async def call_main_api(
     Raises APIError on failure instead of returning {"error": ...}.
     """
     from condor.web.auth import create_jwt
-    from utils.config import WEB_URL
+    from utils.config import WEB_PORT
 
-    url = f"{WEB_URL}/api/v1{path}"
+    url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"
     token = create_jwt(settings.user_id, role="user")
     headers = {"Authorization": f"Bearer {token}"}
 
