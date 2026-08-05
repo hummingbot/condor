@@ -52,6 +52,21 @@ def shared_skills_root() -> Path:
     return _PROJECT_ROOT / "agents" / "_shared" / "skills"
 
 
+def shared_routines_root() -> Path:
+    """The published routine library every assistant reads: ``agents/_shared/routines``.
+
+    The routine twin of :func:`shared_skills_root`, deliberately the same
+    convention: the directory *is* the publication flag (a Python module has no
+    frontmatter to carry one), only the chat writes here, and every agent reads
+    it *under* its own routines, which shadow it by name.
+
+    The ``_`` prefix keeps it out of the agent registry, so a shared routine
+    never surfaces as an agent-owned ``_shared/<name>`` — it is part of the
+    general library, un-prefixed. See :func:`routines.base.assistant_routines`.
+    """
+    return _PROJECT_ROOT / "agents" / "_shared" / "routines"
+
+
 def store_root(user_id: int, agent_slug: str | None = None) -> Path:
     """Root of an agent's per-user store: ``<home>/store/user_{id}``."""
     return assistant_home(agent_slug) / "store" / f"user_{user_id}"

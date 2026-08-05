@@ -147,12 +147,16 @@ def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
 
 
 def _build_routines_section(strategy: Strategy) -> str:
-    """Build an [AVAILABLE ROUTINES] section listing this agent's own routines.
+    """Build an [AVAILABLE ROUTINES] section: this agent's own routines + shared.
 
-    Domain experts/trading agents are isolated: they see only their own routines
-    (``agents/<slug>/routines``), never the chat's general library.
+    An agent sees its own library (``agents/<slug>/routines``) plus the shared
+    one every assistant reads (FEAT-038), its own shadowing a shared name.
+    Shared entries are marked so the agent knows it cannot edit them —
+    ``create_routine`` always writes locally, which is how it specializes one.
+    A routine it cannot see here it will never call, so this list has to be the
+    same one ``_resolve_routine`` resolves against.
     """
-    from routines.base import assistant_routines_dir, discover_routines_from_path
+    from routines.base import assistant_routines
 
     lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
@@ -160,13 +164,11 @@ def _build_routines_section(strategy: Strategy) -> str:
     )
     lines.append("")
 
-    # Agent-level routines (shared across this agent's strategies, isolated from
-    # the chat's general library).
-    routines_dir = assistant_routines_dir(strategy.agent_slug)
-    local = discover_routines_from_path(routines_dir) if routines_dir.exists() else {}
-    if local:
-        for name, r in sorted(local.items()):
-            lines.append(f"  - {name}: {r.description}")
+    available = assistant_routines(strategy.agent_slug)
+    if available:
+        for name, r in sorted(available.items()):
+            mark = "" if (r.source or "").startswith("agent:") else " (shared)"
+            lines.append(f"  - {name}: {r.description}{mark}")
     else:
         lines.append('  (none yet — create one with action="create_routine")')
 

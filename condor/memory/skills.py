@@ -68,28 +68,17 @@ from .store import _atomic_write, _parse_frontmatter, _render, _slugify, _utcnow
 def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
     """True if ``name`` is a routine this assistant can actually run.
 
-    Validated against the *same* scope the runtime resolves routines in: a
-    trading agent / domain expert (``agent_slug`` set) runs ONLY its own routines
-    (``agents/<slug>/routines``) and never the chat's general library, so an agent
-    skill's reference is checked against the agent's dir alone; the chat ``condor``
-    (``agent_slug`` None) is checked against the global registry. A miss simply
-    reports ``routine_ok=false`` (advisory; never fatal).
+    Validated against the *same* scope the runtime resolves routines in —
+    :func:`routines.base.assistant_routines`: an assistant's own library plus
+    the shared one. Sharing the resolver is the point: without it a shared skill
+    referencing a shared routine would report ``routine_ok: false`` for every
+    agent while running perfectly well. A miss simply reports ``routine_ok=false``
+    (advisory; never fatal).
     """
     try:
-        if agent_slug:
-            from routines.base import (
-                assistant_routines_dir,
-                discover_routines_from_path,
-            )
+        from routines.base import assistant_routines
 
-            own_dir = assistant_routines_dir(agent_slug)
-            if not own_dir.exists():
-                return False
-            return name in discover_routines_from_path(own_dir, agent_slug=agent_slug)
-
-        from routines.base import discover_routines
-
-        return name in discover_routines(force_reload=False)
+        return name in assistant_routines(agent_slug)
     except Exception:
         return False
 

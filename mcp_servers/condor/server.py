@@ -21,7 +21,6 @@ from mcp_servers.condor.tools import (
     trading_agent,
 )
 
-
 _CHAT_ROUTINES_RULE = (
     "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
     "design a routine MUST go to a background Condor worker — "
@@ -334,13 +333,21 @@ async def manage_routines(
     agent: str | None = None,
     code: str | None = None,
     strategy_id: str | None = None,
+    shared: bool | None = None,
 ) -> dict:
     """Manage and run Condor routines (auto-discoverable Python scripts).
 
     Actions -- Discovery & Execution:
     - "list": List all available routines with name, description, type, and scope
     - "describe": Show config schema for a routine (requires name)
-    - "run": Execute a one-shot routine and return its result (requires name, optional config)
+    - "run": Execute a one-shot routine and WAIT for its result (requires name, optional config).
+      Blocks for up to 120s, so use it only for routines that finish fast.
+    - "run_async": Submit a one-shot routine and return its instance_id immediately,
+      without waiting (requires name, optional config). Use this for slow work — a
+      backtest, a wide scan — then read the result later with "get_instance" instead
+      of holding up the conversation.
+    - "get_instance": Read a run back by id (requires name=instance_id). Returns
+      status="running" while it is still going, or the finished result and report_id.
     - "start": Start a continuous routine as a background task (requires name, optional config)
     - "stop": Stop a running routine instance (requires name=instance_id)
     - "list_instances": List all running/scheduled routine instances
@@ -356,9 +363,21 @@ async def manage_routines(
     per-strategy routine library. They follow the same pattern as global
     routines: a Config(BaseModel) class and an async run(config, context) function.
 
+    Beside those per-agent libraries there is ONE shared library
+    (agents/_shared/routines) that every assistant also reads, mirroring
+    manage_skill's `shared`. A routine there is listed with scope="shared" and
+    runs under its bare name from any seat. Publication is the library it lives
+    in, not a flag in the file: `shared=True` on "create_routine" writes there.
+    Only Condor may publish — for an agent the flag is ignored and the routine
+    lands in its own dir. Shared routines are read-only to agents: to specialize
+    one, "create_routine" a local routine with the SAME name and it shadows the
+    published one. Publish deliberately — a shared routine lands in every
+    agent's context, and it must work with no chat (no chat_id).
+
     Args:
         action: The action to perform.
-        name: Routine name (required for all except list/list_instances). For "stop", pass the instance_id as name.
+        name: Routine name (required for all except list/list_instances). For "stop"
+            and "get_instance", pass the instance_id as name.
         config: Config overrides for run/start (optional, merged with defaults).
         agent: Slug of the agent whose routine library to target (agent-local
             CRUD, and "list"/"run" against another agent's routines). Omit to use
@@ -367,12 +386,15 @@ async def manage_routines(
         strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
             composite "agent_slug.strategy_slug" key resolves to its owning
             agent; prefer passing that agent's slug as `agent`.
+        shared: Target the shared library every assistant reads (routine CRUD).
+            Condor only, and only without `agent` — for an agent it is ignored
+            and the write stays in its own dir.
 
     Returns:
         Action-specific result dict.
     """
     return await routines.manage_routines(
-        action, name, config, agent, code, strategy_id
+        action, name, config, agent, code, strategy_id, shared
     )
 
 
