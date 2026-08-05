@@ -508,18 +508,16 @@ async def _resume_conversation(dt: DelegateTask) -> None:
         log.exception("Failed to resume conversation for delegation %s", dt.task_id)
 
 
-async def _notify_done(dt: DelegateTask, bot) -> None:
-    """Notify the user the delegation finished.
+def resolve_bot(bot=None):
+    """The best Telegram sender available in this process.
 
     Prefer the passed live ``bot``; otherwise fall back to the registered routine
     bot, and finally the ``_HttpBot`` Telegram-HTTP path (``TELEGRAM_TOKEN``) that
-    routines/notification already use, so a process with no live bot still delivers.
+    routines/notification already use, so a process with no live bot still
+    delivers. Public because a Telegram wake sink (FEAT-034) must reach the user
+    through exactly the same ladder a completion notice does -- two ladders would
+    eventually disagree about who can talk to a chat.
     """
-    if not dt.chat_id:
-        return
-
-    text = _completion_text(dt)
-
     target = bot
     if target is None:
         try:
@@ -532,5 +530,12 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
         from condor.routine_store import _HttpBot
 
         target = _HttpBot()
+    return target
 
-    await target.send_message(chat_id=dt.chat_id, text=text)
+
+async def _notify_done(dt: DelegateTask, bot) -> None:
+    """Notify the user the delegation finished."""
+    if not dt.chat_id:
+        return
+
+    await resolve_bot(bot).send_message(chat_id=dt.chat_id, text=_completion_text(dt))

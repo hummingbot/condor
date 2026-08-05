@@ -33,6 +33,10 @@ from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from .stream import TelegramStreamer
 
+# Imported for its import-time registration: it is what lets a finished
+# background task render its continuation in the chat that asked (FEAT-034).
+from . import wake as _wake  # noqa: F401  isort:skip
+
 log = logging.getLogger(__name__)
 
 
