@@ -44,7 +44,12 @@ export const ChatMessageView = memo(function ChatMessageView({
   // is prose, not a label: the divider treatment (uppercase, nowrap, 10px)
   // would render it as one unreadable line. It stays visibly not-the-agent's
   // own words — an inset note, no avatar — while still being readable.
-  if (message.role === "system" && message.kind === "delegation") {
+  //
+  // A `resume` note is the same shape: it is what a finished background task
+  // said to the agent to make it continue. Nobody typed it, so it must not
+  // render as a user bubble.
+  const isNote = message.kind === "delegation" || message.kind === "resume";
+  if (message.role === "system" && isNote) {
     return (
       <div className="my-3 flex justify-start">
         <div className="chat-markdown max-w-[85%] rounded-xl border border-dashed border-[var(--color-border)] px-3.5 py-2 text-sm text-[var(--color-text-muted)]">

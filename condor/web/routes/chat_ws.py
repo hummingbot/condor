@@ -23,6 +23,7 @@ from condor.runtime.confirmations import (
 )
 from condor.runtime.events import RuntimeEvent
 from condor.runtime.timeouts import TIMEOUTS
+from condor.runtime.wake import register_sink_factory
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import DEFAULT_AGENT
@@ -50,6 +51,16 @@ _pending_spawns: dict[str, asyncio.Task] = {}
 # stopping the turn ahead, claiming the task entry — never across the answer
 # itself, which would turn steering into queueing.
 _slot_gates: dict[str, asyncio.Lock] = {}
+
+# Chat sockets currently attached, per user. One socket carries every
+# conversation a user has open, so this is all the addressing a server-initiated
+# turn needs: the slot travels in the frame like it does for a typed turn.
+#
+# The only reason it exists: a turn nobody typed (FEAT-034) has no request to
+# answer into, so it cannot reach a client the way every other event here does.
+# A user with no tab open simply has no entry — the turn still runs and is still
+# recorded, and the dashboard picks it up from the transcript on reconnect.
+_attached_sockets: dict[int, set[WebSocket]] = {}
 
 
 def _session_key(user_id: int, slot_id: str) -> SessionKey:
@@ -218,6 +229,46 @@ class WebSocketChannel:
         )
 
 
+class _WakeSink:
+    """Streams a server-initiated turn into this user's open dashboard tabs.
+
+    Reuses ``_to_ws_message`` verbatim, so a woken turn is indistinguishable on
+    the wire from one the user typed and the shipped dashboard renders it with
+    no protocol change. Broadcast to every socket the user has open for the same
+    reason a typed turn's events are addressed by ``slot_id``: which tab is
+    "the" one is not knowable here, and the client already routes by slot.
+    """
+
+    def __init__(self, user_id: int, slot_id: str):
+        self._user_id = user_id
+        self._slot_id = slot_id
+
+    async def open(self) -> None:
+        return None
+
+    async def on_event(self, event: RuntimeEvent) -> None:
+        message = _to_ws_message(event, self._slot_id)
+        if not message:
+            return
+        for ws in list(_attached_sockets.get(self._user_id, ())):
+            await _send(ws, message)
+
+    async def close(self) -> None:
+        return None
+
+
+def _wake_sink(key: SessionKey, user_id: int | None) -> _WakeSink | None:
+    """Resolve a renderer for a woken web turn, or None if nobody is watching."""
+    if user_id is None or not _attached_sockets.get(user_id):
+        return None
+    return _WakeSink(user_id, key.slot)
+
+
+# Registered here rather than imported by the runtime: ``condor.runtime`` must
+# not depend on web or handler code (see ``client._local()``).
+register_sink_factory(WEB, _wake_sink)
+
+
 @router.websocket("/ws/chat")
 async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None)):
     """Chat WebSocket endpoint.
@@ -242,6 +293,10 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
         return
 
     await ws.accept(subprotocol=accept_subprotocol)
+
+    # Reachable from now until this socket goes away, so a turn started by
+    # something other than this connection can still be rendered on it.
+    _attached_sockets.setdefault(user_id, set()).add(ws)
 
     # Send list of existing alive sessions on connect
     sessions = await _get_user_sessions(user_id)
@@ -291,6 +346,13 @@ async def chat_websocket(ws: WebSocket, token: str | None = Query(default=None))
     except Exception:
         log.exception("Chat WS error for user %d", user_id)
     finally:
+        attached = _attached_sockets.get(user_id)
+        if attached is not None:
+            attached.discard(ws)
+            if not attached:
+                # Dropped rather than left empty: an entry that outlives the
+                # last tab would read as "someone is watching" forever.
+                _attached_sockets.pop(user_id, None)
         # Cancel any in-flight background tasks on disconnect
         for task in bg_tasks:
             task.cancel()
