@@ -161,11 +161,14 @@ def store(tmp_path, monkeypatch):
 @pytest.fixture
 def stubs(monkeypatch):
     """Stub the chart renderer and the report builder; record what they were asked."""
-    calls = {"charts": 0}
+    calls = {"charts": 0, "render_png": None}
 
-    def fake_generate_chart(*args, **kwargs):
+    def fake_generate_chart(*args, render_png=True, **kwargs):
         calls["charts"] += 1
-        return io.BytesIO(b"png-bytes"), object()
+        calls["render_png"] = render_png
+        # Mirrors the real contract, pinned against plotly in
+        # test_the_renderer_can_skip_the_png.
+        return (io.BytesIO(b"png-bytes") if render_png else None), object()
 
     monkeypatch.setattr(bc, "generate_chart", fake_generate_chart)
     monkeypatch.setattr(reports_mod, "ReportBuilder", FakeReportBuilder)
@@ -326,6 +329,99 @@ def test_polling_gives_up_with_the_task_id_in_hand(routine, monkeypatch):
 
     assert task_id in result.text
     assert "run_async" in result.text
+
+
+# ── It is quiet on demand ─────────────────────────────────────────────────────
+
+
+def test_the_renderer_can_skip_the_png():
+    """The real contract behind chart=False: a figure, no image bytes."""
+    candle_df = bc._build_candle_df(_PAYLOAD["processed_data"])
+
+    buf, fig = bc.generate_chart(
+        candle_df, [], [], _PAYLOAD["results"], bc.Config(), render_png=False
+    )
+
+    assert buf is None
+    assert fig is not None, "the web report still needs the figure"
+
+
+def test_chart_false_sends_no_photo_but_still_reports(routine, stubs, store):
+    """A 20-config sweep must not push 20 images into the chat."""
+    context = FakeContext()
+    result = routine(_completed("task-quiet"), context=context, chart=False)
+
+    assert stubs["render_png"] is False
+    assert context.bot.photos == 0
+    assert result.chart_image is None
+    # Everything else survives: text, the metrics row, the web report, the store.
+    assert result.text
+    assert result.table_data
+    assert FakeReportBuilder.saved == ["Backtest: " + CONFIG_NAME]
+    assert store.get_result("task-quiet") is not None
+
+
+def test_chart_true_still_sends_the_photo(routine):
+    context = FakeContext()
+    result = routine(_completed(), context=context)
+
+    assert context.bot.photos == 1
+    assert result.chart_image == b"png-bytes"
+
+
+def test_a_chat_less_run_never_sends_a_photo(routine):
+    """A shared routine runs under agents, which have no chat."""
+    from condor.routine_store import WebRoutineContext
+
+    context = WebRoutineContext(SERVER, bot=FakeBot(), chat_id=0)
+    routine(_completed("task-agent"), context=context)
+
+    assert context.bot.photos == 0
+
+
+# ── It returns data ───────────────────────────────────────────────────────────
+
+
+def test_the_result_carries_a_metrics_row(routine):
+    """An agent ranking ten configs reads numbers, never prose."""
+    result = routine(_completed("task-1"))
+
+    assert result.table_columns == list(bc.METRIC_COLUMNS)
+    assert len(result.table_data) == 1
+    row = result.table_data[0]
+
+    assert set(row) == set(bc.METRIC_COLUMNS)
+    assert row["task_id"] == "task-1", "the handle to re-render or compare this run"
+    assert row["config_name"] == CONFIG_NAME
+    assert row["net_pnl_quote"] == 12.5
+    assert row["net_pnl_pct"] == 1.25, "ratios are carried as percentages"
+    assert row["sharpe_ratio"] == 1.42
+    assert row["max_drawdown_pct"] == -1.47
+    assert row["accuracy_pct"] == 44.59
+    assert row["profit_factor"] == 1.31
+    assert row["total_executors"] == 74
+    assert row["win_signals"] == 33
+    assert row["loss_signals"] == 41
+    assert row["total_fees_quote"] == 1.25
+    assert row["total_volume"] == 5000.0
+
+
+def test_rows_from_several_runs_concatenate(routine):
+    rows = [
+        routine(_completed("task-1")).table_data[0],
+        routine(_completed("task-2")).table_data[0],
+    ]
+
+    assert [r["task_id"] for r in rows] == ["task-1", "task-2"]
+    assert all(set(r) == set(bc.METRIC_COLUMNS) for r in rows)
+
+
+def test_a_missing_metric_is_none_not_a_crash(routine):
+    """The engine omits metrics on a thin run; the row must still be a row."""
+    row = bc._metrics_row({}, bc.Config(config_name=CONFIG_NAME))
+
+    assert set(row) == set(bc.METRIC_COLUMNS)
+    assert row["sharpe_ratio"] is None
 
 
 if __name__ == "__main__":

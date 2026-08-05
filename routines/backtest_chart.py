@@ -103,6 +103,10 @@ class Config(BaseModel):
     trade_cost: float = Field(
         default=0.0002, description="Trade cost as decimal (0.0002 = 0.02%)"
     )
+    chart: bool = Field(
+        default=True,
+        description="Send the chart image to the chat (off for sweeps)",
+    )
 
 
 def _parse_date(date_str: str) -> int:
@@ -664,8 +668,14 @@ def generate_chart(
     results: dict,
     config: Config,
     position_held_ts: list[dict] | None = None,
-) -> tuple[io.BytesIO, go.Figure]:
-    """Generate a multi-panel backtest chart matching hummingbot reference."""
+    render_png: bool = True,
+) -> tuple[io.BytesIO | None, go.Figure]:
+    """Generate a multi-panel backtest chart matching hummingbot reference.
+
+    ``render_png=False`` returns the figure alone. The web report renders the figure
+    itself, so a quiet run skips the PNG — which is the expensive half (kaleido) and
+    the only half a chat-less sweep has no use for.
+    """
     has_pnl = bool(pnl_ts)
     has_position = bool(position_held_ts)
 
@@ -783,10 +793,62 @@ def generate_chart(
         pos_row = 3 if has_pnl else 2
         fig.update_yaxes(title_text="Position ($)", row=pos_row, col=1)
 
+    if not render_png:
+        return None, fig
+
     buf = io.BytesIO()
     fig.write_image(buf, format="png", scale=2)
     buf.seek(0)
     return buf, fig
+
+
+# One row per run, so N runs of this routine concatenate into a table an agent can
+# rank without parsing the prose summary. Ratios are carried as percentages
+# (net_pnl_pct=1.25 is +1.25%); everything else is in quote currency or a count.
+METRIC_COLUMNS = (
+    "task_id",
+    "config_name",
+    "net_pnl_quote",
+    "net_pnl_pct",
+    "sharpe_ratio",
+    "max_drawdown_pct",
+    "accuracy_pct",
+    "profit_factor",
+    "total_executors",
+    "win_signals",
+    "loss_signals",
+    "total_fees_quote",
+    "total_volume",
+)
+
+
+def _round(value, digits: int = 4, scale: float = 1.0):
+    """A metric as a number, or None when the engine did not report it."""
+    if value is None:
+        return None
+    try:
+        return round(float(value) * scale, digits)
+    except (TypeError, ValueError):
+        return None
+
+
+def _metrics_row(results: dict, config: Config) -> dict:
+    """The run reduced to the row an agent ranks on. Keys are ``METRIC_COLUMNS``."""
+    return {
+        "task_id": config.task_id,
+        "config_name": config.config_name,
+        "net_pnl_quote": _round(results.get("net_pnl_quote"), 2),
+        "net_pnl_pct": _round(results.get("net_pnl"), 4, scale=100),
+        "sharpe_ratio": _round(results.get("sharpe_ratio"), 4),
+        "max_drawdown_pct": _round(results.get("max_drawdown_pct"), 4, scale=100),
+        "accuracy_pct": _round(results.get("accuracy"), 4, scale=100),
+        "profit_factor": _round(results.get("profit_factor"), 4),
+        "total_executors": results.get("total_executors"),
+        "win_signals": results.get("win_signals"),
+        "loss_signals": results.get("loss_signals"),
+        "total_fees_quote": _round(results.get("total_fees_quote"), 2),
+        "total_volume": _round(results.get("total_volume"), 2),
+    }
 
 
 def format_summary(results: dict, config: Config) -> str:
@@ -936,25 +998,34 @@ async def _render(
 
     candle_df = _build_candle_df(processed_data)
 
-    # Generate chart
+    # Generate chart. A sweep runs with chart=False: no PNG, no photo, and no twenty
+    # images pushed into the chat — the figure still reaches the web report, which is
+    # where the charts of a sweep are read from, by task_id.
     chart_bytes = None
     fig = None
     try:
         buf, fig = generate_chart(
-            candle_df, executors, pnl_ts, bt_results, config, position_held_ts
+            candle_df,
+            executors,
+            pnl_ts,
+            bt_results,
+            config,
+            position_held_ts,
+            render_png=config.chart,
         )
-        chart_bytes = buf.getvalue()
+        if buf is not None:
+            chart_bytes = buf.getvalue()
 
-        # Send to Telegram if available
-        if chat_id:
-            buf.seek(0)
-            caption = f"Backtest: {config.config_name} ({config.start_date} to {config.end_date})"
-            if context.bot:
-                await context.bot.send_photo(
-                    chat_id=chat_id, photo=buf, caption=caption
-                )
-            else:
-                await _send_photo_http(chat_id, buf, caption)
+            # Send to Telegram if available
+            if chat_id:
+                buf.seek(0)
+                caption = f"Backtest: {config.config_name} ({config.start_date} to {config.end_date})"
+                if context.bot:
+                    await context.bot.send_photo(
+                        chat_id=chat_id, photo=buf, caption=caption
+                    )
+                else:
+                    await _send_photo_http(chat_id, buf, caption)
     except Exception as e:
         logger.warning(f"Chart generation failed: {e}", exc_info=True)
 
@@ -970,7 +1041,12 @@ async def _render(
         builder.plotly(fig)
     await builder.save()
 
-    return RoutineResult(text=text, chart_image=chart_bytes)
+    return RoutineResult(
+        text=text,
+        table_data=[_metrics_row(bt_results, config)],
+        table_columns=list(METRIC_COLUMNS),
+        chart_image=chart_bytes,
+    )
 
 
 async def _send_photo_http(chat_id: int, buf: io.BytesIO, caption: str) -> None:
