@@ -1575,7 +1575,13 @@ async def agent_message_handler(
         return
 
     chat_id = update.effective_chat.id
-    text = context.chat_data.pop("_voice_transcription", None) or update.message.text
+
+    # Consume the voice hand-off exactly once, before any early return below, so
+    # the transcript survives to build the streamer prefix and neither key leaks
+    # into the next message's turn.
+    voice_transcription = context.chat_data.pop("_voice_transcription", None)
+    voice_placeholder = context.chat_data.pop("_voice_placeholder", None)
+    text = voice_transcription or update.message.text
 
     if not text:
         return
@@ -1652,15 +1658,10 @@ async def agent_message_handler(
             parse_mode="MarkdownV2",
         )
 
-    prefix = ""
-
-    # Fetch voice data if this was a transcription
-    voice_placeholder = context.chat_data.pop("_voice_placeholder", None)
-    voice_transcription = context.chat_data.pop("_voice_transcription", None)
-
-    if voice_transcription:
-        voice_prefix = f"🎙 {voice_transcription}"
-        prefix = f"{prefix}{voice_prefix}" if prefix else voice_prefix
+    # Keep the spoken question at the head of the streamed answer: the streamer
+    # edits the very placeholder that was showing the transcript, so without the
+    # prefix the user's words would be overwritten by the reply.
+    prefix = f"🎙 {voice_transcription}" if voice_transcription else ""
 
     # Send or reuse placeholder message
     if voice_placeholder:
