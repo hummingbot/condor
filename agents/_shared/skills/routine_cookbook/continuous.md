@@ -93,6 +93,13 @@ except asyncio.CancelledError:
     return "Stopped"
 ```
 
+**No extra try/except around the report.** The tick body already sits under the
+loop's own handler — that one exists so a bad tick does not kill a monitor, and
+it is enough. Do not nest a `try: ... except: logger.warning("Report failed")`
+around `report.clear()` / `report.update()`: a report bug then repeats silently
+on every tick and the monitor looks healthy forever. Build the `LiveReport`
+outside the loop, unguarded, so a broken report fails the run immediately.
+
 ### LiveReport API (only these exist)
 - `clear()` — reset builder for next tick
 - `update()` — async save/update of the report

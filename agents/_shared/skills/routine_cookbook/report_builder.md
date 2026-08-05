@@ -4,24 +4,58 @@ How to produce reports (KPIs, tables, charts) and rich inline output.
 
 ## ReportBuilder (mandatory in every routine)
 
-Every routine MUST generate a report. Wrap in try/except so report failure never breaks the routine.
+Every routine MUST generate a report. **NEVER wrap the report block in
+try/except.** Let it raise.
 
 ```python
-try:
-    from condor.reports import ReportBuilder
-    builder = ReportBuilder("Report Title")
-    builder.source("routine", "routine_name").tags(["tag1", "tag2"])
-    builder.section("01 / OVERVIEW", "What this section explains")
-    builder.kpi("Total Volume", "$1,250,000")
-    builder.kpi("Best Spread", "0.12%")
-    builder.table(table_data, ["Column A", "Column B", "Column C"])
-    builder.plotly(fig)
-    builder.markdown("## Summary\nSome **markdown** text.")
-    builder.manual_order()
-    report_id = await builder.save()  # MUST await — async!
-except Exception as e:
-    logger.warning(f"Report generation failed: {e}")
+from condor.reports import ReportBuilder
+
+builder = ReportBuilder("Report Title")
+builder.source("routine", "routine_name")   # exactly the routine's file name
+builder.tags(["tag1", "tag2"])
+builder.section("01 / OVERVIEW", "What this section explains")
+builder.kpi("Total Volume", "$1,250,000")
+builder.kpi("Best Spread", "0.12%")
+builder.table(table_data, ["Column A", "Column B", "Column C"])
+builder.plotly(fig)
+builder.markdown("## Summary\nSome **markdown** text.")
+builder.manual_order()
+report_id = await builder.save()   # MUST await — async!
 ```
+
+### Why no try/except around the report
+
+A swallowed report error is invisible: the runner marks the run **completed**,
+the routine returns its normal summary text, and the only trace is one line in
+the bot's log that nobody reads. The user is told the run succeeded and then
+finds no report. A raised error is recorded on the instance, shown in the UI,
+and returned to whoever ran it — which is the whole point of step 5 of the
+create → test → fix loop.
+
+The same rule applies to the chart code feeding the report: no
+`try: ... except: logger.warning("Chart generation failed")`. If the chart
+cannot be built, the routine is broken and must say so.
+
+This is not in tension with "parse defensively". Defensive parsing is about
+*input* you do not control — a missing key in an API response, a `None` price:
+handle those where you read them, before you build the report. Once you are
+building the report, every failure is your own bug.
+
+### `source()` — how the report is found later
+
+`builder.source("routine", "<name>")` is the only link between a report and its
+routine. The Routines page lists a routine's reports by matching `source_name`,
+so a wrong or missing name means the report is saved but shows up nowhere (the
+routine card reads "No reports yet"). Rules:
+
+- Use the routine's **file name without `.py`**, e.g. `ema_research_charts`.
+- Never prefix it with the agent slug — `directional_trader/ema_research_charts`
+  will not match.
+- Call it on every builder, including each one in a routine that saves several.
+
+The runner stamps `("routine", <routine name>)` on any report saved during a run
+that never called `source()`, so a forgotten call no longer loses the report —
+but that is a safety net, not the contract. Call it explicitly.
 
 ### Core methods
 - `source(type, name)` — declare the routine source (always first)

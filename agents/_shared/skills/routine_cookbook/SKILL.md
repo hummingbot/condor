@@ -3,7 +3,6 @@ name: routine_cookbook
 description: The single reference for writing Condor routines — anatomy, the create → test → fix loop, fetching Hummingbot data, parallel calls, reports/charts, continuous loops, and candlestick charts. Routes to a companion file per topic.
 when_to_use: Before implementing or debugging ANY routine. Read this first, then pull the specific companion file(s) for what your routine actually does (data, async, reports, continuous, charts).
 source: chat
-shared: true
 ---
 
 # Routine Cookbook
@@ -32,14 +31,14 @@ price monitor with a live dashboard, for example, reads `hummingbot_client.md`
 
 ## Where the routine lives
 
-**Agent-local** — `agents/{slug}/routines/` — visible only to that agent. This is
+**Agent-local** — `agents/{slug}/routines/` — visible only to that agent, and
+shared across all of its strategies (there is no per-strategy library). This is
 the default when you *are* an agent: your own routines are yours, and you create
-them with no `strategy_id` (your slug is already the scope).
+them with no `agent` argument (your slug is already the scope).
 
 **Global** — `routines/` — visible to every user and agent. Use it only for
 general-purpose analysis/monitoring not tied to one agent. From the chat, target
-an agent's local dir explicitly with `strategy_id="agent_slug.strategy_slug"`
-(or a bare agent slug).
+an agent's local dir explicitly with `agent="<agent_slug>"`.
 
 If the scope is ambiguous, clarify it before writing code.
 
@@ -95,16 +94,25 @@ manage_routines(action="start", name="x", config={})     # continuous
 manage_routines(action="stop", name="instance_id")       # stop continuous
 manage_routines(action="list_instances")                 # list running
 
-# From the chat, target an agent's local library by adding strategy_id
-manage_routines(action="create_routine", name="x", code="...", strategy_id="slug.strategy")
-manage_routines(action="run", name="x", strategy_id="slug.strategy", config={})
+# From the chat, target an agent's local library by adding agent="<slug>"
+manage_routines(action="create_routine", name="x", code="...", agent="agent_slug")
+manage_routines(action="run", name="x", agent="agent_slug", config={})
 ```
 
 ## Non-negotiables (apply to every routine)
 
 - **Every routine MUST generate a ReportBuilder report** — see `report_builder.md`.
+- **NEVER wrap the report block in try/except.** No
+  `except Exception: logger.warning("Report generation failed")`. A swallowed
+  report error makes the run look completed while no report exists — the failure
+  must reach the runner. Same for the chart code that feeds the report.
+- **`builder.source("routine", "<file name>")` on every builder** — that string
+  is how the Routines page finds the report; wrong or missing and the report is
+  saved but invisible. Bare file name, never `agent_slug/name`.
 - All client calls are **async** — always `await`; never `time.sleep`, only `asyncio.sleep`.
-- **Parse defensively**: handle `None`/missing keys, return error strings, never raise to the caller.
+- **Parse defensively** where you read *external* data: handle `None`/missing
+  keys and return an error string. This covers API responses, not your own
+  report code — never turn it into a blanket `except` over the routine body.
 - One routine per task. Lead with code, be direct.
 - Test after writing (`manage_routines(action="run", ...)`) and fix until the output is clean.
 
