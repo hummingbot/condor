@@ -580,9 +580,9 @@ fi
 
 echo ""
 
-# ── Step 2: AI Brain (LLM) ──────────────────────────
+# ── Step 2: AI Model (LLM) ──────────────────────────
 
-echo -e "${BOLD}Step 2: AI Brain (LLM)${RESET}"
+echo -e "${BOLD}Step 2: AI Model (LLM)${RESET}"
 echo ""
 
 # The wizard writes CONDOR_DEFAULT_AGENT (and, for OpenRouter, the API key)
@@ -590,9 +590,9 @@ echo ""
 # `make install` performs right after this script, just earlier.
 if (: </dev/tty) 2>/dev/null; then
     uv run python -m condor.setup_llm < /dev/tty || \
-        msg_warn "Brain selection did not complete -- run 'uv run python -m condor.setup_llm' to pick one later"
+        msg_warn "Model selection did not complete -- run 'uv run python -m condor.setup_llm' to pick one later"
 else
-    msg_info "No terminal available -- skipping brain selection (run 'uv run python -m condor.setup_llm' later)"
+    msg_info "No terminal available -- skipping model selection (run 'uv run python -m condor.setup_llm' later)"
     uv run python -m condor.setup_llm --status || true
 fi
 
@@ -1079,8 +1079,8 @@ echo -e "    • typescript: $(command_exists tsc && tsc --version 2>/dev/null |
 echo ""
 echo -e "  ${BOLD}Configuration:${RESET}"
 echo -e "    • Telegram:   $([ -n "${TELEGRAM_TOKEN:-}" ] && echo 'configured' || echo 'not set')"
-brain_choice=$(grep "^CONDOR_DEFAULT_AGENT=" "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
-echo -e "    • AI brain:   ${brain_choice:-claude-code (default)}"
+model_choice=$(grep "^CONDOR_DEFAULT_AGENT=" "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
+echo -e "    • AI model:   ${model_choice:-claude-code (default)}"
 echo ""
 echo -e "  ${BOLD}Next steps:${RESET}"
 echo -e "  ${BOLD}make install${RESET}      Install Python dependencies"

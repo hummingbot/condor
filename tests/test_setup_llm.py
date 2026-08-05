@@ -1,4 +1,4 @@
-"""Unit tests for condor.setup_llm (setup-time AI brain selection).
+"""Unit tests for condor.setup_llm (setup-time AI model selection).
 
 Covers the pure parts: .env read/update, menu construction from
 AGENT_OPTIONS, choice persistence, and model-list parsing. Interactive flows

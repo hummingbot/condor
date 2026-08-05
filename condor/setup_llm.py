@@ -1,4 +1,4 @@
-"""Interactive AI-brain (LLM) selection for Condor setup.
+"""Interactive AI model (LLM) selection for Condor setup.
 
 Step 2 of ``setup-environment.sh`` runs this (``uv run python -m
 condor.setup_llm``); it is equally runnable standalone any time later. The
@@ -7,7 +7,7 @@ of the default-model precedence in ``handlers.agents._shared`` — plus
 ``OPENROUTER_API_KEY`` when OpenRouter is picked, since ``openrouter:*``
 models refuse to start without it.
 
-The wizard ends with a readiness report for the chosen brain instead of
+The wizard ends with a readiness report for the chosen model instead of
 letting setup exit green around an unusable default: an unauthenticated CLI
 is reported with its login command, a stopped local server with its start
 command. Without a TTY (CI, ``curl | bash`` with no terminal) it prints the
@@ -292,18 +292,18 @@ def choose(env: dict[str, str]) -> tuple[str, dict[str, str]] | None:
 def report(agent_key: str, env: dict[str, str]) -> None:
     state, detail = detect(agent_key.partition(":")[0], env)
     if state == READY:
-        print(f"\n  ✓ Default brain: {agent_key} — {detail}")
+        print(f"\n  ✓ Default model: {agent_key} — {detail}")
     elif state == UNVERIFIED:
-        print(f"\n  ? Default brain: {agent_key} — {detail}")
+        print(f"\n  ? Default model: {agent_key} — {detail}")
     else:
-        print(f"\n  ✗ Default brain: {agent_key} — NOT READY: {detail}")
+        print(f"\n  ✗ Default model: {agent_key} — NOT READY: {detail}")
         print("    Condor cannot chat until this is fixed.")
 
 
 def status() -> None:
     env = read_env()
     default = current_default(env)
-    print("AI brain options:")
+    print("AI model options:")
     for key, label in menu_options():
         state, detail = detect(key.partition(":")[0], env)
         marker = "  ← current default" if key == default else ""
