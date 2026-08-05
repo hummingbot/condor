@@ -385,6 +385,11 @@ class ReportBuilder:
         charts_dir = store._charts_dir()
         charts_dir.mkdir(exist_ok=True)
         now = datetime.now(timezone.utc)
+        # A routine that never called .source() still gets the running routine's
+        # name, so it is findable on the Routines page (see store.default_source).
+        source_type, source_name = self._source_type, self._source_name
+        if not source_name:
+            source_type, source_name = store._report_source.get() or ("", "")
         sections_html = self._render_sections()
         interactive_sections = [
             section
@@ -402,10 +407,10 @@ class ReportBuilder:
             section["type"] in {"plotly", "chart"} for section in self._sections
         )
         meta_badges = ""
-        if self._source_type:
+        if source_type:
             meta_badges += (
-                f"<span>{html.escape(str(self._source_type))}: "
-                f"{html.escape(str(self._source_name))}</span>"
+                f"<span>{html.escape(str(source_type))}: "
+                f"{html.escape(str(source_name))}</span>"
             )
         for tag in self._tags:
             meta_badges += f"<span>#{html.escape(str(tag))}</span>"
@@ -451,8 +456,8 @@ class ReportBuilder:
                 "title": self._title,
                 "filename": filename,
                 "created_at": now.isoformat(),
-                "source_type": self._source_type,
-                "source_name": self._source_name,
+                "source_type": source_type,
+                "source_name": source_name,
                 "tags": self._tags,
                 "agent": store._report_agent.get() or "condor",
             }

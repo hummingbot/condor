@@ -156,7 +156,7 @@ def _build_routines_section(strategy: Strategy) -> str:
 
     lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
-        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.key}", config={{...}})'
+        f'Call via: manage_routines(action="run", name="<name>", agent="{strategy.agent_slug}", config={{...}})'
     )
     lines.append("")
 

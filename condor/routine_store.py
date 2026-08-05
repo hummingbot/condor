@@ -158,6 +158,11 @@ class RoutineStore:
         agents_dir = Path(__file__).resolve().parent.parent / "agents"
         if agents_dir.exists():
             for agent_dir in sorted(agents_dir.iterdir()):
+                # `_`-prefixed dirs are not agents (`_shared`, `_defaults`) —
+                # same rule as AgentStore._iter_agent_dirs, so a library dir can
+                # never surface here as a routine owner named `_shared/...`.
+                if agent_dir.name.startswith("_"):
+                    continue
                 routines_path = agent_dir / "routines"
                 if not routines_path.is_dir():
                     continue
@@ -339,8 +344,12 @@ class RoutineStore:
         failed = False
         try:
             cfg = routine.config_class(**config)
+            # The bare name (not "agent_slug/name") is what both report lookups
+            # match on, and what routines that do call .source() already use.
+            base_name = (routine.name or "").split("/")[-1]
             with reports.attribute_to(agent or _agent_of(routine)):
-                raw = await routine.run_fn(cfg, ctx)
+                with reports.default_source("routine", base_name):
+                    raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
             result = RoutineResult(text="Stopped by user")

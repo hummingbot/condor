@@ -37,6 +37,21 @@ def assistant_home(agent_slug: str | None = None) -> Path:
     return _PROJECT_ROOT / "agents" / (agent_slug or CHAT_SLUG)
 
 
+def shared_skills_root() -> Path:
+    """The published skill library every assistant reads: ``agents/_shared/skills``.
+
+    Publication is the **directory**, not a frontmatter flag: a playbook in here
+    is global, one that isn't, isn't. That makes the boundary visible on disk and
+    makes leaking an unpublished playbook structurally impossible rather than a
+    check that must never be forgotten.
+
+    The ``_`` prefix keeps it out of the agent registry — ``AgentStore``'s
+    iterator skips ``_``-prefixed dirs, the same convention that already hides
+    ``agents/_defaults``. Only Condor may write here (see :class:`SkillStore`).
+    """
+    return _PROJECT_ROOT / "agents" / "_shared" / "skills"
+
+
 def store_root(user_id: int, agent_slug: str | None = None) -> Path:
     """Root of an agent's per-user store: ``<home>/store/user_{id}``."""
     return assistant_home(agent_slug) / "store" / f"user_{user_id}"
