@@ -23,6 +23,13 @@ REASONING = "\U0001f4ad"  # \ud83d\udcad
 _THINKING_FRAMES = ["Thinking.", "Thinking..", "Thinking..."]
 _DOT_FRAMES = ["", ".", "..", "..."]
 
+# Shown instead of the Thinking pulse while the turn waits its place in the
+# session queue. Static on purpose — see _edit_loop.
+QUEUED_LABEL = (
+    "⏳ Queued — waiting for the current answer to finish.\n/stop interrupts it."
+)
+STOPPED_LABEL = "⏹ _Stopped._"
+
 # How much of the live reasoning to keep on screen (tail chars). Keeps the
 # streamed message small while still showing the agent's current train of thought.
 MAX_REASONING_LEN = 600
@@ -101,6 +108,7 @@ class TelegramStreamer:
         self._needs_edit = False
         self._edit_task: asyncio.Task | None = None
         self._done = False
+        self._queued = False
         self._stop_reason: str | None = None
         self._tick = 0
         self._continuation_ids: list[int] = []
@@ -108,6 +116,16 @@ class TelegramStreamer:
     # --- Event processing ---
 
     async def process_event(self, event: RuntimeEvent) -> None:
+        # Emitted before the turn blocks on the session lock, so the placeholder
+        # can say "waiting its turn" instead of pulsing "Thinking" at a user
+        # whose message has not reached the agent yet.
+        if event.type == EventType.QUEUED:
+            self._queued = True
+            self._needs_edit = True
+            return
+        # Anything else means the lock was won: this turn is live now.
+        self._queued = False
+
         if event.type == EventType.TEXT:
             self._buffer += event.text
             self._needs_edit = True
@@ -164,7 +182,13 @@ class TelegramStreamer:
             while not self._done:
                 self._tick += 1
                 force = self._active_tools and self._tick % 10 == 0
-                if self._needs_edit or not self._buffer or force:
+                if self._queued:
+                    # A queued turn has nothing to animate, and several can be
+                    # stacked behind one answer: flushing on change only keeps
+                    # N idle placeholders from each editing twice a second.
+                    if self._needs_edit:
+                        await self._flush(final=False)
+                elif self._needs_edit or not self._buffer or force:
                     await self._flush(final=False)
                 await asyncio.sleep(EDIT_INTERVAL)
         except asyncio.CancelledError:
@@ -194,6 +218,7 @@ class TelegramStreamer:
             parts.append(self._prefix)
 
         buf = self._buffer.strip()
+        stopped = final and self._stop_reason == "cancelled"
 
         # While streaming, before the answer starts, surface the live reasoning
         # so the user can tell the agent is thinking (and about what) rather than
@@ -218,12 +243,25 @@ class TelegramStreamer:
             # on screen yet (no reasoning, no active or finished tools).
             base = 1 if self._prefix else 0
             if len(parts) == base:
-                parts.append(_THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)])
+                parts.append(
+                    QUEUED_LABEL
+                    if self._queued
+                    else _THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)]
+                )
+        elif stopped:
+            parts.append("_(stopped before answering)_")
+            parse_mode = "Markdown"
         elif self._finished_tools:
             parts.append("_(done)_")
             parse_mode = "Markdown"
         else:
             parts.append("_(no response)_")
+
+        # Say why the answer ends where it does, so a /stop that lands mid
+        # sentence does not read as the agent giving up on its own.
+        if stopped and buf:
+            parts.append(STOPPED_LABEL)
+            parse_mode = "Markdown"
 
         return "\n\n".join(parts), parse_mode
 

@@ -249,6 +249,41 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 @restricted
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stop — interrupt the answer in flight, keep the session.
+
+    This is the dashboard's Stop button, as a command: it aborts the running
+    turn at the agent (ACP ``session/cancel``) and leaves the session and its
+    context intact. Deliberately *not* what the menu's "End session" button
+    does, which kills the subprocess and the conversation with it.
+
+    A message queued behind the aborted turn still runs — stopping the answer
+    you are watching is not the same as discarding what you asked next.
+    """
+    chat_type = update.effective_chat.type
+    if chat_type in ("group", "supergroup"):
+        await update.message.reply_text("The agent is only available in private chats.")
+        return
+
+    chat_id = update.effective_chat.id
+    session = await get_session(chat_id)
+
+    if not session or not session.alive:
+        await update.message.reply_text("No active session.")
+        return
+
+    if not session.is_busy:
+        await update.message.reply_text("Nothing to stop — the agent is idle.")
+        return
+
+    # Awaits the agent's own cancel (bounded by TIMEOUTS.prompt_cancel), so by
+    # the time this replies the generation has actually stopped. The streamed
+    # message finalizes itself on the DONE/cancelled event.
+    await runtime.abort(_tg_key(chat_id))
+    await update.message.reply_text("⏹ Stopped. The session and its context are kept.")
+
+
+@restricted
 async def agent_callback_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -1189,14 +1224,17 @@ async def _handle_custom_cancel(
 
 
 async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Stop the active agent session."""
+    """End the active session — subprocess and conversation both go.
+
+    Not to be confused with /stop, which only interrupts the turn in flight.
+    """
     query = update.callback_query
     chat_id = update.effective_chat.id
 
     destroyed = await destroy_session(chat_id)
 
     if destroyed:
-        await query.message.edit_text("Agent session stopped.")
+        await query.message.edit_text("Agent session ended.")
     else:
         await query.message.edit_text("No active session.")
 
@@ -1650,17 +1688,17 @@ async def agent_message_handler(
             await update.message.reply_text(f"Failed to start agent: {e}")
             return
 
-    # Busy is an acknowledgement, not a refusal. The message really is queued
-    # now: `on_busy="queue"` below lets it block on the session lock, which is
-    # FIFO, so several messages sent mid-answer are answered in the order they
-    # were sent. Telegram has no Stop button and no live composer, so silently
-    # killing a running answer because someone sent a second thought would be
-    # hostile — the dashboard steers, this waits.
-    if session.is_busy:
-        await update.message.reply_text(
-            r"⏳ Queued\. It will run when the current answer finishes\.",
-            parse_mode="MarkdownV2",
-        )
+    # Busy is an acknowledgement, not a refusal. The message really is queued:
+    # `on_busy="queue"` below lets it block on the session lock, which is FIFO,
+    # so several messages sent mid-answer are answered in the order they were
+    # sent. Telegram has no live composer, so silently killing a running answer
+    # because someone sent a second thought would be hostile — the dashboard
+    # steers, this waits, and /stop is how you interrupt on purpose.
+    #
+    # The acknowledgement is not sent from here any more: the QUEUED event the
+    # runtime emits renders inside this turn's own placeholder, which costs one
+    # message instead of two and cannot miss the race where `is_busy` was read
+    # from a snapshot taken just before the turn ahead finished.
 
     # Keep the spoken question at the head of the streamed answer: the streamer
     # edits the very placeholder that was showing the transcript, so without the

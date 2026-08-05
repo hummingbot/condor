@@ -26,7 +26,10 @@ def _active_session_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Talk to", callback_data="agent:talk_to"),
         ],
         [
-            InlineKeyboardButton("Stop", callback_data="agent:stop"),
+            # Kills the subprocess and the conversation with it. Labelled
+            # "End session" so it is not read as "stop generating" — that is
+            # /stop, which aborts the turn and keeps the context.
+            InlineKeyboardButton("End session", callback_data="agent:stop"),
             InlineKeyboardButton("Close", callback_data="agent:close"),
         ],
     ]
@@ -462,6 +465,10 @@ async def show_agent_menu(
             f"Status: {status}",
             "\nSend a message to chat, or use the buttons below.",
         ]
+        # Advertised where the user can see it is answering — a menu opened
+        # mid-answer is exactly when someone wants to interrupt.
+        if session.is_busy:
+            lines.append("/stop interrupts the answer without losing the session.")
         text = "\n".join(lines)
         keyboard = _active_session_keyboard()
     else:
