@@ -142,29 +142,32 @@ def test_the_chats_store_and_skills_moved_with_it():
     assert store_root(42, CHAT_SLUG) == store_root(42, None)
     assert builtin_skills_root() == home / "skills"
     # The shipped library came across intact rather than being re-created empty.
-    assert (home / "skills" / "routine_cookbook" / "SKILL.md").exists()
+    # (Published playbooks live in agents/_shared/skills, not here — FEAT-031.)
+    assert (home / "skills" / "agent_builder" / "SKILL.md").exists()
 
 
-def test_the_chat_inherits_nothing_from_itself(tmp_path, monkeypatch):
-    """``SkillStore("condor")`` is the chat, so it must not shadow itself.
+def test_the_chat_does_not_list_a_skill_twice(tmp_path, monkeypatch):
+    """``SkillStore("condor")`` and ``SkillStore(None)`` are the same library.
 
-    Inheritance (FEAT-031) reads Condor's shared playbooks into every agent's
-    library. Resolved by slug rather than by directory, the chat would inherit
-    from its own dir and list every shared playbook twice.
+    Both spellings resolve the chat (FEAT-033), and the chat reads the shared
+    library like everyone else — so a slug must still surface exactly once,
+    whichever library it lives in.
     """
     from condor.memory import paths as paths_module
     from condor.memory.skills import SkillStore
 
     monkeypatch.setattr(paths_module, "_PROJECT_ROOT", tmp_path)
-    d = tmp_path / "agents" / CHAT_SLUG / "skills" / "published"
-    d.mkdir(parents=True)
-    (d / "SKILL.md").write_text(
-        "---\nname: published\nwhen_to_use: always\nshared: true\n---\n\nSteps.\n"
-    )
+    for parent in ((CHAT_SLUG, "skills"), ("_shared", "skills")):
+        d = tmp_path / "agents" / parent[0] / parent[1] / f"in_{parent[0]}"
+        d.mkdir(parents=True)
+        (d / "SKILL.md").write_text(
+            f"---\nname: in_{parent[0]}\nwhen_to_use: always\n---\n\nSteps.\n"
+        )
 
-    assert SkillStore(None).inherited_dir is None
-    assert SkillStore(CHAT_SLUG).inherited_dir is None
-    assert SkillStore(CHAT_SLUG).list_index().count("[published]") == 1
+    assert SkillStore(None).skills_dir == SkillStore(CHAT_SLUG).skills_dir
+    index = SkillStore(CHAT_SLUG).list_index()
+    assert index.count(f"[in_{CHAT_SLUG}]") == 1
+    assert index.count("[in__shared]") == 1
 
 
 def test_memory_index_lists_the_chat_first_as_the_chat(tmp_path, monkeypatch):

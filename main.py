@@ -276,6 +276,7 @@ def register_handlers(application: Application) -> None:
         agent_callback_handler,
         agent_command,
         agent_voice_handler,
+        stop_command,
     )
     from handlers.bots import (
         bots_callback_handler,
@@ -315,6 +316,9 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("routines", routines_command))
     application.add_handler(CommandHandler("executors", executors_command))
     application.add_handler(CommandHandler("agent", agent_command))
+    # Interrupts the answer in flight without touching the session — the
+    # dashboard's Stop button, for a surface that has no buttons while streaming.
+    application.add_handler(CommandHandler("stop", stop_command))
     application.add_handler(CommandHandler("delegations", delegations_command))
     application.add_handler(CommandHandler("memory", memory_command))
     # Universal escape hatch for flows that arm a "next message is the answer"
@@ -452,6 +456,7 @@ async def register_bot_commands(application: Application) -> None:
         BotCommand("start", "Welcome message and setup"),
         BotCommand("portfolio", "View balances across exchanges"),
         BotCommand("agent", "AI trading assistant"),
+        BotCommand("stop", "Stop the answer being generated"),
         BotCommand("delegations", "Monitor background agent tasks"),
         BotCommand("memory", "Review what the assistant remembers about you"),
         BotCommand("executors", "Deploy and manage trading executors"),
