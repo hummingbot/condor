@@ -250,6 +250,12 @@ class AgentConfigRequest(BaseModel):
         description="Pin the Agent to this Hummingbot API server. Empty string "
         "clears the pin and lets it follow the chat's ambient selection.",
     )
+    agent_key: str | None = Field(
+        default=None,
+        description="The model this Agent answers on, everywhere it runs — "
+        "chat, consult, delegate and loops. Empty string clears it, falling "
+        "back to the chat's default model.",
+    )
 
 
 class CreateStrategyRequest(BaseModel):
@@ -1102,13 +1108,14 @@ async def update_agent_md(
 async def update_agent_config(
     slug: str, req: AgentConfigRequest, user: WebUser = Depends(get_current_user)
 ):
-    """Set the Agent's server pin without hand-editing front matter.
+    """Set the Agent's server pin or model without hand-editing front matter.
 
     ``AgentStore.update`` re-renders the whole front matter, so this is the same
     write the MCP ``manage_trading_agent`` tool already performs — the web layer
     simply had no door to it, which is why the UI could only offer a text editor.
     """
     from config_manager import get_config_manager
+    from handlers.agents._shared import AGENT_OPTIONS
 
     agent = _get_agent(slug)
 
@@ -1120,15 +1127,26 @@ async def update_agent_config(
     ):
         raise HTTPException(status_code=403, detail="No access")
 
+    # Picker sentinels ("openrouter:", "custom:") are drill-downs that open a
+    # model list, not startable models: stored here they would fail at every
+    # session start, in every mode the Agent runs in.
+    if req.agent_key and AGENT_OPTIONS.get(req.agent_key, {}).get("picker"):
+        raise HTTPException(
+            status_code=400, detail=f"'{req.agent_key}' is not a model, but a picker"
+        )
+
     if req.server_name is not None:
         agent.server_name = req.server_name
     if req.server_required is not None:
         agent.server_required = req.server_required
+    if req.agent_key is not None:
+        agent.agent_key = req.agent_key
     _agent_store().update(agent)
     return {
         "updated": True,
         "server_name": agent.server_name,
         "server_required": agent.server_required,
+        "agent_key": agent.agent_key,
     }
 
 

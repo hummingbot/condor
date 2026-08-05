@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import conversations
+from condor.runtime.binding import remember_model_choice
 from condor.runtime.confirmations import (
     PendingConfirmation,
     build_permission_callback,
@@ -366,12 +367,17 @@ async def _handle_start_session(
     msg: dict,
 ) -> None:
     """Open a chat on a brand new conversation."""
-    agent_key = msg.get("agent_key", DEFAULT_AGENT)
     server_name = msg.get("server_name")  # From frontend's selected server
     # A dashboard chat can be born already bound to a domain Agent. Without
     # this, "Chat" on an agent's page would have to start-then-switch, which
     # spawns two subprocesses for one click.
     agent_slug = str(msg.get("agent_slug") or "")
+    # A bound Agent brings its own model, so an omitted (or empty) key means
+    # "ask whoever is bound" — the semantics binding.resolve already has for an
+    # empty spec.agent_key. Only an unbound chat needs Condor's default named,
+    # which makes a non-empty key here a *deliberate* pick, worth remembering.
+    picked = str(msg.get("agent_key") or "")
+    agent_key = picked or ("" if agent_slug else DEFAULT_AGENT)
 
     # The conversation is minted first and *is* the slot, so the key
     # web:{user}:{conversation} is stable forever instead of being a throwaway
@@ -393,6 +399,7 @@ async def _handle_start_session(
         agent_slug=agent_slug,
         client_ref=str(msg.get("client_ref") or ""),
     )
+    remember_model_choice(user_id, agent_slug, picked)
 
 
 async def _handle_resume_conversation(
@@ -416,16 +423,27 @@ async def _handle_resume_conversation(
         await _send(ws, {"event": "error", "message": "No such conversation"})
         return
 
+    # A bound conversation resumes on its Agent's *current* model, not on
+    # whatever answered last: ``conv.agent_key`` is a record of what answered,
+    # never a pin, and honouring it here is what let a reload re-override the
+    # Agent with DEFAULT_AGENT.
+    picked = str(msg.get("agent_key") or "")
+    if conv.agent_slug:
+        agent_key = picked
+    else:
+        agent_key = picked or conv.agent_key or DEFAULT_AGENT
+
     await _start(
         ws,
         user_id,
         conv.id,
-        msg.get("agent_key") or conv.agent_key or DEFAULT_AGENT,
+        agent_key,
         msg.get("server_name") or conv.server_name,
         restored=True,
         agent_slug=conv.agent_slug,
         client_ref=str(msg.get("client_ref") or ""),
     )
+    remember_model_choice(user_id, conv.agent_slug, picked)
 
 
 async def _start(

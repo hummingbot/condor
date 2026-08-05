@@ -133,6 +133,53 @@ def resolve(
     )
 
 
+def remember_model_choice(user_id: int | None, agent_slug: str, agent_key: str) -> None:
+    """Persist a deliberate model pick where the *next* session will find it.
+
+    A specialist's model lives in its own AGENT.md, so picking one in the chat
+    moves the Agent itself — chat, consult, delegate and loop all read that
+    record. Condor's does not: ``DEFAULT_AGENT`` is read from condor/AGENT.md at
+    import and is everyone's default, so an unbound pick is the *user's*, and
+    goes to the same preference Telegram's Change LLM writes.
+
+    Silent no-op when the value already matches, when the key is a picker
+    sentinel, or when there is no user — callers pass whatever the wire said.
+
+    Called only from the web entry points that carry a user's pick. Consult,
+    delegate and loops pass concrete keys for their own plumbing reasons and
+    must not rewrite anything.
+    """
+    from handlers.agents._shared import AGENT_OPTIONS
+
+    if not agent_key or not user_id:
+        return
+    # Drill-downs, not startable models: an agent_key of "openrouter:" would
+    # fail at session start for everyone who inherited it.
+    if AGENT_OPTIONS.get(agent_key, {}).get("picker"):
+        return
+
+    try:
+        if agent_slug and agent_slug != CHAT_SLUG:
+            from condor.agents.agent import AgentStore
+
+            store = AgentStore()
+            agent = store.get(agent_slug)
+            if agent is None or agent.agent_key == agent_key:
+                return
+            agent.agent_key = agent_key
+            store.update(agent)
+            log.info("Agent %s now runs on %s", agent_slug, agent_key)
+        else:
+            from condor.preferences import load_user_data_for, set_active_agent_key
+
+            set_active_agent_key(load_user_data_for(user_id), agent_key)
+    except Exception:
+        # A chat must not fail because a preference could not be written.
+        log.warning(
+            "Could not remember model %r for %r", agent_key, agent_slug, exc_info=True
+        )
+
+
 def agent_identity_context(
     agent_slug: str, user_id: int, instructions: str, label: str = ""
 ) -> str:
