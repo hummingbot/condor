@@ -5,41 +5,15 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-from config_manager import get_config_manager
 from condor.backtest_store import get_backtest_store
+from condor.backtesting import coerce_controller_config
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
+from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["backtesting"])
-
-
-def _coerce_numeric_values(config: dict) -> dict:
-    """Coerce string values that look numeric to int/float.
-
-    Controller configs loaded from YAML sometimes store numbers as strings
-    (e.g. "100" instead of 100). The backtesting engine does arithmetic on
-    these values and will fail with 'int + str' errors if they aren't coerced.
-    """
-    out = {}
-    for k, v in config.items():
-        if isinstance(v, str):
-            # Try int first, then float
-            try:
-                out[k] = int(v)
-                continue
-            except ValueError:
-                pass
-            try:
-                out[k] = float(v)
-                continue
-            except ValueError:
-                pass
-        if isinstance(v, dict):
-            v = _coerce_numeric_values(v)
-        out[k] = v
-    return out
 
 
 class SubmitBacktestRequest(BaseModel):
@@ -65,14 +39,16 @@ async def submit_backtest_task(
     # Resolve config
     config = await client.controllers.get_controller_config(body.config_id)
     if not config:
-        raise HTTPException(status_code=404, detail=f"Config '{body.config_id}' not found")
+        raise HTTPException(
+            status_code=404, detail=f"Config '{body.config_id}' not found"
+        )
 
     result = await client.backtesting.submit_task(
         start_time=body.start_time,
         end_time=body.end_time,
         backtesting_resolution=body.backtesting_resolution,
         trade_cost=body.trade_cost,
-        config=_coerce_numeric_values(config),
+        config=coerce_controller_config(config),
     )
     return result
 
@@ -96,19 +72,23 @@ async def list_backtest_tasks(
         live_tasks = []
 
     # Merge with saved results
-    live_ids = {t["task_id"] for t in live_tasks} if isinstance(live_tasks, list) else set()
+    live_ids = (
+        {t["task_id"] for t in live_tasks} if isinstance(live_tasks, list) else set()
+    )
     saved = store.list_results(name)
 
     # Add saved results that aren't in live tasks
     for entry in saved:
         if entry["task_id"] not in live_ids:
-            live_tasks.append({
-                "task_id": entry["task_id"],
-                "status": "completed",
-                "result": entry.get("result"),
-                "config": entry.get("config"),
-                "saved": True,
-            })
+            live_tasks.append(
+                {
+                    "task_id": entry["task_id"],
+                    "status": "completed",
+                    "result": entry.get("result"),
+                    "config": entry.get("config"),
+                    "saved": True,
+                }
+            )
 
     # Mark live completed tasks as saved if they are
     if isinstance(live_tasks, list):

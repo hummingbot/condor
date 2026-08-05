@@ -13,6 +13,7 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
+from condor.backtesting import BacktestError, run_and_save
 from config_manager import get_client
 from routines.base import RoutineResult
 
@@ -818,6 +819,11 @@ def format_summary(results: dict, config: Config) -> str:
         f"Backtest: {config.config_name}",
         f"Period: {config.start_date} to {config.end_date} @ {config.resolution}",
         f"Trade cost: {config.trade_cost:.4%}",
+    ]
+    # The handle for backtest_compare and for re-rendering this exact run.
+    if config.task_id:
+        lines.append(f"Task ID: {config.task_id}")
+    lines += [
         "",
         f"Net PNL: ${net_pnl:.2f} ({net_pnl_pct * 100:.2f}%) | "
         f"Total Fees: ${total_fees:.2f} | "
@@ -833,6 +839,32 @@ def format_summary(results: dict, config: Config) -> str:
     ]
 
     return "\n".join(lines)
+
+
+def _server_name(chat_id: int | None, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """The server this run belongs to — the key the store files the result under.
+
+    Works from every seat: web and agent runs arrive on a ``WebRoutineContext``, which
+    names the server it was launched against; a Telegram chat resolves through its
+    active server preference instead.
+    """
+    from config_manager import get_config_manager, get_effective_server
+
+    launched_with = getattr(context, "server_name", None)
+    if launched_with:
+        return launched_with
+
+    user_data = getattr(context, "user_data", None)
+    if user_data is None:
+        user_data = getattr(context, "_user_data", None)
+
+    try:
+        name = get_effective_server(chat_id, user_data)
+    except Exception:
+        logger.debug("Could not resolve the active server", exc_info=True)
+        name = None
+
+    return name or get_config_manager().get_default_server() or ""
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResult:
@@ -861,37 +893,28 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     except Exception as e:
         return RoutineResult(text=f"Failed to load config: {e}")
 
-    # Coerce numeric values (YAML stores numbers as strings)
-    def coerce(d):
-        out = {}
-        for k, v in d.items():
-            if isinstance(v, str):
-                for cast in (int, float):
-                    try:
-                        v = cast(v)
-                        break
-                    except ValueError:
-                        pass
-            elif isinstance(v, dict):
-                v = coerce(v)
-            out[k] = v
-        return out
-
+    # The task API, not the sync endpoint: it is what produces the task_id the store
+    # is keyed by, so every run — chat, web or agent — is rankable by backtest_compare.
     try:
-        result = await client.backtesting.run(
-            start_time=start_ts,
-            end_time=end_ts,
-            backtesting_resolution=config.resolution,
+        task_id, task = await run_and_save(
+            client,
+            _server_name(chat_id, context),
+            ctrl_config,
+            start_ts,
+            end_ts,
+            resolution=config.resolution,
             trade_cost=config.trade_cost,
-            config=coerce(ctrl_config),
         )
+    except BacktestError as e:
+        return RoutineResult(text=str(e))
     except Exception as e:
         return RoutineResult(text=f"Backtest failed: {e}")
 
-    if not result or isinstance(result, dict) and "error" in result:
-        return RoutineResult(text=f"Backtest error: {result.get('error', 'unknown')}")
-
-    return await _render(result, config, chat_id, context)
+    # From here on the fresh run is indistinguishable from a stored one: carrying the
+    # task_id on the config is what makes the summary, the table row and a later
+    # re-render (task_id=…) all name the same record.
+    config = config.model_copy(update={"task_id": task_id})
+    return await _render(task["result"], config, chat_id, context)
 
 
 async def _render(
@@ -938,17 +961,14 @@ async def _render(
     text = format_summary(bt_results, config)
 
     # Generate web report
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder(title=f"Backtest: {config.config_name}")
-        builder.source("routine", "backtest_chart").tags(["backtest"])
-        builder.markdown(text)
-        if fig is not None:
-            builder.plotly(fig)
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}", exc_info=True)
+    builder = ReportBuilder(title=f"Backtest: {config.config_name}")
+    builder.source("routine", "backtest_chart").tags(["backtest"])
+    builder.markdown(text)
+    if fig is not None:
+        builder.plotly(fig)
+    await builder.save()
 
     return RoutineResult(text=text, chart_image=chart_bytes)
 

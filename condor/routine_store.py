@@ -113,6 +113,11 @@ class WebRoutineContext:
 
     def __init__(self, server_name: str, bot=None, chat_id: int = 0):
         self._chat_id = chat_id
+        # The server this run was launched against, readable by name. A routine that
+        # must *record* its server (backtest_chart files results under it) cannot get
+        # it from the preferences dict below: that dict is keyed "preferences" while
+        # the preference API reads "user_preferences", so nothing ever resolves it.
+        self.server_name = server_name
         self.bot = bot if bot is not None else _http_bot
         self._user_data: dict[str, Any] = {
             "preferences": {"general": {"active_server": server_name}},
