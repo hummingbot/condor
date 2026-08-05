@@ -701,17 +701,20 @@ class PydanticAIClient:
         toolsets = []
         for srv_config in self.mcp_server_configs:
             command = srv_config["command"]
-            args = srv_config.get("args", [])
+            # StdioServerParameters requires list[str]; YAML/config may yield ints
+            # (e.g. numeric hummingbot passwords) that only surface with pydantic-ai
+            # backends (lmstudio:/ollama:/openrouter:), not ACP agents.
+            args = [str(a) for a in srv_config.get("args", [])]
 
             # Inherit the parent process env (same as ACPClient) so cloud keys
             # loaded via dotenv — e.g. OPENROUTER_API_KEY — reach MCP tools like
             # get_available_models. extra_env / per-server env overlay on top.
-            env = dict(os.environ)
+            env = {k: str(v) for k, v in os.environ.items()}
             if self.extra_env:
-                env.update(self.extra_env)
+                env.update({k: str(v) for k, v in self.extra_env.items()})
             for env_entry in srv_config.get("env", []):
                 if isinstance(env_entry, dict):
-                    env[env_entry["name"]] = env_entry["value"]
+                    env[str(env_entry["name"])] = str(env_entry["value"])
 
             mcp_server = MCPServerStdio(
                 command,

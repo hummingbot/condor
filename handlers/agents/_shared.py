@@ -232,12 +232,36 @@ def _condor_mcp_args(
         os.environ.get("TELEGRAM_TOKEN", ""),
     ]
     if agent_slug:
-        args.extend(["--agent-slug", agent_slug])
+        args.extend(["--agent-slug", str(agent_slug)])
     if server_name:
-        args.extend(["--server-name", server_name])
+        args.extend(["--server-name", str(server_name)])
     if delegate_worker:
         args.append("--delegate-worker")
     return args
+
+
+def _hummingbot_mcp_args(server: dict[str, Any], server_name: str) -> list[str]:
+    """Build CLI args for the hummingbot MCP subprocess.
+
+    Username/password must be strings — YAML loads unquoted numerics as int
+    (e.g. ``password: 123``), and pydantic-ai's StdioServerParameters rejects
+    non-string args when starting LM Studio / other local-model sessions.
+    """
+    api_url = f"http://{server['host']}:{server['port']}"
+    return [
+        "run",
+        "python",
+        "-m",
+        "mcp_servers.hummingbot_api",
+        "--url",
+        api_url,
+        "--username",
+        str(server["username"]),
+        "--password",
+        str(server["password"]),
+        "--server-name",
+        str(server_name),
+    ]
 
 
 def build_mcp_servers_for_session(
@@ -314,25 +338,10 @@ def build_mcp_servers_for_session(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
-
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": [
-            "run",
-            "python",
-            "-m",
-            "mcp_servers.hummingbot_api",
-            "--url",
-            api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
-            "--server-name",
-            server_name,
-        ],
+        "args": _hummingbot_mcp_args(server, server_name),
         "env": [],
     }
 
