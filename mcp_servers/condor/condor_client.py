@@ -30,9 +30,9 @@ async def call_main_api(
         timeout = TIMEOUTS.mcp_call
 
     try:
-        ip = ipaddress.ip_address(host)
+        ip = ipaddress.ip_address(BIND_HOST)
         if ip.version == 6:
-            host = f"[{host}]"
+            BIND_HOST = f"[{BIND_HOST}]"
     except ValueError:
         pass
 
