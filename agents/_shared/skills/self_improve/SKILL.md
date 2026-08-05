@@ -1,14 +1,14 @@
 ---
-name: capture_insights
-description: Real-time reflex for capturing user feedback, preferences, and workflow
-  patterns as they happen
+name: self_improve
+description: Real-time reflex for improving yourself — turn user feedback, preferences,
+  and workflow patterns into memories and skills as they happen
 when_to_use: After any feedback moment in a conversation — a correction, a stated
   preference, a missed pattern, a better flow discovered. Do NOT defer to end of session.
 created: '2026-08-05T09:16:13Z'
 source: chat
 ---
 
-## Capture Insights — Real-Time Reflex
+## Self-Improve — Real-Time Reflex
 
 Run this checklist immediately after any feedback moment. Do NOT accumulate and review at end of session (token-expensive and easy to forget).
 
