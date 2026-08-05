@@ -49,6 +49,37 @@ class _EchoClient:
         yield PromptDone(stop_reason="end_turn")
 
 
+class _GatedClient(_EchoClient):
+    """A turn that hangs until released — or until it is cancelled."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.finished: list[str] = []
+        self.aborts = 0
+        self._release = asyncio.Event()
+        self._cancelled = False
+
+    async def abort_prompt(self):
+        self.aborts += 1
+        self._cancelled = True
+        self._release.set()
+
+    def finish_turn(self):
+        self._release.set()
+
+    async def prompt_stream(self, text):
+        self.prompts.append(text)
+        self._release.clear()
+        self._cancelled = False
+        yield TextChunk(text=f"answering {text}")
+        await self._release.wait()
+        if self._cancelled:
+            yield PromptDone(stop_reason="cancelled")
+        else:
+            self.finished.append(text)
+            yield PromptDone(stop_reason="end_turn")
+
+
 class _RecordingSink:
     def __init__(self):
         self.opened = 0
@@ -90,8 +121,21 @@ async def _open_session() -> tuple[_EchoClient, str]:
     return _EchoClient.last, info.conversation_id
 
 
+async def _collect(stream) -> list:
+    return [event async for event in stream]
+
+
 def _turns(conv_id: str) -> list:
     return conversations.read_transcript(7, conv_id, limit=0)
+
+
+async def _until_busy() -> None:
+    for _ in range(400):
+        session = session_module.get_session(KEY)
+        if session and session.is_busy:
+            return
+        await asyncio.sleep(0.005)
+    raise AssertionError("session never became busy")
 
 
 # ── Liveness ──
@@ -280,6 +324,128 @@ def test_a_typed_turn_is_still_recorded_as_the_user(registry):
     assert opening.role == "user"
     assert opening.kind == ""
     assert opening.text == "hello"
+
+
+# ── Sharing the session with the human ──
+
+
+@pytest.fixture
+def gated(registry, monkeypatch):
+    monkeypatch.setattr(session_module, "ACPClient", _GatedClient)
+    return registry
+
+
+def test_a_wake_waits_its_turn_behind_an_answer_in_flight(gated):
+    """``queue``, never ``steer``: a wake must not take a slot from the human."""
+
+    async def scenario():
+        _client, conv_id = await _open_session()
+        client = _GatedClient.last
+
+        typed = asyncio.create_task(
+            _collect(runtime.prompt(KEY, PromptRequest(text="typed"), on_busy="queue"))
+        )
+        await _until_busy()
+
+        woken = asyncio.create_task(
+            wake.resume_session(
+                session_key=str(KEY),
+                conversation_id=conv_id,
+                text="woken",
+                kind="resume",
+            )
+        )
+        await asyncio.sleep(0.05)
+        # The agent has only ever been asked the human's question.
+        assert client.prompts == ["typed"]
+
+        client.finish_turn()
+        await asyncio.wait_for(typed, timeout=5)
+        await _until_busy()
+        client.finish_turn()
+        await asyncio.wait_for(woken, timeout=5)
+        return client, conv_id
+
+    client, conv_id = asyncio.run(scenario())
+
+    assert client.finished == ["typed", "woken"]
+    assert [(t.role, t.kind) for t in _turns(conv_id)] == [
+        ("user", ""),
+        ("assistant", ""),
+        ("system", "resume"),
+        ("assistant", ""),
+    ]
+
+
+def test_a_user_message_sent_during_a_wake_steers_it_aside(gated):
+    """The human wins. Their message is the one that gets answered."""
+
+    async def scenario():
+        _client, conv_id = await _open_session()
+        client = _GatedClient.last
+
+        woken = asyncio.create_task(
+            wake.resume_session(
+                session_key=str(KEY),
+                conversation_id=conv_id,
+                text="woken",
+                kind="resume",
+            )
+        )
+        await _until_busy()
+
+        typed = asyncio.create_task(
+            _collect(
+                runtime.prompt(
+                    KEY, PromptRequest(text="actually, stop"), on_busy="steer"
+                )
+            )
+        )
+        await asyncio.wait_for(woken, timeout=5)
+
+        await _until_busy()
+        client.finish_turn()
+        await asyncio.wait_for(typed, timeout=5)
+        return client
+
+    client = asyncio.run(scenario())
+
+    assert client.aborts == 1
+    assert client.prompts == ["woken", "actually, stop"]
+    assert client.finished == ["actually, stop"]
+
+
+def test_abort_ends_a_wake_turn(gated):
+    """Dashboard Stop and /stop act on the session, so they reach a wake too."""
+
+    async def scenario():
+        _client, conv_id = await _open_session()
+        client = _GatedClient.last
+
+        woken = asyncio.create_task(
+            wake.resume_session(
+                session_key=str(KEY),
+                conversation_id=conv_id,
+                text="woken",
+                kind="resume",
+            )
+        )
+        await _until_busy()
+        await runtime.abort(KEY)
+        result = await asyncio.wait_for(woken, timeout=5)
+        return client, result, conv_id
+
+    client, result, conv_id = asyncio.run(scenario())
+
+    assert result is True
+    assert client.aborts == 1
+    assert client.finished == []
+    # The half-written turn is still recorded -- the same guarantee a typed
+    # turn gets when the user stops it.
+    assert [(t.role, t.kind) for t in _turns(conv_id)] == [
+        ("system", "resume"),
+        ("assistant", ""),
+    ]
 
 
 # ── Depth-1 guard ──

@@ -9,6 +9,7 @@ result back to the conversation that asked, and every other outcome does not.
 import asyncio
 
 import pytest
+from fastapi import HTTPException
 
 from condor.agents import agent as agent_module
 from condor.agents import consult as consult_module
@@ -16,6 +17,10 @@ from condor.agents import delegate as delegate_module
 from condor.agents.delegate import start_delegation
 from condor.runtime import wake
 from condor.runtime.registry_file import read_status
+from condor.web.models import WebUser
+from condor.web.routes.agents import DelegateRequest, delegate_agent
+
+CALLER = WebUser(id=1, role="user")
 
 
 class _FakeBot:
@@ -339,6 +344,79 @@ def test_a_resume_without_provenance_is_a_no_op(tmp_path, monkeypatch, wakes):
     asyncio.run(scenario())
 
     assert wakes == []
+
+
+# ── Slice 6: the depth-1 guard ──
+
+
+@pytest.fixture
+def route(tmp_path, monkeypatch):
+    """The delegate route with the runtime lookup stubbed to one conversation."""
+    _agent_root(tmp_path, monkeypatch)
+    monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
+    monkeypatch.setattr(wake, "_in_flight", set())
+
+    async def fake_conversation_for_session(session_key):
+        return "conv-1" if session_key else ""
+
+    monkeypatch.setattr(
+        "condor.web.routes.agents._conversation_for_session",
+        fake_conversation_for_session,
+    )
+    return None
+
+
+def _post(on_complete="notify", session_key="web:1:conv-1"):
+    async def scenario():
+        result = await delegate_agent(
+            "scout",
+            DelegateRequest(
+                task="scan pools",
+                chat_id=42,
+                session_key=session_key,
+                on_complete=on_complete,
+            ),
+            user=CALLER,
+        )
+        dt = delegate_module.get_delegation(result["task_id"])
+        await _drain(dt)
+        return dt
+
+    return asyncio.run(scenario())
+
+
+def test_a_delegation_started_mid_wake_is_forced_back_to_notify(route, wakes):
+    """A wake that could start a resuming delegation could keep waking itself."""
+    wake._in_flight.add("conv-1")
+
+    dt = _post(on_complete="resume")
+
+    assert dt.on_complete == "notify"
+    assert wakes == []
+
+
+def test_the_same_call_outside_a_wake_keeps_resume(route, wakes):
+    dt = _post(on_complete="resume")
+
+    assert dt.on_complete == "resume"
+    assert len(wakes) == 1
+
+
+def test_the_guard_does_not_confuse_conversations(route, wakes):
+    """Another conversation being mid-wake says nothing about this one."""
+    wake._in_flight.add("some-other-conversation")
+
+    dt = _post(on_complete="resume")
+
+    assert dt.on_complete == "resume"
+
+
+def test_the_route_rejects_an_unknown_on_complete(route, wakes):
+    with pytest.raises(HTTPException) as excinfo:
+        _post(on_complete="explode")
+
+    assert excinfo.value.status_code == 400
+    assert "on_complete" in str(excinfo.value.detail)
 
 
 def test_a_wake_that_blows_up_does_not_cost_the_notification(

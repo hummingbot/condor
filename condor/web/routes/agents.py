@@ -1143,6 +1143,7 @@ async def delegate_agent(
     ``/consult``.
     """
     from condor.agents.delegate import ON_COMPLETE_CHOICES, start_delegation
+    from condor.runtime import wake
     from config_manager import get_config_manager
 
     _get_agent(slug)
@@ -1161,6 +1162,21 @@ async def delegate_agent(
     ):
         raise HTTPException(status_code=403, detail="No access")
 
+    conversation_id = await _conversation_for_session(req.session_key)
+
+    # Depth 1, structurally. A delegate worker cannot delegate at all
+    # (FEAT-032), and a delegation started from *inside* a wake turn is forced
+    # back to "notify" here -- otherwise a chain of resumes could keep waking
+    # itself. Between the two the recursion is bounded with no counter, no TTL
+    # and no rate limiter.
+    on_complete = req.on_complete
+    if on_complete == "resume" and wake.is_waking(conversation_id):
+        log.info(
+            "Forcing on_complete=notify: conversation %s is already mid-wake",
+            conversation_id,
+        )
+        on_complete = "notify"
+
     # Web callers always act as themselves (mirror consult): honoring
     # ``req.user_id`` here would let any authenticated session run a delegation
     # under another user's memory scope and server grants.
@@ -1171,9 +1187,9 @@ async def delegate_agent(
         server_name=req.server_name,
         task=req.task,
         timeout_s=req.timeout_s,
-        conversation_id=await _conversation_for_session(req.session_key),
+        conversation_id=conversation_id,
         session_key=req.session_key,
-        on_complete=req.on_complete,
+        on_complete=on_complete,
     )
     return {"task_id": dt.task_id, "status": dt.status}
 
