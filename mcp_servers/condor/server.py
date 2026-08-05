@@ -331,8 +331,9 @@ async def manage_routines(
     action: str,
     name: str | None = None,
     config: dict | None = None,
-    strategy_id: str | None = None,
+    agent: str | None = None,
     code: str | None = None,
+    strategy_id: str | None = None,
 ) -> dict:
     """Manage and run Condor routines (auto-discoverable Python scripts).
 
@@ -344,27 +345,35 @@ async def manage_routines(
     - "stop": Stop a running routine instance (requires name=instance_id)
     - "list_instances": List all running/scheduled routine instances
 
-    Actions -- Agent-Local Routine CRUD (requires strategy_id or CONDOR_AGENT_SLUG):
+    Actions -- Agent-Local Routine CRUD (requires agent or CONDOR_AGENT_SLUG):
     - "create_routine": Create a new agent-local routine (requires name, code)
     - "read_routine": Read source code of a routine (requires name)
     - "edit_routine": Update an agent-local routine (requires name, code)
     - "delete_routine": Delete an agent-local routine (requires name)
 
-    Agent-local routines live in agents/{slug}/routines/ and are only
-    visible to that strategy's agent. They follow the same pattern as global
+    Agent-local routines live in agents/{slug}/routines/ and are visible only to
+    that AGENT — they are shared across all of its strategies, there is no
+    per-strategy routine library. They follow the same pattern as global
     routines: a Config(BaseModel) class and an async run(config, context) function.
 
     Args:
         action: The action to perform.
         name: Routine name (required for all except list/list_instances). For "stop", pass the instance_id as name.
         config: Config overrides for run/start (optional, merged with defaults).
-        strategy_id: Strategy ID for agent-local routine CRUD operations.
+        agent: Slug of the agent whose routine library to target (agent-local
+            CRUD, and "list"/"run" against another agent's routines). Omit to use
+            the current assistant's own library.
         code: Python source code for create_routine / edit_routine.
+        strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
+            composite "agent_slug.strategy_slug" key resolves to its owning
+            agent; prefer passing that agent's slug as `agent`.
 
     Returns:
         Action-specific result dict.
     """
-    return await routines.manage_routines(action, name, config, strategy_id, code)
+    return await routines.manage_routines(
+        action, name, config, agent, code, strategy_id
+    )
 
 
 @mcp.tool()
@@ -580,11 +589,14 @@ async def manage_memory(
     query: str | None = None,
     max_entries: int = 30,
 ) -> dict:
-    """Manage your persistent memory ABOUT THE USER (shared across sessions and agents).
+    """Manage your persistent memory ABOUT THE USER (yours alone, across sessions).
 
-    This is what you remember about the user: their preferences, stable facts,
-    feedback they gave you, and reference pointers. It is keyed by the user (not
-    the chat), so the /agent chat and the user's trading agents all share it.
+    This is what YOU remember about the user: their preferences, stable facts,
+    feedback they gave you, and reference pointers. It persists across sessions
+    and is keyed by (assistant, user) — so each agent has its OWN store: what the
+    chat writes is invisible to the trading agents and vice versa. Write what
+    matters for your own work; do not assume another agent will see it. (Skills,
+    by contrast, CAN be published across agents — see manage_skill's `shared`.)
     The index of your memories is auto-injected into your context as
     [USER MEMORY]; use "read" to pull the full body of a specific memory.
 
@@ -630,6 +642,7 @@ async def manage_skill(
     references_routine: str | None = None,
     query: str | None = None,
     max_entries: int = 30,
+    agent: str | None = None,
     strategy_id: str | None = None,
     file: str | None = None,
     content: str | None = None,
@@ -659,16 +672,20 @@ async def manage_skill(
     slug and stays inside the skill folder. ("write_file" only touches companion
     files — edit the playbook body itself with "edit".)
 
-    Skills are scoped per-assistant: a launched agent WRITES only to its own
-    library. From the chat you can target a specific agent's local skill library
-    with strategy_id (an "agent_slug.strategy_slug" key, or a bare agent slug) —
-    use this to author or inspect an agent's skills while building it. Without
-    strategy_id the current assistant's library is used.
+    Skills are scoped PER-AGENT (one library per agent, shared by everyone using
+    it; there is no per-strategy library). A launched agent WRITES only to its
+    own. From the chat, pass `agent="<slug>"` to author or inspect a specific
+    agent's library — DO THIS whenever the playbook belongs to a domain agent
+    rather than to the chat, otherwise the skill silently lands in Condor's own
+    library and only the chat sees it. Without `agent`, the current assistant's
+    library is used.
 
-    An agent also READS the playbooks Condor publishes: a chat skill created with
-    shared=True appears in every agent's index as if it were its own (marked
-    `inherited` on read) — that is how a playbook like `routine_cookbook` reaches
-    every agent. Inherited skills are read-only: to specialize one, "create" a
+    Beside those per-agent libraries there is ONE shared library that every
+    assistant also reads, so a playbook like `routine_cookbook` reaches everyone.
+    Publication is the library a skill lives in, not a flag: `shared=True` MOVES
+    it there (companion files included) and `shared=False` moves it back. Only
+    Condor may publish — for an agent the flag is ignored. Shared skills are
+    read-only to agents (read reports `inherited`): to specialize one, "create" a
     local skill with the SAME name and it shadows the published one. Publish
     deliberately — a shared skill lands in every agent's context.
 
@@ -691,13 +708,16 @@ async def manage_skill(
         references_routine: Optional routine name to link; "" clears it (create/edit).
         query: Search string (for search).
         max_entries: Cap for search results (default 30).
-        strategy_id: Target a specific agent's local skill library (chat-side
-            authoring). Composite "agent_slug.strategy_slug" key or bare agent slug.
+        agent: Slug of the agent whose skill library to target (chat-side
+            authoring). Omit to use the current assistant's own library.
+        strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
+            composite "agent_slug.strategy_slug" key resolves to its owning
+            agent; prefer passing that agent's slug as `agent`.
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
-        shared: Publish this playbook to every agent (create/edit). Only honored
-            in Condor's own library — ignored when targeting an agent's. Omit to
-            leave publication unchanged.
+        shared: Publish this playbook to every assistant by moving it into the
+            shared library (create/edit); False moves it back. Condor only —
+            ignored for an agent. Omit to leave publication unchanged.
 
     Returns:
         Action-specific result dict.
@@ -711,6 +731,7 @@ async def manage_skill(
         references_routine=references_routine,
         query=query,
         max_entries=max_entries,
+        agent=agent,
         strategy_id=strategy_id,
         file=file,
         content=content,

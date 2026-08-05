@@ -142,10 +142,25 @@ async def manage_backtest_tasks(
         result = await client.backtesting.get_task(task_id)
         status = result.get("status", "unknown")
         output = f"Task {task_id[:8]}  status={status}"
-        if status == "completed" and "results" in result:
-            output += "\n\n" + _format_backtest_results(
-                result.get("config_name", "?"), result["results"]
-            )
+
+        # GET /backtesting/tasks/{id} returns BacktestTask.to_dict(), which nests the
+        # payload under "result" (SINGULAR) and carries no "config_name" at all:
+        #   {"task_id", "status", "config", "created_at", ..., "error", "result"}
+        # This used to look for "results" (plural) -- the key that lives one level DOWN,
+        # inside the payload -- so it never matched and a finished async backtest
+        # rendered as a bare "status=completed" with no metrics. That made async
+        # backtests look write-only and pushed callers back to the sync endpoint.
+        payload = result.get("result")
+        if payload:
+            submitted = result.get("config") or {}
+            controller_config = submitted.get("config") if isinstance(submitted, dict) else None
+            name = (controller_config or {}).get("id") if isinstance(controller_config, dict) else None
+            output += "\n\n" + _format_backtest_results(name or task_id, payload)
+        elif status == "failed":
+            output += f"\n\nError: {result.get('error') or 'unknown error'}"
+        elif status in ("pending", "running"):
+            output += "\n\nStill running -- poll again."
+
         return {"action": "get", "task": result, "formatted_output": output}
 
     elif action == "delete":

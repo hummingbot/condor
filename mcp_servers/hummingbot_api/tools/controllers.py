@@ -52,10 +52,14 @@ def _validate_config_against_template(
             + str(config_data.get("controller_name", "..."))
             + "') to see all available parameters and their defaults."
         )
-    # Note: unknown_fields are NOT raised as an error — the template returned by the
-    # backend only includes base-class fields and misses controller-specific params
-    # (e.g. ema_fast, ema_slow on EmaTrendV1Config). The backend's own
-    # validate_controller_config call below is the authoritative check.
+    # Note: unknown_fields are NOT raised as an error. On backends whose
+    # load_controller_config_class still resolves a controller to its *base* config class
+    # (it matched sibling bases and took whichever sorted first by name, so e.g.
+    # ema_trend_v1 -> DirectionalTradingControllerConfigBase), this template lists only
+    # base fields and every controller-specific param looks "unknown". Raising here would
+    # block valid configs. The backend's own validate_controller_config call below is the
+    # authoritative check -- and on a patched backend it is also the one that stops being
+    # a false negative.
 
 
 async def manage_controllers(
@@ -312,8 +316,11 @@ async def modify_controllers(
                                f"Set confirm_override=True to update it."),
                 }
 
+            # POST /controllers/{type}/{name} expects a Controller body -- an OBJECT with a
+            # "content" field -- not a bare source string. Passing the string through made
+            # FastAPI reject the body with 422 for every controller upload.
             result = await client.controllers.create_or_update_controller(
-                controller_type, controller_name, controller_code
+                controller_type, controller_name, {"content": controller_code, "type": controller_type}
             )
 
             return {
