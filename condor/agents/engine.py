@@ -109,6 +109,12 @@ class TickEngine:
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
+    # Session canvas + live report (FEAT-036). Both None for experiments, which
+    # keep no journal and therefore no narrative to render.
+    _session_report: "SessionReport | None" = field(
+        default=None, init=False, repr=False
+    )
+    _nudge: "NudgeTracker | None" = field(default=None, init=False, repr=False)
     # The live per-tick ACP client, held so stop() can reap it if the tick's own
     # finally is skipped (e.g. cancelled mid-await). None between ticks.
     _active_client: "ACPClient | PydanticAIClient | None" = field(
@@ -175,6 +181,23 @@ class TickEngine:
                 namespace,
                 self.session_dir,
                 declared=declared_names(self.config, namespace),
+            )
+
+        # The canvas and its report exist only for loop sessions: an experiment
+        # has no session dir to write a canvas to and no history worth charting.
+        if not self.is_experiment and self.config.get("canvas_enabled", True):
+            from .canvas import NudgeTracker
+            from .session_report import SessionReport
+
+            self._nudge = NudgeTracker(
+                nudge_ticks=self.config.get("canvas_nudge_ticks", 12),
+                band_usd=self.config.get("canvas_band_usd", 25.0),
+            )
+            self._session_report = SessionReport(
+                self.agent.slug,
+                self.strategy.slug,
+                self.session_num,
+                frequency_sec=self.config.get("frequency_sec", 60),
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
@@ -485,6 +508,27 @@ class TickEngine:
             pass
 
         next_tick = self.journal.tick_count + 1 if self.journal else 1
+
+        # Session canvas (FEAT-036): the agent's own narrative, echoed back so it
+        # can revise what is now wrong. The nudge is pure bookkeeping over state
+        # we already hold, so deciding to nudge costs nothing.
+        canvas_text = ""
+        canvas_nudge = ""
+        if self._nudge is not None:
+            from . import canvas as canvas_mod
+
+            try:
+                canvas_text = canvas_mod.read_canvas(self.session_dir)
+                canvas_nudge = self._nudge.next(
+                    tick=next_tick,
+                    last_revised_tick=canvas_mod.last_revised_tick(self.session_dir),
+                    open_count=live_open_count,
+                    total_pnl=float(self._last_skill_data.get("total_pnl", 0.0) or 0.0),
+                    had_error=bool(self._last_error),
+                )
+            except Exception:
+                log.exception("TickEngine %s: canvas read failed", self.agent_id)
+
         prompt = build_tick_prompt(
             agent=self.agent,
             strategy=self.strategy,
@@ -500,6 +544,8 @@ class TickEngine:
             user_memory=user_memory,
             skills_index=skills_index,
             ledger=self.ledger,
+            canvas=canvas_text,
+            canvas_nudge=canvas_nudge,
         )
 
         # Inject pending user directives
@@ -607,6 +653,24 @@ class TickEngine:
                 open_count=skill_executors,
                 last_action=action_brief,
             )
+
+            # Live session report (FEAT-036). Deterministic render over data we
+            # already hold — no tokens. The guard is load-bearing: a charting or
+            # report-index failure must never take down a trading tick.
+            if self._session_report is not None:
+                try:
+                    await self._session_report.update(
+                        info=self.get_info(),
+                        journal=self.journal,
+                        session_dir=self.session_dir,
+                        executors=self._last_skill_data.get("all_executors")
+                        or self._last_skill_data.get("executors")
+                        or [],
+                    )
+                except Exception:
+                    log.exception(
+                        "TickEngine %s: session report update failed", self.agent_id
+                    )
 
             log.info(
                 "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
@@ -824,6 +888,8 @@ class TickEngine:
             "status": self.status,
             "tick_count": summary["total_ticks"],
             "daily_pnl": sd.get("total_pnl", summary["daily_pnl"]),
+            "realized_pnl": sd.get("realized_pnl", 0.0),
+            "unrealized_pnl": sd.get("unrealized_pnl", 0.0),
             "total_volume": sd.get("total_volume", summary.get("total_volume", 0)),
             "total_exposure": sd.get("total_exposure", summary["total_exposure"]),
             "open_executors": len(sd.get("executors", [])) or summary["open_executors"],
