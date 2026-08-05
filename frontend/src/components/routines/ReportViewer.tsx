@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
+import { ReportFrame } from "@/components/routines/ReportFrame";
 import { type ReportSummary } from "@/lib/api";
 
 interface ReportViewerProps {
@@ -172,12 +173,7 @@ export function ReportViewer({
 
       {/* iframe */}
       <div className="relative flex-1">
-        <iframe
-          src={`/reports/${report.filename}`}
-          className="h-full w-full border-0"
-          title={report.title}
-          sandbox="allow-scripts allow-popups"
-        />
+        <ReportFrame reportId={report.id} title={report.title} />
         {/* Fullscreen chevron overlays */}
         {fullscreen && hasPrev && (
           <button

@@ -1,10 +1,15 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 
 import { useAuth } from "@/lib/auth";
-import type { BotsPageResponse, ControllerInfo, ControllerPerformanceHistoryResponse, ControllerPerformanceSnapshot } from "@/lib/api";
-import { candleStore } from "@/lib/candle-store";
-import { CondorWebSocket } from "@/lib/websocket";
+import {
+  acquireSocket,
+  getSocketVersion,
+  onSocketConnect,
+  releaseSocket,
+  subscribeChannel,
+  unsubscribeChannel,
+} from "@/lib/shared-socket";
+import type { CondorWebSocket } from "@/lib/websocket";
 
 /**
  * Filter out candle channels — those are managed exclusively by candleStore.
@@ -14,225 +19,74 @@ function nonCandleChannels(channels: string[]): string[] {
 }
 
 /**
- * Merge incoming performance snapshots into existing ones, deduplicating by
- * `controller_id:timestamp`.
+ * Subscribe to Condor WS channels for as long as the calling component is mounted.
+ *
+ * Every caller shares one connection (see `lib/shared-socket.ts`); this hook
+ * only holds references — one on the socket, one per channel — and hands back
+ * the shared instance for callers that want to read raw frames themselves.
  */
-function mergeSnapshots(
-  existing: ControllerPerformanceSnapshot[],
-  incoming: ControllerPerformanceSnapshot[],
-): ControllerPerformanceSnapshot[] {
-  const merged = [...existing];
-  const seen = new Set(existing.map((s) => `${s.controller_id}:${s.timestamp}`));
-  for (const snap of incoming) {
-    const key = `${snap.controller_id}:${snap.timestamp}`;
-    if (!seen.has(key)) {
-      merged.push(snap);
-      seen.add(key);
-    }
-  }
-  return merged;
-}
-
 export function useCondorWebSocket(
   channels: string[],
   server: string | null,
 ) {
   const { token } = useAuth();
-  const queryClient = useQueryClient();
   const wsRef = useRef<CondorWebSocket | null>(null);
-  const [wsVersion, setWsVersion] = useState(0);
+  const [wsVersion, setWsVersion] = useState(getSocketVersion);
   const prevChannelsRef = useRef<Set<string>>(new Set());
 
-  // ── Effect 1: Create / destroy WS (stable — only depends on token + server) ──
+  // ── Effect 1: Hold a reference on the shared socket ──
   useEffect(() => {
-    if (!token || !server) return;
+    if (!token) return;
 
-    const ws = new CondorWebSocket(token);
-    wsRef.current = ws;
+    wsRef.current = acquireSocket(token);
 
-    // Wire candle store singleton to this WS instance
-    candleStore.setWs(ws);
-
-    ws.onMessage((channel, data) => {
-      const prefix = channel.split(":")[0];
-
-      // Candle data is managed by candle-store.ts — only update status here
-      if (prefix === "candles") {
-        const parts = channel.split(":");
-        if (parts.length >= 5) {
-          const [, srv, conn, pr, iv] = parts;
-          const payload = data as { type: string; message?: string };
-          if (payload.type === "error") {
-            queryClient.setQueryData(
-              ["candles-status", srv, conn, pr, iv],
-              { status: "error", message: payload.message ?? "Unknown error" },
-            );
-          } else if (payload.type === "candle_update" || payload.type === "candles") {
-            queryClient.setQueryData(
-              ["candles-status", srv, conn, pr, iv],
-              { status: "connected" },
-            );
-          }
-        }
-        return;
-      }
-
-      if (prefix === "portfolio") {
-        queryClient.setQueryData(["portfolio", server], data);
-      } else if (prefix === "bots") {
-        queryClient.setQueryData(["bots", server], (old: BotsPageResponse | undefined) => {
-          const incoming = data as BotsPageResponse;
-          if (!incoming?.controllers) return old ?? data;
-          if (!old?.controllers?.length) return incoming;
-
-          // Key by controller_id (stable) — controller_name may differ between REST and WS
-          const oldMap = new Map<string, ControllerInfo>();
-          for (const c of old.controllers) {
-            const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
-            oldMap.set(key, c);
-          }
-          const oldBotMap = new Map(old.bots.map((b) => [b.bot_name, b]));
-
-          return {
-            ...incoming,
-            controllers: incoming.controllers.map((c) => {
-              const key = `${c.bot_name}-${c.controller_id || c.controller_name}`;
-              const prev = oldMap.get(key);
-              if (!prev) return c;
-              return {
-                ...c,
-                config: Object.keys(c.config || {}).length ? c.config : prev.config,
-                deployed_at: c.deployed_at ?? prev.deployed_at,
-                connector: c.connector || prev.connector,
-                trading_pair: c.trading_pair || prev.trading_pair,
-                controller_name: prev.controller_name || c.controller_name,
-                controller_id: prev.controller_id || c.controller_id,
-              };
-            }),
-            bots: incoming.bots.map((b) => {
-              const prev = oldBotMap.get(b.bot_name);
-              return { ...b, deployed_at: b.deployed_at ?? prev?.deployed_at ?? null };
-            }),
-          };
-        });
-      } else if (prefix === "executors") {
-        queryClient.setQueryData(["executors", server, ""], data);
-        // Also update any filtered executor queries (e.g. ["executors", server, "main", pair])
-        const allExecs = data as { controller_id?: string; trading_pair?: string }[];
-        if (Array.isArray(allExecs)) {
-          const cache = queryClient.getQueryCache().findAll({ queryKey: ["executors", server] });
-          for (const entry of cache) {
-            const key = entry.queryKey as string[];
-            // Skip the unfiltered key (already set above)
-            if (key.length <= 3 && key[2] === "") continue;
-            // key format: ["executors", server, controllerId, pair]
-            if (key.length === 4) {
-              const [, , cid, tp] = key;
-              const filtered = allExecs.filter(
-                (ex) => (!cid || ex.controller_id === cid) && (!tp || ex.trading_pair === tp),
-              );
-              queryClient.setQueryData(key, filtered);
-            }
-          }
-        }
-        const execs = data as unknown[];
-        if (Array.isArray(execs)) {
-          queryClient.setQueryData(
-            ["executors-infinite", server],
-            (old: { pages?: { executors: unknown[]; next_cursor: string | null }[]; pageParams?: unknown[] } | undefined) => {
-              if (!old?.pages?.length) return old;
-              const firstPage = old.pages[0];
-              const limit = firstPage.executors.length || 50;
-              const nextFirst = {
-                ...firstPage,
-                executors: execs.slice(0, limit),
-              };
-              return { ...old, pages: [nextFirst, ...old.pages.slice(1)] };
-            },
-          );
-        }
-      } else if (prefix === "controller_perf") {
-        // Update the "all controllers" sparkline cache
-        const incoming = data as { snapshots?: ControllerPerformanceSnapshot[] };
-        if (incoming?.snapshots) {
-          queryClient.setQueryData(
-            ["controller-perf-history-all", server],
-            (old: ControllerPerformanceHistoryResponse | undefined) => {
-              if (!old) return old;
-              // Append new snapshots and deduplicate by controller_id+timestamp
-              const merged = mergeSnapshots(old.snapshots ?? [], incoming.snapshots!);
-              return { ...old, snapshots: merged };
-            },
-          );
-
-          // Also update per-controller history caches
-          const byController = new Map<string, ControllerPerformanceSnapshot[]>();
-          for (const snap of incoming.snapshots) {
-            const cid = snap.controller_id || snap.controller_name;
-            if (!cid) continue;
-            const arr = byController.get(cid) ?? [];
-            arr.push(snap);
-            byController.set(cid, arr);
-          }
-          for (const [cid, snaps] of byController) {
-            queryClient.setQueryData(
-              ["controller-perf-history", server, cid],
-              (old: ControllerPerformanceHistoryResponse | undefined) => {
-                if (!old) return old;
-                const merged = mergeSnapshots(old.snapshots ?? [], snaps);
-                return { ...old, snapshots: merged };
-              },
-            );
-          }
-        }
-      } else if (prefix === "orderbook") {
-        const parts = channel.split(":");
-        if (parts.length >= 4) {
-          const [, srv, connector, pair] = parts;
-          queryClient.setQueryData(["order-book", srv, connector, pair], data);
-        }
-      }
-    });
-
-    // Notify React on each (re)connect. The WS fires onConnect from its onopen
-    // handler after bumping `version`, covering both the initial connect and
-    // every reconnect — no polling needed.
-    ws.onConnect(() => setWsVersion((v) => v + 1));
-
-    ws.connect();
+    // Mounting into an already-open socket needs no catch-up: `wsVersion` was
+    // seeded from the live version at render, and `connect()` can only reach
+    // `onopen` in a later task, so no bump can slip past this registration.
+    const offConnect = onSocketConnect(() => setWsVersion(getSocketVersion()));
 
     return () => {
-      candleStore.setWs(null);
-      ws.disconnect();
+      offConnect();
       wsRef.current = null;
-      prevChannelsRef.current = new Set();
+      releaseSocket();
     };
-  }, [token, server]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token]);
 
   // ── Effect 2: Diff channels — subscribe/unsubscribe without reconnecting ──
   useEffect(() => {
-    const ws = wsRef.current;
-    if (!ws || !server) return;
-
     // Bare channel names (e.g. "bots") need server prefix ("bots:local")
-    // to match the backend broadcast channel format.
-    const resolved = nonCandleChannels(channels).map((ch) =>
-      ch.includes(":") ? ch : `${ch}:${server}`,
-    );
+    // to match the backend broadcast channel format. Without a server nothing
+    // can be resolved, so the previous set is simply released.
+    const resolved = server
+      ? nonCandleChannels(channels).map((ch) =>
+          ch.includes(":") ? ch : `${ch}:${server}`,
+        )
+      : [];
     const newSet = new Set(resolved);
     const oldSet = prevChannelsRef.current;
 
-    // Subscribe new channels
+    // Diff rather than release-and-reacquire: a channel both sets share must
+    // not flap on the wire just because a sibling channel was added.
     for (const ch of newSet) {
-      if (!oldSet.has(ch)) ws.subscribe(ch);
+      if (!oldSet.has(ch)) subscribeChannel(ch);
     }
-    // Unsubscribe removed channels
     for (const ch of oldSet) {
-      if (!newSet.has(ch)) ws.unsubscribe(ch);
+      if (!newSet.has(ch)) unsubscribeChannel(ch);
     }
 
     prevChannelsRef.current = newSet;
   }, [channels.join(","), server]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Effect 3: Release every held channel on unmount ──
+  // Separate from the diffing effect on purpose: that one re-runs whenever the
+  // channel list changes, and a cleanup there would drop and re-take references
+  // the component never actually stopped needing.
+  useEffect(() => {
+    return () => {
+      for (const ch of prevChannelsRef.current) unsubscribeChannel(ch);
+      prevChannelsRef.current = new Set();
+    };
+  }, []);
 
   return { wsRef, wsVersion };
 }

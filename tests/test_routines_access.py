@@ -26,9 +26,12 @@ class FakeRoutineStore:
     def __init__(self):
         self.execute_calls = []
         self.schedule_calls = []
+        self.continuous_calls = []
+        self.agents = []
 
-    async def execute(self, routine_name, config, server_name, user_id=0):
+    async def execute(self, routine_name, config, server_name, user_id=0, agent=""):
         self.execute_calls.append((routine_name, server_name, user_id))
+        self.agents.append(agent)
         return "inst-run"
 
     async def schedule(
@@ -36,6 +39,13 @@ class FakeRoutineStore:
     ):
         self.schedule_calls.append((routine_name, server_name, user_id))
         return "inst-sched"
+
+    async def start_continuous(
+        self, routine_name, config, server_name, user_id=0, agent=""
+    ):
+        self.continuous_calls.append((routine_name, server_name, user_id))
+        self.agents.append(agent)
+        return "inst-cont"
 
 
 class FakeConfigManager:
@@ -153,3 +163,51 @@ def test_schedule_v2_allowed_on_owned_server(client_and_store):
     )
     assert resp.status_code == 200
     assert store.schedule_calls == [("agent/some_routine", OWNED_SERVER, USER.id)]
+
+
+def test_start_v2_denied_on_foreign_server(client_and_store):
+    """The continuous-start endpoint runs a routine too — same gate."""
+    client, store = client_and_store
+    resp = client.post(
+        "/routines/start",
+        json={"routine_name": "agent/watcher", "server_name": FOREIGN_SERVER},
+    )
+    assert resp.status_code == 403
+    assert store.continuous_calls == []
+
+
+def test_start_v2_allowed_on_owned_server(client_and_store):
+    client, store = client_and_store
+    resp = client.post(
+        "/routines/start",
+        json={"routine_name": "agent/watcher", "server_name": OWNED_SERVER},
+    )
+    assert resp.status_code == 200
+    assert resp.json() == {"instance_id": "inst-cont"}
+    assert store.continuous_calls == [("agent/watcher", OWNED_SERVER, USER.id)]
+
+
+# ── FEAT-028: explicit report attribution travels with the run ──
+
+
+def test_attribute_to_is_passed_through_to_the_store(client_and_store):
+    client, store = client_and_store
+    client.post(
+        "/routines/run",
+        json={
+            "routine_name": "some_routine",
+            "server_name": OWNED_SERVER,
+            "attribute_to": "scout",
+        },
+    )
+    assert store.agents == ["scout"]
+
+
+def test_dashboard_runs_leave_attribution_to_the_routine(client_and_store):
+    """Omitted -> empty -> the store derives it from the routine's source."""
+    client, store = client_and_store
+    client.post(
+        "/routines/run",
+        json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
+    )
+    assert store.agents == [""]

@@ -437,3 +437,116 @@ async def delete_credential(
         return {"deleted": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Custom OpenAI-compatible LLM endpoints ──
+#
+# These read and write the same preference records the Telegram
+# /agent → Change LLM → Custom endpoint flow uses (condor/preferences.py),
+# so an endpoint added on either surface immediately shows up on the other.
+
+
+def _provider_public(provider: dict) -> dict:
+    """Strip the API key before sending an endpoint record to the browser."""
+    return {
+        "name": provider.get("name", ""),
+        "base_url": provider.get("base_url", ""),
+        "has_key": bool(provider.get("api_key")),
+    }
+
+
+@router.get("/custom-providers")
+async def list_custom_providers(user: WebUser = Depends(get_current_user)):
+    """List the user's saved OpenAI-compatible endpoints."""
+    from condor.preferences import get_custom_providers, load_user_data_for
+
+    providers = get_custom_providers(load_user_data_for(user.id))
+    return {"providers": [_provider_public(p) for p in providers]}
+
+
+@router.post("/custom-providers")
+async def add_custom_provider(
+    body: dict,
+    user: WebUser = Depends(get_current_user),
+):
+    """Validate an endpoint and save it.
+
+    Validation is a GET {base_url}/models, which proves the URL is reachable,
+    the key is accepted, and the response is OpenAI-shaped — all in one round
+    trip — and returns the model list the caller needs anyway.
+    """
+    from condor.preferences import (
+        load_user_data_for,
+        save_custom_provider,
+        suggest_provider_name,
+        unique_provider_name,
+    )
+    from handlers.agents.custom_models import (
+        CustomProviderError,
+        fetch_models,
+        normalize_base_url,
+    )
+
+    raw_url = (body.get("base_url") or "").strip()
+    api_key = (body.get("api_key") or "").strip()
+    if not raw_url:
+        raise HTTPException(status_code=400, detail="base_url is required")
+
+    try:
+        base_url = normalize_base_url(raw_url)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    try:
+        resolved_url, models = await fetch_models(base_url, api_key)
+    except CustomProviderError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    user_data = load_user_data_for(user.id)
+    requested_name = (body.get("name") or "").strip()
+    name = requested_name or unique_provider_name(
+        user_data, suggest_provider_name(resolved_url)
+    )
+
+    try:
+        saved = save_custom_provider(user_data, name, resolved_url, api_key)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+    return {"provider": _provider_public(saved), "models": models}
+
+
+@router.get("/custom-providers/{name}/models")
+async def get_custom_provider_models(
+    name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Fetch the current chat model list for a saved endpoint."""
+    from condor.preferences import find_custom_provider, load_user_data_for
+    from handlers.agents.custom_models import CustomProviderError, fetch_models
+
+    provider = find_custom_provider(load_user_data_for(user.id), name)
+    if provider is None:
+        raise HTTPException(status_code=404, detail=f"No saved endpoint '{name}'")
+
+    try:
+        _, models = await fetch_models(
+            provider["base_url"], provider.get("api_key", "")
+        )
+    except CustomProviderError as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+    return {"provider": _provider_public(provider), "models": models}
+
+
+@router.delete("/custom-providers/{name}")
+async def delete_custom_provider(
+    name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """Forget an endpoint, including its stored API key."""
+    from condor.preferences import load_user_data_for, remove_custom_provider
+
+    if not remove_custom_provider(load_user_data_for(user.id), name):
+        raise HTTPException(status_code=404, detail=f"No saved endpoint '{name}'")
+    return {"deleted": True, "name": name}

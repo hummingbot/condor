@@ -23,13 +23,30 @@ Layout on disk — keyed by the assistant only (``agent_slug``), via
             SKILL.md         # frontmatter + steps
             <companion>.md   # optional attached reference files (templates, etc.)
 
-where ``{assistant_home}`` is ``assistants/condor`` for the chat (``agent_slug``
-None) or ``agents/<slug>`` for a trading agent / domain expert.
+where ``{assistant_home}`` is ``agents/<slug>`` — ``agents/condor`` for the chat,
+which a falsy ``agent_slug`` resolves (FEAT-033).
 
 A skill folder may bundle **companion files** beside its ``SKILL.md`` — e.g.
 config templates the playbook links. These implement *progressive disclosure*:
 the injected index shows only the ``SKILL.md`` trigger, the companions stay out
 of context, and the agent pulls one on demand via :meth:`SkillStore.read_file`.
+
+**Inheritance (FEAT-031).** Condor's library is the base layer every agent
+inherits, one skill at a time: a chat playbook whose frontmatter carries
+``shared: true`` resolves for *every* agent too, as if it lived in the agent's
+own dir. Three rules:
+
+1. The agent's own library **shadows** an inherited skill of the same slug —
+   that is how an agent specializes a playbook without forking the file.
+2. Inheritance is **read-only**: ``create`` writes locally (and therefore
+   shadows), while ``edit`` / ``delete`` / ``write_file`` on an inherited-only
+   slug error out and name the create-to-shadow fix.
+3. An **unflagged** chat skill is *not found* for an agent, not merely absent
+   from its index — filtering the index but serving the body on request would
+   be a leak with extra steps.
+
+The chat itself inherits nothing: it *is* the publisher and already reads that
+dir as its own.
 """
 
 from __future__ import annotations
@@ -69,18 +86,82 @@ def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
         return False
 
 
+def _is_shared(meta: dict) -> bool:
+    """True if a skill's frontmatter publishes it to every agent (FEAT-031).
+
+    Frontmatter is YAML, so ``shared: true`` parses as a bool; a hand-written
+    ``shared: "yes"`` is accepted too. Anything else — including a missing key —
+    keeps the skill private to its own library, which is the safe default: a
+    published playbook lands in every agent's index and every tick prompt.
+    """
+    return str(meta.get("shared", "")).strip().lower() in ("true", "yes", "1")
+
+
 class SkillStore:
     """Per-assistant, editable skill library.
 
     Keyed by ``agent_slug`` alone (skills are general to the assistant, not
     per-user): ``None`` resolves the chat ``condor`` library, a slug resolves a
     trading agent's / expert's library. The root is :func:`builtin_skills_root`.
+
+    An agent reads from **two** roots: its own (writable) plus the ``shared``
+    slice of Condor's library it inherits — see the module docstring.
     """
 
     def __init__(self, agent_slug: str | None = None):
         self.agent_slug = agent_slug
-        # The assistant's skills dir (repo-shipped + runtime-created playbooks).
+        # The assistant's own skills dir (repo-shipped + runtime-created
+        # playbooks). It is the WRITABLE root, and no longer the whole truth of
+        # what this assistant can read — see ``inherited_dir``.
         self.skills_dir = builtin_skills_root(agent_slug)
+        # Read-only base layer: Condor's ``shared: true`` playbooks, which every
+        # agent inherits. The chat IS the publisher, so it inherits nothing (it
+        # already reads that dir as ``skills_dir``) — compared by resolved dir
+        # rather than by slug because ``None`` and ``"condor"`` are both the chat
+        # (FEAT-033), and inheriting from itself would list every shared playbook
+        # twice.
+        chat_dir = builtin_skills_root(None)
+        self.inherited_dir = None if self.skills_dir == chat_dir else chat_dir
+
+    # -- resolution --------------------------------------------------------
+
+    def _resolve_skill_dir(self, slug: str) -> tuple[Path | None, bool]:
+        """``(skill_dir, is_inherited)`` for ``slug`` — own library shadows Condor's.
+
+        The single choke point every read routes through. An inherited hit must
+        carry ``shared: true``; an unflagged Condor skill is NOT FOUND for an
+        agent, not merely absent from its index. ``(None, False)`` when the slug
+        resolves nowhere.
+        """
+        if self.skills_dir and (self.skills_dir / slug / "SKILL.md").exists():
+            return self.skills_dir / slug, False
+        if self.inherited_dir:
+            path = self.inherited_dir / slug / "SKILL.md"
+            if path.exists():
+                try:
+                    meta, _ = _parse_frontmatter(path.read_text())
+                except OSError:
+                    return None, False
+                if _is_shared(meta):
+                    return self.inherited_dir / slug, True
+        return None, False
+
+    def _readonly_error(self, slug: str) -> dict | None:
+        """Guard for the write paths: error dict if ``slug`` is inherited-only.
+
+        Deliberately an error rather than copy-on-write: silently forking the
+        playbook for one agent while everyone else keeps the original is a
+        divergence nobody would notice. The message names the fix.
+        """
+        skill_dir, inherited = self._resolve_skill_dir(slug)
+        if skill_dir is not None and inherited:
+            return {
+                "error": (
+                    f"'{slug}' is inherited from Condor (read-only). Create a "
+                    "local skill with the same name to specialize it."
+                )
+            }
+        return None
 
     # -- public API --------------------------------------------------------
 
@@ -92,8 +173,16 @@ class SkillStore:
         body: str,
         references_routine: str | None = None,
         source: str = "chat",
+        shared: bool | None = None,
     ) -> dict:
-        """Create or overwrite a skill in this assistant's library."""
+        """Create or overwrite a skill in this assistant's library.
+
+        ``shared`` publishes the playbook to every agent (FEAT-031) and is
+        honored **only** in Condor's own library — an agent cannot publish, so
+        the flag is ignored when ``agent_slug`` is set. ``None`` keeps whatever
+        the skill already had, so re-creating a published playbook does not
+        silently unpublish it.
+        """
         if not self.skills_dir:
             return {"error": "this assistant has no skills library"}
         if not name or not description or not when_to_use or not body:
@@ -102,11 +191,13 @@ class SkillStore:
         slug = _slugify(name)
         path = self.skills_dir / slug / "SKILL.md"
 
-        # Preserve the original created date on overwrite.
+        # Preserve the original created date (and publication) on overwrite.
         created = _utcnow()
+        was_shared = False
         if path.exists():
             existing_meta, _ = _parse_frontmatter(path.read_text())
             created = existing_meta.get("created", created)
+            was_shared = _is_shared(existing_meta)
 
         meta = {
             "name": slug,
@@ -115,6 +206,9 @@ class SkillStore:
             "created": created,
             "source": source,
         }
+        publish = was_shared if shared is None else bool(shared)
+        if publish and not self.agent_slug:
+            meta["shared"] = True
         ref = (references_routine or "").strip()
         if ref:
             meta["references_routine"] = ref
@@ -126,6 +220,8 @@ class SkillStore:
             "description": meta["description"],
             "when_to_use": meta["when_to_use"],
         }
+        if meta.get("shared"):
+            result["shared"] = True
         if ref:
             result["references_routine"] = ref
             result["routine_ok"] = _routine_exists(ref, self.agent_slug)
@@ -135,11 +231,16 @@ class SkillStore:
         """Patch fields of a skill, preserving the rest.
 
         Accepts ``description``, ``when_to_use``, ``body``, ``references_routine``
-        (pass ``references_routine=""`` to clear the reference).
+        (pass ``references_routine=""`` to clear the reference) and ``shared``
+        (publish/unpublish, chat library only — see :meth:`create`). Editing a
+        skill this assistant merely *inherits* is refused.
         """
         if not self.skills_dir:
             return {"error": "this assistant has no skills library"}
         slug = _slugify(name)
+        guard = self._readonly_error(slug)
+        if guard:
+            return guard
         path = self.skills_dir / slug / "SKILL.md"
         if not path.exists():
             return {"error": f"Skill '{name}' not found"}
@@ -157,15 +258,27 @@ class SkillStore:
                 meta.pop("references_routine", None)
         if fields.get("body"):
             body = fields["body"].strip()
+        if fields.get("shared") is not None and not self.agent_slug:
+            if fields["shared"]:
+                meta["shared"] = True
+            else:
+                meta.pop("shared", None)
 
         _atomic_write(path, _render(meta, body))
         return self.read(slug) or {"saved": True, "name": slug}
 
-    def delete(self, name: str) -> bool:
-        """Delete a skill (and its now-empty folder)."""
+    def delete(self, name: str) -> bool | dict:
+        """Delete a skill (and its now-empty folder).
+
+        ``True`` on success, ``False`` when the slug is unknown, and an error
+        dict when it resolves only to an inherited (read-only) skill.
+        """
         if not self.skills_dir:
             return False
         slug = _slugify(name)
+        guard = self._readonly_error(slug)
+        if guard:
+            return guard
         skill_dir = self.skills_dir / slug
         path = skill_dir / "SKILL.md"
         if not path.exists():
@@ -184,14 +297,14 @@ class SkillStore:
         surfaces ``routine_ok`` so the agent won't invoke a broken reference.
         When the skill bundles companion files (see :meth:`read_file`), their
         names are listed under ``files`` so the agent knows what it can pull.
+        A playbook inherited from Condor is flagged ``inherited: true`` — the
+        reader's view of the publisher's ``shared`` flag.
         """
         slug = _slugify(name)
-        if not self.skills_dir:
+        skill_dir, inherited = self._resolve_skill_dir(slug)
+        if skill_dir is None:
             return None
-        skill_dir = self.skills_dir / slug
         path = skill_dir / "SKILL.md"
-        if not path.exists():
-            return None
         meta, body = _parse_frontmatter(path.read_text())
         ref = meta.get("references_routine")
         result = {
@@ -200,6 +313,8 @@ class SkillStore:
             "when_to_use": meta.get("when_to_use", ""),
             "body": body,
         }
+        if inherited:
+            result["inherited"] = True
         files = self._companion_files(skill_dir)
         if files:
             result["files"] = files
@@ -217,14 +332,15 @@ class SkillStore:
         skills-dir presence, skill existence, bare-filename checks (no
         ``SKILL.md``, no path separators) and the resolve()/is_relative_to
         traversal defense, so a skill can never touch anything outside its own
-        folder. Returns ``(target, None)`` on success or ``(None, error_dict)``
-        on failure.
+        folder. The guard is anchored on the *resolved* skill dir, so it covers
+        an inherited skill's folder exactly as it covers an own one. Returns
+        ``(target, None)`` on success or ``(None, error_dict)`` on failure.
         """
         if not self.skills_dir:
             return None, {"error": "this assistant has no skills library"}
         slug = _slugify(name)
-        skill_dir = self.skills_dir / slug
-        if not (skill_dir / "SKILL.md").exists():
+        skill_dir, _ = self._resolve_skill_dir(slug)
+        if skill_dir is None:
             return None, {"error": f"Skill '{name}' not found"}
 
         fname = (filename or "").strip()
@@ -282,6 +398,9 @@ class SkillStore:
             return {"error": "this assistant has no skills library"}
         if content is None:
             return {"error": "content is required for write_file"}
+        guard = self._readonly_error(_slugify(name))
+        if guard:
+            return guard
         target, error = self._resolve_companion(name, filename)
         if error:
             return error
@@ -352,20 +471,31 @@ class SkillStore:
     # -- internals ---------------------------------------------------------
 
     def _iter_skills(self):
-        """Yield (meta, body) for every skill, sorted by slug.
+        """Yield (meta, body) for every skill this assistant can read.
 
-        Authored playbooks have no per-user ``created`` ordering, so slug order
-        gives a stable injection order.
+        Own playbooks first (sorted by slug), then the ``shared`` slice of
+        Condor's library whose slug was not already yielded — so shadowing falls
+        out of iteration order and :meth:`list_index` / :meth:`search` inherit it
+        with no code of their own. Authored playbooks have no per-user
+        ``created`` ordering, so slug order gives a stable injection order.
         """
-        if not self.skills_dir or not self.skills_dir.exists():
-            return
-        for f in sorted(self.skills_dir.glob("*/SKILL.md")):
-            try:
-                meta, body = _parse_frontmatter(f.read_text())
-            except Exception:
+        seen: set[str] = set()
+        for root, inherited in ((self.skills_dir, False), (self.inherited_dir, True)):
+            if not root or not root.exists():
                 continue
-            meta.setdefault("name", f.parent.name)
-            yield meta, body
+            for f in sorted(root.glob("*/SKILL.md")):
+                slug = f.parent.name
+                if slug in seen:
+                    continue
+                try:
+                    meta, body = _parse_frontmatter(f.read_text())
+                except Exception:
+                    continue
+                if inherited and not _is_shared(meta):
+                    continue
+                seen.add(slug)
+                meta.setdefault("name", slug)
+                yield meta, body
 
     def _index_lines(self) -> list[str]:
         """One index line per skill (name + trigger + optional routine link)."""

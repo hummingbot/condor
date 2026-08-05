@@ -299,6 +299,7 @@ class RoutineStore:
             "last_run_at": None,
             "last_result": None,
             "last_duration": None,
+            "report_id": None,
             "run_count": 0,
             **extra,
         }
@@ -314,6 +315,7 @@ class RoutineStore:
         status_after: str,
         failed_status: str | None = None,
         fire_hooks: bool = True,
+        agent: str = "",
     ) -> None:
         """Run a routine once, store the result, update instance metadata, fire hooks.
 
@@ -323,6 +325,12 @@ class RoutineStore:
         ``status_after``) is used when the run raises. ``CancelledError`` is
         recorded as a clean "Stopped by user" run so a stopped continuous
         routine still stores its final result.
+
+        ``agent`` stamps the run's reports with an explicit producer. Left empty
+        (web, Telegram, schedules) it is derived from the routine's own source
+        via ``_agent_of``; the MCP runner passes it because it knows which
+        assistant asked — which differs from the source when an agent runs a
+        routine from the general library.
         """
         ctx = WebRoutineContext(server_name, bot=self._bot, chat_id=user_id)
         start = time.time()
@@ -331,7 +339,7 @@ class RoutineStore:
         failed = False
         try:
             cfg = routine.config_class(**config)
-            with reports.attribute_to(_agent_of(routine)):
+            with reports.attribute_to(agent or _agent_of(routine)):
                 raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
@@ -358,6 +366,11 @@ class RoutineStore:
                     "last_run_at": time.time(),
                     "last_result": result.text[:500],
                     "last_duration": duration,
+                    # The run's report is what a reader wants to open; the text
+                    # is only what the caller (or the LLM) was handed back. A
+                    # run that rendered nothing keeps the previous run's report
+                    # out of the record.
+                    "report_id": report_id,
                     "run_count": self._instances[instance_id].get("run_count", 0) + 1,
                     "error": error_msg,
                 }
@@ -388,8 +401,12 @@ class RoutineStore:
         config: dict,
         server_name: str,
         user_id: int = 0,
+        agent: str = "",
     ) -> str:
-        """Run a one-shot routine from the web. Returns instance_id."""
+        """Run a one-shot routine from the web. Returns instance_id.
+
+        ``agent`` overrides report attribution (see ``_execute_and_record``).
+        """
         routine = self._resolve_routine(routine_name)
         if not routine:
             raise ValueError(f"Routine '{routine_name}' not found")
@@ -400,7 +417,9 @@ class RoutineStore:
         )
 
         task = asyncio.create_task(
-            self._run_oneshot(instance_id, routine, config, server_name, user_id)
+            self._run_oneshot(
+                instance_id, routine, config, server_name, user_id, agent=agent
+            )
         )
         self._tasks[instance_id] = task
         return instance_id
@@ -412,6 +431,7 @@ class RoutineStore:
         config: dict,
         server_name: str,
         user_id: int = 0,
+        agent: str = "",
     ) -> None:
         await self._execute_and_record(
             instance_id,
@@ -421,6 +441,7 @@ class RoutineStore:
             user_id,
             status_after="completed",
             failed_status="failed",
+            agent=agent,
         )
 
     async def start_continuous(
@@ -429,6 +450,7 @@ class RoutineStore:
         config: dict,
         server_name: str,
         user_id: int = 0,
+        agent: str = "",
     ) -> str:
         """Start a continuous routine as a background task. Returns instance_id."""
         routine = self._resolve_routine(routine_name)
@@ -445,7 +467,9 @@ class RoutineStore:
         )
 
         task = asyncio.create_task(
-            self._run_continuous(instance_id, routine, config, server_name, user_id)
+            self._run_continuous(
+                instance_id, routine, config, server_name, user_id, agent=agent
+            )
         )
         self._tasks[instance_id] = task
         return instance_id
@@ -457,6 +481,7 @@ class RoutineStore:
         config: dict,
         server_name: str,
         user_id: int = 0,
+        agent: str = "",
     ) -> None:
         # Continuous routines message the user from inside their own loop and
         # only end on stop/error, so per-run completion hooks are intentionally
@@ -469,6 +494,7 @@ class RoutineStore:
             user_id,
             status_after="stopped",
             fire_hooks=False,
+            agent=agent,
         )
 
     async def schedule(

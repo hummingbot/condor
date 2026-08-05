@@ -16,6 +16,7 @@ import { NavLink, Outlet, useLocation } from "react-router-dom";
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ChatPanel } from "@/components/chat/ChatPanel";
+import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
@@ -33,15 +34,37 @@ const NAV_ITEMS = [
   { to: "/routines", icon: Zap, label: "Routines" },
 ] as const;
 
+/**
+ * The shell owns the chat state, not the panel.
+ *
+ * Both surfaces that render a conversation — the overlay panel here and the
+ * workspace at `/agents` — live under this provider, so there is one socket and
+ * one transcript however the user got to it.
+ */
 export function AppShell() {
+  return (
+    <ChatProvider>
+      <AppShellBody />
+    </ChatProvider>
+  );
+}
+
+function AppShellBody() {
   const { server } = useServer();
-  const { pathname } = useLocation();
+  const { pathname, search } = useLocation();
   const { theme, toggleTheme } = useTheme();
   const [chatOpen, setChatOpen] = useState(false);
   const { hasKeys, isLoading: keysLoading } = useCredentials();
 
   const exemptRoutes = ["/routines", "/settings"];
   const showKeysOverlay = server && !keysLoading && !hasKeys && !exemptRoutes.some((r) => pathname.startsWith(r));
+
+  // The overlay exists to ask about the page you are looking at. On the chat
+  // workspace there is no other page, so it stays out of the way — and the
+  // workspace takes the full height and owns its own scrolling. Everywhere
+  // else, `/agents?tab=fleet` and `/agents/:slug` included, nothing changes.
+  const isChatWorkspace =
+    pathname === "/agents" && !new URLSearchParams(search).get("tab");
 
   // Prefetch core data (executors, bots) and subscribe to WS channels early
   usePrefetchData();
@@ -114,12 +137,18 @@ export function AppShell() {
 
           </div>
 
-          <AgentToggleButton active={chatOpen} onClick={() => setChatOpen((v) => !v)} className="ml-2" />
+          {!isChatWorkspace && (
+            <AgentToggleButton active={chatOpen} onClick={() => setChatOpen((v) => !v)} className="ml-2" />
+          )}
         </div>
       </header>
 
       {/* Main content */}
-      <main className="relative flex-1 overflow-auto p-6">
+      <main
+        className={`relative flex-1 ${
+          isChatWorkspace ? "overflow-hidden" : "overflow-auto p-6"
+        }`}
+      >
         <ErrorBoundary resetKey={pathname + server}>
           <Outlet key={server} />
         </ErrorBoundary>
@@ -127,7 +156,7 @@ export function AppShell() {
       </main>
 
       {/* Chat panel */}
-      <ChatPanel isOpen={chatOpen} onToggle={setChatOpen} />
+      {!isChatWorkspace && <ChatPanel isOpen={chatOpen} onToggle={setChatOpen} />}
     </div>
   );
 }

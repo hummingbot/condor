@@ -19,5 +19,17 @@ class BaseProvider:
     name: str = ""
     is_core: bool = False
 
-    async def execute(self, client: Any, config: dict, agent_id: str = "") -> ProviderResult:
+    async def execute(
+        self,
+        client: Any,
+        config: dict,
+        agent_id: str = "",
+        bot_names: list[str] | None = None,
+    ) -> ProviderResult:
+        """Gather this provider's slice of core data.
+
+        ``bot_names`` are the bases the running session owns (from its ownership
+        ledger); ``None`` means "not supplied" and providers that care fall back
+        to the configured ``bot_name``.
+        """
         raise NotImplementedError

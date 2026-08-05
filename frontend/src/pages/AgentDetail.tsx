@@ -3,120 +3,27 @@ import {
   AlertCircle,
   ArrowLeft,
   Brain,
-  ChevronRight,
   CircleDot,
   FileText,
   MessageSquareText,
   Plus,
+  Repeat,
   ScrollText,
-  Send,
   Server,
   Trash2,
   Wrench,
   X,
 } from "lucide-react";
 import { useState } from "react";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { MarkdownEditor } from "@/components/agent/AgentOverviewTab";
-import { deriveAgentStatus } from "@/components/agent/agentStatus";
 import { ConfirmDialog } from "@/components/agent/ConfirmDialog";
-import { StatusBadge } from "@/components/agent/StatusBadge";
+import { EntityCard } from "@/components/agent/EntityCard";
 import { DiscardChangesDialog } from "@/components/editor/EditorDialogs";
 import { ReportBrowser } from "@/components/routines/ReportBrowser";
 import { useEscapeKey } from "@/hooks/useEscapeKey";
 import { type StrategySummary, api } from "@/lib/api";
-import { formatCurrencyPnl } from "@/lib/formatters";
-
-// ── Strategy Card ──
-
-function StrategyCard({
-  agentSlug,
-  strategy,
-  onDelete,
-}: {
-  agentSlug: string;
-  strategy: StrategySummary;
-  onDelete: () => void;
-}) {
-  const navigate = useNavigate();
-  const totalPnl = strategy.total_pnl ?? 0;
-  const totalPnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const dayPnl = strategy.daily_pnl ?? 0;
-  const dayPnlColor = dayPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
-  const status = deriveAgentStatus(strategy);
-  const isLive = status === "running";
-
-  return (
-    <button
-      onClick={() => navigate(`/agents/${agentSlug}/strategies/${strategy.slug}`)}
-      className={`group relative w-full rounded-lg border text-left transition-all duration-200 hover:border-[var(--color-primary)]/40 hover:shadow-lg ${
-        isLive
-          ? "border-emerald-500/20 bg-emerald-500/[0.03]"
-          : "border-[var(--color-border)] bg-[var(--color-surface)]"
-      }`}
-    >
-      <div className="p-4">
-        <div className="mb-3 flex items-start justify-between">
-          <h3 className="text-sm font-semibold text-[var(--color-text)]">{strategy.name}</h3>
-          <div className="flex items-center gap-2">
-            <StatusBadge status={status} />
-            {strategy.status !== "running" && (
-              <div
-                aria-label="Delete strategy"
-                className="opacity-0 transition-opacity focus-visible:opacity-100 group-hover:opacity-100"
-                onClick={(e) => { e.stopPropagation(); onDelete(); }}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); onDelete(); } }}
-                role="button"
-                tabIndex={0}
-              >
-                <span className="flex h-7 w-7 items-center justify-center rounded-md border border-red-500/30 bg-red-500/10 text-red-400 transition-colors hover:bg-red-500/20">
-                  <Trash2 className="h-3.5 w-3.5" />
-                </span>
-              </div>
-            )}
-          </div>
-        </div>
-
-        {strategy.description && (
-          <p className="mb-3 text-xs text-[var(--color-text-muted)] line-clamp-2">
-            {strategy.description}
-          </p>
-        )}
-
-        <div className="grid grid-cols-4 gap-2 border-t border-[var(--color-border)]/50 pt-3">
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Total PnL</span>
-            <span className={`text-sm font-mono font-semibold ${totalPnlColor}`}>
-              {formatCurrencyPnl(totalPnl)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Session</span>
-            <span className={`text-sm font-mono ${dayPnlColor}`}>
-              {formatCurrencyPnl(dayPnl)}
-            </span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{strategy.open_positions ?? 0}</span>
-          </div>
-          <div>
-            <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Sessions</span>
-            <span className="text-sm font-mono text-[var(--color-text)]">{strategy.session_count}</span>
-          </div>
-        </div>
-      </div>
-
-      <div className="flex items-center justify-end border-t border-[var(--color-border)]/30 px-4 py-2 text-[var(--color-text-muted)] opacity-0 transition-opacity group-hover:opacity-100">
-        <span className="text-[11px]">Open</span>
-        <ChevronRight className="h-3.5 w-3.5" />
-      </div>
-    </button>
-  );
-}
 
 // ── Create Strategy Dialog ──
 
@@ -225,48 +132,90 @@ function CreateStrategyDialog({
   );
 }
 
-// ── Consult Panel ──
+// ── Server pin ──
 
-function ConsultPanel({ slug, whenToConsult }: { slug: string; whenToConsult: string }) {
-  const [task, setTask] = useState("");
-  const consultMutation = useMutation({
-    mutationFn: () => api.consultAgent(slug, { task }),
-    onSuccess: () => setTask(""),
+/**
+ * Which server this Agent's tools trade on, wherever it runs.
+ *
+ * A pin beats the chat's ambient selection everywhere the Agent is used —
+ * chatted, consulted or looped — so it is the Agent's decision, and this is the
+ * page that owns it. Before this it could only be changed by hand-editing
+ * AGENT.md front matter, which is why a locked chat chip links here.
+ */
+function ServerPinPicker({ slug, serverName }: { slug: string; serverName: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+
+  const { data: servers } = useQuery({
+    queryKey: ["servers"],
+    queryFn: api.getServers,
+    enabled: open,
   });
 
+  const pin = useMutation({
+    mutationFn: (name: string) => api.updateAgentConfig(slug, { server_name: name }),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["agent", slug] }),
+  });
+
+  const choose = (name: string) => {
+    setOpen(false);
+    if (name !== serverName) pin.mutate(name);
+  };
+
   return (
-    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
-      <h3 className="mb-2 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
-        <MessageSquareText className="h-3.5 w-3.5" /> Consult
-      </h3>
-      {whenToConsult && (
-        <p className="mb-3 text-xs text-[var(--color-text-muted)]">{whenToConsult}</p>
-      )}
-      <div className="flex gap-2">
-        <input
-          type="text"
-          value={task}
-          onChange={(e) => setTask(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && task.trim()) consultMutation.mutate(); }}
-          placeholder="Ask this agent…"
-          className="flex-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text)] placeholder-[var(--color-text-muted)]/50 outline-none transition-colors focus:border-[var(--color-primary)]"
-        />
-        <button
-          onClick={() => consultMutation.mutate()}
-          disabled={!task.trim() || consultMutation.isPending}
-          className="flex items-center gap-1.5 rounded-lg bg-[var(--color-primary)] px-3 py-2 text-sm font-medium text-white transition-opacity disabled:opacity-40"
-        >
-          <Send className="h-3.5 w-3.5" />
-          {consultMutation.isPending ? "…" : "Ask"}
-        </button>
-      </div>
-      {consultMutation.data && !consultMutation.isPending && (
-        <div className="chat-markdown mt-3 rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-sm text-[var(--color-text)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{consultMutation.data.answer}</ReactMarkdown>
-        </div>
-      )}
-      {consultMutation.isError && (
-        <p className="mt-2 text-xs text-red-400">Consult failed.</p>
+    <div className="relative">
+      <button
+        onClick={() => setOpen((v) => !v)}
+        disabled={pin.isPending}
+        title={
+          serverName
+            ? `Pinned to ${serverName} — every run uses this server`
+            : "No pin: follows whichever server the chat is on"
+        }
+        className={`flex items-center gap-1 rounded border px-2.5 py-1 transition-colors disabled:opacity-50 ${
+          serverName
+            ? "border-emerald-500/30 bg-emerald-500/10 font-mono text-emerald-400 hover:border-emerald-500/60"
+            : "border-dashed border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-primary)]/50 hover:text-[var(--color-text)]"
+        }`}
+      >
+        <Server className="h-3 w-3" /> {serverName || "No server pin"}
+      </button>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-0 top-full z-50 mt-1 min-w-[220px] rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
+            <div className="px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+              Pin to server
+            </div>
+            {(servers ?? []).map((s) => (
+              <button
+                key={s.name}
+                onClick={() => choose(s.name)}
+                className={`flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                  s.name === serverName
+                    ? "font-medium text-[var(--color-primary)]"
+                    : "text-[var(--color-text)]"
+                }`}
+              >
+                <CircleDot
+                  className={`h-2.5 w-2.5 shrink-0 ${
+                    s.online ? "text-[var(--color-green)]" : "text-[var(--color-text-muted)]"
+                  }`}
+                />
+                <span className="truncate">{s.name}</span>
+              </button>
+            ))}
+            <button
+              onClick={() => choose("")}
+              className={`mt-0.5 w-full border-t border-[var(--color-border)] px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+                serverName ? "text-[var(--color-text)]" : "font-medium text-[var(--color-primary)]"
+              }`}
+            >
+              No pin — follow the chat's selection
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
@@ -302,6 +251,16 @@ export function AgentDetail() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
       navigate("/agents");
+    },
+  });
+
+  // Every Agent is loopable. This brings its implicit default playbook on disk
+  // so the normal strategy UI (config, start, sessions) can drive the loop.
+  const createDefaultLoopMutation = useMutation({
+    mutationFn: () => api.createDefaultStrategy(slug!),
+    onSuccess: (strategy) => {
+      queryClient.invalidateQueries({ queryKey: ["agent", slug] });
+      navigate(`/agents/${slug}/strategies/${strategy.slug}`);
     },
   });
 
@@ -404,27 +363,23 @@ export function AgentDetail() {
                   {agent.agent_key}
                 </span>
               )}
-              {agent.consultable && (
-                <span className="rounded border border-blue-500/30 bg-blue-500/10 px-2.5 py-1 font-medium text-blue-400">
-                  consultable
-                </span>
-              )}
               {agent.tools && agent.tools.length > 0 && (
                 <span className="flex items-center gap-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1">
                   <Wrench className="h-3 w-3" /> {agent.tools.length} tool{agent.tools.length !== 1 ? "s" : ""}
                 </span>
               )}
-              {agent.server_name && (
-                <span
-                  className="flex items-center gap-1 rounded border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 font-mono text-emerald-400"
-                  title="Pinned Hummingbot API server"
-                >
-                  <Server className="h-3 w-3" /> {agent.server_name}
-                </span>
-              )}
+              <ServerPinPicker slug={agent.slug} serverName={agent.server_name} />
             </div>
           </div>
           <div className="flex items-center gap-2">
+            <button
+              onClick={() => navigate(`/agents?agent=${encodeURIComponent(agent.slug)}`)}
+              className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+              title={`Chat with ${agent.name}`}
+            >
+              <MessageSquareText className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Chat</span>
+            </button>
             <button
               onClick={() => setShowRoutinesBrowser(true)}
               className="flex items-center gap-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-muted)] transition-all hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
@@ -461,13 +416,6 @@ export function AgentDetail() {
         </div>
       </div>
 
-      {/* Consult panel (consultable agents) */}
-      {agent.consultable && (
-        <div className="mb-6">
-          <ConsultPanel slug={agent.slug} whenToConsult={agent.when_to_consult} />
-        </div>
-      )}
-
       {/* Strategies */}
       <div>
         <h2 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
@@ -477,27 +425,46 @@ export function AgentDetail() {
         {strategies.length === 0 ? (
           <div className="flex h-56 flex-col items-center justify-center rounded-xl border border-dashed border-[var(--color-border)] bg-[var(--color-surface)]/50">
             <CircleDot className="mb-3 h-9 w-9 text-[var(--color-text-muted)]/30" />
-            <p className="mb-1 text-sm font-medium text-[var(--color-text)]">No strategies yet</p>
-            <p className="mb-4 text-xs text-[var(--color-text-muted)]">
-              {agent.consultable
-                ? "This agent is consult-only. Add a strategy to make it loop."
-                : "Add a playbook strategy for this agent to loop."}
+            <p className="mb-1 text-sm font-medium text-[var(--color-text)]">
+              No strategies yet
             </p>
-            <button
-              onClick={() => setShowCreate(true)}
-              className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white"
-            >
-              <Plus className="h-4 w-4" />
-              New Strategy
-            </button>
+            <p className="mb-4 max-w-md text-center text-xs text-[var(--color-text-muted)]">
+              This agent can already be consulted and delegated to. To let it run on a
+              loop, start from its default playbook — its own brain drives each tick —
+              or write a dedicated one.
+            </p>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={() => createDefaultLoopMutation.mutate()}
+                disabled={createDefaultLoopMutation.isPending}
+                className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              >
+                <CircleDot className="h-4 w-4" />
+                {createDefaultLoopMutation.isPending ? "Creating…" : "Use default loop"}
+              </button>
+              <button
+                onClick={() => setShowCreate(true)}
+                className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2 text-sm font-medium text-[var(--color-text)]"
+              >
+                <Plus className="h-4 w-4" />
+                New Strategy
+              </button>
+            </div>
+            {createDefaultLoopMutation.isError && (
+              <p className="mt-3 text-xs text-[var(--color-red)]">
+                Could not create the default loop.
+              </p>
+            )}
           </div>
         ) : (
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
             {strategies.map((strategy) => (
-              <StrategyCard
+              <EntityCard
                 key={strategy.slug}
-                agentSlug={agent.slug}
-                strategy={strategy}
+                entity={strategy}
+                icon={Repeat}
+                deleteLabel="Delete strategy"
+                onClick={() => navigate(`/agents/${agent.slug}/strategies/${strategy.slug}`)}
                 onDelete={() => setDeleteStrategy(strategy)}
               />
             ))}

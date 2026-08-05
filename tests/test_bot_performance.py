@@ -16,9 +16,11 @@ from condor.agents.performance import (
 )
 from condor.fetchers.bot_performance import (
     _aggregate_by_bot,
+    bot_executor_rows,
     extract_snapshots,
     fetch_all_bot_performance,
     fetch_bot_performance,
+    resolve_bot,
 )
 
 # ── Sample payloads ──
@@ -110,6 +112,96 @@ def test_fetch_bot_performance_resilient_to_errors():
     assert asyncio.run(fetch_bot_performance(client, "river")) is None
 
 
+# ── Suffix-tolerant resolution ──
+
+
+def _snap_with_positions(
+    bot_name, controller_id, timestamp, positions, status="running"
+):
+    return {
+        "bot_name": bot_name,
+        "controller_id": controller_id,
+        "status": status,
+        "timestamp": timestamp,
+        "performance": {
+            "realized_pnl_quote": 1.0,
+            "unrealized_pnl_quote": 2.0,
+            "volume_traded": 100.0,
+            "positions_summary": positions,
+        },
+    }
+
+
+def test_resolve_bot_exact_and_suffix():
+    agg = _aggregate_by_bot(
+        [
+            _snap_with_positions(
+                "dn-mm-20260101-000000", "c", "2026-01-01T00:00:00+00:00", []
+            ),
+            _snap_with_positions(
+                "dn-mm-20260724-182221", "c", "2026-07-24T18:22:21+00:00", []
+            ),
+            _snap_with_positions(
+                "dn-mmx-20260724-000000", "c", "2026-07-24T00:00:00+00:00", []
+            ),
+            _snap_with_positions("other", "c", "2026-07-24T00:00:00+00:00", []),
+        ]
+    )
+    # exact match wins outright
+    assert resolve_bot(agg, "other")["bot_name"] == "other"
+    # base name resolves to the freshest timestamped deploy
+    assert resolve_bot(agg, "dn-mm")["bot_name"] == "dn-mm-20260724-182221"
+    # the hyphen boundary keeps a sibling base (dn-mmx) from matching dn-mm
+    assert resolve_bot(agg, "dn-mm")["bot_name"] != "dn-mmx-20260724-000000"
+    # no match → None; empty inputs → None
+    assert resolve_bot(agg, "ghost") is None
+    assert resolve_bot(agg, "") is None
+    assert resolve_bot({}, "dn-mm") is None
+
+
+# ── Executor rows from positions_summary ──
+
+
+def test_bot_executor_rows_from_positions():
+    pos = {
+        "connector_name": "hyperliquid",
+        "trading_pair": "XYZ:CL-USD",
+        "volume_traded_quote": 250.0,
+        "side": "TradeType.SELL",
+        "amount": 2.0,
+        "breakeven_price": 60.0,
+        "unrealized_pnl_quote": -1.5,
+        "realized_pnl_quote": 0.4,
+        "cum_fees_quote": 0.3,
+    }
+    agg = _aggregate_by_bot(
+        [_snap_with_positions("bot", "dn_CL_mm", "2026-07-24T18:00:00+00:00", [pos])]
+    )
+    rows = bot_executor_rows(agg["bot"])
+    assert len(rows) == 1
+    r = rows[0]
+    assert r["controller_id"] == "dn_CL_mm"
+    assert r["pair"] == "XYZ:CL-USD"
+    assert r["side"] == "SELL"  # TradeType. prefix stripped
+    assert r["status"] == "RUNNING"
+    assert r["pnl"] == -1.5  # unrealized mark
+    assert r["volume"] == 250.0
+    assert r["fees"] == 0.3
+    assert r["entry_price"] == 60.0
+    assert r["amount"] == 120.0  # abs(2.0) * 60.0 quote notional
+    assert r["timestamp"] > 0  # ISO parsed to epoch
+
+
+def test_flat_controller_yields_no_rows_but_counts_pnl():
+    agg = _aggregate_by_bot(
+        [_snap_with_positions("bot", "c", "2026-07-24T18:00:00+00:00", [])]
+    )
+    assert bot_executor_rows(agg["bot"]) == []
+    # realized/unrealized still aggregate even with no open positions
+    assert agg["bot"]["realized_pnl_quote"] == 1.0
+    assert agg["bot"]["unrealized_pnl_quote"] == 2.0
+
+
 # ── Merge into AgentPerformance ──
 
 
@@ -135,7 +227,7 @@ def test_merge_is_disjoint_addition():
     assert base.bot_name == ""
 
     # With bot_name "river": adds river's 7/7/1500 on top, no double count.
-    merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_name="river"))
+    merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["river"]))
     assert merged.bot_name == "river"
     assert merged.realized_pnl == 4.0 + 7.0
     assert merged.unrealized_pnl == 7.0
@@ -143,6 +235,38 @@ def test_merge_is_disjoint_addition():
     assert len(merged.controllers) == 2
     # The bot's controller executors never appear in the executor list.
     assert all(r["id"] == "e1" for r in merged.executors)
+
+
+def test_merge_appends_bot_positions_as_rows():
+    # Bot-mode agent: its own agent_id table is empty; the bot holds one open
+    # position that must surface as an executor row with open_count bumped.
+    agent_id = "dn.sess_1"
+    pos = {
+        "connector_name": "hyperliquid",
+        "trading_pair": "XYZ:CL-USD",
+        "volume_traded_quote": 250.0,
+        "side": "TradeType.BUY",
+        "amount": 1.0,
+        "breakeven_price": 60.0,
+        "unrealized_pnl_quote": -0.5,
+        "realized_pnl_quote": 0.4,
+        "cum_fees_quote": 0.3,
+    }
+    snaps = [
+        _snap_with_positions(
+            "dn-mm-20260724-1", "dn_CL_mm", "2026-07-24T18:00:00+00:00", [pos]
+        ),
+    ]
+    client = _FakeClient(rows_by_id={}, snapshots=snaps)
+    # base name resolves suffix-tolerantly to the deployed instance
+    merged = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["dn-mm"]))
+    # bot_name reflects the resolved deployed instance, not just the base
+    assert merged.bot_name == "dn-mm-20260724-1"
+    assert len(merged.executors) == 1
+    assert merged.executors[0]["pair"] == "XYZ:CL-USD"
+    assert merged.open_count == 1
+    assert merged.fees == 0.3
+    assert merged.unrealized_pnl == 2.0  # controller-level aggregate
 
 
 def test_no_snapshot_leaves_executor_totals_unchanged():
@@ -160,7 +284,7 @@ def test_no_snapshot_leaves_executor_totals_unchanged():
     client = _FakeClient(rows_by_id=rows_by_id)
     no_bot = asyncio.run(fetch_agent_performance(client, agent_id))
     # bot_name set but no matching snapshot → totals identical to executor-only.
-    ghost = asyncio.run(fetch_agent_performance(client, agent_id, bot_name="ghost"))
+    ghost = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["ghost"]))
     assert ghost.bot_name == "ghost"
     assert ghost.unrealized_pnl == no_bot.unrealized_pnl == 2.0
     assert ghost.total_pnl == no_bot.total_pnl
@@ -170,7 +294,7 @@ def test_no_snapshot_leaves_executor_totals_unchanged():
 def test_batch_merges_only_named_agents():
     a1, a2 = "river.scalp_1", "plain.scalp_1"
     client = _FakeClient(rows_by_id={})
-    out = asyncio.run(fetch_agent_performance_batch(client, [a1, a2], {a1: "river"}))
+    out = asyncio.run(fetch_agent_performance_batch(client, [a1, a2], {a1: ["river"]}))
     assert out[a1].bot_name == "river"
     assert out[a1].realized_pnl == 7.0
     assert out[a2].bot_name == ""  # not named → untouched, executor-only
@@ -193,32 +317,232 @@ def test_bot_name_round_trips_through_full_config(tmp_path):
     assert cfg2["bot_name"] == ""
 
 
+# ── Per-session history slicing ──
+
+
+def test_resolve_bot_instances_returns_all_matches_sorted():
+    from condor.fetchers.bot_performance import resolve_bot_instances
+
+    def _snap(name, ts):
+        return {
+            "bot_name": name,
+            "controller_id": "c",
+            "timestamp": ts,
+            "performance": {},
+        }
+
+    agg = _aggregate_by_bot(
+        [
+            _snap("dn-mm-20260101-000000", "2026-01-01T00:00:00"),
+            _snap("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
+            _snap("dn-mmx-20260724-000000", "2026-07-24T00:00:00"),
+            _snap("other", "2026-07-24T00:00:00"),
+        ]
+    )
+    got = resolve_bot_instances(agg, "dn-mm")
+    assert got == ["dn-mm-20260101-000000", "dn-mm-20260724-182221"]  # oldest→newest
+    assert resolve_bot_instances(agg, "nope") == []
+
+
+def _instances_agg(*names_ts):
+    return _aggregate_by_bot(
+        [
+            {
+                "bot_name": name,
+                "controller_id": "c",
+                "timestamp": ts,
+                "performance": {},
+            }
+            for name, ts in names_ts
+        ]
+    )
+
+
+def test_partition_assigns_a_tagged_instance_to_its_own_base():
+    from condor.fetchers.bot_performance import (
+        partition_instances,
+        resolve_bot_instances,
+    )
+
+    agg = _instances_agg(
+        ("brigado-ema_trend-20260731-100000", "2026-07-31T10:00:00"),
+        ("brigado-ema_trend-btc-20260731-101500", "2026-07-31T10:15:00"),
+    )
+    bases = ["brigado-ema_trend", "brigado-ema_trend-btc"]
+
+    # Asked one base at a time, the parent swallows its tagged sibling…
+    assert len(resolve_bot_instances(agg, "brigado-ema_trend")) == 2
+    # …but deciding over all owned bases at once, each instance lands on exactly one.
+    assert partition_instances(agg, bases) == {
+        "brigado-ema_trend": ["brigado-ema_trend-20260731-100000"],
+        "brigado-ema_trend-btc": ["brigado-ema_trend-btc-20260731-101500"],
+    }
+
+
+def test_partition_keeps_unowned_instances_out_and_orders_oldest_first():
+    from condor.fetchers.bot_performance import partition_instances
+
+    agg = _instances_agg(
+        ("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
+        ("dn-mm-20260101-000000", "2026-01-01T00:00:00"),
+        ("someone-else", "2026-07-24T00:00:00"),
+    )
+    assert partition_instances(agg, ["dn-mm", "ghost"]) == {
+        "dn-mm": ["dn-mm-20260101-000000", "dn-mm-20260724-182221"],
+        "ghost": [],  # owned but never deployed
+    }
+    assert partition_instances(agg, []) == {}
+
+
+def test_resolve_bots_never_hands_the_same_aggregate_to_two_bases():
+    from condor.fetchers.bot_performance import resolve_bot, resolve_bots
+
+    agg = _instances_agg(
+        ("ns-bot-20260731-100000", "2026-07-31T10:00:00"),
+        ("ns-bot-btc-20260731-101500", "2026-07-31T10:15:00"),
+    )
+    # resolve_bot alone picks the freshest prefix match for BOTH bases…
+    assert resolve_bot(agg, "ns-bot")["bot_name"] == "ns-bot-btc-20260731-101500"
+    assert resolve_bot(agg, "ns-bot-btc")["bot_name"] == "ns-bot-btc-20260731-101500"
+    # …partition-aware resolution gives each base its own live instance.
+    live = resolve_bots(agg, ["ns-bot", "ns-bot-btc"])
+    assert live["ns-bot"]["bot_name"] == "ns-bot-20260731-100000"
+    assert live["ns-bot-btc"]["bot_name"] == "ns-bot-btc-20260731-101500"
+
+
+def test_resolve_bots_prefers_an_exact_deploy_over_a_newer_suffixed_one():
+    from condor.fetchers.bot_performance import resolve_bots
+
+    agg = _instances_agg(
+        ("dn-mm", "2026-01-01T00:00:00"),
+        ("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
+    )
+    # Same rule resolve_bot applies: a bot deployed under the bare base wins.
+    assert resolve_bots(agg, ["dn-mm"])["dn-mm"]["bot_name"] == "dn-mm"
+
+
+def test_slice_history_tiles_exactly():
+    from condor.fetchers.bot_performance import slice_history
+
+    # one instance, cumulative realized/volume/trades at t=10,20,30
+    hist = [
+        (10.0, 1.0, 100.0, 1.0),
+        (20.0, 3.0, 300.0, 4.0),
+        (30.0, 5.0, 500.0, 9.0),
+    ]
+    # window fully before → 0; fully after start baseline → final delta
+    assert slice_history([hist], 0, 5) == (0.0, 0.0, 0.0)
+    # [0,20] captures rows at 10 and 20 → cum_at(20)-cum_at(0)=3
+    assert slice_history([hist], 0, 20) == (3.0, 300.0, 4.0)
+    # [20,40] → cum_at(40)=final(5) - cum_at(20)=3 → 2
+    assert slice_history([hist], 20, 40) == (2.0, 200.0, 5.0)
+    # tiling: [0,20)+[20,40) sums to the instance's full cumulative
+    a = slice_history([hist], 0, 20)
+    b = slice_history([hist], 20, 40)
+    assert (a[0] + b[0], a[1] + b[1], a[2] + b[2]) == (5.0, 500.0, 9.0)
+
+
+def test_slice_history_sums_multiple_instances():
+    from condor.fetchers.bot_performance import slice_history
+
+    h1 = [(10.0, 2.0, 20.0, 1.0)]  # instance 1: +2 at t=10
+    h2 = [(15.0, 3.0, 30.0, 2.0)]  # instance 2: +3 at t=15
+    # window covering both
+    assert slice_history([h1, h2], 0, 100) == (5.0, 50.0, 3.0)
+    # window covering only instance 1
+    assert slice_history([h1, h2], 0, 12) == (2.0, 20.0, 1.0)
+
+
+def test_fetch_instance_history_sums_controllers_and_filters_trades():
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    class _Client:
+        async def get_controller_performance_history(self, **_kw):
+            return {
+                "data": [
+                    {
+                        "timestamp": "2026-07-24T18:00:00+00:00",
+                        "performance": {
+                            "realized_pnl_quote": 1.0,
+                            "volume_traded": 100.0,
+                            # 2 real trades; EARLY_STOP churn + FAILED excluded
+                            "close_type_counts": {
+                                "CloseType.TAKE_PROFIT": 2,
+                                "CloseType.EARLY_STOP": 500,
+                                "CloseType.FAILED": 9,
+                            },
+                        },
+                    },
+                    {
+                        "timestamp": "2026-07-24T18:00:00+00:00",  # 2nd controller, same ts
+                        "performance": {
+                            "realized_pnl_quote": 0.5,
+                            "volume_traded": 40.0,
+                            "close_type_counts": {"CloseType.STOP_LOSS": 1},
+                        },
+                    },
+                ]
+            }
+
+    client = SimpleNamespace(bot_orchestration=_Client())
+    hist = asyncio.run(fetch_instance_history(client, "bot-1"))
+    assert len(hist) == 1  # both controllers summed into one timestamp
+    ts, realized, volume, trades = hist[0]
+    assert realized == 1.5  # 1.0 + 0.5
+    assert volume == 140.0  # 100 + 40
+    assert trades == 3.0  # TAKE_PROFIT 2 + STOP_LOSS 1; EARLY_STOP/FAILED excluded
+
+
 # ── Provider wiring ──
 
 
-def test_executors_provider_forwards_bot_name(monkeypatch):
-    from condor.agents.providers.executors import ExecutorsProvider
+def _capture_provider_fetch(monkeypatch) -> dict:
+    from condor.agents.performance import AgentPerformance as _AP
 
-    captured = {}
+    captured: dict = {}
 
-    async def _fake_fetch(client, agent_id, bot_name=""):
+    async def _fake_fetch(client, agent_id, bot_names=None):
         captured["agent_id"] = agent_id
-        captured["bot_name"] = bot_name
-        return AgentPerformance(agent_id=agent_id, bot_name=bot_name)
+        captured["bot_names"] = bot_names
+        return _AP(agent_id=agent_id, bot_names=list(bot_names or []))
 
     monkeypatch.setattr(
         "condor.agents.performance.fetch_agent_performance", _fake_fetch
     )
+    return captured
 
-    provider = ExecutorsProvider()
+
+def test_executors_provider_falls_back_to_config_bot_name(monkeypatch):
+    # No ledger (executor-mode caller / older engine): the configured name is
+    # still what the session would deploy under, so it must reach the fetch.
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    captured = _capture_provider_fetch(monkeypatch)
     asyncio.run(
-        provider.execute(
+        ExecutorsProvider().execute(
             client=object(),
             config={"bot_name": "river"},
             agent_id="river.scalp_1",
         )
     )
-    assert captured == {"agent_id": "river.scalp_1", "bot_name": "river"}
+    assert captured == {"agent_id": "river.scalp_1", "bot_names": ["river"]}
+
+
+def test_executors_provider_prefers_ledger_bases(monkeypatch):
+    # With a ledger, the session's OWNED bases win over the configured single
+    # name — a session that deployed two bots must see both.
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    captured = _capture_provider_fetch(monkeypatch)
+    asyncio.run(
+        ExecutorsProvider().execute(
+            client=object(),
+            config={"bot_name": "river"},
+            agent_id="river.scalp_1",
+            bot_names=["river-btc", "river-eth"],
+        )
+    )
+    assert captured["bot_names"] == ["river-btc", "river-eth"]
 
 
 # ── Prompt controller-mode block ──

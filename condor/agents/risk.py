@@ -9,7 +9,10 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .ownership import BotLedger
 
 log = logging.getLogger(__name__)
 
@@ -166,14 +169,62 @@ class RiskEngine:
 
         return True, ""
 
+    def check_bot_action(self, tool_call: dict) -> tuple[bool, str]:
+        """Check a manage_bots call against risk limits.
+
+        A bot's capital lives in saved controller configs on the API server,
+        so exposure can't be computed from the tool inputs alone. Instead,
+        bound the loss: a deploy must declare ``max_global_drawdown_quote``
+        (the platform-enforced kill switch) no larger than the strategy's
+        position limit. Stops are risk-reducing and always allowed; an
+        ``update_config`` is only gated when it declares a
+        ``total_amount_quote`` above the position limit.
+
+        Returns (allowed, reason).
+        """
+        input_data = tool_call.get("input", {})
+        action = input_data.get("action", "")
+
+        if action == "deploy":
+            cap = input_data.get("max_global_drawdown_quote")
+            if not cap:
+                return False, (
+                    "Bot deploy must declare max_global_drawdown_quote "
+                    f"(≤ ${self.limits.max_position_size_quote:.2f}) so the "
+                    "platform kill switch bounds the loss"
+                )
+            if float(cap) > self.limits.max_position_size_quote:
+                return False, (
+                    f"max_global_drawdown_quote ${float(cap):.2f} exceeds "
+                    f"position limit ${self.limits.max_position_size_quote:.2f}"
+                )
+        elif action == "update_config":
+            amount = float(
+                (input_data.get("config_data") or {}).get("total_amount_quote", 0) or 0
+            )
+            if amount > self.limits.max_position_size_quote:
+                return False, (
+                    f"update_config total_amount_quote ${amount:.2f} exceeds "
+                    f"position limit ${self.limits.max_position_size_quote:.2f}"
+                )
+
+        return True, ""
+
 
 def auto_approve_with_risk_check(
     risk_engine: RiskEngine,
     risk_state: RiskState,
     execution_mode: str = "loop",
+    ledger: "BotLedger | None" = None,
 ):
-    """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones."""
-    from handlers.agents._shared import is_dangerous_tool_call
+    """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
+
+    ``ledger`` (FEAT-017) scopes bot ownership: with one, a ``manage_bots`` action
+    that deploys or mutates a bot outside the session's namespace is cancelled and
+    recorded. ``None`` (consults, delegations, chat, executor-mode agents) keeps
+    today's behavior exactly.
+    """
+    from handlers.agents._shared import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
@@ -187,6 +238,12 @@ def auto_approve_with_risk_check(
                     action = input_data.get("action", "")
                     if action in ("create", "stop"):
                         log.info("Dry-run mode: blocked manage_executors(%s)", action)
+                        return {"outcome": {"outcome": "cancelled"}}
+                elif tool_name == "manage_bots":
+                    input_data = tool_call.get("input", {})
+                    action = input_data.get("action", "")
+                    if action in DANGEROUS_BOT_ACTIONS:
+                        log.info("Dry-run mode: blocked manage_bots(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
                 elif tool_name in (
                     "place_order",
@@ -214,6 +271,40 @@ def auto_approve_with_risk_check(
                 if not allowed:
                     log.warning("Risk engine blocked tool call: %s", reason)
                     return {"outcome": {"outcome": "cancelled"}}
+
+            # Bot deploys place real capital via controllers — bound the loss
+            # (declared drawdown kill switch) since the amount isn't in the call
+            if tool_name == "manage_bots":
+                # Ownership first: an agent may only touch bots in its own
+                # namespace. Read-only actions (status/logs/get_config) are not
+                # in DANGEROUS_BOT_ACTIONS, so it still sees the whole fleet.
+                if ledger is not None:
+                    input_data = tool_call.get("input", {})
+                    action = input_data.get("action", "")
+                    if action in DANGEROUS_BOT_ACTIONS:
+                        bot_name = input_data.get("bot_name", "") or ""
+                        if not ledger.owns(bot_name):
+                            log.warning(
+                                "Ownership: blocked manage_bots(%s) on '%s' "
+                                "(namespace %s)",
+                                action,
+                                bot_name,
+                                ledger.namespace,
+                            )
+                            ledger.note_violation(bot_name, action)
+                            return {"outcome": {"outcome": "cancelled"}}
+
+                allowed, reason = risk_engine.check_bot_action(tool_call)
+                if not allowed:
+                    log.warning("Risk engine blocked tool call: %s", reason)
+                    return {"outcome": {"outcome": "cancelled"}}
+
+                # Recorded only once the call is actually going through, so a
+                # risk-rejected deploy never lands in the ledger.
+                if ledger is not None:
+                    input_data = tool_call.get("input", {})
+                    if input_data.get("action", "") == "deploy":
+                        ledger.note_deploy(input_data.get("bot_name", "") or "")
 
             # Block direct order placement entirely
             if tool_name == "place_order":

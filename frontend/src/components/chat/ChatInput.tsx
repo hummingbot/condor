@@ -10,13 +10,28 @@ interface ChatInputProps {
   disabled?: boolean;
   isStreaming?: boolean;
   onAbort?: () => void;
+  /** Take the caret on mount — the workspace lands the user in a composer. */
+  autoFocus?: boolean;
+  /** Who the user is writing to. Defaults to Condor, the chat assistant. */
+  placeholder?: string;
 }
 
 type RecordingState = "idle" | "recording" | "transcribing";
 
-export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputProps) {
+export function ChatInput({
+  onSend,
+  disabled,
+  isStreaming,
+  onAbort,
+  autoFocus,
+  placeholder = "Ask Condor...",
+}: ChatInputProps) {
   const [value, setValue] = useState("");
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // The box around the textarea is the affordance, so it has to know when the
+  // textarea has the caret. `:focus-within` would do it without state, but the
+  // recording and transcribing branches replace the textarea entirely.
+  const [focused, setFocused] = useState(false);
 
   const [recordingState, setRecordingState] = useState<RecordingState>("idle");
   const [recordingDuration, setRecordingDuration] = useState(0);
@@ -201,11 +216,19 @@ export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputP
   const isTranscribing = recordingState === "transcribing";
 
   return (
-    <div className="border-t border-[var(--color-border)] bg-[var(--color-surface)] p-3">
+    <div className="p-3">
       {voiceError && (
         <p className="mb-2 text-xs text-red-400">{voiceError}</p>
       )}
-      <div className="flex items-end gap-2">
+      {/* One composer chrome, owned here — the hero, the thread and the overlay
+          drawer all get this box, so they cannot drift into two shapes again. */}
+      <div
+        className={`flex items-end gap-2 rounded-xl border bg-[var(--color-surface)] px-2 py-1.5 transition-colors ${
+          focused
+            ? "border-[var(--color-primary)]/40 ring-1 ring-[var(--color-primary)]/20"
+            : "border-[var(--color-border)]"
+        }`}
+      >
         {isRecording ? (
           // Recording UI
           <div className="flex flex-1 items-center gap-3 rounded-lg border border-red-500/40 bg-red-500/5 px-3 py-2">
@@ -229,16 +252,19 @@ export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputP
           // Normal text input
           <textarea
             ref={textareaRef}
+            autoFocus={autoFocus}
             value={value}
             onChange={(e) => {
               setValue(e.target.value);
               if (voiceError) setVoiceError(null);
             }}
             onKeyDown={handleKeyDown}
-            placeholder="Ask Condor..."
+            onFocus={() => setFocused(true)}
+            onBlur={() => setFocused(false)}
+            placeholder={placeholder}
             disabled={disabled}
             rows={1}
-            className="flex-1 resize-none rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-2 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-primary)] focus:outline-none disabled:opacity-50"
+            className="flex-1 resize-none bg-transparent px-2 py-1.5 text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none disabled:opacity-50"
           />
         )}
 
@@ -266,26 +292,32 @@ export function ChatInput({ onSend, disabled, isStreaming, onAbort }: ChatInputP
           </button>
         )}
 
-        {/* Send / Stop button */}
-        {isStreaming ? (
+        {/* Stop — only while an answer is in flight. It stays even though the
+            composer is now live, because stopping without redirecting is still
+            a thing users want (and Esc does the same). */}
+        {isStreaming && (
           <button
             onClick={onAbort}
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-red-500 text-white transition-opacity hover:opacity-90"
             title="Stop generation (Esc)"
+            aria-label="Stop generation"
           >
             <Square className="h-3.5 w-3.5" />
           </button>
-        ) : (
-          <button
-            onClick={handleSubmit}
-            disabled={disabled || !value.trim() || isRecording || isTranscribing}
-            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-            title="Send message"
-            aria-label="Send message"
-          >
-            <Send className="h-4 w-4" />
-          </button>
         )}
+
+        {/* Send — enabled mid-answer, because that is the whole feature. The
+            tooltip says what it will do before the user finds out: sending
+            discards the answer in flight and redirects the same session. */}
+        <button
+          onClick={handleSubmit}
+          disabled={disabled || !value.trim() || isRecording || isTranscribing}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--color-primary)] text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+          title={isStreaming ? "Send — interrupts the current answer" : "Send message"}
+          aria-label="Send message"
+        >
+          <Send className="h-4 w-4" />
+        </button>
       </div>
     </div>
   );

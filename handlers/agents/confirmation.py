@@ -1,23 +1,34 @@
-"""Trade confirmation flow using async Futures."""
+"""Telegram delivery of trade confirmations.
 
-import asyncio
+The pending approval itself lives in :mod:`condor.runtime.confirmations`; this
+module only renders it as an inline keyboard and posts the answer back. That
+split is what lets the same request be answered from the dashboard or over
+HTTP instead.
+"""
+
 import logging
-import uuid
 from typing import Any
 
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 
-from ._shared import BLOCKED_TOOLS, is_dangerous_tool_call
+from condor.runtime.confirmations import (
+    CONFIRMATION_TIMEOUT,
+    PendingConfirmation,
+    get_registry,
+)
 
 log = logging.getLogger(__name__)
 
-# Pending confirmation futures: request_id -> Future
-_pending: dict[str, asyncio.Future] = {}
+__all__ = [
+    "CONFIRMATION_TIMEOUT",
+    "TelegramChannel",
+    "format_tool_summary",
+    "permission_callback",
+    "resolve_confirmation",
+]
 
-CONFIRMATION_TIMEOUT = 120  # seconds
 
-
-def _format_tool_summary(tool_call: dict[str, Any]) -> str:
+def format_tool_summary(tool_call: dict[str, Any]) -> str:
     """Format a tool call into a human-readable summary for the confirmation message."""
     tool_name = tool_call.get("tool", "") or tool_call.get("title", "Unknown")
     input_data = tool_call.get("input", {})
@@ -47,6 +58,17 @@ def _format_tool_summary(tool_call: dict[str, Any]) -> str:
             return f"Stop executor {exec_id[:12]}..."
         return f"Executor: {action}"
 
+    if tool_name == "manage_bots":
+        action = input_data.get("action", "?")
+        bot_name = input_data.get("bot_name", "?")
+        if action == "deploy":
+            controllers = input_data.get("controllers_config", [])
+            return f"Deploy bot '{bot_name}' with controllers {controllers}"
+        if action == "update_config":
+            config_name = input_data.get("config_name", "?")
+            return f"Update config '{config_name}' on bot '{bot_name}'"
+        return f"Bot '{bot_name}': {action}"
+
     if tool_name == "manage_gateway_swaps":
         action = input_data.get("action", "?")
         pair = input_data.get("trading_pair", "?")
@@ -66,83 +88,69 @@ def _format_tool_summary(tool_call: dict[str, Any]) -> str:
     return tool_name
 
 
+# Backwards-compatible alias for the pre-registry name.
+_format_tool_summary = format_tool_summary
+
+
+class TelegramChannel:
+    """Renders a pending confirmation as an inline keyboard in a chat."""
+
+    def __init__(self, bot: Bot, chat_id: int):
+        self._bot = bot
+        self._chat_id = chat_id
+
+    async def deliver(self, pending: PendingConfirmation) -> None:
+        keyboard = InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton(
+                        "Approve", callback_data=f"agent:confirm_trade:{pending.id}"
+                    ),
+                    InlineKeyboardButton(
+                        "Reject", callback_data=f"agent:reject_trade:{pending.id}"
+                    ),
+                ]
+            ]
+        )
+        await self._bot.send_message(
+            chat_id=self._chat_id,
+            text=f"Trade Confirmation\n\n{pending.summary}\n\nApprove this action?",
+            reply_markup=keyboard,
+        )
+
+
 async def permission_callback(
     bot: Bot,
     chat_id: int,
     tool_call: dict[str, Any],
     options: list[dict[str, Any]],
+    user_id: int | None = None,
 ) -> dict[str, Any]:
-    """Called by ACPClient when agent requests permission.
+    """Permission callback delivering to one Telegram chat.
 
-    For dangerous tools, sends a confirmation message and waits for user response.
-    For safe tools, auto-approves immediately.
+    Thin wrapper over the shared builder, kept because several call sites bind
+    it with ``functools.partial(bot, chat_id)``. In a private chat the chat id
+    IS the user id, which is why it is the authorization fallback.
     """
-    # Block tools that bypass Condor's RBAC
-    tool_name = tool_call.get("tool", "") or tool_call.get("title", "")
-    if tool_name in BLOCKED_TOOLS:
-        log.warning("Blocked tool %s in chat %d", tool_name, chat_id)
-        return {"outcome": {"outcome": "cancelled"}}
+    from condor.runtime.confirmations import build_permission_callback
 
-    # Auto-approve safe tools
-    if not is_dangerous_tool_call(tool_call):
-        for opt in options:
-            if opt.get("kind") in ("allow_once", "allow_always"):
-                return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
-        if options:
-            return {"outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}}
-        return {"outcome": {"outcome": "cancelled"}}
-
-    # Dangerous tool -- ask user for confirmation
-    request_id = str(uuid.uuid4())[:8]
-    summary = _format_tool_summary(tool_call)
-
-    keyboard = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("Approve", callback_data=f"agent:confirm_trade:{request_id}"),
-            InlineKeyboardButton("Reject", callback_data=f"agent:reject_trade:{request_id}"),
-        ]
-    ])
-
-    await bot.send_message(
-        chat_id=chat_id,
-        text=f"Trade Confirmation\n\n{summary}\n\nApprove this action?",
-        reply_markup=keyboard,
+    callback = build_permission_callback(
+        session_key=f"tg:{chat_id}",
+        user_id=user_id if user_id is not None else chat_id,
+        channels=[TelegramChannel(bot, chat_id)],
     )
-
-    # Create future and wait for user response
-    future: asyncio.Future = asyncio.get_event_loop().create_future()
-    _pending[request_id] = future
-
-    try:
-        approved = await asyncio.wait_for(future, timeout=CONFIRMATION_TIMEOUT)
-    except asyncio.TimeoutError:
-        _pending.pop(request_id, None)
-        await bot.send_message(
-            chat_id=chat_id,
-            text="Confirmation timed out -- action rejected.",
-        )
-        return {"outcome": {"outcome": "cancelled"}}
-    finally:
-        _pending.pop(request_id, None)
-
-    if approved:
-        # Find allow option
-        for opt in options:
-            if opt.get("kind") in ("allow_once", "allow_always"):
-                return {"outcome": {"outcome": "selected", "optionId": opt["optionId"]}}
-        if options:
-            return {"outcome": {"outcome": "selected", "optionId": options[0]["optionId"]}}
-
-    return {"outcome": {"outcome": "cancelled"}}
+    return await callback(tool_call, options)
 
 
-def resolve_confirmation(request_id: str, approved: bool) -> bool:
-    """Called from Telegram callback when user clicks Approve/Reject.
+async def resolve_confirmation(
+    request_id: str, approved: bool, by_user_id: int | None = None
+) -> bool:
+    """Called from the Telegram callback when the user taps Approve/Reject.
 
-    Returns True if the request was found and resolved.
+    Returns True if the request was found and this user was allowed to answer
+    it. False also covers "someone already answered", which is why the caller
+    reports it as expired rather than as an error.
     """
-    future = _pending.get(request_id)
-    if future and not future.done():
-        future.set_result(approved)
-        return True
-    return False
+    return await get_registry().resolve(
+        request_id, approved=approved, by_user_id=by_user_id
+    )

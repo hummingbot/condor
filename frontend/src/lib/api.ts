@@ -1,4 +1,4 @@
-import { authHeaders } from "./auth-token";
+import { authFetch, authHeaders } from "./auth-token";
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = {
@@ -272,6 +272,21 @@ export interface TradingRulesResponse {
   rules: TradingRule[];
 }
 
+export interface Ticker {
+  trading_pair: string;
+  price: number;
+  base_volume: number;
+  quote_volume: number;
+  /** 24h volume in USD; null when the quote asset couldn't be priced. */
+  usd_volume: number | null;
+}
+
+export interface TickersResponse {
+  connector: string;
+  tickers: Ticker[];
+  updated_at: number | null;
+}
+
 // ── Deploy Bot ──
 
 export interface ControllerConfigSummary {
@@ -350,11 +365,21 @@ export interface StrategySummary {
   instances: RunningInstance[];
 }
 
+/**
+ * The coordinator's slug — the Agent you get by binding none.
+ *
+ * Condor lives in the same registry as every specialist (FEAT-033), so it
+ * comes back from `/agents` like the rest. But a chat is *with* Condor
+ * precisely when `agent_slug` is empty, so any list of specialists to bind has
+ * to lift it out or offer the same identity twice.
+ */
+export const CHAT_SLUG = "condor";
+
 export interface AgentSummary {
   slug: string;
   name: string;
   description: string;
-  consultable: boolean;
+  /** Routing hint only — every Agent is consultable, delegable and loopable. */
   when_to_consult: string;
   agent_key: string;
   strategy_count: number;
@@ -440,7 +465,6 @@ export interface AgentDetail {
   agent_key: string;
   tools: string[];
   when_to_consult: string;
-  consultable: boolean;
   server_required: boolean;
   server_name: string;
   strategies: StrategySummary[];
@@ -458,7 +482,28 @@ export interface Delegation {
   status: "running" | "done" | "error" | "stopped";
   result: string;
   error: string;
+  /** The conversation that started this task; "" when there was none. */
+  conversation_id: string;
+  /** Wall-clock start (epoch seconds) — drives the elapsed time. */
+  started_at: number;
 }
+
+// One entry of a delegation's session transcript. Mirrors the three shapes the
+// runner's event sink folds into `DelegateTask.events`; tool entries are patched
+// in place server-side, so `id` is stable across a status flip.
+export type DelegationEvent =
+  | { type: "thought"; text: string }
+  | { type: "text"; text: string }
+  | {
+      type: "tool";
+      id: string;
+      name: string;
+      status: string;
+      kind: string;
+      input: Record<string, unknown> | null;
+      /** Clipped at 2000 chars, the same boundary the on-disk transcript uses. */
+      output: string | null;
+    };
 
 // Strategy = a playbook that loops under an Agent. Holds the operational
 // history: sessions, experiments, live instances, config and learnings.
@@ -517,6 +562,8 @@ export interface RoutineInstance {
   last_run_at: number | null;
   last_result: string | null;
   last_duration: number | null;
+  /** The report the last run rendered, if it rendered one. */
+  report_id?: string | null;
   run_count: number;
   has_result?: boolean;
   result_text?: string;
@@ -586,6 +633,8 @@ export interface ReportSummary {
   source_type: string;
   source_name: string;
   tags: string[];
+  /** Producing assistant — "" on reports written before attribution existed. */
+  agent?: string;
 }
 
 export interface ReportsListResponse {
@@ -649,19 +698,141 @@ export interface VoiceSettingsResponse {
 export interface ChatAgentOption {
   key: string;
   label: string;
+  /** True for sentinels that open a model list ("openrouter:", "custom:")
+   *  rather than naming a startable model. Sent explicitly because the key's
+   *  shape doesn't tell you — "ollama:" also ends in a colon but IS startable. */
+  picker?: boolean;
 }
 
-export interface ChatModeOption {
-  key: string;
-  label: string;
-  description: string;
+/** A saved OpenAI-compatible endpoint (Venice AI, Together, local vLLM, ...). */
+export interface CustomProvider {
+  name: string;
+  base_url: string;
+  has_key: boolean;
 }
 
 export interface ChatOptionsResponse {
   agents: ChatAgentOption[];
-  modes: ChatModeOption[];
+  custom_providers: CustomProvider[];
   default_agent: string;
-  default_mode: string;
+}
+
+export interface OpenRouterModelOption {
+  slug: string;
+  name: string;
+  context_length: number;
+  prompt_price: number;
+  completion_price: number;
+}
+
+/** A domain Agent a session can be bound to. Every Agent is chattable. */
+export interface AgentBindingOption {
+  slug: string;
+  name: string;
+  description: string;
+  when_to_consult: string;
+}
+
+export interface SessionOptionsResponse extends ChatOptionsResponse {
+  servers: string[];
+  agent_bindings: AgentBindingOption[];
+}
+
+/** Mirrors condor/runtime/models.py SessionInfo. */
+export interface SessionInfo {
+  key: string;
+  agent_key: string;
+  user_id: number | null;
+  /** Originating frontend: "tg" | "web" | "mcp". */
+  surface: string;
+  slot: string;
+  server_name: string | null;
+  /** The bound Agent pinned this server; the chat cannot change it. */
+  server_pinned: boolean;
+  is_busy: boolean;
+  alive: boolean;
+  created_at: string;
+  last_prompt_at: string | null;
+  /** Bound domain Agent, or "" for the plain assistant. */
+  agent_slug: string;
+  /** Display name of whoever is answering. */
+  label: string;
+  /** Durable conversation behind this session. Outlives it. */
+  conversation_id: string;
+}
+
+export interface CreateSessionRequest {
+  key: string;
+  agent_key: string;
+  server_name?: string | null;
+  agent_slug?: string;
+  lazy_context?: boolean;
+  /** Empty mints a new conversation; an id resumes that transcript. */
+  conversation_id?: string;
+}
+
+// ── Conversations ──
+//
+// A session is the live subprocess; a conversation is what was said. The
+// second outlives the first, so this — not localStorage — is the source of
+// truth for a transcript.
+
+export interface ConversationMeta {
+  id: string;
+  user_id: number;
+  /** Where it was born: "tg" | "web" | "mcp". */
+  surface: string;
+  title: string;
+  agent_key: string;
+  agent_slug: string;
+  server_name: string | null;
+  created_at: string;
+  updated_at: string;
+  turn_count: number;
+  last_snippet: string;
+}
+
+export interface ConversationTurn {
+  /** "user" | "assistant" | "system". */
+  role: string;
+  text: string;
+  thought: string;
+  tool_calls: { id?: string; title?: string; status?: string }[];
+  /** System entries only: "switch" | "error". */
+  kind: string;
+  ts: number;
+}
+
+export interface ConversationDetail {
+  meta: ConversationMeta;
+  turns: ConversationTurn[];
+}
+
+export interface SwitchSessionRequest {
+  agent_slug?: string;
+  agent_key?: string;
+  /** Move the conversation to this server. Also a respawn — the server is
+   *  baked into the MCP subprocess at spawn. */
+  server_name?: string;
+  /** Short recap carried into the new session — the subprocess is replaced. */
+  handoff?: string;
+}
+
+/** Agent key for a model served by a saved custom endpoint. Mirrors
+ *  build_custom_agent_key() in condor/preferences.py. */
+export function customAgentKey(provider: string, model: string): string {
+  return `custom@${provider}:${model}`;
+}
+
+/** Inverse of customAgentKey; returns null for non-custom keys. */
+export function parseCustomAgentKey(
+  agentKey: string,
+): { provider: string; model: string } | null {
+  const colon = agentKey.indexOf(":");
+  if (colon < 0) return null;
+  const prefix = agentKey.slice(0, colon);
+  if (!prefix.startsWith("custom@")) return null;
+  return { provider: prefix.slice("custom@".length), model: agentKey.slice(colon + 1) };
 }
 
 // ── Backtesting ──
@@ -919,15 +1090,23 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/market/prices?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
     ),
 
-  getRateOracleRates: (server: string, tradingPairs: string[]) =>
-    apiFetch<{ rates: Record<string, number> }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/rate-oracle/rates`,
-      { method: "POST", body: JSON.stringify({ trading_pairs: tradingPairs }) },
+  getRates: (server: string, tradingPairs: string[], connector?: string) =>
+    apiFetch<{ rates: Record<string, number | null> }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/rates`,
+      {
+        method: "POST",
+        body: JSON.stringify({ trading_pairs: tradingPairs, connector }),
+      },
     ),
 
   getTradingRules: (server: string, connector: string) =>
     apiFetch<TradingRulesResponse>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/trading-rules?connector=${encodeURIComponent(connector)}`,
+    ),
+
+  getTickers: (server: string, connector: string) =>
+    apiFetch<TickersResponse>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/tickers?connector=${encodeURIComponent(connector)}`,
     ),
 
   getOrderBook: (
@@ -983,24 +1162,35 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
+  /** Set or clear the Agent's server pin. An empty `server_name` clears it,
+   *  so the Agent follows whatever server the chat is pointed at. */
+  updateAgentConfig: (
+    slug: string,
+    data: { server_name?: string; server_required?: boolean },
+  ) =>
+    apiFetch<{ updated: boolean; server_name: string; server_required: boolean }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/config`,
+      { method: "PATCH", body: JSON.stringify(data) },
+    ),
+
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
       method: "DELETE",
     }),
 
-  consultAgent: (
-    slug: string,
-    data: { task: string; context?: string; chat_id?: number; server_name?: string },
-  ) =>
-    apiFetch<{ agent: string; answer: string }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/consult`,
-      { method: "POST", body: JSON.stringify(data) },
-    ),
-
   // ── Delegations (fire-and-forget background agent tasks) ──
 
   getDelegations: () =>
     apiFetch<{ delegations: Delegation[] }>("/api/v1/agents/delegations"),
+
+  /** The human-facing transcript. Separate from the (agent-facing) status route
+   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py. */
+  getDelegationEvents: (taskId: string) =>
+    apiFetch<{
+      task_id: string;
+      status: Delegation["status"];
+      events: DelegationEvent[];
+    }>(`/api/v1/agents/delegations/${encodeURIComponent(taskId)}/events`),
 
   stopDelegation: (taskId: string) =>
     apiFetch<{ task_id: string; status: string }>(
@@ -1016,6 +1206,13 @@ export const api = {
   getStrategy: (slug: string, sslug: string) =>
     apiFetch<StrategyDetail>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}`,
+    ),
+
+  /** Materialize the Agent's default playbook (idempotent) so it can be tuned/looped. */
+  createDefaultStrategy: (slug: string) =>
+    apiFetch<StrategySummary>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/default`,
+      { method: "POST" },
     ),
 
   createStrategy: (
@@ -1191,18 +1388,35 @@ export const api = {
 
   // ── Reports ──
 
-  getReports: (params?: { source_type?: string; tag?: string; search?: string; limit?: number; offset?: number }) => {
+  getReports: (params?: { source_type?: string; tag?: string; search?: string; agent?: string; limit?: number; offset?: number }) => {
     const qs = new URLSearchParams();
     if (params?.source_type) qs.set("source_type", params.source_type);
     if (params?.tag) qs.set("tag", params.tag);
     if (params?.search) qs.set("search", params.search);
+    if (params?.agent) qs.set("agent", params.agent);
     if (params?.limit) qs.set("limit", String(params.limit));
     if (params?.offset) qs.set("offset", String(params.offset));
     const q = qs.toString();
     return apiFetch<ReportsListResponse>(`/api/v1/reports${q ? `?${q}` : ""}`);
   },
 
+  getReport: (id: string) =>
+    apiFetch<ReportSummary>(`/api/v1/reports/${encodeURIComponent(id)}`),
+
   getReportsGrouped: () => apiFetch<ReportGroup[]>("/api/v1/reports/latest-by-source"),
+
+  /**
+   * A report's rendered HTML body.
+   *
+   * Report bodies are authenticated (SEC-112), and an iframe `src` cannot carry
+   * an Authorization header — so callers fetch the HTML here and hand it to the
+   * iframe as `srcDoc`, keeping the token in a header instead of the URL.
+   */
+  getReportHtml: async (id: string): Promise<string> => {
+    const res = await authFetch(`/api/v1/reports/${encodeURIComponent(id)}/html`);
+    if (!res.ok) throw new Error(`Failed to load report (${res.status})`);
+    return res.text();
+  },
 
   deleteReport: (id: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/reports/${encodeURIComponent(id)}`, { method: "DELETE" }),
@@ -1369,6 +1583,92 @@ export const api = {
 
   // ── Chat ──
 
-  getChatOptions: () =>
-    apiFetch<ChatOptionsResponse>("/api/v1/chat/options"),
+  getOpenRouterModels: () =>
+    apiFetch<{ models: OpenRouterModelOption[] }>("/api/v1/chat/openrouter/models"),
+
+  // ── Sessions (runtime API) ──
+  //
+  // The same sessions the Telegram bot uses: one keyspace, so a session started
+  // there is listed and killable here.
+
+  getSessionOptions: () =>
+    apiFetch<SessionOptionsResponse>("/api/v1/sessions/options"),
+
+  listSessions: () => apiFetch<SessionInfo[]>("/api/v1/sessions"),
+
+  createSession: (spec: CreateSessionRequest) =>
+    apiFetch<SessionInfo>("/api/v1/sessions", {
+      method: "POST",
+      body: JSON.stringify(spec),
+    }),
+
+  destroySession: (key: string) =>
+    apiFetch<{ destroyed: boolean }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}`,
+      { method: "DELETE" },
+    ),
+
+  // Binds the chat to a different brain. The subprocess is replaced, so the
+  // conversation only carries over via `handoff`.
+  switchSession: (key: string, body: SwitchSessionRequest) =>
+    apiFetch<{ ok: boolean; session: SessionInfo }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}/action`,
+      { method: "POST", body: JSON.stringify({ action: "switch", ...body }) },
+    ),
+
+  cancelSessionPrompt: (key: string) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/v1/sessions/${encodeURIComponent(key)}/action`,
+      { method: "POST", body: JSON.stringify({ action: "cancel" }) },
+    ),
+
+  // ── Conversations (durable transcripts) ──
+  //
+  // Everything the user has ever said, across Telegram and the dashboard, in
+  // one keyspace. A conversation is continuable long after its session died.
+
+  listConversations: (limit = 100) =>
+    apiFetch<ConversationMeta[]>(`/api/v1/conversations?limit=${limit}`),
+
+  getConversation: (id: string, limit = 200) =>
+    apiFetch<ConversationDetail>(
+      `/api/v1/conversations/${encodeURIComponent(id)}?limit=${limit}`,
+    ),
+
+  renameConversation: (id: string, title: string) =>
+    apiFetch<ConversationMeta>(`/api/v1/conversations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify({ title }),
+    }),
+
+  /** The only way to lose a transcript. Killing a session no longer does. */
+  deleteConversation: (id: string) =>
+    apiFetch<{ deleted: boolean; sessions_destroyed: number }>(
+      `/api/v1/conversations/${encodeURIComponent(id)}`,
+      { method: "DELETE" },
+    ),
+
+  // ── Custom OpenAI-compatible LLM endpoints ──
+
+  getCustomProviders: () =>
+    apiFetch<{ providers: CustomProvider[] }>("/api/v1/settings/custom-providers"),
+
+  /** Validates the endpoint server-side before saving; rejects with the
+   *  provider's own error text (bad key, unreachable host, wrong shape). */
+  addCustomProvider: (data: { base_url: string; api_key?: string; name?: string }) =>
+    apiFetch<{ provider: CustomProvider; models: string[] }>(
+      "/api/v1/settings/custom-providers",
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  getCustomProviderModels: (name: string) =>
+    apiFetch<{ provider: CustomProvider; models: string[] }>(
+      `/api/v1/settings/custom-providers/${encodeURIComponent(name)}/models`,
+    ),
+
+  deleteCustomProvider: (name: string) =>
+    apiFetch<{ deleted: boolean; name: string }>(
+      `/api/v1/settings/custom-providers/${encodeURIComponent(name)}`,
+      { method: "DELETE" },
+    ),
 };

@@ -12,6 +12,31 @@ class Settings:
     bot_token: str
     agent_slug: str
     active_server: str
+    # Canonical key of the session that spawned this subprocess ("web:7:slot-1",
+    # "tg:42", …). Empty when the server runs outside a session.
+    session_key: str
+    # True when this subprocess belongs to a *background Condor worker* — the
+    # detached session `delegate` starts to author a routine (FEAT-032). The chat
+    # and the worker are the same agent record, so this flag is the only thing
+    # that tells them apart: it selects the worker framing in ``_build_instructions``
+    # and makes ``delegate(action="start")`` refuse to recurse.
+    delegate_worker: bool = False
+
+    @property
+    def specialist_slug(self) -> str:
+        """``agent_slug`` when a **specialist** is bound, else ``""``.
+
+        Condor is an ordinary agent now (FEAT-033), so the chat's subprocess is
+        launched with ``--agent-slug condor`` — correct for scoping its memory
+        and skills, and wrong for everything that asks "am I a specialist?".
+        Store resolution is unaffected either way (a falsy slug resolves Condor),
+        but the isolation rules are not: a specialist sees only its own routines
+        and reads its own identity, while the chat owns the general library and
+        the coordinator framing. Ask this, not ``agent_slug``, for those.
+        """
+        from condor.memory.paths import CHAT_SLUG
+
+        return "" if self.agent_slug == CHAT_SLUG else self.agent_slug
 
 
 def _parse_settings() -> Settings:
@@ -21,14 +46,28 @@ def _parse_settings() -> Settings:
     parser.add_argument("--agent-slug", default=None)
     parser.add_argument("--bot-token", default=None)
     parser.add_argument("--server-name", default=None)
+    parser.add_argument("--session-key", default=None)
+    parser.add_argument("--delegate-worker", action="store_true", default=False)
     args, _ = parser.parse_known_args()
 
     return Settings(
-        chat_id=args.chat_id if args.chat_id is not None else int(os.environ.get("CONDOR_CHAT_ID", "0")),
-        user_id=args.user_id if args.user_id is not None else int(os.environ.get("CONDOR_USER_ID", "0")),
+        chat_id=(
+            args.chat_id
+            if args.chat_id is not None
+            else int(os.environ.get("CONDOR_CHAT_ID", "0"))
+        ),
+        user_id=(
+            args.user_id
+            if args.user_id is not None
+            else int(os.environ.get("CONDOR_USER_ID", "0"))
+        ),
         bot_token=args.bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", ""),
         agent_slug=args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", ""),
         active_server=args.server_name or os.environ.get("CONDOR_SERVER_NAME", ""),
+        session_key=args.session_key or os.environ.get("CONDOR_SESSION_KEY", ""),
+        delegate_worker=(
+            args.delegate_worker or os.environ.get("CONDOR_DELEGATE_WORKER", "") == "1"
+        ),
     )
 
 

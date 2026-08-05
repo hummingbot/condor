@@ -27,6 +27,7 @@ from condor.acp.client import (
     resolve_acp,
 )
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
+from condor.runtime.registry_file import LoopState
 
 from .agent import Agent
 from .journal import JournalManager, next_experiment_number, next_session_number
@@ -37,8 +38,13 @@ from .strategy import Strategy
 
 log = logging.getLogger(__name__)
 
-# Module-level registry of running engines
-_engines: dict[str, "TickEngine"] = {}
+# The running-engine registry lives in the supervisor (condor.runtime.loops),
+# which is the single place that mutates it and records each transition to
+# disk. These stay as thin delegations for existing callers.
+#
+# NOTE: neither this module nor condor.runtime.* belongs in main.py's
+# modules_to_reload — they hold live process state (running tick tasks, ACP
+# subprocesses), and re-executing them would orphan every running loop.
 
 
 class _NullTracker:
@@ -54,12 +60,18 @@ class _NullTracker:
         return 0.0
 
 
+def _supervisor():
+    from condor.runtime.loops import get_supervisor
+
+    return get_supervisor()
+
+
 def get_engine(agent_id: str) -> TickEngine | None:
-    return _engines.get(agent_id)
+    return _supervisor().get(agent_id)
 
 
 def get_all_engines() -> dict[str, "TickEngine"]:
-    return dict(_engines)
+    return _supervisor().all()
 
 
 @dataclass
@@ -80,6 +92,11 @@ class TickEngine:
     risk: RiskEngine = field(init=False)
     provider_registry: ProviderRegistry = field(init=False)
     session_dir: "Path | None" = field(default=None, init=False)
+    # Which bots this session owns (FEAT-017). Controller mode only; None for
+    # executor-mode runs, which are unaffected by ownership enforcement.
+    ledger: "BotLedger | None" = field(default=None, init=False, repr=False)
+    # Scratch KV scoped to this (agent, strategy) — see condor.runtime.state.
+    state: "BoundState" = field(init=False, repr=False)
 
     # Runtime state
     _task: asyncio.Task | None = field(default=None, init=False, repr=False)
@@ -91,6 +108,7 @@ class TickEngine:
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
+    _adoption_done: bool = field(default=False, init=False, repr=False)
     # The live per-tick ACP client, held so stop() can reap it if the tick's own
     # finally is skipped (e.g. cancelled mid-await). None between ticks.
     _active_client: "ACPClient | PydanticAIClient | None" = field(
@@ -109,6 +127,21 @@ class TickEngine:
         # "..._e{N}" for experiments). The dot separates the two slugs cleanly —
         # slugs never contain a dot.
         run_key = f"{self.agent.slug}.{self.strategy.slug}"
+
+        # Controller mode (FEAT-017): resolve the effective bot name BEFORE the
+        # session config is persisted, so the session record — which per-session
+        # PnL attribution reads back — carries the name this run actually used.
+        from .ownership import (
+            BotLedger,
+            bot_namespace,
+            declared_names,
+            resolve_bot_name,
+        )
+
+        self.config["bot_name"] = resolve_bot_name(
+            self.config, self.agent.slug, self.strategy.slug
+        )
+
         if self.is_experiment:
             self.session_num = next_experiment_number(strategy_dir)
             self.agent_id = f"{run_key}_e{self.session_num}"
@@ -134,9 +167,27 @@ class TickEngine:
                 agent_dir=strategy_dir,
             )
 
+        # The ledger only exists in controller mode: an executor-mode agent never
+        # touches a bot, so it gets no ownership enforcement and writes no file.
+        if self.config["bot_name"]:
+            namespace = bot_namespace(self.agent.slug, self.strategy.slug)
+            self.ledger = BotLedger(
+                namespace,
+                self.session_dir,
+                declared=declared_names(self.config, namespace),
+            )
+
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
         self.risk = RiskEngine(risk_limits)
         self.provider_registry = ProviderRegistry()
+
+        # Scratch KV for cheap facts this strategy carries across ticks (a
+        # cursor, a cooldown deadline). Keyed on (agent, strategy) rather than
+        # the session, so it survives into the next session — which is the
+        # point of persisting it. Anything worth *remembering* goes to memory.
+        from condor.runtime.state import BoundState, namespace_for
+
+        self.state = BoundState(namespace_for(self))
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -149,7 +200,7 @@ class TickEngine:
         self._running = True
         self._bot = bot
         self._task = asyncio.create_task(self._loop())
-        _engines[self.agent_id] = self
+        _supervisor().register(self)
         log.info(
             "TickEngine %s started (freq=%ss)",
             self.agent_id,
@@ -179,7 +230,7 @@ class TickEngine:
             self._active_client = None
         if self.journal:
             self.journal.close()
-        _engines.pop(self.agent_id, None)
+        _supervisor().unregister(self.agent_id, LoopState.STOPPED)
         log.info("TickEngine %s stopped", self.agent_id)
 
     async def _run_shutdown(self, reason: str) -> None:
@@ -238,14 +289,16 @@ class TickEngine:
         finally:
             if self.journal:
                 self.journal.close()
-            _engines.pop(self.agent_id, None)
+            _supervisor().unregister(self.agent_id, LoopState.STOPPED)
             log.info("TickEngine %s shut down (%s)", self.agent_id, reason)
 
     def pause(self) -> None:
         self._paused = True
+        _supervisor().record(self, LoopState.PAUSED)
 
     def resume(self) -> None:
         self._paused = False
+        _supervisor().record(self, LoopState.RUNNING)
 
     def inject_directive(self, text: str) -> None:
         """Queue a user directive to be included in the next tick's prompt."""
@@ -289,6 +342,11 @@ class TickEngine:
                         self.journal.append_error(str(e))
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
 
+                # Record the tick we just finished. A tiny atomic write, so if
+                # the process dies mid-sleep the boot pass can say which tick
+                # this run reached instead of guessing.
+                _supervisor().record_tick(self)
+
                 # Single-tick modes: stop after first tick
                 if mode in ("dry_run", "run_once"):
                     label = "Dry run" if mode == "dry_run" else "Run-once"
@@ -299,7 +357,7 @@ class TickEngine:
                     )
                     await self._notify(f"Agent {self.agent_id}: {label} complete.")
                     self._running = False
-                    _engines.pop(self.agent_id, None)
+                    _supervisor().unregister(self.agent_id, LoopState.COMPLETED)
                     return
 
                 # max_ticks limit (loop mode only)
@@ -315,7 +373,7 @@ class TickEngine:
                     )
                     self._running = False
                     self.journal.close()
-                    _engines.pop(self.agent_id, None)
+                    _supervisor().unregister(self.agent_id, LoopState.COMPLETED)
                     return
 
             try:
@@ -334,9 +392,20 @@ class TickEngine:
                 self.journal.append_error("No API client available")
             return
 
+        # 1b. Adopt any bot of ours already running (first tick only). A crash
+        # restart always mints a NEW session (see condor/runtime/loops.py), so the
+        # live bot must be taken over rather than orphaned and redeployed.
+        await self._adopt_running_bots(client)
+
         # 2. Run core data providers (executors only -- agent uses MCP for market data)
         skill_results = await self.provider_registry.run_core_providers(
-            client, self.config, agent_id=self.agent_id
+            client,
+            self.config,
+            agent_id=self.agent_id,
+            # Adoption above just refreshed the ledger, so its bases are exactly
+            # the bots this session operates right now — including any extra one
+            # it deployed beyond the configured name.
+            bot_names=self.ledger.bases() if self.ledger else None,
         )
 
         # Extract structured data from providers for tracking
@@ -430,6 +499,7 @@ class TickEngine:
             cached_routines_section=self._cached_routines_section or None,
             user_memory=user_memory,
             skills_index=skills_index,
+            ledger=self.ledger,
         )
 
         # Inject pending user directives
@@ -501,6 +571,8 @@ class TickEngine:
                 response_summary=response_text[:500],
             )
 
+            self._journal_ownership_violations(tick_num)
+
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
             skill_volume = self._last_skill_data.get("total_volume", 0.0)
             skill_executors = len(self._last_skill_data.get("executors", []))
@@ -544,6 +616,54 @@ class TickEngine:
                 len(response_text),
             )
 
+    async def _adopt_running_bots(self, client) -> None:
+        """Record the bots in our namespace that are already live (FEAT-017).
+
+        Runs once, on the first tick — not in ``__post_init__``, which is sync and
+        must not do network I/O. Reaching the API is best-effort: a failure means
+        "own nothing yet" and is retried on the next tick, never fatal.
+        """
+        if self._adoption_done or self.ledger is None:
+            return
+        from condor.fetchers.bot_performance import fetch_all_bot_performance
+
+        try:
+            all_perf = await fetch_all_bot_performance(client)
+        except Exception as e:
+            log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
+            return
+
+        now = time.time()
+        for instance_name in all_perf:
+            if self.ledger.owns(instance_name):
+                self.ledger.adopt(instance_name, now)
+        self._adoption_done = True
+        if self.ledger.bases():
+            log.info(
+                "TickEngine %s adopted bots: %s",
+                self.agent_id,
+                ", ".join(self.ledger.bases()),
+            )
+
+    def _journal_ownership_violations(self, tick_num: int) -> None:
+        """Surface refused bot calls in the journal.
+
+        The permission callback only allows or cancels. On the pydantic-ai path
+        the refused call now gets a refusal string as its tool result (SEC-080),
+        but on the ACP path the model still learns nothing mid-tick, so the
+        correction reaches the agent here and via the next tick's
+        [CONTROLLER MODE] block.
+        """
+        if not self.journal or self.ledger is None:
+            return
+        for v in self.ledger.drain_violations():
+            self.journal.append_action(
+                tick_num,
+                "bot_ownership_blocked",
+                f"manage_bots({v['action']}) on '{v['name']}' refused — outside "
+                f"namespace '{self.ledger.namespace}'",
+            )
+
     async def _collect_stream(self, acp_client: ACPClient, prompt: str):
         """Wrapper to make prompt_stream compatible with wait_for."""
         async for event in acp_client.prompt_stream(prompt):
@@ -565,30 +685,21 @@ class TickEngine:
         two points), avoiding a redundant per-tick journal re-parse.
         """
         from handlers.agents._shared import (
-            build_mcp_servers_for_agent,
             build_mcp_servers_for_session,
             get_project_dir,
         )
 
         mode = self.config.get("execution_mode", "loop")
 
-        server_name = self.config.get("server_name")
-        if server_name:
-            mcp_servers = build_mcp_servers_for_agent(
-                server_name,
-                self.user_id,
-                self.chat_id,
-                agent_slug=self.agent.slug,
-                execution_mode=mode,
-            )
-        else:
-            mcp_servers = build_mcp_servers_for_session(
-                self.user_id,
-                self.chat_id,
-                execution_mode=mode,
-            )
+        # A configured server pins the toolset; None falls back to the chat's.
+        mcp_servers = build_mcp_servers_for_session(
+            self.user_id,
+            self.chat_id,
+            server_name=self.config.get("server_name"),
+            agent_slug=self.agent.slug,
+        )
         permission_cb = auto_approve_with_risk_check(
-            self.risk, risk_state, execution_mode=mode
+            self.risk, risk_state, execution_mode=mode, ledger=self.ledger
         )
 
         agent_key = self._agent_key()
@@ -597,7 +708,14 @@ class TickEngine:
         if use_pydantic_ai:
             import os
 
-            base_url = self.config.get("model_base_url") or None
+            from condor.preferences import resolve_custom_endpoint
+
+            # A custom endpoint's URL/key come from the owner's saved endpoints;
+            # an explicit model_base_url in the run config still wins.
+            custom_url, api_key = resolve_custom_endpoint(
+                agent_key, user_id=self.user_id
+            )
+            base_url = self.config.get("model_base_url") or custom_url or None
             tool_filter_mode = (
                 self.config.get("tool_filter_mode")
                 or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
@@ -608,6 +726,7 @@ class TickEngine:
                 mcp_servers=mcp_servers,
                 permission_callback=permission_cb,
                 base_url=base_url,
+                api_key=api_key,
                 tool_filter_mode=tool_filter_mode,
                 # Same allowlist the agent gets on consult; empty => unrestricted.
                 allowed_tools=self.agent.tools or None,

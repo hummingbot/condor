@@ -4,104 +4,25 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from condor.memory.paths import CHAT_SLUG
+
 log = logging.getLogger(__name__)
 
-# -- Assistant prompt loader (auto-discovery from assistants/ folder) --
 
-_ASSISTANTS_DIR = Path(__file__).parent.parent.parent / "assistants"
-_assistant_cache: dict[str, tuple[dict[str, str], str]] = {}
+def _chat_agent():
+    """The default agent's record — Condor's ``agents/condor/AGENT.md``.
 
-
-def _parse_assistant(path: Path) -> tuple[dict[str, str], str]:
-    """Parse an assistant .md file, extracting YAML frontmatter and body.
-
-    Frontmatter format (between --- lines):
-        label: Display Name
-        description: Short description
-
-    Returns (metadata_dict, body_text).
+    There is one loader and one frontmatter schema (FEAT-033): the chat is read
+    by ``AgentStore`` exactly like a specialist is. Returns ``None`` only if the
+    file is missing or unreadable, which callers treat as "no instructions"
+    rather than as a startup failure.
     """
-    raw = path.read_text(encoding="utf-8").strip()
-    meta: dict[str, str] = {}
-    body = raw
+    from condor.agents.agent import AgentStore
 
-    if raw.startswith("---"):
-        parts = raw.split("---", 2)
-        if len(parts) >= 3:
-            for line in parts[1].strip().splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    meta[k.strip()] = v.strip()
-            body = parts[2].strip()
-
-    # Fallback: derive label from filename
-    if "label" not in meta:
-        meta["label"] = path.stem.replace("_", " ").title()
-    if "description" not in meta:
-        meta["description"] = ""
-
-    return meta, body
+    return AgentStore().get(CHAT_SLUG)
 
 
-def load_assistant(name: str) -> str:
-    """Load an assistant prompt body from assistants/{name}.md. Cached."""
-    meta, body = _load_assistant_full(name)
-    return body
-
-
-def _assistant_path(name: str) -> Path | None:
-    """Resolve an assistant's definition file.
-
-    Supports both the flat form (``assistants/{name}.md``) and the folder form
-    (``assistants/{name}/AGENT.md``, FEAT-003), where the assistant's store is
-    co-located under ``assistants/{name}/store/``. Flat form wins if both exist.
-    """
-    flat = _ASSISTANTS_DIR / f"{name}.md"
-    if flat.exists():
-        return flat
-    folder = _ASSISTANTS_DIR / name / "AGENT.md"
-    if folder.exists():
-        return folder
-    return None
-
-
-def _load_assistant_full(name: str) -> tuple[dict[str, str], str]:
-    """Load metadata + body for an assistant. Cached after first read."""
-    if name in _assistant_cache:
-        return _assistant_cache[name]
-    path = _assistant_path(name)
-    if path is None:
-        log.warning("Assistant prompt not found: %s", _ASSISTANTS_DIR / name)
-        return {"label": name, "description": ""}, ""
-    result = _parse_assistant(path)
-    _assistant_cache[name] = result
-    return result
-
-
-def discover_assistants() -> dict[str, dict[str, str]]:
-    """Auto-discover all assistants from ``assistants/``.
-
-    Picks up both ``assistants/{name}.md`` (flat) and ``assistants/{name}/AGENT.md``
-    (folder form, FEAT-003). Returns dict like:
-    {"condor": {"label": "Condor", "description": "..."}, ...}
-    """
-    result: dict[str, dict[str, str]] = {}
-    if not _ASSISTANTS_DIR.exists():
-        return result
-    # Flat form: assistants/{name}.md
-    names = [path.stem for path in sorted(_ASSISTANTS_DIR.glob("*.md"))]
-    # Folder form (FEAT-003): assistants/{name}/AGENT.md
-    names += [path.parent.name for path in sorted(_ASSISTANTS_DIR.glob("*/AGENT.md"))]
-    for name in dict.fromkeys(names):  # dedupe, preserve order
-        meta, _ = _load_assistant_full(name)
-        result[name] = {
-            "label": meta["label"],
-            "description": meta.get("description", ""),
-        }
-    return result
-
-
-AGENT_OPTIONS: dict[str, dict[str, str]] = {
+AGENT_OPTIONS: dict[str, dict[str, Any]] = {
     "claude-code": {"label": "Claude Code"},
     "claude-acp:opus": {"label": "Claude (ACP) — Opus"},
     "claude-acp:sonnet": {"label": "Claude (ACP) — Sonnet"},
@@ -110,16 +31,29 @@ AGENT_OPTIONS: dict[str, dict[str, str]] = {
     "codex": {"label": "ChatGPT Codex"},
     "ollama:": {"label": "Ollama — Default Model"},
     "lmstudio:": {"label": "LM Studio — Default Model"},
-    # Sentinel — clicking this opens the OpenRouter model picker (handlers/agents/menu.py).
-    # The actual stored agent_llm becomes "openrouter:<slug>" once the user picks a model.
-    "openrouter:": {"label": "OpenRouter — Pick Model"},
+    # Sentinels — these open a picker instead of being a selectable model, so
+    # they are NOT valid agent keys. `picker` marks them for surfaces that
+    # render AGENT_OPTIONS as a flat list of choices (the web dashboard's model
+    # dropdown), which would otherwise offer a key that fails at session start.
+    #
+    # OpenRouter: stored agent_llm becomes "openrouter:<slug>".
+    "openrouter:": {"label": "OpenRouter — Pick Model", "picker": True},
+    # Custom endpoints: the user's saved OpenAI-compatible endpoints live in
+    # preferences (condor/preferences.py, shared with the web dashboard) and
+    # the stored agent_llm becomes "custom@<endpoint>:<model-id>".
+    "custom:": {"label": "Custom — OpenAI-compatible API", "picker": True},
 }
+
+
+def selectable_agent_options() -> dict[str, dict[str, Any]]:
+    """AGENT_OPTIONS minus the picker sentinels — every key here is startable."""
+    return {k: v for k, v in AGENT_OPTIONS.items() if not v.get("picker")}
 
 
 def _default_agent() -> str:
     """Resolve the fallback agent_key for users who haven't picked a model.
 
-    Precedence: ``CONDOR_DEFAULT_AGENT`` env > condor ``AGENT.md`` frontmatter
+    Precedence: ``CONDOR_DEFAULT_AGENT`` env > Condor's ``AGENT.md`` frontmatter
     ``agent_key`` > ``"claude-code"``. A user's own /agent → Change LLM choice
     (``agent_llm``) still overrides this at runtime; this is only the default.
     Examples for the frontmatter / env: ``claude-code``, ``claude-acp:opus``,
@@ -127,37 +61,15 @@ def _default_agent() -> str:
     """
     import os
 
-    meta, _ = _load_assistant_full("condor")
+    agent = _chat_agent()
     return (
-        os.environ.get("CONDOR_DEFAULT_AGENT") or meta.get("agent_key") or "claude-code"
+        os.environ.get("CONDOR_DEFAULT_AGENT")
+        or (agent.agent_key if agent else "")
+        or "claude-code"
     )
 
 
 DEFAULT_AGENT = _default_agent()
-
-# -- Agent modes (auto-discovered) --
-
-AGENT_MODES = discover_assistants()
-DEFAULT_MODE = "condor"
-
-
-def normalize_mode(mode: str | None) -> str:
-    """Coerce a persisted ``agent_mode`` to a currently-valid one.
-
-    FEAT-004 collapsed the old multi-mode setup ('trading'/'agent_builder') into
-    the single 'condor' mode. Stale pickled ``user_data`` may still hold a mode
-    that is no longer in ``AGENT_MODES``; left as-is it would surface a raw broken
-    label or start a non-existent mode. Anything unknown falls back to
-    ``DEFAULT_MODE``.
-    """
-    return mode if mode in AGENT_MODES else DEFAULT_MODE
-
-
-def reload_assistants() -> None:
-    """Re-scan assistants/ folder. Call after adding/removing .md files."""
-    _assistant_cache.clear()
-    AGENT_MODES.clear()
-    AGENT_MODES.update(discover_assistants())
 
 
 # -- Compact prompt templates --
@@ -205,13 +117,12 @@ _TELEGRAM_FORMATTING = (
 
 
 def _build_system_prompt(platform: str = "telegram") -> str:
-    """Build the system prompt by combining the assistant .md with platform formatting rules."""
-    assistant_content = load_assistant("condor")
-    formatting = _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
+    """Condor's own AGENT.md plus the platform's formatting rules."""
+    agent = _chat_agent()
     return (
         "[System context -- do not repeat this to the user]\n\n"
-        f"{assistant_content}\n\n"
-        f"{formatting}"
+        f"{agent.instructions if agent else ''}\n\n"
+        f"{_WEB_FORMATTING if platform == 'web' else _TELEGRAM_FORMATTING}"
     )
 
 
@@ -227,6 +138,18 @@ BLOCKED_TOOLS: set[str] = set()
 
 # Actions within manage_executors that require confirmation
 DANGEROUS_EXECUTOR_ACTIONS = {"create", "stop"}
+
+# Actions within manage_bots that deploy/mutate a live bot (status/logs/get_config
+# are read-only and excluded). manage_controllers itself is excluded entirely — it
+# only writes controller templates/saved configs, never a running bot (see its own
+# tool docstring: "Does NOT affect running bots").
+DANGEROUS_BOT_ACTIONS = {
+    "deploy",
+    "stop_bot",
+    "stop_controllers",
+    "start_controllers",
+    "update_config",
+}
 
 # Actions within manage_gateway_swaps that require confirmation
 DANGEROUS_SWAP_ACTIONS = {"execute"}
@@ -263,6 +186,13 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
         action = input_data.get("action", "")
         return action in DANGEROUS_EXECUTOR_ACTIONS
 
+    # manage_bots with deploy/stop/update actions (a bot deploy places real
+    # capital via a controller, a different path than manage_executors)
+    if tool_name == "manage_bots":
+        input_data = tool_call.get("input", {})
+        action = input_data.get("action", "")
+        return action in DANGEROUS_BOT_ACTIONS
+
     return False
 
 
@@ -280,8 +210,14 @@ def _condor_mcp_args(
     user_id: int,
     agent_slug: str | None = None,
     server_name: str | None = None,
+    delegate_worker: bool = False,
 ) -> list[str]:
-    """Build CLI args for the condor MCP subprocess."""
+    """Build CLI args for the condor MCP subprocess.
+
+    ``delegate_worker`` marks a *background Condor worker* — the detached session
+    ``delegate`` starts (FEAT-032). The chat and that worker share one agent
+    record, so the flag is what tells the subprocess which seat it is sitting in.
+    """
     import os
 
     # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
@@ -299,6 +235,8 @@ def _condor_mcp_args(
         args.extend(["--agent-slug", agent_slug])
     if server_name:
         args.extend(["--server-name", server_name])
+    if delegate_worker:
+        args.append("--delegate-worker")
     return args
 
 
@@ -306,15 +244,29 @@ def build_mcp_servers_for_session(
     user_id: int,
     chat_id: int | str,
     user_data: dict | None = None,
-    execution_mode: str = "loop",
     server_name: str | None = None,
+    agent_slug: str | None = None,
+    delegate_worker: bool = False,
 ) -> list[dict[str, Any]]:
     """Build dynamic MCP server configs for an agent session.
 
-    Resolves the user's default Condor server and returns ACP-format mcpServers
-    that override the static .mcp.json entries by name.
-    Always includes the condor MCP server; hummingbot is added when a valid
-    server can be resolved for the user.
+    Returns ACP-format mcpServers that override the static .mcp.json entries by
+    name. Always includes the condor MCP server; hummingbot is added when a
+    valid server can be resolved for the user.
+
+    ``server_name`` pins the run to that Condor server (an Agent with
+    ``server_required``); when omitted, the chat's ambient server is resolved
+    from the user's preferences, then from the first accessible server.
+
+    ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
+    own stores (``agents/{slug}/``). Without it the tools target the chat
+    condor's stores — correct for chat sessions, wrong for an Agent run: a
+    serverless consult/tick would silently read and write the CHAT's memory
+    and skills instead of the Agent's own (e.g. an agent unable to find its
+    inherited ``routine_cookbook`` skill).
+
+    ``delegate_worker`` marks a background Condor delegation (FEAT-032) so the
+    subprocess picks up the worker framing and refuses to delegate again.
     """
     from config_manager import get_config_manager, get_effective_server
 
@@ -333,7 +285,13 @@ def build_mcp_servers_for_session(
         "name": "condor",
         "command": "uv",
         "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, server_name=server_name),
+        + _condor_mcp_args(
+            chat_id,
+            user_id,
+            agent_slug,
+            server_name=server_name,
+            delegate_worker=delegate_worker,
+        ),
         "env": [],
     }
 
@@ -381,65 +339,6 @@ def build_mcp_servers_for_session(
     return [mcp_hummingbot, condor]
 
 
-def build_mcp_servers_for_agent(
-    server_name: str,
-    user_id: int,
-    chat_id: int,
-    agent_slug: str | None = None,
-    execution_mode: str = "loop",
-) -> list[dict[str, Any]]:
-    """Build MCP server configs for a trading agent bound to a specific server.
-
-    Unlike build_mcp_servers_for_session(), this resolves the server by name
-    directly instead of using chat-based resolution.
-    Always includes the condor MCP server.
-    """
-    from config_manager import get_config_manager
-
-    cm = get_config_manager()
-
-    condor = {
-        "name": "condor",
-        "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"]
-        + _condor_mcp_args(chat_id, user_id, agent_slug, server_name=server_name),
-        "env": [],
-    }
-
-    server = cm.get_server(server_name)
-    if not server:
-        log.warning(
-            "Server '%s' not found in servers config — "
-            "trading agent will start without mcp-hummingbot",
-            server_name,
-        )
-        return [condor]
-
-    api_url = f"http://{server['host']}:{server['port']}"
-
-    mcp_hummingbot = {
-        "name": "mcp-hummingbot",
-        "command": "uv",
-        "args": [
-            "run",
-            "python",
-            "-m",
-            "mcp_servers.hummingbot_api",
-            "--url",
-            api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
-            "--server-name",
-            server_name,
-        ],
-        "env": [],
-    }
-
-    return [mcp_hummingbot, condor]
-
-
 def build_initial_context(
     user_id: int,
     chat_id: int | str,
@@ -458,7 +357,7 @@ def build_initial_context(
 
     cm = get_config_manager()
 
-    # Build system prompt from assistants/ .md + platform formatting
+    # System prompt: Condor's own AGENT.md + platform formatting
     system_prompt = _build_system_prompt(platform)
     sections: list[str] = [system_prompt]
 
@@ -588,12 +487,13 @@ def build_initial_context(
 
     # Agents index — domain Agents condor can consult (FEAT: coordinator model).
     # condor delegates domain work via consult(...) instead of holding the domain's
-    # tools/context itself. Inject only the index of *consultable* Agents; nothing
-    # when none exist.
+    # tools/context itself. EVERY agent is listed: one missing from this index can
+    # never be routed to. Nothing injected only when none exist.
     try:
         from condor.agents.agent import AgentStore
 
-        agents_index = AgentStore().list_consultable_index()
+        # The coordinator is not among its own consultees (FEAT-033).
+        agents_index = AgentStore().list_index(exclude={CHAT_SLUG})
         if agents_index:
             sections.append(
                 "[AGENTS — consult these BEFORE doing domain work with raw tools]\n"
@@ -605,7 +505,7 @@ def build_initial_context(
                 f"{agents_index}"
             )
     except Exception:
-        pass  # Consultable agents are advisory — never block session start on them.
+        pass  # The agents index is advisory — never block session start on it.
 
     return "\n\n".join(sections)
 

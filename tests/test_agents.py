@@ -1,8 +1,9 @@
 """Unit tests for the unified Agent model: AgentStore + Strategy sub-resource.
 
-Covers the FEAT-004 capabilities derived from a definition (consultable vs
-loopeable), the strategy CRUD scoped under an Agent, the shared per-Agent skill
-library, and the pydantic-ai tool allowlist.
+Covers the universal capabilities (every Agent is consultable, delegable and
+loopable — no flags, no gating), the strategy CRUD scoped under an Agent, the
+default playbook that makes a strategy-less Agent loopable, the shared per-Agent
+skill library, and the pydantic-ai tool allowlist.
 """
 
 import asyncio
@@ -29,12 +30,11 @@ def _patch_roots(monkeypatch, tmp_path):
     monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
 
 
-# ── Agent discovery + derived capabilities ──
+# ── Agent discovery + the index every Agent appears in ──
 
 
-def test_agent_discovery_and_consultable_derived(tmp_path, monkeypatch):
+def test_agent_discovery_and_index(tmp_path, monkeypatch):
     _patch_roots(monkeypatch, tmp_path)
-    # Consult-capable Agent: trigger + pydantic-ai model.
     _write_agent(
         tmp_path,
         "executor_manager",
@@ -44,7 +44,8 @@ def test_agent_discovery_and_consultable_derived(tmp_path, monkeypatch):
         agent_key="ollama:qwen3:32b",
         body="Body for executor_manager.",
     )
-    # Loop-only Agent: no consult trigger => NOT consultable.
+    # No consult trigger — still a first-class agent, just described by its
+    # description in the index. Filtering it out would make it unroutable.
     _write_agent(
         tmp_path,
         "brigado",
@@ -59,41 +60,33 @@ def test_agent_discovery_and_consultable_derived(tmp_path, monkeypatch):
     assert em.slug == "executor_manager"
     assert em.agent_key == "ollama:qwen3:32b"
     assert em.instructions.strip().endswith("Body for executor_manager.")
-    assert em.consultable is True
 
-    brig = store.get("brigado")
-    assert brig is not None
-    assert brig.consultable is False  # empty when_to_consult => not consultable
-
-    index = store.list_consultable_index()
+    index = store.list_index()
     assert "[executor_manager] When deploying or tuning executors" in index
-    assert "brigado" not in index  # only consultable agents appear
+    assert "[brigado] BRL market making" in index
 
 
-def test_consultable_on_any_model(tmp_path, monkeypatch):
-    """A consult trigger alone makes an agent consultable, regardless of model.
-
-    An ACP key (claude-code) can't enforce the tools allowlist, but the consult
-    still runs (unrestricted, mutations confirmation-gated) — so it IS consultable.
-    """
+def test_consult_hint_falls_back(tmp_path, monkeypatch):
+    """The hint degrades description -> name; it never gates consultability."""
     _patch_roots(monkeypatch, tmp_path)
     _write_agent(
-        tmp_path,
-        "acp_consult",
-        name="ACP",
-        when_to_consult="whenever",
-        agent_key="claude-code",  # ACP model
+        tmp_path, "with_trigger", name="A", description="d", when_to_consult="t"
     )
+    _write_agent(tmp_path, "with_desc", name="B", description="d")
+    _write_agent(tmp_path, "bare", name="C")
+
     store = AgentStore()
-    assert store.get("acp_consult").consultable is True
-    assert "acp_consult" in store.list_consultable_index()
+    assert store.get("with_trigger").consult_hint == "t"
+    assert store.get("with_desc").consult_hint == "d"
+    assert store.get("bare").consult_hint == "C"
+    assert "[bare] C" in store.list_index()
 
 
 def test_missing_agent_returns_none(tmp_path, monkeypatch):
     _patch_roots(monkeypatch, tmp_path)
     assert AgentStore().get("nope") is None
     assert AgentStore().get("") is None
-    assert AgentStore().list_consultable_index() == ""
+    assert AgentStore().list_index() == ""
 
 
 def test_agent_crud_roundtrip(tmp_path, monkeypatch):
@@ -172,6 +165,53 @@ def test_strategy_agent_key_override_optional(tmp_path, monkeypatch):
     assert store.get_by_key(s2.key).agent_key == "ollama:z"
 
 
+# ── Every Agent is loopable: the default playbook ──
+
+
+def test_agent_with_no_strategy_is_still_loopable(tmp_path, monkeypatch):
+    """An Agent that owns no playbook resolves to a default one, built on demand."""
+    _patch_roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "brigado", name="Brigado", agent_key="claude-code")
+    store = StrategyStore()
+    assert store.list("brigado") == []
+
+    resolved = store.resolve_for_loop("brigado")
+    assert resolved is not None
+    assert resolved.slug == strategy_module.DEFAULT_STRATEGY_SLUG
+    assert resolved.key == "brigado.default"
+    assert (resolved.dir / "strategy.md").exists()
+    assert resolved.instructions.strip()  # a real playbook body, not empty
+
+    # Idempotent: a second start reuses the same one instead of piling up.
+    again = store.resolve_for_loop("brigado")
+    assert again.key == resolved.key
+    assert [x.slug for x in store.list("brigado")] == ["default"]
+
+
+def test_resolve_for_loop_prefers_explicit_playbooks(tmp_path, monkeypatch):
+    _patch_roots(monkeypatch, tmp_path)
+    _write_agent(tmp_path, "brigado", name="Brigado", agent_key="claude-code")
+    store = StrategyStore()
+    store.create(agent_slug="brigado", name="BRL MM", instructions="do the thing")
+
+    # A composite key is always honored verbatim.
+    assert store.resolve_for_loop("brigado.brl_mm").key == "brigado.brl_mm"
+    # A bare slug with exactly one playbook means that playbook — no default is
+    # invented behind the user's back.
+    assert store.resolve_for_loop("brigado").key == "brigado.brl_mm"
+    assert [x.slug for x in store.list("brigado")] == ["brl_mm"]
+
+    # With several, the bare slug falls back to the agent's own default loop.
+    store.create(agent_slug="brigado", name="BRL Scalp", instructions="scalp")
+    assert store.resolve_for_loop("brigado").slug == "default"
+
+
+def test_resolve_for_loop_unknown_target(tmp_path, monkeypatch):
+    _patch_roots(monkeypatch, tmp_path)
+    assert StrategyStore().resolve_for_loop("nope") is None
+    assert StrategyStore().resolve_for_loop("nope.also_nope") is None
+
+
 # ── MCP tool: manage_trading_agent agent CRUD (the AGENT.md identity) ──
 
 
@@ -196,7 +236,6 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
     )
     assert created["created"] is True
     assert created["agent_slug"] == "risk_sentry"
-    assert created["consultable"] is True  # has a consult trigger
 
     got = asyncio.run(
         ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
@@ -209,11 +248,10 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
             action="update_agent",
             agent_slug="risk_sentry",
             instructions="new body",
-            when_to_consult="",  # demote from consultable
+            when_to_consult="",  # clearing the hint must NOT gate anything
         )
     )
     assert updated["updated"] is True
-    assert updated["consultable"] is False
     assert (
         asyncio.run(
             ta.manage_trading_agent(action="get_agent", agent_slug="risk_sentry")
@@ -224,7 +262,9 @@ def test_manage_trading_agent_agent_crud(tmp_path, monkeypatch):
     listed = asyncio.run(ta.manage_trading_agent(action="list_agent_definitions"))[
         "agents"
     ]
-    assert any(a["slug"] == "risk_sentry" for a in listed)
+    entry = next(a for a in listed if a["slug"] == "risk_sentry")
+    # The hint fell back to the description once the trigger was cleared.
+    assert entry["when_to_consult"] == "watches drawdown"
 
     assert asyncio.run(
         ta.manage_trading_agent(action="delete_agent", agent_slug="risk_sentry")
@@ -498,18 +538,26 @@ class _FakeACPClient:
         pass
 
 
-def _run_create_session(monkeypatch, **kwargs):
-    """Invoke get_or_create_session with the ACP client + context stubbed out."""
-    from handlers.agents import session as session_module
+def _run_create_session(monkeypatch, *, chat_id, user_id):
+    """Invoke the runtime's session factory with the ACP client + context stubbed out."""
+    from condor.runtime import SessionKey, SessionSpec
+    from condor.runtime import sessions as session_module
 
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr(session_module, "ACPClient", _FakeACPClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
+    # Resolved through condor.runtime.binding now, so patch it at the source.
     monkeypatch.setattr(
-        session_module, "build_mcp_servers_for_session", lambda *a, **k: []
+        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
     )
     _FakeACPClient.last_extra_env = None
-    asyncio.run(session_module.get_or_create_session(agent_key="claude-code", **kwargs))
+    spec = SessionSpec(
+        key=str(SessionKey.telegram(chat_id)),
+        agent_key="claude-code",
+        chat_id=chat_id,
+        user_id=user_id,
+    )
+    asyncio.run(session_module.get_or_create_session(spec))
     return _FakeACPClient.last_extra_env
 
 
@@ -645,16 +693,31 @@ def test_consult_forces_caller_user_id(monkeypatch):
     assert seen["server_name"] == "X"
 
 
-def test_normalize_mode_coerces_legacy_and_unknown():
-    """Legacy/removed (FEAT-004) or unknown persisted agent_mode -> DEFAULT_MODE."""
-    from handlers.agents._shared import AGENT_MODES, DEFAULT_MODE, normalize_mode
+def test_session_mcp_servers_carry_agent_slug(monkeypatch):
+    """Serverless agent runs (consult/tick without server_name) must scope the
+    condor MCP tools to the agent's own memory/skills via --agent-slug —
+    without it, an agent silently reads/writes the CHAT's stores (e.g. its
+    routines land in the global library instead of its own dir)."""
+    import config_manager
+    from handlers.agents._shared import build_mcp_servers_for_session
 
-    # Removed legacy modes and any unknown/None value fall back to default.
-    assert normalize_mode("trading") == DEFAULT_MODE
-    assert normalize_mode("agent_builder") == DEFAULT_MODE
-    assert normalize_mode("does-not-exist") == DEFAULT_MODE
-    assert normalize_mode(None) == DEFAULT_MODE
+    class _NoServers:
+        def get_accessible_servers(self, user_id):
+            return []
 
-    # The default mode itself is always valid and preserved.
-    assert DEFAULT_MODE in AGENT_MODES
-    assert normalize_mode(DEFAULT_MODE) == DEFAULT_MODE
+        def get_server(self, name):
+            return None
+
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _NoServers())
+    monkeypatch.setattr(config_manager, "get_effective_server", lambda *a, **k: None)
+
+    servers = build_mcp_servers_for_session(42, 42, agent_slug="backpack_mm")
+    condor = next(s for s in servers if s["name"] == "condor")
+    args = condor["args"]
+    assert "--agent-slug" in args
+    assert args[args.index("--agent-slug") + 1] == "backpack_mm"
+
+    # Chat sessions (no agent_slug) keep the chat scope: no --agent-slug arg.
+    servers = build_mcp_servers_for_session(42, 42)
+    condor = next(s for s in servers if s["name"] == "condor")
+    assert "--agent-slug" not in condor["args"]

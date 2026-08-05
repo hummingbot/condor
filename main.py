@@ -18,7 +18,7 @@ from telegram.ext import (
 )
 
 from condor.persistence import SafePicklePersistence
-from handlers import clear_all_input_states
+from handlers import cancel_command, clear_all_input_states
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN, WEB_PORT, WEB_URL
 
@@ -238,7 +238,10 @@ def reload_handlers():
         "handlers.routines",
         "handlers.agents",
         "handlers.agents.menu",
-        "handlers.agents.session",
+        # NOTE: neither "handlers.agents.session" nor any "condor.runtime.*"
+        # module belongs in this list. The runtime holds live subprocess handles
+        # (agent sessions); re-executing those modules resets the registry and
+        # silently orphans every running agent.
         "handlers.agents.stream",
         "handlers.agents.confirmation",
         "handlers.agents._shared",
@@ -314,6 +317,9 @@ def register_handlers(application: Application) -> None:
     application.add_handler(CommandHandler("agent", agent_command))
     application.add_handler(CommandHandler("delegations", delegations_command))
     application.add_handler(CommandHandler("memory", memory_command))
+    # Universal escape hatch for flows that arm a "next message is the answer"
+    # input mode. Every such prompt advertises /cancel.
+    application.add_handler(CommandHandler("cancel", cancel_command))
 
     # Add configuration commands (direct access)
     application.add_handler(CommandHandler("servers", servers_command))
@@ -458,6 +464,7 @@ async def register_bot_commands(application: Application) -> None:
         BotCommand("keys", "Configure exchange API credentials"),
         BotCommand("gateway", "Gateway for DEX trading"),
         BotCommand("web", "Open the web dashboard"),
+        BotCommand("cancel", "Abort the current input flow"),
     ]
     try:
         await application.bot.set_my_commands(commands)
@@ -477,6 +484,36 @@ async def register_bot_commands(application: Application) -> None:
             )
         except Exception as e:
             logger.warning(f"Failed to set admin-specific commands: {e}", exc_info=True)
+
+
+async def _notify_interrupted_runs(bot, report) -> None:
+    """Tell each owner, once, what the restart found.
+
+    One summary per chat rather than a message per run: a crash with several
+    live loops would otherwise spam the user at the worst possible moment.
+    """
+    by_chat: dict[int, list] = {}
+    for run in report.interrupted:
+        status = None
+        try:
+            from condor.runtime.registry_file import read_status
+
+            status = read_status(run.session_dir)
+        except Exception:
+            pass
+        chat_id = (status or {}).get("chat_id")
+        if chat_id:
+            by_chat.setdefault(int(chat_id), []).append(run)
+
+    for chat_id, runs in by_chat.items():
+        lines = [f"Found {len(runs)} interrupted run(s) after restart:"]
+        for run in runs:
+            suffix = " — restarted" if run.restarted else ""
+            lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
+        try:
+            await bot.send_message(chat_id=chat_id, text="\n".join(lines))
+        except Exception:
+            logger.warning("Could not notify chat %s about interrupted runs", chat_id)
 
 
 async def post_init(application: Application) -> None:
@@ -513,10 +550,31 @@ async def post_init(application: Application) -> None:
     sds.start()
     await sds.auto_subscribe_servers()
 
-    # Start agent session health monitor
-    from handlers.agents.session import start_health_monitor
+    # Start agent session health monitor. The health monitor is process
+    # lifecycle, not a session operation, so it is driven off the module
+    # directly rather than through the client facade.
+    from condor.runtime import sessions as runtime_sessions
+    from condor.runtime.confirmations import get_registry
 
-    await start_health_monitor(application.bot)
+    await runtime_sessions.start_health_monitor(application.bot)
+    # Sweeps expired approvals so a request nobody answers is denied, not leaked.
+    await get_registry().start()
+
+    # Settle whatever the previous process left running: mark orphaned loops
+    # interrupted, restart only the ones that opted in, and tell the owner once.
+    from condor.runtime.loops import get_supervisor
+
+    try:
+        report = await get_supervisor().reconcile_boot()
+        if report.total:
+            logger.warning(
+                "Boot reconciliation: %d interrupted, %d restarted",
+                report.total,
+                len(report.restarted),
+            )
+            await _notify_interrupted_runs(application.bot, report)
+    except Exception:
+        logger.exception("Boot reconciliation failed; continuing startup")
 
     # Schedule periodic update checks (notifies admin)
     from handlers.admin.update import schedule_update_checks
@@ -539,18 +597,19 @@ async def watch_and_reload(application: Application) -> None:
 
     handlers_path = Path(__file__).parent / "handlers"
     routines_path = Path(__file__).parent / "routines"
-    assistants_path = Path(__file__).parent / "assistants"
+    # ``agents/`` is deliberately NOT watched: AgentStore reads AGENT.md from
+    # disk on every call, so there is no cache to bust (the assistant cache that
+    # justified watching it is gone with FEAT-033), while agents write journals
+    # and strategy state under the same tree — watching it would thrash reloads.
     watch_paths = [handlers_path, routines_path]
-    if assistants_path.exists():
-        watch_paths.append(assistants_path)
     logger.info(f"👀 Watching for changes in: {', '.join(str(p) for p in watch_paths)}")
 
     class _ReloadFilter(DefaultFilter):
-        """Ignore per-assistant runtime stores (FEAT-003).
+        """Ignore per-agent runtime stores (FEAT-003).
 
-        ``assistants/{name}/store/`` is co-located with the watched assistant
-        definitions, so without this every chat memory/skill write would thrash
-        a full handler reload. AGENT.md / *.md changes still trigger reloads.
+        A store can sit under a watched tree (an agent-owned ``routines/`` dir
+        next to its ``store/``), so without this every memory/skill write would
+        thrash a full handler reload.
         """
 
         def __call__(self, change, path: str) -> bool:
@@ -561,12 +620,6 @@ async def watch_and_reload(application: Application) -> None:
     async for changes in awatch(*watch_paths, watch_filter=_ReloadFilter()):
         logger.info(f"📝 Detected changes: {changes}")
         try:
-            # Reload assistants if any .md file in assistants/ changed
-            if any(str(assistants_path) in str(path) for _, path in changes):
-                from handlers.agents._shared import reload_assistants
-
-                reload_assistants()
-                logger.info("✅ Auto-reloaded assistants")
             reload_handlers()
             register_handlers(application)
             # Refresh the Telegram command menus too, so a newly added/removed
@@ -643,19 +696,27 @@ def main() -> None:
 
     async def post_shutdown(application: Application) -> None:
         """Clean up agent subprocesses on shutdown."""
-        from handlers.agents.session import destroy_all_sessions, stop_health_monitor
+        from condor.runtime import client as runtime
+        from condor.runtime import sessions as runtime_sessions
+        from condor.runtime.confirmations import get_registry
 
-        await stop_health_monitor()
-        await destroy_all_sessions()
+        await runtime_sessions.stop_health_monitor()
+        await get_registry().stop()
+        await runtime.destroy_all()
 
-        # Stop all trading agents
-        from condor.agents.engine import get_all_engines
+        # Stop all trading agents. Graceful stop, deliberately NOT the shutdown
+        # sequence — winding down positions is an emergency action, not what a
+        # restart should do. Each engine records its final state on the way out.
+        from condor.runtime.conversations import flush_all as flush_conversations
+        from condor.runtime.loops import get_supervisor
+        from condor.runtime.state import flush_all
 
-        for engine in list(get_all_engines().values()):
-            try:
-                await engine.stop()
-            except Exception:
-                pass
+        await get_supervisor().stop_all()
+        # Writes are debounced, so force the last one out on a clean shutdown.
+        flush_all()
+        # A prompt still streaming when the bot went down holds its turn in
+        # memory; write it out rather than losing the last thing that was said.
+        flush_conversations()
 
         # Stop WebSocket manager
         from condor.web.ws_manager import get_ws_manager
@@ -759,7 +820,7 @@ async def _run_dual(application: Application) -> None:
         await asyncio.wait({web_task, stop_task}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         # Always run teardown — even if the run raised — so post_shutdown
-        # (destroy_all_sessions + engine.stop) reaps every ACP subprocess tree.
+        # (runtime.destroy_all + engine.stop) reaps every ACP subprocess tree.
         logger.info("Shutting down...")
         stop_task.cancel()
         server.should_exit = True

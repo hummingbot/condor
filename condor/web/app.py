@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -16,7 +16,9 @@ from condor.web.routes import (
     backtesting,
     bots,
     chat_ws,
+    confirmations,
     controller_performance,
+    conversations,
     executors,
     market,
     portfolio,
@@ -24,6 +26,7 @@ from condor.web.routes import (
     reports,
     routines,
     servers,
+    sessions,
     settings,
     transcribe,
     ws,
@@ -75,13 +78,17 @@ def create_app() -> FastAPI:
     app.include_router(routines.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(settings.router, prefix="/api/v1")
+    app.include_router(sessions.router, prefix="/api/v1")
     app.include_router(chat_ws.router, prefix="/api/v1")
+    app.include_router(confirmations.router, prefix="/api/v1")
+    app.include_router(conversations.router, prefix="/api/v1")
     app.include_router(transcribe.router, prefix="/api/v1")
 
-    # ── Serve report HTML files ──
-    reports_dir = Path(__file__).resolve().parent.parent.parent / "reports"
-    reports_dir.mkdir(exist_ok=True)
-    app.mount("/reports", StaticFiles(directory=str(reports_dir)), name="reports")
+    # Report bodies are NOT mounted here. They used to be served by an
+    # unauthenticated ``/reports/{filename:path}`` route, which made every
+    # report — portfolio value, PnL, positions — readable by anyone who could
+    # guess a filename. They now go through the authenticated
+    # ``GET /api/v1/reports/{report_id}/html`` handler instead (SEC-112).
 
     # ── Serve built frontend (production) ──
     dist = Path(__file__).resolve().parent.parent.parent / "frontend" / "dist"
@@ -94,7 +101,23 @@ def create_app() -> FastAPI:
 
         @app.get("/{full_path:path}")
         async def serve_spa(request: Request, full_path: str):
-            """SPA fallback: serve index.html for all non-API routes."""
+            """SPA fallback: serve index.html for all non-API routes.
+
+            An unknown ``/api/`` path is a real 404, never index.html: a frontend
+            running ahead of the backend would otherwise get 200 HTML where it
+            expects JSON, and surface the version skew as an opaque parse error
+            instead of a missing route.
+
+            ``/reports/`` is a real 404 too. It once served report bodies with no
+            auth (SEC-112); a stale link to it must fail loudly rather than fall
+            through to the SPA shell and look like it still works.
+            """
+            if full_path.startswith("api/"):
+                raise HTTPException(
+                    status_code=404, detail=f"No such API route: /{full_path}"
+                )
+            if full_path.startswith("reports/"):
+                raise HTTPException(status_code=404, detail="Report not found")
             if full_path:
                 try:
                     candidate = (dist / full_path).resolve()

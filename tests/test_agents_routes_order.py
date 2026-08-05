@@ -30,6 +30,10 @@ def test_delegation_detail_and_stop_not_shadowed():
         _first_full_match("POST", "/agents/delegations/t1/stop")
         == "stop_delegation_route"
     )
+    assert (
+        _first_full_match("GET", "/agents/delegations/t1/events")
+        == "get_delegation_events"
+    )
 
 
 def test_agent_detail_still_matches_real_slug():

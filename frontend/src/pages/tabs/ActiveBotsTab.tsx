@@ -668,7 +668,7 @@ export function ActiveBotsTab() {
     () => controllers.map((c) => c.trading_pair?.split("-")[1] || "USDT"),
     [controllers],
   );
-  const { convert, formatPnlValue, formatValue, currencySymbol } = useRates(quoteCurrencies);
+  const { convert, formatPnlValue, formatValue, resolvedSymbol: currencySymbol } = useRates(quoteCurrencies);
 
   if (!server) {
     return <NoServerCard message="Select a server from the sidebar to view active bots." />;

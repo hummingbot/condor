@@ -15,22 +15,29 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
+from condor.memory.paths import CHAT_SLUG
+
 logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def assistant_routines_dir(agent_slug: str | None) -> Path:
-    """Routines dir for an assistant.
+    """Routines dir for an agent.
 
     There is a single home for the general library — the repo-root ``routines/``,
     owned by the chat ``condor``. Domain experts/trading agents are isolated: each
     owns its routines and does **not** see the general library.
 
-    - chat ``condor`` (``agent_slug`` None) → ``routines`` (the general library)
+    - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) → ``routines``
     - trading agent / domain expert (slug) → ``agents/<slug>/routines`` (isolated)
+
+    The explicit ``"condor"`` carve-out is load-bearing (FEAT-033): Condor is now
+    an ordinary entry under ``agents/``, so threading its slug through naively
+    would relocate the general library to ``agents/condor/routines`` and empty
+    the catalog — silently, since a missing dir simply lists nothing.
     """
-    if agent_slug:
+    if agent_slug and agent_slug != CHAT_SLUG:
         return _PROJECT_ROOT / "agents" / agent_slug / "routines"
     return _PROJECT_ROOT / "routines"
 

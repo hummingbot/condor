@@ -7,6 +7,19 @@ export function formatToolName(title: string): string {
   return name.replace(/_/g, " ");
 }
 
+/** Classify an ACP tool-call status into the three states the UI renders.
+ *
+ *  The wire vocabulary is `pending | in_progress | completed | failed` — it
+ *  comes straight off the ACP `tool_call`/`tool_call_update` stream (see the
+ *  `ToolCallEvent` dataclass in condor/acp/client.py) and is what the journal
+ *  writes as `### N. name (status)` for parse-agent.ts to read back. Anything
+ *  that is not a terminal `completed`/`failed` is still in flight. */
+export function toolCallState(status: string): "ok" | "error" | "pending" {
+  if (status === "completed") return "ok";
+  if (status === "failed") return "error";
+  return "pending";
+}
+
 /** Escape a string for safe interpolation into innerHTML. */
 export function escapeHtml(val: string): string {
   return val
@@ -65,6 +78,18 @@ export function formatUsd(val: number) {
 
 export function formatVolume(val: number) {
   return formatCurrencyVolume(val);
+}
+
+/**
+ * Compact volume with a billions tier — 24h exchange volumes routinely exceed $1B,
+ * where `formatCurrencyVolume` would render an unreadable "2400.0M".
+ */
+export function formatCompactVolume(val: number, symbol = "$"): string {
+  const abs = Math.abs(val);
+  if (abs >= 1_000_000_000) return symbol + (val / 1_000_000_000).toFixed(2) + "B";
+  if (abs >= 1_000_000) return symbol + (val / 1_000_000).toFixed(1) + "M";
+  if (abs >= 1_000) return symbol + (val / 1_000).toFixed(1) + "K";
+  return symbol + val.toFixed(0);
 }
 
 export function formatPnl(val: number) {
