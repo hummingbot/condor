@@ -126,25 +126,41 @@ def _executor_row(ex: dict) -> dict[str, Any]:
 
 
 async def fetch_agent_performance(
-    client: Any, agent_id: str, bot_names: list[str] | None = None
+    client: Any,
+    agent_id: str,
+    bot_names: list[str] | None = None,
+    since: float = 0.0,
 ) -> AgentPerformance:
     """Fetch authoritative performance for a single ``agent_id``.
 
     When ``bot_names`` is given, the agent is in controller mode: each named bot's
-    aggregate PnL is merged into the returned totals (see
+    PnL is merged into the returned totals (see
     :func:`fetch_agent_performance_batch`).
+
+    ``since`` is the instant this session took the bots over. With it, the bot's
+    realized/volume/trades/fees are sliced to ``[since, now)`` exactly as the web
+    rollup slices them, so a session that adopted a long-running bot is not
+    credited with the PnL it inherited. Without it the whole lifetime aggregate is
+    merged, which is only right for a session that deployed the bot itself.
     """
     names = [b for b in (bot_names or []) if b]
     batch = await fetch_agent_performance_batch(
-        client, [agent_id], {agent_id: names} if names else None
+        client,
+        [agent_id],
+        {agent_id: names} if names else None,
+        since={agent_id: since} if names and since > 0 else None,
     )
     return batch.get(
         agent_id, AgentPerformance(agent_id=agent_id, bot_names=list(names))
     )
 
 
-def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
-    """Fold a bot's aggregate into an executor-derived ``AgentPerformance`` in place.
+def _merge_bot_perf(
+    perf: AgentPerformance,
+    bot: dict[str, Any],
+    window: tuple[float, float, float, float] | None = None,
+) -> None:
+    """Fold a bot's contribution into an executor-derived ``AgentPerformance``.
 
     The two sources are disjoint (bot controllers tag executors with their own
     config ids, never the ``agent_id``), so the merge is plain addition — no
@@ -155,21 +171,36 @@ def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
     Additive in the bot dimension too: folding several owned bots in turn
     accumulates rather than overwrites, so a session operating two bots reports
     their sum and both controller breakdowns.
+
+    ``window`` is this session's sliced ``(realized, volume, trades, fees)`` from
+    the controller history. When given it replaces the lifetime aggregate for
+    those four; unrealized PnL and the open rows always come from the live
+    snapshot, since the open book belongs to whoever operates the bot now.
     """
     from condor.fetchers.bot_performance import bot_executor_rows
 
-    perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
+    rows = bot_executor_rows(bot)
+    open_rows = [r for r in rows if r["status"] == "RUNNING"]
+
+    if window is None:
+        perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
+        perf.volume += float(bot.get("volume_traded", 0) or 0)
+        perf.fees += float(bot.get("cum_fees_quote", 0) or 0)
+        perf.trade_count += len(rows)
+    else:
+        realized, volume, trades, fees = window
+        perf.realized_pnl += realized
+        perf.volume += volume
+        perf.trade_count += int(round(trades))
+        # A backend that reports no cumulative fee column slices to zero; the
+        # live open-position figure is then the only one there is.
+        perf.fees += fees if fees else float(bot.get("cum_fees_quote", 0) or 0)
+
     perf.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
     perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
-    perf.volume += float(bot.get("volume_traded", 0) or 0)
-    perf.fees += float(bot.get("cum_fees_quote", 0) or 0)
     perf.controllers = perf.controllers + list(bot.get("controllers", []))
-
-    rows = bot_executor_rows(bot)
     perf.executors = perf.executors + rows
-    open_rows = [r for r in rows if r["status"] == "RUNNING"]
     perf.open_count += len(open_rows)
-    perf.trade_count += len(rows)
 
 
 def _build_perf_from_rows(
@@ -214,12 +245,19 @@ async def fetch_agent_performance_batch(
     agent_ids: list[str],
     bot_names: dict[str, list[str]] | None = None,
     failed_ids: set[str] | None = None,
+    since: dict[str, float] | None = None,
 ) -> dict[str, AgentPerformance]:
     """Batched multi-agent fetch via a single cursor-paginated executor search.
 
     ``bot_names`` maps ``agent_id -> the bases it owns`` for agents running in
-    controller mode; each such agent's bot aggregates (one shared snapshot fetch
-    for the whole batch) are merged into its executor-derived totals.
+    controller mode; each such agent's bot figures (one shared snapshot fetch for
+    the whole batch) are merged into its executor-derived totals.
+
+    ``since`` maps ``agent_id -> the instant it took its bots over``. Where it is
+    known, that agent's bot realized/volume/trades/fees are sliced from the
+    controller history to ``[since, now)`` instead of taking the bot's whole
+    lifetime, so the figure matches what the web rollup attributes to the same
+    session.
 
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
     search raised — their entries may be partial/empty. This lets callers avoid
@@ -284,9 +322,13 @@ async def fetch_agent_performance_batch(
         if aid in out and any(bases)
     }
     if wanted:
+        import time
+
         from condor.fetchers.bot_performance import (
             fetch_all_bot_performance,
+            fetch_base_histories,
             resolve_bots,
+            slice_history,
         )
 
         try:
@@ -294,16 +336,33 @@ async def fetch_agent_performance_batch(
         except Exception as e:
             log.warning("fetch_all_bot_performance failed: %s", e)
             all_bot_perf = {}
+        now = time.time()
         for aid, bases in wanted.items():
             # Resolved per agent over ALL its bases at once, so an owned parent
             # never resolves to a tagged sibling's instance and no bot is merged
             # into the same agent twice.
             live = resolve_bots(all_bot_perf, bases)
+            start = float((since or {}).get(aid, 0.0) or 0.0)
+            windows: dict[str, tuple[float, float, float, float]] = {}
+            if start > 0 and all_bot_perf:
+                try:
+                    histories = await fetch_base_histories(
+                        client, all_bot_perf, bases, start, now
+                    )
+                    windows = {
+                        base: slice_history(hs, start, now)
+                        for base, hs in histories.items()
+                    }
+                except Exception as e:
+                    # Falling back to the lifetime aggregate over-credits an
+                    # adopted bot, but reporting zero would be worse: the agent
+                    # would read a live position as costless.
+                    log.warning("history slice for %s failed: %s", aid, e)
             for base in bases:
                 bot = live.get(base)
                 # An unresolved base (never deployed, or no snapshot yet) still
                 # names the bot the agent operates, as the single-bot path did.
                 out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)
                 if bot:
-                    _merge_bot_perf(out[aid], bot)
+                    _merge_bot_perf(out[aid], bot, windows.get(base))
     return out

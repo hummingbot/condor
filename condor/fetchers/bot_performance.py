@@ -297,17 +297,54 @@ def _iso_to_epoch(ts: Any) -> float | None:
         return None
 
 
+# Sampling resolutions the performance-history endpoint accepts, finest first.
+# A fixed "5m" only ever covered ``limit`` × 5min ≈ 41h, and _cum_at reads
+# anything older than the retained window as zero — so every session whose window
+# closed before that boundary reported $0 while the single session straddling it
+# absorbed all of their PnL. The strategy total stayed right, which is exactly why
+# it went unnoticed. Coarsening the interval to fit the span keeps one row per
+# bucket across the whole ownership timeline instead.
+_INTERVAL_LADDER: tuple[tuple[str, int], ...] = (
+    ("5m", 300),
+    ("15m", 900),
+    ("1h", 3600),
+    ("4h", 14400),
+    ("1d", 86400),
+)
+
+
+def choose_interval(span_seconds: float, limit: int = 500) -> str:
+    """Finest sampling interval whose buckets cover ``span_seconds`` within ``limit``.
+
+    Boundary precision degrades to the chosen interval, so a handover is attributed
+    to within one bucket. That is a bounded error; the truncation it replaces was
+    unbounded.
+    """
+    for name, secs in _INTERVAL_LADDER:
+        if span_seconds <= secs * max(limit, 1):
+            return name
+    return _INTERVAL_LADDER[-1][0]
+
+
 async def fetch_instance_history(
     client: Any, instance_name: str, interval: str = "5m", limit: int = 500
-) -> list[tuple[float, float, float, float]]:
+) -> list[tuple[float, float, float, float, float]]:
     """Return one bot instance's cumulative history as sorted rows.
 
-    Each row is ``(ts_epoch, cum_realized_quote, cum_volume, cum_trades)`` with the
-    per-controller snapshots at each timestamp summed to a bot-instance total, so a
-    single- and multi-controller bot are handled identically. ``cum_trades`` counts
-    real closes (``close_type_counts`` minus retry/abort noise). The controller
-    performance API retains history for archived/stopped instances, so closed
-    sessions can be attributed too. Resilient: returns ``[]`` on API error.
+    Each row is ``(ts_epoch, cum_realized_quote, cum_volume, cum_trades, cum_fees)``
+    with the per-controller snapshots at each timestamp summed to a bot-instance
+    total, so a single- and multi-controller bot are handled identically.
+    ``cum_trades`` counts real closes (``close_type_counts`` minus retry/abort
+    noise). ``cum_fees`` is taken only from a genuinely cumulative
+    ``cum_fees_quote``; the per-open-position fees ``_aggregate_by_bot`` derives are
+    a point-in-time figure whose differences are meaningless, so they are not used
+    here and the column stays 0 when the backend omits the cumulative field (see
+    :func:`slice_history`'s callers, which fall back in that case).
+
+    The controller performance API retains history for archived/stopped instances,
+    so closed sessions can be attributed too. Resilient: returns ``[]`` on API
+    error. Pick ``interval`` with :func:`choose_interval` so the span of interest
+    actually fits in ``limit`` rows.
     """
     try:
         result = await client.bot_orchestration.get_controller_performance_history(
@@ -331,58 +368,132 @@ async def fetch_instance_history(
         volume = float(perf.get("volume_traded", 0) or 0)
         ctc = perf.get("close_type_counts") or {}
         trades = sum(int(v or 0) for k, v in ctc.items() if k in _TRADE_CLOSE_TYPES)
-        acc = by_ts.setdefault(str(ts), [0.0, 0.0, 0.0])
+        fees = float(perf.get("cum_fees_quote", 0) or 0)
+        acc = by_ts.setdefault(str(ts), [0.0, 0.0, 0.0, 0.0])
         acc[0] += realized
         acc[1] += volume
         acc[2] += trades
+        acc[3] += fees
 
-    out: list[tuple[float, float, float, float]] = []
-    for ts, (realized, volume, trades) in by_ts.items():
+    out: list[tuple[float, float, float, float, float]] = []
+    for ts, (realized, volume, trades, fees) in by_ts.items():
         epoch = _iso_to_epoch(ts)
         if epoch is not None:
-            out.append((epoch, realized, volume, trades))
+            out.append((epoch, realized, volume, trades, fees))
     out.sort()
+    # Hitting the cap means older buckets were dropped, and everything before the
+    # oldest retained row reads as zero — the misattribution this module exists to
+    # avoid. Say so rather than returning a silently truncated timeline.
+    if len(out) >= limit:
+        logger.warning(
+            "fetch_instance_history(%s): hit the %d-row cap at interval %s — "
+            "history before %s is missing and per-session attribution may shift",
+            instance_name,
+            limit,
+            interval,
+            out[0][0] if out else "?",
+        )
     return out
 
 
 def _cum_at(
-    history: list[tuple[float, float, float, float]], t: float
-) -> tuple[float, float, float]:
-    """Cumulative (realized, volume, trades) at time ``t`` for one instance.
+    history: list[tuple[float, float, float, float, float]], t: float
+) -> tuple[float, float, float, float]:
+    """Cumulative (realized, volume, trades, fees) at time ``t`` for one instance.
 
     Zero before the instance's first snapshot; its final value at/after the last.
     """
     if not history or t < history[0][0]:
-        return (0.0, 0.0, 0.0)
+        return (0.0, 0.0, 0.0, 0.0)
     chosen = history[0]
     for row in history:
         if row[0] <= t:
             chosen = row
         else:
             break
-    return (chosen[1], chosen[2], chosen[3])
+    return (chosen[1], chosen[2], chosen[3], chosen[4])
 
 
 def slice_history(
-    histories: list[list[tuple[float, float, float, float]]],
+    histories: list[list[tuple[float, float, float, float, float]]],
     start: float,
     end: float,
-) -> tuple[float, float, float]:
-    """Sum (realized, volume, trades) generated in ``[start, end)`` across instances.
+) -> tuple[float, float, float, float]:
+    """Sum (realized, volume, trades, fees) generated in ``[start, end)``.
 
     Each instance contributes ``cum_at(end) − cum_at(start)`` — naturally zero for
     an instance that lies wholly outside the window, and exact for partial overlap.
     Because session windows tile the timeline, summing every session's slice
     reproduces each instance's full cumulative with no double counting.
     """
-    realized = volume = trades = 0.0
+    realized = volume = trades = fees = 0.0
     for h in histories:
-        r_e, v_e, t_e = _cum_at(h, end)
-        r_s, v_s, t_s = _cum_at(h, start)
+        r_e, v_e, t_e, f_e = _cum_at(h, end)
+        r_s, v_s, t_s, f_s = _cum_at(h, start)
         realized += r_e - r_s
         volume += v_e - v_s
         trades += t_e - t_s
-    return realized, volume, trades
+        fees += f_e - f_s
+    return realized, volume, trades, fees
+
+
+# One shared fetch of every owned base's instance histories, at a resolution that
+# actually spans the ownership timeline. Both attribution callers go through this
+# so the dashboard's per-session slice and the live agent's own view of its PnL
+# are computed from identical inputs.
+MAX_HISTORY_INSTANCES = 24
+MAX_CONCURRENT_HISTORY_FETCHES = 10
+
+
+async def fetch_base_histories(
+    client: Any,
+    all_bot_perf: dict[str, dict],
+    bases: list[str],
+    earliest: float,
+    now: float,
+) -> dict[str, list[list[tuple[float, float, float, float, float]]]]:
+    """``{base: [history per deployed instance]}`` covering ``[earliest, now]``.
+
+    Fans out one bounded round-trip per instance. A fetch that raises degrades to
+    the empty list :func:`fetch_instance_history` already returns on API error, so
+    one bad instance costs its own history rather than the whole rollup.
+    """
+    instances_by_base = partition_instances(all_bot_perf, bases)
+    all_instances = sorted({i for lst in instances_by_base.values() for i in lst})
+    if len(all_instances) > MAX_HISTORY_INSTANCES:
+        logger.warning(
+            "bot history: %d instances, capping at %d newest "
+            "(older sessions may under-report)",
+            len(all_instances),
+            MAX_HISTORY_INSTANCES,
+        )
+        all_instances = all_instances[-MAX_HISTORY_INSTANCES:]
+
+    # A zero/absent takeover instant means "unknown", not "epoch 0" — spanning
+    # back to 1970 would coarsen every bot to daily buckets. Cap the span at what
+    # the finest ladder rung can hold and let the cap warning speak if it bites.
+    span = now - earliest if earliest > 0 else _INTERVAL_LADDER[0][1] * 500
+    interval = choose_interval(max(span, 0.0))
+
+    semaphore = asyncio.Semaphore(MAX_CONCURRENT_HISTORY_FETCHES)
+
+    async def _bounded(instance_name: str):
+        async with semaphore:
+            return await fetch_instance_history(
+                client, instance_name, interval=interval
+            )
+
+    results = await asyncio.gather(
+        *(_bounded(inst) for inst in all_instances), return_exceptions=True
+    )
+    history = {
+        inst: [] if isinstance(rows, BaseException) else rows
+        for inst, rows in zip(all_instances, results)
+    }
+    return {
+        base: [history[k] for k in insts if k in history]
+        for base, insts in instances_by_base.items()
+    }
 
 
 def _clean_side(side: Any) -> str:

@@ -249,7 +249,7 @@ async def _fetch_and_cache_performance(
     primary_connector, primary_trading_pair = _derive_primary_pair(executors, exchanges, trading_pairs)
 
     # Calculate PnL from trades
-    from handlers.bots.archived_chart import calculate_pnl_from_trades
+    from condor.archived_pnl import calculate_pnl_from_trades
 
     pnl_data = calculate_pnl_from_trades(all_trades)
 

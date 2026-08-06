@@ -55,12 +55,32 @@ async def _boom(config, ctx):
     raise ValueError("no server")
 
 
-def _store(conversation_id: str) -> RoutineStore:
+def _store(conversation_id: str, session_key: str = "") -> RoutineStore:
     store = RoutineStore()
     store._instances["i1"] = store._new_instance_meta(
-        "probe", {}, "srv", 7, source="mcp", conversation_id=conversation_id
+        "probe",
+        {},
+        "srv",
+        7,
+        source="mcp",
+        conversation_id=conversation_id,
+        session_key=session_key,
     )
     return store
+
+
+@pytest.fixture
+def shown(monkeypatch):
+    """Capture what the run pushes to an attached surface."""
+    pushed: list[dict] = []
+    from condor.runtime import wake
+
+    async def deliver(**kwargs):
+        pushed.append(kwargs)
+        return True
+
+    monkeypatch.setattr(wake, "deliver_note", deliver)
+    return pushed
 
 
 def _run(store: RoutineStore, run_fn) -> dict:
@@ -105,6 +125,47 @@ def test_a_failed_run_reports_the_error_the_instance_recorded(notes):
 
     assert meta["error"] == "ValueError: no server"
     assert notes[0][2] == "❌ Routine probe failed: ValueError: no server"
+
+
+def test_a_run_shows_its_outcome_in_the_session_that_started_it(notes, shown):
+    """Recording the note is not showing it.
+
+    A dashboard reads the transcript when it loads, so a run that finished while
+    the tab was open stayed invisible until the user refreshed the page — which
+    is exactly what a fire-and-forget run is for.
+    """
+    _run(_store("conv-1", "web:7:slot-1"), _ok)
+
+    assert len(shown) == 1
+    assert shown[0]["session_key"] == "web:7:slot-1"
+    assert shown[0]["conversation_id"] == "conv-1"
+    assert shown[0]["kind"] == "routine"
+    # One note, two deliveries: what is shown is what is recorded, verbatim.
+    assert shown[0]["text"] == notes[0][2]
+
+
+def test_a_run_with_no_session_behind_it_is_recorded_but_not_pushed(notes, shown):
+    """The scheduler and the Telegram menu have no live surface to reach."""
+    _run(_store("conv-1"), _ok)
+
+    assert len(notes) == 1
+    assert shown == []
+
+
+def test_a_surface_that_cannot_be_reached_does_not_fail_the_run(notes, monkeypatch):
+    """Same rule as the transcript: delivery is best-effort, the run is not."""
+    from condor.runtime import wake
+
+    async def explode(**kwargs):
+        raise RuntimeError("socket is gone")
+
+    monkeypatch.setattr(wake, "deliver_note", explode)
+
+    meta = _run(_store("conv-1", "web:7:slot-1"), _ok)
+
+    assert meta["status"] == "completed"
+    assert meta["last_result"] == "24 pairs scanned"
+    assert len(notes) == 1
 
 
 def test_a_transcript_that_cannot_be_written_does_not_fail_the_run(monkeypatch):

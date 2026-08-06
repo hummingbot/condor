@@ -29,13 +29,22 @@ class FakeRoutineStore:
         self.continuous_calls = []
         self.agents = []
         self.conversations = []
+        self.session_keys = []
 
     async def execute(
-        self, routine_name, config, server_name, user_id=0, agent="", conversation_id=""
+        self,
+        routine_name,
+        config,
+        server_name,
+        user_id=0,
+        agent="",
+        conversation_id="",
+        session_key="",
     ):
         self.execute_calls.append((routine_name, server_name, user_id))
         self.agents.append(agent)
         self.conversations.append(conversation_id)
+        self.session_keys.append(session_key)
         return "inst-run"
 
     async def schedule(
@@ -45,11 +54,19 @@ class FakeRoutineStore:
         return "inst-sched"
 
     async def start_continuous(
-        self, routine_name, config, server_name, user_id=0, agent="", conversation_id=""
+        self,
+        routine_name,
+        config,
+        server_name,
+        user_id=0,
+        agent="",
+        conversation_id="",
+        session_key="",
     ):
         self.continuous_calls.append((routine_name, server_name, user_id))
         self.agents.append(agent)
         self.conversations.append(conversation_id)
+        self.session_keys.append(session_key)
         return "inst-cont"
 
 
@@ -246,6 +263,23 @@ def test_a_session_key_reaches_the_store_as_a_conversation(
         },
     )
     assert store.conversations == ["conv-1"]
+
+
+def test_the_session_key_itself_reaches_the_store_too(client_and_store, monkeypatch):
+    """The id says where to *record* the outcome; the key says where to *show*
+    it while the tab is still open."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/run",
+        json={
+            "routine_name": "some_routine",
+            "server_name": OWNED_SERVER,
+            "session_key": "web:1:slot-1",
+        },
+    )
+    assert store.session_keys == ["web:1:slot-1"]
 
 
 def test_a_dashboard_run_has_no_conversation_behind_it(client_and_store, monkeypatch):

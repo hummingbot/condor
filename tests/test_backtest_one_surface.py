@@ -327,12 +327,19 @@ def test_a_pending_task_is_polled_until_it_completes(store, routine, monkeypatch
 
 
 def test_a_failed_task_explains_itself(store, routine):
+    """And fails the run while it does.
+
+    Returning the message as a result would file the run as a success: the
+    instance keeps status "completed" with no error, the dashboard dot is blue
+    and the conversation is told "✅ Routine backtest_chart done" above the
+    failure it was just handed. Raising is what keeps all three honest.
+    """
     task_id = "task-bad"
     envelope = _envelope(task_id, status="failed", error="No candles for ETH-USDT")
 
-    result = routine(FakeClient(FakeBacktesting(task_id, [envelope])))
+    with pytest.raises(core.BacktestError, match="No candles for ETH-USDT"):
+        routine(FakeClient(FakeBacktesting(task_id, [envelope])))
 
-    assert "No candles for ETH-USDT" in result.text
     assert store.get_result(task_id) is None, "a failure is not a rankable run"
 
 
@@ -344,10 +351,11 @@ def test_polling_gives_up_with_the_task_id_in_hand(routine, monkeypatch):
         FakeBacktesting(task_id, [_envelope(task_id, status="running")])
     )
 
-    result = routine(client)
+    with pytest.raises(core.BacktestError) as excinfo:
+        routine(client)
 
-    assert task_id in result.text
-    assert "run_async" in result.text
+    assert task_id in str(excinfo.value)
+    assert "run_async" in str(excinfo.value)
 
 
 # ── It is quiet on demand ─────────────────────────────────────────────────────

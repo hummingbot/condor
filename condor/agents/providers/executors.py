@@ -22,6 +22,7 @@ class ExecutorsProvider(BaseProvider):
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
+        since: float = 0.0,
     ) -> ProviderResult:
         from condor.agents.performance import fetch_agent_performance
 
@@ -38,7 +39,12 @@ class ExecutorsProvider(BaseProvider):
         bases = list(bot_names or []) or [config.get("bot_name", "")]
 
         try:
-            perf = await fetch_agent_performance(client, agent_id, bot_names=bases)
+            # ``since`` slices an adopted bot's history to this session's window,
+            # so what the agent is told it earned is what the dashboard attributes
+            # to it — inherited PnL is not reported as its own.
+            perf = await fetch_agent_performance(
+                client, agent_id, bot_names=bases, since=since
+            )
         except Exception as e:
             return ProviderResult(
                 name=self.name,

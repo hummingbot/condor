@@ -140,7 +140,11 @@ export function ContextDock({
         open={routinesOpen}
         onToggle={() => setRoutinesOpen((v) => !v)}
       >
-        <DockRoutines instances={instances} agentSlug={agentSlug} />
+        <DockRoutines
+          instances={instances}
+          agentSlug={agentSlug}
+          conversationId={conversationId}
+        />
       </DockSection>
     </aside>
   );

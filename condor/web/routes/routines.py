@@ -171,6 +171,7 @@ async def run_routine_v2(
             user_id=user.id,
             agent=body.attribute_to,
             conversation_id=await client.conversation_for_session(body.session_key),
+            session_key=body.session_key,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -200,6 +201,7 @@ async def start_continuous_v2(
             user_id=user.id,
             agent=body.attribute_to,
             conversation_id=await client.conversation_for_session(body.session_key),
+            session_key=body.session_key,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))

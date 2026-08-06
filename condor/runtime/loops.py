@@ -290,7 +290,27 @@ class LoopSupervisor:
             # A missing/!writable journal must not stop us recording the state.
             log.warning("Could not annotate journal at %s", session_dir, exc_info=True)
 
+        # A crashed process never ran stop(), so the session's ownership window is
+        # still open and would keep accruing a surviving bot's PnL to a run that
+        # ended at boot. Close it here — the best instant we can honestly claim is
+        # the last recorded tick, so fall back to now only if there is none.
+        self._release_ownership(session_dir)
+
         write_status(session_dir, state=LoopState.INTERRUPTED, boot_id=BOOT_ID)
+
+    @staticmethod
+    def _release_ownership(session_dir: Path) -> None:
+        """Close an interrupted session's bot-ownership window, if it kept one."""
+        try:
+            from condor.agents.ownership import LEDGER_FILENAME, BotLedger
+
+            if not (session_dir / LEDGER_FILENAME).exists():
+                return  # executor-mode session — never owned a bot
+            BotLedger("", session_dir).release()
+        except Exception:
+            log.warning(
+                "Could not release bot ownership at %s", session_dir, exc_info=True
+            )
 
     @staticmethod
     def _owner_of(status: dict, agent, strategy) -> int:

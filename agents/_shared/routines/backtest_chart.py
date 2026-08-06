@@ -13,7 +13,7 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
-from condor.backtesting import BacktestError, run_and_save
+from condor.backtesting import run_and_save
 from config_manager import get_client
 from routines.base import RoutineResult
 
@@ -700,23 +700,15 @@ def generate_chart(
         specs=specs,
     )
 
-    # --- Row 1: Candlestick ---
-    o_col = "open_bt" if "open_bt" in candle_df.columns else "open"
-    h_col = "high_bt" if "high_bt" in candle_df.columns else "high"
-    l_col = "low_bt" if "low_bt" in candle_df.columns else "low"
+    # --- Row 1: Close price line (lighter than candlestick, renders faster) ---
     c_col = "close_bt" if "close_bt" in candle_df.columns else "close"
 
     fig.add_trace(
-        go.Candlestick(
+        go.Scatter(
             x=candle_df["datetime"],
-            open=candle_df[o_col],
-            high=candle_df[h_col],
-            low=candle_df[l_col],
-            close=candle_df[c_col],
-            increasing_line_color=COLORS["green"],
-            decreasing_line_color=COLORS["red"],
-            increasing_fillcolor=COLORS["green"],
-            decreasing_fillcolor=COLORS["red"],
+            y=candle_df[c_col],
+            mode="lines",
+            line=dict(color=COLORS["blue"], width=1.5),
             name="Price",
         ),
         row=1,
@@ -1001,30 +993,27 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
     start_ts = _parse_date(config.start_date)
     end_ts = _parse_date(config.end_date)
 
-    # Fetch controller config and run backtest
-    try:
-        ctrl_config = await client.controllers.get_controller_config(config.config_name)
-        if not ctrl_config:
-            return RoutineResult(text=f"Config '{config.config_name}' not found")
-    except Exception as e:
-        return RoutineResult(text=f"Failed to load config: {e}")
+    # A failure raises rather than being returned as text. A returned string is a
+    # *result*, and the store records a result as a successful run — so a backtest
+    # the engine refused (a rate-limited candle fetch, a config that is not there)
+    # was filed as status "completed" with error None, and the conversation was
+    # told "✅ Routine backtest_chart done" followed by the failure it had just
+    # been handed. Raising is what makes the instance, its dot and its note agree.
+    ctrl_config = await client.controllers.get_controller_config(config.config_name)
+    if not ctrl_config:
+        raise ValueError(f"Config '{config.config_name}' not found")
 
     # The task API, not the sync endpoint: it is what produces the task_id the store
     # is keyed by, so every run — chat, web or agent — is rankable by backtest_compare.
-    try:
-        task_id, task = await run_and_save(
-            client,
-            _server_name(chat_id, context),
-            ctrl_config,
-            start_ts,
-            end_ts,
-            resolution=config.resolution,
-            trade_cost=config.trade_cost,
-        )
-    except BacktestError as e:
-        return RoutineResult(text=str(e))
-    except Exception as e:
-        return RoutineResult(text=f"Backtest failed: {e}")
+    task_id, task = await run_and_save(
+        client,
+        _server_name(chat_id, context),
+        ctrl_config,
+        start_ts,
+        end_ts,
+        resolution=config.resolution,
+        trade_cost=config.trade_cost,
+    )
 
     # From here on the fresh run is indistinguishable from a stored one: carrying the
     # task_id on the config is what makes the summary, the table row and a later

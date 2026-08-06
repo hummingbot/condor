@@ -575,6 +575,13 @@ export interface RoutineInstance {
   config: Record<string, unknown>;
   status: string;
   source: string;
+  /**
+   * The conversation that asked for this run, "" for the scheduler, the
+   * dashboard and Telegram. Set since ARCH-089, and what scopes a run to a
+   * chat — the routine's own name cannot, since an agent runs shared-library
+   * routines under their bare name.
+   */
+  conversation_id?: string;
   schedule?: Record<string, unknown>;
   created_at: number;
   last_run_at: number | null;

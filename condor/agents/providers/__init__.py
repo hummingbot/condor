@@ -49,11 +49,14 @@ class ProviderRegistry:
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
+        since: float = 0.0,
     ) -> dict[str, ProviderResult]:
         """Run all core providers and return {name: ProviderResult} dict.
 
         ``bot_names`` are the bases the session owns per its ownership ledger, so
         a session operating several bots sees all of them in its core data.
+        ``since`` is the earliest instant it took one over, which scopes bot PnL
+        to this session's window.
         """
         if not _REGISTRY:
             _auto_register()
@@ -62,7 +65,11 @@ class ProviderRegistry:
         for provider in list_core_providers():
             try:
                 result = await provider.execute(
-                    client, config, agent_id=agent_id, bot_names=bot_names
+                    client,
+                    config,
+                    agent_id=agent_id,
+                    bot_names=bot_names,
+                    since=since,
                 )
                 results[result.name] = result
             except Exception:

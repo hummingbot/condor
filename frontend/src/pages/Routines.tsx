@@ -120,10 +120,21 @@ export function Routines() {
     return result;
   }, [routines, sourceTypeFilter, search]);
 
-  const activeInstances = useMemo(
-    () => instances.filter((i) => i.status === "running" || i.status === "scheduled"),
+  // Every run this process still holds, newest first — not just the ones still
+  // going. A one-shot that takes 30s was only ever visible for those 30s: it
+  // left the strip the moment it finished, and a run that rendered no report
+  // (a failed one, most of all) then existed nowhere in the UI at all.
+  const recentInstances = useMemo(
+    () =>
+      [...instances].sort(
+        (a, b) =>
+          toMs(b.last_run_at ?? b.created_at) - toMs(a.last_run_at ?? a.created_at),
+      ),
     [instances],
   );
+
+  const isLive = (status: string) =>
+    status === "running" || status === "scheduled";
 
   // Latest execution time (epoch ms) per routine, from instance runs.
   const lastRunByRoutine = useMemo(() => {
@@ -294,14 +305,14 @@ export function Routines() {
           </button>
         </div>
 
-        {/* Active instances strip */}
-        {activeInstances.length > 0 && (
+        {/* Recent runs strip */}
+        {recentInstances.length > 0 && (
           <div>
             <h2 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-              Active
+              Runs
             </h2>
             <div className="flex flex-wrap gap-2">
-              {activeInstances.map((inst) => (
+              {recentInstances.map((inst) => (
                 <div
                   key={inst.instance_id}
                   className="group flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 transition-all hover:border-[var(--color-primary)]/30"
@@ -312,9 +323,13 @@ export function Routines() {
                   >
                     <span
                       className={`h-2 w-2 rounded-full shrink-0 ${
-                        inst.status === "running"
-                          ? "bg-emerald-400 animate-pulse"
-                          : "bg-amber-400"
+                        inst.error || inst.status === "failed"
+                          ? "bg-[var(--color-red)]"
+                          : inst.status === "running"
+                            ? "bg-emerald-400 animate-pulse"
+                            : inst.status === "scheduled"
+                              ? "bg-amber-400"
+                              : "bg-sky-400"
                       }`}
                     />
                     <div>
@@ -323,6 +338,9 @@ export function Routines() {
                       </span>
                       <div className="flex items-center gap-2 text-[9px] text-[var(--color-text-muted)]">
                         <span className="capitalize">{inst.status}</span>
+                        {!isLive(inst.status) && inst.last_run_at && (
+                          <span>{formatRelativeTime(inst.last_run_at, "")}</span>
+                        )}
                         {inst.schedule?.type === "interval" && (
                           <span className="flex items-center gap-0.5">
                             <Clock className="h-2 w-2" />
@@ -333,14 +351,18 @@ export function Routines() {
                       </div>
                     </div>
                   </button>
-                  <button
-                    onClick={() => stopMutation.mutate(inst.instance_id)}
-                    disabled={stopMutation.isPending}
-                    className="rounded p-1 text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)] transition-all"
-                    title="Stop"
-                  >
-                    <Square className="h-3 w-3" />
-                  </button>
+                  {/* Only something still going can be stopped. A finished run
+                      keeps its row — that is the point — but not the button. */}
+                  {isLive(inst.status) && (
+                    <button
+                      onClick={() => stopMutation.mutate(inst.instance_id)}
+                      disabled={stopMutation.isPending}
+                      className="rounded p-1 text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)] transition-all"
+                      title="Stop"
+                    >
+                      <Square className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
               ))}
             </div>

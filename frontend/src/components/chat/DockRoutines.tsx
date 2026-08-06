@@ -23,13 +23,19 @@ type Run =
   | { kind: "report"; key: string; at: number; report: ReportSummary };
 
 /**
- * What the agent on the other end has been running.
+ * What has been run from this conversation, and what the agent has run lately.
  *
- * Scoped by agent, not by conversation: routine runs carry no conversation
- * provenance (the store is shared with the scheduler and Telegram), and "this
- * agent's recent runs" is the question the dock is being asked. When the
- * conversation is unbound — the Condor assistant — the same list runs
- * unfiltered, which is the user's own recent runs.
+ * Scoped by conversation first: a run stamped with this conversation belongs
+ * here whatever it is called. That is the only rule that holds for a *shared*
+ * library routine (`agents/_shared/routines`), which the store registers under
+ * its bare name — an agent running one produced an instance named
+ * `backtest_chart`, no `{slug}/` prefix, so the name-based filter dropped it and
+ * four backtests fired from this chat showed up nowhere.
+ *
+ * Runs with no conversation behind them — the scheduler, the dashboard, the
+ * Telegram menu — fall back to the agent-prefix rule, which is still the right
+ * answer for "what has this agent been running". An unbound Condor conversation
+ * keeps them all: they are the user's own runs.
  *
  * The instance store is in-memory, so on its own this column forgets every run
  * made before the last restart. The report index is on disk and does not, which
@@ -38,10 +44,13 @@ type Run =
 export function DockRoutines({
   instances,
   agentSlug,
+  conversationId,
 }: {
   instances: RoutineInstance[];
   /** Bound agent's slug, or "" for the unbound Condor conversation. */
   agentSlug: string;
+  /** The conversation on screen, so its own runs are never filtered out. */
+  conversationId: string;
 }) {
   const [openKey, setOpenKey] = useState<string | null>(null);
 
@@ -58,11 +67,14 @@ export function DockRoutines({
     refetchInterval: 15000,
   });
 
-  // Agent routines are stored keyed `{agent_slug}/{name}` — the same prefix the
-  // per-agent routes filter on.
+  // Agent-local routines are stored keyed `{agent_slug}/{name}` — the same
+  // prefix the per-agent routes filter on. Shared and general-library ones are
+  // not, which is why provenance wins where it exists.
   const prefix = `${agentSlug}/`;
-  const mine = instances.filter(
-    (i) => !agentSlug || i.routine_name.startsWith(prefix),
+  const mine = instances.filter((i) =>
+    i.conversation_id
+      ? i.conversation_id === conversationId
+      : !agentSlug || i.routine_name.startsWith(prefix),
   );
 
   // An instance that rendered a report owns that report's row, so the run is

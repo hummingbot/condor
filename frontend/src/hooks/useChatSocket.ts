@@ -18,7 +18,7 @@ export interface ChatMessage {
   text: string;
   toolCalls: ToolCall[];
   thought?: string;
-  /** System messages only: "switch" | "error" | "delegation" | "resume" | "notification". */
+  /** System: "switch" | "error" | "delegation" | "resume" | "notification" | "routine". */
   kind?: string;
   /**
    * The user redirected the agent while this answer was being written. The
@@ -865,6 +865,38 @@ export function useChatSocket() {
           // dashboard ate my message" and "it is next in line".
           if (!slotId) break;
           setQueuedSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
+          break;
+        }
+
+        case "system_note": {
+          // Something finished in the background and wrote a note into the
+          // transcript — a routine's outcome, most often. The note is already
+          // recorded server-side; this only puts it on screen without a reload.
+          // Appended after the buffered text so it cannot cut an answer in half.
+          if (!slotId) break;
+          flushChunks(slotId);
+          const noteText = (data.text as string) || "";
+          const noteKind = (data.kind as string) || undefined;
+          if (!noteText) break;
+          setSlots((prev) =>
+            prev.map((s) =>
+              s.info.slot_id === slotId
+                ? {
+                    ...s,
+                    messages: [
+                      ...s.messages,
+                      {
+                        id: nextMsgId(),
+                        role: "system" as const,
+                        text: noteText,
+                        kind: noteKind,
+                        toolCalls: [],
+                      },
+                    ],
+                  }
+                : s,
+            ),
+          );
           break;
         }
 

@@ -24,7 +24,7 @@ from condor.runtime.confirmations import (
 )
 from condor.runtime.events import RuntimeEvent
 from condor.runtime.timeouts import TIMEOUTS
-from condor.runtime.wake import register_sink_factory
+from condor.runtime.wake import register_note_sink, register_sink_factory
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
 from handlers.agents._shared import DEFAULT_AGENT
@@ -268,9 +268,37 @@ def _wake_sink(key: SessionKey, user_id: int | None) -> _WakeSink | None:
     return _WakeSink(user_id, key.slot)
 
 
+async def _deliver_note(
+    key: SessionKey, user_id: int | None, text: str, kind: str
+) -> None:
+    """Show an out-of-band transcript note in this user's open tabs.
+
+    A background producer that only records a ``system`` turn — a finished
+    routine, a delegation's outcome — is invisible to a tab that is already
+    open, because the transcript is read at load. This is the push that closes
+    that gap; the event carries the same ``role``/``kind`` pair the hydrated
+    turn does, so a later reload agrees with what was shown live.
+
+    Broadcast to every socket the user has open, addressed by ``slot_id`` like
+    every other chat event (CORR-101): which tab is "the" one is not knowable
+    here, and the client already routes by slot.
+    """
+    if user_id is None:
+        return
+    message = {
+        "event": "system_note",
+        "slot_id": key.slot,
+        "text": text,
+        "kind": kind,
+    }
+    for ws in list(_attached_sockets.get(user_id, ())):
+        await _send(ws, message)
+
+
 # Registered here rather than imported by the runtime: ``condor.runtime`` must
 # not depend on web or handler code (see ``client._local()``).
 register_sink_factory(WEB, _wake_sink)
+register_note_sink(WEB, _deliver_note)
 
 
 @router.websocket("/ws/chat")

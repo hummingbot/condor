@@ -48,11 +48,14 @@ export const ChatMessageView = memo(function ChatMessageView({
   // A `resume` note is the same shape: it is what a finished background task
   // said to the agent to make it continue. Nobody typed it, so it must not
   // render as a user bubble. So is a `notification`: the agent announced it to
-  // the user out of band, and the transcript records that it did.
+  // the user out of band, and the transcript records that it did. And so is a
+  // `routine` outcome — a run's result, often a multi-line error, which the
+  // divider rendered as one shouting, unreadable, un-wrapped line.
   const isNote =
     message.kind === "delegation" ||
     message.kind === "resume" ||
-    message.kind === "notification";
+    message.kind === "notification" ||
+    message.kind === "routine";
   if (message.role === "system" && isNote) {
     return (
       <div className="my-3 flex justify-start">

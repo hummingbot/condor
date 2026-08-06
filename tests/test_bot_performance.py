@@ -575,33 +575,38 @@ def test_resolve_bots_prefers_an_exact_deploy_over_a_newer_suffixed_one():
 def test_slice_history_tiles_exactly():
     from condor.fetchers.bot_performance import slice_history
 
-    # one instance, cumulative realized/volume/trades at t=10,20,30
+    # one instance, cumulative realized/volume/trades/fees at t=10,20,30
     hist = [
-        (10.0, 1.0, 100.0, 1.0),
-        (20.0, 3.0, 300.0, 4.0),
-        (30.0, 5.0, 500.0, 9.0),
+        (10.0, 1.0, 100.0, 1.0, 0.1),
+        (20.0, 3.0, 300.0, 4.0, 0.3),
+        (30.0, 5.0, 500.0, 9.0, 0.5),
     ]
     # window fully before → 0; fully after start baseline → final delta
-    assert slice_history([hist], 0, 5) == (0.0, 0.0, 0.0)
+    assert slice_history([hist], 0, 5) == (0.0, 0.0, 0.0, 0.0)
     # [0,20] captures rows at 10 and 20 → cum_at(20)-cum_at(0)=3
-    assert slice_history([hist], 0, 20) == (3.0, 300.0, 4.0)
+    assert slice_history([hist], 0, 20) == (3.0, 300.0, 4.0, 0.3)
     # [20,40] → cum_at(40)=final(5) - cum_at(20)=3 → 2
-    assert slice_history([hist], 20, 40) == (2.0, 200.0, 5.0)
+    assert slice_history([hist], 20, 40) == (2.0, 200.0, 5.0, pytest.approx(0.2))
     # tiling: [0,20)+[20,40) sums to the instance's full cumulative
     a = slice_history([hist], 0, 20)
     b = slice_history([hist], 20, 40)
-    assert (a[0] + b[0], a[1] + b[1], a[2] + b[2]) == (5.0, 500.0, 9.0)
+    assert (a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]) == (
+        5.0,
+        500.0,
+        9.0,
+        pytest.approx(0.5),
+    )
 
 
 def test_slice_history_sums_multiple_instances():
     from condor.fetchers.bot_performance import slice_history
 
-    h1 = [(10.0, 2.0, 20.0, 1.0)]  # instance 1: +2 at t=10
-    h2 = [(15.0, 3.0, 30.0, 2.0)]  # instance 2: +3 at t=15
+    h1 = [(10.0, 2.0, 20.0, 1.0, 0.2)]  # instance 1: +2 at t=10
+    h2 = [(15.0, 3.0, 30.0, 2.0, 0.3)]  # instance 2: +3 at t=15
     # window covering both
-    assert slice_history([h1, h2], 0, 100) == (5.0, 50.0, 3.0)
+    assert slice_history([h1, h2], 0, 100) == (5.0, 50.0, 3.0, pytest.approx(0.5))
     # window covering only instance 1
-    assert slice_history([h1, h2], 0, 12) == (2.0, 20.0, 1.0)
+    assert slice_history([h1, h2], 0, 12) == (2.0, 20.0, 1.0, 0.2)
 
 
 def test_fetch_instance_history_sums_controllers_and_filters_trades():
@@ -638,10 +643,13 @@ def test_fetch_instance_history_sums_controllers_and_filters_trades():
     client = SimpleNamespace(bot_orchestration=_Client())
     hist = asyncio.run(fetch_instance_history(client, "bot-1"))
     assert len(hist) == 1  # both controllers summed into one timestamp
-    ts, realized, volume, trades = hist[0]
+    ts, realized, volume, trades, fees = hist[0]
     assert realized == 1.5  # 1.0 + 0.5
     assert volume == 140.0  # 100 + 40
     assert trades == 3.0  # TAKE_PROFIT 2 + STOP_LOSS 1; EARLY_STOP/FAILED excluded
+    # No cumulative fee column in this payload → 0, which is the signal callers
+    # use to fall back to the live open-position figure.
+    assert fees == 0.0
 
 
 # ── Provider wiring ──
@@ -652,9 +660,10 @@ def _capture_provider_fetch(monkeypatch) -> dict:
 
     captured: dict = {}
 
-    async def _fake_fetch(client, agent_id, bot_names=None):
+    async def _fake_fetch(client, agent_id, bot_names=None, since=0.0):
         captured["agent_id"] = agent_id
         captured["bot_names"] = bot_names
+        captured["since"] = since
         return _AP(agent_id=agent_id, bot_names=list(bot_names or []))
 
     monkeypatch.setattr(
@@ -676,7 +685,11 @@ def test_executors_provider_falls_back_to_config_bot_name(monkeypatch):
             agent_id="river.scalp_1",
         )
     )
-    assert captured == {"agent_id": "river.scalp_1", "bot_names": ["river"]}
+    assert captured == {
+        "agent_id": "river.scalp_1",
+        "bot_names": ["river"],
+        "since": 0.0,  # no ledger → no takeover instant → unsliced, as before
+    }
 
 
 def test_executors_provider_prefers_ledger_bases(monkeypatch):
@@ -733,3 +746,108 @@ def test_prompt_controller_block_present_iff_bot_name():
 
     without = _minimal_prompt({"execution_mode": "loop"})
     assert "[CONTROLLER MODE]" not in without
+
+
+# ── The live agent view and the dashboard must agree ──
+
+
+def _epoch_utc(iso: str) -> float:
+    from datetime import datetime
+
+    return datetime.fromisoformat(iso).timestamp()
+
+
+def test_adopted_bot_pnl_is_sliced_to_the_sessions_window():
+    """`since` scopes an inherited bot to what THIS session produced.
+
+    Without it the live tick merged the bot's whole lifetime aggregate, so a
+    session that adopted a long-running bot was told it had earned everything
+    the bot ever made — while the dashboard sliced the same bot per session.
+    """
+    from condor.agents.performance import fetch_agent_performance
+
+    inst = "ns-bot-20260701-000000"
+    snapshot = [
+        {
+            "bot_name": inst,
+            "controller_id": "c1",
+            "timestamp": "2026-07-04T00:00:00+00:00",
+            "status": "RUNNING",
+            "performance": {
+                "realized_pnl_quote": 100.0,  # lifetime
+                "unrealized_pnl_quote": 7.0,
+                "volume_traded": 5000.0,
+                "positions_summary": [],
+            },
+        }
+    ]
+    # The session took over at T2, by which point the bot had made $40.
+    history = [
+        {
+            "timestamp": ts,
+            "performance": {
+                "realized_pnl_quote": cum,
+                "volume_traded": vol,
+                "close_type_counts": {},
+            },
+        }
+        for ts, cum, vol in (
+            ("2026-07-01T00:00:00+00:00", 0.0, 0.0),
+            ("2026-07-03T00:00:00+00:00", 40.0, 2000.0),
+            ("2026-07-04T00:00:00+00:00", 100.0, 5000.0),
+        )
+    ]
+
+    class _Client:
+        base_url = "http://slice-test"
+
+        async def get_latest_controller_performance(self):
+            return snapshot
+
+        async def get_controller_performance_history(self, bot_name, interval, limit):
+            return {"data": history}
+
+    class _Executors:
+        async def search_executors(self, **_kw):
+            return []  # controller mode: nothing tagged with the agent_id
+
+    client = SimpleNamespace(
+        bot_orchestration=_Client(),
+        executors=_Executors(),
+        base_url="http://slice-test",
+    )
+    took_over = _epoch_utc("2026-07-03T00:00:00+00:00")
+
+    perf = asyncio.run(
+        fetch_agent_performance(
+            client, "ns.strat_2", bot_names=["ns-bot"], since=took_over
+        )
+    )
+
+    # $60 earned since the takeover, not the bot's lifetime $100.
+    assert perf.realized_pnl == 60.0
+    assert perf.volume == 3000.0
+    # The open book belongs to whoever runs the bot now — this session.
+    assert perf.unrealized_pnl == 7.0
+    assert perf.total_pnl == 67.0
+
+
+def test_without_since_the_lifetime_aggregate_is_still_used():
+    """A session that deployed the bot itself has no inherited PnL to strip."""
+    from condor.agents.performance import AgentPerformance, _merge_bot_perf
+
+    bot = {
+        "bot_name": "ns-bot",
+        "realized_pnl_quote": 100.0,
+        "unrealized_pnl_quote": 7.0,
+        "volume_traded": 5000.0,
+        "cum_fees_quote": 2.0,
+        "controllers": [],
+    }
+    perf = AgentPerformance(agent_id="ns.strat_1")
+    _merge_bot_perf(perf, bot)
+
+    assert perf.realized_pnl == 100.0
+    assert perf.volume == 5000.0
+    assert perf.fees == 2.0
+    assert perf.total_pnl == 107.0

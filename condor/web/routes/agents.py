@@ -54,12 +54,6 @@ _PERF_TTL = 30.0  # seconds
 # here; everything else keeps flowing through the 30s TTL path above.
 _CLOSED_PERF_CACHE: dict[str, Any] = {}
 
-# Upper bound on concurrent per-instance history calls against one API server.
-# The fan-out is bounded rather than unlimited so a strategy owning many bot
-# instances never bursts the whole cap at the backend at once (same bound
-# handlers/bots/archived.py and routines/archived_analyzer.py already use).
-MAX_CONCURRENT_HISTORY_FETCHES = 10
-
 
 def _cache_get(key: str) -> Any | None:
     entry = _PERF_CACHE.get(key)
@@ -459,18 +453,23 @@ def _session_ownership(
 
 def _owner_windows(
     real_sessions: list, strategy_dir: Path, default_config: dict | None
-) -> dict[str, list[tuple[float, Any]]]:
-    """``{base: [(since, session), …]}`` — each base's owners, oldest takeover first.
+) -> dict[str, list[tuple[float, Any, float]]]:
+    """``{base: [(since, session, until), …]}`` — owners, oldest takeover first.
 
     The windows a base's owners occupy tile ``[since_i, since_{i+1})`` and the last
     one runs to now, so slicing over them reproduces the bot's whole cumulative with
     no gap and no double count. Keyed per base rather than globally per session
     number: two bases handed over at different moments never share a timeline.
+
+    ``until`` is the instant the session released the bot, or ``0.0`` while it
+    still holds it. A released last window stops there rather than running to now,
+    which is the one case where the tiling deliberately leaves a gap: PnL a bot
+    earned with no session operating it belongs to no session.
     """
-    owners: dict[str, list[tuple[float, Any]]] = {}
+    owners: dict[str, list[tuple[float, Any, float]]] = {}
     for s in real_sessions:
         for ob in _session_ownership(strategy_dir, default_config, s.session_num):
-            owners.setdefault(ob.base, []).append((ob.since, s))
+            owners.setdefault(ob.base, []).append((ob.since, s, ob.until))
     for lst in owners.values():
         lst.sort(key=lambda t: (t[0], t[1].session_num))
     return owners
@@ -488,14 +487,17 @@ def _current_owner_bases(
     gate for merging them into one session's view. Same rule
     :func:`_apply_bot_mode_pnl` applies to live unrealized PnL, kept here as one
     lookup over the same windows so the rollup and the per-session detail can
-    never disagree about who holds the open book.
+    never disagree about who holds the open book. A session that released the bot
+    is not its current owner, so an ended session shows no live open book.
     """
-    last: dict[str, tuple[float, int]] = {}
+    last: dict[str, tuple[float, int, float]] = {}
     for n in session_nums:
         for ob in _session_ownership(strategy_dir, default_config, n):
-            if last.get(ob.base, (float("-inf"), -1)) <= (ob.since, n):
-                last[ob.base] = (ob.since, n)
-    return sorted(base for base, (_, owner) in last.items() if owner == num)
+            if last.get(ob.base, (float("-inf"), -1, 0.0))[:2] <= (ob.since, n):
+                last[ob.base] = (ob.since, n, ob.until)
+    return sorted(
+        base for base, (_, owner, until) in last.items() if owner == num and until <= 0
+    )
 
 
 async def _apply_bot_mode_pnl(
@@ -521,8 +523,7 @@ async def _apply_bot_mode_pnl(
     from condor.fetchers.bot_performance import (
         bot_executor_rows,
         fetch_all_bot_performance,
-        fetch_instance_history,
-        partition_instances,
+        fetch_base_histories,
         resolve_bots,
         slice_history,
     )
@@ -540,61 +541,59 @@ async def _apply_bot_mode_pnl(
         log.warning("bot perf fetch for %s failed: %s", strategy_dir.name, e)
         return
 
-    instances_by_base = partition_instances(all_perf, bases)
-    all_instances = sorted({i for lst in instances_by_base.values() for i in lst})
-    MAX_INSTANCES = 24
-    if len(all_instances) > MAX_INSTANCES:
-        log.warning(
-            "bot history for %s: %d instances, capping at %d newest "
-            "(older sessions may under-report)",
-            strategy_dir.name,
-            len(all_instances),
-            MAX_INSTANCES,
-        )
-        all_instances = all_instances[-MAX_INSTANCES:]
-    # One round-trip per instance, fanned out concurrently instead of walked one
-    # at a time, capped so the API server never sees more than
-    # MAX_CONCURRENT_HISTORY_FETCHES in flight. Results come back positionally
-    # aligned with all_instances, and a fetch that raises is normalized to the
-    # empty list fetch_instance_history already returns on API error — one bad
-    # instance degrades exactly as before instead of losing the whole rollup.
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_HISTORY_FETCHES)
-
-    async def _bounded_history(instance_name: str):
-        async with semaphore:
-            return await fetch_instance_history(client, instance_name)
-
-    histories = await asyncio.gather(
-        *(_bounded_history(inst) for inst in all_instances), return_exceptions=True
+    now = time.time()
+    # The oldest takeover across every base sets how far back the histories must
+    # reach; sampling resolution is chosen from it so no owner's window falls off
+    # the end of the retained rows.
+    earliest = min(
+        (since for lst in owners.values() for since, _, _ in lst if since > 0),
+        default=0.0,
     )
-    history = {
-        inst: [] if isinstance(rows, BaseException) else rows
-        for inst, rows in zip(all_instances, histories)
-    }
+    histories_by_base = await fetch_base_histories(
+        client, all_perf, bases, earliest, now
+    )
 
     live = resolve_bots(all_perf, bases)
-    now = time.time()
     for base in bases:
         window_owners = owners[base]
-        insts = [history[k] for k in instances_by_base.get(base, []) if k in history]
+        insts = histories_by_base.get(base, [])
 
-        # Realized / volume / trades: one window per owner, tiling the timeline.
-        for i, (since, s) in enumerate(window_owners):
+        # Realized / volume / trades / fees: one window per owner, tiling the
+        # timeline. A released window (the session stopped and left the bot
+        # running) ends at its release instant, so PnL earned while no session
+        # was operating the bot is attributed to nobody instead of accruing to
+        # whoever happened to hold last.
+        sliced_fees = 0.0
+        for i, (since, s, until) in enumerate(window_owners):
             end = window_owners[i + 1][0] if i + 1 < len(window_owners) else now
-            realized, volume, trades = slice_history(insts, since, end)
+            if until > 0:
+                end = min(end, until)
+            if end <= since:
+                continue
+            realized, volume, trades, fees = slice_history(insts, since, end)
             s.realized_pnl += realized
             s.volume += volume
             s.trade_count += int(round(trades))
+            s.fees += fees
+            sliced_fees += fees
             s.total_pnl = s.realized_pnl + s.unrealized_pnl
 
-        # Live unrealized + open positions → the base's current owner.
+        # Live unrealized + open positions → the base's current owner, unless it
+        # has released the bot: an ended session holds no open book.
         bot = live.get(base)
         if not bot:
             continue
-        operator = window_owners[-1][1]
+        last_since, operator, last_until = window_owners[-1]
+        if last_until > 0:
+            continue
         b_rows = bot_executor_rows(bot)
         operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
-        operator.fees += float(bot.get("cum_fees_quote", 0) or 0)
+        # Fees come from the sliced history when the backend reports a cumulative
+        # figure. When it does not, that column is all zeros and the only fees
+        # available are the live open-position ones — attributed to the current
+        # operator as before rather than silently dropped.
+        if sliced_fees == 0.0:
+            operator.fees += float(bot.get("cum_fees_quote", 0) or 0)
         operator.open_count += sum(1 for r in b_rows if r["status"] == "RUNNING")
         operator.executors = list(operator.executors) + b_rows
         operator.total_pnl = operator.realized_pnl + operator.unrealized_pnl
@@ -1606,7 +1605,14 @@ async def get_session_executors(
     bot_names = _current_owner_bases(
         strategy.dir, strategy.default_config, session_nums, session_num
     )
-    perf = await fetch_agent_performance(client, agent_id, bot_names=bot_names)
+    # Slice the bot to this session's window for the same reason the rollup does:
+    # merging the lifetime aggregate here made the session detail disagree with
+    # the session's own row in the strategy list.
+    owned = _session_ownership(strategy.dir, strategy.default_config, session_num)
+    since = min((b.since for b in owned if b.since > 0), default=0.0)
+    perf = await fetch_agent_performance(
+        client, agent_id, bot_names=bot_names, since=since
+    )
     model = AgentPerformanceModel(
         agent_id=agent_id,
         session_num=session_num,

@@ -305,39 +305,61 @@ class RoutineStore:
                 f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
             )
 
-    def _record_run_turn(
+    async def _report_run(
         self, instance_id: str, summary: str, error: str | None
     ) -> None:
-        """Write a finished run back to the conversation that asked for it.
+        """Report a finished run to the conversation that asked for it.
 
-        The routine sibling of ``delegate._record_completion_turn``: a routine an
-        agent starts from chat used to report only to Telegram, so the
-        conversation ended on "I started it" and never learned another word —
-        and ``replay_context`` told the next session the same incomplete story
-        (ARCH-089). Recorded as a ``system`` turn so the replay reads it as a
-        parenthetical note rather than as the agent's own words.
+        One note, delivered twice. The ``system`` turn is the *record*: the
+        routine sibling of ``delegate._record_completion_turn``, without which
+        the conversation ended on "I started it" and ``replay_context`` told the
+        next session the same incomplete story (ARCH-089). Recorded as a
+        ``system`` turn so the replay reads it as a parenthetical note rather
+        than as the agent's own words.
+
+        The push is what the user *sees*. A recorded turn reaches an already-open
+        dashboard only when the page is reloaded, so a run that failed thirty
+        seconds in stayed invisible until someone refreshed. ``deliver_note``
+        shows the same line immediately and costs nothing: a finished routine is
+        worth showing, not worth a model turn to announce it.
 
         A run with no conversation behind it — the scheduler, the dashboard, the
         Telegram menu, an instance restored on boot — is a no-op: ``record_system``
-        already ignores an empty id. Never allowed to raise: a missing note must
-        not cost the user the run's own delivery.
+        ignores an empty id and a run with no session key reaches no surface.
+        Neither delivery is allowed to raise: a missing note must not cost the
+        user the run's own result or its hooks.
         """
         meta = self._instances.get(instance_id) or {}
         conversation_id = meta.get("conversation_id") or ""
         if not conversation_id:
             return
+
+        text = _run_outcome_text(meta.get("routine_name") or "", summary, error)
         try:
             from condor.runtime.conversations import record_system
 
-            record_system(
-                meta.get("user_id"),
-                conversation_id,
-                _run_outcome_text(meta.get("routine_name") or "", summary, error),
+            record_system(meta.get("user_id"), conversation_id, text, kind="routine")
+        except Exception:
+            logger.debug(
+                f"Could not record run {instance_id} in conversation {conversation_id}",
+                exc_info=True,
+            )
+
+        session_key = meta.get("session_key") or ""
+        if not session_key:
+            return
+        try:
+            from condor.runtime import wake
+
+            await wake.deliver_note(
+                session_key=session_key,
+                conversation_id=conversation_id,
+                text=text,
                 kind="routine",
             )
         except Exception:
             logger.debug(
-                f"Could not record run {instance_id} in conversation {conversation_id}",
+                f"Could not show run {instance_id} in conversation {conversation_id}",
                 exc_info=True,
             )
 
@@ -349,13 +371,16 @@ class RoutineStore:
         user_id: int,
         source: str,
         conversation_id: str = "",
+        session_key: str = "",
         **extra,
     ) -> dict:
         """Fresh instance-metadata dict shared by execute/start_continuous/schedule.
 
         ``conversation_id`` is the run's provenance: the conversation that asked
-        for it, which its outcome is reported back to. Empty for everything with
-        no conversation behind it (dashboard, Telegram, restored schedules).
+        for it, which its outcome is reported back to. ``session_key`` is the
+        live session behind that conversation, which the outcome is *shown* in
+        while it is still open. Both empty for everything with no conversation
+        behind it (dashboard, Telegram, restored schedules).
         """
         return {
             "routine_name": routine_name,
@@ -365,6 +390,7 @@ class RoutineStore:
             "server_name": server_name,
             "user_id": user_id,
             "conversation_id": conversation_id,
+            "session_key": session_key,
             "created_at": time.time(),
             "last_run_at": None,
             "last_result": None,
@@ -453,7 +479,7 @@ class RoutineStore:
                 }
             )
 
-        self._record_run_turn(instance_id, summary, error_msg)
+        await self._report_run(instance_id, summary, error_msg)
 
         if fire_hooks:
             await self._fire_hooks(instance_id, result, report_id, failed)
@@ -482,12 +508,13 @@ class RoutineStore:
         user_id: int = 0,
         agent: str = "",
         conversation_id: str = "",
+        session_key: str = "",
     ) -> str:
         """Run a one-shot routine from the web. Returns instance_id.
 
         ``agent`` overrides report attribution (see ``_execute_and_record``);
-        ``conversation_id`` is where the finished run reports back to (see
-        ``_record_run_turn``).
+        ``conversation_id`` and ``session_key`` are where the finished run
+        reports back to and shows itself (see ``_report_run``).
         """
         routine = self._resolve_routine(routine_name)
         if not routine:
@@ -501,6 +528,7 @@ class RoutineStore:
             user_id,
             source="web",
             conversation_id=conversation_id,
+            session_key=session_key,
         )
 
         task = asyncio.create_task(
@@ -539,6 +567,7 @@ class RoutineStore:
         user_id: int = 0,
         agent: str = "",
         conversation_id: str = "",
+        session_key: str = "",
     ) -> str:
         """Start a continuous routine as a background task. Returns instance_id."""
         routine = self._resolve_routine(routine_name)
@@ -557,6 +586,7 @@ class RoutineStore:
             user_id,
             source="mcp",
             conversation_id=conversation_id,
+            session_key=session_key,
         )
 
         task = asyncio.create_task(

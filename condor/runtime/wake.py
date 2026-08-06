@@ -20,9 +20,14 @@ entry must survive a channel that dies. Sinks are *registered* by the surfaces a
 import time rather than imported from here — ``condor.runtime`` must not depend
 on handler or web code (see ``client._local()``).
 
-Deliberately narrow. ``resume_session(session_key, conversation_id, text, kind)``
-is everything a background producer needs; routines will call it unchanged once
-they carry a session key (ARCH-089). Do not generalise it before then.
+Two deliveries, one shape. :func:`resume_session` spends a model turn — the
+agent continues from the result. :func:`deliver_note` spends nothing: it shows a
+note the transcript already holds, which is all a finished routine needs (its
+outcome is text, not work to continue from). Both address the surface the same
+way and both degrade to silence when nobody is attached.
+
+Deliberately narrow: a background producer passes its session key, the
+conversation it belongs to, and the line to show. Do not generalise further.
 """
 
 from __future__ import annotations
@@ -59,6 +64,13 @@ SinkFactory = Callable[[SessionKey, "int | None"], "TurnSink | None"]
 
 _sink_factories: dict[str, SinkFactory] = {}
 
+# surface -> deliver(key, user_id, text, kind). A note is not a turn: nothing is
+# prompted and nothing is recorded — the transcript already holds it — so a sink
+# only has to render one line into whatever is attached.
+NoteSink = Callable[[SessionKey, "int | None", str, str], Awaitable[None]]
+
+_note_sinks: dict[str, NoteSink] = {}
+
 # Conversations with a wake turn in flight. Read by the delegate route to force
 # a delegation started *from inside* a wake back to ``notify`` — which is what
 # bounds the recursion to depth 1 without a counter or a rate limiter.
@@ -68,6 +80,11 @@ _in_flight: set[str] = set()
 def register_sink_factory(surface: str, factory: SinkFactory) -> None:
     """Bind a surface's renderer. Called by the surface, at import time."""
     _sink_factories[surface] = factory
+
+
+def register_note_sink(surface: str, sink: NoteSink) -> None:
+    """Bind a surface's out-of-band note renderer. Called by the surface."""
+    _note_sinks[surface] = sink
 
 
 def is_waking(conversation_id: str) -> bool:
@@ -101,6 +118,80 @@ def _build_sink(key: SessionKey, user_id: int | None) -> "TurnSink | None":
         return None
 
 
+async def _live_session(session_key: str, conversation_id: str):
+    """The session a background task can still reach, or None.
+
+    Shared by both deliveries below so they agree on what "there is nobody to
+    talk to" means: a malformed key, no session, a dead one, or a session that
+    has since moved to another conversation. That last check is load-bearing on
+    Telegram, where the key ``tg:{chat_id}`` is stable but the conversation
+    behind it is not — without it a task started before ``/new`` would report
+    into a chat about something else.
+
+    Returns ``(key, info)`` so the caller can address a sink by slot.
+    """
+    from condor.runtime import client
+
+    try:
+        key = SessionKey.parse(session_key)
+    except ValueError:
+        log.debug("Cannot reach %r: not a canonical session key", session_key)
+        return None
+
+    try:
+        info = await client.get_info(key)
+    except Exception:  # noqa: BLE001 - a lookup failure is "nothing to reach"
+        log.warning("Could not look up session %s", key, exc_info=True)
+        return None
+
+    if info is None or not info.alive:
+        log.debug("Not reaching %s: no live session", key)
+        return None
+    if info.conversation_id != conversation_id:
+        log.debug(
+            "Not reaching %s: session has moved to conversation %s, task was from %s",
+            key,
+            info.conversation_id,
+            conversation_id,
+        )
+        return None
+    return key, info
+
+
+async def deliver_note(
+    *,
+    session_key: str,
+    conversation_id: str,
+    text: str,
+    kind: str,
+) -> bool:
+    """Show an already-recorded transcript note on the surface that is attached.
+
+    The cheap half of :func:`resume_session`. A background producer that only
+    writes a ``system`` turn is invisible to a dashboard that is already open —
+    the transcript is read at load, so the user learns their routine failed
+    thirty seconds in only by reloading the page. This pushes the same note,
+    with no prompt behind it: a finished routine is worth *showing*, not worth
+    paying for a model turn to announce.
+
+    Returns False — never raises — when there is nobody to show it to. The note
+    is in the transcript either way, so this degrades to exactly the passive
+    behaviour it extends.
+    """
+    if not session_key or not conversation_id or not text:
+        return False
+
+    found = await _live_session(session_key, conversation_id)
+    if found is None:
+        return False
+    key, info = found
+
+    sink = _note_sinks.get(key.surface)
+    if sink is None:
+        return False
+    return await _guard(sink(key, info.user_id, text, kind), "deliver a note")
+
+
 async def resume_session(
     *,
     session_key: str,
@@ -127,29 +218,10 @@ async def resume_session(
     if not session_key or not conversation_id or not text:
         return False
 
-    try:
-        key = SessionKey.parse(session_key)
-    except ValueError:
-        log.debug("Cannot wake %r: not a canonical session key", session_key)
+    found = await _live_session(session_key, conversation_id)
+    if found is None:
         return False
-
-    try:
-        info = await client.get_info(key)
-    except Exception:  # noqa: BLE001 - a lookup failure is "nothing to wake"
-        log.warning("Could not look up session %s to wake it", key, exc_info=True)
-        return False
-
-    if info is None or not info.alive:
-        log.debug("Not waking %s: no live session", key)
-        return False
-    if info.conversation_id != conversation_id:
-        log.debug(
-            "Not waking %s: session has moved to conversation %s, task was from %s",
-            key,
-            info.conversation_id,
-            conversation_id,
-        )
-        return False
+    key, info = found
 
     sink = _build_sink(key, info.user_id)
     if sink is not None and not await _guard(sink.open(), "open"):

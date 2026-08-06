@@ -224,6 +224,7 @@ def auto_approve_with_risk_check(
     risk_state: RiskState,
     execution_mode: str = "loop",
     ledger: "BotLedger | None" = None,
+    agent_id: str = "",
 ):
     """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
 
@@ -231,6 +232,13 @@ def auto_approve_with_risk_check(
     that deploys or mutates a bot outside the session's namespace is cancelled and
     recorded. ``None`` (consults, delegations, chat, executor-mode agents) keeps
     today's behavior exactly.
+
+    ``agent_id``, when given, is the session's own ``controller_id`` tag and an
+    executor create must carry exactly it. The tag is model-supplied (the prompt
+    merely asks for it) and is the sole link between a real position and the
+    session that opened it, so checking only that *some* tag is present lets a
+    mistyped one open a live position no session can ever claim. Empty (consults,
+    chat, tests) keeps the presence-only check.
     """
     from handlers.agents._shared import (
         DANGEROUS_BOT_ACTIONS,
@@ -275,11 +283,22 @@ def auto_approve_with_risk_check(
             if tool_name == "manage_executors":
                 action = input_data.get("action", "")
 
-                # Validate controller_id on create
+                # Validate controller_id on create — presence AND value, since
+                # this tag is what per-session PnL attribution keys on.
                 if action == "create":
                     executor_config = input_data.get("executor_config", {})
-                    if not executor_config.get("controller_id"):
+                    tag = str(executor_config.get("controller_id") or "")
+                    if not tag:
                         log.warning("Blocked executor create: missing controller_id")
+                        return {"outcome": {"outcome": "cancelled"}}
+                    if agent_id and tag != agent_id:
+                        log.warning(
+                            "Blocked executor create: controller_id %r is not this "
+                            "session's agent_id %r — the position would be "
+                            "unattributable",
+                            tag,
+                            agent_id,
+                        )
                         return {"outcome": {"outcome": "cancelled"}}
 
                 allowed, reason = risk_engine.check_executor_action(

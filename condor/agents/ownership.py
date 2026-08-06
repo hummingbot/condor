@@ -104,6 +104,13 @@ class OwnedBot:
     origin: str  # "deployed" | "adopted" | "legacy"
     since: float  # epoch this session took ownership
     last_seen: float
+    # Epoch this session gave the bot up, or 0.0 while it still holds it. A
+    # session that stops without winding its bot down leaves it running, and
+    # without this the attribution window ran to *now* — so a finished session
+    # kept accruing PnL it had nothing to do with, and kept showing the live open
+    # book, until some later session adopted the bot. Stamped by
+    # :meth:`BotLedger.release`.
+    until: float = 0.0
 
 
 def _parse_bots(data: dict[str, Any]) -> dict[str, OwnedBot]:
@@ -116,6 +123,9 @@ def _parse_bots(data: dict[str, Any]) -> dict[str, OwnedBot]:
                 origin=raw.get("origin", "adopted"),
                 since=float(raw.get("since", 0.0)),
                 last_seen=float(raw.get("last_seen", 0.0)),
+                # Absent in ledgers written before releases were recorded: those
+                # sessions read as still-holding, exactly as they did then.
+                until=float(raw.get("until", 0.0) or 0.0),
             )
         except Exception:
             continue
@@ -203,6 +213,22 @@ class BotLedger:
         """
         self._record(name, "adopted", now)
 
+    def release(self, now: float | None = None) -> None:
+        """Close the ownership window on every bot this session still holds.
+
+        Called when the session ends. Idempotent and never re-opens a window: a
+        bot already released keeps its first release instant, so a double stop
+        cannot extend attribution.
+        """
+        ts = time.time() if now is None else now
+        changed = False
+        for bot in self.bots.values():
+            if bot.until <= 0:
+                bot.until = ts
+                changed = True
+        if changed:
+            self._save()
+
     def note_violation(self, name: str, action: str, now: float | None = None) -> None:
         entry = {
             "name": name or "",
@@ -231,6 +257,9 @@ class BotLedger:
             # First claim wins: a bot this session deployed stays "deployed" even
             # if a later adoption pass sees it running.
             existing.last_seen = ts
+            # Operating it again re-opens a window closed by an earlier release,
+            # so a stop followed by another tick cannot strand the attribution.
+            existing.until = 0.0
         self._save()
 
     # ------------------------------------------------------------------
@@ -256,6 +285,14 @@ class BotLedger:
             return
         self.bots = _parse_bots(data)
         self.violations = list(data.get("violations") or [])[-_MAX_VIOLATIONS:]
+        # Recover the persisted scope when the caller did not supply one. Boot
+        # reconciliation opens a finished session's ledger only to close its
+        # window and has no strategy context to rebuild the namespace from;
+        # without this, saving would blank the very fields enforcement reads.
+        if not self.namespace:
+            self.namespace = str(data.get("namespace", "") or "")
+        if not self.declared:
+            self.declared = [d for d in (data.get("declared") or []) if d]
 
     def _save(self) -> None:
         path = self.path

@@ -18,6 +18,7 @@ class PositionsProvider(BaseProvider):
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
+        since: float = 0.0,
     ) -> ProviderResult:
         # bot_names is part of the provider contract but irrelevant here: positions
         # are queried by controller_id, not by bot.

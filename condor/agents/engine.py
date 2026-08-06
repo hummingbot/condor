@@ -251,6 +251,12 @@ class TickEngine:
                     "TickEngine %s: error reaping active client", self.agent_id
                 )
             self._active_client = None
+        # Close the ownership window before the journal: from here on this session
+        # operates nothing, so a bot left running must stop accruing to it. The
+        # next session adopts the bot on its first tick and picks the timeline up
+        # from there; the gap in between belongs to no session, which is the truth.
+        if self.ledger is not None:
+            self.ledger.release()
         if self.journal:
             self.journal.close()
         _supervisor().unregister(self.agent_id, LoopState.STOPPED)
@@ -310,6 +316,11 @@ class TickEngine:
                 f"verify positions manually! ({reason})"
             )
         finally:
+            # Mirrors stop(): the session operates nothing past this point, so its
+            # ownership window closes here too. run_shutdown() may have wound the
+            # bot down, but it also may have failed — either way the window ends.
+            if self.ledger is not None:
+                self.ledger.release()
             if self.journal:
                 self.journal.close()
             _supervisor().unregister(self.agent_id, LoopState.STOPPED)
@@ -429,6 +440,14 @@ class TickEngine:
             # the bots this session operates right now — including any extra one
             # it deployed beyond the configured name.
             bot_names=self.ledger.bases() if self.ledger else None,
+            # Earliest takeover across those bases. Bot PnL earned before it was
+            # inherited, not produced by this session, so it is sliced off rather
+            # than reported back to the agent as its own.
+            since=(
+                min((b.since for b in self.ledger.owned() if b.since > 0), default=0.0)
+                if self.ledger
+                else 0.0
+            ),
         )
 
         # Extract structured data from providers for tracking
@@ -763,7 +782,11 @@ class TickEngine:
             agent_slug=self.agent.slug,
         )
         permission_cb = auto_approve_with_risk_check(
-            self.risk, risk_state, execution_mode=mode, ledger=self.ledger
+            self.risk,
+            risk_state,
+            execution_mode=mode,
+            ledger=self.ledger,
+            agent_id=self.agent_id,
         )
 
         agent_key = self._agent_key()

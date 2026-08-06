@@ -161,6 +161,73 @@ def test_a_closed_tab_does_not_stop_the_turn(ws_env):
     ]
 
 
+def test_a_note_reaches_every_open_tab_without_prompting_the_session(ws_env):
+    """The cheap delivery: shown, not answered.
+
+    A finished routine's outcome is text the transcript already holds, so
+    ``deliver_note`` must reach the tabs without spending a model turn — which
+    is what makes it safe to fire on every run.
+    """
+
+    async def scenario():
+        opener = _FakeWS()
+        slot_id = await _start(opener)
+        client = _EchoClient.last
+        first, second = _FakeWS(), _FakeWS()
+        _attach(first)
+        _attach(second)
+        shown = await wake.deliver_note(
+            session_key=str(SessionKey.web(USER, slot_id)),
+            conversation_id=slot_id,
+            text="❌ Routine backtest_chart failed: HTTP 429",
+            kind="routine",
+        )
+        return client, shown, first, second, slot_id
+
+    client, shown, first, second, slot_id = asyncio.run(scenario())
+
+    assert shown is True
+    assert client.prompts == []
+    assert first.sent == [
+        {
+            "event": "system_note",
+            "slot_id": slot_id,
+            "text": "❌ Routine backtest_chart failed: HTTP 429",
+            "kind": "routine",
+        }
+    ]
+    assert second.sent == first.sent
+
+
+def test_a_note_for_a_conversation_the_session_left_is_not_shown(ws_env):
+    """Same guard as a wake: a run started before ``/new`` must not report into
+    a chat about something else."""
+
+    async def scenario():
+        opener = _FakeWS()
+        slot_id = await _start(opener)
+        watcher = _FakeWS()
+        _attach(watcher)
+        moved = await wake.deliver_note(
+            session_key=str(SessionKey.web(USER, slot_id)),
+            conversation_id="some-older-conversation",
+            text="done",
+            kind="routine",
+        )
+        gone = await wake.deliver_note(
+            session_key=str(SessionKey.web(USER, "no-such-slot")),
+            conversation_id="no-such-slot",
+            text="done",
+            kind="routine",
+        )
+        return moved, gone, watcher
+
+    moved, gone, watcher = asyncio.run(scenario())
+
+    assert (moved, gone) == (False, False)
+    assert watcher.sent == []
+
+
 def test_the_sink_is_only_offered_while_a_socket_is_attached(ws_env):
     key = SessionKey.web(USER, "conv-1")
     assert chat_ws._wake_sink(key, USER) is None

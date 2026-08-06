@@ -19,7 +19,8 @@ from routines.base import RoutineResult
 
 logger = logging.getLogger(__name__)
 
-# Shared with routines/backtest_chart.py so both reports read as one family.
+# Shared with backtest_chart.py / archived_analyzer.py so the reports read as
+# one family.
 COLORS = {
     "bg": "#0e1117",
     "plot_bg": "#0e1117",
