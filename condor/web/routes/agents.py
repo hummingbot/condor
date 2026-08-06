@@ -96,7 +96,7 @@ class RunningInstance(BaseModel):
     fees: float = 0.0
     open_count: int = 0
     closed_count: int = 0
-    win_rate: float = 0.0
+    win_rate: float | None = None
     server_name: str = ""
     total_amount_quote: float = 100.0
     trading_context: str = ""
@@ -154,7 +154,9 @@ class AgentPerformanceModel(BaseModel):
     volume: float = 0.0
     fees: float = 0.0
     trade_count: int = 0
-    win_rate: float = 0.0
+    # None = no closed executor rows to derive it from; see AgentPerformance.
+    # Rendering it as 0% would report a bot-mode session as all-losses.
+    win_rate: float | None = None
     open_count: int = 0
     closed_count: int = 0
     executors: list[dict[str, Any]] = []
@@ -573,7 +575,12 @@ async def _apply_bot_mode_pnl(
             realized, volume, trades, fees = slice_history(insts, since, end)
             s.realized_pnl += realized
             s.volume += volume
+            # Sliced closes are round-trip closes, so they are this session's
+            # trades AND its closed positions — the same two counters
+            # _merge_bot_perf bumps, so the session detail and this rollup report
+            # one number.
             s.trade_count += int(round(trades))
+            s.closed_count += int(round(trades))
             s.fees += fees
             sliced_fees += fees
             s.total_pnl = s.realized_pnl + s.unrealized_pnl
@@ -737,7 +744,7 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         fees=p.fees if p else 0.0,
         open_count=p.open_count if p else 0,
         closed_count=p.closed_count if p else 0,
-        win_rate=p.win_rate if p else 0.0,
+        win_rate=p.win_rate if p else None,
         server_name=info.get("server_name", ""),
         total_amount_quote=info.get("total_amount_quote", 100),
         trading_context=info.get("trading_context", ""),

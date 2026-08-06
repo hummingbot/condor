@@ -24,7 +24,11 @@ class AgentPerformance:
     volume: float = 0.0
     fees: float = 0.0
     trade_count: int = 0
-    win_rate: float = 0.0
+    # Executor-derived, and ``None`` when there is nothing to derive it from —
+    # which is not the same as 0%. Only closed executor rows carry a per-trade
+    # outcome; a bot-mode agent's trades come from the controller snapshot, which
+    # says how many positions closed but not how any of them ended.
+    win_rate: float | None = None
     open_count: int = 0
     closed_count: int = 0
     executors: list[dict[str, Any]] = field(default_factory=list)
@@ -181,6 +185,12 @@ def _merge_bot_perf(
     the controller history. When given it replaces the lifetime aggregate for
     those four; unrealized PnL and the open rows always come from the live
     snapshot, since the open book belongs to whoever operates the bot now.
+
+    Trades come from the bot's real round-trip closes (``closed_trades``, or the
+    sliced ``trades`` when a window is given) — never from ``rows``, which only
+    describe the positions open at this instant. ``win_rate`` is left untouched:
+    the bot snapshot reports how many positions closed but not how each one ended,
+    so a bot-mode agent has no per-trade outcome to derive one from.
     """
     from condor.fetchers.bot_performance import bot_executor_rows
 
@@ -188,19 +198,21 @@ def _merge_bot_perf(
     open_rows = [r for r in rows if r["status"] == "RUNNING"]
 
     if window is None:
+        closes = int(bot.get("closed_trades", 0) or 0)
         perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
         perf.volume += float(bot.get("volume_traded", 0) or 0)
         perf.fees += float(bot.get("cum_fees_quote", 0) or 0)
-        perf.trade_count += len(rows)
     else:
         realized, volume, trades, fees = window
+        closes = int(round(trades))
         perf.realized_pnl += realized
         perf.volume += volume
-        perf.trade_count += int(round(trades))
         # A backend that reports no cumulative fee column slices to zero; the
         # live open-position figure is then the only one there is.
         perf.fees += fees if fees else float(bot.get("cum_fees_quote", 0) or 0)
 
+    perf.trade_count += closes
+    perf.closed_count += closes
     perf.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
     perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
     perf.controllers = perf.controllers + list(bot.get("controllers", []))
@@ -225,7 +237,7 @@ def _build_perf_from_rows(
     volume = sum(r["volume"] for r in rows)
     fees = sum(r["fees"] for r in rows)
 
-    win_rate = 0.0
+    win_rate: float | None = None
     if closed:
         wins = sum(1 for r in closed if r["pnl"] > 0)
         win_rate = wins / len(closed)

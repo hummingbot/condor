@@ -253,7 +253,7 @@ def test_client_without_base_url_is_never_cached():
 
 
 def _snap_with_positions(
-    bot_name, controller_id, timestamp, positions, status="running"
+    bot_name, controller_id, timestamp, positions, status="running", closes=None
 ):
     return {
         "bot_name": bot_name,
@@ -265,6 +265,7 @@ def _snap_with_positions(
             "unrealized_pnl_quote": 2.0,
             "volume_traded": 100.0,
             "positions_summary": positions,
+            "close_type_counts": closes or {},
         },
     }
 
@@ -406,6 +407,75 @@ def test_merge_appends_bot_positions_as_rows():
     assert merged.open_count == 1
     assert merged.fees == 0.3
     assert merged.unrealized_pnl == 2.0  # controller-level aggregate
+
+
+def test_aggregate_counts_only_round_trip_closes():
+    """EARLY_STOP is pmm re-quoting churn, not a trade — per controller and per bot."""
+    agg = _aggregate_by_bot(
+        [
+            _snap_with_positions(
+                "bot",
+                "c1",
+                "2026-07-24T18:00:00+00:00",
+                [],
+                closes={"CloseType.TAKE_PROFIT": 40, "CloseType.EARLY_STOP": 900},
+            ),
+            _snap_with_positions(
+                "bot",
+                "c2",
+                "2026-07-24T18:00:00+00:00",
+                [],
+                closes={"CloseType.STOP_LOSS": 10, "CloseType.POSITION_HOLD": 3},
+            ),
+        ]
+    )
+    assert agg["bot"]["closed_trades"] == 50
+    assert [c["closed_trades"] for c in agg["bot"]["controllers"]] == [40, 10]
+
+
+def test_bot_mode_trades_are_closes_not_open_positions():
+    """A bot with 50 real closes and 2 open positions reports 50 trades, not 2.
+
+    ``positions_summary`` only ever describes the currently-open book, so counting
+    its rows made a session that had closed hundreds of round trips report as many
+    trades as it happened to hold positions — while closed_count stayed 0.
+    """
+    agent_id = "dn.sess_1"
+    positions = [
+        {
+            "connector_name": "hyperliquid",
+            "trading_pair": pair,
+            "volume_traded_quote": 250.0,
+            "side": "TradeType.BUY",
+            "amount": 1.0,
+            "breakeven_price": 60.0,
+            "unrealized_pnl_quote": -0.5,
+            "cum_fees_quote": 0.3,
+        }
+        for pair in ("BTC-USD", "ETH-USD")
+    ]
+    snaps = [
+        _snap_with_positions(
+            "dn-mm-20260724-1",
+            "dn_CL_mm",
+            "2026-07-24T18:00:00+00:00",
+            positions,
+            closes={
+                "CloseType.TAKE_PROFIT": 40,
+                "CloseType.STOP_LOSS": 10,
+                "CloseType.EARLY_STOP": 900,
+            },
+        )
+    ]
+    client = _FakeClient(rows_by_id={}, snapshots=snaps)
+    perf = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["dn-mm"]))
+
+    assert perf.trade_count == 50
+    assert perf.closed_count == 50
+    assert perf.open_count == 2  # the live book, unchanged
+    # The snapshot says how many positions closed, not how they ended: unknown,
+    # which is not the same as a 0% win rate.
+    assert perf.win_rate is None
 
 
 def test_no_snapshot_leaves_executor_totals_unchanged():

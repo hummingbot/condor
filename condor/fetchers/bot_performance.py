@@ -51,6 +51,32 @@ def extract_snapshots(result: Any) -> list[dict]:
     return []
 
 
+# Only genuine round-trip position closes count as "trades". Everything else in
+# close_type_counts is churn or non-trades: EARLY_STOP is pmm order re-quoting
+# (thousands per session), POSITION_HOLD is a fill that built a still-open position,
+# and INSUFFICIENT_BALANCE/FAILED/EXPIRED never executed.
+_TRADE_CLOSE_TYPES = {
+    "CloseType.TAKE_PROFIT",
+    "CloseType.STOP_LOSS",
+    "CloseType.TIME_LIMIT",
+    "CloseType.TRAILING_STOP",
+    "CloseType.COMPLETED",
+}
+
+
+def count_trade_closes(perf: dict) -> int:
+    """Round-trip closes in one controller-performance payload's ``close_type_counts``.
+
+    The single authority for "how many trades did this controller actually close",
+    shared by the live snapshot aggregate and the cumulative history so both
+    surfaces count the same events.
+    """
+    counts = perf.get("close_type_counts") or {}
+    if not isinstance(counts, dict):
+        return 0
+    return sum(int(v or 0) for k, v in counts.items() if k in _TRADE_CLOSE_TYPES)
+
+
 def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
     """Roll up per-controller snapshots into one aggregate per bot_name.
 
@@ -58,6 +84,11 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
     controller holds, with per-position PnL/volume/fees) and ``status`` so callers
     can render executor-like rows for bot-mode agents, whose executors live in the
     bot container and never surface in the ``agent_id``-keyed executor table.
+
+    ``closed_trades`` carries the controller's real round-trip closes. Open
+    positions are the only thing ``positions_summary`` describes, so without it a
+    caller counting rows would read a bot's whole trading history as "however many
+    positions happen to be open right now".
     """
     agg: dict[str, dict] = {}
     for snap in snapshots:
@@ -75,6 +106,7 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
                 "global_pnl_quote": 0.0,
                 "volume_traded": 0.0,
                 "cum_fees_quote": 0.0,
+                "closed_trades": 0,
                 "num_controllers": 0,
                 "timestamp": "",
                 "controllers": [],
@@ -86,11 +118,13 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
             p for p in (perf.get("positions_summary") or []) if isinstance(p, dict)
         ]
         fees = sum(float(p.get("cum_fees_quote", 0) or 0) for p in positions)
+        closes = count_trade_closes(perf)
         agg[bn]["realized_pnl_quote"] += realized
         agg[bn]["unrealized_pnl_quote"] += unrealized
         agg[bn]["global_pnl_quote"] += realized + unrealized
         agg[bn]["volume_traded"] += volume
         agg[bn]["cum_fees_quote"] += fees
+        agg[bn]["closed_trades"] += closes
         agg[bn]["num_controllers"] += 1
         # Track the freshest snapshot timestamp so suffix-tolerant resolution can
         # pick the most recent deploy of a re-launched bot.
@@ -108,6 +142,7 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
                 "unrealized_pnl_quote": unrealized,
                 "volume_traded": volume,
                 "cum_fees_quote": fees,
+                "closed_trades": closes,
                 "positions_summary": positions,
             }
         )
@@ -238,19 +273,6 @@ def resolve_bots(all_bot_perf: dict[str, dict], bases: list[str]) -> dict[str, d
     return out
 
 
-# Only genuine round-trip position closes count as "trades". Everything else in
-# close_type_counts is churn or non-trades: EARLY_STOP is pmm order re-quoting
-# (thousands per session), POSITION_HOLD is a fill that built a still-open position,
-# and INSUFFICIENT_BALANCE/FAILED/EXPIRED never executed.
-_TRADE_CLOSE_TYPES = {
-    "CloseType.TAKE_PROFIT",
-    "CloseType.STOP_LOSS",
-    "CloseType.TIME_LIMIT",
-    "CloseType.TRAILING_STOP",
-    "CloseType.COMPLETED",
-}
-
-
 def _iso_to_epoch(ts: Any) -> float | None:
     from datetime import datetime
 
@@ -331,8 +353,7 @@ async def fetch_instance_history(
         perf = r.get("performance") or {}
         realized = float(perf.get("realized_pnl_quote", 0) or 0)
         volume = float(perf.get("volume_traded", 0) or 0)
-        ctc = perf.get("close_type_counts") or {}
-        trades = sum(int(v or 0) for k, v in ctc.items() if k in _TRADE_CLOSE_TYPES)
+        trades = count_trade_closes(perf)
         fees = float(perf.get("cum_fees_quote", 0) or 0)
         acc = by_ts.setdefault(str(ts), [0.0, 0.0, 0.0, 0.0])
         acc[0] += realized

@@ -340,7 +340,8 @@ export interface RunningInstance {
   fees: number;
   open_count: number;
   closed_count: number;
-  win_rate: number;
+  /** null = no closed executors to derive it from (bot-mode sessions), not 0%. */
+  win_rate: number | null;
   server_name: string;
   total_amount_quote: number;
   trading_context: string;
@@ -429,7 +430,8 @@ export interface AgentPerformance {
   volume: number;
   fees: number;
   trade_count: number;
-  win_rate: number;
+  /** null = no closed executors to derive it from (bot-mode sessions), not 0%. */
+  win_rate: number | null;
   open_count: number;
   closed_count: number;
   executors: AgentExecutorRow[];

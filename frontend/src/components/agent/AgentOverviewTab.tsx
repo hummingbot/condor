@@ -177,9 +177,14 @@ export function PerformancePanel({
   const openPos = Number(totals.open_positions ?? 0);
   const pnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 
-  const closed = sessions.reduce((s, x) => s + x.closed_count, 0);
-  const wins = sessions.reduce((s, x) => s + Math.round(x.win_rate * x.closed_count), 0);
-  const winRate = closed > 0 ? (wins / closed) * 100 : 0;
+  // Only sessions whose closes carry an outcome can be averaged. A bot-mode
+  // session reports its closes with win_rate === null (the controller snapshot
+  // says how many positions closed, not how they ended); counting those closes
+  // in the denominator would read every one of them as a loss.
+  const rated = sessions.filter((x) => x.win_rate != null);
+  const closed = rated.reduce((s, x) => s + x.closed_count, 0);
+  const wins = rated.reduce((s, x) => s + Math.round((x.win_rate as number) * x.closed_count), 0);
+  const winRate = closed > 0 ? (wins / closed) * 100 : null;
   const trades = sessions.reduce((s, x) => s + x.trade_count, 0);
 
   // PnL chart data from session-level performance
@@ -219,7 +224,9 @@ export function PerformancePanel({
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Win Rate</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">{winRate.toFixed(0)}%</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">
+              {winRate === null ? "—" : `${winRate.toFixed(0)}%`}
+            </span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Trades</span>

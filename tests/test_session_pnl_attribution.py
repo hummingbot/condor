@@ -98,12 +98,16 @@ def _snap(bot_name: str, ts: str, realized=0.0, unrealized=0.0, positions=None):
 
 
 def _hist_row(
-    ts: str, cum_realized: float, cum_volume: float = 0.0, cum_fees: float = 0.0
+    ts: str,
+    cum_realized: float,
+    cum_volume: float = 0.0,
+    cum_fees: float = 0.0,
+    closes: dict[str, int] | None = None,
 ):
     perf = {
         "realized_pnl_quote": cum_realized,
         "volume_traded": cum_volume,
-        "close_type_counts": {},
+        "close_type_counts": closes or {},
     }
     if cum_fees:
         perf["cum_fees_quote"] = cum_fees
@@ -322,6 +326,52 @@ def test_rollup_of_a_handover_sums_to_the_bots_cumulative(monkeypatch, tmp_path)
     # The strategy total is the bot's cumulative — distributed, never duplicated.
     assert totals["realized_pnl"] == 100.0
     assert totals["total_pnl"] == 108.0
+
+
+def test_session_detail_and_rollup_report_the_same_trade_count(monkeypatch, tmp_path):
+    """One session, one bot, two surfaces, one number (CORR-114).
+
+    The strategy rollup counted round-trip closes from the sliced history while
+    the session detail counted rows built from the open book, so the same session
+    read "50 trades" on the strategy list and "2 trades" on its own page — both
+    with 0 closed positions.
+    """
+    from types import SimpleNamespace
+
+    from condor.agents.performance import fetch_agent_performance
+
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T0)})
+
+    inst = "ns-bot-20260701-000000"
+    positions = [
+        {"trading_pair": pair, "amount": 1.0, "breakeven_price": 60.0}
+        for pair in ("BTC-USD", "ETH-USD")
+    ]
+    closes = {
+        "CloseType.TAKE_PROFIT": 40,
+        "CloseType.STOP_LOSS": 10,
+        "CloseType.EARLY_STOP": 900,  # pmm re-quoting churn, never a trade
+    }
+    client = _FakeClient(
+        snapshots=[_snap(inst, T3, realized=100.0, positions=positions)],
+        history={inst: [_hist_row(T0, 0.0), _hist_row(T3, 100.0, closes=closes)]},
+    )
+
+    # The session-detail path, before _rollup patches the executor fetch out.
+    async def _no_executors(**_kw):
+        return []
+
+    client.executors = SimpleNamespace(search_executors=_no_executors)
+    detail = asyncio.run(
+        fetch_agent_performance(client, "a_1", bot_names=["ns-bot"], since=_epoch(T0))
+    )
+
+    rollup = next(s for s in _rollup(monkeypatch, tmp_path, client)[0])
+
+    assert detail.trade_count == rollup.trade_count == 50
+    assert detail.closed_count == rollup.closed_count == 50
+    assert detail.open_count == 2  # the open book is not a trade count
 
 
 def test_rollup_of_one_session_on_two_bots_sums_both(monkeypatch, tmp_path):
