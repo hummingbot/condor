@@ -238,10 +238,9 @@ def reload_handlers():
         "handlers.routines",
         "handlers.agents",
         "handlers.agents.menu",
-        # NOTE: neither "handlers.agents.session" nor any "condor.runtime.*"
-        # module belongs in this list. The runtime holds live subprocess handles
-        # (agent sessions); re-executing those modules resets the registry and
-        # silently orphans every running agent.
+        # NOTE: no "condor.runtime.*" module belongs in this list. The runtime
+        # holds live subprocess handles (agent sessions); re-executing those
+        # modules resets the registry and silently orphans every running agent.
         "handlers.agents.stream",
         "handlers.agents.confirmation",
         "handlers.agents._shared",

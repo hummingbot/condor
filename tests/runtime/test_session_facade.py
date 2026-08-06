@@ -1,9 +1,9 @@
 """Tests for the session runtime facade (FEAT-008).
 
 The load-bearing one is ``test_hot_reload_does_not_clear_registry``: session
-state used to live in ``handlers/agents/session.py``, which ``reload_handlers()``
-re-executes on every handler edit, so editing any handler reset the registry to
-``{}`` and orphaned every live agent subprocess.
+state used to live in a handler module, which ``reload_handlers()`` re-executes
+on every handler edit, so editing any handler reset the registry to ``{}`` and
+orphaned every live agent subprocess.
 """
 
 import asyncio
@@ -174,19 +174,18 @@ def test_hot_reload_does_not_clear_registry(registry):
     """Reloading a handler module must not orphan live sessions.
 
     ``reload_handlers()`` re-executes every module in its list. While the
-    registry lived in ``handlers/agents/session.py`` that wiped ``_sessions``
-    and left the agent subprocesses running with nothing pointing at them.
+    registry lived in a handler module that wiped ``_sessions`` and left the
+    agent subprocesses running with nothing pointing at them.
     """
     key = SessionKey.telegram(1234)
     asyncio.run(runtime.create_session(_spec(key)))
     assert len(asyncio.run(runtime.list_sessions())) == 1
 
-    # Simulate reload_handlers(): re-execute the handler modules that used to
-    # own session state. Import first — under a narrow pytest selection they
-    # may not have been pulled in yet.
-    for name in ("handlers.agents.session", "handlers.agents.menu"):
-        importlib.reload(importlib.import_module(name))
-    assert "handlers.agents.session" in sys.modules
+    # Simulate reload_handlers(): re-execute a handler module that is actually
+    # in its list. Import first — under a narrow pytest selection it may not
+    # have been pulled in yet.
+    importlib.reload(importlib.import_module("handlers.agents.menu"))
+    assert "handlers.agents.menu" in sys.modules
 
     still_there = asyncio.run(runtime.list_sessions())
     assert [info.key for info in still_there] == [str(key)]

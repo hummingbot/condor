@@ -439,7 +439,8 @@ class PydanticAIClient:
       - "custom@venice:llama-3.3-70b" → any OpenAI-compatible API (Venice AI,
         Together, a local vLLM, ...). The "@venice" segment names one of the
         user's saved endpoints; base_url and api_key are resolved from it by
-        handlers/agents/session.py, with CUSTOM_LLM_* env vars as fallback.
+        ``condor.preferences.resolve_custom_endpoint``, with CUSTOM_LLM_* env
+        vars as fallback.
         The bare "custom:<model-id>" form (no endpoint name) is still accepted
         for configs written before endpoints were nameable.
     """
