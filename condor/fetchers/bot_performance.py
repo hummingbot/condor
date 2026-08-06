@@ -22,6 +22,8 @@ import logging
 import time
 from typing import Any
 
+from condor.fetchers.executors import normalize_executor_side
+
 logger = logging.getLogger(__name__)
 
 
@@ -496,12 +498,6 @@ async def fetch_base_histories(
     }
 
 
-def _clean_side(side: Any) -> str:
-    """Normalize a ``TradeType.SELL``-style side into a bare ``SELL``/``BUY``."""
-    s = str(side or "").upper()
-    return s.rsplit(".", 1)[-1] if "." in s else s
-
-
 def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
     """Build executor-like display rows from a resolved bot aggregate.
 
@@ -537,7 +533,7 @@ def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
                     "type": "controller",
                     "connector": pos.get("connector_name", ctrl.get("connector", "")),
                     "pair": pair,
-                    "side": _clean_side(pos.get("side")),
+                    "side": normalize_executor_side(pos.get("side")),
                     "status": status,
                     "close_type": "",
                     # Row PnL is the live (unrealized) mark of the open position;

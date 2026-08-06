@@ -60,6 +60,7 @@ def _executor_row(ex: dict) -> dict[str, Any]:
         get_executor_fees,
         get_executor_pnl,
         get_executor_volume,
+        normalize_executor_side,
     )
 
     cfg = ex.get("config", ex) if isinstance(ex.get("config"), dict) else ex
@@ -108,7 +109,11 @@ def _executor_row(ex: dict) -> dict[str, Any]:
         or ex.get("connector")
         or "",
         "pair": cfg.get("trading_pair") or ex.get("trading_pair") or "",
-        "side": str(cfg.get("side") or ex.get("side") or ""),
+        # custom_info first: that is where a position executor carries its side,
+        # matching the web route's own resolution order.
+        "side": normalize_executor_side(
+            custom_info.get("side") or cfg.get("side") or ex.get("side")
+        ),
         "status": str(ex.get("status") or "").upper(),
         "close_type": str(ex.get("close_type") or ""),
         "pnl": get_executor_pnl(ex),

@@ -8,6 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from config_manager import get_config_manager
+from condor.fetchers.executors import normalize_executor_side
 from condor.web.auth import get_current_user
 from condor.web.models import (
     ArchivedBotPerformance,
@@ -57,16 +58,6 @@ async def _get_bot_summary(client: Any, db_path: str) -> ArchivedBotSummary | No
     except Exception as e:
         logger.debug("Failed to get summary for %s: %s", db_path, e)
         return None
-
-
-def _normalize_side(raw_side: Any) -> str:
-    """Normalize side value from int/string variants."""
-    s = str(raw_side).strip().upper()
-    if s in ("1", "BUY", "LONG"):
-        return "BUY"
-    if s in ("2", "SELL", "SHORT"):
-        return "SELL"
-    return s
 
 
 def _parse_json_field(val: Any) -> dict:
@@ -143,7 +134,7 @@ def _normalize_executors(raw: list[dict]) -> list[NormalizedExecutor]:
             type=str(ex.get("type", "") or ex.get("executor_type", "") or config.get("type", "position")),
             connector=connector,
             trading_pair=trading_pair,
-            side=_normalize_side(side_raw),
+            side=normalize_executor_side(side_raw),
             status=str(ex.get("status", "") or "closed"),
             close_type=str(ex.get("close_type", "") or ""),
             pnl=pnl,

@@ -179,7 +179,7 @@ const ExecutorRow = memo(function ExecutorRow({
         <span
           className="text-xs font-semibold uppercase"
           style={{
-            color: side === "BUY" || side === "1" ? "var(--color-green)" : "var(--color-red)",
+            color: side === "BUY" ? "var(--color-green)" : "var(--color-red)",
           }}
         >
           {side}
@@ -392,8 +392,10 @@ export function DetailPanel({
   });
 
   const sideLabel = executor.side.toUpperCase();
-  const sideColor = sideLabel === "BUY" || sideLabel === "1" ? "var(--color-green)" : "var(--color-red)";
-  const sideBg = sideLabel === "BUY" || sideLabel === "1" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)";
+  // The backend normalizes every side to BUY/SELL (normalize_executor_side), so
+  // no raw "1"/"TradeType.BUY" fallback is needed here.
+  const sideColor = sideLabel === "BUY" ? "var(--color-green)" : "var(--color-red)";
+  const sideBg = sideLabel === "BUY" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)";
   const configEntries = Object.entries(executor.config || {});
   const customEntries = Object.entries(executor.custom_info || {});
 

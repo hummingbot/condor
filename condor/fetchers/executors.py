@@ -54,6 +54,32 @@ def get_executor_type(executor: Dict[str, Any]) -> str:
     return "unknown"
 
 
+def normalize_executor_side(raw: Any) -> str:
+    """Canonical ``BUY``/``SELL`` from any side encoding the API emits.
+
+    The same logical side arrives in at least three shapes depending on which
+    endpoint produced it: the enum's integer value (``1``/``2``), a bare word
+    (``BUY``/``SELL``/``LONG``/``SHORT``), or a stringified enum
+    (``TradeType.SELL``, ``PositionSide.LONG``). Every consumer funnels through
+    here so no renderer has to guess -- the executor table used to carry a
+    ``side === "1"`` fallback precisely because unnormalized values leaked to it.
+
+    An unrecognized side is passed through uppercased rather than coerced, so a
+    value we have never seen stays visible instead of silently rendering as a buy.
+    """
+    s = str(raw or "").strip().upper()
+    # ``TradeType.SELL`` -> ``SELL``. Guarded on an alphabetic tail so a numeric
+    # side is never split on its own decimal point (``1.0`` must not become ``0``).
+    prefix, _, tail = s.rpartition(".")
+    if prefix and tail.isalpha():
+        s = tail
+    if s in ("1", "BUY", "LONG"):
+        return "BUY"
+    if s in ("2", "SELL", "SHORT"):
+        return "SELL"
+    return s
+
+
 def get_executor_pnl(executor: Dict[str, Any]) -> float:
     """Extract PnL from an executor response."""
     for key in (

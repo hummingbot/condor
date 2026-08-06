@@ -18,14 +18,13 @@ from condor.fetchers.executors import (
     get_executor_volume,
     get_executor_type,
     get_executor_fees,
+    normalize_executor_side,
     EXECUTORS_POLL_MAX,
     MAX_EXECUTORS_FETCH,
 )
 
 router = APIRouter(tags=["executors"])
 
-
-_SIDE_MAP = {"1": "BUY", "2": "SELL"}
 
 # Cursor scheme for pages served as an offset into the executor stream rather
 # than by an opaque API cursor.
@@ -43,10 +42,6 @@ def _mutation_error(action: str, exc: Exception) -> HTTPException:
     status, message = describe_executor_error(exc)
     code = 400 if status is not None and 400 <= status < 500 else 502
     return HTTPException(status_code=code, detail=f"{action}: {message}")
-
-
-def _normalize_side(raw: str) -> str:
-    return _SIDE_MAP.get(raw, raw.upper() if raw else "")
 
 
 def _build_executor_info(ex: dict) -> ExecutorInfo | None:
@@ -87,7 +82,7 @@ def _build_executor_info(ex: dict) -> ExecutorInfo | None:
         type=get_executor_type(ex),
         connector=config.get("connector_name") or ex.get("connector_name") or ex.get("connector") or "",
         trading_pair=config.get("trading_pair") or ex.get("trading_pair") or "",
-        side=_normalize_side(str(custom_info.get("side") or config.get("side") or ex.get("side") or "")),
+        side=normalize_executor_side(custom_info.get("side") or config.get("side") or ex.get("side")),
         status=(ex.get("status") or "").lower(),
         close_type=str(ex.get("close_type") or "").lower(),
         pnl=get_executor_pnl(ex),
