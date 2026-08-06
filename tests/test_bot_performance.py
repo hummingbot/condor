@@ -22,8 +22,6 @@ from condor.fetchers.bot_performance import (
     clear_snapshot_cache,
     extract_snapshots,
     fetch_all_bot_performance,
-    fetch_bot_performance,
-    resolve_bot,
 )
 
 
@@ -105,23 +103,11 @@ def test_extract_snapshots_shapes():
     assert extract_snapshots(None) == []
 
 
-def test_fetch_all_and_one_bot():
+def test_fetch_all_bot_performance_keys_by_bot():
     client = _FakeClient()
     allp = asyncio.run(fetch_all_bot_performance(client))
     assert set(allp) == {"river", "otherbot"}
-    one = asyncio.run(fetch_bot_performance(client, "river"))
-    assert one["realized_pnl_quote"] == 7.0
-    assert asyncio.run(fetch_bot_performance(client, "ghost")) is None
-    assert asyncio.run(fetch_bot_performance(client, "")) is None
-
-
-def test_fetch_bot_performance_resilient_to_errors():
-    class _Boom:
-        async def get_latest_controller_performance(self, bot_name=None):
-            raise RuntimeError("api down")
-
-    client = SimpleNamespace(bot_orchestration=_Boom())
-    assert asyncio.run(fetch_bot_performance(client, "river")) is None
+    assert allp["river"]["realized_pnl_quote"] == 7.0
 
 
 # ── Whole-server snapshot coalescing ──
@@ -283,7 +269,9 @@ def _snap_with_positions(
     }
 
 
-def test_resolve_bot_exact_and_suffix():
+def test_resolve_bots_exact_and_suffix():
+    from condor.fetchers.bot_performance import resolve_bots
+
     agg = _aggregate_by_bot(
         [
             _snap_with_positions(
@@ -299,15 +287,15 @@ def test_resolve_bot_exact_and_suffix():
         ]
     )
     # exact match wins outright
-    assert resolve_bot(agg, "other")["bot_name"] == "other"
+    assert resolve_bots(agg, ["other"])["other"]["bot_name"] == "other"
     # base name resolves to the freshest timestamped deploy
-    assert resolve_bot(agg, "dn-mm")["bot_name"] == "dn-mm-20260724-182221"
+    assert resolve_bots(agg, ["dn-mm"])["dn-mm"]["bot_name"] == "dn-mm-20260724-182221"
     # the hyphen boundary keeps a sibling base (dn-mmx) from matching dn-mm
-    assert resolve_bot(agg, "dn-mm")["bot_name"] != "dn-mmx-20260724-000000"
-    # no match → None; empty inputs → None
-    assert resolve_bot(agg, "ghost") is None
-    assert resolve_bot(agg, "") is None
-    assert resolve_bot({}, "dn-mm") is None
+    assert resolve_bots(agg, ["dn-mm"])["dn-mm"]["bot_name"] != "dn-mmx-20260724-000000"
+    # never deployed → absent from the result; empty inputs → nothing to resolve
+    assert resolve_bots(agg, ["ghost"]) == {}
+    assert resolve_bots(agg, [""]) == {}
+    assert resolve_bots({}, ["dn-mm"]) == {}
 
 
 # ── Executor rows from positions_summary ──
@@ -471,30 +459,6 @@ def test_bot_name_round_trips_through_full_config(tmp_path):
 # ── Per-session history slicing ──
 
 
-def test_resolve_bot_instances_returns_all_matches_sorted():
-    from condor.fetchers.bot_performance import resolve_bot_instances
-
-    def _snap(name, ts):
-        return {
-            "bot_name": name,
-            "controller_id": "c",
-            "timestamp": ts,
-            "performance": {},
-        }
-
-    agg = _aggregate_by_bot(
-        [
-            _snap("dn-mm-20260101-000000", "2026-01-01T00:00:00"),
-            _snap("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
-            _snap("dn-mmx-20260724-000000", "2026-07-24T00:00:00"),
-            _snap("other", "2026-07-24T00:00:00"),
-        ]
-    )
-    got = resolve_bot_instances(agg, "dn-mm")
-    assert got == ["dn-mm-20260101-000000", "dn-mm-20260724-182221"]  # oldest→newest
-    assert resolve_bot_instances(agg, "nope") == []
-
-
 def _instances_agg(*names_ts):
     return _aggregate_by_bot(
         [
@@ -510,10 +474,7 @@ def _instances_agg(*names_ts):
 
 
 def test_partition_assigns_a_tagged_instance_to_its_own_base():
-    from condor.fetchers.bot_performance import (
-        partition_instances,
-        resolve_bot_instances,
-    )
+    from condor.fetchers.bot_performance import partition_instances
 
     agg = _instances_agg(
         ("brigado-ema_trend-20260731-100000", "2026-07-31T10:00:00"),
@@ -521,9 +482,8 @@ def test_partition_assigns_a_tagged_instance_to_its_own_base():
     )
     bases = ["brigado-ema_trend", "brigado-ema_trend-btc"]
 
-    # Asked one base at a time, the parent swallows its tagged sibling…
-    assert len(resolve_bot_instances(agg, "brigado-ema_trend")) == 2
-    # …but deciding over all owned bases at once, each instance lands on exactly one.
+    # Prefix-matching one base at a time, the parent would swallow its tagged
+    # sibling; deciding over all owned bases at once, each instance lands on one.
     assert partition_instances(agg, bases) == {
         "brigado-ema_trend": ["brigado-ema_trend-20260731-100000"],
         "brigado-ema_trend-btc": ["brigado-ema_trend-btc-20260731-101500"],
@@ -546,16 +506,14 @@ def test_partition_keeps_unowned_instances_out_and_orders_oldest_first():
 
 
 def test_resolve_bots_never_hands_the_same_aggregate_to_two_bases():
-    from condor.fetchers.bot_performance import resolve_bot, resolve_bots
+    from condor.fetchers.bot_performance import resolve_bots
 
     agg = _instances_agg(
         ("ns-bot-20260731-100000", "2026-07-31T10:00:00"),
         ("ns-bot-btc-20260731-101500", "2026-07-31T10:15:00"),
     )
-    # resolve_bot alone picks the freshest prefix match for BOTH bases…
-    assert resolve_bot(agg, "ns-bot")["bot_name"] == "ns-bot-btc-20260731-101500"
-    assert resolve_bot(agg, "ns-bot-btc")["bot_name"] == "ns-bot-btc-20260731-101500"
-    # …partition-aware resolution gives each base its own live instance.
+    # Freshest-prefix-match alone would give BOTH bases the …-btc instance;
+    # partition-aware resolution gives each base its own live instance.
     live = resolve_bots(agg, ["ns-bot", "ns-bot-btc"])
     assert live["ns-bot"]["bot_name"] == "ns-bot-20260731-100000"
     assert live["ns-bot-btc"]["bot_name"] == "ns-bot-btc-20260731-101500"
@@ -568,7 +526,7 @@ def test_resolve_bots_prefers_an_exact_deploy_over_a_newer_suffixed_one():
         ("dn-mm", "2026-01-01T00:00:00"),
         ("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
     )
-    # Same rule resolve_bot applies: a bot deployed under the bare base wins.
+    # Exact beats freshest: a bot deployed under the bare base wins.
     assert resolve_bots(agg, ["dn-mm"])["dn-mm"]["bot_name"] == "dn-mm"
 
 

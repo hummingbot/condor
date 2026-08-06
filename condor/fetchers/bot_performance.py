@@ -187,63 +187,21 @@ async def fetch_all_bot_performance(client: Any) -> dict[str, dict]:
     return agg
 
 
-def resolve_bot(all_bot_perf: dict[str, dict], bot_name: str) -> dict | None:
-    """Resolve a configured ``bot_name`` to its live aggregate, suffix-tolerant.
-
-    A bot deploys under an instance name with a timestamp suffix appended
-    (``dn-CL-BRENTOIL-mm`` → ``dn-CL-BRENTOIL-mm-20260724-182221``), while the
-    strategy config only knows the stable base name. Resolution order:
-
-    1. exact match on the base name;
-    2. otherwise, among keys of the form ``<base>-<suffix>``, the one with the
-       freshest snapshot ``timestamp`` (ISO strings sort chronologically), so a
-       re-launched bot resolves to its most recent deploy.
-
-    Returns the aggregate dict (its ``bot_name`` is the full resolved name) or
-    ``None`` when nothing matches.
-    """
-    if not bot_name or not all_bot_perf:
-        return None
-    exact = all_bot_perf.get(bot_name)
-    if exact is not None:
-        return exact
-    prefix = f"{bot_name}-"
-    candidates = [agg for key, agg in all_bot_perf.items() if key.startswith(prefix)]
-    if not candidates:
-        return None
-    return max(candidates, key=lambda a: (str(a.get("timestamp", "")), a["bot_name"]))
-
-
-def resolve_bot_instances(all_bot_perf: dict[str, dict], bot_name: str) -> list[str]:
-    """Return every deployed instance name for a base ``bot_name``, newest last.
-
-    Suffix-tolerant like :func:`resolve_bot`, but returns ALL matches (a base that
-    has been re-launched several times) rather than only the freshest — used to
-    time-slice per-session PnL across every instance a strategy has operated.
-    """
-    if not bot_name or not all_bot_perf:
-        return []
-    names = [
-        key for key in all_bot_perf if key == bot_name or key.startswith(f"{bot_name}-")
-    ]
-    return sorted(names, key=lambda k: (str(all_bot_perf[k].get("timestamp", "")), k))
-
-
 def partition_instances(
     all_bot_perf: dict[str, dict], bases: list[str]
 ) -> dict[str, list[str]]:
     """Assign every deployed instance to the LONGEST owned base that prefixes it.
 
-    :func:`resolve_bot_instances` cannot tell a *tag* from a *deploy timestamp*, so
-    asked one base at a time a parent swallows its tagged siblings:
-    ``brigado-ema_trend`` prefix-matches ``brigado-ema_trend-btc-20260731-101500``
-    as readily as ``brigado-ema_trend-btc`` does. Deciding over ALL owned bases at
-    once settles it — that instance lands on ``…-btc``, the longest base that
-    prefixes it — so each instance's PnL is counted under exactly one base and a
-    session operating several bots gets a truthful sum.
+    Prefix-matching one base at a time cannot tell a *tag* from a *deploy
+    timestamp*, so a parent swallows its tagged siblings: ``brigado-ema_trend``
+    prefix-matches ``brigado-ema_trend-btc-20260731-101500`` as readily as
+    ``brigado-ema_trend-btc`` does. Deciding over ALL owned bases at once settles
+    it — that instance lands on ``…-btc``, the longest base that prefixes it — so
+    each instance's PnL is counted under exactly one base and a session operating
+    several bots gets a truthful sum.
 
     Returns one entry per base (possibly empty), each instance list ordered oldest
-    first like :func:`resolve_bot_instances`.
+    first.
     """
     out: dict[str, list[str]] = {b: [] for b in bases if b}
     if not all_bot_perf or not out:
@@ -260,12 +218,17 @@ def partition_instances(
 
 
 def resolve_bots(all_bot_perf: dict[str, dict], bases: list[str]) -> dict[str, dict]:
-    """Live aggregate per base — :func:`resolve_bot`, but partition-aware.
+    """Live aggregate per base, partition-aware.
 
-    Same resolution rule (the exact name if deployed under it, else the freshest
-    instance) applied within each base's own partition, so an owned parent never
-    resolves to a sibling's instance and two owned bases never hand back the same
-    aggregate twice. Bases with no deployed instance are absent from the result.
+    A bot deploys under an instance name with a timestamp suffix appended
+    (``dn-CL-BRENTOIL-mm`` → ``dn-CL-BRENTOIL-mm-20260724-182221``), while the
+    strategy config only knows the stable base name. Each base resolves to the
+    exact name if it was deployed under it, else to its freshest instance (ISO
+    ``timestamp`` strings sort chronologically, so a re-launched bot resolves to
+    its most recent deploy). Applying that rule within each base's own partition
+    means an owned parent never resolves to a sibling's instance and two owned
+    bases never hand back the same aggregate twice. Bases with no deployed
+    instance are absent from the result.
     """
     out: dict[str, dict] = {}
     for base, insts in partition_instances(all_bot_perf, bases).items():
@@ -552,20 +515,3 @@ def bot_executor_rows(aggregate: dict) -> list[dict[str, Any]]:
                 }
             )
     return rows
-
-
-async def fetch_bot_performance(client: Any, bot_name: str) -> dict | None:
-    """Return the aggregate for a single bot, or ``None`` if it has no snapshot.
-
-    Suffix-tolerant (see :func:`resolve_bot`). Resilient: swallows API errors and
-    returns ``None`` so a caller merging this into other performance never breaks
-    on a transient bot-orchestration hiccup.
-    """
-    if not client or not bot_name:
-        return None
-    try:
-        all_perf = await fetch_all_bot_performance(client)
-    except Exception as e:
-        logger.debug("fetch_bot_performance(%s) failed: %s", bot_name, e)
-        return None
-    return resolve_bot(all_perf, bot_name)
