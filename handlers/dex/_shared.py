@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from condor.cache import (
     DEFAULT_CACHE_TTL,
     clear_cache as _clear_cache,
+    evict_expired as _evict_expired,
     get_cached as _get_cached,
     invalidate_groups as _invalidate_groups,
     invalidates as _invalidates,
@@ -37,6 +38,10 @@ def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optio
 
 def set_cached(user_data: dict, key: str, value: Any) -> None:
     _set_cached(user_data, key, value, namespace=_NS)
+
+
+def evict_expired(user_data: dict) -> int:
+    return _evict_expired(user_data, namespace=_NS)
 
 
 def clear_cache(user_data: dict, key: Optional[str] = None) -> None:

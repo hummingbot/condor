@@ -3,18 +3,25 @@ Pool Data Utilities
 
 Provides unified data fetching for DEX pools:
 - OHLCV data via GeckoTerminal (works for any pool on any DEX)
+- Token symbol / top-pool resolution via GeckoTerminal
 - Liquidity/bin data via Gateway CLMM (for supported DEXes)
 - Pool info normalization across different sources
+
+This is the single module that talks to GeckoTerminal for pool and token market
+data. Consumers (Telegram handlers, the web dashboard's market routes) call these
+functions rather than building GeckoTerminal URLs themselves.
 """
 
 import logging
+import math
+import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from geckoterminal_py import GeckoTerminalAsyncClient
 
 from config_manager import get_client
 
-from ._shared import get_cached, set_cached
+from ._shared import evict_expired, get_cached, set_cached
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +67,186 @@ DEX_TO_GECKO = {
 # Cache TTLs
 OHLCV_CACHE_TTL = 300  # 5 minutes
 BINS_CACHE_TTL = 60  # 1 minute
+TOKEN_SYMBOL_TTL = 24 * 3600  # a mint's ticker does not change
+TOKEN_POOL_TTL = 3600  # a token's main pool is stable over an hour
+
+# GeckoTerminal's OHLCV endpoint only accepts these aggregates, and its client
+# raises ValueError on anything else. Charts pick their own interval, so map an
+# unsupported one down to the nearest supported bucket rather than returning an
+# empty chart.
+GECKO_TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "12h", "1d")
+_TIMEFRAME_SECONDS = {
+    "1m": 60,
+    "5m": 300,
+    "15m": 900,
+    "1h": 3600,
+    "4h": 14400,
+    "12h": 43200,
+    "1d": 86400,
+}
+# GeckoTerminal caps a single OHLCV response at this many candles.
+GECKO_OHLCV_MAX = 1000
 
 
 def get_gecko_network(network: str) -> str:
     """Convert internal network name to GeckoTerminal network ID"""
     return NETWORK_TO_GECKO.get(network, network)
+
+
+def timeframe_seconds(timeframe: str) -> int:
+    """Length of one candle in seconds; 60 for anything unrecognized."""
+    return _TIMEFRAME_SECONDS.get(timeframe, 60)
+
+
+def normalize_timeframe(interval: str) -> str:
+    """Snap an arbitrary chart interval onto a GeckoTerminal timeframe.
+
+    Exact matches pass through. Anything else (``3m``, ``30m``, ``1s``…) resolves
+    to the largest supported timeframe that is no coarser than requested, so the
+    chart keeps at least the resolution it asked for. Unparseable input falls back
+    to ``1m``.
+    """
+    if interval in _TIMEFRAME_SECONDS:
+        return interval
+    unit_seconds = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    try:
+        wanted = int(interval[:-1]) * unit_seconds[interval[-1]]
+    except (ValueError, KeyError, IndexError):
+        return "1m"
+    supported = sorted(_TIMEFRAME_SECONDS.items(), key=lambda kv: kv[1])
+    best = supported[0][0]
+    for name, seconds in supported:
+        if seconds <= wanted:
+            best = name
+    return best
+
+
+def candles_needed(start: Optional[float], end: Optional[float], timeframe: str) -> int:
+    """How many candles cover ``[start, end]`` at ``timeframe``.
+
+    The chart asks for a *window*; GeckoTerminal answers with a *count* walking
+    back from ``before_timestamp``. Without this translation a ten-minute position
+    charted at 1m would come back with the maximum 1000 candles — ~16h of history
+    that ``fitContent()`` then squeezes the actual position into.
+    """
+    if start is None or end is None or end <= start:
+        return GECKO_OHLCV_MAX
+    span = math.ceil((end - start) / timeframe_seconds(timeframe))
+    # A couple of candles of headroom so the window's edges are never clipped.
+    return max(1, min(span + 2, GECKO_OHLCV_MAX))
+
+
+# ── GeckoTerminal client ──
+# One client (and so one httpx connection pool) for the process. Constructing a
+# fresh GeckoTerminalAsyncClient per call leaks an unclosed httpx.AsyncClient
+# every time, which at chart-refresh rates exhausts sockets.
+_gecko_client_instance: Optional[GeckoTerminalAsyncClient] = None
+
+
+def _gecko_client() -> GeckoTerminalAsyncClient:
+    global _gecko_client_instance
+    if _gecko_client_instance is None:
+        _gecko_client_instance = GeckoTerminalAsyncClient()
+    return _gecko_client_instance
+
+
+# ── Small TTL caches for token lookups ──
+# These answers are process-wide (not per-user) and tiny, so they live here rather
+# than in a caller's user_data. Capped so an unbounded stream of distinct mints
+# cannot grow them without limit.
+_TOKEN_CACHE_MAX = 512
+_token_symbol_cache: Dict[Tuple[str, str], Tuple[float, str]] = {}
+_token_pool_cache: Dict[Tuple[str, str, str], Tuple[float, str]] = {}
+
+
+def _ttl_get(cache: dict, key: tuple, ttl: float) -> Optional[str]:
+    entry = cache.get(key)
+    if entry and (time.time() - entry[0]) < ttl:
+        return entry[1]
+    return None
+
+
+def _ttl_put(cache: dict, key: tuple, value: str, ttl: float) -> None:
+    now = time.time()
+    for k in [k for k, (ts, _) in cache.items() if now - ts >= ttl]:
+        cache.pop(k, None)
+    cache[key] = (now, value)
+    while len(cache) > _TOKEN_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+
+
+async def fetch_token_symbol(mint: str, network: str) -> str:
+    """Resolve a token mint/contract address to its ticker (e.g. ``Bonk``).
+
+    Returns "" when the token is unknown or the lookup fails. An empty answer from
+    a *successful* response is cached (a genuinely unlisted mint should not be
+    re-queried on every render); a failed lookup is not, so one blip does not blank
+    the ticker for a day.
+    """
+    gnet = get_gecko_network(network)
+    key = (gnet, mint)
+    cached = _ttl_get(_token_symbol_cache, key, TOKEN_SYMBOL_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        data = await _gecko_client().get_specific_token_on_network(gnet, mint)
+    except Exception as e:
+        logger.info("token symbol lookup failed mint=%s net=%s: %s", mint, gnet, e)
+        return ""
+
+    symbol = ""
+    if isinstance(data, dict):
+        symbol = str((data.get("attributes") or {}).get("symbol") or "")
+    _ttl_put(_token_symbol_cache, key, symbol, TOKEN_SYMBOL_TTL)
+    return symbol
+
+
+def _pool_quote_symbols(name: Any) -> List[str]:
+    """Token symbols in a GeckoTerminal pool name (``"BONK / SOL"`` → BONK, SOL)."""
+    return [p.strip().upper() for p in str(name or "").split("/") if p.strip()]
+
+
+async def fetch_token_top_pool(mint: str, network: str, quote: str) -> str:
+    """Address of the token's highest-volume pool **quoted in ``quote``**.
+
+    Used as a fallback when an executor's own ``pool_address`` yields no candles
+    (a closed slot, a pool that never had one recorded). The quote match is not
+    cosmetic: candles are requested with ``currency="token"``, so prices come back
+    denominated in the pool's quote token. Charting a token/USDC pool underneath a
+    token/SOL position would silently draw the right shape on the wrong scale, so
+    a pool that does not match returns "" and the chart stays empty instead.
+    """
+    gnet = get_gecko_network(network)
+    want = (quote or "").strip().upper()
+    key = (gnet, mint, want)
+    cached = _ttl_get(_token_pool_cache, key, TOKEN_POOL_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        pools = await _gecko_client().get_top_pools_by_network_token(gnet, mint)
+    except Exception as e:
+        # Includes the KeyError geckoterminal_py raises post-processing an empty
+        # result set. Not cached — a transient failure must not pin "" for an hour.
+        logger.info("top-pool lookup failed mint=%s net=%s: %s", mint, gnet, e)
+        return ""
+
+    address = ""
+    try:
+        # Rows arrive sorted by 24h volume, so the first quote match is the deepest.
+        for row in pools.to_dict("records"):
+            if want and want not in _pool_quote_symbols(row.get("name")):
+                continue
+            address = str(row.get("address") or "")
+            if address:
+                break
+    except Exception as e:
+        logger.info("top-pool parse failed mint=%s net=%s: %s", mint, gnet, e)
+        return ""
+
+    _ttl_put(_token_pool_cache, key, address, TOKEN_POOL_TTL)
+    return address
 
 
 def can_fetch_liquidity(dex_id: str, network: str = None) -> bool:
@@ -123,15 +305,21 @@ async def fetch_ohlcv(
     timeframe: str = "1h",
     currency: str = "usd",
     user_data: dict = None,
+    limit: int = 100,
+    before_timestamp: Optional[int] = None,
 ) -> Tuple[Optional[List], Optional[str]]:
     """Fetch OHLCV data for any pool via GeckoTerminal
 
     Args:
         pool_address: Pool contract address
         network: Network identifier (will be converted to GeckoTerminal format)
-        timeframe: OHLCV timeframe ("1m", "5m", "15m", "1h", "4h", "1d")
+        timeframe: OHLCV timeframe (see GECKO_TIMEFRAMES)
         currency: Price currency - "usd" or "token" (quote token)
         user_data: Optional user_data dict for caching
+        limit: Number of candles to fetch (capped at GECKO_OHLCV_MAX)
+        before_timestamp: Unix seconds; candles walk back from here. None asks for
+            the latest candles, which is also what keeps a live chart's cache key
+            stable — pass it only for a window that has actually closed.
 
     Returns:
         Tuple of (ohlcv_list, error_message)
@@ -140,26 +328,36 @@ async def fetch_ohlcv(
     """
     try:
         gecko_network = get_gecko_network(network)
+        timeframe = normalize_timeframe(timeframe)
+        limit = max(1, min(int(limit), GECKO_OHLCV_MAX))
 
-        # Check cache
+        # Check cache. limit/before_timestamp belong to the key: the same pool
+        # charted over a historical window and over the live one are different
+        # answers.
         if user_data is not None:
-            cache_key = f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
+            cache_key = (
+                f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
+                f"_{limit}_{before_timestamp or 0}"
+            )
             cached = get_cached(user_data, cache_key, ttl=OHLCV_CACHE_TTL)
             if cached is not None:
                 return cached, None
+            # Sweep on miss, as cached_call does. Historical windows mint a fresh
+            # key per executor, so a long-lived caller would otherwise accumulate
+            # one entry per chart forever.
+            evict_expired(user_data)
 
-        client = GeckoTerminalAsyncClient()
         # Pass all parameters explicitly:
         # - currency="token" means price in quote token (not USD)
         # - token="base" means OHLCV for the base token
-        # - limit=100 for reasonable data size
-        result = await client.get_ohlcv(
+        result = await _gecko_client().get_ohlcv(
             gecko_network,
             pool_address,
             timeframe,
+            before_timestamp=before_timestamp,
             currency=currency,
             token="base",
-            limit=100,
+            limit=limit,
         )
 
         # Parse response - handle different formats

@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useQuery } from "@tanstack/react-query";
 
+import { PairLabel } from "@/components/executor/PairLabel";
 import { api, type CandleData, type ExecutorInfo, type PnlPoint } from "@/lib/api";
 import {
   computeMultiOverlays,
   getExecutorColor,
   getOverlayTimeRange,
+  getPoolAddress,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
 import { MANY_EXECUTORS_THRESHOLD, computeVolumeBuckets } from "@/lib/executor-volume";
@@ -217,9 +219,14 @@ export function ArchivedPerformanceCharts({
 
   const isManyExecutors = executors.length > MANY_EXECUTORS_THRESHOLD;
 
+  // See ExecutorChart: a DEX/LP pool address routes candles to GeckoTerminal, and
+  // charts the exact pool these archived positions traded in.
+  const poolAddress = useMemo(() => getPoolAddress(executors), [executors]);
+
   const { data: candles } = useQuery({
-    queryKey: ["archived-candles", server, connector, tradingPair, fetchStart, fetchEnd, interval],
-    queryFn: () => api.getCandles(server, connector, tradingPair, interval, limit, fetchStart, fetchEnd),
+    queryKey: ["archived-candles", server, connector, tradingPair, fetchStart, fetchEnd, interval, poolAddress ?? null],
+    queryFn: () =>
+      api.getCandles(server, connector, tradingPair, interval, limit, fetchStart, fetchEnd, poolAddress),
     enabled: !!server && !!connector && !!tradingPair && timeRange.start > 0,
     staleTime: Infinity,
     retry: 1,
@@ -548,7 +555,7 @@ export function ArchivedPerformanceCharts({
       {/* Header */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-[var(--color-bg)]">
         <p className="text-[10px] text-[var(--color-text-muted)]">
-          {tradingPair} &middot; {interval} &middot; {executors.length} executors{overlayNote}
+          <PairLabel tradingPair={tradingPair} connector={connector} /> &middot; {interval} &middot; {executors.length} executors{overlayNote}
         </p>
         <div className="flex items-center gap-4 text-[10px]">
           {isManyExecutors && (

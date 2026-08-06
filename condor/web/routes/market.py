@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -43,6 +44,148 @@ from condor.web.models import (
 )
 
 router = APIRouter(tags=["market"])
+
+
+# A token or pool address: an EVM 0x-address or a base58 Solana pubkey. Guards the
+# values that reach GeckoTerminal as URL path segments, and tells a real address
+# apart from a plain ticker like "BTC".
+_ADDRESS_RE = re.compile(r"^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$")
+_POOL_ADDRESS_RE = _ADDRESS_RE
+
+# GeckoTerminal answers are shared across users, so one process-wide dict backs the
+# pool_data OHLCV cache for every dashboard viewer.
+_dex_ohlcv_cache: dict = {}
+
+
+def _is_dex_connector(connector: str) -> bool:
+    """Whether this connector is a DEX network rather than a CEX venue."""
+    from handlers.dex.pool_data import NETWORK_TO_GECKO
+
+    return connector in NETWORK_TO_GECKO
+
+
+def _split_pair(trading_pair: str) -> tuple[str, str]:
+    """``<base>-<quote>`` → (base, quote). LP/DEX pairs carry a raw mint as base."""
+    dash = trading_pair.rfind("-")
+    if dash <= 0:
+        return trading_pair, ""
+    return trading_pair[:dash], trading_pair[dash + 1 :]
+
+
+async def _pool_ohlcv(
+    pool_address: str,
+    connector: str,
+    timeframe: str,
+    limit: int,
+    before_timestamp: int | None,
+) -> list:
+    """Raw OHLCV rows for one pool, or [] on any miss. Never raises."""
+    from handlers.dex.pool_data import fetch_ohlcv
+
+    try:
+        rows, err = await fetch_ohlcv(
+            pool_address,
+            connector,
+            timeframe=timeframe,
+            # Prices in the quote token, matching the scale of the entry and range
+            # prices the executor overlays draw on the same chart.
+            currency="token",
+            user_data=_dex_ohlcv_cache,
+            limit=limit,
+            before_timestamp=before_timestamp,
+        )
+    except Exception as e:
+        logger.warning(
+            "GeckoTerminal OHLCV failed pool=%s connector=%s tf=%s: %s",
+            pool_address,
+            connector,
+            timeframe,
+            e,
+        )
+        return []
+    return [] if err or not rows else rows
+
+
+async def _fetch_dex_candles(
+    connector: str,
+    pool_address: str | None,
+    trading_pair: str,
+    interval: str,
+    start_time: float | None,
+    end_time: float | None,
+) -> list[CandleData]:
+    """Candles for a DEX/LP pair from GeckoTerminal.
+
+    Prefers the executor's own pool. If that yields nothing — a closed slot, or an
+    executor that never recorded one — falls back to the base token's deepest pool
+    *in the same quote token*; a pool on another quote would draw a plausible chart
+    on the wrong price scale, so no match means no candles.
+
+    Note the volume column is USD (GeckoTerminal reports ``volume_usd``) while the
+    CEX path reports base units.
+    """
+    from handlers.dex.pool_data import (
+        candles_needed,
+        normalize_timeframe,
+        timeframe_seconds,
+    )
+
+    timeframe = normalize_timeframe(interval)
+    tf_seconds = timeframe_seconds(timeframe)
+    # The chart asks for a window; GeckoTerminal answers with a count walking back
+    # from before_timestamp. Asking for the raw `limit` would return ~16h of 1m
+    # candles for a ten-minute position.
+    count = candles_needed(start_time, end_time, timeframe)
+
+    # Only pin before_timestamp for a window that has already closed. A live chart
+    # would otherwise mint a new cache key on every request as its end drifts,
+    # re-hitting GeckoTerminal each time; "latest candles" is both correct and
+    # cacheable for it.
+    before = (
+        int(end_time)
+        if end_time is not None and end_time < time.time() - tf_seconds
+        else None
+    )
+
+    rows = []
+    if pool_address:
+        rows = await _pool_ohlcv(pool_address, connector, timeframe, count, before)
+
+    if not rows:
+        base, quote = _split_pair(trading_pair)
+        if _ADDRESS_RE.match(base):
+            from handlers.dex.pool_data import fetch_token_top_pool
+
+            top = await fetch_token_top_pool(base, connector, quote)
+            if top and top != pool_address:
+                rows = await _pool_ohlcv(top, connector, timeframe, count, before)
+
+    # Rows are [timestamp, open, high, low, close, volume_usd, (datetime)], ascending.
+    candles: list[CandleData] = []
+    # Keep the candle that contains `start`, not just those starting after it.
+    lower = start_time - tf_seconds if start_time is not None else None
+    for row in rows:
+        if not isinstance(row, (list, tuple)) or len(row) < 6:
+            continue
+        try:
+            ts = float(row[0])
+            if lower is not None and ts < lower:
+                continue
+            if end_time is not None and ts > end_time:
+                continue
+            candles.append(
+                CandleData(
+                    timestamp=ts,
+                    open=float(row[1]),
+                    high=float(row[2]),
+                    low=float(row[3]),
+                    close=float(row[4]),
+                    volume=float(row[5]),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return candles
 
 
 @router.get("/servers/{name}/market/connectors")
@@ -291,11 +434,20 @@ async def get_candles(
     limit: int = Query(default=1000, ge=1, le=5000),
     start_time: float | None = Query(default=None, description="Unix epoch seconds"),
     end_time: float | None = Query(default=None, description="Unix epoch seconds"),
+    pool_address: str | None = Query(
+        default=None,
+        description="DEX pool address. Set by LP/DEX executor charts — their "
+        "connector (e.g. solana-mainnet-beta) has no CandlesFactory feed, so "
+        "candles come from GeckoTerminal by pool instead.",
+    ),
     user: WebUser = Depends(get_current_user),
 ):
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
+
+    if pool_address and not _POOL_ADDRESS_RE.match(pool_address):
+        raise HTTPException(status_code=400, detail="Invalid pool_address")
 
     # Bucket start_time to 60s intervals so near-identical requests share cache
     bucketed_start = int(start_time // 60) * 60 if start_time is not None else None
@@ -308,11 +460,22 @@ async def get_candles(
         limit,
         bucketed_start,
         bucketed_end,
+        pool_address,
     )
     now = time.monotonic()
     cached = _candle_cache.get(cache_key)
     if cached and (now - cached[0]) < _CANDLE_CACHE_TTL:
         return cached[1]
+
+    # DEX/LP pairs have no CEX candle feed, so they never reach the client below —
+    # that path 502s for them. A DEX network connector or an explicit pool_address
+    # routes to GeckoTerminal instead.
+    if pool_address or _is_dex_connector(connector):
+        candles = await _fetch_dex_candles(
+            connector, pool_address, trading_pair, interval, start_time, end_time
+        )
+        _candle_cache_put(cache_key, candles, now)
+        return candles
 
     client = await cm.get_client(name)
     result = None
@@ -400,3 +563,28 @@ async def get_candles(
             )
     _candle_cache_put(cache_key, candles, now)
     return candles
+
+
+@router.get("/market/token-symbol")
+async def get_token_symbol(
+    mint: str = Query(..., description="Token mint or contract address"),
+    network: str = Query(
+        default="solana",
+        description="Network id or DEX connector (e.g. solana-mainnet-beta)",
+    ),
+    user: WebUser = Depends(get_current_user),
+):
+    """Resolve a token address to its ticker.
+
+    LP/DEX executors store ``trading_pair`` as ``<base_mint>-<quote>`` because
+    Gateway cannot resolve memecoins by symbol, so without this the dashboard shows
+    a raw mint. Not server-scoped — it is a pure GeckoTerminal lookup, so the
+    executor tables can resolve a symbol without threading a server name through
+    every row. Auth is still required.
+    """
+    from handlers.dex.pool_data import fetch_token_symbol
+
+    if not _ADDRESS_RE.match(mint):
+        raise HTTPException(status_code=400, detail="Invalid token address")
+
+    return {"mint": mint, "symbol": await fetch_token_symbol(mint, network)}

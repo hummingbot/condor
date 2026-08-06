@@ -522,6 +522,23 @@ export function getOverlayTimeRange(overlays: ExecutorOverlay[]): { start: numbe
 }
 
 /**
+ * The pool a group of DEX/LP executors traded in, from whichever records one.
+ *
+ * Passing it to the candles endpoint charts the exact pool the position traded in
+ * rather than the token's current top pool. CEX executors carry none, so the
+ * result is `undefined` and the normal candle path applies.
+ */
+export function getPoolAddress(executors: ExecutorInfo[]): string | undefined {
+  for (const ex of executors) {
+    const pool =
+      (ex.config?.pool_address as string | undefined) ??
+      (ex.custom_info?.pool_address as string | undefined);
+    if (pool) return pool;
+  }
+  return undefined;
+}
+
+/**
  * Group executors by `connector:trading_pair` for per-market charts.
  * Executors without a `trading_pair` are skipped. Insertion order is preserved.
  */

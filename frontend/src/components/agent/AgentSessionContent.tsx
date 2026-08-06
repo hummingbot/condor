@@ -7,6 +7,7 @@ import {
 import { useCallback, useMemo, useState } from "react";
 
 import { ExecutorChart, type SnapshotBubble } from "@/components/charts/ExecutorChart";
+import { PairLabel } from "@/components/executor/PairLabel";
 import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
@@ -375,7 +376,9 @@ export function SessionExecutors({
                   const current = p.current_price ?? 0;
                   return (
                     <tr key={`${p.trading_pair}-${i}`} className="border-b border-[var(--color-border)]/30">
-                      <td className="py-2 pr-3 font-mono text-[var(--color-text)]">{p.trading_pair}</td>
+                      <td className="py-2 pr-3 font-mono text-[var(--color-text)]">
+                        <PairLabel tradingPair={p.trading_pair} connector={p.connector_name} />
+                      </td>
                       <td className="py-2 pr-3">
                         <span className={side.toLowerCase().includes("long") || side.toLowerCase() === "buy" ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}>
                           {side.toUpperCase()}
@@ -405,7 +408,11 @@ export function SessionExecutors({
             {/* Pair header (only when multiple pairs) */}
             {chartGroups.length > 1 && (
               <div className="mb-1.5 flex items-center gap-2 px-1">
-                <span className="text-xs font-medium text-[var(--color-text)]">{group[0].trading_pair}</span>
+                <PairLabel
+                  tradingPair={group[0].trading_pair}
+                  connector={group[0].connector}
+                  className="text-xs font-medium text-[var(--color-text)]"
+                />
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
                 <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
                   {formatCurrencyPnl(pairPnl)}

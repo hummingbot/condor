@@ -1172,12 +1172,23 @@ export const api = {
     limit = 1000,
     startTime?: number,
     endTime?: number,
+    poolAddress?: string,
   ) => {
     let url = `/api/v1/servers/${encodeURIComponent(server)}/market/candles?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
     if (startTime) url += `&start_time=${startTime}`;
     if (endTime) url += `&end_time=${endTime}`;
+    // DEX/LP executors: the pool address routes the backend to GeckoTerminal,
+    // since these connectors have no CEX candle feed.
+    if (poolAddress) url += `&pool_address=${encodeURIComponent(poolAddress)}`;
     return apiFetch<CandleData[]>(url);
   },
+
+  // Resolve a token address → ticker (GeckoTerminal). Not server-scoped; used to
+  // render LP/DEX pairs, which are stored as `<address>-<quote>`.
+  getTokenSymbol: (mint: string, network?: string) =>
+    apiFetch<{ mint: string; symbol: string }>(
+      `/api/v1/market/token-symbol?mint=${encodeURIComponent(mint)}${network ? `&network=${encodeURIComponent(network)}` : ""}`,
+    ),
 
   // ── Agents (identity + brain) ──
 
