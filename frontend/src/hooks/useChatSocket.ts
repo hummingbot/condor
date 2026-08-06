@@ -18,7 +18,7 @@ export interface ChatMessage {
   text: string;
   toolCalls: ToolCall[];
   thought?: string;
-  /** System messages only: "switch" | "error" | "delegation" | "resume". */
+  /** System messages only: "switch" | "error" | "delegation" | "resume" | "notification". */
   kind?: string;
   /**
    * The user redirected the agent while this answer was being written. The

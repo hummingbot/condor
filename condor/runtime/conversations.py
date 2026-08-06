@@ -237,7 +237,10 @@ class TurnEntry(BaseModel):
     )
     kind: str = Field(
         default="",
-        description="System entries only: switch | error | delegation | resume.",
+        description=(
+            "System entries only: switch | error | delegation | resume | "
+            "notification."
+        ),
     )
     ts: float = Field(default_factory=time.time)
     agent_key: str = Field(default="", description="Model that produced this turn.")

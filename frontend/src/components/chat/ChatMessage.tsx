@@ -47,8 +47,12 @@ export const ChatMessageView = memo(function ChatMessageView({
   //
   // A `resume` note is the same shape: it is what a finished background task
   // said to the agent to make it continue. Nobody typed it, so it must not
-  // render as a user bubble.
-  const isNote = message.kind === "delegation" || message.kind === "resume";
+  // render as a user bubble. So is a `notification`: the agent announced it to
+  // the user out of band, and the transcript records that it did.
+  const isNote =
+    message.kind === "delegation" ||
+    message.kind === "resume" ||
+    message.kind === "notification";
   if (message.role === "system" && isNote) {
     return (
       <div className="my-3 flex justify-start">

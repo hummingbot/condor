@@ -317,6 +317,16 @@ class DelegateRequest(BaseModel):
     on_complete: str = "notify"
 
 
+class NotifyRequest(BaseModel):
+    text: str
+    parse_mode: str = "Markdown"
+    chat_id: int = 0  # Telegram chat to push to (0 = nothing to push to)
+    user_id: int | None = None  # Accepted for compat but ignored (see handler)
+    # Canonical key of the session announcing something (posted by the condor
+    # MCP server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
+    session_key: str = ""
+
+
 # ── Stores / lookups ──
 
 
@@ -1288,6 +1298,89 @@ async def delegate_agent(
         on_complete=on_complete,
     )
     return {"task_id": dt.task_id, "status": dt.status}
+
+
+def _delivered(result: Any) -> bool:
+    """Did a ``send_message`` on the resolved bot actually deliver?
+
+    The ladder returns two different things: a live python-telegram-bot raises
+    on failure and returns a ``Message``, while ``_HttpBot`` never raises and
+    hands back Telegram's raw envelope (or ``None`` when it has no token). Only
+    the envelope can say "no" quietly, so that is the case worth reading.
+    """
+    if result is None:
+        return False
+    if isinstance(result, dict):
+        return bool(result.get("ok"))
+    return True
+
+
+async def _push_to_telegram(chat_id: int, text: str, parse_mode: str) -> bool:
+    """Push a notification through the shared outbound-bot ladder.
+
+    Retries once without ``parse_mode`` because the overwhelmingly common
+    failure is an unescaped ``_`` or ``*`` in text a model wrote: the user must
+    get the message, ugly, rather than not get it at all.
+    """
+    from condor.agents.delegate import resolve_bot
+
+    bot = resolve_bot()
+    if parse_mode:
+        try:
+            if _delivered(
+                await bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode=parse_mode
+                )
+            ):
+                return True
+        except Exception:
+            log.debug("Notification rejected with parse_mode=%s", parse_mode)
+    try:
+        return _delivered(await bot.send_message(chat_id=chat_id, text=text))
+    except Exception:
+        log.warning("Could not deliver notification to chat %s", chat_id)
+        return False
+
+
+@router.post("/notify")
+async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_user)):
+    """Announce something to the user, in the conversation *and* on Telegram.
+
+    The MCP ``send_notification`` tool used to POST straight to Telegram, which
+    made it the one user-visible tool that never crossed back into the main
+    process — so it could not know where its caller lived, and the conversation
+    that announced something kept no trace of it (ARCH-088). Crossing back also
+    gets it the same bot ladder every other outbound message uses.
+
+    The transcript note is the ``system`` turn ``_record_completion_turn``
+    writes for a finished delegation, with ``kind="notification"``; a missing or
+    dead ``session_key`` simply means there is no conversation behind this call,
+    which is the truth for a routine- or tick-started agent.
+    """
+    if not req.text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    # The caller is the JWT, never ``req.user_id``: mirror consult/delegate so an
+    # authenticated session cannot write into another user's transcript.
+    conversation_id = await _conversation_for_session(req.session_key)
+    recorded = False
+    if conversation_id:
+        try:
+            from condor.runtime.conversations import record_system
+
+            record_system(user.id, conversation_id, req.text, kind="notification")
+            recorded = True
+        except Exception:
+            log.debug(
+                "Could not note a notification in conversation %s",
+                conversation_id,
+                exc_info=True,
+            )
+
+    sent = False
+    if req.chat_id:
+        sent = await _push_to_telegram(req.chat_id, req.text, req.parse_mode)
+    return {"sent": sent, "recorded": recorded}
 
 
 # ── Strategy CRUD ──
