@@ -391,3 +391,56 @@ def test_current_owner_bases_follows_the_ledger_not_the_session_number(tmp_path)
     nums = [1, 2]
     assert _current_owner_bases(tmp_path, None, nums, 1) == ["ns-b"]
     assert _current_owner_bases(tmp_path, None, nums, 2) == ["ns-a"]
+
+
+# ── Whole-server snapshot is fetched once per rollup, not once per strategy ──
+
+
+def test_rollup_fans_out_one_snapshot_call_for_all_strategies(tmp_path):
+    """N strategies on one server share a single whole-server snapshot fetch.
+
+    ``list_agents`` gathers every strategy's ``_apply_bot_mode_pnl`` at once, and
+    ``get_latest_controller_performance()`` returns the same whole-server payload
+    to each of them — so the fan-out must collapse to one round-trip.
+    """
+    from condor.fetchers.bot_performance import clear_snapshot_cache
+
+    class _CountingClient(_FakeClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.base_url = "http://rollup-server:8000"
+            self.snapshot_calls = 0
+
+        async def get_latest_controller_performance(self):
+            self.snapshot_calls += 1
+            return self._snapshots
+
+    inst = "ns-bot-20260701-000000"
+    client = _CountingClient(
+        snapshots=[_snap(inst, T3, realized=100.0)],
+        history={inst: [_hist_row(T0, 0.0), _hist_row(T3, 100.0)]},
+    )
+
+    strategies = []
+    for i in range(3):
+        sdir = tmp_path / f"strategy_{i}"
+        _write_ledger(_write_session(sdir, 1), {"ns-bot": _epoch(T0)})
+        strategies.append((sdir, [_session(1)]))
+
+    async def _go():
+        await asyncio.gather(
+            *[
+                _apply_bot_mode_pnl(sessions, sdir, None, client)
+                for sdir, sessions in strategies
+            ]
+        )
+
+    clear_snapshot_cache()
+    try:
+        asyncio.run(_go())
+    finally:
+        clear_snapshot_cache()
+
+    assert client.snapshot_calls == 1
+    # Every strategy still gets its attribution from that one snapshot.
+    assert [sessions[0].realized_pnl for _, sessions in strategies] == [100.0] * 3

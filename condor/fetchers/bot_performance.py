@@ -17,7 +17,9 @@ without double counting.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -110,6 +112,42 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
     return agg
 
 
+# ── Whole-server snapshot cache ──
+# get_latest_controller_performance() is a WHOLE-SERVER call: it returns the
+# latest snapshot of every bot and every controller, so the payload is identical
+# no matter which caller asks. The agents rollup fans one call per strategy into
+# a single asyncio.gather, which without coalescing fires N byte-identical
+# whole-server requests at the same API server simultaneously. A short TTL plus
+# in-flight coalescing collapses that burst into one round-trip and one
+# aggregation shared by every caller, while staying far fresher than the 30s TTL
+# the agents route already tolerates above this call.
+_SNAPSHOT_TTL = 5.0
+_snapshot_cache: dict[str, tuple[float, dict[str, dict]]] = {}
+_snapshot_inflight: dict[str, tuple[Any, asyncio.Task]] = {}
+
+
+def _server_key(client: Any) -> str:
+    """Identify the API server a client talks to, or ``""`` if unidentifiable.
+
+    Keyed on ``base_url`` — never ``id(client)``, whose reuse after GC would hand
+    one server's snapshot to another. A client with no ``base_url`` (test doubles)
+    cannot be told apart from any other, so it is not cached at all rather than
+    sharing a blank key with unrelated servers.
+    """
+    return str(getattr(client, "base_url", "") or "")
+
+
+def clear_snapshot_cache() -> None:
+    """Drop every cached whole-server snapshot (tests, server reconfiguration)."""
+    _snapshot_cache.clear()
+    _snapshot_inflight.clear()
+
+
+async def _fetch_and_aggregate(client: Any) -> dict[str, dict]:
+    result = await client.bot_orchestration.get_latest_controller_performance()
+    return _aggregate_by_bot(extract_snapshots(result))
+
+
 async def fetch_all_bot_performance(client: Any) -> dict[str, dict]:
     """Return ``{bot_name: aggregate}`` from the latest controller-performance snapshot.
 
@@ -117,9 +155,34 @@ async def fetch_all_bot_performance(client: Any) -> dict[str, dict]:
     ``global_pnl_quote``, ``volume_traded``, ``num_controllers`` and a
     ``controllers`` breakdown. Raises if the API call fails — callers decide how
     to degrade.
+
+    Cached per server for ``_SNAPSHOT_TTL`` seconds and coalesced while in flight,
+    so concurrent callers on the same server share one round-trip and one
+    aggregation. A fetch that raises is never cached: the exception propagates to
+    every waiter and the next call retries. The returned aggregate is shared
+    between callers and must be treated as read-only.
     """
-    result = await client.bot_orchestration.get_latest_controller_performance()
-    return _aggregate_by_bot(extract_snapshots(result))
+    key = _server_key(client)
+    if not key:
+        return await _fetch_and_aggregate(client)
+
+    entry = _snapshot_cache.get(key)
+    if entry is not None and time.monotonic() - entry[0] <= _SNAPSHOT_TTL:
+        return entry[1]
+
+    # Reuse an in-flight fetch only from the loop that created it: a task is
+    # bound to its loop and awaiting it from another one raises.
+    loop = asyncio.get_running_loop()
+    inflight = _snapshot_inflight.get(key)
+    task = inflight[1] if inflight is not None and inflight[0] is loop else None
+    if task is None:
+        task = asyncio.ensure_future(_fetch_and_aggregate(client))
+        _snapshot_inflight[key] = (loop, task)
+        task.add_done_callback(lambda _t, k=key: _snapshot_inflight.pop(k, None))
+
+    agg = await task
+    _snapshot_cache[key] = (time.monotonic(), agg)
+    return agg
 
 
 def resolve_bot(all_bot_perf: dict[str, dict], bot_name: str) -> dict | None:

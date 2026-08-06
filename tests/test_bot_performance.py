@@ -8,6 +8,8 @@ controller-mode block.
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from condor.agents.config import AgentConfig, load_full_config
 from condor.agents.performance import (
     AgentPerformance,
@@ -17,11 +19,21 @@ from condor.agents.performance import (
 from condor.fetchers.bot_performance import (
     _aggregate_by_bot,
     bot_executor_rows,
+    clear_snapshot_cache,
     extract_snapshots,
     fetch_all_bot_performance,
     fetch_bot_performance,
     resolve_bot,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_snapshot_cache_bleed():
+    """Isolate the per-server snapshot cache between tests."""
+    clear_snapshot_cache()
+    yield
+    clear_snapshot_cache()
+
 
 # ── Sample payloads ──
 
@@ -110,6 +122,145 @@ def test_fetch_bot_performance_resilient_to_errors():
 
     client = SimpleNamespace(bot_orchestration=_Boom())
     assert asyncio.run(fetch_bot_performance(client, "river")) is None
+
+
+# ── Whole-server snapshot coalescing ──
+#
+# get_latest_controller_performance() returns every bot on the server, so the
+# agents rollup — which fans one call per strategy into a single gather — used to
+# fire N byte-identical whole-server requests at once.
+
+
+class _CountingOrchestration:
+    def __init__(self, snapshots, delay=0.0):
+        self._snapshots = snapshots
+        self._delay = delay
+        self.calls = 0
+
+    async def get_latest_controller_performance(self, bot_name=None):
+        self.calls += 1
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        return {"data": self._snapshots}
+
+
+class _ServerClient:
+    """Fake client that identifies its server via ``base_url``, like the real one."""
+
+    def __init__(self, base_url, snapshots=None, delay=0.0):
+        self.base_url = base_url
+        self.bot_orchestration = _CountingOrchestration(
+            SNAPSHOTS if snapshots is None else snapshots, delay
+        )
+
+    @property
+    def calls(self):
+        return self.bot_orchestration.calls
+
+
+def test_concurrent_callers_share_one_round_trip():
+    # In-flight coalescing, not just TTL: the fetch is still running when the
+    # other callers arrive, so they must join it rather than start their own.
+    client = _ServerClient("http://server-a:8000", delay=0.02)
+
+    async def _go():
+        return await asyncio.gather(
+            *[fetch_all_bot_performance(client) for _ in range(5)]
+        )
+
+    results = asyncio.run(_go())
+    assert client.calls == 1
+    assert all(set(r) == {"river", "otherbot"} for r in results)
+
+
+def test_staggered_callers_within_ttl_reuse_the_snapshot():
+    # The rollup's per-strategy calls do not always overlap exactly; the TTL keeps
+    # a staggered fan-out at one round-trip too.
+    client = _ServerClient("http://server-a:8000")
+
+    async def _go():
+        for _ in range(4):
+            await fetch_all_bot_performance(client)
+
+    asyncio.run(_go())
+    assert client.calls == 1
+
+
+def test_two_servers_never_share_a_snapshot():
+    a = _ServerClient(
+        "http://a:8000", snapshots=[_snapshot("river", "c1", 1.0, 0.0, 10.0)]
+    )
+    b = _ServerClient(
+        "http://b:8000", snapshots=[_snapshot("otherbot", "c2", 2.0, 0.0, 20.0)]
+    )
+
+    async def _go():
+        return await asyncio.gather(
+            fetch_all_bot_performance(a), fetch_all_bot_performance(b)
+        )
+
+    ra, rb = asyncio.run(_go())
+    assert set(ra) == {"river"}
+    assert set(rb) == {"otherbot"}
+    assert (a.calls, b.calls) == (1, 1)
+
+
+def test_failed_fetch_is_not_cached_and_still_propagates():
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_latest_controller_performance(self, bot_name=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("api down")
+            return {"data": SNAPSHOTS}
+
+    client = SimpleNamespace(base_url="http://flaky:8000", bot_orchestration=_Flaky())
+
+    async def _go():
+        with pytest.raises(RuntimeError):
+            await fetch_all_bot_performance(client)
+        # The failure left nothing cached, so the next call really re-fetches.
+        return await fetch_all_bot_performance(client)
+
+    out = asyncio.run(_go())
+    assert client.bot_orchestration.calls == 2
+    assert set(out) == {"river", "otherbot"}
+
+
+def test_concurrent_waiters_all_see_the_failure():
+    class _Boom:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_latest_controller_performance(self, bot_name=None):
+            self.calls += 1
+            await asyncio.sleep(0.02)
+            raise RuntimeError("api down")
+
+    client = SimpleNamespace(base_url="http://boom:8000", bot_orchestration=_Boom())
+
+    async def _go():
+        return await asyncio.gather(
+            *[fetch_all_bot_performance(client) for _ in range(3)],
+            return_exceptions=True,
+        )
+
+    out = asyncio.run(_go())
+    assert client.bot_orchestration.calls == 1
+    assert all(isinstance(r, RuntimeError) for r in out)
+
+
+def test_client_without_base_url_is_never_cached():
+    # An unidentifiable client (test doubles) must not share a blank key with
+    # unrelated servers — it bypasses the cache entirely.
+    a = _ServerClient("", snapshots=[_snapshot("river", "c1", 1.0, 0.0, 10.0)])
+    b = _ServerClient("", snapshots=[_snapshot("otherbot", "c2", 2.0, 0.0, 20.0)])
+    assert set(asyncio.run(fetch_all_bot_performance(a))) == {"river"}
+    assert set(asyncio.run(fetch_all_bot_performance(b))) == {"otherbot"}
+    assert set(asyncio.run(fetch_all_bot_performance(a))) == {"river"}
+    assert a.calls == 2
 
 
 # ── Suffix-tolerant resolution ──
