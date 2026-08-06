@@ -185,7 +185,9 @@ def agent_identity_context(
 ) -> str:
     """Identity + domain memory/skills the bound Agent opens the chat with.
 
-    Mirrors ``build_agent_context`` (used by consult) minus the consult request,
+    Shares its domain memory/skills sections with ``build_agent_context`` (used
+    by consult) via :func:`~condor.memory.domain_context`, and differs from it
+    only by the identity header in front and the absent consult request behind —
     so a chatted Agent starts from the same self-knowledge a consulted one does.
 
     Leads with :func:`~condor.agents.agent.identity_header` — the same line the
@@ -193,37 +195,11 @@ def agent_identity_context(
     domain but never says which agent this is (FEAT-025).
     """
     from condor.agents.agent import identity_header
+    from condor.memory import domain_context
 
     sections: list[str] = [identity_header(agent_slug, label)]
     if instructions:
         sections.append(instructions)
-
-    try:
-        from condor.memory import MemoryStore
-
-        memory_index = MemoryStore(user_id, agent_slug).list_index()
-        if memory_index:
-            sections.append(
-                "[DOMAIN MEMORY — what you remember in this domain]\n"
-                'Read a full memory with manage_memory(action="read", name="..."). '
-                'Save new, stable domain facts with manage_memory(action="write", ...).\n\n'
-                f"{memory_index}"
-            )
-    except Exception:
-        log.debug("Could not load memory index for %s", agent_slug, exc_info=True)
-
-    try:
-        from condor.memory import SkillStore
-
-        skills_index = SkillStore(agent_slug).list_index()
-        if skills_index:
-            sections.append(
-                "[DOMAIN SKILLS — playbooks you can follow]\n"
-                "Read-only playbooks shipped with this Agent. Read one with "
-                'manage_skill(action="read", name="...") and follow its steps.\n\n'
-                f"{skills_index}"
-            )
-    except Exception:
-        log.debug("Could not load skill index for %s", agent_slug, exc_info=True)
+    sections.extend(domain_context(agent_slug, user_id))
 
     return "\n\n".join(s for s in sections if s)

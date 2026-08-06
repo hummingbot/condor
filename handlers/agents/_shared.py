@@ -523,36 +523,16 @@ def build_agent_context(
     are injected (keyed by the Agent slug, FEAT-003 — the shared brain), and the
     consult task is appended last. Read on demand via manage_memory/manage_skill
     inside the run.
+
+    Those indexes come from :func:`~condor.memory.domain_context`, the same
+    builder ``binding.agent_identity_context`` composes, so this Agent carries
+    identical instructions about its own memory whether it is consulted or
+    chatted with (ARCH-099).
     """
+    from condor.memory import domain_context
+
     sections: list[str] = [agent.instructions]
-
-    try:
-        from condor.memory import MemoryStore
-
-        memory_index = MemoryStore(user_id, agent.slug).list_index()
-        if memory_index:
-            sections.append(
-                "[DOMAIN MEMORY — what you remember in this domain]\n"
-                'Read a full memory with manage_memory(action="read", name="..."). '
-                'Save new, stable domain facts with manage_memory(action="write", ...).\n\n'
-                f"{memory_index}"
-            )
-    except Exception:
-        pass
-
-    try:
-        from condor.memory import SkillStore
-
-        skills_index = SkillStore(agent.slug).list_index()
-        if skills_index:
-            sections.append(
-                "[DOMAIN SKILLS — playbooks you can follow]\n"
-                "Read-only playbooks shipped with this Agent. Read one with "
-                'manage_skill(action="read", name="...") and follow its steps.\n\n'
-                f"{skills_index}"
-            )
-    except Exception:
-        pass
+    sections.extend(domain_context(agent.slug, user_id))
 
     consult = f"[CONSULT REQUEST]\n{task}"
     if context:
