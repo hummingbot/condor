@@ -443,5 +443,86 @@ def test_a_missing_metric_is_none_not_a_crash(routine):
     assert row["sharpe_ratio"] is None
 
 
+# ── A metric travels with the parameters it was measured under ────────────────
+
+
+def test_the_row_carries_the_runs_window_resolution_and_cost(routine):
+    """A sweep concatenates rows; a Sharpe alone is not comparable to the row above."""
+    row = routine(_completed("task-1")).table_data[0]
+
+    assert row["start_date"] == "2025-04-22"
+    assert row["end_date"] == "2025-04-23"
+    assert row["resolution"] == "1m"
+    assert row["trade_cost"] == 0.0002
+
+
+def test_a_re_rendered_run_reports_its_own_parameters_not_the_form_defaults(
+    routine, store
+):
+    """task_id= renders a stored run: the row must describe THAT run's window."""
+    routine(_completed("task-1"), resolution="15m", trade_cost=0.0006)
+
+    row = asyncio.run(bc.run(bc.Config(task_id="task-1"), FakeContext())).table_data[0]
+
+    assert row["resolution"] == "1m", "the stored run's resolution, not the default"
+    assert row["trade_cost"] == 0.0002
+    assert row["start_date"] == "2025-04-22"
+    assert row["end_date"] == "2025-04-23"
+
+
+# ── The trade-count validity gate ─────────────────────────────────────────────
+
+
+def _thin(task_id="task-thin", executors=8) -> FakeClient:
+    """A run with too few executors for any metric to mean anything."""
+    envelope = _envelope(task_id)
+    envelope["result"] = {
+        **_PAYLOAD,
+        "results": {**_PAYLOAD["results"], "total_executors": executors},
+    }
+    return FakeClient(FakeBacktesting(task_id, [envelope]))
+
+
+def test_a_thin_run_is_disqualified_above_its_own_numbers(routine):
+    """The gate is stated by every playbook; here it is unmissable in the result."""
+    text = routine(_thin()).text
+
+    assert "8 executors" in text
+    assert f"{bc.MIN_VALID_TRADES}-trade validity gate" in text
+    assert text.index("validity gate") < text.index(
+        "Sharpe Ratio"
+    ), "a thin run is disqualified before anyone reads its metrics, not after"
+
+
+def test_a_valid_run_is_not_nagged(routine):
+    assert "validity gate" not in routine(_completed("task-1")).text
+
+
+def test_the_gate_reaches_an_agent_as_data(routine):
+    """``get_instance`` hands sections back — the reader that never parses prose."""
+    thin = routine(_thin())
+    healthy = routine(_completed("task-1"))
+
+    (kpi,) = [s for s in thin.sections if s["label"] == "Trades"]
+    assert kpi["value"] == "8"
+    assert kpi["trend"] == "down"
+    assert f"below {bc.MIN_VALID_TRADES}-trade gate" == kpi["delta"]
+
+    (ok,) = [s for s in healthy.sections if s["label"] == "Trades"]
+    assert ok["value"] == "74"
+    assert ok["trend"] == "flat"
+    assert ok["delta"] is None
+
+
+def test_a_run_at_the_threshold_clears_the_gate(routine):
+    assert "validity gate" not in routine(_thin(executors=bc.MIN_VALID_TRADES)).text
+
+
+def test_a_missing_trade_count_does_not_manufacture_a_warning(routine):
+    """The engine omits metrics on a broken run; absence is not 'below the gate'."""
+    assert bc._trade_count_warning({}) is None
+    assert bc._sections({})[0]["value"] == "—"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
