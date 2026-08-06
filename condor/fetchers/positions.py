@@ -26,6 +26,7 @@ async def fetch_positions(
     client,
     connector_name: Optional[str] = None,
     limit: int = MAX_POSITIONS_FETCH,
+    strict: bool = False,
     **_kw,
 ) -> List[Dict[str, Any]]:
     """Fetch open positions, optionally filtered by connector.
@@ -38,6 +39,11 @@ async def fetch_positions(
     Walks the cursor in ``POSITIONS_PAGE_SIZE`` pages until exhausted or until
     ``limit`` rows are accumulated; reaching that cap truncates the result and
     logs a warning.
+
+    Args:
+        strict: Raise when the request itself fails, instead of reporting the
+            account as flat. Callers that cache the answer want the distinction:
+            an unreachable server is worth retrying, "no open positions" is not.
     """
     try:
         positions: List[Dict[str, Any]] = []
@@ -78,5 +84,7 @@ async def fetch_positions(
         return positions
 
     except Exception as e:
+        if strict:
+            raise
         logger.error("Error fetching positions: %s", e, exc_info=True)
         return []

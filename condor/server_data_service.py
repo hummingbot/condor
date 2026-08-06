@@ -19,6 +19,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import partial
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -859,10 +860,19 @@ def register_default_fetches() -> None:
 
     sds.register_fetch(ServerDataType.PORTFOLIO, fetch_portfolio)
     sds.register_fetch(ServerDataType.PRICES, fetch_current_price)
-    sds.register_fetch(ServerDataType.POSITIONS, fetch_positions)
-    sds.register_fetch(ServerDataType.ACTIVE_ORDERS, fetch_active_orders)
-    sds.register_fetch(ServerDataType.TRADING_RULES, fetch_trading_rules)
-    sds.register_fetch(ServerDataType.CONNECTORS, fetch_available_cex_connectors)
+    # strict=True on the cached reads: a failed call must reach
+    # _do_fetch_and_cache's except branch (record_error, keep the last good
+    # value, back off) instead of being cached as "nothing here".
+    sds.register_fetch(ServerDataType.POSITIONS, partial(fetch_positions, strict=True))
+    sds.register_fetch(
+        ServerDataType.ACTIVE_ORDERS, partial(fetch_active_orders, strict=True)
+    )
+    sds.register_fetch(
+        ServerDataType.TRADING_RULES, partial(fetch_trading_rules, strict=True)
+    )
+    sds.register_fetch(
+        ServerDataType.CONNECTORS, partial(fetch_available_cex_connectors, strict=True)
+    )
     sds.register_fetch(ServerDataType.ALL_CONNECTORS, fetch_connectors)
     sds.register_fetch(ServerDataType.BOTS_STATUS, fetch_bots_status)
     sds.register_fetch(ServerDataType.EXECUTORS, fetch_executors)

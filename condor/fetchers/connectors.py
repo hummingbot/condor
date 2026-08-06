@@ -24,12 +24,18 @@ async def fetch_connectors(client, **_kw) -> List[str]:
 
 
 async def fetch_available_cex_connectors(
-    client, account_name: str = "master_account", **_kw
+    client, account_name: str = "master_account", strict: bool = False, **_kw
 ) -> List[str]:
     """Fetch CEX connectors with credentials configured for an account.
 
     Intersects configured connectors with actually-available connectors
     and filters to CEX only.
+
+    Args:
+        strict: Raise when the credentials request itself fails, instead of
+            reporting the account as having no connectors. Callers that cache
+            the answer want the distinction: an unreachable server is worth
+            retrying, "no credentials configured" is not.
 
     Raises:
         IdentifierError: if ``account_name`` is not a safe URL path segment.
@@ -51,5 +57,7 @@ async def fetch_available_cex_connectors(
             cex = [c for c in cex if c in available]
         return cex
     except Exception as e:
+        if strict:
+            raise
         logger.error("Error fetching connectors: %s", e, exc_info=True)
         return []
