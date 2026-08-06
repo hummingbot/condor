@@ -354,19 +354,17 @@ async def agent_callback_handler(
     elif action == "cu_clear":
         await _handle_custom_clear_filter(update, context)
     elif action.startswith("cu_use:"):
-        await _handle_custom_use(update, context, int(action.split(":", 1)[1]))
+        await _handle_custom_use(update, context, action.split(":", 1)[1])
     elif action.startswith("cu_page:"):
         await _handle_custom_page(update, context, int(action.split(":", 1)[1]))
     elif action.startswith("cu_pick:"):
         await _handle_custom_pick(update, context, action.split(":", 1)[1])
     elif action.startswith("cu_key:"):
-        await _handle_custom_rekey(update, context, int(action.split(":", 1)[1]))
+        await _handle_custom_rekey(update, context, action.split(":", 1)[1])
     elif action.startswith("cu_delok:"):
-        await _handle_custom_delete(update, context, int(action.split(":", 1)[1]))
+        await _handle_custom_delete(update, context, action.split(":", 1)[1])
     elif action.startswith("cu_del:"):
-        await _handle_custom_delete_confirm(
-            update, context, int(action.split(":", 1)[1])
-        )
+        await _handle_custom_delete_confirm(update, context, action.split(":", 1)[1])
     elif action == "cu_noop":
         pass  # page indicator / section header — do nothing
 
@@ -777,13 +775,17 @@ async def _handle_custom_list(
     )
 
 
-def _provider_at(context: ContextTypes.DEFAULT_TYPE, idx: int) -> dict | None:
-    from condor.preferences import get_custom_providers
+def _provider_named(context: ContextTypes.DEFAULT_TYPE, name: str) -> dict | None:
+    """Resolve the endpoint a `cu_*` button was rendered for.
 
-    providers = get_custom_providers(context.user_data)
-    if 0 <= idx < len(providers):
-        return providers[idx]
-    return None
+    Buttons carry the sanitized nickname rather than a list position: the saved
+    list is shared state (the web dashboard writes it too), so an index taken at
+    render time can point at a different endpoint by the time it's tapped —
+    which for delete and re-key means destroying the wrong credential.
+    """
+    from condor.preferences import find_custom_provider
+
+    return find_custom_provider(context.user_data, name)
 
 
 # -- Adding an endpoint --
@@ -969,18 +971,21 @@ def _cached_models(
 
 
 async def _handle_custom_use(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, provider_name: str
 ) -> None:
     """Open the model picker for a saved endpoint, refetching if stale."""
+    from condor.preferences import sanitize_provider_name
+
     from .custom_models import CustomProviderError, fetch_models
     from .menu import _custom_error_keyboard, _custom_picker_keyboard
 
-    provider = _provider_at(context, idx)
+    provider = _provider_named(context, provider_name)
     if provider is None:
         await _handle_custom_list(update, context, notice="That endpoint is gone.")
         return
 
     name = provider["name"]
+    key = sanitize_provider_name(name)
     models = _cached_models(context, name)
 
     if models is None:
@@ -993,8 +998,8 @@ async def _handle_custom_use(
             await placeholder.edit_text(
                 f"'{name}' isn't responding: {e}",
                 reply_markup=_custom_error_keyboard(
-                    f"agent:cu_use:{idx}",
-                    secondary=("Change API key", f"agent:cu_key:{idx}"),
+                    f"agent:cu_use:{key}",
+                    secondary=("Change API key", f"agent:cu_key:{key}"),
                 ),
             )
             return
@@ -1146,12 +1151,12 @@ async def _handle_custom_manage(
 
 
 async def _handle_custom_rekey(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, provider_name: str
 ) -> None:
     """Replace the API key on a saved endpoint without re-entering its URL."""
     from .menu import _custom_key_prompt_keyboard
 
-    provider = _provider_at(context, idx)
+    provider = _provider_named(context, provider_name)
     if provider is None:
         await _handle_custom_list(update, context, notice="That endpoint is gone.")
         return
@@ -1172,11 +1177,11 @@ async def _handle_custom_rekey(
 
 
 async def _handle_custom_delete_confirm(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, provider_name: str
 ) -> None:
     from .menu import _custom_delete_keyboard
 
-    provider = _provider_at(context, idx)
+    provider = _provider_named(context, provider_name)
     if provider is None:
         await _handle_custom_list(update, context, notice="That endpoint is gone.")
         return
@@ -1185,17 +1190,17 @@ async def _handle_custom_delete_confirm(
         update,
         f"Forget '{provider['name']}' ({provider['base_url']})?\n\n"
         "The saved URL and API key are deleted from this bot.",
-        _custom_delete_keyboard(idx, provider["name"]),
+        _custom_delete_keyboard(provider["name"]),
     )
 
 
 async def _handle_custom_delete(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, provider_name: str
 ) -> None:
     """Forget an endpoint, clearing agent_llm if it pointed at that endpoint."""
     from condor.preferences import parse_custom_agent_key, remove_custom_provider
 
-    provider = _provider_at(context, idx)
+    provider = _provider_named(context, provider_name)
     if provider is None:
         await _handle_custom_list(update, context, notice="That endpoint is gone.")
         return

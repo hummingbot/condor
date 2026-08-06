@@ -232,19 +232,20 @@ def _custom_endpoints_keyboard(
     providers: list[dict], current_llm: str
 ) -> InlineKeyboardMarkup:
     """Landing screen for custom endpoints: pick one, add one, or manage them."""
-    from condor.preferences import parse_custom_agent_key
+    from condor.preferences import parse_custom_agent_key, sanitize_provider_name
 
     active_provider, active_model = parse_custom_agent_key(current_llm)
 
     keyboard: list[list[InlineKeyboardButton]] = []
-    for idx, provider in enumerate(providers):
+    for provider in providers:
         name = provider.get("name", "?")
         if active_provider == name and active_model:
             label = f"• {name} — {format_model_label(active_model, limit=24)}"
         else:
             label = name
+        key = sanitize_provider_name(name)
         keyboard.append(
-            [InlineKeyboardButton(label, callback_data=f"agent:cu_use:{idx}")]
+            [InlineKeyboardButton(label, callback_data=f"agent:cu_use:{key}")]
         )
 
     keyboard.append(
@@ -260,29 +261,40 @@ def _custom_endpoints_keyboard(
 
 def _custom_manage_keyboard(providers: list[dict]) -> InlineKeyboardMarkup:
     """Per-endpoint maintenance: replace the API key, or forget the endpoint."""
+    from condor.preferences import sanitize_provider_name
+
     keyboard: list[list[InlineKeyboardButton]] = []
-    for idx, provider in enumerate(providers):
+    for provider in providers:
         name = provider.get("name", "?")
+        key = sanitize_provider_name(name)
         keyboard.append([InlineKeyboardButton(name, callback_data="agent:cu_noop")])
         keyboard.append(
             [
                 InlineKeyboardButton(
-                    "Change API key", callback_data=f"agent:cu_key:{idx}"
+                    "Change API key", callback_data=f"agent:cu_key:{key}"
                 ),
-                InlineKeyboardButton("Forget", callback_data=f"agent:cu_del:{idx}"),
+                InlineKeyboardButton("Forget", callback_data=f"agent:cu_del:{key}"),
             ]
         )
     keyboard.append([InlineKeyboardButton("Back", callback_data="agent:cu_list")])
     return InlineKeyboardMarkup(keyboard)
 
 
-def _custom_delete_keyboard(idx: int, name: str) -> InlineKeyboardMarkup:
-    """Confirmation for forgetting an endpoint."""
+def _custom_delete_keyboard(name: str) -> InlineKeyboardMarkup:
+    """Confirmation for forgetting an endpoint.
+
+    The button carries the endpoint's name, not its position: the saved list is
+    shared with the web dashboard, so an index could resolve to a different
+    endpoint by the time the confirmation is tapped.
+    """
+    from condor.preferences import sanitize_provider_name
+
     return InlineKeyboardMarkup(
         [
             [
                 InlineKeyboardButton(
-                    f"Forget {name}", callback_data=f"agent:cu_delok:{idx}"
+                    f"Forget {name}",
+                    callback_data=f"agent:cu_delok:{sanitize_provider_name(name)}",
                 )
             ],
             [InlineKeyboardButton("Keep it", callback_data="agent:cu_manage")],
