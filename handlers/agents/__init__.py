@@ -1247,8 +1247,6 @@ async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Close the agent menu (keep session alive if running)."""
     query = update.callback_query
-    chat_id = update.effective_chat.id
-    session = await get_session(chat_id)
 
     await query.message.delete()
 
@@ -1275,28 +1273,63 @@ async def _handle_compact_menu(
     )
 
 
-async def _handle_compact(
+def _edit_render(message):
+    """Render every step by editing one message in place (callback surface)."""
+
+    async def render(text: str) -> None:
+        await message.edit_text(text)
+
+    return render
+
+
+def _reply_render(message):
+    """Reply once, then edit that reply in place (typed-message surface)."""
+    placeholder = None
+
+    async def render(text: str) -> None:
+        nonlocal placeholder
+        if placeholder is None:
+            placeholder = await message.reply_text(text)
+        else:
+            await placeholder.edit_text(text)
+
+    return render
+
+
+async def _compact(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    custom_instructions: str | None = None,
+    *,
+    instructions: str | None,
+    render,
+    keep_custom_flag_on_busy: bool = False,
 ) -> None:
-    """Compact: summarize context → destroy session → recreate with summary."""
-    query = update.callback_query
+    """Summarize context → destroy session → recreate with the summary reinjected.
+
+    The single implementation behind both compact surfaces: the menu button
+    (which edits its own callback message) and the typed custom instructions
+    (which replies, then edits that reply). ``render`` is what abstracts the
+    two apart — everything else about the sequence is identical, and keeping it
+    identical is the point: a fix here can no longer land in only one copy.
+    """
     chat_id = update.effective_chat.id
     session = await get_session(chat_id)
 
     if not session or not session.alive:
-        await query.message.edit_text("No active session to compact.")
+        await render("No active session to compact.")
         return
 
     if session.is_busy:
-        await query.message.edit_text("Agent is busy. Wait for it to finish first.")
+        await render("Agent is busy. Wait for it to finish first.")
+        if keep_custom_flag_on_busy:
+            # Stay armed so the user can resend the same instructions.
+            context.user_data["agent_compact_custom"] = True
         return
 
-    await query.message.edit_text("Compacting context...")
+    await render("Compacting context...")
 
-    if custom_instructions:
-        prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=custom_instructions)
+    if instructions:
+        prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=instructions)
     else:
         prompt = COMPACT_PROMPT_AUTO
 
@@ -1304,11 +1337,11 @@ async def _handle_compact(
         summary = await runtime.prompt_once(_tg_key(chat_id), prompt)
     except Exception as e:
         log.exception("Failed to get compact summary")
-        await query.message.edit_text(f"Compact failed: {e}")
+        await render(f"Compact failed: {e}")
         return
 
     if not summary or not summary.strip():
-        await query.message.edit_text("Agent returned empty summary. Compact aborted.")
+        await render("Agent returned empty summary. Compact aborted.")
         return
 
     agent_key = session.agent_key
@@ -1320,7 +1353,7 @@ async def _handle_compact(
 
         _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
-        new_session = await _create_tg_session(
+        await _create_tg_session(
             chat_id=chat_id,
             agent_key=agent_key,
             user_id=user_id,
@@ -1333,13 +1366,27 @@ async def _handle_compact(
 
     except Exception as e:
         log.exception("Failed to recreate session after compact")
-        await query.message.edit_text(f"Compact failed during session reset: {e}")
+        await render(f"Compact failed during session reset: {e}")
         return
 
     word_count = len(summary.split())
-    await query.message.edit_text(
+    await render(
         f"Context compacted ({word_count} words carried over).\n\n"
         "Send a message to continue chatting."
+    )
+
+
+async def _handle_compact(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    custom_instructions: str | None = None,
+) -> None:
+    """Compact: summarize context → destroy session → recreate with summary."""
+    await _compact(
+        update,
+        context,
+        instructions=custom_instructions,
+        render=_edit_render(update.callback_query.message),
     )
 
 
@@ -1470,59 +1517,12 @@ async def _do_compact_from_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE, instructions: str
 ) -> None:
     """Execute custom compact from user's text input."""
-    chat_id = update.effective_chat.id
-    session = await get_session(chat_id)
-
-    if not session or not session.alive:
-        await update.message.reply_text("No active session to compact.")
-        return
-
-    if session.is_busy:
-        await update.message.reply_text("Agent is busy. Wait for it to finish first.")
-        context.user_data["agent_compact_custom"] = True
-        return
-
-    placeholder = await update.message.reply_text("Compacting context...")
-
-    prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=instructions)
-    try:
-        summary = await runtime.prompt_once(_tg_key(chat_id), prompt)
-    except Exception as e:
-        log.exception("Failed to get compact summary")
-        await placeholder.edit_text(f"Compact failed: {e}")
-        return
-
-    if not summary or not summary.strip():
-        await placeholder.edit_text("Agent returned empty summary. Compact aborted.")
-        return
-
-    agent_key = session.agent_key
-    await destroy_session(chat_id)
-
-    try:
-        user_id = update.effective_user.id
-        bot = context.bot
-
-        _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
-
-        new_session = await _create_tg_session(
-            chat_id=chat_id,
-            agent_key=agent_key,
-            user_id=user_id,
-            permission_callback=_perm_cb,
-            user_data=context.user_data,
-        )
-        compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
-        await runtime.prompt_once(_tg_key(chat_id), compact_context)
-    except Exception as e:
-        log.exception("Failed to recreate session after compact")
-        await placeholder.edit_text(f"Compact failed during session reset: {e}")
-        return
-
-    word_count = len(summary.split())
-    await placeholder.edit_text(
-        f"Context compacted ({word_count} words carried over).\n\n"
-        "Send a message to continue chatting."
+    await _compact(
+        update,
+        context,
+        instructions=instructions,
+        render=_reply_render(update.message),
+        keep_custom_flag_on_busy=True,
     )
 
 
