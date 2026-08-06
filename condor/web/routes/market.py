@@ -156,7 +156,15 @@ async def get_trading_rules(
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
+    from condor.fetchers._identifiers import IdentifierError, validate_identifier
     from condor.server_data_service import ServerDataType, get_server_data_service
+
+    # Rejected here, not in the fetcher: SDS records a failed fetch as an
+    # error-only cache entry, so a bad connector would still mint a key.
+    try:
+        validate_identifier(connector, "connector name")
+    except IdentifierError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     try:
         result = await get_server_data_service().get_or_fetch(

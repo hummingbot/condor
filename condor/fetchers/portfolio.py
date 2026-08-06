@@ -23,8 +23,16 @@ async def fetch_cex_balances(
 
     Returns:
         Dict of connector_name -> list of balances
+
+    Raises:
+        IdentifierError: if ``account_name`` is not a safe URL path segment.
     """
+    from condor.fetchers._identifiers import validate_identifier
     from condor.fetchers.connectors import is_cex_connector
+
+    # Before the try: the except below turns everything into {}, which would
+    # cache a bogus entry instead of surfacing the rejection.
+    validate_identifier(account_name, "account name")
 
     try:
         configured = await client.accounts.list_account_credentials(account_name)

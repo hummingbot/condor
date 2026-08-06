@@ -3,6 +3,8 @@
 import logging
 from typing import Any, Dict
 
+from condor.fetchers._identifiers import validate_identifier
+
 logger = logging.getLogger(__name__)
 
 
@@ -13,7 +15,14 @@ async def fetch_trading_rules(
 
     Returns:
         Dict of trading_pair -> rules
+
+    Raises:
+        IdentifierError: if ``connector_name`` is not a safe URL path segment.
     """
+    # Before the try: the except below turns everything into {}, which would
+    # cache a bogus entry instead of surfacing the rejection.
+    validate_identifier(connector_name, "connector name")
+
     try:
         result = await client.connectors.get_trading_rules(
             connector_name=connector_name

@@ -3,6 +3,8 @@
 import logging
 from typing import List
 
+from condor.fetchers._identifiers import validate_identifier
+
 logger = logging.getLogger(__name__)
 
 _DEX_PREFIXES = (
@@ -28,7 +30,14 @@ async def fetch_available_cex_connectors(
 
     Intersects configured connectors with actually-available connectors
     and filters to CEX only.
+
+    Raises:
+        IdentifierError: if ``account_name`` is not a safe URL path segment.
     """
+    # Before the try: the except below turns everything into [], which would
+    # cache a bogus entry instead of surfacing the rejection.
+    validate_identifier(account_name, "account name")
+
     try:
         configured = await client.accounts.list_account_credentials(account_name)
 
