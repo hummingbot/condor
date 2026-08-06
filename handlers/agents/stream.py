@@ -112,6 +112,9 @@ class TelegramStreamer:
         self._stop_reason: str | None = None
         self._tick = 0
         self._continuation_ids: list[int] = []
+        # message_id -> (text, parse_mode) last known to be on screen. Guards
+        # against re-sending an edit Telegram would reject as "not modified".
+        self._last_sent: dict[int, tuple[str, str | None]] = {}
 
     # --- Event processing ---
 
@@ -313,6 +316,13 @@ class TelegramStreamer:
     async def _edit(
         self, message_id: int, text: str, parse_mode: str | None = None
     ) -> None:
+        # A long answer splits at a paragraph boundary that stays put as the
+        # buffer grows, so every chunk but the last is byte-identical on each
+        # tick. Those edits only ever come back "not modified" — and each one
+        # spends per-chat quota that the chunk which *did* change then waits
+        # for. Skip what is already on screen.
+        if self._last_sent.get(message_id) == (text, parse_mode):
+            return
         try:
             await self._bot.edit_message_text(
                 chat_id=self._chat_id,
@@ -323,9 +333,14 @@ class TelegramStreamer:
         except BadRequest as e:
             if "not modified" not in str(e).lower():
                 if parse_mode:
+                    # The retry carries the same text, so drop the entry rather
+                    # than let the cache mistake the fallback for a no-op.
+                    self._last_sent.pop(message_id, None)
                     await self._edit(message_id, text, parse_mode=None)
                 else:
                     log.warning("Failed to edit message: %s", e)
+                return
+            # Telegram itself says the text is already there: remember it.
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after)
             try:
@@ -336,11 +351,13 @@ class TelegramStreamer:
                     parse_mode=parse_mode,
                 )
             except Exception:
-                pass
+                return
         except TimedOut:
-            pass
+            return
         except Exception:
             log.exception("Unexpected error editing message")
+            return
+        self._last_sent[message_id] = (text, parse_mode)
 
     async def _send(self, text: str, parse_mode: str | None = None) -> int | None:
         try:
@@ -349,6 +366,7 @@ class TelegramStreamer:
                 text=text,
                 parse_mode=parse_mode,
             )
+            self._last_sent[msg.message_id] = (text, parse_mode)
             return msg.message_id
         except BadRequest:
             if parse_mode:
@@ -361,6 +379,7 @@ class TelegramStreamer:
                     chat_id=self._chat_id,
                     text=text,
                 )
+                self._last_sent[msg.message_id] = (text, None)
                 return msg.message_id
             except Exception:
                 return None
