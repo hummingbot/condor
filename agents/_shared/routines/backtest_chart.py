@@ -808,6 +808,14 @@ def generate_chart(
 METRIC_COLUMNS = (
     "task_id",
     "config_name",
+    # The run's parameters travel WITH its metrics. A sweep concatenates N rows into
+    # one table, and a Sharpe without the window, resolution and cost it was measured
+    # under cannot be compared against the row above it. They are in the summary text
+    # too, but readers are told to rank on table_data and never to parse the prose.
+    "start_date",
+    "end_date",
+    "resolution",
+    "trade_cost",
     "net_pnl_quote",
     "net_pnl_pct",
     "sharpe_ratio",
@@ -820,6 +828,43 @@ METRIC_COLUMNS = (
     "total_fees_quote",
     "total_volume",
 )
+
+
+# Below this many executors, no metric in the report means anything — a Sharpe over
+# 8 trades is noise with a decimal point. Every backtesting playbook states the gate;
+# stating it here too means a reader who skipped the playbook still cannot miss it.
+MIN_VALID_TRADES = 20
+
+
+def _trade_count_warning(results: dict) -> str | None:
+    """The validity gate, as a line — or None when the run cleared it."""
+    total = results.get("total_executors")
+    try:
+        total = int(total)
+    except (TypeError, ValueError):
+        return None
+    if total >= MIN_VALID_TRADES:
+        return None
+    return (
+        f"⚠️ {total} executors — below the {MIN_VALID_TRADES}-trade validity gate. "
+        "Treat every metric below as noise: widen the window or loosen the filters "
+        "and re-run before reading anything into these numbers."
+    )
+
+
+def _sections(results: dict) -> list[dict]:
+    """Dashboard KPIs. The trade count leads because it gates reading the rest."""
+    total = results.get("total_executors")
+    below_gate = _trade_count_warning(results) is not None
+    return [
+        {
+            "type": "kpi",
+            "label": "Trades",
+            "value": str(total if total is not None else "—"),
+            "delta": f"below {MIN_VALID_TRADES}-trade gate" if below_gate else None,
+            "trend": "down" if below_gate else "flat",
+        }
+    ]
 
 
 def _round(value, digits: int = 4, scale: float = 1.0):
@@ -837,6 +882,10 @@ def _metrics_row(results: dict, config: Config) -> dict:
     return {
         "task_id": config.task_id,
         "config_name": config.config_name,
+        "start_date": config.start_date,
+        "end_date": config.end_date,
+        "resolution": config.resolution,
+        "trade_cost": config.trade_cost,
         "net_pnl_quote": _round(results.get("net_pnl_quote"), 2),
         "net_pnl_pct": _round(results.get("net_pnl"), 4, scale=100),
         "sharpe_ratio": _round(results.get("sharpe_ratio"), 4),
@@ -885,6 +934,11 @@ def format_summary(results: dict, config: Config) -> str:
     # The handle for backtest_compare and for re-rendering this exact run.
     if config.task_id:
         lines.append(f"Task ID: {config.task_id}")
+    # Above the numbers, not below them: a thin run has to be disqualified before
+    # anyone reads its Sharpe, not after.
+    warning = _trade_count_warning(results)
+    if warning:
+        lines += ["", warning]
     lines += [
         "",
         f"Net PNL: ${net_pnl:.2f} ({net_pnl_pct * 100:.2f}%) | "
@@ -1046,6 +1100,7 @@ async def _render(
         table_data=[_metrics_row(bt_results, config)],
         table_columns=list(METRIC_COLUMNS),
         chart_image=chart_bytes,
+        sections=_sections(bt_results),
     )
 
 
