@@ -458,7 +458,14 @@ class ConfigManager:
             # 3. First accessible server
             return await self.get_client(accessible[0])
 
-        # No user_id - use chat default with proper fallbacks
+        # No user_id — no access list to check against, so the caller's explicit
+        # choice wins over the chat default. This branch used to drop
+        # preferred_server entirely, which meant a routine run (web, MCP or agent)
+        # and any handler that omits user_id ran against the chat default no matter
+        # which server was actually selected.
+        if preferred_server and preferred_server in self._data["servers"]:
+            return await self.get_client(preferred_server)
+
         server_name = self.get_chat_default_server(chat_id)
         if not server_name:
             raise ValueError("No servers configured")
