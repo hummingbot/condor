@@ -577,46 +577,43 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> RoutineResu
         )
 
     # Generate persistent report
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        title = f"Archived Bots — {config.mode.title()}"
-        if config.mode == "detail" and config.db_path:
-            title = f"Archived Bot — {_extract_bot_name(config.db_path)}"
-        elif config.db_filter:
-            title += f" ({config.db_filter})"
+    title = f"Archived Bots — {config.mode.title()}"
+    if config.mode == "detail" and config.db_path:
+        title = f"Archived Bot — {_extract_bot_name(config.db_path)}"
+    elif config.db_filter:
+        title += f" ({config.db_filter})"
 
-        builder = ReportBuilder(title)
-        builder.source("routine", "archived_analyzer").tags(
-            ["bots", "archived", config.mode]
-        )
+    builder = ReportBuilder(title)
+    builder.source("routine", "archived_analyzer").tags(
+        ["bots", "archived", config.mode]
+    )
 
-        if config.mode == "detail":
-            kpis = getattr(result, "_detail_kpis", None)
-            if kpis:
-                builder.kpi(
-                    "PnL",
-                    _fmt_pnl(kpis["total_pnl"]),
-                    delta=f"{kpis['duration']}",
-                    trend="up" if kpis["total_pnl"] >= 0 else "down",
-                )
-                builder.kpi("Volume", f"${kpis['total_volume']:,.0f}")
-                builder.kpi("Fees", f"${kpis['total_fees']:,.2f}")
-                builder.kpi("Trades", str(kpis["trade_count"]))
+    if config.mode == "detail":
+        kpis = getattr(result, "_detail_kpis", None)
+        if kpis:
+            builder.kpi(
+                "PnL",
+                _fmt_pnl(kpis["total_pnl"]),
+                delta=f"{kpis['duration']}",
+                trend="up" if kpis["total_pnl"] >= 0 else "down",
+            )
+            builder.kpi("Volume", f"${kpis['total_volume']:,.0f}")
+            builder.kpi("Fees", f"${kpis['total_fees']:,.2f}")
+            builder.kpi("Trades", str(kpis["trade_count"]))
 
-            pnl_fig = getattr(result, "_pnl_fig", None)
-            if pnl_fig:
-                builder.plotly(pnl_fig)
+        pnl_fig = getattr(result, "_pnl_fig", None)
+        if pnl_fig:
+            builder.plotly(pnl_fig)
 
-        if result.table_data:
-            builder.table(result.table_data, result.table_columns)
+    if result.table_data:
+        builder.table(result.table_data, result.table_columns)
 
-        if result.text:
-            builder.markdown(result.text)
+    if result.text:
+        builder.markdown(result.text)
 
-        builder.manual_order()
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    builder.manual_order()
+    await builder.save()
 
     return result

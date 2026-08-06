@@ -537,117 +537,114 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             track_curve=True,
         )
 
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder(f"Quote Optimizer: {config.trading_pair}")
-        builder.source("routine", "quote_optimizer").tags(
-            ["market-making", "1s", config.trading_pair]
+    builder = ReportBuilder(f"Quote Optimizer: {config.trading_pair}")
+    builder.source("routine", "quote_optimizer").tags(
+        ["market-making", "1s", config.trading_pair]
+    )
+    builder.markdown(result)
+
+    if scenarios:
+        # Chart 1: Net/day by distance (bar chart)
+        fig1 = go.Figure()
+        dists = [f"{s['dist_pct']:.3f}%" for s in scenarios[:12]]
+        nets = [s["net_day"] for s in scenarios[:12]]
+        rts = [s["round_trips"] for s in scenarios[:12]]
+        colors = ["#22c55e" if n > 0 else "#ef4444" for n in nets]
+
+        fig1.add_trace(
+            go.Bar(
+                x=dists,
+                y=nets,
+                name="Net/Day",
+                marker_color=colors,
+                text=[f"${n:.1f}<br>{r} RTs" for n, r in zip(nets, rts)],
+                textposition="outside",
+            )
         )
-        builder.markdown(result)
+        fig1.update_layout(
+            title=f"Net Profit/Day by Quote Distance ({config.alloc_per_side_pct:.0f}% alloc, ${side_capital:,.0f}/side)",
+            xaxis_title="Quote Distance",
+            yaxis_title="Net $/Day",
+            template="plotly_dark",
+            height=400,
+            yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.3)"),
+        )
+        builder.plotly(fig1)
 
-        if scenarios:
-            # Chart 1: Net/day by distance (bar chart)
-            fig1 = go.Figure()
-            dists = [f"{s['dist_pct']:.3f}%" for s in scenarios[:12]]
-            nets = [s["net_day"] for s in scenarios[:12]]
-            rts = [s["round_trips"] for s in scenarios[:12]]
-            colors = ["#22c55e" if n > 0 else "#ef4444" for n in nets]
+        # Chart 2: Cumulative PnL + Price for best scenario
+        if best_curve_sim and best_curve_sim.get("pnl_curve"):
+            pnl_curve = best_curve_sim["pnl_curve"]
+            price_curve = best_curve_sim["price_curve"]
+            minutes = [p[0] for p in pnl_curve]
+            pnls = [p[1] for p in pnl_curve]
+            prices = [p[1] for p in price_curve]
 
-            fig1.add_trace(
-                go.Bar(
-                    x=dists,
-                    y=nets,
-                    name="Net/Day",
-                    marker_color=colors,
-                    text=[f"${n:.1f}<br>{r} RTs" for n, r in zip(nets, rts)],
-                    textposition="outside",
-                )
+            fig2 = make_subplots(
+                rows=2,
+                cols=1,
+                shared_xaxes=True,
+                vertical_spacing=0.08,
+                subplot_titles=[
+                    f"Cumulative PnL — Best Distance {scenarios[0]['dist_pct']:.3f}%",
+                    "BTC Price",
+                ],
+                row_heights=[0.6, 0.4],
             )
-            fig1.update_layout(
-                title=f"Net Profit/Day by Quote Distance ({config.alloc_per_side_pct:.0f}% alloc, ${side_capital:,.0f}/side)",
-                xaxis_title="Quote Distance",
-                yaxis_title="Net $/Day",
+            fig2.add_trace(
+                go.Scatter(
+                    x=minutes,
+                    y=pnls,
+                    mode="lines",
+                    name="Cumulative PnL",
+                    line=dict(color="#22c55e", width=2),
+                    fill="tozeroy",
+                    fillcolor="rgba(34,197,94,0.1)",
+                ),
+                row=1,
+                col=1,
+            )
+            fig2.add_trace(
+                go.Scatter(
+                    x=minutes,
+                    y=prices,
+                    mode="lines",
+                    name="BTC Price",
+                    line=dict(color="#60a5fa", width=1),
+                ),
+                row=2,
+                col=1,
+            )
+            fig2.update_layout(
                 template="plotly_dark",
-                height=400,
-                yaxis=dict(zeroline=True, zerolinecolor="rgba(255,255,255,0.3)"),
+                height=500,
+                showlegend=False,
+                xaxis2_title="Time (minutes)",
             )
-            builder.plotly(fig1)
+            fig2.update_yaxes(title_text="PnL ($)", row=1, col=1)
+            fig2.update_yaxes(title_text="Price ($)", row=2, col=1)
+            builder.plotly(fig2)
 
-            # Chart 2: Cumulative PnL + Price for best scenario
-            if best_curve_sim and best_curve_sim.get("pnl_curve"):
-                pnl_curve = best_curve_sim["pnl_curve"]
-                price_curve = best_curve_sim["price_curve"]
-                minutes = [p[0] for p in pnl_curve]
-                pnls = [p[1] for p in pnl_curve]
-                prices = [p[1] for p in price_curve]
+        builder.table(
+            [
+                {
+                    "Distance": f"{s['dist_pct']:.4f}%",
+                    "Spread": f"${s['spread_usd']:.2f}",
+                    "Round Trips": s["round_trips"],
+                    "1-Sided": s["one_sided"],
+                    "Stops": s["stop_outs"],
+                    "Net/Day": f"${s['net_day']:.2f}",
+                    "Net/Month": f"${s['net_month']:,.0f}",
+                }
+                for s in scenarios[:12]
+            ]
+        )
 
-                fig2 = make_subplots(
-                    rows=2,
-                    cols=1,
-                    shared_xaxes=True,
-                    vertical_spacing=0.08,
-                    subplot_titles=[
-                        f"Cumulative PnL — Best Distance {scenarios[0]['dist_pct']:.3f}%",
-                        "BTC Price",
-                    ],
-                    row_heights=[0.6, 0.4],
-                )
-                fig2.add_trace(
-                    go.Scatter(
-                        x=minutes,
-                        y=pnls,
-                        mode="lines",
-                        name="Cumulative PnL",
-                        line=dict(color="#22c55e", width=2),
-                        fill="tozeroy",
-                        fillcolor="rgba(34,197,94,0.1)",
-                    ),
-                    row=1,
-                    col=1,
-                )
-                fig2.add_trace(
-                    go.Scatter(
-                        x=minutes,
-                        y=prices,
-                        mode="lines",
-                        name="BTC Price",
-                        line=dict(color="#60a5fa", width=1),
-                    ),
-                    row=2,
-                    col=1,
-                )
-                fig2.update_layout(
-                    template="plotly_dark",
-                    height=500,
-                    showlegend=False,
-                    xaxis2_title="Time (minutes)",
-                )
-                fig2.update_yaxes(title_text="PnL ($)", row=1, col=1)
-                fig2.update_yaxes(title_text="Price ($)", row=2, col=1)
-                builder.plotly(fig2)
-
-            builder.table(
-                [
-                    {
-                        "Distance": f"{s['dist_pct']:.4f}%",
-                        "Spread": f"${s['spread_usd']:.2f}",
-                        "Round Trips": s["round_trips"],
-                        "1-Sided": s["one_sided"],
-                        "Stops": s["stop_outs"],
-                        "Net/Day": f"${s['net_day']:.2f}",
-                        "Net/Month": f"${s['net_month']:,.0f}",
-                    }
-                    for s in scenarios[:12]
-                ]
-            )
-
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    await builder.save()
 
     # Send oscillation chart to Telegram via matplotlib
     chat_id = context._chat_id if hasattr(context, "_chat_id") else None

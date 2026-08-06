@@ -187,75 +187,72 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     all_rows = gainers + (losers if config.show_losers else [])
     table_data = [{c: row[c] for c in table_cols} for row in all_rows]
 
-    try:
-        import plotly.graph_objects as go
+    import plotly.graph_objects as go
 
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        fig = go.Figure()
+    fig = go.Figure()
+    fig.add_trace(
+        go.Bar(
+            x=[p["pair"] for p in gainers],
+            y=[p["change_pct"] for p in gainers],
+            marker_color="#3fb950",
+            name="Gainers",
+        )
+    )
+    if config.show_losers:
         fig.add_trace(
             go.Bar(
-                x=[p["pair"] for p in gainers],
-                y=[p["change_pct"] for p in gainers],
-                marker_color="#3fb950",
-                name="Gainers",
+                x=[p["pair"] for p in losers],
+                y=[p["change_pct"] for p in losers],
+                marker_color="#f85149",
+                name="Losers",
             )
         )
-        if config.show_losers:
-            fig.add_trace(
-                go.Bar(
-                    x=[p["pair"] for p in losers],
-                    y=[p["change_pct"] for p in losers],
-                    marker_color="#f85149",
-                    name="Losers",
-                )
-            )
-        fig.update_layout(
-            title="24h Price Change %",
-            paper_bgcolor="#0d1117",
-            plot_bgcolor="#161b22",
-            font=dict(color="#c9d1d9", size=10),
-            yaxis_title="Change %",
-            xaxis_tickangle=-45,
-            margin=dict(l=50, r=30, t=50, b=80),
-        )
+    fig.update_layout(
+        title="24h Price Change %",
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#161b22",
+        font=dict(color="#c9d1d9", size=10),
+        yaxis_title="Change %",
+        xaxis_tickangle=-45,
+        margin=dict(l=50, r=30, t=50, b=80),
+    )
 
-        report_table = [
-            {
-                "Pair": p["pair"],
-                "Change": f"{p['change_pct']:+.1f}%",
-                "Price": format_price(p["price"]),
-                "Volume": format_volume(p["volume_usd"]),
-                "Range": f"{p['range_pct']:.1f}%",
-            }
-            for p in all_rows
-        ]
+    report_table = [
+        {
+            "Pair": p["pair"],
+            "Change": f"{p['change_pct']:+.1f}%",
+            "Price": format_price(p["price"]),
+            "Volume": format_volume(p["volume_usd"]),
+            "Range": f"{p['range_pct']:.1f}%",
+        }
+        for p in all_rows
+    ]
 
-        builder = ReportBuilder("Top Movers — Binance Perpetuals")
-        builder.source("routine", "top_movers").tags(["market", "movers"])
-        builder.kpi("Pairs", str(len(tradable)))
-        if gainers:
-            builder.kpi(
-                "Top Gainer",
-                gainers[0]["pair"],
-                delta=f"{gainers[0]['change_pct']:+.1f}%",
-                trend="up",
-            )
-        if losers:
-            builder.kpi(
-                "Top Loser",
-                losers[0]["pair"],
-                delta=f"{losers[0]['change_pct']:+.1f}%",
-                trend="down",
-            )
-        builder.markdown(
-            f"{len(tradable)} pairs · vol > {format_volume(config.min_volume_usd)}"
+    builder = ReportBuilder("Top Movers — Binance Perpetuals")
+    builder.source("routine", "top_movers").tags(["market", "movers"])
+    builder.kpi("Pairs", str(len(tradable)))
+    if gainers:
+        builder.kpi(
+            "Top Gainer",
+            gainers[0]["pair"],
+            delta=f"{gainers[0]['change_pct']:+.1f}%",
+            trend="up",
         )
-        builder.plotly(fig)
-        builder.table(report_table)
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    if losers:
+        builder.kpi(
+            "Top Loser",
+            losers[0]["pair"],
+            delta=f"{losers[0]['change_pct']:+.1f}%",
+            trend="down",
+        )
+    builder.markdown(
+        f"{len(tradable)} pairs · vol > {format_volume(config.min_volume_usd)}"
+    )
+    builder.plotly(fig)
+    builder.table(report_table)
+    await builder.save()
 
     # Build KPI sections for inline dashboard view
     kpi_sections = [{"type": "kpi", "label": "Pairs", "value": str(len(tradable))}]

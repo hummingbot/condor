@@ -279,234 +279,225 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     except (ValueError, Exception):
         pass
 
-    try:
-        from condor.reports import ReportBuilder
-        from routines.base import RoutineResult
+    from condor.reports import ReportBuilder
+    from routines.base import RoutineResult
 
-        builder = ReportBuilder(f"Mean Reversion Research — {config.trading_pair}")
-        builder.source("routine", "mean_reversion_research").tags(
-            ["analysis", "mean-reversion", config.trading_pair, config.connector]
-        )
+    builder = ReportBuilder(f"Mean Reversion Research — {config.trading_pair}")
+    builder.source("routine", "mean_reversion_research").tags(
+        ["analysis", "mean-reversion", config.trading_pair, config.connector]
+    )
 
-        # ── Summary KPIs ───────────────────────────────────────────────────────
-        builder.section(
-            "SUMMARY",
-            f"{config.trading_pair} · {config.connector} · {len(analyses)} timeframes",
-        )
-        builder.kpi("Pair", config.trading_pair)
-        builder.kpi("Connector", config.connector)
-        builder.kpi("Best MR Timeframe", best_tf)
-        builder.kpi("Best MR Score", f"{best['mr_score']:.1f} / 100")
-        builder.kpi("Regime Gate TF", regime_gate_tf or "N/A")
-        builder.kpi("Timeframes Analyzed", str(len(analyses)))
+    # ── Summary KPIs ───────────────────────────────────────────────────────
+    builder.section(
+        "SUMMARY",
+        f"{config.trading_pair} · {config.connector} · {len(analyses)} timeframes",
+    )
+    builder.kpi("Pair", config.trading_pair)
+    builder.kpi("Connector", config.connector)
+    builder.kpi("Best MR Timeframe", best_tf)
+    builder.kpi("Best MR Score", f"{best['mr_score']:.1f} / 100")
+    builder.kpi("Regime Gate TF", regime_gate_tf or "N/A")
+    builder.kpi("Timeframes Analyzed", str(len(analyses)))
 
-        # ── MR Suitability Ranking ─────────────────────────────────────────────
-        builder.section(
-            "MR SUITABILITY RANKING",
-            "Composite score — Hurst 30% · AutoCorr 25% · BB-Rev 25% · Z-Tail 10% · Kurtosis 10%",
-        )
-        ranking_rows = []
-        for i, a in enumerate(ranked):
-            if a["hurst"] < 0.4:
-                regime = "Strong MR"
-            elif a["hurst"] < 0.5:
-                regime = "Weak MR"
-            elif a["hurst"] < 0.6:
-                regime = "Random Walk"
-            else:
-                regime = "Trending"
-            ranking_rows.append(
-                {
-                    "Rank": i + 1,
-                    "TF": a["tf"],
-                    "MR Score": f"{a['mr_score']:.1f}",
-                    "Hurst": f"{a['hurst']:.3f}",
-                    "Regime": regime,
-                    "AutoCorr L1": f"{a['autocorr_lag1']:.3f}",
-                    "BB Rev%": f"{a['bb_reversion_rate']:.1f}%",
-                    "Z-Tail%": f"{a['z_tail_freq']:.1f}%",
-                    "RSI Sig%": f"{a['rsi_signal_freq']:.1f}%",
-                }
-            )
-        builder.table(
-            ranking_rows,
-            [
-                "Rank",
-                "TF",
-                "MR Score",
-                "Hurst",
-                "Regime",
-                "AutoCorr L1",
-                "BB Rev%",
-                "Z-Tail%",
-                "RSI Sig%",
-            ],
-        )
-
-        # ── Return Distribution ────────────────────────────────────────────────
-        builder.section(
-            "RETURN DISTRIBUTION",
-            "Per-bar return stats — mean/std in %; skew & excess kurtosis",
-        )
-        ret_rows = [
-            {
-                "TF": a["tf"],
-                "Candles": a["n_candles"],
-                "Mean %": f"{a['ret_mean_pct']:.5f}",
-                "Std %": f"{a['ret_std_pct']:.4f}",
-                "Skew": f"{a['ret_skew']:.3f}",
-                "Ex. Kurt": f"{a['ret_kurt']:.2f}",
-            }
-            for a in analyses
-        ]
-        builder.table(
-            ret_rows, ["TF", "Candles", "Mean %", "Std %", "Skew", "Ex. Kurt"]
-        )
-
-        # ── RSI(14) ────────────────────────────────────────────────────────────
-        builder.section(
-            "RSI(14) DISTRIBUTION",
-            "Extreme-zone frequency: oversold <30, overbought >70",
-        )
-        rsi_rows = [
-            {
-                "TF": a["tf"],
-                "RSI Mean": f"{a['rsi_mean']:.1f}",
-                "RSI Std": f"{a['rsi_std']:.1f}",
-                "OS % (<30)": f"{a['rsi_os_freq']:.2f}%",
-                "OB % (>70)": f"{a['rsi_ob_freq']:.2f}%",
-                "Total Signal %": f"{a['rsi_signal_freq']:.2f}%",
-            }
-            for a in analyses
-        ]
-        builder.table(
-            rsi_rows,
-            ["TF", "RSI Mean", "RSI Std", "OS % (<30)", "OB % (>70)", "Total Signal %"],
-        )
-
-        # ── Bollinger Bands(20,2) ──────────────────────────────────────────────
-        builder.section(
-            "BOLLINGER BANDS(20,2)", "Band-touch rate and 3-bar reversion rate"
-        )
-        bb_rows = [
-            {
-                "TF": a["tf"],
-                "Touch Rate %": f"{a['bb_touch_rate']:.2f}%",
-                "3-Bar Reversion %": f"{a['bb_reversion_rate']:.1f}%",
-            }
-            for a in analyses
-        ]
-        builder.table(bb_rows, ["TF", "Touch Rate %", "3-Bar Reversion %"])
-
-        # ── Z-Score(30) ────────────────────────────────────────────────────────
-        builder.section("Z-SCORE(30) DISTRIBUTION", "Rolling Z-score tail frequency")
-        z_rows = [
-            {
-                "TF": a["tf"],
-                "Z Mean": f"{a['z_mean']:.3f}",
-                "Z Std": f"{a['z_std']:.3f}",
-                "|Z|>2 %": f"{a['z_tail_freq']:.2f}%",
-                "|Z|>3 %": f"{a['z_extreme_freq']:.2f}%",
-            }
-            for a in analyses
-        ]
-        builder.table(z_rows, ["TF", "Z Mean", "Z Std", "|Z|>2 %", "|Z|>3 %"])
-
-        # ── Recommendation ─────────────────────────────────────────────────────
-        builder.section("RECOMMENDATION", "Primary timeframe and regime gate")
-        hurst_interp = (
-            "strong mean reversion"
-            if best["hurst"] < 0.4
-            else (
-                "moderate mean reversion"
-                if best["hurst"] < 0.5
-                else "near-random walk — MR is marginal"
-            )
-        )
-        autocorr_interp = (
-            "negative (confirms MR tendency)"
-            if best["autocorr_lag1"] < -0.02
-            else (
-                "near-zero (neutral)"
-                if best["autocorr_lag1"] < 0.02
-                else "positive (slight trending bias)"
-            )
-        )
-        rec = [
-            f"## {config.trading_pair} Mean Reversion Summary",
-            "",
-            f"**Primary Timeframe: {best_tf}**  (MR Score: {best['mr_score']:.1f}/100)",
-            f"| Metric | Value | Interpretation |",
-            f"|---|---|---|",
-            f"| Hurst | {best['hurst']:.3f} | {hurst_interp} |",
-            f"| AutoCorr Lag-1 | {best['autocorr_lag1']:.3f} | {autocorr_interp} |",
-            f"| BB 3-Bar Reversion | {best['bb_reversion_rate']:.1f}% | {'strong' if best['bb_reversion_rate'] > 70 else 'moderate' if best['bb_reversion_rate'] > 50 else 'weak'} snap-back |",
-            f"| Z-Score Tail (|z|>2) | {best['z_tail_freq']:.1f}% | {'fat tails, many signals' if best['z_tail_freq'] > 10 else 'thin tails, few signals'} |",
-            f"| RSI Signal Freq | {best['rsi_signal_freq']:.1f}% | extreme-zone bars |",
-            "",
-        ]
-        if regime_gate_tf and regime_gate_a:
-            rga = regime_gate_a
-            rec += [
-                f"**Regime Gate: {regime_gate_tf}**",
-                f"- Use {regime_gate_tf} Z-score or Hurst to gate {best_tf} entries.",
-                f"- Only trade MR on {best_tf} when {regime_gate_tf} shows non-trending regime.",
-                f"  - {regime_gate_tf} Hurst: {rga['hurst']:.3f} | AutoCorr: {rga['autocorr_lag1']:.3f} | Z-Tail: {rga['z_tail_freq']:.1f}%",
-                "",
-            ]
+    # ── MR Suitability Ranking ─────────────────────────────────────────────
+    builder.section(
+        "MR SUITABILITY RANKING",
+        "Composite score — Hurst 30% · AutoCorr 25% · BB-Rev 25% · Z-Tail 10% · Kurtosis 10%",
+    )
+    ranking_rows = []
+    for i, a in enumerate(ranked):
+        if a["hurst"] < 0.4:
+            regime = "Strong MR"
+        elif a["hurst"] < 0.5:
+            regime = "Weak MR"
+        elif a["hurst"] < 0.6:
+            regime = "Random Walk"
         else:
-            rec.append(f"No suitable regime gate found among analyzed timeframes.\n")
-
-        if best["hurst"] >= 0.5:
-            rec.append(
-                "⚠️ **Warning**: Top-ranked TF shows random-walk or trending behavior. MR strategies may underperform — consider a trend-following approach instead."
-            )
-        elif best["mr_score"] < 40:
-            rec.append(
-                "⚠️ **Warning**: Overall MR score is low. Verify with a longer sample before deploying capital."
-            )
-        else:
-            rec.append(
-                f"✅ **Verdict**: {best_tf} shows meaningful mean-reversion characteristics. Suitable for MR strategy deployment with {regime_gate_tf or 'no'} regime filter."
-            )
-
-        builder.markdown("\n".join(rec))
-        builder.manual_order()
-        await builder.save()
-
-        summary_rows = [
+            regime = "Trending"
+        ranking_rows.append(
             {
                 "Rank": i + 1,
                 "TF": a["tf"],
-                "MR Score": f"{a['mr_score']:.0f}",
+                "MR Score": f"{a['mr_score']:.1f}",
                 "Hurst": f"{a['hurst']:.3f}",
-                "AutoCorr": f"{a['autocorr_lag1']:.3f}",
-                "BB Rev%": f"{a['bb_reversion_rate']:.0f}%",
+                "Regime": regime,
+                "AutoCorr L1": f"{a['autocorr_lag1']:.3f}",
+                "BB Rev%": f"{a['bb_reversion_rate']:.1f}%",
+                "Z-Tail%": f"{a['z_tail_freq']:.1f}%",
                 "RSI Sig%": f"{a['rsi_signal_freq']:.1f}%",
             }
-            for i, a in enumerate(ranked)
+        )
+    builder.table(
+        ranking_rows,
+        [
+            "Rank",
+            "TF",
+            "MR Score",
+            "Hurst",
+            "Regime",
+            "AutoCorr L1",
+            "BB Rev%",
+            "Z-Tail%",
+            "RSI Sig%",
+        ],
+    )
+
+    # ── Return Distribution ────────────────────────────────────────────────
+    builder.section(
+        "RETURN DISTRIBUTION",
+        "Per-bar return stats — mean/std in %; skew & excess kurtosis",
+    )
+    ret_rows = [
+        {
+            "TF": a["tf"],
+            "Candles": a["n_candles"],
+            "Mean %": f"{a['ret_mean_pct']:.5f}",
+            "Std %": f"{a['ret_std_pct']:.4f}",
+            "Skew": f"{a['ret_skew']:.3f}",
+            "Ex. Kurt": f"{a['ret_kurt']:.2f}",
+        }
+        for a in analyses
+    ]
+    builder.table(ret_rows, ["TF", "Candles", "Mean %", "Std %", "Skew", "Ex. Kurt"])
+
+    # ── RSI(14) ────────────────────────────────────────────────────────────
+    builder.section(
+        "RSI(14) DISTRIBUTION",
+        "Extreme-zone frequency: oversold <30, overbought >70",
+    )
+    rsi_rows = [
+        {
+            "TF": a["tf"],
+            "RSI Mean": f"{a['rsi_mean']:.1f}",
+            "RSI Std": f"{a['rsi_std']:.1f}",
+            "OS % (<30)": f"{a['rsi_os_freq']:.2f}%",
+            "OB % (>70)": f"{a['rsi_ob_freq']:.2f}%",
+            "Total Signal %": f"{a['rsi_signal_freq']:.2f}%",
+        }
+        for a in analyses
+    ]
+    builder.table(
+        rsi_rows,
+        ["TF", "RSI Mean", "RSI Std", "OS % (<30)", "OB % (>70)", "Total Signal %"],
+    )
+
+    # ── Bollinger Bands(20,2) ──────────────────────────────────────────────
+    builder.section("BOLLINGER BANDS(20,2)", "Band-touch rate and 3-bar reversion rate")
+    bb_rows = [
+        {
+            "TF": a["tf"],
+            "Touch Rate %": f"{a['bb_touch_rate']:.2f}%",
+            "3-Bar Reversion %": f"{a['bb_reversion_rate']:.1f}%",
+        }
+        for a in analyses
+    ]
+    builder.table(bb_rows, ["TF", "Touch Rate %", "3-Bar Reversion %"])
+
+    # ── Z-Score(30) ────────────────────────────────────────────────────────
+    builder.section("Z-SCORE(30) DISTRIBUTION", "Rolling Z-score tail frequency")
+    z_rows = [
+        {
+            "TF": a["tf"],
+            "Z Mean": f"{a['z_mean']:.3f}",
+            "Z Std": f"{a['z_std']:.3f}",
+            "|Z|>2 %": f"{a['z_tail_freq']:.2f}%",
+            "|Z|>3 %": f"{a['z_extreme_freq']:.2f}%",
+        }
+        for a in analyses
+    ]
+    builder.table(z_rows, ["TF", "Z Mean", "Z Std", "|Z|>2 %", "|Z|>3 %"])
+
+    # ── Recommendation ─────────────────────────────────────────────────────
+    builder.section("RECOMMENDATION", "Primary timeframe and regime gate")
+    hurst_interp = (
+        "strong mean reversion"
+        if best["hurst"] < 0.4
+        else (
+            "moderate mean reversion"
+            if best["hurst"] < 0.5
+            else "near-random walk — MR is marginal"
+        )
+    )
+    autocorr_interp = (
+        "negative (confirms MR tendency)"
+        if best["autocorr_lag1"] < -0.02
+        else (
+            "near-zero (neutral)"
+            if best["autocorr_lag1"] < 0.02
+            else "positive (slight trending bias)"
+        )
+    )
+    rec = [
+        f"## {config.trading_pair} Mean Reversion Summary",
+        "",
+        f"**Primary Timeframe: {best_tf}**  (MR Score: {best['mr_score']:.1f}/100)",
+        f"| Metric | Value | Interpretation |",
+        f"|---|---|---|",
+        f"| Hurst | {best['hurst']:.3f} | {hurst_interp} |",
+        f"| AutoCorr Lag-1 | {best['autocorr_lag1']:.3f} | {autocorr_interp} |",
+        f"| BB 3-Bar Reversion | {best['bb_reversion_rate']:.1f}% | {'strong' if best['bb_reversion_rate'] > 70 else 'moderate' if best['bb_reversion_rate'] > 50 else 'weak'} snap-back |",
+        f"| Z-Score Tail (|z|>2) | {best['z_tail_freq']:.1f}% | {'fat tails, many signals' if best['z_tail_freq'] > 10 else 'thin tails, few signals'} |",
+        f"| RSI Signal Freq | {best['rsi_signal_freq']:.1f}% | extreme-zone bars |",
+        "",
+    ]
+    if regime_gate_tf and regime_gate_a:
+        rga = regime_gate_a
+        rec += [
+            f"**Regime Gate: {regime_gate_tf}**",
+            f"- Use {regime_gate_tf} Z-score or Hurst to gate {best_tf} entries.",
+            f"- Only trade MR on {best_tf} when {regime_gate_tf} shows non-trending regime.",
+            f"  - {regime_gate_tf} Hurst: {rga['hurst']:.3f} | AutoCorr: {rga['autocorr_lag1']:.3f} | Z-Tail: {rga['z_tail_freq']:.1f}%",
+            "",
         ]
+    else:
+        rec.append(f"No suitable regime gate found among analyzed timeframes.\n")
 
-        summary = (
-            f"MR Research: {config.trading_pair} on {config.connector}\n"
-            f"Best TF: {best_tf} (score {best['mr_score']:.0f}/100) · "
-            f"Hurst {best['hurst']:.3f} · AutoCorr {best['autocorr_lag1']:.3f} · "
-            f"Regime Gate: {regime_gate_tf or 'N/A'}"
+    if best["hurst"] >= 0.5:
+        rec.append(
+            "⚠️ **Warning**: Top-ranked TF shows random-walk or trending behavior. MR strategies may underperform — consider a trend-following approach instead."
         )
-        return RoutineResult(
-            text=summary,
-            table_data=summary_rows,
-            table_columns=[
-                "Rank",
-                "TF",
-                "MR Score",
-                "Hurst",
-                "AutoCorr",
-                "BB Rev%",
-                "RSI Sig%",
-            ],
+    elif best["mr_score"] < 40:
+        rec.append(
+            "⚠️ **Warning**: Overall MR score is low. Verify with a longer sample before deploying capital."
+        )
+    else:
+        rec.append(
+            f"✅ **Verdict**: {best_tf} shows meaningful mean-reversion characteristics. Suitable for MR strategy deployment with {regime_gate_tf or 'no'} regime filter."
         )
 
-    except Exception as e:
-        logger.error(f"Report failed: {e}", exc_info=True)
-        return f"Analysis complete for {config.trading_pair} but report generation failed: {e}"
+    builder.markdown("\n".join(rec))
+    builder.manual_order()
+    await builder.save()
+
+    summary_rows = [
+        {
+            "Rank": i + 1,
+            "TF": a["tf"],
+            "MR Score": f"{a['mr_score']:.0f}",
+            "Hurst": f"{a['hurst']:.3f}",
+            "AutoCorr": f"{a['autocorr_lag1']:.3f}",
+            "BB Rev%": f"{a['bb_reversion_rate']:.0f}%",
+            "RSI Sig%": f"{a['rsi_signal_freq']:.1f}%",
+        }
+        for i, a in enumerate(ranked)
+    ]
+
+    summary = (
+        f"MR Research: {config.trading_pair} on {config.connector}\n"
+        f"Best TF: {best_tf} (score {best['mr_score']:.0f}/100) · "
+        f"Hurst {best['hurst']:.3f} · AutoCorr {best['autocorr_lag1']:.3f} · "
+        f"Regime Gate: {regime_gate_tf or 'N/A'}"
+    )
+    return RoutineResult(
+        text=summary,
+        table_data=summary_rows,
+        table_columns=[
+            "Rank",
+            "TF",
+            "MR Score",
+            "Hurst",
+            "AutoCorr",
+            "BB Rev%",
+            "RSI Sig%",
+        ],
+    )

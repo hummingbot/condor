@@ -225,34 +225,31 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     text = "\n".join(lines)
 
     # Save HTML report
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder(f"Spot-Perp Basis: {config.symbol}")
-        builder.source("routine", "spot_perp_basis").tags(
-            ["basis", "funding", config.symbol]
-        )
+    builder = ReportBuilder(f"Spot-Perp Basis: {config.symbol}")
+    builder.source("routine", "spot_perp_basis").tags(
+        ["basis", "funding", config.symbol]
+    )
+    builder.kpi(
+        "Current Basis",
+        f"{merged['basis_pct'].iloc[-1]:.4f}%",
+        trend="up" if merged["basis_pct"].iloc[-1] >= 0 else "down",
+    )
+    builder.kpi("Mean Basis", f"{merged['basis_pct'].mean():.4f}%")
+    if has_funding:
+        last_fr = funding_df["rate"].iloc[-1]
+        avg_fr = funding_df["rate"].mean()
         builder.kpi(
-            "Current Basis",
-            f"{merged['basis_pct'].iloc[-1]:.4f}%",
-            trend="up" if merged["basis_pct"].iloc[-1] >= 0 else "down",
+            "Last Funding",
+            f"{last_fr:.4f}%",
+            delta=f"Ann. {avg_fr * 3 * 365:.1f}%",
+            trend="up" if last_fr >= 0 else "down",
         )
-        builder.kpi("Mean Basis", f"{merged['basis_pct'].mean():.4f}%")
-        if has_funding:
-            last_fr = funding_df["rate"].iloc[-1]
-            avg_fr = funding_df["rate"].mean()
-            builder.kpi(
-                "Last Funding",
-                f"{last_fr:.4f}%",
-                delta=f"Ann. {avg_fr * 3 * 365:.1f}%",
-                trend="up" if last_fr >= 0 else "down",
-            )
-        if fig is not None:
-            builder.plotly(fig)
-        builder.markdown(text)
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    if fig is not None:
+        builder.plotly(fig)
+    builder.markdown(text)
+    await builder.save()
 
     return RoutineResult(text=text, chart_image=chart_bytes)
 

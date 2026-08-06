@@ -328,146 +328,134 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     text = format_results(results, sort_key, config.show_n)
 
     # 5. Report
-    try:
-        import plotly.graph_objects as go
+    import plotly.graph_objects as go
 
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        # --- Scatter: VWAP upside vs ATH upside ---
-        sizes = np.array([r["volume_24h_usd"] for r in results])
-        sizes_norm = (
-            (sizes / sizes.max() * 30 + 8)
-            if sizes.max() > 0
-            else np.full(len(results), 15)
-        )
-        colors = ["#3fb950" if r["upside_vwap"] > 0 else "#f85149" for r in results]
+    # --- Scatter: VWAP upside vs ATH upside ---
+    sizes = np.array([r["volume_24h_usd"] for r in results])
+    sizes_norm = (
+        (sizes / sizes.max() * 30 + 8) if sizes.max() > 0 else np.full(len(results), 15)
+    )
+    colors = ["#3fb950" if r["upside_vwap"] > 0 else "#f85149" for r in results]
 
-        fig = go.Figure()
-        fig.add_trace(
-            go.Scatter(
-                x=[r["upside_vwap"] for r in results],
-                y=[r["upside_ath"] for r in results],
-                mode="markers+text",
-                marker=dict(
-                    size=sizes_norm,
-                    color=colors,
-                    line=dict(width=1, color="#0d1117"),
-                    opacity=0.8,
-                ),
-                text=[r["trading_pair"].replace("-USDT", "") for r in results],
-                textposition="top center",
-                textfont=dict(size=7, color="#8b949e"),
-                hovertemplate=(
-                    "<b>%{text}</b><br>"
-                    "VWAP upside: %{x:.0f}%<br>"
-                    "ATH upside: %{y:.0f}%<extra></extra>"
-                ),
-            )
+    fig = go.Figure()
+    fig.add_trace(
+        go.Scatter(
+            x=[r["upside_vwap"] for r in results],
+            y=[r["upside_ath"] for r in results],
+            mode="markers+text",
+            marker=dict(
+                size=sizes_norm,
+                color=colors,
+                line=dict(width=1, color="#0d1117"),
+                opacity=0.8,
+            ),
+            text=[r["trading_pair"].replace("-USDT", "") for r in results],
+            textposition="top center",
+            textfont=dict(size=7, color="#8b949e"),
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                "VWAP upside: %{x:.0f}%<br>"
+                "ATH upside: %{y:.0f}%<extra></extra>"
+            ),
         )
-        fig.update_layout(
-            title="Mean Reversion — ATH vs VWAP Upside",
-            xaxis_title="VWAP Upside (%)",
-            yaxis_title="ATH Upside (%)",
-            paper_bgcolor="#0d1117",
-            plot_bgcolor="#161b22",
-            font=dict(color="#c9d1d9", size=11),
-            margin=dict(l=60, r=30, t=80, b=60),
-            showlegend=False,
-        )
-        fig.update_xaxes(gridcolor="#21262d", zeroline=True, zerolinecolor="#30363d")
-        fig.update_yaxes(gridcolor="#21262d", zeroline=True, zerolinecolor="#30363d")
-        fig.update_layout(
-            legend=dict(
-                orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5
-            )
-        )
+    )
+    fig.update_layout(
+        title="Mean Reversion — ATH vs VWAP Upside",
+        xaxis_title="VWAP Upside (%)",
+        yaxis_title="ATH Upside (%)",
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#161b22",
+        font=dict(color="#c9d1d9", size=11),
+        margin=dict(l=60, r=30, t=80, b=60),
+        showlegend=False,
+    )
+    fig.update_xaxes(gridcolor="#21262d", zeroline=True, zerolinecolor="#30363d")
+    fig.update_yaxes(gridcolor="#21262d", zeroline=True, zerolinecolor="#30363d")
+    fig.update_layout(
+        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
+    )
 
-        # --- Bar chart: top 20 by discount from ATH ---
-        top_discount = sorted(results, key=lambda x: x["discount_pct"], reverse=True)[
-            :20
-        ]
-        fig2 = go.Figure()
-        fig2.add_trace(
-            go.Bar(
-                x=[r["trading_pair"].replace("-USDT", "") for r in top_discount],
-                y=[r["discount_pct"] for r in top_discount],
-                marker_color=[
-                    "#3fb950" if r["upside_vwap"] > 0 else "#f85149"
-                    for r in top_discount
-                ],
-                hovertemplate="%{x}<br>Discount: %{y:.0f}%<extra></extra>",
-            )
+    # --- Bar chart: top 20 by discount from ATH ---
+    top_discount = sorted(results, key=lambda x: x["discount_pct"], reverse=True)[:20]
+    fig2 = go.Figure()
+    fig2.add_trace(
+        go.Bar(
+            x=[r["trading_pair"].replace("-USDT", "") for r in top_discount],
+            y=[r["discount_pct"] for r in top_discount],
+            marker_color=[
+                "#3fb950" if r["upside_vwap"] > 0 else "#f85149" for r in top_discount
+            ],
+            hovertemplate="%{x}<br>Discount: %{y:.0f}%<extra></extra>",
         )
-        fig2.update_layout(
-            title="Discount from ATH (%)",
-            xaxis_title="",
-            yaxis_title="Discount %",
-            paper_bgcolor="#0d1117",
-            plot_bgcolor="#161b22",
-            font=dict(color="#c9d1d9", size=11),
-            margin=dict(l=50, r=20, t=60, b=80),
-            xaxis_tickangle=-45,
-        )
-        fig2.update_xaxes(gridcolor="#21262d")
-        fig2.update_yaxes(gridcolor="#21262d")
-        fig2.update_layout(
-            legend=dict(
-                orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5
-            )
-        )
+    )
+    fig2.update_layout(
+        title="Discount from ATH (%)",
+        xaxis_title="",
+        yaxis_title="Discount %",
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#161b22",
+        font=dict(color="#c9d1d9", size=11),
+        margin=dict(l=50, r=20, t=60, b=80),
+        xaxis_tickangle=-45,
+    )
+    fig2.update_xaxes(gridcolor="#21262d")
+    fig2.update_yaxes(gridcolor="#21262d")
+    fig2.update_layout(
+        legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5)
+    )
 
-        # --- Table ---
-        table_data = [
-            {
-                "Pair": r["trading_pair"],
-                "Price": fmt_price(r["current_price"]),
-                "ATH": fmt_price(r["ath"]),
-                "ATH Up": f"{r['upside_ath']:+.0f}%",
-                "VWAP": fmt_price(r["vwap"]),
-                "VWAP Up": f"{r['upside_vwap']:+.0f}%",
-                "Discount": f"{r['discount_pct']:.0f}%",
-                "Range": f"{r['position_pct']:.0f}%",
-                "Vol 24h": fmt_vol(r["volume_24h_usd"]),
-                "Days": r["history_days"],
-            }
-            for r in results
-        ]
+    # --- Table ---
+    table_data = [
+        {
+            "Pair": r["trading_pair"],
+            "Price": fmt_price(r["current_price"]),
+            "ATH": fmt_price(r["ath"]),
+            "ATH Up": f"{r['upside_ath']:+.0f}%",
+            "VWAP": fmt_price(r["vwap"]),
+            "VWAP Up": f"{r['upside_vwap']:+.0f}%",
+            "Discount": f"{r['discount_pct']:.0f}%",
+            "Range": f"{r['position_pct']:.0f}%",
+            "Vol 24h": fmt_vol(r["volume_24h_usd"]),
+            "Days": r["history_days"],
+        }
+        for r in results
+    ]
 
-        # KPIs
-        top_ath_r = results[0]
-        top_vwap_r = max(results, key=lambda x: x["upside_vwap"])
-        below_vwap = sum(1 for r in results if r["upside_vwap"] > 0)
-        avg_discount = np.mean([r["discount_pct"] for r in results])
+    # KPIs
+    top_ath_r = results[0]
+    top_vwap_r = max(results, key=lambda x: x["upside_vwap"])
+    below_vwap = sum(1 for r in results if r["upside_vwap"] > 0)
+    avg_discount = np.mean([r["discount_pct"] for r in results])
 
-        builder = ReportBuilder(f"Mean Reversion Scanner ({len(results)} pairs)")
-        builder.source("routine", "mean_reversion_scanner").tags(
-            ["scanner", "mean-reversion", "perpetual"]
-        )
-        builder.kpi(
-            "Top ATH Upside",
-            f"{top_ath_r['trading_pair']} +{top_ath_r['upside_ath']:.0f}%",
-        )
-        builder.kpi(
-            "Top VWAP Upside",
-            f"{top_vwap_r['trading_pair']} +{top_vwap_r['upside_vwap']:.0f}%",
-        )
-        builder.kpi("Below VWAP", f"{below_vwap}/{len(results)} pairs")
-        builder.kpi("Avg ATH Discount", f"{avg_discount:.0f}%")
-        builder.plotly(fig)
-        builder.plotly(fig2)
-        builder.markdown(
-            "## Methodology\n"
-            "- **ATH**: All-time high from daily candles (up to 1000 days)\n"
-            "- **VWAP**: Volume-weighted average price over full history\n"
-            "- **Upside**: Potential gain if price reverts to ATH or VWAP\n"
-            "- **Range Position**: 0% = near all-time low, 100% = near ATH\n"
-            "- Green = below VWAP (potential mean reversion up)\n"
-            "- Red = above VWAP (already extended)"
-        )
-        builder.table(table_data)
-        builder.manual_order()
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    builder = ReportBuilder(f"Mean Reversion Scanner ({len(results)} pairs)")
+    builder.source("routine", "mean_reversion_scanner").tags(
+        ["scanner", "mean-reversion", "perpetual"]
+    )
+    builder.kpi(
+        "Top ATH Upside",
+        f"{top_ath_r['trading_pair']} +{top_ath_r['upside_ath']:.0f}%",
+    )
+    builder.kpi(
+        "Top VWAP Upside",
+        f"{top_vwap_r['trading_pair']} +{top_vwap_r['upside_vwap']:.0f}%",
+    )
+    builder.kpi("Below VWAP", f"{below_vwap}/{len(results)} pairs")
+    builder.kpi("Avg ATH Discount", f"{avg_discount:.0f}%")
+    builder.plotly(fig)
+    builder.plotly(fig2)
+    builder.markdown(
+        "## Methodology\n"
+        "- **ATH**: All-time high from daily candles (up to 1000 days)\n"
+        "- **VWAP**: Volume-weighted average price over full history\n"
+        "- **Upside**: Potential gain if price reverts to ATH or VWAP\n"
+        "- **Range Position**: 0% = near all-time low, 100% = near ATH\n"
+        "- Green = below VWAP (potential mean reversion up)\n"
+        "- Red = above VWAP (already extended)"
+    )
+    builder.table(table_data)
+    builder.manual_order()
+    await builder.save()
 
     return text
