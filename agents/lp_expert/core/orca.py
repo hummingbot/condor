@@ -1,14 +1,29 @@
-"""Pure Orca pool normalization, metrics, categories, and ranking."""
+"""Pure Orca pool normalization, metrics, and neutral ranking."""
 
 from __future__ import annotations
 
+import asyncio
+import json
 import math
+import time
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
 WINDOWS = ("1h", "4h", "24h", "7d")
+BASE_URL = "https://api.orca.so/v2/solana"
+POOL_PATH = "/v2/solana/pools"
+DISCOVERY_LENSES = (
+    "yieldovertvl24h",
+    "yieldovertvl7d",
+    "volume24h",
+    "volume7d",
+)
 MCDA_WEIGHTS = {
     "fee_productivity": 0.40,
     "recent_activity": 0.25,
@@ -16,6 +31,88 @@ MCDA_WEIGHTS = {
     "liquidity_depth": 0.10,
     "execution_simplicity": 0.10,
 }
+
+
+def _validate_url(url: str) -> None:
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != "api.orca.so"
+        or parsed.path != POOL_PATH
+        or parsed.fragment
+    ):
+        raise ValueError("untrusted Orca API URL")
+
+
+class _TrustedRedirects(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _validate_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _retry_delay(error: HTTPError) -> float:
+    value = error.headers.get("Retry-After") if error.headers else None
+    if value:
+        try:
+            return min(5.0, max(0.0, float(value)))
+        except ValueError:
+            try:
+                target = parsedate_to_datetime(value)
+                if target.tzinfo is None:
+                    target = target.replace(tzinfo=timezone.utc)
+                return min(
+                    5.0,
+                    max(0.0, (target - datetime.now(timezone.utc)).total_seconds()),
+                )
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return 0.5
+
+
+def fetch_json(url: str) -> dict[str, Any]:
+    """Fetch one bounded Orca list page from the trusted endpoint."""
+    _validate_url(url)
+    request = Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "Condor-lp-expert/2.0"},
+    )
+    opener = build_opener(_TrustedRedirects())
+    for attempt in range(2):
+        try:
+            with opener.open(request, timeout=15) as response:
+                _validate_url(response.geturl())
+                value = json.loads(response.read().decode("utf-8"))
+            if not isinstance(value, dict) or not isinstance(value.get("data"), list):
+                raise ValueError("Orca response must contain a data list")
+            return value
+        except HTTPError as exc:
+            if attempt == 0 and (exc.code == 429 or 500 <= exc.code <= 599):
+                time.sleep(_retry_delay(exc))
+                continue
+            raise
+        except (TimeoutError, URLError):
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            raise
+    raise RuntimeError("unreachable Orca retry state")
+
+
+def discovery_request(lens: str) -> str:
+    if lens not in DISCOVERY_LENSES:
+        raise ValueError("unsupported Orca discovery lens")
+    query = urlencode(
+        {
+            "sortBy": lens,
+            "sortDirection": "desc",
+            "stats": ",".join(WINDOWS),
+            "size": 100,
+            "minTvl": 0,
+        }
+    )
+    url = f"{BASE_URL}/pools?{query}"
+    _validate_url(url)
+    return url
 
 
 def _first(value: Any, paths: tuple[str, ...]) -> Any:
@@ -515,3 +612,166 @@ def rank_pools(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in ranked:
         row.pop("_movement", None)
     return _round_tree(ranked)
+
+
+def _error_text(error: BaseException) -> str:
+    if isinstance(error, HTTPError):
+        return f"HTTP {error.code}"
+    if isinstance(error, URLError):
+        return f"URL error: {error.reason}"
+    return f"{type(error).__name__}: {error}"
+
+
+async def scan_pools(limit: int) -> dict[str, Any]:
+    """Fetch the four bounded discovery lenses and return compact neutral evidence."""
+    if isinstance(limit, bool) or not 1 <= limit <= 5:
+        raise ValueError("candidate limit must be between one and five")
+    specs = [(lens, discovery_request(lens)) for lens in DISCOVERY_LENSES]
+    responses = await asyncio.gather(
+        *(asyncio.to_thread(fetch_json, url) for _, url in specs),
+        return_exceptions=True,
+    )
+    normalized: list[dict[str, Any]] = []
+    rejections: Counter[str] = Counter()
+    requests: list[dict[str, Any]] = []
+    source_index = 0
+    for (lens, _), response in zip(specs, responses, strict=True):
+        if isinstance(response, BaseException):
+            requests.append(
+                {
+                    "source": lens,
+                    "status": "failed",
+                    "records": 0,
+                    "error": _error_text(response),
+                }
+            )
+            continue
+        records = response["data"]
+        requests.append(
+            {
+                "source": lens,
+                "status": "complete",
+                "records": len(records),
+                "error": None,
+            }
+        )
+        for raw in records:
+            source_index += 1
+            record, reason = normalize_record(raw, "all", lens, source_index)
+            if record is None:
+                rejections[reason or "unknown_rejection"] += 1
+            else:
+                normalized.append(record)
+    deduplicated, duplicate_rejections = deduplicate(normalized)
+    rejections.update(duplicate_rejections)
+    ranked = rank_pools(deduplicated)
+    complete = all(row["status"] == "complete" for row in requests)
+    return {
+        "status": "complete" if complete else "incomplete",
+        "deployable": complete and bool(ranked),
+        "source_coverage": {
+            "required_requests": len(specs),
+            "completed_requests": sum(row["status"] == "complete" for row in requests),
+            "requests": requests,
+        },
+        "universe": {
+            "raw_records": sum(row["records"] for row in requests),
+            "normalized_records": len(normalized),
+            "valid_unique_pools": len(ranked),
+            "returned_candidates": min(limit, len(ranked)),
+        },
+        "technical_rejections": dict(sorted(rejections.items())),
+        "candidates": ranked[:limit],
+    }
+
+
+def _token_rows(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        rows = value
+    elif isinstance(value, dict):
+        rows = value.get("tokens", value.get("data"))
+    else:
+        rows = None
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ValueError("Gateway token registry response is invalid")
+    return rows
+
+
+def filter_registered_tokens(
+    candidates: list[dict[str, Any]], registry_response: Any
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep candidates whose exact base mint, symbol, and decimals are registered."""
+    registry = _token_rows(registry_response)
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        token = candidate["token_a"]
+        matches = [
+            row
+            for row in registry
+            if str(
+                row.get("address") or row.get("token_address") or row.get("mint") or ""
+            ).strip()
+            == token["mint"]
+        ]
+        exact = [
+            row
+            for row in matches
+            if str(row.get("symbol") or "").strip().casefold()
+            == str(token["symbol"]).casefold()
+            and not isinstance(row.get("decimals"), bool)
+            and str(row.get("decimals")) == str(token["decimals"])
+        ]
+        if len(matches) == 1 and len(exact) == 1:
+            accepted.append(candidate)
+        else:
+            rejected.append(
+                {
+                    "pool_address": candidate["pool_address"],
+                    "base_mint": token["mint"],
+                    "reason": (
+                        "registered_token_identity_conflict"
+                        if matches
+                        else "base_token_not_registered"
+                    ),
+                }
+            )
+    return accepted, rejected
+
+
+async def refresh_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Refetch the candidate's original bounded lens and validate exact identity."""
+    lenses = candidate.get("source_lenses")
+    if not isinstance(lenses, list) or not lenses:
+        raise ValueError("candidate source lens is unavailable")
+    lens = next((item for item in lenses if item in DISCOVERY_LENSES), None)
+    if lens is None:
+        raise ValueError("candidate source lens is unsupported")
+    response = await asyncio.to_thread(fetch_json, discovery_request(lens))
+    matches = []
+    for index, raw in enumerate(response["data"], 1):
+        normalized, _ = normalize_record(raw, "all", lens, index)
+        if normalized and normalized["pool_address"] == candidate.get("pool_address"):
+            matches.append(normalized)
+    if len(matches) != 1:
+        raise ValueError("selected Orca pool was not uniquely refreshed")
+    refreshed = matches[0]
+    expected = (
+        candidate.get("pool_address"),
+        candidate.get("trading_pair"),
+        candidate.get("token_a", {}).get("mint"),
+        candidate.get("token_a", {}).get("decimals"),
+        candidate.get("token_b", {}).get("mint"),
+        candidate.get("tick_spacing"),
+    )
+    observed = (
+        refreshed["pool_address"],
+        refreshed["trading_pair"],
+        refreshed["token_a"]["mint"],
+        refreshed["token_a"]["decimals"],
+        refreshed["token_b"]["mint"],
+        refreshed["tick_spacing"],
+    )
+    if observed != expected:
+        raise ValueError("selected Orca pool identity changed during refresh")
+    return refreshed

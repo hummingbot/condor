@@ -5,9 +5,9 @@ account_name: master_account
 trading_context: ""
 default_risk_posture: balanced
 total_amount_quote: 10
-max_open_executors: 2
-max_slot_deployments_per_tick: 2
-min_quote_per_executor: 5
+max_open_executors: 3
+max_slot_deployments_per_tick: 1
+min_quote_per_executor: 3
 max_quote_per_executor: 5
 max_slippage_pct: 1
 min_sol_reserve: 0.05
@@ -21,12 +21,8 @@ executor_stop_loss_net_pnl_ratio: 0.05
 session_max_age_minutes: 1440
 session_take_profit_net_pnl_ratio: 0.05
 session_stop_loss_net_pnl_ratio: 0.05
-onchain_reconcile_before_seconds: 15
-onchain_reconcile_after_seconds: 180
-onchain_reconcile_signature_limit: 100
-onchain_reconcile_rpc_timeout_seconds: 15
 risk_limits:
   max_position_size_quote: 10
-  max_open_executors: 2
+  max_open_executors: 3
   max_drawdown_pct: -1
   shutdown_drawdown_pct: -1

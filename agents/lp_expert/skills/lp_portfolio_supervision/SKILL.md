@@ -1,48 +1,35 @@
 ---
 name: lp_portfolio_supervision
-description: Supervise multiple standardized LP executors as one bounded portfolio, preserving exact ownership, independent capacity, dynamic risk posture, and serialized portfolio actions.
-when_to_use: Read only for a genuine ownership, lifecycle, capacity, terminal, or multi-executor ambiguity after exact executor evidence; a healthy active LP follows the Strategy fast path without a skill read.
+description: Interpret a bounded multi-executor LP portfolio while preserving independent ownership, clean capacity, and serialized actions.
+when_to_use: Read only when valid lp_snapshot evidence leaves a genuine multi-executor ownership, lifecycle, capacity, diversification, or supervision ambiguity.
+references_routine: lp_snapshot
 source: agent:lp_expert
 ---
 
 # LP Portfolio Supervision
 
-1. Reconcile any uncertain current-session mutation before making a new
-   decision. A journaled intent alone is not a mutation. For an interrupted
-   Gateway operation, use its exact current-session receipt to distinguish
-   absent/rejected, confirmed/pending, and uncertain submission states.
-2. Use exact current-controller executor detail and its embedded on-chain LP
-   position as active-LP authority. Preserve one executor's identity
-   independently from every other executor and keep foreign resources read-only.
-   `positions_summary` contains executor-held residual positions, not active LPs;
-   a running LP plus an empty held summary is expected and not contradictory.
-3. For an active portfolio, derive clean slots from nonterminal
-   current-controller executors, configured capacity, remaining capital, and
-   unresolved mutation state. After CLOSE, classify capacity as reusable only
-   after terminal executor, absent embedded LP position, and required residual
-   restoration evidence agree. Opening, closing, swapping,
-   failed-but-unreconciled, or ambiguous resources still occupy capacity.
-4. Use the Strategy's exact limit check every tick as the authority for both
-   session and per-executor age, stop-loss, and take-profit triggers.
-   `session.stop_latched=true` requires portfolio-wide wind-down and remains
-   authoritative after the portfolio is flat, so it cannot redeploy. A triggered
-   executor is a mandatory close target when its lifecycle is stoppable; if it
-   is already closing, swapping, or failed, reconcile without another stop. Do
-   not replace or clear a configured threshold with discretionary judgment.
-5. For a non-latched session, assess the portfolio using remaining capital,
-   same-pool overlap, diversification, correlated exposure, replacement
-   opportunity, and the active dynamic risk posture. Assess non-triggered
-   executors using lifecycle state, in-range status, range distance, fees and net
-   yield, inventory drift, pool quality change, age, loss, and technical
-   warnings.
-6. Choose exactly one portfolio action allowed by the Strategy: deploy into
-   clean slots, close selected executors, or HOLD. A DEPLOY or CLOSE action may
-   operate on multiple distinct executors up to current configured capacity.
-7. Execute each executor's transition chain serially. Continue to the next
-   selected pool or executor only after the previous chain confirms and
-   refreshed state remains clean. Stop the batch immediately when confirmation
-   is missing.
+1. Treat every current-controller executor, pool, position, preparation receipt,
+   stop, and cleanup as an independent chain. Foreign resources stay read-only.
+2. Use `lp_snapshot` as the authority for lifecycle, close triggers, stop latch,
+   occupied pools, capital, clean slots, and quarantined capacity. Do not rebuild
+   those values from broad tool reads.
+3. A slot is clean only when no opening, active, closing, cleanup-pending,
+   uncertain, ambiguous, or failed-but-unreconciled resource still owns it.
+4. The portfolio may hold up to its configured limit, shipped as three, but may
+   prepare and create at most one new executor per tick.
+5. Apply per-executor age, take-profit, and stop-loss triggers independently.
+   The session stop latch is portfolio-wide and cannot be cleared by judgment.
+6. For non-triggered executors, compare range condition, range distance, fee and
+   net yield, inventory drift, pool-quality change, age, replacement opportunity,
+   correlated exposure, and diversification.
+7. Keep at most one active or reconciling executor per pool. Executors sharing a
+   base mint still own separate attributed inventory.
+8. Choose one portfolio action: deploy one new chain, close an ordered set of
+   exact targets, or HOLD. Serialize every mutation and stop the affected scope
+   when confirmation is missing.
+9. A closed slot remains quarantined until a following tick proves no material
+   residual or confirms exact cleanup. Never release or reuse it from a broad
+   balance change.
 
-Use configured limits as hard gates. Use market and portfolio evidence for
-judgment; do not invent fixed close thresholds merely to make the decision
-mechanical.
+Use configured limits as hard gates. This playbook supplies portfolio judgment,
+not alternate arithmetic or mutation authority.

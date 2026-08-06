@@ -8,10 +8,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
-from agents.lp_expert.routines import _routine_report as reports
-from agents.lp_expert.routines._orca_pool_metrics import USDC_MINT
+from agents.lp_expert.core.orca import USDC_MINT
 
-CATEGORY = "Orca LP Planning"
 NETWORK = "solana-mainnet-beta"
 LP_PROVIDER = "orca/clmm"
 SWAP_PROVIDER = "jupiter/router"
@@ -49,7 +47,7 @@ def plan_digest(plan: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-class Config(BaseModel):
+class PlanRequest(BaseModel):
     """Calculate one bounded double-sided Orca LP executor plan."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -71,7 +69,7 @@ class Config(BaseModel):
     attributed_base_amount: Decimal | None = None
 
     @model_validator(mode="after")
-    def validate_contract(self) -> "Config":
+    def validate_contract(self) -> "PlanRequest":
         for field in (
             "pool_address",
             "base_symbol",
@@ -131,7 +129,7 @@ def _price_from_tick(tick: int, decimal_factor: float) -> Decimal:
     return Decimal(str(math.exp(tick * math.log(1.0001)) * decimal_factor))
 
 
-def _build(config: Config) -> dict[str, Any]:
+def build_plan(config: PlanRequest) -> dict[str, Any]:
     price = _decimal(config.current_price, "current_price", positive=True)
     width = _decimal(config.range_half_width_pct, "range_half_width_pct") / 100
     decimal_factor = 10.0 ** (config.base_decimals - config.quote_decimals)
@@ -306,60 +304,3 @@ def _build(config: Config) -> dict[str, Any]:
     payload = {"status": "planned", **_json_value(plan)}
     payload["plan_digest"] = plan_digest(plan)
     return payload
-
-
-async def run(config: Config, context: Any) -> str:
-    try:
-        payload = _build(config)
-        status = "planned"
-        evidence = [
-            {
-                "kind": "range",
-                **payload["range"],
-            },
-            {
-                "kind": "inventory",
-                "base_amount": payload["inventory"]["base_amount"],
-                "quote_amount": payload["inventory"]["quote_amount"],
-                "base_shortfall": payload["inventory"]["base_shortfall"],
-                "estimated_usdc_for_preparation_swap": payload["inventory"][
-                    "estimated_usdc_for_preparation_swap"
-                ],
-                "max_usdc_for_preparation_swap": payload["inventory"][
-                    "max_usdc_for_preparation_swap"
-                ],
-                "preparation_slippage_headroom_quote": payload["inventory"][
-                    "preparation_slippage_headroom_quote"
-                ],
-                "maximum_total_usdc": payload["inventory"]["maximum_total_usdc"],
-                "schema_native_exposure_quote": payload["inventory"][
-                    "schema_native_exposure_quote"
-                ],
-                "capital_dust_quote": payload["inventory"]["capital_dust_quote"],
-                "inventory_ready": payload["inventory"]["inventory_ready"],
-            },
-        ]
-    except Exception as exc:
-        status = "rejected"
-        payload = {
-            "status": status,
-            "reason": f"{type(exc).__name__}: {exc}",
-            "mutation": False,
-        }
-        evidence = [{"kind": "error", "reason": payload["reason"]}]
-    payload = await reports.attach_trace(
-        payload,
-        title="Orca LP Position Plan",
-        source="clmm_position_plan",
-        status=status,
-        summary={
-            "pool_address": config.pool_address,
-            "trading_pair": f"{config.base_symbol}-USDC",
-            "amount_quote": config.amount_quote,
-            "current_price": config.current_price,
-            "range_half_width_pct": config.range_half_width_pct,
-            "rebalance_threshold_pct": config.rebalance_threshold_pct,
-        },
-        evidence=evidence,
-    )
-    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
