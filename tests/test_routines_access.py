@@ -28,10 +28,14 @@ class FakeRoutineStore:
         self.schedule_calls = []
         self.continuous_calls = []
         self.agents = []
+        self.conversations = []
 
-    async def execute(self, routine_name, config, server_name, user_id=0, agent=""):
+    async def execute(
+        self, routine_name, config, server_name, user_id=0, agent="", conversation_id=""
+    ):
         self.execute_calls.append((routine_name, server_name, user_id))
         self.agents.append(agent)
+        self.conversations.append(conversation_id)
         return "inst-run"
 
     async def schedule(
@@ -41,10 +45,11 @@ class FakeRoutineStore:
         return "inst-sched"
 
     async def start_continuous(
-        self, routine_name, config, server_name, user_id=0, agent=""
+        self, routine_name, config, server_name, user_id=0, agent="", conversation_id=""
     ):
         self.continuous_calls.append((routine_name, server_name, user_id))
         self.agents.append(agent)
+        self.conversations.append(conversation_id)
         return "inst-cont"
 
 
@@ -211,3 +216,45 @@ def test_dashboard_runs_leave_attribution_to_the_routine(client_and_store):
         json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
     )
     assert store.agents == [""]
+
+
+# ── ARCH-089: the run remembers which conversation asked for it ──
+
+
+def _resolves_to(monkeypatch, conversation_id: str):
+    async def fake(session_key: str) -> str:
+        return conversation_id if session_key else ""
+
+    monkeypatch.setattr(
+        routines_module.client, "conversation_for_session", fake, raising=False
+    )
+
+
+def test_a_session_key_reaches_the_store_as_a_conversation(
+    client_and_store, monkeypatch
+):
+    """The middle link of the chain: the route is what turns a key into an id."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/start",
+        json={
+            "routine_name": "agent/watcher",
+            "server_name": OWNED_SERVER,
+            "session_key": "web:1:slot-1",
+        },
+    )
+    assert store.conversations == ["conv-1"]
+
+
+def test_a_dashboard_run_has_no_conversation_behind_it(client_and_store, monkeypatch):
+    """Omitted -> the run reports nowhere, exactly as before ARCH-089."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/run",
+        json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
+    )
+    assert store.conversations == [""]

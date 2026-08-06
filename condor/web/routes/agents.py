@@ -1217,25 +1217,14 @@ async def consult_agent(
 async def _conversation_for_session(session_key: str) -> str:
     """Resolve a session key to the conversation currently on that session.
 
-    Answered here rather than cached at spawn because the conversation id does
-    not exist when the MCP subprocess starts (``sessions.get_or_create_session``
-    mints it after the client is up) — by delegate time it is settled.
-
-    A missing, malformed or dead key is not an error: it means "no conversation
-    behind this task", which is the truth for a consult- or tick-started
-    delegation and for anything predating this provenance.
+    The resolution itself lives in ``condor.runtime.client`` — routine runs need
+    the same answer (ARCH-089) and a second copy could drift from this one. Kept
+    as a thin local name because the runtime import stays lazy here, as it does
+    for the rest of this module's runtime touchpoints.
     """
-    if not session_key:
-        return ""
-    try:
-        from condor.runtime import client
-        from condor.runtime.keys import SessionKey
+    from condor.runtime import client
 
-        info = await client.get_info(SessionKey.parse(session_key))
-        return info.conversation_id if info else ""
-    except Exception:
-        log.debug("Could not resolve session key %r", session_key, exc_info=True)
-        return ""
+    return await client.conversation_for_session(session_key)
 
 
 @router.post("/{slug}/delegate")

@@ -248,6 +248,21 @@ def _store_name(routine, fallback: str) -> str:
     return rname
 
 
+def _with_provenance(payload: dict) -> dict:
+    """Stamp a run payload with the session that asked for it.
+
+    The main process turns the key into the conversation the finished run reports
+    back to (ARCH-089) — the same provenance ``delegate`` and ``send_notification``
+    carry, so all three announce their outcome where the user asked for it. A
+    runner with no session behind it (a tick loop, a delegate worker) sends
+    nothing: there is no conversation to report to, and the route already reads a
+    missing key as exactly that.
+    """
+    if settings.session_key:
+        payload["session_key"] = settings.session_key
+    return payload
+
+
 async def _poll_until_done(instance_id: str) -> dict | None:
     """Follow a delegated run until it leaves ``running``. None on timeout."""
     deadline = time.monotonic() + _RUN_BUDGET
@@ -295,12 +310,14 @@ async def _submit_oneshot(
         started = await call_main_api(
             "POST",
             "/routines/run",
-            {
-                "routine_name": _store_name(routine, name),
-                "server_name": settings.active_server,
-                "config": config or {},
-                "attribute_to": agent,
-            },
+            _with_provenance(
+                {
+                    "routine_name": _store_name(routine, name),
+                    "server_name": settings.active_server,
+                    "config": config or {},
+                    "attribute_to": agent,
+                }
+            ),
         )
     except APIError as e:
         return None, {"error": f"Routine '{name}' could not be run: {e}"}
@@ -440,12 +457,14 @@ async def start_routine(name: str, config: dict | None) -> dict:
         data = await call_main_api(
             "POST",
             "/routines/start",
-            {
-                "routine_name": _store_name(routine, name),
-                "server_name": settings.active_server,
-                "config": config or {},
-                "attribute_to": settings.specialist_slug or "condor",
-            },
+            _with_provenance(
+                {
+                    "routine_name": _store_name(routine, name),
+                    "server_name": settings.active_server,
+                    "config": config or {},
+                    "attribute_to": settings.specialist_slug or "condor",
+                }
+            ),
         )
     except APIError as e:
         return {"error": f"Failed to start '{name}': {e}"}

@@ -108,6 +108,18 @@ def _agent_of(routine) -> str:
     return src.split(":", 1)[1] if src.startswith("agent:") else "condor"
 
 
+def _run_outcome_text(routine_name: str, summary: str, error: str | None) -> str:
+    """The one-line outcome of a finished run, for the conversation transcript.
+
+    Built from the same two values the instance record keeps — its ``error`` and
+    its already-clipped ``last_result`` — so the note a conversation reads and
+    the record the dashboard shows can never disagree about the same run.
+    """
+    if error:
+        return f"❌ Routine {routine_name} failed: {error}"
+    return f"✅ Routine {routine_name} done\n\n{(summary or '').strip()}".rstrip()
+
+
 class WebRoutineContext:
     """Lightweight context so routines can run without Telegram."""
 
@@ -293,6 +305,42 @@ class RoutineStore:
                 f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
             )
 
+    def _record_run_turn(
+        self, instance_id: str, summary: str, error: str | None
+    ) -> None:
+        """Write a finished run back to the conversation that asked for it.
+
+        The routine sibling of ``delegate._record_completion_turn``: a routine an
+        agent starts from chat used to report only to Telegram, so the
+        conversation ended on "I started it" and never learned another word —
+        and ``replay_context`` told the next session the same incomplete story
+        (ARCH-089). Recorded as a ``system`` turn so the replay reads it as a
+        parenthetical note rather than as the agent's own words.
+
+        A run with no conversation behind it — the scheduler, the dashboard, the
+        Telegram menu, an instance restored on boot — is a no-op: ``record_system``
+        already ignores an empty id. Never allowed to raise: a missing note must
+        not cost the user the run's own delivery.
+        """
+        meta = self._instances.get(instance_id) or {}
+        conversation_id = meta.get("conversation_id") or ""
+        if not conversation_id:
+            return
+        try:
+            from condor.runtime.conversations import record_system
+
+            record_system(
+                meta.get("user_id"),
+                conversation_id,
+                _run_outcome_text(meta.get("routine_name") or "", summary, error),
+                kind="routine",
+            )
+        except Exception:
+            logger.debug(
+                f"Could not record run {instance_id} in conversation {conversation_id}",
+                exc_info=True,
+            )
+
     def _new_instance_meta(
         self,
         routine_name: str,
@@ -300,9 +348,15 @@ class RoutineStore:
         server_name: str,
         user_id: int,
         source: str,
+        conversation_id: str = "",
         **extra,
     ) -> dict:
-        """Fresh instance-metadata dict shared by execute/start_continuous/schedule."""
+        """Fresh instance-metadata dict shared by execute/start_continuous/schedule.
+
+        ``conversation_id`` is the run's provenance: the conversation that asked
+        for it, which its outcome is reported back to. Empty for everything with
+        no conversation behind it (dashboard, Telegram, restored schedules).
+        """
         return {
             "routine_name": routine_name,
             "config": config,
@@ -310,6 +364,7 @@ class RoutineStore:
             "source": source,
             "server_name": server_name,
             "user_id": user_id,
+            "conversation_id": conversation_id,
             "created_at": time.time(),
             "last_run_at": None,
             "last_result": None,
@@ -375,6 +430,9 @@ class RoutineStore:
         duration = time.time() - start
         report_id = reports.get_last_report_id()
         self._results[instance_id] = result
+        # Clipped once: the instance record and the conversation note are the
+        # same summary, so they cannot tell the user different stories.
+        summary = result.text[:500]
 
         if instance_id in self._instances:
             self._instances[instance_id].update(
@@ -383,7 +441,7 @@ class RoutineStore:
                         (failed_status or status_after) if failed else status_after
                     ),
                     "last_run_at": time.time(),
-                    "last_result": result.text[:500],
+                    "last_result": summary,
                     "last_duration": duration,
                     # The run's report is what a reader wants to open; the text
                     # is only what the caller (or the LLM) was handed back. A
@@ -394,6 +452,8 @@ class RoutineStore:
                     "error": error_msg,
                 }
             )
+
+        self._record_run_turn(instance_id, summary, error_msg)
 
         if fire_hooks:
             await self._fire_hooks(instance_id, result, report_id, failed)
@@ -421,10 +481,13 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
         agent: str = "",
+        conversation_id: str = "",
     ) -> str:
         """Run a one-shot routine from the web. Returns instance_id.
 
-        ``agent`` overrides report attribution (see ``_execute_and_record``).
+        ``agent`` overrides report attribution (see ``_execute_and_record``);
+        ``conversation_id`` is where the finished run reports back to (see
+        ``_record_run_turn``).
         """
         routine = self._resolve_routine(routine_name)
         if not routine:
@@ -432,7 +495,12 @@ class RoutineStore:
 
         instance_id = self._gen_id()
         self._instances[instance_id] = self._new_instance_meta(
-            routine_name, config, server_name, user_id, source="web"
+            routine_name,
+            config,
+            server_name,
+            user_id,
+            source="web",
+            conversation_id=conversation_id,
         )
 
         task = asyncio.create_task(
@@ -470,6 +538,7 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
         agent: str = "",
+        conversation_id: str = "",
     ) -> str:
         """Start a continuous routine as a background task. Returns instance_id."""
         routine = self._resolve_routine(routine_name)
@@ -482,7 +551,12 @@ class RoutineStore:
 
         instance_id = self._gen_id()
         self._instances[instance_id] = self._new_instance_meta(
-            routine_name, config, server_name, user_id, source="mcp"
+            routine_name,
+            config,
+            server_name,
+            user_id,
+            source="mcp",
+            conversation_id=conversation_id,
         )
 
         task = asyncio.create_task(
