@@ -5,7 +5,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Safety cap to avoid runaway pagination loops
+# Cap on how many executors a single walk accumulates (not on iterations:
+# the loop's own empty-page and cursor-progress guards end a stalled walk).
 MAX_EXECUTORS_FETCH = 5000
 EXECUTORS_PAGE_SIZE = 500
 
@@ -112,11 +113,12 @@ async def fetch_all_executors(
             pagination = result.get("pagination")
             if not next_cursor and isinstance(pagination, dict):
                 next_cursor = pagination.get("next_cursor") or pagination.get("cursor")
-        if not next_cursor:
-            if len(page) < page_size:
-                break
+        if not page:
             break
-        if len(all_items) >= max_items:
+        if not next_cursor or len(page) < page_size:
+            break
+        if next_cursor == cursor:
+            # The API echoed the cursor we sent: the walk is not progressing.
             break
         cursor = next_cursor
     return all_items
