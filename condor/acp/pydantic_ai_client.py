@@ -952,11 +952,15 @@ class PydanticAIClient:
 
                                     # Risk check via permission callback
                                     if self.permission_callback:
+                                        # Unparseable args stay None rather than
+                                        # collapsing to {}: the gate reads that
+                                        # as "unknown" and fails closed, where
+                                        # an empty dict would have read as a
+                                        # harmless no-argument call (SEC-093).
                                         tool_call_info = {
                                             "tool": tool_name,
                                             "title": tool_name,
-                                            "input": _tool_args_to_dict(part.args)
-                                            or {},
+                                            "input": _tool_args_to_dict(part.args),
                                         }
                                         options = [
                                             {"optionId": "allow", "kind": "allow_once"},

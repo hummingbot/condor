@@ -136,7 +136,11 @@ class RiskEngine:
 
         Returns (allowed, reason).
         """
-        input_data = tool_call.get("input", {})
+        from handlers.agents._shared import tool_call_input
+
+        input_data = tool_call_input(tool_call)
+        if input_data is None:
+            return False, "Tool arguments could not be read"
         action = input_data.get("action", "")
 
         # Only gate "create" actions
@@ -182,7 +186,11 @@ class RiskEngine:
 
         Returns (allowed, reason).
         """
-        input_data = tool_call.get("input", {})
+        from handlers.agents._shared import tool_call_input
+
+        input_data = tool_call_input(tool_call)
+        if input_data is None:
+            return False, "Tool arguments could not be read"
         action = input_data.get("action", "")
 
         if action == "deploy":
@@ -224,23 +232,33 @@ def auto_approve_with_risk_check(
     recorded. ``None`` (consults, delegations, chat, executor-mode agents) keeps
     today's behavior exactly.
     """
-    from handlers.agents._shared import DANGEROUS_BOT_ACTIONS, is_dangerous_tool_call
+    from handlers.agents._shared import (
+        DANGEROUS_BOT_ACTIONS,
+        is_dangerous_tool_call,
+        tool_call_input,
+        tool_call_name,
+    )
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):
-            raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
-            tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+            tool_name = tool_call_name(tool_call)
+
+            # A dangerous tool whose arguments we can't read can't be risk-checked
+            # either, so it never runs unattended: cancel instead of falling
+            # through to the auto-approve tail (SEC-093).
+            input_data = tool_call_input(tool_call)
+            if input_data is None:
+                log.warning("Blocked %s: tool arguments could not be read", tool_name)
+                return {"outcome": {"outcome": "cancelled"}}
 
             # Dry-run mode: block ALL mutating actions
             if execution_mode == "dry_run":
                 if tool_name == "manage_executors":
-                    input_data = tool_call.get("input", {})
                     action = input_data.get("action", "")
                     if action in ("create", "stop"):
                         log.info("Dry-run mode: blocked manage_executors(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
                 elif tool_name == "manage_bots":
-                    input_data = tool_call.get("input", {})
                     action = input_data.get("action", "")
                     if action in DANGEROUS_BOT_ACTIONS:
                         log.info("Dry-run mode: blocked manage_bots(%s)", action)
@@ -255,7 +273,6 @@ def auto_approve_with_risk_check(
 
             # For executor actions, run risk check
             if tool_name == "manage_executors":
-                input_data = tool_call.get("input", {})
                 action = input_data.get("action", "")
 
                 # Validate controller_id on create
@@ -279,7 +296,6 @@ def auto_approve_with_risk_check(
                 # namespace. Read-only actions (status/logs/get_config) are not
                 # in DANGEROUS_BOT_ACTIONS, so it still sees the whole fleet.
                 if ledger is not None:
-                    input_data = tool_call.get("input", {})
                     action = input_data.get("action", "")
                     if action in DANGEROUS_BOT_ACTIONS:
                         bot_name = input_data.get("bot_name", "") or ""
@@ -302,7 +318,6 @@ def auto_approve_with_risk_check(
                 # Recorded only once the call is actually going through, so a
                 # risk-rejected deploy never lands in the ledger.
                 if ledger is not None:
-                    input_data = tool_call.get("input", {})
                     if input_data.get("action", "") == "deploy":
                         ledger.note_deploy(input_data.get("bot_name", "") or "")
 

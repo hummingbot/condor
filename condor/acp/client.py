@@ -22,6 +22,33 @@ from .jsonrpc import JSONRPCPeer
 log = logging.getLogger(__name__)
 
 
+def normalize_tool_call(payload: dict[str, Any]) -> dict[str, Any]:
+    """Canonical ``{tool, title, input}`` view of an ACP ``toolCall`` (SEC-093).
+
+    The ACP wire carries a tool call's arguments under ``rawInput``; every
+    consumer in this repo reads ``input`` (``is_dangerous_tool_call``,
+    ``condor.agents.risk``, ``format_tool_summary``, the transcript recorder).
+    Left untranslated, the whole action-gated half of the danger list resolved
+    ``action == ""`` and took the auto-approve fast path, so no confirmation
+    was ever raised. This is the single seam that translates the wire shape —
+    consumers stay on one contract instead of each learning ACP's spelling.
+
+    The arguments are passed through **as they arrive**, without coercing a
+    missing or malformed value into ``{}``: the gate has to be able to tell
+    "no arguments I can read" from "an empty argument set", and fail closed on
+    the former.
+    """
+    title = payload.get("title") or ""
+    normalized = dict(payload)
+    normalized["title"] = title
+    normalized["tool"] = payload.get("tool") or title
+    args = payload.get("rawInput")
+    if args is None:
+        args = payload.get("input")
+    normalized["input"] = args
+    return normalized
+
+
 def _descendant_pids(root: int) -> set[int]:
     """Every transitive child PID of ``root``, from a single ``ps`` snapshot.
 
@@ -806,7 +833,7 @@ class ACPClient:
                     title=update.get("title", ""),
                     status=update.get("status", "pending"),
                     kind=update.get("kind", "other"),
-                    input=update.get("input"),
+                    input=normalize_tool_call(update)["input"],
                 )
             )
         elif kind == "tool_call_update":
@@ -829,9 +856,21 @@ class ACPClient:
     ) -> dict[str, Any]:
         options = options or []
 
-        # If we have a permission callback, delegate to it
+        # If we have a permission callback, delegate to it. The wire shape is
+        # translated first (SEC-093) so the gate sees the arguments it decides
+        # on, and a callback that blows up denies rather than escaping into the
+        # RPC layer, where the error would surface as something other than a
+        # refusal.
         if self.permission_callback:
-            return await self.permission_callback(toolCall or {}, options)
+            tool_call = normalize_tool_call(toolCall or {})
+            try:
+                return await self.permission_callback(tool_call, options)
+            except Exception:
+                log.exception(
+                    "Permission callback failed for %s — denying",
+                    tool_call.get("title") or "<unknown tool>",
+                )
+                return {"outcome": {"outcome": "cancelled"}}
 
         # Default: auto-approve
         for opt in options:
