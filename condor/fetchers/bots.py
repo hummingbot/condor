@@ -37,6 +37,17 @@ def extract_bots_list(result: Any) -> list[dict]:
     return []
 
 
+def _pick(live: dict, db: dict, key: str, default: float = 0.0) -> float:
+    """Merge a numeric field preferring live, by key presence — not truthiness.
+
+    A live reading of exactly ``0`` is legitimate (a freshly redeployed controller
+    that has closed nothing), so it must win over the DB snapshot instead of
+    falling through to a stale value from a previous deploy.
+    """
+    val = live.get(key, db.get(key, default))
+    return float(val if val is not None else default)
+
+
 def build_bots_page(
     raw_status: Any,
     *,
@@ -109,27 +120,11 @@ def build_bots_page(
                     live_perf = {}
 
                 # Merge: prefer live data for real-time fields, DB for historical consistency
-                realized = float(
-                    live_perf.get("realized_pnl_quote", 0)
-                    or db_perf.get("realized_pnl_quote", 0)
-                    or 0
-                )
-                unrealized = float(
-                    live_perf.get("unrealized_pnl_quote", 0)
-                    or db_perf.get("unrealized_pnl_quote", 0)
-                    or 0
-                )
+                realized = _pick(live_perf, db_perf, "realized_pnl_quote")
+                unrealized = _pick(live_perf, db_perf, "unrealized_pnl_quote")
                 global_pnl = realized + unrealized
-                global_pnl_pct = float(
-                    live_perf.get("global_pnl_pct", 0)
-                    or db_perf.get("global_pnl_pct", 0)
-                    or 0
-                )
-                volume = float(
-                    live_perf.get("volume_traded", 0)
-                    or db_perf.get("volume_traded", 0)
-                    or 0
-                )
+                global_pnl_pct = _pick(live_perf, db_perf, "global_pnl_pct")
+                volume = _pick(live_perf, db_perf, "volume_traded")
                 close_types = live_perf.get("close_type_counts") or db_perf.get(
                     "close_type_counts", {}
                 )
