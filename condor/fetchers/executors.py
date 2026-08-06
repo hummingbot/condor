@@ -10,6 +10,11 @@ logger = logging.getLogger(__name__)
 MAX_EXECUTORS_FETCH = 5000
 EXECUTORS_PAGE_SIZE = 500
 
+# Budget for one SDS poll tick. The EXECUTORS key is polled every 2s for every
+# configured server, and SDS spends exactly one rate-limiter token per key per
+# tick, so the poll must cost exactly one request: keep this at one page.
+EXECUTORS_POLL_MAX = EXECUTORS_PAGE_SIZE
+
 
 # ============================================
 # EXTRACTION / PARSING HELPERS
@@ -82,16 +87,26 @@ def get_executor_fees(executor: Dict[str, Any]) -> float:
 
 
 async def fetch_executors(client, **_kw) -> list[dict]:
-    """Fetch all executors via cursor-based pagination (used by SDS)."""
-    return await fetch_all_executors(client)
+    """Poll variant: the most recent page of executors, in one request.
+
+    This is what SDS registers for ``ServerDataType.EXECUTORS`` and polls every
+    2s per server, so it is deliberately bounded to ``EXECUTORS_POLL_MAX``
+    instead of walking the whole history: one tick, one request, matching the
+    single rate-limiter token SDS spends on it. Callers that need more than the
+    newest page (history exports, filtered searches) call ``fetch_all_executors``
+    directly with their own ``max_items``.
+    """
+    return await fetch_all_executors(client, max_items=EXECUTORS_POLL_MAX)
 
 
 async def fetch_all_executors(
     client, max_items: int = MAX_EXECUTORS_FETCH, **filters
 ) -> list[dict]:
-    """Fetch all executors via cursor-based pagination.
+    """Full-history variant: walk the cursor across pages, on demand.
 
-    Walks the cursor until exhausted or safety cap reached.
+    Walks the cursor until exhausted or ``max_items`` is reached. Not for the
+    hot poll — each call can issue up to ``max_items / EXECUTORS_PAGE_SIZE``
+    sequential requests that the SDS rate limiter cannot see.
     """
     all_items: list[dict] = []
     cursor: str | None = None

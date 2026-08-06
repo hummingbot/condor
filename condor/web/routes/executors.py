@@ -17,6 +17,7 @@ from condor.fetchers.executors import (
     get_executor_volume,
     get_executor_type,
     get_executor_fees,
+    EXECUTORS_POLL_MAX,
     MAX_EXECUTORS_FETCH,
 )
 
@@ -24,6 +25,10 @@ router = APIRouter(tags=["executors"])
 
 
 _SIDE_MAP = {"1": "BUY", "2": "SELL"}
+
+# Cursor scheme for pages served as an offset into the executor stream rather
+# than by an opaque API cursor.
+_SDS_OFFSET_PREFIX = "__sds_offset__"
 
 
 def _normalize_side(raw: str) -> str:
@@ -142,6 +147,20 @@ async def list_executors(
     return items
 
 
+def _offset_page(rows: list[dict], offset: int, limit: int) -> dict:
+    """Build a page response for the offset-cursor scheme over ``rows``."""
+    items: list[ExecutorInfo] = []
+    for ex in rows[offset : offset + limit]:
+        info = _build_executor_info(ex)
+        if info:
+            items.append(info)
+    has_more = len(rows) > offset + limit
+    return {
+        "executors": items,
+        "next_cursor": _SDS_OFFSET_PREFIX + str(offset + limit) if has_more else None,
+    }
+
+
 @router.get("/servers/{name}/executors/page")
 async def list_executors_page(
     name: str,
@@ -159,6 +178,8 @@ async def list_executors_page(
     and render them as they arrive instead of waiting for the full dataset.
 
     First page with no filters: served from SDS cache if available (instant).
+    Scrolling past the cached prefix keeps the same offset cursor and is served
+    from the API instead, so the stream continues past the poll's page budget.
     """
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
@@ -166,52 +187,43 @@ async def list_executors_page(
 
     has_filters = bool(executor_type or trading_pair or status or controller_id)
 
-    # First page, no filters → try SDS cache for instant response
-    if not cursor and not has_filters:
+    # Offset paging over the SDS cache: the unfiltered first page, and any page
+    # whose cursor was handed out by a previous one.
+    offset: int | None = None
+    if not has_filters:
+        if not cursor:
+            offset = 0
+        elif cursor.startswith(_SDS_OFFSET_PREFIX):
+            offset = int(cursor[len(_SDS_OFFSET_PREFIX) :] or 0)
+
+    if offset is not None:
         from condor.server_data_service import ServerDataType, get_server_data_service
 
-        sds = get_server_data_service()
-        cached = sds.get(name, ServerDataType.EXECUTORS)
-        if cached is not None:
-            all_executors = _extract_executors_list(cached)
-            page = all_executors[:limit]
-            items: list[ExecutorInfo] = []
-            for ex in page:
-                info = _build_executor_info(ex)
-                if info:
-                    items.append(info)
-            has_more = len(all_executors) > limit
-            return {
-                "executors": items,
-                "next_cursor": "__sds_offset__" + str(limit) if has_more else None,
-            }
+        cached = get_server_data_service().get(name, ServerDataType.EXECUTORS)
+        cached_rows = _extract_executors_list(cached) if cached is not None else []
+        # The poll caps its walk at EXECUTORS_POLL_MAX, so a cache of exactly
+        # that length is only a prefix of the history: just a short cache proves
+        # there is nothing past it.
+        cache_is_whole = cached is not None and len(cached_rows) < EXECUTORS_POLL_MAX
+        if offset + limit < len(cached_rows) or cache_is_whole:
+            return _offset_page(cached_rows, offset, limit)
 
-    # Handle SDS-based pagination for subsequent pages
-    if cursor and cursor.startswith("__sds_offset__"):
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
-        sds = get_server_data_service()
-        cached = sds.get(name, ServerDataType.EXECUTORS)
-        if cached is not None:
-            all_executors = _extract_executors_list(cached)
-            offset = int(cursor.replace("__sds_offset__", ""))
-            page = all_executors[offset : offset + limit]
-            items = []
-            for ex in page:
-                info = _build_executor_info(ex)
-                if info:
-                    items.append(info)
-            next_offset = offset + limit
-            has_more = next_offset < len(all_executors)
-            return {
-                "executors": items,
-                "next_cursor": "__sds_offset__" + str(next_offset) if has_more else None,
-            }
-        # Cache expired, fall through to API
+        if cursor:
+            # Scrolled past the cached prefix, or the cache expired mid-scroll.
+            # An offset cursor has no API equivalent, so keep the scheme going:
+            # walk far enough to fill this page and to tell if another follows.
+            client = await cm.get_client(name)
+            try:
+                rows = await fetch_all_executors(client, max_items=offset + limit + 1)
+            except Exception as e:
+                raise HTTPException(status_code=502, detail=str(e))
+            return _offset_page(rows, offset, limit)
+        # Cold cache on the first page: fall through to opaque API cursors,
+        # which page the rest of the scroll in one request each.
 
     client = await cm.get_client(name)
     kwargs: dict = {"limit": limit}
-    if cursor and not cursor.startswith("__sds_offset__"):
+    if cursor and not cursor.startswith(_SDS_OFFSET_PREFIX):
         kwargs["cursor"] = cursor
     if executor_type:
         kwargs["executor_types"] = [executor_type]
