@@ -453,12 +453,16 @@ async def get_available_models(
 
     Returns a dict with:
       - acp_clis: subscription/CLI bridges (claude-code, gemini, copilot, …),
-        each with ``agent_key`` and ``available`` — the CLI is installed and
-        launchable. ``available`` does NOT mean signed in: every bridge needs its
-        own interactive login (Claude/Google/GitHub/OpenAI) that cannot be probed
-        from here. Treat a bridge as a candidate to CONFIRM with the user, and
-        prefer a credential you can verify (a set ``cloud_keys`` provider, or a
-        loaded local model) when recommending unprompted.
+        each with ``agent_key``, ``available`` — the CLI is installed and
+        launchable — and ``logged_in``: true a credential for its interactive
+        login (Claude/Google/GitHub/OpenAI) was found on this machine, false none
+        was found where that CLI keeps one, null no marker exists to read
+        (Copilot) or the bridge isn't installed. ``available`` alone does NOT
+        mean signed in, and ``logged_in`` is a heuristic (a credential file can
+        still hold an expired token), so treat a bridge with ``logged_in`` false
+        or null as a candidate to CONFIRM with the user, and prefer a credential
+        you can verify (a set ``cloud_keys`` provider, or a loaded local model)
+        when recommending unprompted.
       - cloud_keys: {provider: bool} — whether OPENROUTER/OPENAI/ANTHROPIC/GROQ/
         GOOGLE keys are set in the environment.
       - custom_endpoints: the user's own saved OpenAI-compatible endpoints, each
