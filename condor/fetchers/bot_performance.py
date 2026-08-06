@@ -313,8 +313,41 @@ def choose_interval(span_seconds: float, limit: int = 500) -> str:
     return _INTERVAL_LADDER[-1][0]
 
 
+def extract_history_rows(result: Any) -> list[dict]:
+    """Rows out of one controller-performance-history page, whatever it is wrapped in."""
+    rows = result.get("data", []) if isinstance(result, dict) else result
+    if not isinstance(rows, list):
+        return []
+    return [r for r in rows if isinstance(r, dict)]
+
+
+def _next_history_cursor(result: Any) -> str | None:
+    """The cursor for the following page, top level or nested under ``pagination``."""
+    if not isinstance(result, dict):
+        return None
+    cursor = result.get("next_cursor") or result.get("cursor")
+    if not cursor:
+        pagination = result.get("pagination")
+        if isinstance(pagination, dict):
+            cursor = pagination.get("next_cursor") or pagination.get("cursor")
+    return cursor or None
+
+
+# One instance's history is walked to exhaustion, so the cap is on rows
+# accumulated, not on iterations — the loop's own empty-page and cursor-progress
+# guards end a stalled walk. ``limit`` is the per-page budget; the endpoint counts
+# it in ROWS, and rows are per controller, so a single page holds only
+# ``limit / num_controllers`` timestamps.
+MAX_HISTORY_ROWS = 5000
+HISTORY_PAGE_SIZE = 500
+
+
 async def fetch_instance_history(
-    client: Any, instance_name: str, interval: str = "5m", limit: int = 500
+    client: Any,
+    instance_name: str,
+    interval: str = "5m",
+    limit: int = HISTORY_PAGE_SIZE,
+    max_rows: int = MAX_HISTORY_ROWS,
 ) -> list[tuple[float, float, float, float, float]]:
     """Return one bot instance's cumulative history as sorted rows.
 
@@ -328,27 +361,74 @@ async def fetch_instance_history(
     here and the column stays 0 when the backend omits the cumulative field (see
     :func:`slice_history`'s callers, which fall back in that case).
 
+    Walks the endpoint's cursor to exhaustion (or ``max_rows``) rather than
+    keeping whatever fits in one page. ``limit`` is a *row* budget and rows are
+    per controller, so one page of 500 covers ~41h of 5m samples for a
+    single-controller bot but only ~14h for a three-controller one. Anything older
+    than the first retained row reads as zero through :func:`_cum_at`, so a
+    truncated walk hands the earliest session's whole lifetime cumulative to
+    whichever window straddles the boundary — the misattribution this module
+    exists to prevent. :func:`choose_interval` bounds the number of *buckets* in
+    the span; only paginating bounds the number of controllers per bucket.
+
     The controller performance API retains history for archived/stopped instances,
     so closed sessions can be attributed too. Resilient: returns ``[]`` on API
-    error. Pick ``interval`` with :func:`choose_interval` so the span of interest
-    actually fits in ``limit`` rows.
+    error, including one raised part-way through the walk — a partial timeline is
+    the same silent misattribution as a truncated one, so the caller degrades to
+    "no history" instead of to "wrong history".
     """
-    try:
-        result = await client.bot_orchestration.get_controller_performance_history(
-            bot_name=instance_name, interval=interval, limit=limit
-        )
-    except Exception as e:
-        logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
-        return []
+    rows: list[dict] = []
+    cursor: str | None = None
+    capped = False
+    while True:
+        remaining = max_rows - len(rows)
+        if remaining <= 0:
+            capped = True
+            break
+        page_size = min(limit, remaining)
+        kwargs: dict[str, Any] = {
+            "bot_name": instance_name,
+            "interval": interval,
+            "limit": page_size,
+        }
+        if cursor:
+            kwargs["cursor"] = cursor
+        try:
+            result = await client.bot_orchestration.get_controller_performance_history(
+                **kwargs
+            )
+        except Exception as e:
+            logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
+            return []
+        page = extract_history_rows(result)
+        rows.extend(page)
 
-    rows = result.get("data", []) if isinstance(result, dict) else result
-    if not isinstance(rows, list):
-        return []
+        next_cursor = _next_history_cursor(result)
+        if not page:
+            break
+        if not next_cursor or len(page) < page_size:
+            break
+        if next_cursor == cursor:
+            # The API echoed the cursor we sent: the walk is not progressing.
+            # Re-issuing it would re-append the same page, and these rows are
+            # summed per timestamp — duplicates would inflate every bucket.
+            break
+        cursor = next_cursor
+
+    if capped:
+        # Older buckets were dropped, and everything before the oldest retained
+        # row reads as zero. Say so rather than returning a silently truncated
+        # timeline.
+        logger.warning(
+            "fetch_instance_history(%s): hit the %d-row cap at interval %s — "
+            "history is truncated and per-session attribution may shift",
+            instance_name,
+            max_rows,
+            interval,
+        )
 
     by_ts: dict[str, list[float]] = {}
     for r in rows:
-        if not isinstance(r, dict):
-            continue
         ts = r.get("timestamp")
         perf = r.get("performance") or {}
         realized = float(perf.get("realized_pnl_quote", 0) or 0)
@@ -367,18 +447,6 @@ async def fetch_instance_history(
         if epoch is not None:
             out.append((epoch, realized, volume, trades, fees))
     out.sort()
-    # Hitting the cap means older buckets were dropped, and everything before the
-    # oldest retained row reads as zero — the misattribution this module exists to
-    # avoid. Say so rather than returning a silently truncated timeline.
-    if len(out) >= limit:
-        logger.warning(
-            "fetch_instance_history(%s): hit the %d-row cap at interval %s — "
-            "history before %s is missing and per-session attribution may shift",
-            instance_name,
-            limit,
-            interval,
-            out[0][0] if out else "?",
-        )
     return out
 
 
@@ -440,7 +508,8 @@ async def fetch_base_histories(
 ) -> dict[str, list[list[tuple[float, float, float, float, float]]]]:
     """``{base: [history per deployed instance]}`` covering ``[earliest, now]``.
 
-    Fans out one bounded round-trip per instance. A fetch that raises degrades to
+    Fans out one bounded cursor walk per instance, at most
+    ``MAX_CONCURRENT_HISTORY_FETCHES`` at a time. A fetch that raises degrades to
     the empty list :func:`fetch_instance_history` already returns on API error, so
     one bad instance costs its own history rather than the whole rollup.
     """
