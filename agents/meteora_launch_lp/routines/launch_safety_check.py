@@ -15,7 +15,7 @@ with rpc_url for a private endpoint. No credentials are hardcoded.
 import logging
 
 import aiohttp
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
@@ -32,6 +32,13 @@ class Config(BaseModel):
 
     pool_address: str = Field(description="DAMM v2 pool address to vet (required)")
     rpc_url: str = Field(default=DEFAULT_RPC, description="Solana RPC endpoint")
+
+    @field_validator("rpc_url", mode="before")
+    @classmethod
+    def _rpc_url_default(cls, v):
+        # Callers (e.g. strategy configs) may pass an empty string meaning "no private RPC" —
+        # fall back to the public endpoint instead of failing every RPC gate on an invalid URL.
+        return v or DEFAULT_RPC
     max_top10_holder_pct: float = Field(default=60.0, description="Fail if top-10 holders exceed this % of supply")
     require_mint_renounced: bool = Field(default=True, description="Fail if the token mint authority is not renounced")
     require_freeze_disabled: bool = Field(default=True, description="Fail if the freeze authority is not disabled")

@@ -188,6 +188,11 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
                 f"  Pool {pi.get('pool_address')}: {len(positions)} position(s), "
                 f"aggregate base={pi.get('base_token_amount')} quote={pi.get('quote_token_amount')}"
             )
+            for p in positions:
+                lines.append(
+                    f"    • {p.get('position_address')} — LP: {p.get('lp_token_amount')}  "
+                    f"Base: {p.get('base_token_amount')}  Quote: {p.get('quote_token_amount')}"
+                )
         return "\n".join(lines)
 
     if action in ("quote_swap", "quote_liquidity") and isinstance(payload, dict):
