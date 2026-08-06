@@ -1,6 +1,7 @@
 """Agent selection and session status UI."""
 
 import logging
+from datetime import datetime, timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
@@ -25,6 +26,7 @@ def _active_session_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
             InlineKeyboardButton("Talk to", callback_data="agent:talk_to"),
         ],
+        [InlineKeyboardButton("Conversations", callback_data="agent:conv_list")],
         [
             # Kills the subprocess and the conversation with it. Labelled
             # "End session" so it is not read as "stop generating" — that is
@@ -111,6 +113,131 @@ def _talk_to_keyboard(
 
     keyboard.append([InlineKeyboardButton("Back", callback_data="agent:menu")])
     return InlineKeyboardMarkup(keyboard)
+
+
+# Conversations picker pagination. Smaller than the other pickers on purpose:
+# each row here is a conversation *plus* its delete button, and the labels carry
+# three facts, so eight of them is a wall of text on a phone.
+CONVERSATIONS_PAGE_SIZE = 6
+
+# How much of a title survives into a button label. The rest of the row is the
+# age and the agent, which is what tells two same-titled chats apart.
+_CONV_TITLE_CHARS = 28
+
+
+def _ago(when: datetime) -> str:
+    """Compact age of a conversation: ``now``, ``12m``, ``5h``, ``3d``.
+
+    Rendered rather than the timestamp itself because the only question a picker
+    answers is "which of these is the one I was in" — and the answer is almost
+    always the recency, not the date.
+    """
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    seconds = (datetime.now(timezone.utc) - when).total_seconds()
+    if seconds < 60:
+        return "now"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
+
+
+def _conversation_label(meta, current_id: str) -> str:
+    """One conversation as a button: how old, who with, what about.
+
+    The agent is on every row because that is what makes a flat log navigable as
+    multi-agent history — "the one with the funding desk" is how someone
+    remembers a chat. An empty ``agent_slug`` is the coordinator.
+    """
+    title = meta.title or meta.last_snippet or "empty"
+    if len(title) > _CONV_TITLE_CHARS:
+        title = title[: _CONV_TITLE_CHARS - 1].rstrip() + "…"
+    marker = "• " if current_id and meta.id == current_id else ""
+    return f"{marker}{_ago(meta.updated_at)} · {meta.agent_slug or 'Condor'} · {title}"
+
+
+def _conversations_keyboard(
+    metas: list, page: int, current_id: str
+) -> InlineKeyboardMarkup:
+    """Paginated picker over the caller's conversations, newest first.
+
+    Rows are addressed by a digest of the conversation id rather than by their
+    position: this list is shared with the dashboard and is sorted by last write,
+    so it reorders under the user's thumb, and a position tapped after a reorder
+    would resume — or delete — the wrong chat.
+    """
+    from ._shared import conversation_token
+
+    keyboard: list[list[InlineKeyboardButton]] = []
+
+    if not metas:
+        keyboard.append([InlineKeyboardButton("Back", callback_data="agent:menu")])
+        return InlineKeyboardMarkup(keyboard)
+
+    total_pages = (len(metas) + CONVERSATIONS_PAGE_SIZE - 1) // CONVERSATIONS_PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    start = page * CONVERSATIONS_PAGE_SIZE
+
+    for meta in metas[start : start + CONVERSATIONS_PAGE_SIZE]:
+        token = conversation_token(meta.id)
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    _conversation_label(meta, current_id),
+                    callback_data=f"agent:conv_pick:{token}",
+                ),
+                InlineKeyboardButton("🗑", callback_data=f"agent:conv_del:{token}"),
+            ]
+        )
+
+    if total_pages > 1:
+        nav: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav.append(
+                InlineKeyboardButton(
+                    "‹ Prev", callback_data=f"agent:conv_page:{page - 1}"
+                )
+            )
+        nav.append(
+            InlineKeyboardButton(
+                f"{page + 1}/{total_pages}", callback_data="agent:conv_noop"
+            )
+        )
+        if page < total_pages - 1:
+            nav.append(
+                InlineKeyboardButton(
+                    "Next ›", callback_data=f"agent:conv_page:{page + 1}"
+                )
+            )
+        keyboard.append(nav)
+
+    keyboard.append([InlineKeyboardButton("Back", callback_data="agent:menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def _conversation_delete_keyboard(meta) -> InlineKeyboardMarkup:
+    """Confirmation for forgetting a conversation.
+
+    Deleting is the only verb in the store that loses something, and it loses it
+    for both surfaces at once, so it gets the same explicit second tap the custom
+    endpoints do. The button carries the id's digest, not the row's position, so
+    a list that reordered while the confirmation was open cannot redirect it.
+    """
+    from ._shared import conversation_token
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton(
+                    "Delete for good",
+                    callback_data=f"agent:conv_delok:{conversation_token(meta.id)}",
+                )
+            ],
+            [InlineKeyboardButton("Keep it", callback_data="agent:conv_list")],
+        ]
+    )
 
 
 # Sentinel rows that open a model picker instead of setting agent_llm directly.
@@ -453,6 +580,10 @@ def _no_session_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("Start", callback_data="agent:start"),
             InlineKeyboardButton("Change LLM", callback_data="agent:settings"),
         ],
+        # Reachable with no session precisely because this is when it is wanted:
+        # the chat whose subprocess is gone is the one whose owner is looking for
+        # what they were saying yesterday.
+        [InlineKeyboardButton("Conversations", callback_data="agent:conv_list")],
         [InlineKeyboardButton("Close", callback_data="agent:close")],
     ]
     return InlineKeyboardMarkup(rows)

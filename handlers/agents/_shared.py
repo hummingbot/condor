@@ -1,5 +1,6 @@
 """Constants and MCP config loader for agent sessions."""
 
+import hashlib
 import json
 import logging
 import os
@@ -157,6 +158,30 @@ def stored_chat_conversation(user_data: dict | None) -> str:
     if user_data is None:
         return ""
     return get_chat_binding(user_data).get("conversation_id") or ""
+
+
+def conversation_token(conversation_id: str) -> str:
+    """Short stable token for a conversation id, for use in callback_data.
+
+    Telegram caps callback_data at 64 bytes. Conversation ids are only bounded
+    by what the store accepts as a path segment, so the picker addresses them by
+    a fixed-width digest instead of by the id itself — the payload is the same
+    size whoever minted the id. It is deliberately not a list position either:
+    the list is shared with the dashboard and reorders on every write (it is
+    sorted by ``updated_at``), so an index rendered a minute ago can resolve to
+    somebody else's conversation by the time it is tapped (CORR-097).
+    """
+    return hashlib.blake2s(conversation_id.encode("utf-8"), digest_size=4).hexdigest()
+
+
+def find_conversation(metas: list, token: str):
+    """Resolve a token from :func:`conversation_token` against a fresh listing.
+
+    ``None`` means the conversation is no longer there — deleted from the
+    dashboard, or from another chat, between the render and the tap. Callers
+    must treat that as a normal outcome and say so rather than failing.
+    """
+    return next((m for m in metas if conversation_token(m.id) == token), None)
 
 
 def _default_agent() -> str:
