@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 async def fetch_current_price(
-    client, connector_name: str, trading_pair: str, **_kw
+    client, connector_name: str = "", trading_pair: str = "", **_kw
 ) -> Optional[float]:
     """Fetch current price for a trading pair."""
     try:

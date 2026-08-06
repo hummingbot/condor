@@ -16,7 +16,6 @@ Rules:
 """
 
 from condor.fetchers.portfolio import fetch_portfolio
-from condor.fetchers.prices import fetch_prices
 from condor.fetchers.positions import fetch_positions
 from condor.fetchers.orders import fetch_active_orders
 from condor.fetchers.trading_rules import fetch_trading_rules
@@ -50,7 +49,6 @@ from condor.fetchers.server_status import fetch_server_status
 
 __all__ = [
     "fetch_portfolio",
-    "fetch_prices",
     "fetch_positions",
     "fetch_active_orders",
     "fetch_trading_rules",

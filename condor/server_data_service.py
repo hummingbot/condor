@@ -845,9 +845,7 @@ def register_default_fetches() -> None:
         fetch_bots_status,
         fetch_candle_connectors,
         fetch_connectors,
-    )
-    from condor.fetchers import fetch_current_price as _fetch_price
-    from condor.fetchers import (
+        fetch_current_price,
         fetch_executors,
         fetch_portfolio,
         fetch_positions,
@@ -860,15 +858,7 @@ def register_default_fetches() -> None:
     sds = get_server_data_service()
 
     sds.register_fetch(ServerDataType.PORTFOLIO, fetch_portfolio)
-
-    # Prices needs a thin wrapper to match the (client, **params) signature
-    async def _fetch_prices(
-        client, connector_name: str = "", trading_pair: str = "", **_kw
-    ):
-        return await _fetch_price(client, connector_name, trading_pair)
-
-    sds.register_fetch(ServerDataType.PRICES, _fetch_prices)
-
+    sds.register_fetch(ServerDataType.PRICES, fetch_current_price)
     sds.register_fetch(ServerDataType.POSITIONS, fetch_positions)
     sds.register_fetch(ServerDataType.ACTIVE_ORDERS, fetch_active_orders)
     sds.register_fetch(ServerDataType.TRADING_RULES, fetch_trading_rules)
