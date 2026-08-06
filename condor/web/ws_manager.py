@@ -1480,6 +1480,12 @@ class WebSocketManager:
                         break
                     if len(all_raw) >= 5000:
                         break
+                    if next_cursor == cursor:
+                        # The API echoed the cursor we sent: the walk is not
+                        # progressing. Re-issuing it would append the same page
+                        # again, and those duplicates reach both the WS channel
+                        # and the shared SDS cache below.
+                        break
                     cursor = next_cursor
                     page_num += 1
 

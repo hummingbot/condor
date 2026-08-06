@@ -308,6 +308,11 @@ async def fetch_agent_performance_batch(
                         )
                 if not next_cursor or len(page) < PAGE_SIZE:
                     break
+                if next_cursor == cursor:
+                    # The API echoed the cursor we sent: the walk is not
+                    # progressing. Re-issuing it would re-append the same page
+                    # and inflate this agent's PnL, volume and trade count.
+                    break
                 cursor = next_cursor
         except Exception as e:
             log.warning("search_executors(%s) failed: %s", aid, e)
