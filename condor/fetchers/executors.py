@@ -208,6 +208,48 @@ def build_executor_row(ex: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def executor_quote(pair: str) -> str:
+    """Quote asset an executor's PnL and volume are denominated in.
+
+    A pair with no quote segment (or none at all) falls back to ``USDT``, which
+    is what the API reports for the overwhelming majority of markets and what the
+    KPI strip assumed before the totals moved server-side.
+    """
+    quote = (pair or "").split("-")[1:2]
+    return (quote[0] or "USDT").upper() if quote else "USDT"
+
+
+def summarize_executors_by_quote(
+    executors: List[Dict[str, Any]], since: float
+) -> Dict[str, Dict[str, float]]:
+    """Period totals for executors started at or after ``since``, per quote asset.
+
+    Deliberately currency-blind: PnL and volume are quote-denominated, and two
+    executors on ``BTC-USDT`` and ``ETH-BTC`` cannot be added without a rate. The
+    caller owns that conversion, so this stays pure and the rate lookup happens
+    once per quote instead of once per executor.
+
+    ``since`` is compared against the executor's *start* timestamp, the same
+    filter the KPI strip applied client-side before this moved server-side: an
+    executor opened before the window is outside it even if it is still running.
+
+    Returns:
+        ``{quote: {"pnl": float, "volume": float, "count": float}}``
+    """
+    totals: Dict[str, Dict[str, float]] = {}
+    for ex in executors:
+        row = build_executor_row(ex)
+        if row["timestamp"] < since:
+            continue
+        bucket = totals.setdefault(
+            executor_quote(row["pair"]), {"pnl": 0.0, "volume": 0.0, "count": 0.0}
+        )
+        bucket["pnl"] += row["pnl"]
+        bucket["volume"] += row["volume"]
+        bucket["count"] += 1
+    return totals
+
+
 # ============================================
 # API FETCHERS
 # ============================================

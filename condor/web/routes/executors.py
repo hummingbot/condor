@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -9,11 +10,17 @@ logger = logging.getLogger(__name__)
 
 from config_manager import get_config_manager
 from condor.web.auth import get_current_user
-from condor.web.models import CreateExecutorRequest, ExecutorInfo, WebUser
+from condor.web.models import (
+    CreateExecutorRequest,
+    ExecutorInfo,
+    ExecutorPeriodSummary,
+    WebUser,
+)
 from condor.fetchers.executors import (
     describe_executor_error,
     fetch_all_executors,
     extract_executors_list as _extract_executors_list,
+    summarize_executors_by_quote,
     EXECUTORS_POLL_MAX,
     MAX_EXECUTORS_FETCH,
 )
@@ -24,6 +31,19 @@ router = APIRouter(tags=["executors"])
 # Cursor scheme for pages served as an offset into the executor stream rather
 # than by an opaque API cursor.
 _SDS_OFFSET_PREFIX = "__sds_offset__"
+
+
+# Windows the dashboard's KPI strip offers, in seconds, with the TTL each
+# aggregate is cached for. A period total is not a live number -- the longer the
+# window, the less one new executor moves it, so the month total is allowed to
+# age far more than the day's. The floor matters because computing one of these
+# walks the whole executor history: without it, every browser tab polling the
+# strip would re-walk it.
+_PERIOD_SECONDS: dict[str, int] = {"1D": 86400, "1W": 7 * 86400, "1M": 30 * 86400}
+_PERIOD_TTLS: dict[str, int] = {"1D": 60, "1W": 300, "1M": 900}
+
+# (server, period) -> (computed_at, summary). Bounded by servers x periods.
+_summary_cache: dict[tuple[str, str], tuple[float, ExecutorPeriodSummary]] = {}
 
 
 def _executor_error(action: str, exc: Exception) -> HTTPException:
@@ -213,6 +233,95 @@ async def list_executors_page(
         if info:
             items.append(info)
     return {"executors": items, "next_cursor": next_cursor or None}
+
+
+async def _usd_summary(
+    server: str, period: str, by_quote: dict[str, dict[str, float]]
+) -> ExecutorPeriodSummary:
+    """Fold per-quote totals into one USD-denominated summary.
+
+    One rate lookup per quote asset, not per executor, and served from the cached
+    ticker pool. A quote with no path to USD is added at face value and flips
+    ``converted`` — the same fallback the strip's client-side ``convert()`` made,
+    but reported instead of silent.
+    """
+    from condor.market_rates import get_rates
+
+    rates: dict[str, float | None] = {}
+    if by_quote:
+        try:
+            rates = await get_rates(server, [f"{q}-USDT" for q in by_quote])
+        except Exception as e:
+            logger.warning(
+                "Rates unavailable while summarizing executors for %s: %s", server, e
+            )
+
+    pnl = 0.0
+    volume = 0.0
+    count = 0
+    converted = True
+    for quote, totals in by_quote.items():
+        rate = rates.get(f"{quote}-USDT")
+        if not rate or rate <= 0:
+            converted = False
+            rate = 1.0
+        pnl += totals["pnl"] * rate
+        volume += totals["volume"] * rate
+        count += int(totals["count"])
+
+    return ExecutorPeriodSummary(
+        period=period, pnl=pnl, volume=volume, count=count, converted=converted
+    )
+
+
+@router.get("/servers/{name}/executors/summary", response_model=ExecutorPeriodSummary)
+async def executors_summary(
+    name: str,
+    period: str = Query(default="1D", description="Window: 1D, 1W or 1M"),
+    user: WebUser = Depends(get_current_user),
+):
+    """PnL, volume and executor count over a period, across the whole history.
+
+    The dashboard's KPI strip used to compute this in the browser by summing the
+    executor list it already had. That list is the SDS cache, which the poll
+    bounds to a single page (``EXECUTORS_POLL_MAX``, PERF-117), so on a busy
+    server the 1W and 1M tiles silently reported the newest page instead of the
+    period — a wrong number with nothing to distinguish it from a right one.
+
+    A period total belongs here, over the full history: this walks it with
+    ``fetch_all_executors``, on demand and cached per period, leaving the 2s poll
+    at its one request per tick.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    period = period.upper()
+    window = _PERIOD_SECONDS.get(period)
+    if window is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown period '{period}': expected one of "
+            + ", ".join(_PERIOD_SECONDS),
+        )
+
+    now = time.time()
+    cached = _summary_cache.get((name, period))
+    if cached is not None and now - cached[0] < _PERIOD_TTLS[period]:
+        return cached[1]
+
+    client = await cm.get_client(name)
+    try:
+        executors = await fetch_all_executors(client)
+    except Exception as e:
+        logger.exception("Failed to summarize executors for server %s", name)
+        raise _executor_error("Failed to fetch executors", e)
+
+    summary = await _usd_summary(
+        name, period, summarize_executors_by_quote(executors, now - window)
+    )
+    _summary_cache[(name, period)] = (now, summary)
+    return summary
 
 
 @router.post("/servers/{name}/executors")

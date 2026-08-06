@@ -23,7 +23,7 @@ import {
   type AgentSummary,
   type BalanceItem,
   type ConnectorBalance,
-  type ExecutorInfo,
+  type ExecutorPeriodSummary,
   type PortfolioHistoryPoint,
   type PortfolioHistoryResponse,
 } from "@/lib/api";
@@ -70,28 +70,6 @@ function getChartColors() {
 
 const TIME_PERIODS = ["1D", "1W", "1M"] as const;
 
-function computeExecutorStats(
-  executors: ExecutorInfo[],
-  period: string,
-  convert: (value: number, quote: string) => { value: number; converted: boolean },
-) {
-  const now = Date.now() / 1000;
-  const cutoff =
-    period === "1D" ? now - 86400 :
-    period === "1W" ? now - 7 * 86400 :
-    now - 30 * 86400;
-
-  const filtered = executors.filter((e) => e.timestamp >= cutoff);
-  let pnl = 0;
-  let volume = 0;
-  for (const e of filtered) {
-    const quote = e.trading_pair?.split("-")[1] || "USDT";
-    pnl += convert(e.pnl, quote).value;
-    volume += convert(e.volume, quote).value;
-  }
-  return { pnl, volume, count: filtered.length };
-}
-
 // ── Unified Dashboard Strip ──
 
 function KpiCell({
@@ -135,12 +113,11 @@ function DashboardStrip({
   botPnl,
   botVolume,
   activeExecutorCount,
-  allExecutors,
+  execStats,
   agents,
   period,
   onPeriodChange,
   onNavigate,
-  convert,
   convertFromUsd,
   currencySymbol,
 }: {
@@ -153,17 +130,14 @@ function DashboardStrip({
   botPnl: number;
   botVolume: number;
   activeExecutorCount: number;
-  allExecutors: ExecutorInfo[];
+  execStats: ExecutorPeriodSummary | undefined;
   agents: AgentSummary[];
   period: string;
   onPeriodChange: (p: string) => void;
   onNavigate: (path: string) => void;
-  convert: (value: number, quote: string) => { value: number; converted: boolean };
   convertFromUsd: (val: number) => number;
   currencySymbol: string;
 }) {
-  const execStats = useMemo(() => computeExecutorStats(allExecutors, period, convert), [allExecutors, period, convert]);
-
   const activeAgents = agents.filter((a) => a.status === "running" || a.status === "active");
   const agentPnl = agents.reduce((s, a) => s + (a.daily_pnl ?? 0), 0);
   const agentSessions = agents.reduce((s, a) => s + (a.session_count ?? 0), 0);
@@ -192,8 +166,12 @@ function DashboardStrip({
         <KpiCell
           label="Executors"
           mainValue={`${activeExecutorCount} active`}
-          pnl={execStats.pnl}
-          details={`${execStats.count} in ${period} · vol ${formatCurrencyVolume(execStats.volume, currencySymbol)}`}
+          pnl={execStats ? convertFromUsd(execStats.pnl) : undefined}
+          details={
+            execStats
+              ? `${execStats.count} in ${period} · vol ${formatCurrencyVolume(convertFromUsd(execStats.volume), currencySymbol)}${execStats.converted ? "" : " ⚠"}`
+              : `Loading ${period}…`
+          }
           currencySymbol={currencySymbol}
         />
 
@@ -820,6 +798,19 @@ export function Portfolio() {
     placeholderData: keepPreviousData,
   });
 
+  // Period totals are aggregated server-side over the whole executor history:
+  // the cache above is bounded to one poll page, so summing it here reported a
+  // fraction of the window on any busy server (CORR-129).
+  const { data: execStats } = useQuery({
+    queryKey: ["executors-summary", server, period],
+    queryFn: () => api.getExecutorsSummary(server!, period),
+    enabled: !!server,
+    refetchInterval: 60000,
+    // No keepPreviousData: the tile labels its own window ("12 in 1M"), so
+    // carrying the previous period's totals across a switch would caption the
+    // old numbers with the new period.
+  });
+
   const { data: agents } = useQuery({
     queryKey: ["agents"],
     queryFn: () => api.getAgents(),
@@ -945,12 +936,11 @@ export function Portfolio() {
         botPnl={botPnl}
         botVolume={botVolume}
         activeExecutorCount={activeExecutorCount}
-        allExecutors={executorsList}
+        execStats={execStats}
         agents={agents ?? []}
         period={period}
         onPeriodChange={setPeriod}
         onNavigate={navigate}
-        convert={convert}
         convertFromUsd={convertFromUsd}
         currencySymbol={currencySymbol}
       />

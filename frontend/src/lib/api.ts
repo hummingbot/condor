@@ -186,6 +186,17 @@ export interface ExecutorInfo {
   config: Record<string, unknown>;
 }
 
+/** Executor totals for a period, aggregated server-side over the full history.
+ *  `pnl` and `volume` are USD-denominated; `converted` is false when some quote
+ *  asset had no path to USD and its rows were counted in their own quote. */
+export interface ExecutorPeriodSummary {
+  period: string;
+  pnl: number;
+  volume: number;
+  count: number;
+  converted: boolean;
+}
+
 export interface PositionHeld {
   connector_name: string;
   trading_pair: string;
@@ -1055,6 +1066,11 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/executors${q ? `?${q}` : ""}`,
     );
   },
+
+  getExecutorsSummary: (server: string, period: string) =>
+    apiFetch<ExecutorPeriodSummary>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/summary?period=${encodeURIComponent(period)}`,
+    ),
 
   getExecutorsPage: (
     server: string,

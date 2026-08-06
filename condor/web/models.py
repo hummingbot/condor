@@ -266,6 +266,23 @@ class ExecutorInfo(BaseModel):
         )
 
 
+class ExecutorPeriodSummary(BaseModel):
+    """Executor totals over a time window, computed across the whole history.
+
+    ``pnl`` and ``volume`` are USD-denominated (the repo convention for anything
+    aggregated across trading pairs); the dashboard converts once into whatever
+    display currency the user picked. ``converted`` is False when at least one
+    quote asset in the window had no path to USD, so its rows are counted in
+    their own quote and the totals are approximate.
+    """
+
+    period: str
+    pnl: float = 0.0
+    volume: float = 0.0
+    count: int = 0
+    converted: bool = True
+
+
 # ── Market Data ──
 
 
