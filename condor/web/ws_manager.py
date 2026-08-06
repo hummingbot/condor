@@ -192,7 +192,21 @@ class WebSocketManager:
         so the GC can't silently cancel it (the event loop only holds a weak
         reference). The reference is dropped automatically on completion."""
         self._oneshot_tasks.add(task)
-        task.add_done_callback(self._oneshot_tasks.discard)
+        task.add_done_callback(self._on_oneshot_done)
+
+    def _on_oneshot_done(self, task: asyncio.Task) -> None:
+        """Release the strong reference and surface failures on this module's
+        logger. Nobody awaits a one-shot task, so without this a crash would
+        only show up as asyncio's "Task exception was never retrieved" at GC
+        time, leaving a channel silently stalled."""
+        self._oneshot_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "One-shot task %s failed: %s", task.get_name(), exc, exc_info=exc
+            )
 
     @staticmethod
     def _server_from_channel(channel: str) -> str | None:
@@ -442,7 +456,10 @@ class WebSocketManager:
                 buf.set_duration(dur)
                 if buf.max_size > old_max and buf.needs_backfill:
                     self._track_oneshot(
-                        asyncio.create_task(self._backfill_candles(channel))
+                        asyncio.create_task(
+                            self._backfill_candles(channel),
+                            name=f"backfill:{channel}",
+                        )
                     )
 
         # Send buffered candles as initial snapshot
@@ -591,7 +608,10 @@ class WebSocketManager:
                 from condor.web.routes.portfolio import warm_portfolio_history
 
                 self._track_oneshot(
-                    asyncio.create_task(warm_portfolio_history(server_name))
+                    asyncio.create_task(
+                        warm_portfolio_history(server_name),
+                        name=f"warm_portfolio_history:{server_name}",
+                    )
                 )
         except Exception as e:
             logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
@@ -668,7 +688,12 @@ class WebSocketManager:
                 logger.debug("Failed to transform bots data for WS: %s", e)
                 return
 
-        asyncio.ensure_future(self._broadcast_update(channel, value))
+        self._track_oneshot(
+            asyncio.create_task(
+                self._broadcast_update(channel, value),
+                name=f"broadcast:{channel}",
+            )
+        )
 
     async def _broadcast_update(self, channel: str, data: Any) -> None:
         prev = self._last_data.get(channel)
