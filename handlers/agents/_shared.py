@@ -1,9 +1,11 @@
 """Constants and MCP config loader for agent sessions."""
 
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
+from condor.acp.client import bot_process_marker
 from condor.memory.paths import CHAT_SLUG
 
 log = logging.getLogger(__name__)
@@ -205,6 +207,42 @@ def get_project_dir() -> str:
     return str(Path(__file__).parent.parent.parent)
 
 
+def _bot_token() -> str:
+    """This bot's Telegram token, read at call time.
+
+    Goes through ``utils.config`` for its ``load_dotenv()`` side effect, so the
+    marker built here is derived from the same token ``main.py`` hands the
+    reaper — a mismatch would silently strand orphaned subprocess trees.
+    """
+    import utils.config  # noqa: F401  (imported for load_dotenv())
+
+    return os.environ.get("TELEGRAM_TOKEN", "")
+
+
+def _bot_id_args() -> list[str]:
+    """``--bot-id <digest>`` for an MCP subprocess, or nothing without a token.
+
+    The digest is what the startup reaper (``reap_stale_acp_trees``) seeds on to
+    find subprocess trees orphaned by a previous crash. It replaced the raw
+    token, which used to sit here in clear text (SEC-095). Both MCP servers
+    parse their argv with ``parse_known_args``, so the flag is inert to them —
+    it exists purely to be visible in ``ps``.
+    """
+    marker = bot_process_marker(_bot_token())
+    return ["--bot-id", marker] if marker else []
+
+
+def _env_entries(**values: str) -> list[dict[str, str]]:
+    """ACP ``env`` entries (``{"name", "value"}``), skipping empty values.
+
+    This is the channel every secret an MCP subprocess needs must travel on: the
+    ACP bridge and the pydantic-ai stdio client both overlay these onto the
+    child's inherited environment, which — unlike argv — no other local user can
+    read out of ``ps``.
+    """
+    return [{"name": name, "value": value} for name, value in values.items() if value]
+
+
 def _condor_mcp_args(
     chat_id: int | str,
     user_id: int,
@@ -217,9 +255,12 @@ def _condor_mcp_args(
     ``delegate_worker`` marks a *background Condor worker* — the detached session
     ``delegate`` starts (FEAT-032). The chat and that worker share one agent
     record, so the flag is what tells the subprocess which seat it is sitting in.
-    """
-    import os
 
+    The bot token travels in the server's ``env``, never here: argv is
+    world-readable via ``ps`` (SEC-095). What argv carries instead is
+    ``--bot-id``, the token's non-secret digest, which is how the startup reaper
+    recognizes our own leaked subprocess trees.
+    """
     # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
     # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
     effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
@@ -228,9 +269,8 @@ def _condor_mcp_args(
         str(effective_chat_id),
         "--user-id",
         str(user_id),
-        "--bot-token",
-        os.environ.get("TELEGRAM_TOKEN", ""),
     ]
+    args.extend(_bot_id_args())
     if agent_slug:
         args.extend(["--agent-slug", agent_slug])
     if server_name:
@@ -292,7 +332,7 @@ def build_mcp_servers_for_session(
             server_name=server_name,
             delegate_worker=delegate_worker,
         ),
-        "env": [],
+        "env": _env_entries(TELEGRAM_BOT_TOKEN=_bot_token()),
     }
 
     if not server_name:
@@ -316,6 +356,10 @@ def build_mcp_servers_for_session(
 
     api_url = f"http://{server['host']}:{server['port']}"
 
+    # Credentials go in env, not argv: the API username/password used to sit on
+    # the command line, where any local `ps` recovered them (SEC-095). The
+    # non-secret coordinates (url, server name) stay on argv, where they make a
+    # running subprocess identifiable.
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
@@ -326,14 +370,14 @@ def build_mcp_servers_for_session(
             "mcp_servers.hummingbot_api",
             "--url",
             api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
             "--server-name",
             server_name,
-        ],
-        "env": [],
+        ]
+        + _bot_id_args(),
+        "env": _env_entries(
+            HUMMINGBOT_API_USERNAME=server["username"],
+            HUMMINGBOT_API_PASSWORD=server["password"],
+        ),
     }
 
     return [mcp_hummingbot, condor]

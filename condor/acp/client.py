@@ -7,6 +7,7 @@ streaming via session/update notifications.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -100,20 +101,39 @@ def _ps_rows() -> list[tuple[int, int, str]]:
     return rows
 
 
+def bot_process_marker(token: str) -> str:
+    """Non-secret argv marker identifying subprocesses spawned by THIS bot.
+
+    ``ps`` output is world-readable, so the bot token itself must never sit on a
+    child's command line (SEC-095). A digest of the token gives the same
+    discrimination the raw token gave — one running bot's trees vs. another's,
+    vs. an interactive Claude Code session — while revealing nothing: the hash
+    is one-way, and the token is a high-entropy secret so it cannot be guessed
+    back from it.
+
+    Empty token → empty marker, so a tokenless dev run tags nothing (and the
+    reaper, which refuses an empty marker, seeds on nothing).
+    """
+    if not token:
+        return ""
+    return "condor-bot-" + hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
 def reap_stale_acp_trees(token: str, *, wait_s: float = 2.0) -> int:
     """Kill leaked ACP/MCP subprocess trees from a prior crashed run.
 
     A hard kill (``kill -9``, OOM, power loss) bypasses the graceful shutdown
     path, orphaning the ``claude-agent-acp → claude → MCP`` tree. Call this at
     startup, BEFORE spawning any of our own subprocesses: at that point anything
-    whose cmdline carries this bot's ``token`` is necessarily a stale leak. We
-    seed on those, climb to the owning ``claude-agent-acp`` root, and kill the
-    whole tree. Interactive Claude Code sessions are never touched (their MCP
-    servers carry no token, and we explicitly exclude their signatures).
+    carrying this bot's process marker is necessarily a stale leak. We seed on
+    those, climb to the owning ``claude-agent-acp`` root, and kill the whole
+    tree. Interactive Claude Code sessions are never touched (their MCP servers
+    carry no marker, and we explicitly exclude their signatures).
 
     Returns the number of processes signalled.
     """
-    if not token:
+    marker = bot_process_marker(token)
+    if not marker:
         return 0
     rows = _ps_rows()
     if not rows:
@@ -124,8 +144,8 @@ def reap_stale_acp_trees(token: str, *, wait_s: float = 2.0) -> int:
     def _protected(a: str) -> bool:
         return "dangerously-skip-permissions" in a or "claude-code-acp" in a
 
-    # Seeds: our own MCP servers are launched with --bot-token <token>.
-    seeds = [pid for pid, _, args in rows if token in args and not _protected(args)]
+    # Seeds: our own MCP servers are launched with --bot-id <marker>.
+    seeds = [pid for pid, _, args in rows if marker in args and not _protected(args)]
     if not seeds:
         return 0
 

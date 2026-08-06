@@ -4,6 +4,7 @@ Main MCP server for Hummingbot API integration
 
 import asyncio
 import logging
+import os
 import sys
 from typing import Any, Literal
 
@@ -925,22 +926,30 @@ async def explore_geckoterminal(
 
 
 def _apply_cli_args():
-    """Parse CLI args and override settings if provided."""
+    """Override settings from the spawn: credentials via env, the rest via CLI.
+
+    The API username/password used to arrive as ``--username``/``--password``,
+    which put them in every local user's ``ps`` output (SEC-095). They now come
+    in on the environment, and they are applied HERE rather than in
+    ``_load_server_config`` on purpose: that loader prefers the cached
+    ``~/.hummingbot_mcp/server.yml`` and never reaches its own env fallbacks
+    once the file exists, so credentials injected for this spawn have to sit at
+    the same precedence layer the CLI args did — above the file.
+    """
     import argparse
+
+    if username := os.getenv("HUMMINGBOT_API_USERNAME"):
+        settings.api_username = username
+    if password := os.getenv("HUMMINGBOT_API_PASSWORD"):
+        settings.api_password = password
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--url")
-    parser.add_argument("--username")
-    parser.add_argument("--password")
     parser.add_argument("--server-name")
     args, _ = parser.parse_known_args()
 
     if args.url:
         settings.api_url = args.url
-    if args.username:
-        settings.api_username = args.username
-    if args.password:
-        settings.api_password = args.password
     if args.server_name:
         settings.server_name = args.server_name
 
