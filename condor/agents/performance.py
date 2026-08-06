@@ -60,78 +60,27 @@ def _extract_executors_list(result: Any) -> list[dict]:
 
 
 def _executor_row(ex: dict) -> dict[str, Any]:
-    from condor.fetchers.executors import (
-        get_executor_fees,
-        get_executor_pnl,
-        get_executor_volume,
-        normalize_executor_side,
-    )
+    """The agents-side display row for one raw executor.
 
-    cfg = ex.get("config", ex) if isinstance(ex.get("config"), dict) else ex
-    custom_info = ex.get("custom_info") or {}
-    if not isinstance(custom_info, dict):
-        custom_info = {}
+    The transform itself is shared — :func:`condor.fetchers.executors.build_executor_row`
+    — so an executor cannot mean two things depending on whether the executors
+    tab or the agent session view built its row. Only the agents-side reading of
+    it stays here: ``status`` is uppercased for this wire, and a position
+    executor that resolved no entry price is worth a log line.
+    """
+    from condor.fetchers.executors import build_executor_row
 
-    # entry_price is a display-only field; PnL comes straight from the executor's
-    # reported fields via get_executor_pnl() and never depends on it.
-    # Only position executors carry a real entry_price (config > top-level > custom_info).
-    # Grid/DCA executors expose break_even_price instead; use it as the display "entry".
-    _cfg_entry = float(cfg.get("entry_price") or 0)
-    _top_entry = float(ex.get("entry_price") or 0)
-    _ci_entry = float(custom_info.get("current_position_average_price") or 0)
-    _be_price = float(custom_info.get("break_even_price") or 0)
-    entry_price = _cfg_entry or _top_entry or _ci_entry or _be_price or 0.0
+    row = build_executor_row(ex)
+    row["status"] = row["status"].upper()
+
     # A position executor with no entry_price is genuinely suspicious; everything
     # else legitimately lacks one, so don't warn for them.
-    _ex_type = str(cfg.get("type") or ex.get("type") or "").lower()
-    if entry_price == 0.0 and "position" in _ex_type:
+    if row["entry_price"] == 0.0 and "position" in str(row["type"]).lower():
         log.warning(
             "entry_price fell back to 0.0 for position executor %s — PnL may be wrong",
-            ex.get("id") or ex.get("executor_id") or "?",
+            row["id"] or "?",
         )
-
-    # current_price / close_price: top-level > custom_info
-    _top_cur = float(ex.get("current_price") or 0)
-    _ci_cur = float(custom_info.get("current_price") or 0)
-    _ci_close = float(custom_info.get("close_price") or 0)
-    current_price = (
-        _top_cur
-        if _top_cur > 0
-        else (_ci_cur if _ci_cur > 0 else (_ci_close if _ci_close > 0 else 0.0))
-    )
-
-    amount = float(cfg.get("total_amount_quote") or cfg.get("amount") or 0)
-    if amount <= 0:
-        amount = float(custom_info.get("total_value_quote") or 0)
-
-    return {
-        "id": str(ex.get("id") or ex.get("executor_id") or ""),
-        "type": cfg.get("type") or ex.get("type") or "",
-        "connector": cfg.get("connector_name")
-        or ex.get("connector_name")
-        or cfg.get("connector")
-        or ex.get("connector")
-        or "",
-        "pair": cfg.get("trading_pair") or ex.get("trading_pair") or "",
-        # custom_info first: that is where a position executor carries its side,
-        # matching the web route's own resolution order.
-        "side": normalize_executor_side(
-            custom_info.get("side") or cfg.get("side") or ex.get("side")
-        ),
-        "status": str(ex.get("status") or "").upper(),
-        "close_type": str(ex.get("close_type") or ""),
-        "pnl": get_executor_pnl(ex),
-        "volume": get_executor_volume(ex),
-        "fees": get_executor_fees(ex),
-        "entry_price": entry_price,
-        "current_price": current_price,
-        "amount": amount,
-        "timestamp": float(cfg.get("timestamp") or ex.get("timestamp") or 0),
-        "close_timestamp": float(ex.get("close_timestamp") or 0),
-        "controller_id": str(cfg.get("controller_id") or ex.get("controller_id") or ""),
-        "custom_info": custom_info,
-        "config": ex.get("config") if isinstance(ex.get("config"), dict) else {},
-    }
+    return row
 
 
 async def fetch_agent_performance(

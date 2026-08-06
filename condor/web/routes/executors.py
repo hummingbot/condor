@@ -14,11 +14,6 @@ from condor.fetchers.executors import (
     describe_executor_error,
     fetch_all_executors,
     extract_executors_list as _extract_executors_list,
-    get_executor_pnl,
-    get_executor_volume,
-    get_executor_type,
-    get_executor_fees,
-    normalize_executor_side,
     EXECUTORS_POLL_MAX,
     MAX_EXECUTORS_FETCH,
 )
@@ -47,62 +42,6 @@ def _executor_error(action: str, exc: Exception) -> HTTPException:
     status, message = describe_executor_error(exc)
     code = 400 if status is not None and 400 <= status < 500 else 502
     return HTTPException(status_code=code, detail=f"{action}: {message}")
-
-
-def _build_executor_info(ex: dict) -> ExecutorInfo | None:
-    """Convert a raw executor dict to an ExecutorInfo model.
-
-    Handles both REST API format (id, config.type, config.connector_name)
-    and WS format (executor_id, executor_type, connector_name at top level).
-    """
-    if not isinstance(ex, dict):
-        return None
-    config = ex.get("config", ex)
-    custom_info = ex.get("custom_info") or {}
-
-    # Entry price is display-only (PnL comes from get_executor_pnl(), independent of it).
-    # Only position executors carry a real entry_price (config > top-level > custom_info);
-    # grid/DCA executors expose break_even_price instead, so fall back to it for display.
-    _cfg_entry = float(config.get("entry_price") or 0)
-    _top_entry = float(ex.get("entry_price") or 0)
-    _ci_entry = float(custom_info.get("current_position_average_price") or 0)
-    _be_price = float(custom_info.get("break_even_price") or 0)
-    entry_price = _cfg_entry or _top_entry or _ci_entry or _be_price or 0.0
-
-    # Current/close price: top-level > custom_info.close_price > held_position_orders fill price
-    _top_cur = float(ex.get("current_price") or 0)
-    _ci_close = float(custom_info.get("close_price") or 0)
-    # Extract fill price from held_position_orders (order executors store fills there)
-    _held_price = 0.0
-    held_orders = custom_info.get("held_position_orders")
-    if isinstance(held_orders, list) and held_orders:
-        try:
-            _held_price = float(held_orders[-1].get("price") or 0)
-        except (TypeError, ValueError, AttributeError):
-            pass
-    current_price = _top_cur if _top_cur > 0 else (_ci_close if _ci_close > 0 else (_held_price if _held_price > 0 else 0.0))
-
-    return ExecutorInfo(
-        id=str(ex.get("id") or ex.get("executor_id") or ""),
-        type=get_executor_type(ex),
-        connector=config.get("connector_name") or ex.get("connector_name") or ex.get("connector") or "",
-        trading_pair=config.get("trading_pair") or ex.get("trading_pair") or "",
-        side=normalize_executor_side(custom_info.get("side") or config.get("side") or ex.get("side")),
-        status=(ex.get("status") or "").lower(),
-        close_type=str(ex.get("close_type") or "").lower(),
-        pnl=get_executor_pnl(ex),
-        volume=get_executor_volume(ex),
-        timestamp=float(config.get("timestamp") or ex.get("timestamp") or 0),
-        controller_id=str(config.get("controller_id") or ex.get("controller_id") or ""),
-        cum_fees_quote=get_executor_fees(ex),
-        net_pnl_pct=float(ex.get("net_pnl_pct") or 0),
-        entry_price=entry_price,
-        current_price=current_price,
-        close_timestamp=float(ex.get("close_timestamp") or 0),
-        custom_info=custom_info,
-        config=ex.get("config", {}),
-    )
-
 
 
 @router.get("/servers/{name}/executors", response_model=list[ExecutorInfo])
@@ -157,7 +96,7 @@ async def list_executors(
 
     items: list[ExecutorInfo] = []
     for ex in executors_list:
-        info = _build_executor_info(ex)
+        info = ExecutorInfo.from_raw(ex)
         if info:
             items.append(info)
     return items
@@ -167,7 +106,7 @@ def _offset_page(rows: list[dict], offset: int, limit: int) -> dict:
     """Build a page response for the offset-cursor scheme over ``rows``."""
     items: list[ExecutorInfo] = []
     for ex in rows[offset : offset + limit]:
-        info = _build_executor_info(ex)
+        info = ExecutorInfo.from_raw(ex)
         if info:
             items.append(info)
     has_more = len(rows) > offset + limit
@@ -270,7 +209,7 @@ async def list_executors_page(
 
     items = []
     for ex in page:
-        info = _build_executor_info(ex)
+        info = ExecutorInfo.from_raw(ex)
         if info:
             items.append(info)
     return {"executors": items, "next_cursor": next_cursor or None}

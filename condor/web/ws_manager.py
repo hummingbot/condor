@@ -622,12 +622,12 @@ class WebSocketManager:
     def _transform_executors(raw_data: Any) -> list[dict]:
         """Transform raw executor data to ExecutorInfo-compatible dicts for WS broadcast."""
         from condor.fetchers.executors import extract_executors_list
-        from condor.web.routes.executors import _build_executor_info
+        from condor.web.models import ExecutorInfo
 
         executors_list = extract_executors_list(raw_data)
         result = []
         for ex in executors_list:
-            info = _build_executor_info(ex)
+            info = ExecutorInfo.from_raw(ex)
             if info:
                 result.append(info.model_dump())
         return result

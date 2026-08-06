@@ -222,6 +222,49 @@ class ExecutorInfo(BaseModel):
     custom_info: dict[str, Any] = {}
     config: dict[str, Any] = {}
 
+    @classmethod
+    def from_raw(cls, ex: Any) -> Optional["ExecutorInfo"]:
+        """Build the wire model from one raw executor dict, or ``None``.
+
+        The transform itself lives in
+        :func:`condor.fetchers.executors.build_executor_row` -- shared with the
+        agents rollup so a row cannot mean two different things depending on
+        which layer built it. This method is only the renaming: the wire calls
+        the pair ``trading_pair`` and the fees ``cum_fees_quote``, spells
+        ``status``/``close_type`` lowercase, and reports ``type`` as the
+        normalized label (``position``, ``grid``) rather than the API's raw
+        class name.
+
+        Both REST responses and WS broadcasts go through here, so the executors
+        tab renders the same row however it arrived.
+        """
+        if not isinstance(ex, dict):
+            return None
+
+        from condor.fetchers.executors import build_executor_row, get_executor_type
+
+        row = build_executor_row(ex)
+        return cls(
+            id=row["id"],
+            type=get_executor_type(ex),
+            connector=row["connector"],
+            trading_pair=row["pair"],
+            side=row["side"],
+            status=row["status"].lower(),
+            close_type=row["close_type"].lower(),
+            pnl=row["pnl"],
+            volume=row["volume"],
+            timestamp=row["timestamp"],
+            controller_id=row["controller_id"],
+            cum_fees_quote=row["fees"],
+            net_pnl_pct=float(ex.get("net_pnl_pct") or 0),
+            entry_price=row["entry_price"],
+            current_price=row["current_price"],
+            close_timestamp=row["close_timestamp"],
+            custom_info=row["custom_info"],
+            config=row["config"],
+        )
+
 
 # ── Market Data ──
 
