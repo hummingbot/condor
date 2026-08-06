@@ -19,6 +19,7 @@ from utils.telegram_formatters import escape_markdown_v2, format_error_message
 from ._shared import (
     SIDE_LONG,
     clear_executors_state,
+    describe_executor_error,
     format_executor_pnl,
     format_executor_status_line,
     get_executor_fees,
@@ -876,69 +877,56 @@ async def handle_confirm_stop_executor(
                     ):
                         full_id = ex_id
                         break
-        result = await stop_executor(client, full_id, keep_position=False)
+        try:
+            await stop_executor(client, full_id, keep_position=False)
+        finally:
+            # Either way the cached view is stale: a stop that failed to answer
+            # may still have gone through upstream.
+            # Invalidate selectively - preserve menu cache for better UX
+            invalidate_cache(context.user_data, "all")
+            context.user_data.pop("current_executor", None)
 
-        # Invalidate cache selectively - preserve menu cache for better UX
-        invalidate_cache(context.user_data, "all")
-        context.user_data.pop("current_executor", None)
-        # Only clear running_executors if successful stop
-        if (
-            result.get("status") in ("success", "stopping", "stopped")
-            or "stop" in str(result).lower()
-        ):
-            context.user_data.pop("running_executors", None)
+        # stop_executor raises on failure, so reaching here is a confirmed stop
+        # — it used to be inferred from "stop" appearing anywhere in the
+        # response, which the *error* text "may have already stopped" matched.
+        context.user_data.pop("running_executors", None)
 
-        if (
-            result.get("status") in ("success", "stopping", "stopped")
-            or "stop" in str(result).lower()
-        ):
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "📋 Back to List", callback_data="executors:menu"
-                    )
-                ]
-            ]
-            await query.message.edit_text(
-                f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        else:
-            error_msg = result.get("message", str(result))
-
-            # If executor not found, it might have already stopped - offer to refresh list
-            if "not found" in error_msg.lower():
-                keyboard = [
-                    [
-                        InlineKeyboardButton(
-                            "🔄 Refresh List", callback_data="executors:menu"
-                        ),
-                        InlineKeyboardButton(
-                            "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
-                        ),
-                    ]
-                ]
-            else:
-                keyboard = [
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
-                        )
-                    ]
-                ]
-
-            await query.message.edit_text(
-                f"❌ *Stop Failed*\n\n{escape_markdown_v2(error_msg[:200])}",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
+        keyboard = [
+            [InlineKeyboardButton("📋 Back to List", callback_data="executors:menu")]
+        ]
+        await query.message.edit_text(
+            f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     except Exception as e:
         logger.error(f"Error stopping executor: {e}", exc_info=True)
-        keyboard = [[InlineKeyboardButton("Back", callback_data="executors:menu")]]
+        status, error_msg = describe_executor_error(e)
+
+        # A 404 means it is already gone - offer the refresh that reconciles the list
+        if status == 404:
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh List", callback_data="executors:menu"
+                    ),
+                    InlineKeyboardButton(
+                        "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
+                    ),
+                ]
+            ]
+        else:
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
+                    )
+                ]
+            ]
+
         await query.message.edit_text(
-            f"*Error*\n\n{escape_markdown_v2(str(e)[:200])}",
+            format_error_message(f"Stop failed: {error_msg[:200]}"),
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )

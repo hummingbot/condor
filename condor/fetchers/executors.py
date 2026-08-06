@@ -1,7 +1,10 @@
 """Fetch and manage executors via Hummingbot API."""
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional
+
+import aiohttp
 
 logger = logging.getLogger(__name__)
 
@@ -139,37 +142,66 @@ async def fetch_all_executors(
     return all_items
 
 
+def describe_executor_error(exc: BaseException) -> tuple[Optional[int], str]:
+    """Split a mutation failure into ``(upstream status, user-safe message)``.
+
+    Never show a user ``str(exc)``: ``aiohttp.ClientResponseError`` stringifies
+    with the backend's own URL in it, so a trader on a shared server would read
+    the internal host and port off a failed deploy. The pieces that are safe to
+    surface live in the attributes — ``status`` is the code the API answered
+    with and ``message`` is the API's own ``detail`` — and a transport failure,
+    which has neither, collapses to a generic line.
+
+    A ``None`` status means "no HTTP answer": the caller maps that to 502.
+    """
+    status = getattr(exc, "status", None)
+    if isinstance(status, int):
+        message = getattr(exc, "message", None)
+        if isinstance(message, str) and message.strip():
+            return status, message.strip()
+        return status, f"the trading API returned HTTP {status}"
+    if isinstance(exc, (aiohttp.ClientError, asyncio.TimeoutError, OSError)):
+        return None, "the trading API is unreachable"
+    return None, type(exc).__name__
+
+
 async def create_executor(
     client, config: Dict[str, Any], account_name: str = "master_account"
 ) -> Dict[str, Any]:
-    """Create a new executor."""
+    """Create a new executor. Raises on failure.
+
+    Deliberately does not translate a failure into a ``{"status": "error"}``
+    dict: that envelope is shaped like a successful response, so callers ended
+    up guessing at success by substring ("created" appears in *"could not be
+    created"*) and pasting the raw exception into user-facing text. Failure is
+    an exception here, as in the other fetchers; callers classify it once at
+    their own boundary with :func:`describe_executor_error`.
+    """
     try:
         return await client.executors.create_executor(
             executor_config=config, account_name=account_name
         )
     except Exception as e:
         logger.error("Error creating executor: %s", e, exc_info=True)
-        return {"status": "error", "message": str(e)}
+        raise
 
 
 async def stop_executor(
     client, executor_id: str, keep_position: bool = False
 ) -> Dict[str, Any]:
-    """Stop a running executor."""
+    """Stop a running executor. Raises on failure.
+
+    See :func:`create_executor` for why a failure is not returned as a dict.
+    The old HTTP-code-in-the-message classification is gone with it: it matched
+    ``"400"`` against any executor id that happened to contain those digits.
+    """
     try:
         return await client.executors.stop_executor(
             executor_id=executor_id, keep_position=keep_position
         )
     except Exception as e:
         logger.error("Error stopping executor: %s", e, exc_info=True)
-        error_str = str(e)
-        if "404" in error_str and "not found" in error_str.lower():
-            return {"status": "error", "message": "Executor not found (may have already stopped or expired)"}
-        elif "403" in error_str:
-            return {"status": "error", "message": "Permission denied - cannot stop this executor"}
-        elif "400" in error_str:
-            return {"status": "error", "message": "Bad request - executor may be in invalid state"}
-        return {"status": "error", "message": error_str}
+        raise
 
 
 async def get_executor_detail(client, executor_id: str) -> Optional[Dict[str, Any]]:

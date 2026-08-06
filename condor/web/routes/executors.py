@@ -11,6 +11,7 @@ from config_manager import get_config_manager
 from condor.web.auth import get_current_user
 from condor.web.models import CreateExecutorRequest, ExecutorInfo, WebUser
 from condor.fetchers.executors import (
+    describe_executor_error,
     fetch_all_executors,
     extract_executors_list as _extract_executors_list,
     get_executor_pnl,
@@ -29,6 +30,19 @@ _SIDE_MAP = {"1": "BUY", "2": "SELL"}
 # Cursor scheme for pages served as an offset into the executor stream rather
 # than by an opaque API cursor.
 _SDS_OFFSET_PREFIX = "__sds_offset__"
+
+
+def _mutation_error(action: str, exc: Exception) -> HTTPException:
+    """Map an executor mutation failure to an HTTPException that leaks nothing.
+
+    An upstream 4xx is the caller's own bad request and stays a 400; anything
+    else — an upstream 5xx, a timeout, a refused connection — is the gateway
+    failing, so 502. The detail carries the API's message but never the raw
+    exception, whose string embeds the backend URL and port.
+    """
+    status, message = describe_executor_error(exc)
+    code = 400 if status is not None and 400 <= status < 500 else 502
+    return HTTPException(status_code=code, detail=f"{action}: {message}")
 
 
 def _normalize_side(raw: str) -> str:
@@ -275,9 +289,10 @@ async def create_executor_endpoint(
 
     from condor.fetchers.executors import create_executor
 
-    result = await create_executor(client, config, account_name=body.account_name)
-    if isinstance(result, dict) and result.get("status") == "error":
-        raise HTTPException(status_code=400, detail=result.get("message", "Failed to create executor"))
+    try:
+        result = await create_executor(client, config, account_name=body.account_name)
+    except Exception as e:
+        raise _mutation_error("Failed to create executor", e)
     executor_id = ""
     if isinstance(result, dict):
         executor_id = str(result.get("executor_id") or result.get("id") or "")
@@ -299,9 +314,10 @@ async def stop_executor_endpoint(
 
     from condor.fetchers.executors import stop_executor
 
-    result = await stop_executor(client, executor_id, keep_position=keep_position)
-    if isinstance(result, dict) and result.get("status") == "error":
-        raise HTTPException(status_code=400, detail=result.get("message", "Failed to stop executor"))
+    try:
+        result = await stop_executor(client, executor_id, keep_position=keep_position)
+    except Exception as e:
+        raise _mutation_error("Failed to stop executor", e)
     return {"status": "ok", "result": result}
 
 
