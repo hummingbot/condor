@@ -205,8 +205,10 @@ def test_picking_the_coordinator_clears_the_binding(monkeypatch):
     _pick(ctx, 0, monkeypatch, agents)
     assert get_chat_binding(ctx.user_data).get("agent_slug") == "funding_desk"
 
+    # Only the slug is cleared, not the record: the conversation stored beside
+    # it survives the change of interlocutor (ARCH-101).
     _pick(ctx, -1, monkeypatch, agents)
-    assert get_chat_binding(ctx.user_data) == {}
+    assert not get_chat_binding(ctx.user_data).get("agent_slug")
 
     restarted = _Context(user_data=deepcopy(ctx.user_data))
     _, creates = _respawn(restarted, monkeypatch, agents)

@@ -58,17 +58,17 @@ def bind_chat_to_agent(user_data: dict | None, agent_slug: str) -> None:
 
     Written by the "Talk to" picker and read by every path that spawns a session
     for the chat, which is what makes the choice outlive the subprocess that
-    served it (CORR-090). An empty slug means Condor was picked, so the binding
-    is dropped rather than stored as "".
+    served it (CORR-090). An empty slug means Condor was picked, i.e. unbound.
+
+    Only the slug field is written. Unbinding is a change of interlocutor, not
+    the end of the chat: the conversation stored beside it (ARCH-101) has to
+    survive picking the coordinator, so this must never drop the whole record.
     """
-    from condor.preferences import clear_chat_binding, set_chat_binding
+    from condor.preferences import set_chat_binding
 
     if user_data is None:
         return
-    if agent_slug:
-        set_chat_binding(user_data, {"agent_slug": agent_slug})
-    else:
-        clear_chat_binding(user_data)
+    set_chat_binding(user_data, {"agent_slug": agent_slug})
 
 
 def stale_binding_notice(slug: str) -> str:
@@ -95,7 +95,7 @@ def resolve_chat_binding(user_data: dict | None, drop_stale: bool = True):
     one to consume the warning the next spawn owes the user.
     """
     from condor.agents.agent import AgentStore
-    from condor.preferences import clear_chat_binding, get_chat_binding
+    from condor.preferences import get_chat_binding
 
     if user_data is None:
         return None, ""
@@ -108,10 +108,55 @@ def resolve_chat_binding(user_data: dict | None, drop_stale: bool = True):
     if agent is None:
         log.warning("Chat is bound to unknown agent %r", slug)
         if drop_stale:
-            clear_chat_binding(user_data)
+            # The agent is gone; the chat and its transcript are not. Clearing
+            # the slug alone leaves the conversation to be resumed by Condor.
+            bind_chat_to_agent(user_data, "")
         return None, slug
 
     return agent, ""
+
+
+def remember_chat_conversation(user_data: dict | None, conversation_id: str) -> None:
+    """Record the conversation this chat is now in, for the next respawn.
+
+    The id lives on the in-memory session and nowhere else, so a chat that lost
+    its subprocess had no way to say which transcript it belonged to and every
+    respawn started blank (ARCH-101). Written after every successful spawn —
+    including the ones that deliberately minted a fresh conversation, since that
+    new one is what the chat is in from then on.
+
+    An empty id is not recorded: it means the runtime could not resolve a
+    conversation at all (a session with no owner, or a recording failure), which
+    is no reason to forget the one the chat already had.
+    """
+    from condor.preferences import set_chat_binding
+
+    if user_data is None or not conversation_id:
+        return
+    set_chat_binding(user_data, {"conversation_id": conversation_id})
+
+
+def forget_chat_conversation(user_data: dict | None) -> None:
+    """Start the chat's next spawn on a fresh conversation.
+
+    The deliberate new-chat verbs — "New session" and the ``-`` reset — call
+    this. The agent binding is untouched: a new chat is a new transcript, not a
+    demotion to the coordinator.
+    """
+    from condor.preferences import set_chat_binding
+
+    if user_data is None:
+        return
+    set_chat_binding(user_data, {"conversation_id": ""})
+
+
+def stored_chat_conversation(user_data: dict | None) -> str:
+    """The conversation this chat should come back to, or "" for a fresh one."""
+    from condor.preferences import get_chat_binding
+
+    if user_data is None:
+        return ""
+    return get_chat_binding(user_data).get("conversation_id") or ""
 
 
 def _default_agent() -> str:

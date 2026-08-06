@@ -264,6 +264,12 @@ class ChatBindingPrefs(TypedDict, total=False):
     # coordinator -- i.e. unbound, which is what clearing the binding restores.
     agent_slug: str
 
+    # Durable conversation the chat is in. Replayed into every respawn, so a
+    # restart, a reap or an LRU detach resumes the transcript instead of
+    # orphaning it (ARCH-101). Absent/empty = the next spawn mints a fresh one,
+    # which is what the deliberate new-chat verbs restore.
+    conversation_id: str
+
 
 class AgentPrefs(TypedDict, total=False):
     default_agent: str  # "claude-code", "gemini", "codex", "copilot"

@@ -27,10 +27,13 @@ from ._shared import (
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
     bind_chat_to_agent,
+    forget_chat_conversation,
     get_project_dir,
+    remember_chat_conversation,
     resolve_chat_binding,
     selectable_agent_options,
     stale_binding_notice,
+    stored_chat_conversation,
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
@@ -98,13 +101,17 @@ async def _create_tg_session(
     An empty ``agent_key`` with ``agent_slug`` set lets the bound Agent's own
     configured model win; pass both to override it deliberately.
 
-    An empty ``conversation_id`` starts a fresh conversation — which is what
-    every call site here wants, since ``/agent → New session`` means a new
-    chat. Passing one resumes that transcript; the key ``tg:{chat_id}`` is
-    unchanged either way, so Telegram carries the conversation on the session
-    record rather than in the key.
+    An empty ``conversation_id`` starts a fresh conversation, which only the
+    deliberate new-chat verbs want; the respawn paths pass the one the chat was
+    already in. The key ``tg:{chat_id}`` is unchanged either way, so Telegram
+    carries the conversation on the session record rather than in the key.
+
+    Whichever conversation the session ends up on is recorded on the chat before
+    returning. That single write is what makes every respawn path resumable
+    without each of them having to remember to stash anything — including the
+    ones that just minted a fresh conversation, which the chat is now in.
     """
-    return await runtime.create_session(
+    info = await runtime.create_session(
         SessionSpec(
             key=str(_tg_key(chat_id)),
             agent_key=agent_key,
@@ -118,6 +125,20 @@ async def _create_tg_session(
         permission_callback=permission_callback,
         user_data=user_data,
     )
+    remember_chat_conversation(user_data, info.conversation_id)
+    return info
+
+
+async def _chat_conversation_id(chat_id: int, user_data: dict | None) -> str:
+    """The conversation a respawn of this chat should continue.
+
+    The live session is the authority while it exists — another surface can move
+    the key onto a different conversation, and ARCH-089's resolver is the one
+    place that knows how to ask. The recorded id is the answer once the
+    subprocess is gone, which is precisely when a respawn needs it.
+    """
+    live = await runtime.conversation_for_session(str(_tg_key(chat_id)))
+    return live or stored_chat_conversation(user_data)
 
 
 # Cache CLI availability checks so we only hit the filesystem once per key
@@ -425,8 +446,8 @@ async def _handle_start(
     """Start a fresh session for this chat, under whoever it is bound to.
 
     "New session" means a new conversation, not a new interlocutor: a chat bound
-    to a specialist restarts as that specialist. Use "Talk to → Condor" to go
-    back to the coordinator.
+    to a specialist restarts as that specialist, but with an empty transcript.
+    Use "Talk to → Condor" to go back to the coordinator.
     """
     query = update.callback_query
     message = query.message if query else update.message
@@ -453,6 +474,10 @@ async def _handle_start(
 
     # Destroy existing session
     await destroy_session(chat_id)
+    # Dropped before the spawn, not after: if the spawn fails there is no
+    # session and the next message auto-creates one, which must still honour
+    # the "new session" the user asked for rather than resuming the old chat.
+    forget_chat_conversation(context.user_data)
 
     try:
         bot = context.bot
@@ -1398,6 +1423,10 @@ async def _compact(
             permission_callback=_perm_cb,
             user_data=context.user_data,
             agent_slug=agent_slug,
+            # No conversation_id on purpose: compact is the one respawn that
+            # must NOT resume, or the replay would re-inject the very transcript
+            # the summary just replaced. The fresh conversation minted here is
+            # recorded as the chat's, so later respawns resume the compacted one.
         )
 
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
@@ -1505,10 +1534,12 @@ async def _handle_talk_pick(
     """Bind (or unbind) the chat's session to a domain Agent.
 
     ACP cannot hot-swap an identity, so this reaps the subprocess and spawns a
-    new one under the same key. The conversation does not survive; the user is
-    told so rather than silently losing it.
+    new one under the same key. The conversation is carried across that reap and
+    the handover is marked in the transcript, so switching happens *inside* one
+    chat — the same semantics the dashboard's ``switch`` action already has.
     """
     from condor.agents.agent import AgentStore
+    from condor.runtime import conversations
 
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -1531,17 +1562,21 @@ async def _handle_talk_pick(
 
     _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
+    # Read before the teardown — afterwards there is no session left to ask.
+    conversation_id = await _chat_conversation_id(chat_id, context.user_data)
+
     await query.message.edit_text(f"Switching to {label}...")
     await destroy_session(chat_id)
 
     try:
-        await _create_tg_session(
+        info = await _create_tg_session(
             chat_id=chat_id,
             agent_key="" if agent_slug else agent_key,
             user_id=user_id,
             permission_callback=_perm_cb,
             user_data=context.user_data,
             agent_slug=agent_slug,
+            conversation_id=conversation_id,
         )
     except Exception as e:
         log.exception("Failed to bind session to agent %r", agent_slug)
@@ -1552,9 +1587,20 @@ async def _handle_talk_pick(
     # pointing at an agent it could not spawn.
     bind_chat_to_agent(context.user_data, agent_slug)
 
+    # The handover, marked in the transcript rather than only in the header, so
+    # the resumed agent reads a divider between the two identities' turns.
+    # Recorded after the respawn: a switch that failed to spawn leaves no
+    # divider claiming it happened.
+    carried = bool(conversation_id) and info.conversation_id == conversation_id
+    if carried:
+        conversations.record_system(
+            user_id, conversation_id, f"Switched to {label}", kind="switch"
+        )
+
     await query.message.edit_text(
-        f"Now talking to {label}. Previous conversation was not carried over.\n\n"
-        "Send a message to start."
+        f"Now talking to {label}."
+        + (" The conversation so far is carried over." if carried else "")
+        + "\n\nSend a message to continue."
     )
 
 
@@ -1683,6 +1729,9 @@ async def agent_message_handler(
         session = await get_session(chat_id)
         if session:
             await destroy_session(chat_id)
+        # "Fresh" is the whole point of the verb: without this the auto-create
+        # below would replay the transcript the user just asked to leave.
+        forget_chat_conversation(context.user_data)
         await update.message.reply_text("Session reset. Send a message to start fresh.")
         return
 
@@ -1742,6 +1791,11 @@ async def agent_message_handler(
                 permission_callback=_perm_cb,
                 user_data=context.user_data,
                 agent_slug=agent.slug if agent else "",
+                # The subprocess died, the chat did not: resume the transcript
+                # it was in. Without this every restart, health-monitor reap or
+                # LRU detach silently hands the user an agent with no memory of
+                # the conversation they are in the middle of (ARCH-101).
+                conversation_id=stored_chat_conversation(context.user_data),
             )
 
         except Exception as e:

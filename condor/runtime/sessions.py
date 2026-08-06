@@ -259,21 +259,32 @@ def _resolve_conversation(
     A session without a ``user_id`` gets no conversation: the store is keyed by
     owner, and a transcript nobody owns can neither be listed nor authorized.
     Such a session behaves exactly as it did before this feature.
+
+    A requested conversation that no longer exists falls through to a new one
+    rather than resurrecting the id as an empty, meta-less directory. Callers
+    can now hold an id across a restart (ARCH-101), so "deleted since" is a
+    normal outcome and not a reason to strand the chat.
     """
     if not spec.user_id:
         return "", ""
 
     try:
-        if spec.conversation_id:
-            conversations.update_meta(
-                spec.user_id,
-                spec.conversation_id,
-                agent_key=agent_key,
-                agent_slug=agent_slug,
-                server_name=server_name,
-            )
+        if spec.conversation_id and conversations.update_meta(
+            spec.user_id,
+            spec.conversation_id,
+            agent_key=agent_key,
+            agent_slug=agent_slug,
+            server_name=server_name,
+        ):
             return spec.conversation_id, conversations.replay_context(
                 spec.user_id, spec.conversation_id
+            )
+
+        if spec.conversation_id:
+            log.info(
+                "Conversation %s is gone; %s starts a new one",
+                spec.conversation_id,
+                key,
             )
 
         meta = conversations.new_conversation(
