@@ -8,7 +8,7 @@ from telegram.ext import ContextTypes
 from condor.runtime import SessionKey
 from condor.runtime import client as runtime
 
-from ._shared import AGENT_OPTIONS, DEFAULT_AGENT
+from ._shared import AGENT_OPTIONS, DEFAULT_AGENT, resolve_chat_binding
 from .custom_models import format_model_label
 
 log = logging.getLogger(__name__)
@@ -487,11 +487,16 @@ async def show_agent_menu(
         # No session — show options to start or change settings
         agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
         llm_label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
-        text = (
-            f"No active session\n"
-            f"LLM: {llm_label}\n\n"
-            "Start a session or adjust settings below."
-        )
+        # The binding outlives the subprocess, so between respawns this is the
+        # only place the chat's real interlocutor shows: reporting the LLM alone
+        # would read as "you are back on Condor" when the next message is not.
+        bound, _ = resolve_chat_binding(context.user_data)
+        lines = ["No active session"]
+        if bound:
+            lines.append(f"Talking to: {bound.name or bound.slug}")
+        lines.append(f"LLM: {llm_label}")
+        lines.append("\nStart a session or adjust settings below.")
+        text = "\n".join(lines)
         keyboard = _no_session_keyboard()
 
     message = update.message or (

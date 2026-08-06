@@ -16,10 +16,13 @@ from handlers import agents as agents_mod
 
 
 class _FakeSession:
-    def __init__(self, alive=True, is_busy=False, agent_key="claude"):
+    def __init__(self, alive=True, is_busy=False, agent_key="claude", agent_slug=""):
         self.alive = alive
         self.is_busy = is_busy
         self.agent_key = agent_key
+        # Compact recreates the session, so it carries the bound identity over
+        # as well as the model (CORR-090).
+        self.agent_slug = agent_slug
 
 
 class _CallbackMessage:

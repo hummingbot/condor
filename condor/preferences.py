@@ -247,11 +247,30 @@ class CustomProviderPrefs(TypedDict, total=False):
     api_key: str
 
 
+class ChatBindingPrefs(TypedDict, total=False):
+    """What a chat is bound to, replayed every time its session respawns.
+
+    The live session is not durable — a bot restart, a health-monitor reap or an
+    LRU detach all destroy it — so anything the next session must be recreated
+    *with* is recorded here instead of only on the session object.
+
+    It is a record rather than a bare slug on purpose: identity is the first
+    thing a respawn has to replay, not the last (the conversation to resume is
+    the obvious next one), and each of those belongs beside the others rather
+    than as another loose top-level key.
+    """
+
+    # Slug of the specialist answering this chat. Absent/empty = Condor, the
+    # coordinator -- i.e. unbound, which is what clearing the binding restores.
+    agent_slug: str
+
+
 class AgentPrefs(TypedDict, total=False):
     default_agent: str  # "claude-code", "gemini", "codex", "copilot"
     show_tool_calls: bool  # Show tool call indicators (default True)
     tool_filter_mode: str  # "essential", "moderate", or "full" for PydanticAI models
     custom_providers: List[CustomProviderPrefs]  # OpenAI-compatible endpoints
+    chat_binding: ChatBindingPrefs  # who this chat talks to across respawns
     # Mirror of the live chat selection (user_data["agent_llm"]). Kept here so
     # code outside a PTB context — the MCP subprocess, web, background agent
     # runs — can see which model the user is actually on.
@@ -1030,6 +1049,40 @@ def set_default_agent(user_data: Dict, agent_key: str) -> None:
     prefs["agent"]["default_agent"] = agent_key
     _sync_section_to_cm(user_data, "agent")
     logger.info(f"Set default agent to {agent_key}")
+
+
+def get_chat_binding(user_data: Dict) -> "ChatBindingPrefs":
+    """What this chat is bound to — see :class:`ChatBindingPrefs`.
+
+    Empty dict when the chat is unbound, which is the coordinator.
+    """
+    prefs = _ensure_preferences(user_data)
+    return deepcopy(prefs.get("agent", {}).get("chat_binding") or {})
+
+
+def set_chat_binding(user_data: Dict, binding: "ChatBindingPrefs") -> None:
+    """Merge ``binding`` into the stored record, leaving the other fields alone.
+
+    Merging rather than replacing is what lets each thing a respawn replays be
+    written by whichever handler owns it, without that handler having to know
+    (or preserve) the rest of the record.
+    """
+    prefs = _ensure_preferences(user_data)
+    agent = prefs.setdefault("agent", {})
+    merged = {**(agent.get("chat_binding") or {}), **binding}
+    if merged == agent.get("chat_binding"):
+        return
+    agent["chat_binding"] = merged
+    _sync_section_to_cm(user_data, "agent")
+
+
+def clear_chat_binding(user_data: Dict) -> None:
+    """Forget the binding, so later respawns come back unbound (Condor)."""
+    prefs = _ensure_preferences(user_data)
+    agent = prefs.get("agent") or {}
+    if agent.pop("chat_binding", None) is None:
+        return
+    _sync_section_to_cm(user_data, "agent")
 
 
 # ============================================

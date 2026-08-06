@@ -53,6 +53,67 @@ def selectable_agent_options() -> dict[str, dict[str, Any]]:
     return {k: v for k, v in AGENT_OPTIONS.items() if not v.get("picker")}
 
 
+def bind_chat_to_agent(user_data: dict | None, agent_slug: str) -> None:
+    """Record (or clear) the specialist this chat talks to.
+
+    Written by the "Talk to" picker and read by every path that spawns a session
+    for the chat, which is what makes the choice outlive the subprocess that
+    served it (CORR-090). An empty slug means Condor was picked, so the binding
+    is dropped rather than stored as "".
+    """
+    from condor.preferences import clear_chat_binding, set_chat_binding
+
+    if user_data is None:
+        return
+    if agent_slug:
+        set_chat_binding(user_data, {"agent_slug": agent_slug})
+    else:
+        clear_chat_binding(user_data)
+
+
+def stale_binding_notice(slug: str) -> str:
+    """Told once, when a bound Agent's directory is gone by the time we respawn."""
+    return (
+        f"The agent '{slug}' no longer exists, so this chat is back to Condor. "
+        "Use /agent → Talk to if you want to bind it to another one."
+    )
+
+
+def resolve_chat_binding(user_data: dict | None, drop_stale: bool = True):
+    """The Agent this chat is bound to, as ``(agent, stale_slug)``.
+
+    ``agent`` is ``None`` when the chat is unbound (Condor answers) or when the
+    binding could not be honoured. In that second case ``stale_slug`` names the
+    agent that went missing — its directory was deleted while the chat was bound
+    to it. Silently falling back to the coordinator is the bug this exists to
+    prevent: it swaps the identity, the toolset, the pinned server and the
+    memory scope with nothing on screen to show for it.
+
+    ``drop_stale`` forgets such a binding, so the notice is delivered exactly
+    once and every later respawn is cleanly unbound. Only the paths that spawn a
+    session pass it: a surface that merely *renders* the binding must not be the
+    one to consume the warning the next spawn owes the user.
+    """
+    from condor.agents.agent import AgentStore
+    from condor.preferences import clear_chat_binding, get_chat_binding
+
+    if user_data is None:
+        return None, ""
+
+    slug = get_chat_binding(user_data).get("agent_slug") or ""
+    if not slug:
+        return None, ""
+
+    agent = AgentStore().get(slug)
+    if agent is None:
+        log.warning("Chat is bound to unknown agent %r", slug)
+        if drop_stale:
+            clear_chat_binding(user_data)
+        return None, slug
+
+    return agent, ""
+
+
 def _default_agent() -> str:
     """Resolve the fallback agent_key for users who haven't picked a model.
 

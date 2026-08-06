@@ -26,8 +26,11 @@ from ._shared import (
     COMPACT_PROMPT_AUTO,
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
+    bind_chat_to_agent,
     get_project_dir,
+    resolve_chat_binding,
     selectable_agent_options,
+    stale_binding_notice,
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
@@ -417,7 +420,12 @@ async def _handle_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Start a fresh Condor session for this chat."""
+    """Start a fresh session for this chat, under whoever it is bound to.
+
+    "New session" means a new conversation, not a new interlocutor: a chat bound
+    to a specialist restarts as that specialist. Use "Talk to → Condor" to go
+    back to the coordinator.
+    """
     query = update.callback_query
     message = query.message if query else update.message
     chat_id = update.effective_chat.id
@@ -426,7 +434,16 @@ async def _handle_start(
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     llm_label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
 
-    status_text = f"Starting Condor session ({llm_label})..."
+    agent, stale_slug = resolve_chat_binding(context.user_data)
+    label = (agent.name or agent.slug) if agent else "Condor"
+
+    status_text = (
+        f"Starting {label} session..."
+        if agent
+        else f"Starting Condor session ({llm_label})..."
+    )
+    if stale_slug:
+        status_text = f"{stale_binding_notice(stale_slug)}\n\n{status_text}"
     if query:
         await message.edit_text(status_text)
     else:
@@ -442,14 +459,17 @@ async def _handle_start(
 
         await _create_tg_session(
             chat_id=chat_id,
-            agent_key=agent_key,
+            # A bound Agent's own configured model wins, exactly as it does when
+            # the binding is first made in the "Talk to" picker.
+            agent_key="" if agent else agent_key,
             user_id=user_id,
             permission_callback=_perm_cb,
             user_data=context.user_data,
+            agent_slug=agent.slug if agent else "",
         )
 
         await message.edit_text(
-            "Condor is ready. Send a message to start chatting.\n\n"
+            f"{label} is ready. Send a message to start chatting.\n\n"
             "Use /agent to see options or any other command to exit."
         )
     except Exception as e:
@@ -1345,6 +1365,10 @@ async def _compact(
         return
 
     agent_key = session.agent_key
+    # Compact is a respawn like any other, so it has to carry the identity over:
+    # keeping only the model would summarize the specialist's context and then
+    # hand it to the coordinator.
+    agent_slug = session.agent_slug
     await destroy_session(chat_id)
 
     try:
@@ -1359,6 +1383,7 @@ async def _compact(
             user_id=user_id,
             permission_callback=_perm_cb,
             user_data=context.user_data,
+            agent_slug=agent_slug,
         )
 
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
@@ -1434,6 +1459,10 @@ async def _handle_talk_to(
 
     query = update.callback_query
     session = await get_session(update.effective_chat.id)
+    # Between respawns there is no session, but the chat is still bound -- tick
+    # what it will come back as, not what happens to be running.
+    bound, _ = resolve_chat_binding(context.user_data, drop_stale=False)
+    current_slug = session.agent_slug if session else (bound.slug if bound else "")
     # The coordinator is the keyboard's own first row, so listing it here too
     # would offer Condor twice (FEAT-033 put it in the registry).
     agents = AgentStore().list_specialists()
@@ -1442,7 +1471,7 @@ async def _handle_talk_to(
         await query.message.edit_text(
             "No agents defined yet. Create one with /agent → Condor, or from the "
             "dashboard's Agents page.",
-            reply_markup=_talk_to_keyboard([], 0, ""),
+            reply_markup=_talk_to_keyboard([], 0, current_slug),
         )
         return
 
@@ -1452,9 +1481,7 @@ async def _handle_talk_to(
         "Who do you want to talk to?\n\n"
         "A domain Agent answers with its own identity, tools and memory. "
         "Condor is the general coordinator.",
-        reply_markup=_talk_to_keyboard(
-            agents, page, session.agent_slug if session else ""
-        ),
+        reply_markup=_talk_to_keyboard(agents, page, current_slug),
     )
 
 
@@ -1506,6 +1533,10 @@ async def _handle_talk_pick(
         log.exception("Failed to bind session to agent %r", agent_slug)
         await query.message.edit_text(f"Could not switch to {label}: {e}")
         return
+
+    # Only once the session actually stands up: a chat must never be left
+    # pointing at an agent it could not spawn.
+    bind_chat_to_agent(context.user_data, agent_slug)
 
     await query.message.edit_text(
         f"Now talking to {label}. Previous conversation was not carried over.\n\n"
@@ -1670,9 +1701,19 @@ async def agent_message_handler(
         # /agent command does, so users who only ever type messages benefit too.
         agent_key = _reclaim_default_agent(context)
 
-        # Check if the CLI binary is installed before attempting to spawn
-        if not _is_agent_available(agent_key):
-            log.debug("Agent CLI for %s not found, skipping auto-create", agent_key)
+        # The subprocess is gone but the chat's choice is not: respawn under the
+        # Agent it was bound to, or this silently answers as the coordinator --
+        # other identity, other tools, other server, other memory (CORR-090).
+        agent, stale_slug = resolve_chat_binding(context.user_data)
+        if stale_slug:
+            await update.message.reply_text(stale_binding_notice(stale_slug))
+
+        # Check if the CLI binary is installed before attempting to spawn. A
+        # bound Agent runs on its own configured model, so that is the one whose
+        # CLI has to be there.
+        probe_key = (agent.agent_key or agent_key) if agent else agent_key
+        if not _is_agent_available(probe_key):
+            log.debug("Agent CLI for %s not found, skipping auto-create", probe_key)
             return
 
         try:
@@ -1682,10 +1723,11 @@ async def agent_message_handler(
 
             session = await _create_tg_session(
                 chat_id=chat_id,
-                agent_key=agent_key,
+                agent_key="" if agent else agent_key,
                 user_id=user_id,
                 permission_callback=_perm_cb,
                 user_data=context.user_data,
+                agent_slug=agent.slug if agent else "",
             )
 
         except Exception as e:
