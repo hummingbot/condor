@@ -5,10 +5,12 @@ import logging
 import re
 import time
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from condor.runtime.events import EventType, RuntimeEvent
+
+from .menu import stop_generating_keyboard
 
 log = logging.getLogger(__name__)
 
@@ -112,9 +114,14 @@ class TelegramStreamer:
         self._stop_reason: str | None = None
         self._tick = 0
         self._continuation_ids: list[int] = []
-        # message_id -> (text, parse_mode) last known to be on screen. Guards
-        # against re-sending an edit Telegram would reject as "not modified".
-        self._last_sent: dict[int, tuple[str, str | None]] = {}
+        # message_id -> (text, parse_mode, reply_markup) last known to be on
+        # screen. Guards against re-sending an edit Telegram would reject as
+        # "not modified". The markup belongs in the key: the final flush of a
+        # long answer often changes nothing but the button's absence.
+        self._last_sent: dict[int, tuple[str, str | None, object]] = {}
+        # Built once so every flush passes the same object — cheap, and the
+        # dedupe compare above short-circuits on identity.
+        self._stop_markup = stop_generating_keyboard()
 
     # --- Event processing ---
 
@@ -299,8 +306,14 @@ class TelegramStreamer:
         text, parse_mode = self._build_text(final)
         chunks = _split_text(text, MAX_MESSAGE_LEN)
 
+        # Only the placeholder carries the Stop button, and only while the turn
+        # is still open: a queued turn counts, since stopping the answer ahead
+        # is exactly what its notice tells the user /stop does. `final` passes
+        # None, which is how editMessageText drops an inline keyboard.
+        markup = None if final else self._stop_markup
+
         # Edit the main placeholder message
-        await self._edit(self._message_id, chunks[0], parse_mode)
+        await self._edit(self._message_id, chunks[0], parse_mode, markup)
 
         # Handle overflow chunks
         for i, chunk in enumerate(chunks[1:]):
@@ -314,14 +327,18 @@ class TelegramStreamer:
     # --- Telegram I/O ---
 
     async def _edit(
-        self, message_id: int, text: str, parse_mode: str | None = None
+        self,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> None:
         # A long answer splits at a paragraph boundary that stays put as the
         # buffer grows, so every chunk but the last is byte-identical on each
         # tick. Those edits only ever come back "not modified" — and each one
         # spends per-chat quota that the chunk which *did* change then waits
         # for. Skip what is already on screen.
-        if self._last_sent.get(message_id) == (text, parse_mode):
+        if self._last_sent.get(message_id) == (text, parse_mode, reply_markup):
             return
         try:
             await self._bot.edit_message_text(
@@ -329,6 +346,7 @@ class TelegramStreamer:
                 message_id=message_id,
                 text=text,
                 parse_mode=parse_mode,
+                reply_markup=reply_markup,
             )
         except BadRequest as e:
             if "not modified" not in str(e).lower():
@@ -336,7 +354,9 @@ class TelegramStreamer:
                     # The retry carries the same text, so drop the entry rather
                     # than let the cache mistake the fallback for a no-op.
                     self._last_sent.pop(message_id, None)
-                    await self._edit(message_id, text, parse_mode=None)
+                    await self._edit(
+                        message_id, text, parse_mode=None, reply_markup=reply_markup
+                    )
                 else:
                     log.warning("Failed to edit message: %s", e)
                 return
@@ -349,6 +369,7 @@ class TelegramStreamer:
                     message_id=message_id,
                     text=text,
                     parse_mode=parse_mode,
+                    reply_markup=reply_markup,
                 )
             except Exception:
                 return
@@ -357,7 +378,7 @@ class TelegramStreamer:
         except Exception:
             log.exception("Unexpected error editing message")
             return
-        self._last_sent[message_id] = (text, parse_mode)
+        self._last_sent[message_id] = (text, parse_mode, reply_markup)
 
     async def _send(self, text: str, parse_mode: str | None = None) -> int | None:
         try:
@@ -366,7 +387,7 @@ class TelegramStreamer:
                 text=text,
                 parse_mode=parse_mode,
             )
-            self._last_sent[msg.message_id] = (text, parse_mode)
+            self._last_sent[msg.message_id] = (text, parse_mode, None)
             return msg.message_id
         except BadRequest:
             if parse_mode:
@@ -379,7 +400,7 @@ class TelegramStreamer:
                     chat_id=self._chat_id,
                     text=text,
                 )
-                self._last_sent[msg.message_id] = (text, None)
+                self._last_sent[msg.message_id] = (text, None, None)
                 return msg.message_id
             except Exception:
                 return None

@@ -374,6 +374,8 @@ async def agent_callback_handler(
     # Session management
     elif action == "stop":
         await _handle_stop(update, context)
+    elif action == "cancel":
+        await _handle_cancel(update, context)
     elif action == "close":
         await _handle_close(update, context)
     elif action == "menu":
@@ -1262,6 +1264,18 @@ async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.message.edit_text("Agent session ended.")
     else:
         await query.message.edit_text("No active session.")
+
+
+async def _handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stop generating — the /stop command as a button on the answer itself.
+
+    Aborts the turn in flight (ACP ``session/cancel``) and leaves the session
+    standing, unlike "End session" above. Nothing is written back here: the
+    button lives on the message the streamer is still editing, so the reply
+    belongs to `TelegramStreamer.finalize()`, which marks the partial answer
+    stopped and drops the button with it.
+    """
+    await runtime.abort(_tg_key(update.effective_chat.id))
 
 
 async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

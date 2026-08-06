@@ -36,6 +36,19 @@ def _active_session_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
+def stop_generating_keyboard() -> InlineKeyboardMarkup:
+    """The button that rides on a streamed answer while it is being written.
+
+    Same semantics as /stop — abort the turn at the agent, keep the session and
+    its context — but reachable without leaving the message you are watching,
+    which is where someone actually decides an answer has gone wrong. Dropped by
+    `TelegramStreamer.finalize()`, so it never outlives the turn it can stop.
+    """
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("⏹ Stop generating", callback_data="agent:cancel")]]
+    )
+
+
 # "Talk to" picker pagination
 TALK_PAGE_SIZE = 8
 
