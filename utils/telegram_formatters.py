@@ -122,6 +122,19 @@ def escape_markdown_v2(text: str) -> str:
     return re.sub(f"([{re.escape(special_chars)}])", r"\\\1", str(text))
 
 
+def escape_markdown_v2_code(text: str) -> str:
+    """
+    Escape text that goes inside a MarkdownV2 code/pre entity (``` fence)
+
+    Telegram only treats '`' and '\\' as special inside pre/code entities, and both
+    must be escaped: an unescaped backtick closes the entity early and makes the
+    whole message unparseable, an unescaped backslash silently swallows the
+    character after it. Every other special char is literal in there, so the full
+    escape_markdown_v2() set is not needed.
+    """
+    return str(text).replace("\\", "\\\\").replace("`", "\\`")
+
+
 def format_number(value: float, decimals: int = 2) -> str:
     """Format a number with commas and specified decimals"""
     if value >= 1000000:
