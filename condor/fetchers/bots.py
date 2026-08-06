@@ -37,14 +37,22 @@ def extract_bots_list(result: Any) -> list[dict]:
     return []
 
 
-def _pick(live: dict, db: dict, key: str, default: float = 0.0) -> float:
-    """Merge a numeric field preferring live, by key presence — not truthiness.
+def _pick_value(live: dict, db: dict, key: str, default: Any = None) -> Any:
+    """Merge a field preferring live, by key presence — not truthiness.
 
-    A live reading of exactly ``0`` is legitimate (a freshly redeployed controller
-    that has closed nothing), so it must win over the DB snapshot instead of
-    falling through to a stale value from a previous deploy.
+    An empty live reading (``0``, ``{}``, ``[]``) is legitimate — a freshly
+    redeployed controller has closed nothing and holds no positions — so it must
+    win over the DB snapshot instead of falling through to a stale value from a
+    previous deploy. Only an absent key falls back to the DB.
     """
-    val = live.get(key, db.get(key, default))
+    if key in live:
+        return live[key]
+    return db.get(key, default)
+
+
+def _pick(live: dict, db: dict, key: str, default: float = 0.0) -> float:
+    """Presence-based merge of a numeric field, coerced to float."""
+    val = _pick_value(live, db, key, default)
     return float(val if val is not None else default)
 
 
@@ -125,14 +133,10 @@ def build_bots_page(
                 global_pnl = realized + unrealized
                 global_pnl_pct = _pick(live_perf, db_perf, "global_pnl_pct")
                 volume = _pick(live_perf, db_perf, "volume_traded")
-                close_types = live_perf.get("close_type_counts") or db_perf.get(
-                    "close_type_counts", {}
-                )
+                close_types = _pick_value(live_perf, db_perf, "close_type_counts", {})
                 if not isinstance(close_types, dict):
                     close_types = {}
-                positions = live_perf.get("positions_summary") or db_perf.get(
-                    "positions_summary", []
-                )
+                positions = _pick_value(live_perf, db_perf, "positions_summary", [])
                 if not isinstance(positions, list):
                     positions = []
 
