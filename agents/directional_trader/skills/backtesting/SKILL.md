@@ -1,8 +1,8 @@
 ---
 name: backtesting
-description: The single reference for backtesting a directional controller — windows
-  and costs, metric interpretation, parameter sweeps, and the out-of-sample go/no-go.
-  Routes to a companion file per topic.
+description: The directional-specific half of backtesting — window sizing, the metric
+  threshold table, parameter sweeps, and the out-of-sample go/no-go. The tool contract
+  and the family-agnostic rules live in the shared `backtest_flow` skill.
 when_to_use: After a controller config is uploaded, whenever you run, interpret, sweep,
   or compare backtests. Read this hub first, then pull the companion for the step you
   are on. Never deploy a config that has not passed the go/no-go here.
@@ -21,49 +21,33 @@ manage_skill(action="read_file", name="backtesting", file="interpret_metrics.md"
 
 ## Which companion to read
 
-| You are…                                                          | Read                     |
-|-------------------------------------------------------------------|--------------------------|
-| Choosing the window, resolution, or trade cost; launching a run    | `windows_and_costs.md`   |
-| Reading results — thresholds, red flags, how to report them        | `interpret_metrics.md`   |
-| Designing or ranking a parameter sweep; checking for overfitting   | `parameter_sweep.md`     |
-| Validating out-of-sample and deciding deploy / don't deploy        | `go_no_go.md`            |
+| You are…                                                          | Read                       |
+|-------------------------------------------------------------------|----------------------------|
+| Running anything for the first time this session                   | shared `backtest_flow`     |
+| Sizing the window for a controller interval                        | `windows_and_costs.md`     |
+| Reading results — thresholds, red flags, how to report them        | `interpret_metrics.md`     |
+| Designing or ranking a parameter sweep; checking for overfitting   | `parameter_sweep.md`       |
+| Validating out-of-sample and deciding deploy / don't deploy        | `go_no_go.md`              |
 
-A full pass reads all four in that order. A one-off "what does this Sharpe mean?"
-needs only `interpret_metrics.md`.
+A full pass reads `backtest_flow` once, then all four in that order. A one-off
+"what does this Sharpe mean?" needs only `interpret_metrics.md`.
 
-## The tool contract
+## The tool contract — read it once, elsewhere
 
-There is exactly **one** way to run a backtest: the shared `backtest_chart`
-routine. It runs the backtest, saves it, charts it, and hands back the metrics as
-data. Dates are `YYYY-MM-DD` strings, not epoch seconds.
+How to run a backtest is **not** directional knowledge, so it is not duplicated
+here. The shared `backtest_flow` skill holds the single copy: the `backtest_chart`
+routine, blocking vs `run_async`/`get_instance`, the `table_data` columns,
+`chart=False` for sweeps, `task_id` persistence and retention, plus the rules that
+hold for every strategy family (trade cost, resolution fidelity, the trade-count
+gate, one-parameter sweeps, mandatory out-of-sample).
 
-```python
-# Blocking — one run you are waiting on interactively.
-manage_routines(action="run", name="backtest_chart", config={
-    "config_name": ..., "start_date": "2025-04-22", "end_date": "2025-07-22",
-    "resolution": "1m", "trade_cost": 0.0002, "chart": False,
-})
-
-# Fire and forget — long windows and every sweep. submit → read back.
-manage_routines(action="run_async", name="backtest_chart", config={...})  # → instance_id
-manage_routines(action="get_instance", name=<instance_id>)
+```
+manage_skill(action="read", name="backtest_flow")
 ```
 
-Read the numbers from `result.table_data` — one row per run, with `task_id`,
-`net_pnl_quote`, `net_pnl_pct`, `sharpe_ratio`, `max_drawdown_pct`, `accuracy_pct`,
-`profit_factor`, `total_executors`, `win_signals`/`loss_signals`, `total_fees_quote`,
-`total_volume`. N runs concatenate into one table; never parse `result.text`.
-
-Set **`chart=False` for every sweep** — otherwise each run pushes an image into the
-user's chat. The chart still reaches the web report; a single run you are presenting
-is the one case worth leaving `chart=True`.
-
-Re-render or inspect any past run with `config={"task_id": ...}` — no re-run, no API
-call. `backtest_compare` ranks saved runs against each other.
-
-Config variants are created with
-`manage_controllers(action="upsert", target="config", config_name=..., config_data={...})`,
-adding `confirm_override=True` when overwriting.
+Read it before your first run of a session. What follows in *this* playbook is the
+part that is calibrated to directional trading and does not transfer to other
+strategy families.
 
 ## The loop
 
@@ -76,11 +60,15 @@ adding `confirm_override=True` when overwriting.
 
 ## Non-negotiables
 
-- **Never sweep every parameter at once** — that is curve fitting with extra steps.
-- **Stability beats the peak.** An isolated Sharpe spike surrounded by collapse is
-  overfit; a plateau is a result.
-- **Never deploy on in-sample numbers alone** — the held-out run is mandatory.
-- Trade count is a validity gate, not a statistic: under ~20 trades, no metric in
-  the report means anything.
-- Report the numbers you actually got, including the bad ones. A NO-GO is a
-  successful outcome of this workflow.
+The universal ones — one parameter at a time, plateau over peak, mandatory
+out-of-sample, the trade-count gate, report the bad numbers too — live in
+`backtest_flow` and apply here unchanged. On top of them, for directional:
+
+- **Sharpe < 0 means the signal is actively harmful.** Go back to `research`; do
+  not sweep a negative-edge signal until it looks positive.
+- **Never deploy a config that has not passed `go_no_go.md`** — a good baseline is
+  not a decision.
+- **Judge the exit, not just the entry.** An average trade duration far off the
+  controller interval means `time_limit` or the stop is driving exits, not the
+  signal — a "profitable" config of that shape is not the strategy you think you
+  are deploying.

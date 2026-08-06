@@ -1,16 +1,31 @@
-# Windows, Resolution and Trade Cost
+# Windows for a Directional Controller
 
-Companion to the `backtesting` playbook — read it for the tool contract.
+Companion to the `backtesting` playbook.
+
+**Cost, resolution and the run mechanics are not here.** `trade_cost` (including the
+per-exchange fee table), what `backtesting_resolution` actually controls, blocking
+vs `run_async`/`get_instance`, and how runs are saved and retained all live in the
+shared `backtest_flow` skill — one copy, read it there:
+
+```
+manage_skill(action="read", name="backtest_flow")
+```
+
+What follows is the part calibrated to directional trading.
 
 ## Window selection
 
-**Minimum by interval** (below this the trade count is never valid):
+**Minimum by controller interval** (below this the trade count is never valid):
 
 | Controller interval | Minimum window | Preferred      |
 |---------------------|----------------|----------------|
 | 15m                 | 7 days         | 30–60 days     |
 | 1h                  | 30 days        | 90–180 days    |
 | 1d                  | 90 days        | 180–365 days   |
+
+These are *directional* minimums: they exist to accumulate enough discrete
+entry/exit signals for the metrics to mean anything. A strategy that earns
+continuously rather than per-signal sizes its window differently.
 
 **Rules:**
 - Prefer 3–6 months covering at least one full regime cycle (trend *and* range).
@@ -24,75 +39,19 @@ end_time = int(time.time())
 start_time = end_time - (90 * 86400)   # 90 days
 ```
 
-## Resolution
+## Resolution, applied to a sweep
 
-`backtesting_resolution` is the granularity the engine simulates fills at, not the
-controller's candle interval.
+The general rule is in `backtest_flow`. Its directional application:
 
-- `1m` — maximum fidelity, slowest. Use it for the baseline and the final
-  validation run.
-- Match the controller interval (`15m`, `1h`) for speed during a wide sweep, then
-  re-run the winner at `1m` before deploying.
-- A winner that only survives at coarse resolution is not a winner — the gap is
-  usually intrabar stop/TP ordering.
+- Baseline and final validation at `1m`.
+- Match the controller interval (`15m`, `1h`) while sweeping wide, then re-run the
+  winner at `1m` before it goes anywhere near `go_no_go.md`.
 
-## Trade cost
+## Comparability
 
-`trade_cost` is a decimal fraction of notional.
-
-| Setting  | Meaning                                                    |
-|----------|------------------------------------------------------------|
-| `0.0002` | Tool default — roughly a maker leg                         |
-| `0.0006` | **Recommended default** — conservative taker round-trip     |
-
-Per-exchange reference (one leg):
-
-| Exchange | Maker    | Taker     |
-|----------|----------|-----------|
-| Binance  | 0.0002   | 0.0004    |
-| Bybit    | 0.0002   | 0.00055   |
-
-Use the taker rate unless the controller is provably passive. Understating cost is
-the single easiest way to manufacture a profitable backtest that loses money live —
-if the edge disappears between `0.0002` and `0.0006`, there was no edge.
-
-## Blocking vs fire-and-forget
-
-Both are the same routine — the difference is only whether you wait.
-
-- **`action="run"`** — one short run you are waiting on interactively. It gives up
-  after ~2 minutes and hands you the `instance_id` to read later; the run itself
-  keeps going.
-- **`action="run_async"`** → **`action="get_instance"`** — long windows and *every*
-  sweep. Submit the whole grid, then read the instances back; do not serialize a
-  15-variant sweep through blocking calls.
-
-`get_instance` returns the finished run in full — the metrics row in `table_data`,
-the summary in `text`, the error text on failure, and the status otherwise. You
-never need to re-run a window just to see its numbers.
-
-### Every run is saved
-
-The routine stores each completed backtest under its `task_id`, whoever ran it and
-from wherever. That is what makes the rest possible:
-
-- re-render a past run with `backtest_chart` `config={"task_id": ...}` — no re-run;
-- rank past runs against each other with `backtest_compare`;
-- a run from the chat, the dashboard or an agent is one record, not three.
-
-The `task_id` is in the metrics row and in the summary text. Record it.
-
-### Result retention
-
-The Hummingbot API archives finished results to `bots/data/backtests/{task_id}.json.gz`;
-only their metrics stay resident, and reads rehydrate the full payload from disk.
-
-- Retention is a **count of results** — 100 by default, via `BACKTESTING_MAX_RESULTS`
-  (`BACKTESTING_RESULTS_PATH` sets the directory).
-- Results **survive an API restart** — an index file restores finished tasks on
-  startup.
-- Condor's own copy is independent of that reaping, so a run you saved stays
-  renderable and comparable after the API has dropped it.
-
-Record for every run: `config_name`, window, resolution, trade cost. A metric
-without its window and cost is not comparable to anything.
+You no longer record the window, resolution and cost by hand. Every row
+`backtest_chart` returns carries `start_date`, `end_date`, `resolution` and
+`trade_cost` alongside the metrics, so a sweep's table is self-describing and rows
+measured under different parameters cannot be silently ranked against each other.
+Check those columns match your intent before ranking — a row whose parameters
+differ from the rest of the grid is a mistake, not a winner.

@@ -2,15 +2,24 @@
 
 Companion to the `backtesting` playbook.
 
+**These thresholds are calibrated to directional trading and do not transfer.** A
+95% win rate at profit factor 1.1 is a red flag here and the normal shape of a
+funding-arb trade. Another strategy family reads its own table, or none.
+
 ## Metrics to extract
 
-- `net_pnl_quote` / net PnL % — total profit
+Column names as `backtest_chart` actually returns them in `table_data`:
+
+- `net_pnl_quote` / `net_pnl_pct` — total profit
 - `sharpe_ratio` — risk-adjusted return
 - `max_drawdown_pct` — peak-to-trough
-- `total_trades` — the validity gate
-- `win_rate` — % profitable
+- `total_executors` — the trade count, and the validity gate
+- `accuracy_pct` — % profitable (with `win_signals` / `loss_signals` behind it)
 - `profit_factor` — gross profit / gross loss
-- `avg_trade_duration_hours` — sets the live monitoring window later
+
+Average trade duration is not a returned column — read it from the close-type
+breakdown in the summary text when you need it, and see the exit non-negotiable in
+the hub.
 
 ## Threshold table
 
@@ -60,5 +69,7 @@ Profit Factor: 1.89
 Verdict: ✅ GO for parameter sweep
 ```
 
-Always print the window, resolution and trade cost in the header — a metric
-without them cannot be compared against the next run.
+The header's window, resolution and cost come straight off the row —
+`start_date`, `end_date`, `resolution`, `trade_cost` are columns, not something you
+have to have remembered. Print them: a metric without them cannot be compared
+against the next run.
