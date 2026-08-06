@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: help setup install run test lint build-frontend setup-chrome
+.PHONY: help setup install run test lint build-frontend setup-chrome pick-model
 
 # Helper function to find node/npm via nvm or system
 define find_node
@@ -18,6 +18,7 @@ help:
 	@echo "Condor - Available Commands"
 	@echo ""
 	@echo "  make setup       - Interactive setup wizard"
+	@echo "  make pick-model  - Choose the AI model Condor thinks with"
 	@echo "  make install     - Setup + install all dependencies"
 	@echo "  make run         - Run locally (dev)"
 	@echo "  make test        - Run tests"
@@ -25,6 +26,9 @@ help:
 
 setup:
 	@chmod +x setup-environment.sh && ./setup-environment.sh
+
+pick-model:
+	uv run python -m condor.setup_llm
 
 install: setup
 	uv sync --dev
