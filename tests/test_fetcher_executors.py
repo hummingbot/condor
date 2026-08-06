@@ -4,9 +4,13 @@ The pagination loop used to end only on an absent cursor (behind a dead double
 ``break``) or on the item cap. Because the cursor is read from ``cursor`` as
 well as ``next_cursor`` — the field many APIs echo back — a final partial page
 could be re-requested until the cap, duplicating rows, and an echoed cursor on
-an empty page spun forever. These tests pin the terminal conditions the sibling
-walks in ``condor/web/ws_manager.py`` and ``condor/agents/performance.py``
-already use, plus the progress guards.
+an empty page spun forever.
+
+Since ARCH-128 the loop itself lives in ``condor/fetchers/_pagination.py`` and
+there are no sibling copies left to drift from; these tests stay as the
+end-to-end check that ``fetch_all_executors`` drives that walker with the right
+page size, cap and terminal behaviour. ``tests/test_pagination_walk.py`` pins the
+walker directly.
 """
 
 import asyncio

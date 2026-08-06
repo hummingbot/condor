@@ -1434,6 +1434,7 @@ class WebSocketManager:
         # Progressive pre-fetch only if we still have no data
         if channel not in self._last_data:
             try:
+                from condor.fetchers._pagination import walk_pages
                 from condor.fetchers.executors import (
                     extract_executors_list as _extract_executors_list,
                 )
@@ -1441,18 +1442,19 @@ class WebSocketManager:
                 sds = get_server_data_service()
                 client = await cm.get_client(server_name)
                 all_raw: list[dict] = []
-                cursor: str | None = None
                 page_num = 0
                 FIRST_PAGE = 50
                 NEXT_PAGE = 500
+                MAX_PREFETCH = 5000
 
-                while True:
-                    page_size = FIRST_PAGE if page_num == 0 else NEXT_PAGE
-                    kwargs: dict = {"limit": page_size}
-                    if cursor:
-                        kwargs["cursor"] = cursor
-                    result = await client.executors.search_executors(**kwargs)
-                    page = _extract_executors_list(result)
+                # A small first page so the tab paints before the long pages land.
+                async for page in walk_pages(
+                    client.executors.search_executors,
+                    _extract_executors_list,
+                    page_size=NEXT_PAGE,
+                    first_page_size=FIRST_PAGE,
+                    max_items=MAX_PREFETCH,
+                ):
                     all_raw.extend(page)
 
                     # Transform and broadcast accumulated results after each page
@@ -1466,27 +1468,6 @@ class WebSocketManager:
                             len(executors),
                             channel,
                         )
-
-                    # Determine next cursor
-                    next_cursor = None
-                    if isinstance(result, dict):
-                        next_cursor = result.get("next_cursor") or result.get("cursor")
-                        pagination = result.get("pagination")
-                        if not next_cursor and isinstance(pagination, dict):
-                            next_cursor = pagination.get(
-                                "next_cursor"
-                            ) or pagination.get("cursor")
-                    if not next_cursor or len(page) < page_size:
-                        break
-                    if len(all_raw) >= 5000:
-                        break
-                    if next_cursor == cursor:
-                        # The API echoed the cursor we sent: the walk is not
-                        # progressing. Re-issuing it would append the same page
-                        # again, and those duplicates reach both the WS channel
-                        # and the shared SDS cache below.
-                        break
-                    cursor = next_cursor
                     page_num += 1
 
                 # Cache in SDS so other consumers benefit

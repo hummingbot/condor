@@ -2,14 +2,17 @@
 
 import asyncio
 import logging
+from functools import partial
 from typing import Any, Dict, List, Optional
 
 import aiohttp
 
+from condor.fetchers._pagination import collect_pages
+
 logger = logging.getLogger(__name__)
 
 # Cap on how many executors a single walk accumulates (not on iterations:
-# the loop's own empty-page and cursor-progress guards end a stalled walk).
+# the walker's own empty-page and cursor-progress guards end a stalled walk).
 MAX_EXECUTORS_FETCH = 5000
 EXECUTORS_PAGE_SIZE = 500
 
@@ -232,35 +235,12 @@ async def fetch_all_executors(
     hot poll — each call can issue up to ``max_items / EXECUTORS_PAGE_SIZE``
     sequential requests that the SDS rate limiter cannot see.
     """
-    all_items: list[dict] = []
-    cursor: str | None = None
-    while True:
-        remaining = max_items - len(all_items)
-        if remaining <= 0:
-            break
-        page_size = min(EXECUTORS_PAGE_SIZE, remaining)
-        kwargs = {**filters, "limit": page_size}
-        if cursor:
-            kwargs["cursor"] = cursor
-        result = await client.executors.search_executors(**kwargs)
-        page = extract_executors_list(result)
-        all_items.extend(page)
-
-        next_cursor = None
-        if isinstance(result, dict):
-            next_cursor = result.get("next_cursor") or result.get("cursor")
-            pagination = result.get("pagination")
-            if not next_cursor and isinstance(pagination, dict):
-                next_cursor = pagination.get("next_cursor") or pagination.get("cursor")
-        if not page:
-            break
-        if not next_cursor or len(page) < page_size:
-            break
-        if next_cursor == cursor:
-            # The API echoed the cursor we sent: the walk is not progressing.
-            break
-        cursor = next_cursor
-    return all_items
+    return await collect_pages(
+        partial(client.executors.search_executors, **filters),
+        extract_executors_list,
+        page_size=EXECUTORS_PAGE_SIZE,
+        max_items=max_items,
+    )
 
 
 def describe_executor_error(exc: BaseException) -> tuple[Optional[int], str]:

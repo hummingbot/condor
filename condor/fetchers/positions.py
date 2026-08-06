@@ -1,25 +1,22 @@
 """Fetch position data from Hummingbot API."""
 
 import logging
+from functools import partial
 from typing import Any, Dict, List, Optional
+
+from condor.fetchers._pagination import collect_pages
 
 logger = logging.getLogger(__name__)
 
 # Cap on how many positions a single walk accumulates (not on iterations:
-# the loop's own empty-page and cursor-progress guards end a stalled walk).
+# the walker's own empty-page and cursor-progress guards end a stalled walk).
 MAX_POSITIONS_FETCH = 2000
 POSITIONS_PAGE_SIZE = 200
 
 
-def _next_cursor(result: Any) -> Optional[str]:
-    """Extract the pagination cursor from a positions response."""
-    if not isinstance(result, dict):
-        return None
-    cursor = result.get("next_cursor") or result.get("cursor")
-    pagination = result.get("pagination")
-    if not cursor and isinstance(pagination, dict):
-        cursor = pagination.get("next_cursor") or pagination.get("cursor")
-    return cursor
+def _extract_positions(result: Any) -> List[Dict[str, Any]]:
+    """Rows out of one ``get_positions`` page."""
+    return result.get("data", []) if isinstance(result, dict) else []
 
 
 async def fetch_positions(
@@ -45,36 +42,25 @@ async def fetch_positions(
             account as flat. Callers that cache the answer want the distinction:
             an unreachable server is worth retrying, "no open positions" is not.
     """
+
+    def _warn_truncated() -> None:
+        logger.warning(
+            "fetch_positions reached the %s-position safety cap; "
+            "results are truncated",
+            limit,
+        )
+
+    filters: Dict[str, Any] = (
+        {"connector_names": [connector_name]} if connector_name else {}
+    )
     try:
-        positions: List[Dict[str, Any]] = []
-        cursor: Optional[str] = None
-        while True:
-            remaining = limit - len(positions)
-            if remaining <= 0:
-                logger.warning(
-                    "fetch_positions reached the %s-position safety cap; "
-                    "results are truncated",
-                    limit,
-                )
-                break
-            page_size = min(POSITIONS_PAGE_SIZE, remaining)
-            kwargs: Dict[str, Any] = {"limit": page_size}
-            if connector_name:
-                kwargs["connector_names"] = [connector_name]
-            if cursor:
-                kwargs["cursor"] = cursor
-
-            result = await client.trading.get_positions(**kwargs)
-            page = result.get("data", []) if isinstance(result, dict) else []
-            positions.extend(page)
-
-            next_cursor = _next_cursor(result)
-            if not page or not next_cursor or len(page) < page_size:
-                break
-            if next_cursor == cursor:
-                # The API echoed the cursor we sent: the walk is not progressing.
-                break
-            cursor = next_cursor
+        positions: List[Dict[str, Any]] = await collect_pages(
+            partial(client.trading.get_positions, **filters),
+            _extract_positions,
+            page_size=POSITIONS_PAGE_SIZE,
+            max_items=limit,
+            on_truncated=_warn_truncated,
+        )
 
         if connector_name and positions:
             positions = [

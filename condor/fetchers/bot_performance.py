@@ -20,8 +20,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from functools import partial
 from typing import Any
 
+from condor.fetchers._pagination import collect_pages
 from condor.fetchers.executors import normalize_executor_side
 
 logger = logging.getLogger(__name__)
@@ -321,20 +323,8 @@ def extract_history_rows(result: Any) -> list[dict]:
     return [r for r in rows if isinstance(r, dict)]
 
 
-def _next_history_cursor(result: Any) -> str | None:
-    """The cursor for the following page, top level or nested under ``pagination``."""
-    if not isinstance(result, dict):
-        return None
-    cursor = result.get("next_cursor") or result.get("cursor")
-    if not cursor:
-        pagination = result.get("pagination")
-        if isinstance(pagination, dict):
-            cursor = pagination.get("next_cursor") or pagination.get("cursor")
-    return cursor or None
-
-
 # One instance's history is walked to exhaustion, so the cap is on rows
-# accumulated, not on iterations — the loop's own empty-page and cursor-progress
+# accumulated, not on iterations — the walker's own empty-page and cursor-progress
 # guards end a stalled walk. ``limit`` is the per-page budget; the endpoint counts
 # it in ROWS, and rows are per controller, so a single page holds only
 # ``limit / num_controllers`` timestamps.
@@ -377,45 +367,8 @@ async def fetch_instance_history(
     the same silent misattribution as a truncated one, so the caller degrades to
     "no history" instead of to "wrong history".
     """
-    rows: list[dict] = []
-    cursor: str | None = None
-    capped = False
-    while True:
-        remaining = max_rows - len(rows)
-        if remaining <= 0:
-            capped = True
-            break
-        page_size = min(limit, remaining)
-        kwargs: dict[str, Any] = {
-            "bot_name": instance_name,
-            "interval": interval,
-            "limit": page_size,
-        }
-        if cursor:
-            kwargs["cursor"] = cursor
-        try:
-            result = await client.bot_orchestration.get_controller_performance_history(
-                **kwargs
-            )
-        except Exception as e:
-            logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
-            return []
-        page = extract_history_rows(result)
-        rows.extend(page)
 
-        next_cursor = _next_history_cursor(result)
-        if not page:
-            break
-        if not next_cursor or len(page) < page_size:
-            break
-        if next_cursor == cursor:
-            # The API echoed the cursor we sent: the walk is not progressing.
-            # Re-issuing it would re-append the same page, and these rows are
-            # summed per timestamp — duplicates would inflate every bucket.
-            break
-        cursor = next_cursor
-
-    if capped:
+    def _warn_truncated() -> None:
         # Older buckets were dropped, and everything before the oldest retained
         # row reads as zero. Say so rather than returning a silently truncated
         # timeline.
@@ -426,6 +379,22 @@ async def fetch_instance_history(
             max_rows,
             interval,
         )
+
+    try:
+        rows: list[dict] = await collect_pages(
+            partial(
+                client.bot_orchestration.get_controller_performance_history,
+                bot_name=instance_name,
+                interval=interval,
+            ),
+            extract_history_rows,
+            page_size=limit,
+            max_items=max_rows,
+            on_truncated=_warn_truncated,
+        )
+    except Exception as e:
+        logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
+        return []
 
     by_ts: dict[str, list[float]] = {}
     for r in rows:

@@ -10,7 +10,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import asdict, dataclass, field
+from functools import partial
 from typing import Any
+
+from condor.fetchers._pagination import walk_pages
 
 log = logging.getLogger(__name__)
 
@@ -240,41 +243,22 @@ async def fetch_agent_performance_batch(
     # causing sessions with many executors to appear as zero in the rollup
     # while the per-session endpoint showed the correct numbers.
     PAGE_SIZE = 50
-    MAX_PAGES = 200  # safety cap → 10,000 executors per agent
+    # Safety cap, expressed in rows: the walker counts what it accumulated, not
+    # how many times it looped, and its own terminal guards end a stalled walk.
+    MAX_PAGES = 200  # → 10,000 executors per agent
 
     async def _fetch_rows(aid: str) -> list[dict]:
         rows: list[dict] = []
-        cursor: str | None = None
         try:
-            for _ in range(MAX_PAGES):
-                kwargs: dict[str, Any] = {
-                    "controller_ids": [aid],
-                    "limit": PAGE_SIZE,
-                }
-                if cursor:
-                    kwargs["cursor"] = cursor
-                result = await client.executors.search_executors(**kwargs)
-                page = _extract_executors_list(result)
+            async for page in walk_pages(
+                partial(client.executors.search_executors, controller_ids=[aid]),
+                _extract_executors_list,
+                page_size=PAGE_SIZE,
+                max_items=MAX_PAGES * PAGE_SIZE,
+            ):
                 for ex in page:
                     if isinstance(ex, dict):
                         rows.append(_executor_row(ex))
-
-                next_cursor = None
-                if isinstance(result, dict):
-                    next_cursor = result.get("next_cursor") or result.get("cursor")
-                    pagination = result.get("pagination")
-                    if not next_cursor and isinstance(pagination, dict):
-                        next_cursor = pagination.get("next_cursor") or pagination.get(
-                            "cursor"
-                        )
-                if not next_cursor or len(page) < PAGE_SIZE:
-                    break
-                if next_cursor == cursor:
-                    # The API echoed the cursor we sent: the walk is not
-                    # progressing. Re-issuing it would re-append the same page
-                    # and inflate this agent's PnL, volume and trade count.
-                    break
-                cursor = next_cursor
         except Exception as e:
             log.warning("search_executors(%s) failed: %s", aid, e)
             if failed_ids is not None:
