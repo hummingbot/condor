@@ -70,6 +70,8 @@ export interface SlotInfo {
 export interface PermissionRequest {
   request_id: string;
   summary: string;
+  /** Which agent, on which server, raised it. Empty when unattributable. */
+  origin?: string;
 }
 
 /**
@@ -827,6 +829,7 @@ export function useChatSocket() {
             [askingSlot]: {
               request_id: data.request_id as string,
               summary: data.summary as string,
+              origin: (data.origin as string) || "",
             },
           }));
           break;

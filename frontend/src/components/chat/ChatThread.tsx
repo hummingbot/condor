@@ -56,7 +56,11 @@ export function ChatThread({
    * identical to a dropped one is the bug this replaces.
    */
   isQueued?: boolean;
-  permissionRequest: { request_id: string; summary: string } | null;
+  permissionRequest: {
+    request_id: string;
+    summary: string;
+    origin?: string;
+  } | null;
   onResolvePermission: (requestId: string, approved: boolean) => void;
   switchError?: string | null;
   onDismissSwitchError?: () => void;
@@ -144,7 +148,10 @@ export function ChatThread({
           <div className="flex items-start gap-2">
             <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-yellow)]" />
             <div className="flex-1 text-sm">
-              <p className="font-medium text-[var(--color-yellow)]">Confirm action</p>
+              <p className="font-medium text-[var(--color-yellow)]">
+                Confirm action
+                {permissionRequest.origin ? ` — ${permissionRequest.origin}` : ""}
+              </p>
               <p className="mt-0.5 text-[var(--color-text-muted)]">
                 {permissionRequest.summary}
               </p>

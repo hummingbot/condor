@@ -24,6 +24,7 @@ from condor.acp.pydantic_ai_client import (
 )
 from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
+from condor.runtime.confirmations import get_registry as get_confirmation_registry
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
@@ -184,6 +185,27 @@ class SessionLimitReached(RuntimeError):
     """Raised when a user already holds MAX_SESSIONS_PER_USER live sessions."""
 
 
+def _deny_pending_confirmations(raw_key: str) -> int:
+    """Deny whatever this session was still asking a human to approve.
+
+    A session that is going away cannot act on an approval, and the identity
+    that raised the request no longer exists — while the entry stays PENDING
+    its "Approve" button is still tappable, and after a respawn under the same
+    key it would authorize a live tool call for whoever is bound *now*. Denying
+    here, on the one funnel every teardown goes through (destroy, agent/server
+    switch, LRU detach, health-monitor reap, shutdown), is what keeps that from
+    depending on each caller remembering to.
+    """
+    try:
+        denied = get_confirmation_registry().deny_pending_for_session(raw_key)
+    except Exception:  # noqa: BLE001 - cleanup must never block a teardown
+        log.warning("Could not deny pending confirmations for %s", raw_key)
+        return 0
+    if denied:
+        log.info("Denied %d pending confirmation(s) tearing down %s", denied, raw_key)
+    return denied
+
+
 async def _enforce_session_budget(user_id: int) -> None:
     """Reap dead sessions, detach the least recently used idle one, then refuse.
 
@@ -195,6 +217,10 @@ async def _enforce_session_budget(user_id: int) -> None:
     """
     for raw_key, session in list(_sessions.items()):
         if session.user_id == user_id and not session.client.alive:
+            # Dropped straight from the registry rather than through
+            # _destroy_session_internal (the subprocess is already gone), so
+            # the sweep it owns has to be repeated here.
+            _deny_pending_confirmations(raw_key)
             _sessions.pop(raw_key, None)
 
     while True:
@@ -517,6 +543,7 @@ async def destroy_session(key: SessionKey) -> bool:
 
 async def _destroy_session_internal(key: SessionKey) -> bool:
     raw_key = str(key)
+    _deny_pending_confirmations(raw_key)
     session = _sessions.pop(raw_key, None)
     if session:
         try:

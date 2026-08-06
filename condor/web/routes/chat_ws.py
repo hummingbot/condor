@@ -226,6 +226,9 @@ class WebSocketChannel:
                 "slot_id": _slot_of(pending.session_key),
                 "request_id": pending.id,
                 "summary": pending.summary,
+                # Which agent, on which server, is asking. The slot addresses
+                # the request; this says out loud what the user is authorizing.
+                "origin": pending.origin,
             },
         )
 

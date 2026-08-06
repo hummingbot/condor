@@ -112,9 +112,16 @@ class TelegramChannel:
                 ]
             ]
         )
+        # Naming the asker is not decoration: one chat can talk to several
+        # agents on several servers, and "Approve this action?" on its own does
+        # not say whose action, or where it lands.
+        asked_by = f"\nRequested by {pending.origin}\n" if pending.origin else ""
         await self._bot.send_message(
             chat_id=self._chat_id,
-            text=f"Trade Confirmation\n\n{pending.summary}\n\nApprove this action?",
+            text=(
+                f"Trade Confirmation\n{asked_by}\n"
+                f"{pending.summary}\n\nApprove this action?"
+            ),
             reply_markup=keyboard,
         )
 
