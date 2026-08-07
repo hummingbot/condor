@@ -22,7 +22,6 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
 import { type RoutineInstance, api } from "@/lib/api";
 import { buildConfigValues, formatAgo, formatInterval, invalidateRoutineQueries, saveConfig } from "@/lib/routineUtils";
 import { setViewContext } from "@/lib/viewContext";
@@ -679,7 +678,6 @@ export function ReportBrowser({
               {reportTheme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
             {/* Agent chat toggle */}
-            <AgentToggleButton className="ml-1" />
             {/* Close */}
             <button
               onClick={onClose}

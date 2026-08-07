@@ -16,6 +16,10 @@ import {
  * Who is answering. The two fields are orthogonal — a bound Agent brings its
  * own model, and picking a model while one is bound overrides just the model —
  * so a selection names whichever one the user actually changed.
+ *
+ * `BrainPicker` only ever sets `agentKey`; `agentSlug` stays on the type
+ * because the switch endpoint takes both, and rebinding is still what the
+ * rail's rows do when they start a conversation.
  */
 export interface BrainSelection {
   /** Bind a domain Agent. `""` unbinds, back to the plain assistant. */
@@ -57,14 +61,19 @@ function shortModelLabel(label: string): string {
 }
 
 /**
- * "Who's answering" — one picker over two sections.
+ * "What's answering" — the model, and only the model.
  *
- * **Agents** binds a domain Agent (its identity, tools, memory scope);
- * **Models** picks the LLM. They are deliberately one list rather than two
- * dropdowns, because the user is asking one question. Picker sentinels
- * ("openrouter:", "custom:") are drill-downs, never selectable keys — the
- * backend flags them, since the key's shape does not tell you ("ollama:" also
- * ends in a colon and is a real key meaning "that backend's default model").
+ * This picks the LLM, which for a bound Agent *is* its `agent_key` in AGENT.md:
+ * the backend persists the pick there, so it reaches consult, delegate and its
+ * loops too. It does not bind or unbind an Agent — that is a different question
+ * with a different answer ("who am I talking to"), and it belongs to the rail,
+ * which can also switch conversations and start one. Offering it here as well
+ * gave two doors to one thing and neither of them the full gesture.
+ *
+ * Picker sentinels ("openrouter:", "custom:") are drill-downs, never selectable
+ * keys — the backend flags them, since the key's shape does not tell you
+ * ("ollama:" also ends in a colon and is a real key meaning "that backend's
+ * default model").
  */
 export function BrainPicker({
   agents,
@@ -195,44 +204,14 @@ export function BrainPicker({
           >
             {submenu === null ? (
               <>
-                {agentBindings.length > 0 && (
-                  <>
-                    {sectionHeader("Agents", true)}
-                    <button
-                      onClick={() => pick({ agentSlug: "" })}
-                      className={rowClass(!selectedAgentSlug)}
-                    >
-                      Condor assistant
-                    </button>
-                    {agentBindings.map((a) => (
-                      <button
-                        key={a.slug}
-                        onClick={() => pick({ agentSlug: a.slug })}
-                        title={a.when_to_consult || a.description}
-                        className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                          a.slug === selectedAgentSlug
-                            ? "font-medium text-[var(--color-primary)]"
-                            : "text-[var(--color-text)]"
-                        }`}
-                      >
-                        <span className="w-full truncate">{a.name}</span>
-                        {(a.when_to_consult || a.description) && (
-                          <span className="w-full truncate text-[10px] font-normal text-[var(--color-text-muted)]">
-                            {a.when_to_consult || a.description}
-                          </span>
-                        )}
-                      </button>
-                    ))}
-                    {/* An Agent's model is global — it reaches consult,
-                        delegate and its loops — so the consequence of picking
-                        one here is stated, never a silent side effect. */}
-                    {sectionHeader(
-                      boundAgent
-                        ? `Model — also becomes ${boundAgent.name}'s default`
-                        : "Model",
-                    )}
-                  </>
-                )}
+                {/* An Agent's model is global — it reaches consult, delegate
+                    and its loops — so the consequence of picking one here is
+                    stated, never a silent side effect. */}
+                {boundAgent &&
+                  sectionHeader(
+                    `Model — also becomes ${boundAgent.name}'s default`,
+                    true,
+                  )}
                 {directAgents.map((a) => (
                   <button
                     key={a.key}

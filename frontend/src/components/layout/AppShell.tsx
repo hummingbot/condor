@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect } from "react";
 import {
   Activity,
   Bot,
@@ -11,35 +11,34 @@ import {
   Wallet,
   Zap,
 } from "lucide-react";
-import { NavLink, Outlet, useLocation } from "react-router-dom";
+import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
-import { ChatPanel } from "@/components/chat/ChatPanel";
 import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
-import { AgentToggleButton } from "./AgentToggleButton";
 import { CurrencySelector } from "./CurrencySelector";
 import { ServerSelector } from "./ServerSelector";
 
 const NAV_ITEMS = [
-  { to: "/", icon: Wallet, label: "Portfolio" },
+  { to: "/", icon: Brain, label: "Agents" },
+  { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
-  { to: "/agents", icon: Brain, label: "Agents" },
   { to: "/routines", icon: Zap, label: "Routines" },
 ] as const;
 
 /**
- * The shell owns the chat state, not the panel.
+ * The shell owns the chat state.
  *
- * Both surfaces that render a conversation — the overlay panel here and the
- * workspace at `/agents` — live under this provider, so there is one socket and
- * one transcript however the user got to it.
+ * There used to be two surfaces rendering a conversation — an overlay panel
+ * docked to the right of every page, and the workspace at `/agents` — which
+ * meant two doors to one thing. The panel is gone; the provider stays here so
+ * the socket outlives navigation between pages and `/agents`.
  */
 export function AppShell() {
   return (
@@ -51,20 +50,37 @@ export function AppShell() {
 
 function AppShellBody() {
   const { server } = useServer();
-  const { pathname, search } = useLocation();
+  const { pathname } = useLocation();
   const { theme, toggleTheme } = useTheme();
-  const [chatOpen, setChatOpen] = useState(false);
+  const navigate = useNavigate();
   const { hasKeys, isLoading: keysLoading } = useCredentials();
 
-  const exemptRoutes = ["/routines", "/settings"];
-  const showKeysOverlay = server && !keysLoading && !hasKeys && !exemptRoutes.some((r) => pathname.startsWith(r));
+  // The chat workspace takes the full height and owns its own scrolling, so
+  // the shell drops `main`'s padding for it. It lives at `/` — the entry point
+  // — while `/agents/:slug` is an ordinary padded page, deliberately not
+  // matched here.
+  const isChatWorkspace = pathname === "/";
 
-  // The overlay exists to ask about the page you are looking at. On the chat
-  // workspace there is no other page, so it stays out of the way — and the
-  // workspace takes the full height and owns its own scrolling. Everywhere
-  // else, `/agents?tab=fleet` and `/agents/:slug` included, nothing changes.
-  const isChatWorkspace =
-    pathname === "/agents" && !new URLSearchParams(search).get("tab");
+  // The chat is the landing page and needs no exchange keys, so the blocking
+  // overlay would otherwise be the first thing every unconfigured user hits —
+  // on the one surface that can talk them through connecting.
+  const exemptRoutes = ["/routines", "/settings"];
+  const showKeysOverlay =
+    server && !keysLoading && !hasKeys && !isChatWorkspace &&
+    !exemptRoutes.some((r) => pathname.startsWith(r));
+
+  // ⌘K used to toggle the overlay panel. It now goes to the chat, so the
+  // reflex still lands somewhere sensible instead of silently doing nothing.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === "k") {
+        e.preventDefault();
+        navigate("/");
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [navigate]);
 
   // Prefetch core data (executors, bots) and subscribe to WS channels early
   usePrefetchData();
@@ -136,10 +152,6 @@ function AppShellBody() {
             </button>
 
           </div>
-
-          {!isChatWorkspace && (
-            <AgentToggleButton active={chatOpen} onClick={() => setChatOpen((v) => !v)} className="ml-2" />
-          )}
         </div>
       </header>
 
@@ -154,9 +166,6 @@ function AppShellBody() {
         </ErrorBoundary>
         {showKeysOverlay && <ConnectKeysOverlay />}
       </main>
-
-      {/* Chat panel */}
-      {!isChatWorkspace && <ChatPanel isOpen={chatOpen} onToggle={setChatOpen} />}
     </div>
   );
 }

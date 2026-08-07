@@ -32,19 +32,18 @@ export function ContextDock({
   delegations,
   conversationId,
   agentSlug,
-  onOpenFleet,
 }: {
   /** The shared `["delegations"]` result — the dock adds no poll of its own. */
   delegations: Delegation[];
   conversationId: string;
   agentSlug: string;
-  onOpenFleet: () => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [tasksOpen, setTasksOpen] = useState(true);
-  // Collapsed by default so the chat tab fetches routines only once someone
-  // asks for them — this page never polled that endpoint before.
-  const [routinesOpen, setRoutinesOpen] = useState(false);
+  // Expanded like Tasks: a collapsed section is a section nobody finds, and
+  // "where do I watch this?" was the question both of them exist to answer.
+  // The extra poll it costs is one endpoint on a page that is already open.
+  const [routinesOpen, setRoutinesOpen] = useState(true);
 
   useEffect(() => {
     localStorage.setItem(OPEN_KEY, String(open));
@@ -127,11 +126,7 @@ export function ContextDock({
         open={tasksOpen}
         onToggle={() => setTasksOpen((v) => !v)}
       >
-        <DockTasks
-          delegations={delegations}
-          conversationId={conversationId}
-          onOpenFleet={onOpenFleet}
-        />
+        <DockTasks delegations={delegations} conversationId={conversationId} />
       </DockSection>
 
       <DockSection

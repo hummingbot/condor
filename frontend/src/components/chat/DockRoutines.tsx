@@ -250,6 +250,7 @@ function ReportSheet({
       subtitle={formatRelativeTime(report.created_at, "")}
       onClose={onClose}
       bleed
+      defaultZen
     >
       <ReportFrame
         reportId={report.id}
@@ -305,6 +306,10 @@ function RoutineRunSheet({
       // whichever view owns the rest of it. Without one there is nothing to
       // switch to, so the sheet's own padding is right.
       bleed={!!report}
+      // The report itself arrives a fetch later, but the row already knows there
+      // is one — read that, so the sheet opens at its final size instead of
+      // resizing under the reader.
+      defaultZen={!!instance.report_id}
     >
       {report && (
         <div className="flex shrink-0 items-center gap-1 border-b border-[var(--color-border)]/50 px-6 py-2">

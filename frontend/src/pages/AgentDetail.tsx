@@ -291,7 +291,7 @@ export function AgentDetail() {
     mutationFn: () => api.deleteAgent(slug!),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["agents"] });
-      navigate("/agents");
+      navigate("/");
     },
   });
 
@@ -351,7 +351,7 @@ export function AgentDetail() {
             {error instanceof Error ? error.message : "An unexpected error occurred."}
           </p>
           <button
-            onClick={() => navigate("/agents")}
+            onClick={() => navigate("/")}
             className="mt-4 inline-flex items-center gap-1 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
           >
             <ArrowLeft className="h-3.5 w-3.5" /> Back to Agents
@@ -378,7 +378,7 @@ export function AgentDetail() {
       {/* Header */}
       <div className="mb-6">
         <button
-          onClick={() => navigate("/agents")}
+          onClick={() => navigate("/")}
           className="mb-3 flex items-center gap-1 text-xs text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Back to Agents

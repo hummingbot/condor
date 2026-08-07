@@ -1,7 +1,8 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowUpRight, Loader2, Square } from "lucide-react";
+import { ChevronDown, ChevronRight, History, Loader2, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 
+import { DelegationHistory } from "@/components/agent/DelegationHistory";
 import { DelegationSheet } from "@/components/agent/DelegationSheet";
 import {
   DELEGATION_STATUS,
@@ -14,29 +15,32 @@ import { api, type Delegation } from "@/lib/api";
  *
  * Scoped by `conversation_id`, not by agent or user: two conversations with the
  * same agent are the case this exists for. Delegations with no conversation
- * behind them (Telegram-era, consult-started) are not claimed here — they are
- * counted in the footer and left to the fleet report.
+ * behind them (Telegram-era, consult-started) are folded in behind a toggle
+ * rather than sent to another page — this dock is now the only place they are
+ * reachable from, so nothing may be left pointing somewhere that no longer
+ * exists.
  */
 export function DockTasks({
   delegations,
   conversationId,
-  onOpenFleet,
 }: {
   /** Every delegation in the process — the shared `["delegations"]` query. */
   delegations: Delegation[];
   /** The conversation this dock belongs to; "" before a session settles. */
   conversationId: string;
-  onOpenFleet: () => void;
 }) {
   const queryClient = useQueryClient();
   const [openId, setOpenId] = useState<string | null>(null);
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
+  const [showOthers, setShowOthers] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
 
   const mine = conversationId
     ? delegations.filter((d) => d.conversation_id === conversationId)
     : [];
   // Newest first: the thing just started is the thing being watched.
-  const ordered = [...mine].sort((a, b) => b.started_at - a.started_at);
+  const byNewest = (a: Delegation, b: Delegation) => b.started_at - a.started_at;
+  const ordered = [...(showOthers ? delegations : mine)].sort(byNewest);
   const others = delegations.length - mine.length;
   const anyRunning = mine.some((d) => d.status === "running");
 
@@ -129,15 +133,39 @@ export function DockTasks({
         </div>
       )}
 
-      {/* Work that belongs to no conversation still exists — say so. */}
+      {/* Work that belongs to no conversation still exists — show it here
+          rather than sending the reader to a page that no longer exists. */}
       {others > 0 && (
         <button
-          onClick={onOpenFleet}
+          onClick={() => setShowOthers((v) => !v)}
           className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[10px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
         >
+          {showOthers ? (
+            <ChevronDown className="h-3 w-3 shrink-0" />
+          ) : (
+            <ChevronRight className="h-3 w-3 shrink-0" />
+          )}
           {others} other background task{others !== 1 ? "s" : ""}
-          <ArrowUpRight className="h-3 w-3 shrink-0" />
         </button>
+      )}
+
+      {/* The live registry dies with the bot; the records do not. */}
+      <button
+        onClick={() => setShowHistory((v) => !v)}
+        className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[10px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+      >
+        {showHistory ? (
+          <ChevronDown className="h-3 w-3 shrink-0" />
+        ) : (
+          <ChevronRight className="h-3 w-3 shrink-0" />
+        )}
+        <History className="h-3 w-3 shrink-0" />
+        Everything that has run
+      </button>
+      {showHistory && (
+        <div className="px-2 pb-1">
+          <DelegationHistory />
+        </div>
       )}
 
       {open && (

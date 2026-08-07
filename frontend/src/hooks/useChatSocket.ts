@@ -142,17 +142,20 @@ function foldIntoStream(
 /**
  * End the turn: whatever is on screen is what was said.
  *
- * Only the last message can be open — a bubble stops being foldable the moment
- * anything is appended after it — so closing it is enough, and returning the
- * same array when there is nothing to close keeps a `prompt_done` for an idle
- * slot from re-rendering the transcript.
+ * Every open bubble is closed, not just the last one. A bubble stops being
+ * *foldable* the moment anything is appended after it, but it does not stop
+ * being open: an out-of-band note (a routine outcome pushed mid-answer) lands
+ * after a bubble the turn was still writing into, and that bubble is what
+ * `open` has to keep describing until the turn actually ends. Closing only the
+ * tail left it flagged open forever, and the next turn in the same slot lit it
+ * up as live again.
+ *
+ * Returning the same array when there is nothing to close keeps a
+ * `prompt_done` for an idle slot from re-rendering the transcript.
  */
 function closeStream(msgs: ChatMessage[]): ChatMessage[] {
-  const last = msgs.length - 1;
-  if (last < 0 || !msgs[last].open) return msgs;
-  const out = [...msgs];
-  out[last] = { ...out[last], open: false };
-  return out;
+  if (!msgs.some((m) => m.open)) return msgs;
+  return msgs.map((m) => (m.open ? { ...m, open: false } : m));
 }
 
 /** Stop every tool call that is still spinning. A prompt that ended, ended. */
