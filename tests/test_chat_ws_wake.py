@@ -70,7 +70,7 @@ def ws_env(tmp_path, monkeypatch):
     monkeypatch.setattr(chat_ws, "_active_prompt_tasks", {})
     monkeypatch.setattr(chat_ws, "_slot_gates", {})
     monkeypatch.setattr(chat_ws, "_attached_sockets", {})
-    monkeypatch.setattr(wake, "_in_flight", set())
+    monkeypatch.setattr(wake, "_in_flight", {})
     return chat_ws
 
 

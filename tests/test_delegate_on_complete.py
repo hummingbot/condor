@@ -354,7 +354,7 @@ def route(tmp_path, monkeypatch):
     """The delegate route with the runtime lookup stubbed to one conversation."""
     _agent_root(tmp_path, monkeypatch)
     monkeypatch.setattr(consult_module, "_run_agent_to_completion", _answer())
-    monkeypatch.setattr(wake, "_in_flight", set())
+    monkeypatch.setattr(wake, "_in_flight", {})
 
     async def fake_conversation_for_session(session_key):
         return "conv-1" if session_key else ""
@@ -387,7 +387,7 @@ def _post(on_complete="notify", session_key="web:1:conv-1"):
 
 def test_a_delegation_started_mid_wake_is_forced_back_to_notify(route, wakes):
     """A wake that could start a resuming delegation could keep waking itself."""
-    wake._in_flight.add("conv-1")
+    wake._in_flight["conv-1"] = 1
 
     dt = _post(on_complete="resume")
 
@@ -404,7 +404,7 @@ def test_the_same_call_outside_a_wake_keeps_resume(route, wakes):
 
 def test_the_guard_does_not_confuse_conversations(route, wakes):
     """Another conversation being mid-wake says nothing about this one."""
-    wake._in_flight.add("some-other-conversation")
+    wake._in_flight["some-other-conversation"] = 1
 
     dt = _post(on_complete="resume")
 

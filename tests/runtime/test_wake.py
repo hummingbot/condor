@@ -106,10 +106,10 @@ def registry(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
     )
-    # Sink factories and the in-flight set are process-global, exactly like the
+    # Sink factories and the in-flight counts are process-global, exactly like the
     # confirmation registry: reset both so tests cannot leak into each other.
     monkeypatch.setattr(wake, "_sink_factories", {})
-    monkeypatch.setattr(wake, "_in_flight", set())
+    monkeypatch.setattr(wake, "_in_flight", {})
     return session_module
 
 
@@ -474,4 +474,53 @@ def test_the_conversation_is_marked_in_flight_only_while_it_is_waking(registry):
     conv_id = asyncio.run(scenario())
 
     assert seen and all(seen)
+    assert not wake.is_waking(conv_id)
+
+
+def test_overlapping_wakes_hold_the_guard_until_the_last_one_ends(gated):
+    """Two tasks finishing onto one conversation share the mark.
+
+    The second wake queues behind the first on the session lock, so the first
+    one's cleanup runs while the second is still to come. If that cleanup
+    cleared the mark, the queued turn would be free to start another resuming
+    delegation — the depth-1 bound, gone.
+    """
+
+    async def scenario():
+        _client, conv_id = await _open_session()
+        client = _GatedClient.last
+
+        first = asyncio.create_task(
+            wake.resume_session(
+                session_key=str(KEY),
+                conversation_id=conv_id,
+                text="first done",
+                kind="resume",
+            )
+        )
+        await _until_busy()
+        second = asyncio.create_task(
+            wake.resume_session(
+                session_key=str(KEY),
+                conversation_id=conv_id,
+                text="second done",
+                kind="resume",
+            )
+        )
+        # Long enough for the second wake to reach the queue behind the first.
+        await asyncio.sleep(0.05)
+
+        client.finish_turn()
+        await asyncio.wait_for(first, timeout=5)
+        marked_between = wake.is_waking(conv_id)
+
+        await _until_busy()
+        client.finish_turn()
+        await asyncio.wait_for(second, timeout=5)
+        return conv_id, marked_between, client
+
+    conv_id, marked_between, client = asyncio.run(scenario())
+
+    assert client.finished == ["first done", "second done"]
+    assert marked_between, "the wake still queued was left unguarded"
     assert not wake.is_waking(conv_id)
