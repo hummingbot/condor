@@ -571,7 +571,11 @@ async def manage_bots(
     - status: Get status of all active bots (no additional params needed)
     - logs: Get detailed logs for a specific bot (requires bot_name)
     - stop_bot: Stop and archive a bot forever (requires bot_name)
-    - stop_controllers: Stop specific controllers in a bot (requires bot_name + controller_names)
+    - stop_controllers: Stop specific controllers in a bot (requires bot_name + controller_names).
+      Flips manual_kill_switch in the controller config and verifies the write; the bot picks it
+      up on its next config reload (~10s) and then closes that controller's executors. A stopped
+      controller keeps publishing performance, so confirm with the 'state' column of
+      action="status" (stopped/running), never by the controller still appearing in the table.
     - start_controllers: Start/resume specific controllers (requires bot_name + controller_names)
     - get_config: View current configs of a running bot (requires bot_name)
     - update_config: Modify config of a controller INSIDE a running bot in real-time (requires bot_name + config_name + config_data)
@@ -615,7 +619,9 @@ async def manage_bots(
         return (
             f"Active Bots Status Summary:\n"
             f"Total Active Bots: {result['total_bots']}\n\n"
-            f"{result['bots_table']}"
+            f"{result['bots_table']}\n\n"
+            f"controller state: running = active | stopped = kill switch on (no new entries) | "
+            f"error = performance report failed | unknown = controller config unreadable"
         )
 
     elif action == "logs":
