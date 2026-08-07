@@ -103,3 +103,6 @@ State which is active: **unhedged** (deliberate XRP exposure) or **hedged**
 ## Rollout
 
 `dry_run` → `run_once` → `loop` with short `max_ticks` and conservative limits.
+
+`execution_mode` accepts exactly `dry_run`, `run_once`, or `loop` — nothing else.
+There is no `live` value; continuous live trading is `loop`.

@@ -1,7 +1,7 @@
 ---
 name: RLUSD XRP Maker
-description: Quotes both sides of an XRPL CLOB pair against a CEX reference price, sized
-  to reserves and bounded by the AMM fee ceiling.
+description: Quotes both sides of an XRPL CLOB pair against a CEX reference price,
+  sized to reserves and bounded by the AMM fee ceiling.
 agent_key: null
 skills:
 - xrpl_mm_deploy
@@ -29,6 +29,7 @@ default_config:
     max_drawdown_pct: 10
     shutdown_drawdown_pct: 20
 default_trading_context: ''
+created_by: 0
 created_at: '2026-07-28T00:00:00Z'
 ---
 
@@ -46,6 +47,18 @@ AMM fee ceiling. Read all runtime values from `[CURRENT CONFIG]`.
   "pick" executor mode.
 - First tick, if no bot by that name: deploy `pmm_simple` per `xrpl_mm_deploy` Phase 3.
   Fall back to executors only on real failure — then clear `bot_name` to `''` and journal why.
+
+## Startup guard — notSynced race condition
+
+The XRPL connector takes a few seconds to sync after bot startup. A `notSynced` / HTTP 500
+error from the XRPL connector on tick #1 or tick #2 is **transient, not fatal**.
+
+- If any XRPL call (book, balances, order status) returns a `notSynced` or 500 error:
+  **HOLD this tick entirely** — do not attempt deploy, do not cancel orders, do not journal
+  a failure. Log "XRPL notSynced — holding tick, will retry next tick."
+- Retry on tick #2. If the error persists beyond tick #3, treat it as a real failure and
+  journal `category="execution"`.
+- Reference feed errors (CEX) are NOT transient — treat those as hard stops immediately.
 
 ## Each tick
 
@@ -66,6 +79,9 @@ manage_routines(action="run", name="xrpl_mm_quote_planner",
                         "use_vol_clock": <from config>})
 ```
 
+If the planner returns an XRPL book error tagged as `notSynced` or `status: ERROR` on tick
+#1/#2, apply the startup guard above (HOLD, retry next tick).
+
 **2. Viability** — `viable: false` (with correct requote interval) → stop quoting
 (controller: `manual_kill_switch: true`; executor: cancel). HOLD. Do not tighten below floor.
 
@@ -82,6 +98,7 @@ positions + `get_portfolio_overview()`.
 
 | Condition | Action |
 |---|---|
+| notSynced error (tick #1/#2) | **HOLD** — startup guard, retry next tick |
 | `viable: false` or book unavailable | **STOP** — `manual_kill_switch: true` |
 | Viable, previously killed | **RESUME** — kill switch false, spreads refreshed |
 | Viable, plan changed | **RETUNE** — push spreads to both config stores |
@@ -94,6 +111,7 @@ positions + `get_portfolio_overview()`.
 
 | Condition | Action |
 |---|---|
+| notSynced error (tick #1/#2) | **HOLD** — startup guard, retry next tick |
 | `viable: false` or book unavailable | **HOLD** — cancel, journal |
 | Viable, no offers | **QUOTE** — LIMIT ladder |
 | Viable, reference moved > ½ spread | **REQUOTE** |
@@ -122,6 +140,8 @@ positions + `get_portfolio_overview()`.
 
 | Tell | Action |
 |---|---|
+| `notSynced` / 500 on tick #1 or #2 | **HOLD** — transient startup race; retry next tick |
+| `notSynced` / 500 on tick #3+ | Journal `category="execution"`, notify user |
 | `tecUNFUNDED_OFFER` | Resize vs free balance, retry once |
 | `tecNO_LINE` / `tecPATH_DRY` | Notify user — do not retry blindly |
 | Accepted but absent from book | Check balances before replacing |
