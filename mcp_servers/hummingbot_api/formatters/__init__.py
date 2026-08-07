@@ -36,6 +36,7 @@ from .bots import format_active_bots_as_table, format_bot_logs_as_table, format_
 
 # Gateway formatters
 from .gateway import (
+    format_amm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
     format_gateway_container_result,
