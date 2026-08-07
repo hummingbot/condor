@@ -363,3 +363,44 @@ def test_a_live_session_publishes_one_report_the_strategy_page_finds(
     # A quiet tick writes no canvas, but the report still refreshed.
     assert engine.journal.tick_count == 2
     assert not (engine.session_dir / canvas.CANVAS_FILE).exists()
+
+
+# ── Attribution block (PnL unification) ──
+# "Total PnL $0.00" is equally the shape of a flat session and of one whose bots
+# are invisible to the aggregator. The report must not render the two alike.
+
+
+def _blocks(info):
+    from condor.agents.session_report import SessionReport
+    from condor.reports.builder import ReportBuilder
+
+    b = ReportBuilder()
+    b.manual_order()
+    SessionReport._attribution(b, info)
+    return b
+
+
+def _rendered(b) -> str:
+    return b._render_sections()
+
+
+def test_attribution_names_the_bots_the_pnl_covers():
+    out = _rendered(_blocks({"bot_names": ["ema_trend_loop-20260807-045821"]}))
+
+    assert "Attribution" in out
+    assert "ema_trend_loop-20260807-045821" in out
+
+
+def test_attribution_flags_a_bot_the_aggregator_cannot_see():
+    out = _rendered(
+        _blocks({"bot_names": ["vanished"], "unresolved_bases": ["vanished"]})
+    )
+
+    assert "Incomplete" in out
+    assert "FLOOR" in out
+    assert "vanished" in out
+
+
+def test_attribution_is_silent_for_a_pure_executor_session():
+    """No bots, nothing missing — the agent_id tag is the whole story."""
+    assert _blocks({})._sections == []
