@@ -220,6 +220,27 @@ ACP_COMMANDS: dict[str, str] = {
     "codex": "npx @agentclientprotocol/codex-acp",
 }
 
+# Session markers Claude Code exports into the shells it spawns. If the bot was
+# launched from inside a Claude Code session (`uv run python main.py` typed at a
+# Claude Code prompt), main.py inherits them and passes them on to every ACP
+# subprocess — and the `claude` CLI behind claude-agent-acp then refuses to boot
+# with "Claude Code cannot be launched inside another Claude Code session". The
+# bridge reports that as a bare `[-32603] Internal error` (data.details:
+# "Query closed before response received"), which says nothing about the cause.
+# Our ACP children are their own top-level sessions, so we drop the markers.
+# Only the session-identity vars go — CLAUDE_CONFIG_DIR, ANTHROPIC_* and other
+# real configuration must survive.
+_CLAUDE_SESSION_ENV_VARS = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+)
+
 # ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").
 # The suffix is selected at runtime via session/set_model against the agent's
 # advertised models (see ACPClient._select_model), which resolves aliases
@@ -439,6 +460,8 @@ class ACPClient:
     async def start(self) -> None:
         """Spawn subprocess, run ACP handshake (initialize + session/new)."""
         env = dict(os.environ)
+        for var in _CLAUDE_SESSION_ENV_VARS:
+            env.pop(var, None)
         if self.extra_env:
             env.update(self.extra_env)
 
