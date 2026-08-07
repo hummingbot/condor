@@ -71,10 +71,17 @@ NoteSink = Callable[[SessionKey, "int | None", str, str], Awaitable[None]]
 
 _note_sinks: dict[str, NoteSink] = {}
 
-# Conversations with a wake turn in flight. Read by the delegate route to force
-# a delegation started *from inside* a wake back to ``notify`` — which is what
-# bounds the recursion to depth 1 without a counter or a rate limiter.
-_in_flight: set[str] = set()
+# Conversations with a wake turn in flight, counted. Read by the delegate route
+# to force a delegation started *from inside* a wake back to ``notify`` — which
+# is what bounds the recursion to depth 1 without a rate limiter.
+#
+# Counted rather than a set because two delegations can finish onto the same
+# conversation at once: the second wake queues behind the first on the session
+# lock, so the first one's ``finally`` runs while the second is still to come.
+# A set would drop the mark there, and the turn that queued behind it would be
+# free to start another resuming delegation — exactly the depth-1 bound this
+# exists to hold.
+_in_flight: dict[str, int] = {}
 
 
 def register_sink_factory(surface: str, factory: SinkFactory) -> None:
@@ -88,8 +95,8 @@ def register_note_sink(surface: str, sink: NoteSink) -> None:
 
 
 def is_waking(conversation_id: str) -> bool:
-    """True while a wake turn is running on this conversation."""
-    return bool(conversation_id) and conversation_id in _in_flight
+    """True while at least one wake turn is running on this conversation."""
+    return bool(conversation_id) and _in_flight.get(conversation_id, 0) > 0
 
 
 async def _guard(awaitable: Awaitable, what: str) -> bool:
@@ -227,7 +234,7 @@ async def resume_session(
     if sink is not None and not await _guard(sink.open(), "open"):
         sink = None
 
-    _in_flight.add(conversation_id)
+    _in_flight[conversation_id] = _in_flight.get(conversation_id, 0) + 1
     try:
         # ``queue`` and never ``steer``: a wake must not take a slot away from
         # the human. A user message sent during a wake turn steers it aside and
@@ -240,6 +247,10 @@ async def resume_session(
                 sink = None
         return True
     finally:
-        _in_flight.discard(conversation_id)
+        remaining = _in_flight.get(conversation_id, 0) - 1
+        if remaining > 0:
+            _in_flight[conversation_id] = remaining
+        else:
+            _in_flight.pop(conversation_id, None)
         if sink is not None:
             await _guard(sink.close(), "close")
