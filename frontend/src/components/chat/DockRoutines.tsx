@@ -23,6 +23,26 @@ type Run =
   | { kind: "report"; key: string; at: number; report: ReportSummary };
 
 /**
+ * The runs this dock claims, out of every instance in the process.
+ *
+ * Exported because the dock's header needs the same answer the list does: a
+ * count badge that disagreed with the rows under it would be worse than none.
+ * The rule itself is explained on {@link DockRoutines}.
+ */
+export function conversationInstances(
+  instances: RoutineInstance[],
+  agentSlug: string,
+  conversationId: string,
+): RoutineInstance[] {
+  const prefix = `${agentSlug}/`;
+  return instances.filter((i) =>
+    i.conversation_id
+      ? i.conversation_id === conversationId
+      : !agentSlug || i.routine_name.startsWith(prefix),
+  );
+}
+
+/**
  * What has been run from this conversation, and what the agent has run lately.
  *
  * Scoped by conversation first: a run stamped with this conversation belongs
@@ -70,12 +90,7 @@ export function DockRoutines({
   // Agent-local routines are stored keyed `{agent_slug}/{name}` — the same
   // prefix the per-agent routes filter on. Shared and general-library ones are
   // not, which is why provenance wins where it exists.
-  const prefix = `${agentSlug}/`;
-  const mine = instances.filter((i) =>
-    i.conversation_id
-      ? i.conversation_id === conversationId
-      : !agentSlug || i.routine_name.startsWith(prefix),
-  );
+  const mine = conversationInstances(instances, agentSlug, conversationId);
 
   // An instance that rendered a report owns that report's row, so the run is
   // not listed twice.
