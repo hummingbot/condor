@@ -79,7 +79,8 @@ The following applies after **Install Condor**. If you used **Install only Hummi
 | Another device on your tailnet (Condor, browser) | `http://hummingbot-api:8000` |
 
 - Open the **Telegram** chat with your Condor bot. When startup succeeds, admins receive a message such as **"Condor is online and ready."**
-- **Logs:** Condor runs in a **tmux** session named `condor`. Attach with `tmux attach -t condor`. Detach without stopping the bot: **Ctrl+B**, then **D**. To stop Condor completely: `tmux kill-session -t condor`.
+- **Logs:** Condor runs in a **tmux** session named `condor`. Attach with `make logs` (or `tmux attach -t condor`). Detach without stopping the bot: **Ctrl+B**, then **D**.
+- **Control:** `make run` starts Condor in that session, `make stop` stops it, `make restart` does both, `make status` shows whether it is up. Use `make run-fg` to run in the foreground when a startup error needs debugging.
 - In Telegram, use **`/servers`** for Hummingbot API URLs and auth, **`/keys`** for exchange credentials, and **`/gateway`** for DEX setup (or **`/start`** for the setup shortcuts) so commands like `/portfolio` and `/trade` can reach your stack.
 - If Condor and the API are on **different machines**, install [Tailscale](https://tailscale.com/download) on the Condor host and add the API in **`/servers`** with host **`hummingbot-api`** (not a public IP). See [Secure Connection via Tailscale](#secure-connection-via-tailscale) below.
 - If something fails, see **Troubleshooting** below.
