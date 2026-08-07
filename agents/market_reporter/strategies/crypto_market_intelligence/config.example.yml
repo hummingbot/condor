@@ -1,0 +1,20 @@
+execution_mode: dry_run
+frequency_sec: 86400
+coverage_mode: primary
+report_profile: daily_dual_horizon
+news_lookback_hours: 72
+market_history_days: 90
+near_term_days: 7
+medium_term_weeks: 6
+max_news_items: 60
+max_social_items: 60
+max_event_items: 30
+max_research_candidates: 3
+source_collection_budget_sec: 60
+report_language: en
+report_timezone: UTC
+risk_limits:
+  max_position_size_quote: 0
+  max_open_executors: 0
+  max_drawdown_pct: -1
+  shutdown_drawdown_pct: -1
