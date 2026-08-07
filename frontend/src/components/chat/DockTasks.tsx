@@ -23,17 +23,24 @@ import { api, type Delegation } from "@/lib/api";
 export function DockTasks({
   delegations,
   conversationId,
+  agentSlug,
 }: {
   /** Every delegation in the process — the shared `["delegations"]` query. */
   delegations: Delegation[];
   /** The conversation this dock belongs to; "" before a session settles. */
   conversationId: string;
+  /** Who this conversation talks to; scopes the history. "" before a slot settles. */
+  agentSlug: string;
 }) {
   const queryClient = useQueryClient();
   const [openId, setOpenId] = useState<string | null>(null);
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
   const [showOthers, setShowOthers] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
+  // The history follows the agent the rail has highlighted, because "what has
+  // this one been asked to do" is the question it is opened with. Fleet-wide is
+  // one click away and reachable nowhere else, so it does not simply vanish.
+  const [historyAll, setHistoryAll] = useState(false);
 
   const mine = conversationId
     ? delegations.filter((d) => d.conversation_id === conversationId)
@@ -160,11 +167,25 @@ export function DockTasks({
           <ChevronRight className="h-3 w-3 shrink-0" />
         )}
         <History className="h-3 w-3 shrink-0" />
-        Everything that has run
+        Delegation history
       </button>
       {showHistory && (
         <div className="px-2 pb-1">
-          <DelegationHistory />
+          {agentSlug && (
+            <div className="flex items-center gap-2 px-1 py-1 text-[10px] text-[var(--color-text-muted)]">
+              <span className="min-w-0 flex-1 truncate">
+                {historyAll ? "Every agent" : agentSlug}
+              </span>
+              <button
+                type="button"
+                onClick={() => setHistoryAll((v) => !v)}
+                className="shrink-0 rounded border border-[var(--color-border)] px-1.5 py-0.5 transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              >
+                {historyAll ? `Only ${agentSlug}` : "All agents"}
+              </button>
+            </div>
+          )}
+          <DelegationHistory agent={historyAll ? undefined : agentSlug || undefined} />
         </div>
       )}
 

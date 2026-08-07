@@ -126,7 +126,11 @@ export function ContextDock({
         open={tasksOpen}
         onToggle={() => setTasksOpen((v) => !v)}
       >
-        <DockTasks delegations={delegations} conversationId={conversationId} />
+        <DockTasks
+          delegations={delegations}
+          conversationId={conversationId}
+          agentSlug={agentSlug}
+        />
       </DockSection>
 
       <DockSection

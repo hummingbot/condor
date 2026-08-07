@@ -446,6 +446,55 @@ export interface AgentPerformance {
   open_count: number;
   closed_count: number;
   executors: AgentExecutorRow[];
+  // ── Bot-mode attribution ──
+  // A session trading through bots has no rows in the agent_id-keyed executor
+  // table: its executors live inside the bot instance's own database, and the
+  // only ones Condor can reconstruct are the positions open right now. These say
+  // what the session actually operated when `executors` is empty.
+  /** Instance names alive now, one per owned base. */
+  bot_names?: string[];
+  /** Every instance ever deployed under an owned base, oldest first — a name in
+   *  here but not in `bot_names` is one this session already stopped. */
+  bot_instances?: string[];
+  /** Owned bases with no live and no archived instance: their PnL is unknown,
+   *  not zero, so the totals are a floor. */
+  unresolved_bases?: string[];
+  controllers?: AgentControllerRow[];
+  /** Raw `CloseType.X -> n` across the operated bots. `trade_count` counts only
+   *  round-trip closes and reads a directional controller's risk stop as churn,
+   *  so this is what explains "0 trades" on non-zero volume. */
+  close_type_counts?: Record<string, number>;
+  /** False when `fees` is a floor: the backend reports no cumulative fee column,
+   *  so 0 means unknown rather than free. */
+  fees_known?: boolean;
+}
+
+/** One controller of one bot instance a session operated. */
+export interface AgentControllerRow {
+  /** The deploy this controller ran under. */
+  bot_name: string;
+  controller_id: string;
+  controller_name: string;
+  connector: string;
+  trading_pair: string;
+  /** From the performance snapshot, which reports "running" even for archived
+   *  instances — never render this as live truth. Derive liveness from whether
+   *  `bot_name` appears in `AgentPerformance.bot_names`. */
+  status: string;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  volume_traded: number;
+  cum_fees_quote: number;
+  closed_trades: number;
+  close_type_counts: Record<string, number>;
+}
+
+export interface SessionCanvas {
+  sections: Record<string, string>;
+  section_titles: Record<string, string>;
+  section_order: string[];
+  last_revised_tick: number;
+  revisions: { tick: number; section: string; text: string }[];
 }
 
 export interface AgentPerformanceResponse {
@@ -1334,7 +1383,14 @@ export const api = {
     ),
 
   getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
-    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
+    apiFetch<{
+      executors: AgentExecutorRow[];
+      performance: AgentPerformance;
+      // Realized-PnL curve sliced from the session's bot-ownership window. Derived
+      // from the bots' own history, not from the journal's per-tick snapshots,
+      // which only record what the aggregator believed at the time.
+      pnl_series?: { timestamp: string; pnl: number; volume: number }[];
+    }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
     ),
 
@@ -1391,6 +1447,17 @@ export const api = {
   getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
+    ),
+
+  getSessionCanvas: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<SessionCanvas>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/canvas`,
+    ),
+
+  // The live report this session keeps — `{report: null}` when it has none.
+  getSessionReport: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<{ report: ReportSummary | null }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/report`,
     ),
 
   getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>

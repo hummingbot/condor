@@ -100,10 +100,37 @@ export function StrategyDetail() {
   const hasRunning = instances.length > 0;
   const serverName = (strategy?.config?.server_name as string) || "";
 
-  const controllerIds = useMemo(
+  // Executor-mode ids: a running engine tags its own executors with its agent_id.
+  // A bot-mode strategy adds nothing here — its controllers tag executors with
+  // their own config ids — which is why the live charts below stayed empty for it.
+  // The session reviewer widens this with the live bots' controller ids, which it
+  // can resolve per session; here we widen it with the newest session's.
+  const agentControllerIds = useMemo(
     () => instances.map((inst) => inst.agent_id).filter(Boolean),
     [instances],
   );
+
+  const latestSessionNum = useMemo(
+    () => (strategy?.sessions?.length ? Math.max(...strategy.sessions.map((s) => s.number)) : 0),
+    [strategy?.sessions],
+  );
+
+  const { data: latestSessionPerf } = useQuery({
+    queryKey: ["strategy-session-executors", slug, sslug, latestSessionNum],
+    queryFn: () => api.getStrategySessionExecutors(slug!, sslug!, latestSessionNum),
+    enabled: !!slug && !!sslug && latestSessionNum > 0,
+    refetchInterval: 10000,
+  });
+
+  const controllerIds = useMemo(() => {
+    const ids = new Set(agentControllerIds);
+    const perf = latestSessionPerf?.performance;
+    const live = new Set(perf?.bot_names ?? []);
+    for (const c of perf?.controllers ?? []) {
+      if (c.controller_id && live.has(c.bot_name)) ids.add(c.controller_id);
+    }
+    return Array.from(ids);
+  }, [agentControllerIds, latestSessionPerf]);
 
   // Real-time executor data via WS
   const { executors: liveExecutors } = useAgentExecutors(
