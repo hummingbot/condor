@@ -50,7 +50,17 @@ NETWORK_TO_GECKO = {
     "polygon-mainnet": "polygon_pos",
     "avalanche": "avalanche",
     "optimism": "optimism",
+    # Not a Gateway network: `xrpl` is a first-class Hummingbot connector (orders,
+    # balances, order book) that CandlesFactory simply has no feed for. Its AMM
+    # pools are indexed by GeckoTerminal, so its charts resolve here like a DEX's.
+    "xrpl": "xrpl",
 }
+
+# Networks whose venues quote *tickers* rather than token addresses. An XRPL token
+# is a (currency, issuer) pair that the connector hides behind a symbol like
+# ``SOLO-XRP``, so its pool can only be found by searching for that symbol —
+# unlike a Solana pair, whose base already *is* the mint.
+SYMBOL_PAIR_NETWORKS = {"xrpl"}
 
 # DEX ID to GeckoTerminal DEX mapping
 DEX_TO_GECKO = {
@@ -91,6 +101,11 @@ GECKO_OHLCV_MAX = 1000
 def get_gecko_network(network: str) -> str:
     """Convert internal network name to GeckoTerminal network ID"""
     return NETWORK_TO_GECKO.get(network, network)
+
+
+def uses_symbol_pairs(network: str) -> bool:
+    """Whether this network's trading pairs are tickers instead of addresses."""
+    return get_gecko_network(network) in SYMBOL_PAIR_NETWORKS
 
 
 def timeframe_seconds(timeframe: str) -> int:
@@ -157,16 +172,17 @@ def _gecko_client() -> GeckoTerminalAsyncClient:
 _TOKEN_CACHE_MAX = 512
 _token_symbol_cache: Dict[Tuple[str, str], Tuple[float, str]] = {}
 _token_pool_cache: Dict[Tuple[str, str, str], Tuple[float, str]] = {}
+_pair_pool_cache: Dict[Tuple[str, str, str], Tuple[float, Tuple[str, bool]]] = {}
 
 
-def _ttl_get(cache: dict, key: tuple, ttl: float) -> Optional[str]:
+def _ttl_get(cache: dict, key: tuple, ttl: float) -> Optional[Any]:
     entry = cache.get(key)
     if entry and (time.time() - entry[0]) < ttl:
         return entry[1]
     return None
 
 
-def _ttl_put(cache: dict, key: tuple, value: str, ttl: float) -> None:
+def _ttl_put(cache: dict, key: tuple, value: Any, ttl: float) -> None:
     now = time.time()
     for k in [k for k, (ts, _) in cache.items() if now - ts >= ttl]:
         cache.pop(k, None)
@@ -249,6 +265,72 @@ async def fetch_token_top_pool(mint: str, network: str, quote: str) -> str:
     return address
 
 
+async def fetch_pair_top_pool(base: str, quote: str, network: str) -> Tuple[str, bool]:
+    """Deepest pool trading ``base``/``quote`` on ``network``, found by *symbol*.
+
+    For venues that quote tickers rather than addresses (see
+    ``SYMBOL_PAIR_NETWORKS``): an xrpl pair like ``SOLO-XRP`` names no token that
+    GeckoTerminal can look up, so this searches pools instead and keeps only exact
+    symbol matches. Ticker collisions are real on XRPL — any issuer can mint a
+    ``RLUSD`` — so the highest 24h volume wins, which is also the pool the
+    GeckoTerminal UI shows first.
+
+    Returns:
+        ``(pool_address, inverted)``. ``inverted`` is True when the pool is quoted
+        the other way round (pair ``XRP-RLUSD`` against a ``RLUSD / XRP`` pool);
+        the caller must then read the quote token's price series, not the base's.
+        ``("", False)`` when nothing matches — an empty chart beats a chart drawn
+        on the wrong pair.
+    """
+    gnet = get_gecko_network(network)
+    b, q = (base or "").strip().upper(), (quote or "").strip().upper()
+    if not b or not q:
+        return "", False
+
+    key = (gnet, b, q)
+    cached = _ttl_get(_pair_pool_cache, key, TOKEN_POOL_TTL)
+    if cached is not None:
+        return cached
+
+    try:
+        # Both symbols in the query: GeckoTerminal matches them against the pool
+        # name ("SOLO / XRP"), so this narrows the answer set before we filter.
+        data = await _gecko_client().api_request(
+            "GET", "search/pools", params={"query": f"{b} {q}", "network": gnet}
+        )
+    except Exception as e:
+        # Not cached — a blip must not pin "no pool" for the full hour.
+        logger.info("pair-pool search failed %s-%s net=%s: %s", b, q, gnet, e)
+        return "", False
+
+    best: Tuple[str, bool] = ("", False)
+    best_volume = -1.0
+    try:
+        for row in data.get("data") or []:
+            attrs = row.get("attributes") or {}
+            symbols = _pool_quote_symbols(attrs.get("name"))
+            if len(symbols) != 2:
+                continue
+            if symbols == [b, q]:
+                inverted = False
+            elif symbols == [q, b]:
+                inverted = True
+            else:
+                continue  # fuzzy hit (RLUSDM for RLUSD), not this pair
+            address = str(attrs.get("address") or "")
+            if not address:
+                continue
+            volume = _get_nested_float(attrs, "volume_usd", "h24") or 0.0
+            if volume > best_volume:
+                best, best_volume = (address, inverted), volume
+    except Exception as e:
+        logger.info("pair-pool parse failed %s-%s net=%s: %s", b, q, gnet, e)
+        return "", False
+
+    _ttl_put(_pair_pool_cache, key, best, TOKEN_POOL_TTL)
+    return best
+
+
 def can_fetch_liquidity(dex_id: str, network: str = None) -> bool:
     """Check if liquidity/bin data can be fetched for this DEX
 
@@ -307,6 +389,7 @@ async def fetch_ohlcv(
     user_data: dict = None,
     limit: int = 100,
     before_timestamp: Optional[int] = None,
+    token: str = "base",
 ) -> Tuple[Optional[List], Optional[str]]:
     """Fetch OHLCV data for any pool via GeckoTerminal
 
@@ -320,6 +403,9 @@ async def fetch_ohlcv(
         before_timestamp: Unix seconds; candles walk back from here. None asks for
             the latest candles, which is also what keeps a live chart's cache key
             stable — pass it only for a window that has actually closed.
+        token: Which side of the pool to price, "base" or "quote". "quote" flips
+            the series, for a venue pair quoted the other way round from the pool
+            (``XRP-RLUSD`` against a ``RLUSD / XRP`` pool).
 
     Returns:
         Tuple of (ohlcv_list, error_message)
@@ -337,7 +423,7 @@ async def fetch_ohlcv(
         if user_data is not None:
             cache_key = (
                 f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
-                f"_{limit}_{before_timestamp or 0}"
+                f"_{token}_{limit}_{before_timestamp or 0}"
             )
             cached = get_cached(user_data, cache_key, ttl=OHLCV_CACHE_TTL)
             if cached is not None:
@@ -356,7 +442,7 @@ async def fetch_ohlcv(
             timeframe,
             before_timestamp=before_timestamp,
             currency=currency,
-            token="base",
+            token=token,
             limit=limit,
         )
 

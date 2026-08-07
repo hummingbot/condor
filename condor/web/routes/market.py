@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor import dex_candles
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -49,61 +49,8 @@ router = APIRouter(tags=["market"])
 # A token or pool address: an EVM 0x-address or a base58 Solana pubkey. Guards the
 # values that reach GeckoTerminal as URL path segments, and tells a real address
 # apart from a plain ticker like "BTC".
-_ADDRESS_RE = re.compile(r"^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$")
+_ADDRESS_RE = dex_candles.ADDRESS_RE
 _POOL_ADDRESS_RE = _ADDRESS_RE
-
-# GeckoTerminal answers are shared across users, so one process-wide dict backs the
-# pool_data OHLCV cache for every dashboard viewer.
-_dex_ohlcv_cache: dict = {}
-
-
-def _is_dex_connector(connector: str) -> bool:
-    """Whether this connector is a DEX network rather than a CEX venue."""
-    from handlers.dex.pool_data import NETWORK_TO_GECKO
-
-    return connector in NETWORK_TO_GECKO
-
-
-def _split_pair(trading_pair: str) -> tuple[str, str]:
-    """``<base>-<quote>`` → (base, quote). LP/DEX pairs carry a raw mint as base."""
-    dash = trading_pair.rfind("-")
-    if dash <= 0:
-        return trading_pair, ""
-    return trading_pair[:dash], trading_pair[dash + 1 :]
-
-
-async def _pool_ohlcv(
-    pool_address: str,
-    connector: str,
-    timeframe: str,
-    limit: int,
-    before_timestamp: int | None,
-) -> list:
-    """Raw OHLCV rows for one pool, or [] on any miss. Never raises."""
-    from handlers.dex.pool_data import fetch_ohlcv
-
-    try:
-        rows, err = await fetch_ohlcv(
-            pool_address,
-            connector,
-            timeframe=timeframe,
-            # Prices in the quote token, matching the scale of the entry and range
-            # prices the executor overlays draw on the same chart.
-            currency="token",
-            user_data=_dex_ohlcv_cache,
-            limit=limit,
-            before_timestamp=before_timestamp,
-        )
-    except Exception as e:
-        logger.warning(
-            "GeckoTerminal OHLCV failed pool=%s connector=%s tf=%s: %s",
-            pool_address,
-            connector,
-            timeframe,
-            e,
-        )
-        return []
-    return [] if err or not rows else rows
 
 
 async def _fetch_dex_candles(
@@ -114,78 +61,11 @@ async def _fetch_dex_candles(
     start_time: float | None,
     end_time: float | None,
 ) -> list[CandleData]:
-    """Candles for a DEX/LP pair from GeckoTerminal.
-
-    Prefers the executor's own pool. If that yields nothing — a closed slot, or an
-    executor that never recorded one — falls back to the base token's deepest pool
-    *in the same quote token*; a pool on another quote would draw a plausible chart
-    on the wrong price scale, so no match means no candles.
-
-    Note the volume column is USD (GeckoTerminal reports ``volume_usd``) while the
-    CEX path reports base units.
-    """
-    from handlers.dex.pool_data import (
-        candles_needed,
-        normalize_timeframe,
-        timeframe_seconds,
+    """GeckoTerminal candles for a DEX/LP/XRPL pair, as the response model."""
+    rows = await dex_candles.fetch_dex_candles(
+        connector, pool_address, trading_pair, interval, start_time, end_time
     )
-
-    timeframe = normalize_timeframe(interval)
-    tf_seconds = timeframe_seconds(timeframe)
-    # The chart asks for a window; GeckoTerminal answers with a count walking back
-    # from before_timestamp. Asking for the raw `limit` would return ~16h of 1m
-    # candles for a ten-minute position.
-    count = candles_needed(start_time, end_time, timeframe)
-
-    # Only pin before_timestamp for a window that has already closed. A live chart
-    # would otherwise mint a new cache key on every request as its end drifts,
-    # re-hitting GeckoTerminal each time; "latest candles" is both correct and
-    # cacheable for it.
-    before = (
-        int(end_time)
-        if end_time is not None and end_time < time.time() - tf_seconds
-        else None
-    )
-
-    rows = []
-    if pool_address:
-        rows = await _pool_ohlcv(pool_address, connector, timeframe, count, before)
-
-    if not rows:
-        base, quote = _split_pair(trading_pair)
-        if _ADDRESS_RE.match(base):
-            from handlers.dex.pool_data import fetch_token_top_pool
-
-            top = await fetch_token_top_pool(base, connector, quote)
-            if top and top != pool_address:
-                rows = await _pool_ohlcv(top, connector, timeframe, count, before)
-
-    # Rows are [timestamp, open, high, low, close, volume_usd, (datetime)], ascending.
-    candles: list[CandleData] = []
-    # Keep the candle that contains `start`, not just those starting after it.
-    lower = start_time - tf_seconds if start_time is not None else None
-    for row in rows:
-        if not isinstance(row, (list, tuple)) or len(row) < 6:
-            continue
-        try:
-            ts = float(row[0])
-            if lower is not None and ts < lower:
-                continue
-            if end_time is not None and ts > end_time:
-                continue
-            candles.append(
-                CandleData(
-                    timestamp=ts,
-                    open=float(row[1]),
-                    high=float(row[2]),
-                    low=float(row[3]),
-                    close=float(row[4]),
-                    volume=float(row[5]),
-                )
-            )
-        except (TypeError, ValueError):
-            continue
-    return candles
+    return [CandleData(**row) for row in rows]
 
 
 @router.get("/servers/{name}/market/connectors")
@@ -467,10 +347,10 @@ async def get_candles(
     if cached and (now - cached[0]) < _CANDLE_CACHE_TTL:
         return cached[1]
 
-    # DEX/LP pairs have no CEX candle feed, so they never reach the client below —
-    # that path 502s for them. A DEX network connector or an explicit pool_address
-    # routes to GeckoTerminal instead.
-    if pool_address or _is_dex_connector(connector):
+    # Pairs with no CandlesFactory feed never reach the client below — that path
+    # 502s for them. A GeckoTerminal-backed connector (a DEX network, or an
+    # on-chain venue like xrpl) or an explicit pool_address routes there instead.
+    if pool_address or dex_candles.uses_gecko_candles(connector):
         candles = await _fetch_dex_candles(
             connector, pool_address, trading_pair, interval, start_time, end_time
         )

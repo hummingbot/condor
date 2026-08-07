@@ -11,6 +11,7 @@ import asyncio
 
 import pytest
 
+from condor import dex_candles
 from condor.web.routes import market
 from handlers.dex import pool_data
 
@@ -126,7 +127,7 @@ def test_non_addresses_are_rejected(value):
     ],
 )
 def test_split_pair(pair, base, quote):
-    assert market._split_pair(pair) == (base, quote)
+    assert dex_candles.split_pair(pair) == (base, quote)
 
 
 # ── Quote matching on the fallback pool ──
@@ -146,11 +147,16 @@ def _pools(*names_and_addresses):
 
 @pytest.fixture(autouse=True)
 def _clear_token_caches():
-    pool_data._token_pool_cache.clear()
-    pool_data._token_symbol_cache.clear()
+    caches = (
+        pool_data._token_pool_cache,
+        pool_data._token_symbol_cache,
+        pool_data._pair_pool_cache,
+    )
+    for cache in caches:
+        cache.clear()
     yield
-    pool_data._token_pool_cache.clear()
-    pool_data._token_symbol_cache.clear()
+    for cache in caches:
+        cache.clear()
 
 
 def test_fallback_pool_must_match_the_quote_token(monkeypatch):
@@ -254,7 +260,7 @@ def test_candles_outside_the_requested_window_are_dropped(monkeypatch):
     async def _fake(*_a, **_k):
         return rows
 
-    monkeypatch.setattr(market, "_pool_ohlcv", _fake)
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake)
     candles = run(
         market._fetch_dex_candles(
             "solana-mainnet-beta", "pool", f"{MINT}-SOL", "1m", start, end
@@ -270,7 +276,7 @@ def test_the_candle_containing_the_start_is_kept(monkeypatch):
     async def _fake(*_a, **_k):
         return [_row(start - 30)]
 
-    monkeypatch.setattr(market, "_pool_ohlcv", _fake)
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake)
     candles = run(
         market._fetch_dex_candles(
             "solana-mainnet-beta", "pool", f"{MINT}-SOL", "1m", start, end
@@ -283,7 +289,7 @@ def test_malformed_rows_are_skipped_not_fatal(monkeypatch):
     async def _fake(*_a, **_k):
         return [_row(1000), ["short"], None, [2000, "x", 1, 1, 1, 1], _row(3000)]
 
-    monkeypatch.setattr(market, "_pool_ohlcv", _fake)
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake)
     candles = run(
         market._fetch_dex_candles(
             "solana-mainnet-beta", "pool", f"{MINT}-SOL", "1m", None, None
@@ -300,11 +306,11 @@ def test_a_live_window_asks_for_latest_candles(monkeypatch):
 
     seen = {}
 
-    async def _fake(pool, connector, timeframe, limit, before_timestamp):
+    async def _fake(pool, connector, timeframe, limit, before_timestamp, **_k):
         seen["before"] = before_timestamp
         return []
 
-    monkeypatch.setattr(market, "_pool_ohlcv", _fake)
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake)
     now = _time.time()
     run(
         market._fetch_dex_candles(
@@ -319,11 +325,11 @@ def test_a_closed_window_pins_before_timestamp(monkeypatch):
     not the newest ones."""
     seen = {}
 
-    async def _fake(pool, connector, timeframe, limit, before_timestamp):
+    async def _fake(pool, connector, timeframe, limit, before_timestamp, **_k):
         seen["before"] = before_timestamp
         return []
 
-    monkeypatch.setattr(market, "_pool_ohlcv", _fake)
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake)
     run(
         market._fetch_dex_candles(
             "solana-mainnet-beta",
@@ -350,7 +356,7 @@ def test_top_pool_fallback_when_the_executors_pool_is_empty(monkeypatch):
         assert (mint, quote) == (MINT, "SOL")
         return "live_pool"
 
-    monkeypatch.setattr(market, "_pool_ohlcv", _fake_ohlcv)
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake_ohlcv)
     monkeypatch.setattr(pool_data, "fetch_token_top_pool", _fake_top)
     candles = run(
         market._fetch_dex_candles(
@@ -373,7 +379,7 @@ def test_no_fallback_for_a_ticker_base(monkeypatch):
         called.append(1)
         return ""
 
-    monkeypatch.setattr(market, "_pool_ohlcv", _fake_ohlcv)
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake_ohlcv)
     monkeypatch.setattr(pool_data, "fetch_token_top_pool", _fake_top)
     assert (
         run(
@@ -387,7 +393,137 @@ def test_no_fallback_for_a_ticker_base(monkeypatch):
 
 
 def test_dex_connectors_route_away_from_the_cex_feed():
-    assert market._is_dex_connector("solana-mainnet-beta")
-    assert market._is_dex_connector("base")
-    assert not market._is_dex_connector("binance")
-    assert not market._is_dex_connector("hyperliquid_perpetual")
+    assert dex_candles.uses_gecko_candles("solana-mainnet-beta")
+    assert dex_candles.uses_gecko_candles("base")
+    assert not dex_candles.uses_gecko_candles("binance")
+    assert not dex_candles.uses_gecko_candles("hyperliquid_perpetual")
+
+
+# ── XRPL: a Hummingbot venue with no candle feed ──
+
+
+def test_xrpl_routes_to_geckoterminal():
+    """xrpl trades through Hummingbot like a CEX but is absent from
+    available-candle-connectors, so its charts must take the GeckoTerminal path
+    instead of 502-ing on a feed that does not exist."""
+    assert dex_candles.uses_gecko_candles("xrpl")
+    assert pool_data.uses_symbol_pairs("xrpl")
+    # Address-based networks keep resolving pools by mint, not by ticker.
+    assert not pool_data.uses_symbol_pairs("solana-mainnet-beta")
+
+
+class _FakeSearch:
+    """Stands in for GeckoTerminal's /search/pools."""
+
+    def __init__(self, rows, on_request=None):
+        self._rows = rows
+        self._on_request = on_request
+
+    async def api_request(self, _method, path, params=None):
+        if self._on_request:
+            self._on_request(path, params)
+        return {
+            "data": [
+                {
+                    "attributes": {
+                        "name": name,
+                        "address": address,
+                        "volume_usd": {"h24": volume},
+                    }
+                }
+                for name, address, volume in self._rows
+            ]
+        }
+
+
+def test_symbol_pair_picks_the_deepest_exact_match(monkeypatch):
+    """Any XRPL issuer can mint a "RLUSD", so the search returns several pools of
+    the same name plus fuzzy neighbours. Only an exact symbol match counts, and
+    among those the deepest wins — the thin ones are dead issuers."""
+    monkeypatch.setattr(
+        pool_data,
+        "_gecko_client",
+        lambda: _FakeSearch(
+            [
+                ("RLUSDM / XRP", "fuzzy_pool", 9_999_999.0),  # different token
+                ("RLUSD / XRP", "thin_pool", 0.08),
+                ("RLUSD / XRP", "deep_pool", 3_400_000.0),
+            ]
+        ),
+    )
+    assert run(pool_data.fetch_pair_top_pool("RLUSD", "XRP", "xrpl")) == (
+        "deep_pool",
+        False,
+    )
+
+
+def test_symbol_pair_reports_an_inverted_pool(monkeypatch):
+    """A venue pair quoted the other way round from the pool (XRP-RLUSD against a
+    RLUSD / XRP pool) must chart the quote token's series — reading the base's
+    would draw the reciprocal price with nothing on screen to say so."""
+    monkeypatch.setattr(
+        pool_data,
+        "_gecko_client",
+        lambda: _FakeSearch([("RLUSD / XRP", "pool", 3_400_000.0)]),
+    )
+    assert run(pool_data.fetch_pair_top_pool("XRP", "RLUSD", "xrpl")) == ("pool", True)
+
+
+def test_symbol_pair_with_no_exact_match_returns_nothing(monkeypatch):
+    monkeypatch.setattr(
+        pool_data,
+        "_gecko_client",
+        lambda: _FakeSearch([("SOLO / USDC", "other_quote", 1.0)]),
+    )
+    assert run(pool_data.fetch_pair_top_pool("SOLO", "XRP", "xrpl")) == ("", False)
+
+
+def test_a_failed_pair_search_is_not_cached(monkeypatch):
+    calls = []
+
+    class _Failing:
+        async def api_request(self, *_a, **_k):
+            calls.append(1)
+            raise RuntimeError("429 Too Many Requests")
+
+    monkeypatch.setattr(pool_data, "_gecko_client", lambda: _Failing())
+    assert run(pool_data.fetch_pair_top_pool("SOLO", "XRP", "xrpl")) == ("", False)
+    assert run(pool_data.fetch_pair_top_pool("SOLO", "XRP", "xrpl")) == ("", False)
+    assert len(calls) == 2
+
+
+def test_xrpl_pair_charts_the_pool_found_by_symbol(monkeypatch):
+    """End to end: SOLO-XRP carries no address at all, so the pool comes from the
+    symbol search and its candles are priced in XRP like the venue quotes them."""
+    seen = {}
+
+    async def _fake_ohlcv(pool, connector, timeframe, limit, before, **kwargs):
+        seen["pool"] = pool
+        seen["token"] = kwargs.get("token", "base")
+        return [_row(1000, close=0.0121)]
+
+    async def _fake_search(base, quote, network):
+        assert (base, quote, network) == ("SOLO", "XRP", "xrpl")
+        return "solo_xrp_pool", False
+
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake_ohlcv)
+    monkeypatch.setattr(pool_data, "fetch_pair_top_pool", _fake_search)
+    candles = run(market._fetch_dex_candles("xrpl", None, "SOLO-XRP", "1m", None, None))
+    assert seen == {"pool": "solo_xrp_pool", "token": "base"}
+    assert [c.close for c in candles] == [0.0121]
+
+
+def test_an_inverted_xrpl_pair_reads_the_quote_series(monkeypatch):
+    seen = {}
+
+    async def _fake_ohlcv(pool, connector, timeframe, limit, before, **kwargs):
+        seen["token"] = kwargs.get("token", "base")
+        return []
+
+    async def _fake_search(*_a, **_k):
+        return "rlusd_xrp_pool", True
+
+    monkeypatch.setattr(dex_candles, "_pool_ohlcv", _fake_ohlcv)
+    monkeypatch.setattr(pool_data, "fetch_pair_top_pool", _fake_search)
+    run(market._fetch_dex_candles("xrpl", None, "XRP-RLUSD", "1m", None, None))
+    assert seen["token"] == "quote"

@@ -172,6 +172,31 @@ def test_reconcile_marks_interrupted(tmp_path):
     assert "brigado.mm session 1" in report.summary()
 
 
+def test_reconcile_closes_ownership_at_the_last_recorded_instant(tmp_path):
+    """The orphan gap between a crash and the reboot belongs to no session.
+
+    Closing at ``time.time()`` instead would credit this session with whatever a
+    surviving bot traded while nobody was operating it.
+    """
+    import json as _json
+    import time
+
+    from condor.agents.ownership import BotLedger, read_owned
+
+    session_dir = _seed_session(tmp_path)
+    died_at = time.time() - 3600  # last tick, an hour before this boot
+    status = _json.loads((session_dir / "status.json").read_text())
+    status["updated_at"] = died_at
+    (session_dir / "status.json").write_text(_json.dumps(status))
+    BotLedger("brigado-mm", session_dir).note_deploy(
+        "brigado-mm-btc", now=died_at - 600
+    )
+
+    asyncio.run(LoopSupervisor().reconcile_boot(agents_root=tmp_path))
+
+    assert read_owned(session_dir)[0].until == died_at
+
+
 def test_reconcile_ignores_current_boot(tmp_path):
     """A live engine's status file is left untouched."""
     session_dir = _seed_session(tmp_path, boot_id=BOOT_ID)

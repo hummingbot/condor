@@ -259,12 +259,17 @@ class BotLedger:
         Called when the session ends. Idempotent and never re-opens a window: a
         bot already released keeps its first release instant, so a double stop
         cannot extend attribution.
+
+        ``now`` lets a caller close the window at an instant other than the call
+        itself — boot reconciliation closes a crashed session at the last moment
+        it was recorded alive, not at the reboot. It is clamped to ``since``: a
+        window can never end before it opened, which would slice negative.
         """
         ts = time.time() if now is None else now
         changed = False
         for bot in self.bots.values():
             if bot.until <= 0:
-                bot.until = ts
+                bot.until = max(ts, bot.since)
                 changed = True
         if changed:
             self._save()

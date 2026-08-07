@@ -656,6 +656,19 @@ def test_release_is_idempotent_and_reopens_on_further_use(tmp_path):
     assert read_owned(sd)[0].until == 0.0
 
 
+def test_release_never_closes_a_window_before_it_opened(tmp_path):
+    """A stale instant is clamped to ``since`` — a negative slice is not a window."""
+    from condor.agents.ownership import BotLedger, read_owned
+
+    sd = tmp_path / "session_1"
+    sd.mkdir()
+    ledger = BotLedger("ns", sd)
+    ledger.note_deploy("ns-bot", now=500.0)
+
+    ledger.release(now=100.0)  # older than the deploy
+    assert read_owned(sd)[0].until == 500.0
+
+
 def test_release_preserves_namespace_for_a_ledger_opened_without_one(tmp_path):
     """Boot reconciliation closes windows with no strategy context to hand."""
     from condor.agents.ownership import BotLedger, read_owned

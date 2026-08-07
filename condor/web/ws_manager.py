@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 
+from condor import dex_candles
 from condor.web.auth import decode_jwt
 
 logger = logging.getLogger(__name__)
@@ -509,7 +510,6 @@ class WebSocketManager:
 
         cm = get_config_manager()
         try:
-            client = await cm.get_client(server_name)
             interval_sec = _INTERVAL_SECONDS.get(interval, 60)
             end_time = int(time.time())
             start_time = end_time - (buf.max_size * interval_sec)
@@ -523,6 +523,22 @@ class WebSocketManager:
                 end_time,
             )
 
+            if dex_candles.uses_gecko_candles(connector):
+                candles = await dex_candles.fetch_dex_candles(
+                    connector, None, pair, interval, start_time, end_time
+                )
+                if candles:
+                    buf.upsert_many(candles)
+                    logger.info(
+                        "Backfilled %d GeckoTerminal candles for %s (buffer: %d/%d)",
+                        len(candles),
+                        channel,
+                        buf.size,
+                        buf.max_size,
+                    )
+                return
+
+            client = await cm.get_client(server_name)
             result = await client.market_data.get_historical_candles(
                 connector,
                 pair,
@@ -1003,6 +1019,15 @@ class WebSocketManager:
         # Start REST poll fallback alongside the WS stream
         self._ensure_candle_poll_fallback(channel)
 
+        if dex_candles.uses_gecko_candles(connector):
+            # No CandlesFactory feed to subscribe to (xrpl, DEX networks): the
+            # poll loop above is the whole stream. Subscribing anyway would just
+            # reconnect-loop on an error the API can never stop returning.
+            logger.info(
+                "Candle stream for %s is GeckoTerminal-polled (no API feed)", channel
+            )
+            return
+
         while True:
             try:
                 client = await cm.get_client(server_name)
@@ -1148,17 +1173,27 @@ class WebSocketManager:
         )
 
     async def _candle_poll_fallback(self, channel: str) -> None:
-        """Periodically poll REST for candles when WS stream goes silent."""
+        """Periodically poll REST for candles when WS stream goes silent.
+
+        For a GeckoTerminal-backed connector there is no WS stream to fall back
+        from — this loop *is* the feed, so it polls from the first tick and never
+        waits for staleness.
+        """
         parts = channel.split(":")
         if len(parts) < 5:
             return
         _, server_name, connector, pair, interval = parts
         interval_sec = _INTERVAL_SECONDS.get(interval, 60)
+        gecko = dex_candles.uses_gecko_candles(connector)
         # How long without a WS update before we consider it stale
         stale_threshold = max(interval_sec, 15)
-        # How often to poll REST once stale (keep the last candle fresh)
-        poll_interval = min(interval_sec, 10)
-        was_stale = False
+        # How often to poll REST once stale (keep the last candle fresh). Gecko
+        # polls stay well clear of its per-minute rate limit — every chart on the
+        # dashboard shares one budget — while still refreshing a forming candle.
+        poll_interval = (
+            max(min(interval_sec // 2, 60), 30) if gecko else min(interval_sec, 10)
+        )
+        was_stale = gecko
 
         from config_manager import get_config_manager
 
@@ -1189,26 +1224,43 @@ class WebSocketManager:
                     was_stale = True
 
                 try:
-                    cm = get_config_manager()
-                    client = await cm.get_client(server_name)
                     now = int(time.time())
-                    result = await client.market_data.get_historical_candles(
-                        connector,
-                        pair,
-                        interval,
-                        start_time=now - interval_sec * 5,
-                        end_time=now,
-                    )
-                    candles_raw = (
-                        result
-                        if isinstance(result, list)
-                        else result.get("data", []) if isinstance(result, dict) else []
-                    )
-                    candles = [
-                        c
-                        for r in candles_raw
-                        if (c := self._normalize_candle(r)) is not None
-                    ]
+                    if gecko:
+                        candles = await dex_candles.fetch_dex_candles(
+                            connector,
+                            None,
+                            pair,
+                            interval,
+                            now - interval_sec * 5,
+                            now,
+                            # The shared OHLCV cache holds a pool for minutes,
+                            # long enough to freeze a live chart.
+                            use_cache=False,
+                        )
+                    else:
+                        cm = get_config_manager()
+                        client = await cm.get_client(server_name)
+                        result = await client.market_data.get_historical_candles(
+                            connector,
+                            pair,
+                            interval,
+                            start_time=now - interval_sec * 5,
+                            end_time=now,
+                        )
+                        candles_raw = (
+                            result
+                            if isinstance(result, list)
+                            else (
+                                result.get("data", [])
+                                if isinstance(result, dict)
+                                else []
+                            )
+                        )
+                        candles = [
+                            c
+                            for r in candles_raw
+                            if (c := self._normalize_candle(r)) is not None
+                        ]
                     if candles:
                         buf = self._candle_buffers.get(channel)
                         # Broadcast if we have newer candles OR if the latest
