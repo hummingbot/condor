@@ -632,7 +632,7 @@ async def manage_trading_agent(
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
         when_to_consult: One-line hint describing when to route work to this agent (create/update_agent). Purely for routing — every agent is consultable with or without it; it falls back to the description.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
-        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
+        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). LEAVE EMPTY unless the user explicitly asks to pin this agent to one server — empty means follow the ambient chat server, which is what travels to other installs. When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server, and on a machine without that server the agent is broken. Do not fill it in with whatever server the chat happens to be on.
 
     Returns:
         Action-specific result dict.
