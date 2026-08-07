@@ -49,6 +49,14 @@ AGENT_OPTIONS: dict[str, dict[str, Any]] = {
 }
 
 
+# What a fresh install should pick unless it has a reason not to: the ACP bridge
+# is the best-supported path, and Sonnet is the balance of capability and cost
+# most users want. Surfaces that rank the catalog (the `make pick-model` wizard)
+# float this key to the top and mark it; it is deliberately NOT part of the
+# `label`, which is reused as a plain display name all over the bot.
+RECOMMENDED_AGENT = "claude-acp:sonnet"
+
+
 def selectable_agent_options() -> dict[str, dict[str, Any]]:
     """AGENT_OPTIONS minus the picker sentinels — every key here is startable."""
     return {k: v for k, v in AGENT_OPTIONS.items() if not v.get("picker")}

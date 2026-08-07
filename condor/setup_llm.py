@@ -30,7 +30,11 @@ import httpx
 
 from condor.acp.pydantic_ai_client import DEFAULT_BASE_URLS
 from handlers.agents import readiness
-from handlers.agents._shared import AGENT_OPTIONS, selectable_agent_options
+from handlers.agents._shared import (
+    AGENT_OPTIONS,
+    RECOMMENDED_AGENT,
+    selectable_agent_options,
+)
 from handlers.agents.openrouter_models import fetch_models
 from handlers.agents.readiness import MISSING, READY, UNVERIFIED, Readiness
 
@@ -107,11 +111,18 @@ def update_env_var(path: Path, key: str, value: str) -> None:
 def menu_options() -> dict[str, dict]:
     """Every startable key, plus the one picker this wizard can complete.
 
+    ``RECOMMENDED_AGENT`` is listed first so the answer most installs want is
+    option 1; the rest keep their ``AGENT_OPTIONS`` order.
+
     ``custom:`` is excluded on purpose: OpenAI-compatible endpoints live in
     per-user preferences, which do not exist at install time — the closing report
     points at ``/agent → Change LLM`` for those.
     """
-    options = dict(selectable_agent_options())
+    selectable = dict(selectable_agent_options())
+    options: dict[str, dict] = {}
+    if RECOMMENDED_AGENT in selectable:
+        options[RECOMMENDED_AGENT] = selectable.pop(RECOMMENDED_AGENT)
+    options.update(selectable)
     options["openrouter:"] = AGENT_OPTIONS["openrouter:"]
     return options
 
@@ -177,11 +188,19 @@ def render_menu(
     options: dict[str, dict], states: dict[str, Readiness], current: str
 ) -> str:
     """The numbered table: one row per option, badged with why it is/isn't ready."""
+
+    def label_of(key: str) -> str:
+        label = options[key]["label"]
+        return f"{label} (recommended)" if key == RECOMMENDED_AGENT else label
+
+    # Widened to the longest label so the badge column still lines up once the
+    # recommended row carries its suffix.
+    width = max([32] + [len(label_of(k)) for k in options])
     lines = []
-    for n, (key, meta) in enumerate(options.items(), 1):
+    for n, key in enumerate(options, 1):
         state = states.get(base_of(key)) or Readiness(UNVERIFIED, "not checked")
         badge = _BADGES.get(state.state, "?")
-        row = f"  {n}. {meta['label']:<32} [{badge} {state.detail}]"
+        row = f"  {n}. {label_of(key):<{width}} [{badge} {state.detail}]"
         if key == current:
             row += "  ← current default"
         lines.append(row)

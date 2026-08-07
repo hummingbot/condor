@@ -11,7 +11,11 @@ import asyncio
 import pytest
 
 from condor import setup_llm
-from handlers.agents._shared import AGENT_OPTIONS, selectable_agent_options
+from handlers.agents._shared import (
+    AGENT_OPTIONS,
+    RECOMMENDED_AGENT,
+    selectable_agent_options,
+)
 from handlers.agents.openrouter_models import OpenRouterModel
 from handlers.agents.readiness import MISSING, READY, UNVERIFIED, Readiness
 
@@ -115,6 +119,33 @@ def test_menu_is_derived_from_agent_options():
     assert "openrouter:" in options  # the one picker the wizard can complete
     assert "custom:" not in options  # per-user preferences don't exist at install time
     assert all(AGENT_OPTIONS[k]["label"] == v["label"] for k, v in options.items())
+
+
+def test_recommended_agent_is_option_one():
+    """A fresh install should land on the recommended model by typing `1`."""
+    options = setup_llm.menu_options()
+    assert list(options)[0] == RECOMMENDED_AGENT
+    # Everything else keeps its AGENT_OPTIONS order.
+    rest = [k for k in selectable_agent_options() if k != RECOMMENDED_AGENT]
+    assert list(options)[1:] == rest + ["openrouter:"]
+
+    picked = setup_llm.choose(
+        options,
+        READY_STATES,
+        "claude-code",
+        {},
+        ask=scripted(["1"]),
+        say=lambda *a: None,
+    )
+    assert picked == (RECOMMENDED_AGENT, {})
+
+
+def test_menu_marks_the_recommended_row():
+    text = setup_llm.render_menu(setup_llm.menu_options(), READY_STATES, "claude-code")
+    assert text.count("(recommended)") == 1
+    first = text.splitlines()[0]
+    assert AGENT_OPTIONS[RECOMMENDED_AGENT]["label"] in first
+    assert "(recommended)" in first
 
 
 def test_base_of_agent_keys():
