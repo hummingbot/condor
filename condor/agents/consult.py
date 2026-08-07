@@ -110,11 +110,13 @@ async def _run_agent_to_completion(
     so a caller can persist the full session transcript. When ``None`` (CONSULT's
     path) the cheaper one-shot ``client.prompt()`` is used and behavior is unchanged.
 
-    ``delegate_worker`` is DELEGATE's flag (FEAT-032). It only bites when the
-    delegated agent IS Condor: chat and background worker are then the same record
-    and the subprocess needs telling which one it is. A specialist already reads
-    its own ``_agent_base`` framing — and is explicitly invited there to delegate
-    long work onward — so its delegations are left exactly as they were.
+    ``delegate_worker`` is DELEGATE's flag (FEAT-032): it tells the subprocess it
+    is the detached background seat rather than the interactive one. Every agent
+    gets it now, not just Condor (FEAT-041) — an agent can start a delegation of
+    *itself*, so a specialist's background session needs the same marker, both to
+    read the unattended framing and so the guard in ``tools/delegate.py`` can stop
+    it from spawning a copy of itself in turn. Handing work to a PEER stays open
+    for a specialist worker; only self-recursion is closed.
     """
     store = AgentStore()
     agent = store.get(slug)
@@ -176,14 +178,13 @@ async def _run_agent_to_completion(
     # Serverless agents still need their own memory/skill scope — without
     # agent_slug the condor MCP tools would target the CHAT's stores.
     effective_server = agent.server_name or server_name
-    from condor.memory.paths import CHAT_SLUG
 
     mcp_servers = build_mcp_servers_for_session(
         user_id,
         chat_id,
         server_name=effective_server if agent.server_required else None,
         agent_slug=slug,
-        delegate_worker=delegate_worker and slug == CHAT_SLUG,
+        delegate_worker=delegate_worker,
     )
 
     # ``permission_callback`` is passed in: CONSULT routes dangerous-tool

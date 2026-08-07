@@ -32,7 +32,7 @@ from .base import (
 from .table_builder import ColumnDef, TableBuilder, create_simple_table
 
 # Bot formatters
-from .bots import format_active_bots_as_table, format_bot_logs_as_table
+from .bots import format_active_bots_as_table, format_bot_logs_as_table, format_controller_state
 
 # Gateway formatters
 from .gateway import (
@@ -101,6 +101,7 @@ __all__ = [
     # Bot formatters
     "format_bot_logs_as_table",
     "format_active_bots_as_table",
+    "format_controller_state",
     # Portfolio formatters
     "format_portfolio_as_table",
     # Executor formatters

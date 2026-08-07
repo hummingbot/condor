@@ -250,154 +250,145 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     summary = "\n".join(lines)
 
     # Build charts
-    try:
-        import plotly.graph_objects as go
-        from plotly.subplots import make_subplots
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
 
-        colors = {"ORCA": "#00D1FF", "MET": "#E8A317", "RAY": "#8B5CF6"}
+    colors = {"ORCA": "#00D1FF", "MET": "#E8A317", "RAY": "#8B5CF6"}
 
-        # Figure with 2 rows: mcap + fees
-        fig = make_subplots(
-            rows=2,
-            cols=1,
-            row_heights=[0.55, 0.45],
-            shared_xaxes=True,
-            vertical_spacing=0.08,
-            subplot_titles=["Market Cap Evolution", "Daily Protocol Fees"],
-        )
+    # Figure with 2 rows: mcap + fees
+    fig = make_subplots(
+        rows=2,
+        cols=1,
+        row_heights=[0.55, 0.45],
+        shared_xaxes=True,
+        vertical_spacing=0.08,
+        subplot_titles=["Market Cap Evolution", "Daily Protocol Fees"],
+    )
 
-        # Row 1: Market cap
-        y_label = "Market Cap (USD)"
-        for name in active_tokens:
-            if name not in price_data:
-                continue
-            df = price_data[name]
-            if df.empty or df["mcap"].sum() == 0:
-                continue
-            y_values = df["mcap"]
-            if config.normalize and y_values.iloc[0] > 0:
-                y_values = (y_values / y_values.iloc[0]) * 100
-                y_label = "Indexed (100 = start)"
-            fig.add_trace(
-                go.Scatter(
-                    x=df["date"],
-                    y=y_values,
-                    mode="lines",
-                    name=name,
-                    line=dict(color=colors.get(name, "#FFFFFF"), width=2),
-                    hovertemplate=f"{name}<br>%{{x|%b %d}}<br>%{{y:,.0f}}<extra></extra>",
-                    legendgroup=name,
-                ),
-                row=1,
-                col=1,
-            )
-
-        # Row 2: Daily fees (7d rolling avg for smoothing)
-        for name in active_tokens:
-            fd = fee_data.get(name, {})
-            chart_df = fd.get("chart", pd.DataFrame())
-            if chart_df.empty:
-                continue
-            # Filter to requested days
-            cutoff = datetime.now(timezone.utc).timestamp() - (config.days * 86400)
-            chart_df = chart_df[chart_df["timestamp"] >= cutoff].copy()
-            if chart_df.empty:
-                continue
-            chart_df["fees_7d_avg"] = chart_df["fees"].rolling(7, min_periods=1).mean()
-            fig.add_trace(
-                go.Scatter(
-                    x=chart_df["date"],
-                    y=chart_df["fees_7d_avg"],
-                    mode="lines",
-                    name=f"{name} fees",
-                    line=dict(color=colors.get(name, "#FFFFFF"), width=2, dash="dot"),
-                    hovertemplate=f"{name}<br>%{{x|%b %d}}<br>${{y:,.0f}}<extra></extra>",
-                    legendgroup=name,
-                    showlegend=False,
-                ),
-                row=2,
-                col=1,
-            )
-
-        fig.update_layout(
-            title=f"Solana DEX Comparison — {config.days}d",
-            paper_bgcolor="#0d1117",
-            plot_bgcolor="#161b22",
-            font=dict(color="#c9d1d9", size=11),
-            legend=dict(
-                orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1
+    # Row 1: Market cap
+    y_label = "Market Cap (USD)"
+    for name in active_tokens:
+        if name not in price_data:
+            continue
+        df = price_data[name]
+        if df.empty or df["mcap"].sum() == 0:
+            continue
+        y_values = df["mcap"]
+        if config.normalize and y_values.iloc[0] > 0:
+            y_values = (y_values / y_values.iloc[0]) * 100
+            y_label = "Indexed (100 = start)"
+        fig.add_trace(
+            go.Scatter(
+                x=df["date"],
+                y=y_values,
+                mode="lines",
+                name=name,
+                line=dict(color=colors.get(name, "#FFFFFF"), width=2),
+                hovertemplate=f"{name}<br>%{{x|%b %d}}<br>%{{y:,.0f}}<extra></extra>",
+                legendgroup=name,
             ),
-            margin=dict(l=60, r=30, t=110, b=40),
-            hovermode="x unified",
-            height=700,
-        )
-        for row in [1, 2]:
-            fig.update_xaxes(gridcolor="#21262d", row=row, col=1)
-            fig.update_yaxes(gridcolor="#21262d", row=row, col=1)
-        fig.update_yaxes(title_text=y_label, tickformat=",.0f", row=1, col=1)
-        fig.update_yaxes(
-            title_text="Daily Fees (7d avg, USD)", tickformat="$,.0f", row=2, col=1
+            row=1,
+            col=1,
         )
 
-        # Send to Telegram
-        if config.send_to_telegram and getattr(context, "bot", None):
-            import io
+    # Row 2: Daily fees (7d rolling avg for smoothing)
+    for name in active_tokens:
+        fd = fee_data.get(name, {})
+        chart_df = fd.get("chart", pd.DataFrame())
+        if chart_df.empty:
+            continue
+        # Filter to requested days
+        cutoff = datetime.now(timezone.utc).timestamp() - (config.days * 86400)
+        chart_df = chart_df[chart_df["timestamp"] >= cutoff].copy()
+        if chart_df.empty:
+            continue
+        chart_df["fees_7d_avg"] = chart_df["fees"].rolling(7, min_periods=1).mean()
+        fig.add_trace(
+            go.Scatter(
+                x=chart_df["date"],
+                y=chart_df["fees_7d_avg"],
+                mode="lines",
+                name=f"{name} fees",
+                line=dict(color=colors.get(name, "#FFFFFF"), width=2, dash="dot"),
+                hovertemplate=f"{name}<br>%{{x|%b %d}}<br>${{y:,.0f}}<extra></extra>",
+                legendgroup=name,
+                showlegend=False,
+            ),
+            row=2,
+            col=1,
+        )
 
-            chat_id = context._chat_id if hasattr(context, "_chat_id") else None
-            if chat_id:
-                buf = io.BytesIO()
-                fig.write_image(buf, format="png", width=900, height=700, scale=2)
-                buf.seek(0)
-                await context.bot.send_photo(
-                    chat_id=chat_id, photo=buf, caption=summary, parse_mode="Markdown"
-                )
+    fig.update_layout(
+        title=f"Solana DEX Comparison — {config.days}d",
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#161b22",
+        font=dict(color="#c9d1d9", size=11),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
+        margin=dict(l=60, r=30, t=110, b=40),
+        hovermode="x unified",
+        height=700,
+    )
+    for row in [1, 2]:
+        fig.update_xaxes(gridcolor="#21262d", row=row, col=1)
+        fig.update_yaxes(gridcolor="#21262d", row=row, col=1)
+    fig.update_yaxes(title_text=y_label, tickformat=",.0f", row=1, col=1)
+    fig.update_yaxes(
+        title_text="Daily Fees (7d avg, USD)", tickformat="$,.0f", row=2, col=1
+    )
 
-        # Save HTML report
-        try:
-            from condor.reports import ReportBuilder
+    # Send to Telegram
+    if config.send_to_telegram and getattr(context, "bot", None):
+        import io
 
-            builder = ReportBuilder(f"Solana DEX Comparison — {config.days}d")
-            builder.source("routine", "mcap_comparison").tags(
-                ["market-cap", "fees", "solana"] + [n.lower() for n in active_tokens]
+        chat_id = context._chat_id if hasattr(context, "_chat_id") else None
+        if chat_id:
+            buf = io.BytesIO()
+            fig.write_image(buf, format="png", width=900, height=700, scale=2)
+            buf.seek(0)
+            await context.bot.send_photo(
+                chat_id=chat_id, photo=buf, caption=summary, parse_mode="Markdown"
             )
-            builder.markdown(summary)
-            builder.plotly(fig)
 
-            table_rows = []
-            for name in active_tokens:
-                info = token_info.get(name, {})
-                fd = fee_data.get(name, {})
-                df = price_data.get(name, pd.DataFrame())
-                first_mcap = df["mcap"].iloc[0] if not df.empty else 0
-                change = (
-                    ((info.get("mcap", 0) - first_mcap) / first_mcap * 100)
-                    if first_mcap > 0
-                    else 0
-                )
-                f30d = fd.get("total30d", 0)
-                annualized = f30d * 12
-                mcap = info.get("mcap", 0)
-                table_rows.append(
-                    {
-                        "Token": name,
-                        "Price": f"${info.get('price', 0):.4f}",
-                        "MCap": _fmt_mcap(mcap),
-                        f"{config.days}d Chg": _fmt_pct(change),
-                        "FDV": _fmt_mcap(info.get("fdv", 0)),
-                        "Fees 24h": _fmt_mcap(fd.get("total24h", 0)),
-                        "Fees 30d": _fmt_mcap(f30d),
-                        "Ann. Fees": _fmt_mcap(annualized),
-                        "MCap/Ann.Fees": (
-                            f"{mcap / annualized:.1f}x" if annualized > 0 else "N/A"
-                        ),
-                    }
-                )
-            builder.table(table_rows)
-            await builder.save()
-        except Exception as e:
-            logger.warning(f"Report generation failed: {e}")
+    # Save HTML report
+    from condor.reports import ReportBuilder
 
-    except Exception as e:
-        logger.warning(f"Chart generation failed: {e}")
+    builder = ReportBuilder(f"Solana DEX Comparison — {config.days}d")
+    builder.source("routine", "mcap_comparison").tags(
+        ["market-cap", "fees", "solana"] + [n.lower() for n in active_tokens]
+    )
+    builder.markdown(summary)
+    builder.plotly(fig)
+
+    table_rows = []
+    for name in active_tokens:
+        info = token_info.get(name, {})
+        fd = fee_data.get(name, {})
+        df = price_data.get(name, pd.DataFrame())
+        first_mcap = df["mcap"].iloc[0] if not df.empty else 0
+        change = (
+            ((info.get("mcap", 0) - first_mcap) / first_mcap * 100)
+            if first_mcap > 0
+            else 0
+        )
+        f30d = fd.get("total30d", 0)
+        annualized = f30d * 12
+        mcap = info.get("mcap", 0)
+        table_rows.append(
+            {
+                "Token": name,
+                "Price": f"${info.get('price', 0):.4f}",
+                "MCap": _fmt_mcap(mcap),
+                f"{config.days}d Chg": _fmt_pct(change),
+                "FDV": _fmt_mcap(info.get("fdv", 0)),
+                "Fees 24h": _fmt_mcap(fd.get("total24h", 0)),
+                "Fees 30d": _fmt_mcap(f30d),
+                "Ann. Fees": _fmt_mcap(annualized),
+                "MCap/Ann.Fees": (
+                    f"{mcap / annualized:.1f}x" if annualized > 0 else "N/A"
+                ),
+            }
+        )
+    builder.table(table_rows)
+    await builder.save()
 
     return RoutineResult(text=summary)

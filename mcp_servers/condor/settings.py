@@ -15,11 +15,13 @@ class Settings:
     # Canonical key of the session that spawned this subprocess ("web:7:slot-1",
     # "tg:42", …). Empty when the server runs outside a session.
     session_key: str
-    # True when this subprocess belongs to a *background Condor worker* — the
-    # detached session `delegate` starts to author a routine (FEAT-032). The chat
-    # and the worker are the same agent record, so this flag is the only thing
-    # that tells them apart: it selects the worker framing in ``_build_instructions``
-    # and makes ``delegate(action="start")`` refuse to recurse.
+    # True when this subprocess is a *background delegation worker* — a detached
+    # session `delegate` started to carry one task unattended (FEAT-032). The
+    # interactive session and the worker resolve the same agent record, so this
+    # flag is the only thing that tells them apart: it selects the unattended
+    # framing in ``_build_instructions`` and makes ``delegate(action="start")``
+    # refuse to recurse. Every agent has this seat now, not just Condor, since an
+    # agent can start a delegation of itself (FEAT-041).
     delegate_worker: bool = False
 
     @property
@@ -44,7 +46,6 @@ def _parse_settings() -> Settings:
     parser.add_argument("--chat-id", type=int, default=None)
     parser.add_argument("--user-id", type=int, default=None)
     parser.add_argument("--agent-slug", default=None)
-    parser.add_argument("--bot-token", default=None)
     parser.add_argument("--server-name", default=None)
     parser.add_argument("--session-key", default=None)
     parser.add_argument("--delegate-worker", action="store_true", default=False)
@@ -61,7 +62,13 @@ def _parse_settings() -> Settings:
             if args.user_id is not None
             else int(os.environ.get("CONDOR_USER_ID", "0"))
         ),
-        bot_token=args.bot_token or os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+        # Env only, never argv: a token on the command line is readable by every
+        # local process through `ps` (SEC-095). The spawner injects
+        # TELEGRAM_BOT_TOKEN into this subprocess's environment; TELEGRAM_TOKEN
+        # is the inherited name, and covers a run started outside a session.
+        bot_token=(
+            os.environ.get("TELEGRAM_BOT_TOKEN") or os.environ.get("TELEGRAM_TOKEN", "")
+        ),
         agent_slug=args.agent_slug or os.environ.get("CONDOR_AGENT_SLUG", ""),
         active_server=args.server_name or os.environ.get("CONDOR_SERVER_NAME", ""),
         session_key=args.session_key or os.environ.get("CONDOR_SESSION_KEY", ""),

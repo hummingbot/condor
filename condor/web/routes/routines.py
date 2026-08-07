@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from condor import routine_hooks
 from condor.reports import list_reports
 from condor.routine_store import get_routine_store
+from condor.runtime import client
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
 from config_manager import get_config_manager
@@ -41,6 +42,10 @@ class RunRequestV2(BaseModel):
     # calls) derives it from the routine's source; the MCP runner sends it
     # because it knows which agent asked — see RoutineStore._execute_and_record.
     attribute_to: str = ""
+    # The MCP caller's session, resolved here into the conversation the run
+    # reports back to when it finishes (ARCH-089). Empty for the dashboard's own
+    # calls, which have no conversation behind them.
+    session_key: str = ""
 
 
 class ScheduleRequestV2(BaseModel):
@@ -165,6 +170,8 @@ async def run_routine_v2(
             server_name=body.server_name,
             user_id=user.id,
             agent=body.attribute_to,
+            conversation_id=await client.conversation_for_session(body.session_key),
+            session_key=body.session_key,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))
@@ -193,6 +200,8 @@ async def start_continuous_v2(
             server_name=body.server_name,
             user_id=user.id,
             agent=body.attribute_to,
+            conversation_id=await client.conversation_for_session(body.session_key),
+            session_key=body.session_key,
         )
     except ValueError as e:
         raise HTTPException(404, str(e))

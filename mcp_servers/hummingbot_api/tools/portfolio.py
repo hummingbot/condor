@@ -17,6 +17,13 @@ from mcp_servers.hummingbot_api.tools import trading as trading_tools
 
 logger = logging.getLogger("hummingbot-mcp")
 
+# Upper bound on concurrent real-time CLMM pool reads through Gateway. These are
+# on-chain queries — the slowest calls in the overview — so they are fanned out
+# instead of walked one at a time, but bounded so an LP-heavy account never
+# bursts unlimited simultaneous Gateway/RPC requests (same bound the other
+# fan-outs in this repo use).
+MAX_CONCURRENT_POOL_FETCHES = 10
+
 
 async def get_portfolio_overview(
     client: HummingbotClient,
@@ -121,26 +128,45 @@ async def get_portfolio_overview(
                         if connector and network and pool_address:
                             pools_map[(connector, network, pool_address)] = True
 
-                    # Step 3: Fetch real-time data for each pool
-                    real_time_positions = []
-                    for (connector, network, pool_address) in pools_map.keys():
-                        try:
-                            positions = await client.gateway_clmm.get_positions_owned(
-                                connector=connector,
-                                network=network,
-                                pool_address=pool_address,
-                                wallet_address=None  # Uses default wallet
-                            )
+                    # Step 3: Fetch real-time data for each pool, concurrently.
+                    # Total latency is one pool's round-trip (per semaphore slot)
+                    # instead of the sum over every pool. Each call keeps its own
+                    # try/except so one bad pool is logged and skipped exactly as
+                    # in the serial version, and results stay positionally aligned
+                    # with `pools` so every position is stamped with its own pool's
+                    # connector/network.
+                    pools = list(pools_map.keys())
+                    semaphore = asyncio.Semaphore(MAX_CONCURRENT_POOL_FETCHES)
 
-                            if positions and isinstance(positions, list):
-                                # Add connector and network info to each position
-                                for pos in positions:
-                                    pos["connector"] = connector
-                                    pos["network"] = network
-                                real_time_positions.extend(positions)
-                        except Exception as e:
-                            logger.warning(f"Failed to get positions for pool {pool_address}: {str(e)}")
+                    async def fetch_pool(connector, network, pool_address):
+                        async with semaphore:
+                            try:
+                                return await client.gateway_clmm.get_positions_owned(
+                                    connector=connector,
+                                    network=network,
+                                    pool_address=pool_address,
+                                    wallet_address=None  # Uses default wallet
+                                )
+                            except Exception as e:
+                                logger.warning(f"Failed to get positions for pool {pool_address}: {str(e)}")
+                                return None
+
+                    pool_results = await asyncio.gather(
+                        *(fetch_pool(*pool) for pool in pools), return_exceptions=True
+                    )
+
+                    real_time_positions = []
+                    for (connector, network, _pool_address), positions in zip(
+                        pools, pool_results
+                    ):
+                        if isinstance(positions, BaseException):
                             continue
+                        if positions and isinstance(positions, list):
+                            # Add connector and network info to each position
+                            for pos in positions:
+                                pos["connector"] = connector
+                                pos["network"] = network
+                            real_time_positions.extend(positions)
 
                     return real_time_positions
 

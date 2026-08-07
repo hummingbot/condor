@@ -67,6 +67,21 @@ class AgentConfig(BaseModel):
         "bot = controller mode on, deriving bot_name as {agent_slug}-{strategy_slug} "
         "when empty; executors = force executor mode even with a bot_name set.",
     )
+    canvas_enabled: bool = Field(
+        default=True,
+        description="Keep a session canvas (the agent's running narrative) and "
+        "publish a live session report. Costs ~1.2k input tokens per tick.",
+    )
+    canvas_nudge_ticks: int = Field(
+        default=12,
+        description="Remind the agent to revise its canvas after this many ticks "
+        "without a revision",
+    )
+    canvas_band_usd: float = Field(
+        default=25.0,
+        description="PnL drift since the last canvas revision that triggers a "
+        "revise-your-canvas nudge",
+    )
     risk_limits: RiskLimitsConfig = Field(default_factory=RiskLimitsConfig)
 
     def to_engine_dict(self) -> dict[str, Any]:

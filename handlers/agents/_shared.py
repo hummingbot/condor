@@ -1,9 +1,13 @@
 """Constants and MCP config loader for agent sessions."""
 
+import hashlib
+import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
+from condor.acp.client import bot_process_marker
 from condor.memory.paths import CHAT_SLUG
 
 log = logging.getLogger(__name__)
@@ -48,6 +52,136 @@ AGENT_OPTIONS: dict[str, dict[str, Any]] = {
 def selectable_agent_options() -> dict[str, dict[str, Any]]:
     """AGENT_OPTIONS minus the picker sentinels — every key here is startable."""
     return {k: v for k, v in AGENT_OPTIONS.items() if not v.get("picker")}
+
+
+def bind_chat_to_agent(user_data: dict | None, agent_slug: str) -> None:
+    """Record (or clear) the specialist this chat talks to.
+
+    Written by the "Talk to" picker and read by every path that spawns a session
+    for the chat, which is what makes the choice outlive the subprocess that
+    served it (CORR-090). An empty slug means Condor was picked, i.e. unbound.
+
+    Only the slug field is written. Unbinding is a change of interlocutor, not
+    the end of the chat: the conversation stored beside it (ARCH-101) has to
+    survive picking the coordinator, so this must never drop the whole record.
+    """
+    from condor.preferences import set_chat_binding
+
+    if user_data is None:
+        return
+    set_chat_binding(user_data, {"agent_slug": agent_slug})
+
+
+def stale_binding_notice(slug: str) -> str:
+    """Told once, when a bound Agent's directory is gone by the time we respawn."""
+    return (
+        f"The agent '{slug}' no longer exists, so this chat is back to Condor. "
+        "Use /agent → Talk to if you want to bind it to another one."
+    )
+
+
+def resolve_chat_binding(user_data: dict | None, drop_stale: bool = True):
+    """The Agent this chat is bound to, as ``(agent, stale_slug)``.
+
+    ``agent`` is ``None`` when the chat is unbound (Condor answers) or when the
+    binding could not be honoured. In that second case ``stale_slug`` names the
+    agent that went missing — its directory was deleted while the chat was bound
+    to it. Silently falling back to the coordinator is the bug this exists to
+    prevent: it swaps the identity, the toolset, the pinned server and the
+    memory scope with nothing on screen to show for it.
+
+    ``drop_stale`` forgets such a binding, so the notice is delivered exactly
+    once and every later respawn is cleanly unbound. Only the paths that spawn a
+    session pass it: a surface that merely *renders* the binding must not be the
+    one to consume the warning the next spawn owes the user.
+    """
+    from condor.agents.agent import AgentStore
+    from condor.preferences import get_chat_binding
+
+    if user_data is None:
+        return None, ""
+
+    slug = get_chat_binding(user_data).get("agent_slug") or ""
+    if not slug:
+        return None, ""
+
+    agent = AgentStore().get(slug)
+    if agent is None:
+        log.warning("Chat is bound to unknown agent %r", slug)
+        if drop_stale:
+            # The agent is gone; the chat and its transcript are not. Clearing
+            # the slug alone leaves the conversation to be resumed by Condor.
+            bind_chat_to_agent(user_data, "")
+        return None, slug
+
+    return agent, ""
+
+
+def remember_chat_conversation(user_data: dict | None, conversation_id: str) -> None:
+    """Record the conversation this chat is now in, for the next respawn.
+
+    The id lives on the in-memory session and nowhere else, so a chat that lost
+    its subprocess had no way to say which transcript it belonged to and every
+    respawn started blank (ARCH-101). Written after every successful spawn —
+    including the ones that deliberately minted a fresh conversation, since that
+    new one is what the chat is in from then on.
+
+    An empty id is not recorded: it means the runtime could not resolve a
+    conversation at all (a session with no owner, or a recording failure), which
+    is no reason to forget the one the chat already had.
+    """
+    from condor.preferences import set_chat_binding
+
+    if user_data is None or not conversation_id:
+        return
+    set_chat_binding(user_data, {"conversation_id": conversation_id})
+
+
+def forget_chat_conversation(user_data: dict | None) -> None:
+    """Start the chat's next spawn on a fresh conversation.
+
+    The deliberate new-chat verbs — "New session" and the ``-`` reset — call
+    this. The agent binding is untouched: a new chat is a new transcript, not a
+    demotion to the coordinator.
+    """
+    from condor.preferences import set_chat_binding
+
+    if user_data is None:
+        return
+    set_chat_binding(user_data, {"conversation_id": ""})
+
+
+def stored_chat_conversation(user_data: dict | None) -> str:
+    """The conversation this chat should come back to, or "" for a fresh one."""
+    from condor.preferences import get_chat_binding
+
+    if user_data is None:
+        return ""
+    return get_chat_binding(user_data).get("conversation_id") or ""
+
+
+def conversation_token(conversation_id: str) -> str:
+    """Short stable token for a conversation id, for use in callback_data.
+
+    Telegram caps callback_data at 64 bytes. Conversation ids are only bounded
+    by what the store accepts as a path segment, so the picker addresses them by
+    a fixed-width digest instead of by the id itself — the payload is the same
+    size whoever minted the id. It is deliberately not a list position either:
+    the list is shared with the dashboard and reorders on every write (it is
+    sorted by ``updated_at``), so an index rendered a minute ago can resolve to
+    somebody else's conversation by the time it is tapped (CORR-097).
+    """
+    return hashlib.blake2s(conversation_id.encode("utf-8"), digest_size=4).hexdigest()
+
+
+def find_conversation(metas: list, token: str):
+    """Resolve a token from :func:`conversation_token` against a fresh listing.
+
+    ``None`` means the conversation is no longer there — deleted from the
+    dashboard, or from another chat, between the render and the tap. Callers
+    must treat that as a normal outcome and say so rather than failing.
+    """
+    return next((m for m in metas if conversation_token(m.id) == token), None)
 
 
 def _default_agent() -> str:
@@ -158,40 +292,85 @@ DANGEROUS_SWAP_ACTIONS = {"execute"}
 DANGEROUS_CLMM_ACTIONS = {"open_position", "close_position"}
 
 
+def tool_call_name(tool_call: dict[str, Any]) -> str:
+    """The bare tool name, with any MCP prefix stripped.
+
+    ACP names a tool by its wire name (``mcp__mcp-hummingbot__manage_bots``)
+    where the local surfaces use the bare one, so everything that dispatches on
+    a tool name — the danger list, the risk gate, the confirmation summary —
+    has to normalize identically or they disagree about the same call.
+    """
+    raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
+    return raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+
+
+def tool_call_input(tool_call: dict[str, Any]) -> dict[str, Any] | None:
+    """A tool call's arguments as a mapping, or ``None`` when unreadable.
+
+    ``None`` means "I cannot tell what this call does", and every caller has to
+    fail closed on it: an action-gated tool whose action can't be read is
+    treated as dangerous rather than waved through (SEC-093). Callers must not
+    reach for other spellings of the arguments — the ACP wire's ``rawInput`` is
+    translated once, at the boundary in :func:`condor.acp.client.normalize_tool_call`.
+
+    A JSON string is parsed: OpenAI-compatible providers deliver tool arguments
+    that way.
+    """
+    args = tool_call.get("input")
+    if isinstance(args, dict):
+        return args
+    if isinstance(args, str) and args.strip():
+        try:
+            parsed = json.loads(args)
+        except json.JSONDecodeError:
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _has_dangerous_action(
+    tool_call: dict[str, Any], dangerous_actions: set[str]
+) -> bool:
+    """Whether an action-gated tool call selects one of its dangerous actions.
+
+    Fails closed (SEC-093): unreadable arguments, or a missing/non-string
+    ``action``, count as dangerous. ``action`` is required by every one of
+    these tools, so an unreadable one is never a benign read — it is a call we
+    failed to understand, and those belong in front of a human.
+    """
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        return True
+    action = input_data.get("action")
+    if not isinstance(action, str) or not action:
+        return True
+    return action in dangerous_actions
+
+
 def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
     """Check if a tool call requires user confirmation."""
-    raw_name = tool_call.get("tool", "") or tool_call.get("title", "")
-    # Normalize MCP-prefixed names (e.g. mcp__mcp-hummingbot__manage_executors → manage_executors)
-    tool_name = raw_name.rsplit("__", 1)[-1] if "__" in raw_name else raw_name
+    tool_name = tool_call_name(tool_call)
 
     # Direct dangerous tools
     if tool_name in DANGEROUS_TOOLS:
         # For manage_gateway_swaps, only "execute" action is dangerous
         if tool_name == "manage_gateway_swaps":
-            input_data = tool_call.get("input", {})
-            action = input_data.get("action", "")
-            return action in DANGEROUS_SWAP_ACTIONS
+            return _has_dangerous_action(tool_call, DANGEROUS_SWAP_ACTIONS)
 
         # For manage_gateway_clmm, only open/close are dangerous
         if tool_name == "manage_gateway_clmm":
-            input_data = tool_call.get("input", {})
-            action = input_data.get("action", "")
-            return action in DANGEROUS_CLMM_ACTIONS
+            return _has_dangerous_action(tool_call, DANGEROUS_CLMM_ACTIONS)
 
         return True
 
     # manage_executors with create/stop actions
     if tool_name == "manage_executors":
-        input_data = tool_call.get("input", {})
-        action = input_data.get("action", "")
-        return action in DANGEROUS_EXECUTOR_ACTIONS
+        return _has_dangerous_action(tool_call, DANGEROUS_EXECUTOR_ACTIONS)
 
     # manage_bots with deploy/stop/update actions (a bot deploy places real
     # capital via a controller, a different path than manage_executors)
     if tool_name == "manage_bots":
-        input_data = tool_call.get("input", {})
-        action = input_data.get("action", "")
-        return action in DANGEROUS_BOT_ACTIONS
+        return _has_dangerous_action(tool_call, DANGEROUS_BOT_ACTIONS)
 
     return False
 
@@ -203,6 +382,42 @@ def get_project_dir() -> str:
     so we just need to point it at the project root.
     """
     return str(Path(__file__).parent.parent.parent)
+
+
+def _bot_token() -> str:
+    """This bot's Telegram token, read at call time.
+
+    Goes through ``utils.config`` for its ``load_dotenv()`` side effect, so the
+    marker built here is derived from the same token ``main.py`` hands the
+    reaper — a mismatch would silently strand orphaned subprocess trees.
+    """
+    import utils.config  # noqa: F401  (imported for load_dotenv())
+
+    return os.environ.get("TELEGRAM_TOKEN", "")
+
+
+def _bot_id_args() -> list[str]:
+    """``--bot-id <digest>`` for an MCP subprocess, or nothing without a token.
+
+    The digest is what the startup reaper (``reap_stale_acp_trees``) seeds on to
+    find subprocess trees orphaned by a previous crash. It replaced the raw
+    token, which used to sit here in clear text (SEC-095). Both MCP servers
+    parse their argv with ``parse_known_args``, so the flag is inert to them —
+    it exists purely to be visible in ``ps``.
+    """
+    marker = bot_process_marker(_bot_token())
+    return ["--bot-id", marker] if marker else []
+
+
+def _env_entries(**values: str) -> list[dict[str, str]]:
+    """ACP ``env`` entries (``{"name", "value"}``), skipping empty values.
+
+    This is the channel every secret an MCP subprocess needs must travel on: the
+    ACP bridge and the pydantic-ai stdio client both overlay these onto the
+    child's inherited environment, which — unlike argv — no other local user can
+    read out of ``ps``.
+    """
+    return [{"name": name, "value": value} for name, value in values.items() if value]
 
 
 def _condor_mcp_args(
@@ -217,9 +432,12 @@ def _condor_mcp_args(
     ``delegate_worker`` marks a *background Condor worker* — the detached session
     ``delegate`` starts (FEAT-032). The chat and that worker share one agent
     record, so the flag is what tells the subprocess which seat it is sitting in.
-    """
-    import os
 
+    The bot token travels in the server's ``env``, never here: argv is
+    world-readable via ``ps`` (SEC-095). What argv carries instead is
+    ``--bot-id``, the token's non-secret digest, which is how the startup reaper
+    recognizes our own leaked subprocess trees.
+    """
     # MCP server expects int chat_id. For web sessions (string keys like "web_42"),
     # use user_id instead — in Telegram DMs, chat_id == user_id anyway.
     effective_chat_id = chat_id if isinstance(chat_id, int) else user_id
@@ -228,9 +446,8 @@ def _condor_mcp_args(
         str(effective_chat_id),
         "--user-id",
         str(user_id),
-        "--bot-token",
-        os.environ.get("TELEGRAM_TOKEN", ""),
     ]
+    args.extend(_bot_id_args())
     if agent_slug:
         args.extend(["--agent-slug", agent_slug])
     if server_name:
@@ -292,7 +509,7 @@ def build_mcp_servers_for_session(
             server_name=server_name,
             delegate_worker=delegate_worker,
         ),
-        "env": [],
+        "env": _env_entries(TELEGRAM_BOT_TOKEN=_bot_token()),
     }
 
     if not server_name:
@@ -316,6 +533,10 @@ def build_mcp_servers_for_session(
 
     api_url = f"http://{server['host']}:{server['port']}"
 
+    # Credentials go in env, not argv: the API username/password used to sit on
+    # the command line, where any local `ps` recovered them (SEC-095). The
+    # non-secret coordinates (url, server name) stay on argv, where they make a
+    # running subprocess identifiable.
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
@@ -326,14 +547,14 @@ def build_mcp_servers_for_session(
             "mcp_servers.hummingbot_api",
             "--url",
             api_url,
-            "--username",
-            server["username"],
-            "--password",
-            server["password"],
             "--server-name",
             server_name,
-        ],
-        "env": [],
+        ]
+        + _bot_id_args(),
+        "env": _env_entries(
+            HUMMINGBOT_API_USERNAME=server["username"],
+            HUMMINGBOT_API_PASSWORD=server["password"],
+        ),
     }
 
     return [mcp_hummingbot, condor]
@@ -523,36 +744,16 @@ def build_agent_context(
     are injected (keyed by the Agent slug, FEAT-003 — the shared brain), and the
     consult task is appended last. Read on demand via manage_memory/manage_skill
     inside the run.
+
+    Those indexes come from :func:`~condor.memory.domain_context`, the same
+    builder ``binding.agent_identity_context`` composes, so this Agent carries
+    identical instructions about its own memory whether it is consulted or
+    chatted with (ARCH-099).
     """
+    from condor.memory import domain_context
+
     sections: list[str] = [agent.instructions]
-
-    try:
-        from condor.memory import MemoryStore
-
-        memory_index = MemoryStore(user_id, agent.slug).list_index()
-        if memory_index:
-            sections.append(
-                "[DOMAIN MEMORY — what you remember in this domain]\n"
-                'Read a full memory with manage_memory(action="read", name="..."). '
-                'Save new, stable domain facts with manage_memory(action="write", ...).\n\n'
-                f"{memory_index}"
-            )
-    except Exception:
-        pass
-
-    try:
-        from condor.memory import SkillStore
-
-        skills_index = SkillStore(agent.slug).list_index()
-        if skills_index:
-            sections.append(
-                "[DOMAIN SKILLS — playbooks you can follow]\n"
-                "Read-only playbooks shipped with this Agent. Read one with "
-                'manage_skill(action="read", name="...") and follow its steps.\n\n'
-                f"{skills_index}"
-            )
-    except Exception:
-        pass
+    sections.extend(domain_context(agent.slug, user_id))
 
     consult = f"[CONSULT REQUEST]\n{task}"
     if context:

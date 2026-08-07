@@ -92,6 +92,20 @@ JOURNAL:
 - Keep learnings factual and short (1 line). No speculation.
 - Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
 - Do NOT call trading_agent_journal_read — context is already in this prompt.
+
+SESSION CANVAS — your running narrative, shown to the user in the session report:
+- Four sections, no others: "thesis" (what you believe the market is doing and
+  how you're playing it), "working" (what is and isn't paying off), "changed"
+  (what you adjusted and why), "questions" (what you still don't know).
+- Revise one with:
+  trading_agent_journal_write(entry_type="canvas", section="thesis|working|changed|questions", text="...")
+- Revise a section ONLY when it is now WRONG or genuinely out of date. A quiet
+  tick needs no canvas call at all — silence is the correct answer when nothing
+  has changed.
+- One section per call, at most one revision per section per tick.
+- Short prose, a few sentences. Anything past ~1200 characters is cut.
+- NEVER restate PnL, volume, or executor counts: the report already shows those
+  live and correct. Write what the numbers MEAN, not the numbers.
 """
 
 JOURNAL_SECTION_EXPERIMENT = """\
@@ -133,26 +147,28 @@ def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
 
 
 def _build_routines_section(strategy: Strategy) -> str:
-    """Build an [AVAILABLE ROUTINES] section listing this agent's own routines.
+    """Build an [AVAILABLE ROUTINES] section: this agent's own routines + shared.
 
-    Domain experts/trading agents are isolated: they see only their own routines
-    (``agents/<slug>/routines``), never the chat's general library.
+    An agent sees its own library (``agents/<slug>/routines``) plus the shared
+    one every assistant reads (FEAT-038), its own shadowing a shared name.
+    Shared entries are marked so the agent knows it cannot edit them —
+    ``create_routine`` always writes locally, which is how it specializes one.
+    A routine it cannot see here it will never call, so this list has to be the
+    same one ``_resolve_routine`` resolves against.
     """
-    from routines.base import assistant_routines_dir, discover_routines_from_path
+    from routines.base import assistant_routines
 
     lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
-        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.key}", config={{...}})'
+        f'Call via: manage_routines(action="run", name="<name>", agent="{strategy.agent_slug}", config={{...}})'
     )
     lines.append("")
 
-    # Agent-level routines (shared across this agent's strategies, isolated from
-    # the chat's general library).
-    routines_dir = assistant_routines_dir(strategy.agent_slug)
-    local = discover_routines_from_path(routines_dir) if routines_dir.exists() else {}
-    if local:
-        for name, r in sorted(local.items()):
-            lines.append(f"  - {name}: {r.description}")
+    available = assistant_routines(strategy.agent_slug)
+    if available:
+        for name, r in sorted(available.items()):
+            mark = "" if (r.source or "").startswith("agent:") else " (shared)"
+            lines.append(f"  - {name}: {r.description}{mark}")
     else:
         lines.append('  (none yet — create one with action="create_routine")')
 
@@ -234,6 +250,8 @@ def build_tick_prompt(
     user_memory: str = "",
     skills_index: str = "",
     ledger: Any | None = None,
+    canvas: str = "",
+    canvas_nudge: str = "",
 ) -> str:
     """Build the full prompt for one agent tick.
 
@@ -388,5 +406,17 @@ def build_tick_prompt(
         sections.append(f"[CURRENT STATUS]\n{summary}")
     if recent_decisions:
         sections.append(f"[RECENT DECISIONS — last 3 snapshots]\n{recent_decisions}")
+
+    # Session canvas -- the agent's own narrative, echoed back so it can revise
+    # what is now wrong. Experiments keep no canvas (they keep no journal), so
+    # the engine passes nothing and the block is omitted entirely.
+    if not is_experiment:
+        canvas_lines = [
+            "[SESSION CANVAS — your running narrative, shown to the user in the session report]",
+            canvas.strip() or "(empty — write your opening thesis this tick)",
+        ]
+        if canvas_nudge:
+            canvas_lines.append(canvas_nudge)
+        sections.append("\n".join(canvas_lines))
 
     return "\n\n".join(sections)

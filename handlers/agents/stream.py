@@ -5,10 +5,12 @@ import logging
 import re
 import time
 
-from telegram import Bot
+from telegram import Bot, InlineKeyboardMarkup
 from telegram.error import BadRequest, RetryAfter, TimedOut
 
 from condor.runtime.events import EventType, RuntimeEvent
+
+from .menu import stop_generating_keyboard
 
 log = logging.getLogger(__name__)
 
@@ -22,6 +24,13 @@ REASONING = "\U0001f4ad"  # \ud83d\udcad
 
 _THINKING_FRAMES = ["Thinking.", "Thinking..", "Thinking..."]
 _DOT_FRAMES = ["", ".", "..", "..."]
+
+# Shown instead of the Thinking pulse while the turn waits its place in the
+# session queue. Static on purpose — see _edit_loop.
+QUEUED_LABEL = (
+    "⏳ Queued — waiting for the current answer to finish.\n/stop interrupts it."
+)
+STOPPED_LABEL = "⏹ _Stopped._"
 
 # How much of the live reasoning to keep on screen (tail chars). Keeps the
 # streamed message small while still showing the agent's current train of thought.
@@ -101,13 +110,32 @@ class TelegramStreamer:
         self._needs_edit = False
         self._edit_task: asyncio.Task | None = None
         self._done = False
+        self._queued = False
         self._stop_reason: str | None = None
         self._tick = 0
         self._continuation_ids: list[int] = []
+        # message_id -> (text, parse_mode, reply_markup) last known to be on
+        # screen. Guards against re-sending an edit Telegram would reject as
+        # "not modified". The markup belongs in the key: the final flush of a
+        # long answer often changes nothing but the button's absence.
+        self._last_sent: dict[int, tuple[str, str | None, object]] = {}
+        # Built once so every flush passes the same object — cheap, and the
+        # dedupe compare above short-circuits on identity.
+        self._stop_markup = stop_generating_keyboard()
 
     # --- Event processing ---
 
     async def process_event(self, event: RuntimeEvent) -> None:
+        # Emitted before the turn blocks on the session lock, so the placeholder
+        # can say "waiting its turn" instead of pulsing "Thinking" at a user
+        # whose message has not reached the agent yet.
+        if event.type == EventType.QUEUED:
+            self._queued = True
+            self._needs_edit = True
+            return
+        # Anything else means the lock was won: this turn is live now.
+        self._queued = False
+
         if event.type == EventType.TEXT:
             self._buffer += event.text
             self._needs_edit = True
@@ -164,7 +192,13 @@ class TelegramStreamer:
             while not self._done:
                 self._tick += 1
                 force = self._active_tools and self._tick % 10 == 0
-                if self._needs_edit or not self._buffer or force:
+                if self._queued:
+                    # A queued turn has nothing to animate, and several can be
+                    # stacked behind one answer: flushing on change only keeps
+                    # N idle placeholders from each editing twice a second.
+                    if self._needs_edit:
+                        await self._flush(final=False)
+                elif self._needs_edit or not self._buffer or force:
                     await self._flush(final=False)
                 await asyncio.sleep(EDIT_INTERVAL)
         except asyncio.CancelledError:
@@ -194,6 +228,7 @@ class TelegramStreamer:
             parts.append(self._prefix)
 
         buf = self._buffer.strip()
+        stopped = final and self._stop_reason == "cancelled"
 
         # While streaming, before the answer starts, surface the live reasoning
         # so the user can tell the agent is thinking (and about what) rather than
@@ -218,12 +253,25 @@ class TelegramStreamer:
             # on screen yet (no reasoning, no active or finished tools).
             base = 1 if self._prefix else 0
             if len(parts) == base:
-                parts.append(_THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)])
+                parts.append(
+                    QUEUED_LABEL
+                    if self._queued
+                    else _THINKING_FRAMES[self._tick % len(_THINKING_FRAMES)]
+                )
+        elif stopped:
+            parts.append("_(stopped before answering)_")
+            parse_mode = "Markdown"
         elif self._finished_tools:
             parts.append("_(done)_")
             parse_mode = "Markdown"
         else:
             parts.append("_(no response)_")
+
+        # Say why the answer ends where it does, so a /stop that lands mid
+        # sentence does not read as the agent giving up on its own.
+        if stopped and buf:
+            parts.append(STOPPED_LABEL)
+            parse_mode = "Markdown"
 
         return "\n\n".join(parts), parse_mode
 
@@ -258,8 +306,14 @@ class TelegramStreamer:
         text, parse_mode = self._build_text(final)
         chunks = _split_text(text, MAX_MESSAGE_LEN)
 
+        # Only the placeholder carries the Stop button, and only while the turn
+        # is still open: a queued turn counts, since stopping the answer ahead
+        # is exactly what its notice tells the user /stop does. `final` passes
+        # None, which is how editMessageText drops an inline keyboard.
+        markup = None if final else self._stop_markup
+
         # Edit the main placeholder message
-        await self._edit(self._message_id, chunks[0], parse_mode)
+        await self._edit(self._message_id, chunks[0], parse_mode, markup)
 
         # Handle overflow chunks
         for i, chunk in enumerate(chunks[1:]):
@@ -273,21 +327,40 @@ class TelegramStreamer:
     # --- Telegram I/O ---
 
     async def _edit(
-        self, message_id: int, text: str, parse_mode: str | None = None
+        self,
+        message_id: int,
+        text: str,
+        parse_mode: str | None = None,
+        reply_markup: InlineKeyboardMarkup | None = None,
     ) -> None:
+        # A long answer splits at a paragraph boundary that stays put as the
+        # buffer grows, so every chunk but the last is byte-identical on each
+        # tick. Those edits only ever come back "not modified" — and each one
+        # spends per-chat quota that the chunk which *did* change then waits
+        # for. Skip what is already on screen.
+        if self._last_sent.get(message_id) == (text, parse_mode, reply_markup):
+            return
         try:
             await self._bot.edit_message_text(
                 chat_id=self._chat_id,
                 message_id=message_id,
                 text=text,
                 parse_mode=parse_mode,
+                reply_markup=reply_markup,
             )
         except BadRequest as e:
             if "not modified" not in str(e).lower():
                 if parse_mode:
-                    await self._edit(message_id, text, parse_mode=None)
+                    # The retry carries the same text, so drop the entry rather
+                    # than let the cache mistake the fallback for a no-op.
+                    self._last_sent.pop(message_id, None)
+                    await self._edit(
+                        message_id, text, parse_mode=None, reply_markup=reply_markup
+                    )
                 else:
                     log.warning("Failed to edit message: %s", e)
+                return
+            # Telegram itself says the text is already there: remember it.
         except RetryAfter as e:
             await asyncio.sleep(e.retry_after)
             try:
@@ -296,13 +369,16 @@ class TelegramStreamer:
                     message_id=message_id,
                     text=text,
                     parse_mode=parse_mode,
+                    reply_markup=reply_markup,
                 )
             except Exception:
-                pass
+                return
         except TimedOut:
-            pass
+            return
         except Exception:
             log.exception("Unexpected error editing message")
+            return
+        self._last_sent[message_id] = (text, parse_mode, reply_markup)
 
     async def _send(self, text: str, parse_mode: str | None = None) -> int | None:
         try:
@@ -311,6 +387,7 @@ class TelegramStreamer:
                 text=text,
                 parse_mode=parse_mode,
             )
+            self._last_sent[msg.message_id] = (text, parse_mode, None)
             return msg.message_id
         except BadRequest:
             if parse_mode:
@@ -323,6 +400,7 @@ class TelegramStreamer:
                     chat_id=self._chat_id,
                     text=text,
                 )
+                self._last_sent[msg.message_id] = (text, None, None)
                 return msg.message_id
             except Exception:
                 return None

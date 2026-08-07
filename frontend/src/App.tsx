@@ -66,7 +66,8 @@ export default function App() {
                   </ProtectedRoute>
                 }
               >
-                <Route path="/" element={<Portfolio />} />
+                <Route path="/" element={<Agents />} />
+                <Route path="/portfolio" element={<Portfolio />} />
                 <Route path="/bots" element={<Bots />} />
                 <Route path="/bots/:id" element={<BotDetail />} />
                 <Route path="/trade" element={<CreateExecutor />} />
@@ -77,7 +78,7 @@ export default function App() {
                 <Route path="/archived" element={<Navigate to="/bots?tab=archived" replace />} />
                 <Route path="/routines" element={<Routines />} />
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
-                <Route path="/agents" element={<Agents />} />
+                <Route path="/agents" element={<Navigate to="/" replace />} />
                 <Route path="/agents/:slug" element={<AgentDetail />} />
                 <Route path="/agents/:slug/strategies/:sslug" element={<StrategyDetail />} />
                 <Route path="/settings" element={<Settings />} />

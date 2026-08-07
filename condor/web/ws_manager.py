@@ -9,6 +9,7 @@ from typing import Any, Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 
+from condor import dex_candles
 from condor.web.auth import decode_jwt
 
 logger = logging.getLogger(__name__)
@@ -192,7 +193,21 @@ class WebSocketManager:
         so the GC can't silently cancel it (the event loop only holds a weak
         reference). The reference is dropped automatically on completion."""
         self._oneshot_tasks.add(task)
-        task.add_done_callback(self._oneshot_tasks.discard)
+        task.add_done_callback(self._on_oneshot_done)
+
+    def _on_oneshot_done(self, task: asyncio.Task) -> None:
+        """Release the strong reference and surface failures on this module's
+        logger. Nobody awaits a one-shot task, so without this a crash would
+        only show up as asyncio's "Task exception was never retrieved" at GC
+        time, leaving a channel silently stalled."""
+        self._oneshot_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "One-shot task %s failed: %s", task.get_name(), exc, exc_info=exc
+            )
 
     @staticmethod
     def _server_from_channel(channel: str) -> str | None:
@@ -442,7 +457,10 @@ class WebSocketManager:
                 buf.set_duration(dur)
                 if buf.max_size > old_max and buf.needs_backfill:
                     self._track_oneshot(
-                        asyncio.create_task(self._backfill_candles(channel))
+                        asyncio.create_task(
+                            self._backfill_candles(channel),
+                            name=f"backfill:{channel}",
+                        )
                     )
 
         # Send buffered candles as initial snapshot
@@ -492,7 +510,6 @@ class WebSocketManager:
 
         cm = get_config_manager()
         try:
-            client = await cm.get_client(server_name)
             interval_sec = _INTERVAL_SECONDS.get(interval, 60)
             end_time = int(time.time())
             start_time = end_time - (buf.max_size * interval_sec)
@@ -506,6 +523,22 @@ class WebSocketManager:
                 end_time,
             )
 
+            if dex_candles.uses_gecko_candles(connector):
+                candles = await dex_candles.fetch_dex_candles(
+                    connector, None, pair, interval, start_time, end_time
+                )
+                if candles:
+                    buf.upsert_many(candles)
+                    logger.info(
+                        "Backfilled %d GeckoTerminal candles for %s (buffer: %d/%d)",
+                        len(candles),
+                        channel,
+                        buf.size,
+                        buf.max_size,
+                    )
+                return
+
+            client = await cm.get_client(server_name)
             result = await client.market_data.get_historical_candles(
                 connector,
                 pair,
@@ -591,7 +624,10 @@ class WebSocketManager:
                 from condor.web.routes.portfolio import warm_portfolio_history
 
                 self._track_oneshot(
-                    asyncio.create_task(warm_portfolio_history(server_name))
+                    asyncio.create_task(
+                        warm_portfolio_history(server_name),
+                        name=f"warm_portfolio_history:{server_name}",
+                    )
                 )
         except Exception as e:
             logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
@@ -602,12 +638,12 @@ class WebSocketManager:
     def _transform_executors(raw_data: Any) -> list[dict]:
         """Transform raw executor data to ExecutorInfo-compatible dicts for WS broadcast."""
         from condor.fetchers.executors import extract_executors_list
-        from condor.web.routes.executors import _build_executor_info
+        from condor.web.models import ExecutorInfo
 
         executors_list = extract_executors_list(raw_data)
         result = []
         for ex in executors_list:
-            info = _build_executor_info(ex)
+            info = ExecutorInfo.from_raw(ex)
             if info:
                 result.append(info.model_dump())
         return result
@@ -668,7 +704,12 @@ class WebSocketManager:
                 logger.debug("Failed to transform bots data for WS: %s", e)
                 return
 
-        asyncio.ensure_future(self._broadcast_update(channel, value))
+        self._track_oneshot(
+            asyncio.create_task(
+                self._broadcast_update(channel, value),
+                name=f"broadcast:{channel}",
+            )
+        )
 
     async def _broadcast_update(self, channel: str, data: Any) -> None:
         prev = self._last_data.get(channel)
@@ -978,6 +1019,15 @@ class WebSocketManager:
         # Start REST poll fallback alongside the WS stream
         self._ensure_candle_poll_fallback(channel)
 
+        if dex_candles.uses_gecko_candles(connector):
+            # No CandlesFactory feed to subscribe to (xrpl, DEX networks): the
+            # poll loop above is the whole stream. Subscribing anyway would just
+            # reconnect-loop on an error the API can never stop returning.
+            logger.info(
+                "Candle stream for %s is GeckoTerminal-polled (no API feed)", channel
+            )
+            return
+
         while True:
             try:
                 client = await cm.get_client(server_name)
@@ -1123,17 +1173,27 @@ class WebSocketManager:
         )
 
     async def _candle_poll_fallback(self, channel: str) -> None:
-        """Periodically poll REST for candles when WS stream goes silent."""
+        """Periodically poll REST for candles when WS stream goes silent.
+
+        For a GeckoTerminal-backed connector there is no WS stream to fall back
+        from — this loop *is* the feed, so it polls from the first tick and never
+        waits for staleness.
+        """
         parts = channel.split(":")
         if len(parts) < 5:
             return
         _, server_name, connector, pair, interval = parts
         interval_sec = _INTERVAL_SECONDS.get(interval, 60)
+        gecko = dex_candles.uses_gecko_candles(connector)
         # How long without a WS update before we consider it stale
         stale_threshold = max(interval_sec, 15)
-        # How often to poll REST once stale (keep the last candle fresh)
-        poll_interval = min(interval_sec, 10)
-        was_stale = False
+        # How often to poll REST once stale (keep the last candle fresh). Gecko
+        # polls stay well clear of its per-minute rate limit — every chart on the
+        # dashboard shares one budget — while still refreshing a forming candle.
+        poll_interval = (
+            max(min(interval_sec // 2, 60), 30) if gecko else min(interval_sec, 10)
+        )
+        was_stale = gecko
 
         from config_manager import get_config_manager
 
@@ -1164,26 +1224,43 @@ class WebSocketManager:
                     was_stale = True
 
                 try:
-                    cm = get_config_manager()
-                    client = await cm.get_client(server_name)
                     now = int(time.time())
-                    result = await client.market_data.get_historical_candles(
-                        connector,
-                        pair,
-                        interval,
-                        start_time=now - interval_sec * 5,
-                        end_time=now,
-                    )
-                    candles_raw = (
-                        result
-                        if isinstance(result, list)
-                        else result.get("data", []) if isinstance(result, dict) else []
-                    )
-                    candles = [
-                        c
-                        for r in candles_raw
-                        if (c := self._normalize_candle(r)) is not None
-                    ]
+                    if gecko:
+                        candles = await dex_candles.fetch_dex_candles(
+                            connector,
+                            None,
+                            pair,
+                            interval,
+                            now - interval_sec * 5,
+                            now,
+                            # The shared OHLCV cache holds a pool for minutes,
+                            # long enough to freeze a live chart.
+                            use_cache=False,
+                        )
+                    else:
+                        cm = get_config_manager()
+                        client = await cm.get_client(server_name)
+                        result = await client.market_data.get_historical_candles(
+                            connector,
+                            pair,
+                            interval,
+                            start_time=now - interval_sec * 5,
+                            end_time=now,
+                        )
+                        candles_raw = (
+                            result
+                            if isinstance(result, list)
+                            else (
+                                result.get("data", [])
+                                if isinstance(result, dict)
+                                else []
+                            )
+                        )
+                        candles = [
+                            c
+                            for r in candles_raw
+                            if (c := self._normalize_candle(r)) is not None
+                        ]
                     if candles:
                         buf = self._candle_buffers.get(channel)
                         # Broadcast if we have newer candles OR if the latest
@@ -1409,6 +1486,7 @@ class WebSocketManager:
         # Progressive pre-fetch only if we still have no data
         if channel not in self._last_data:
             try:
+                from condor.fetchers._pagination import walk_pages
                 from condor.fetchers.executors import (
                     extract_executors_list as _extract_executors_list,
                 )
@@ -1416,18 +1494,19 @@ class WebSocketManager:
                 sds = get_server_data_service()
                 client = await cm.get_client(server_name)
                 all_raw: list[dict] = []
-                cursor: str | None = None
                 page_num = 0
                 FIRST_PAGE = 50
                 NEXT_PAGE = 500
+                MAX_PREFETCH = 5000
 
-                while True:
-                    page_size = FIRST_PAGE if page_num == 0 else NEXT_PAGE
-                    kwargs: dict = {"limit": page_size}
-                    if cursor:
-                        kwargs["cursor"] = cursor
-                    result = await client.executors.search_executors(**kwargs)
-                    page = _extract_executors_list(result)
+                # A small first page so the tab paints before the long pages land.
+                async for page in walk_pages(
+                    client.executors.search_executors,
+                    _extract_executors_list,
+                    page_size=NEXT_PAGE,
+                    first_page_size=FIRST_PAGE,
+                    max_items=MAX_PREFETCH,
+                ):
                     all_raw.extend(page)
 
                     # Transform and broadcast accumulated results after each page
@@ -1441,21 +1520,6 @@ class WebSocketManager:
                             len(executors),
                             channel,
                         )
-
-                    # Determine next cursor
-                    next_cursor = None
-                    if isinstance(result, dict):
-                        next_cursor = result.get("next_cursor") or result.get("cursor")
-                        pagination = result.get("pagination")
-                        if not next_cursor and isinstance(pagination, dict):
-                            next_cursor = pagination.get(
-                                "next_cursor"
-                            ) or pagination.get("cursor")
-                    if not next_cursor or len(page) < page_size:
-                        break
-                    if len(all_raw) >= 5000:
-                        break
-                    cursor = next_cursor
                     page_num += 1
 
                 # Cache in SDS so other consumers benefit

@@ -1,4 +1,5 @@
 """Multi-timeframe market regime analyzer for MM decision-making."""
+
 import logging
 import math
 from pydantic import BaseModel, Field
@@ -13,11 +14,15 @@ CATEGORY = "Analysis"
 
 class Config(BaseModel):
     """Analyze market regime across multiple timeframes for a trading pair."""
+
     trading_pair: str = Field(default="JTO-USDT", description="Trading pair to analyze")
-    connector_name: str = Field(default="binance_perpetual", description="Exchange connector")
+    connector_name: str = Field(
+        default="binance_perpetual", description="Exchange connector"
+    )
 
 
 # ── Technical indicator helpers ──────────────────────────────────────────────
+
 
 def _calc_atr(candles: list, period: int = 14) -> float:
     if len(candles) < period + 1:
@@ -54,7 +59,11 @@ def _calc_ema_series(values: list, period: int) -> list:
     if not values:
         return []
     multiplier = 2 / (period + 1)
-    seed = sum(values[:period]) / period if len(values) >= period else sum(values) / len(values)
+    seed = (
+        sum(values[:period]) / period
+        if len(values) >= period
+        else sum(values) / len(values)
+    )
     result = [None] * (period - 1)
     result.append(seed)
     ema = seed
@@ -70,7 +79,7 @@ def _calc_sma_series(values: list, period: int) -> list:
         if i < period - 1:
             result.append(None)
         else:
-            result.append(sum(values[i - period + 1:i + 1]) / period)
+            result.append(sum(values[i - period + 1 : i + 1]) / period)
     return result
 
 
@@ -133,11 +142,13 @@ def _calc_bbw(closes: list, period: int = 20) -> float:
     if sma == 0:
         return 0.0
     variance = sum((x - sma) ** 2 for x in window) / period
-    std = variance ** 0.5
+    std = variance**0.5
     return (4 * std / sma) * 100
 
 
-def _classify_regime(adx: float, rsi: float, bbw: float, price_vs_sma: float, vol_ratio: float) -> str:
+def _classify_regime(
+    adx: float, rsi: float, bbw: float, price_vs_sma: float, vol_ratio: float
+) -> str:
     if adx > 25 and abs(price_vs_sma) > 1.0:
         if price_vs_sma > 0:
             return "trending_up"
@@ -206,12 +217,15 @@ def _analyze_timeframe(candles: list, label: str) -> dict:
 
 # ── Order book helpers ───────────────────────────────────────────────────────
 
+
 def _normalize_levels(raw: list) -> list:
     result = []
     for entry in raw:
         if isinstance(entry, dict):
             p = entry.get("price", entry.get("p", 0))
-            s = entry.get("amount", entry.get("quantity", entry.get("size", entry.get("s", 0))))
+            s = entry.get(
+                "amount", entry.get("quantity", entry.get("size", entry.get("s", 0)))
+            )
         else:
             p, s = entry[0], entry[1]
         p, s = float(p), float(s)
@@ -240,12 +254,14 @@ def _find_walls(levels: list, mid: float, threshold_mult: float = 3.0) -> list:
     for price, size in levels:
         if size >= avg_size * threshold_mult:
             dist_pct = abs(price - mid) / mid * 100
-            walls.append({
-                "price": price,
-                "size": size,
-                "dist_pct": dist_pct,
-                "mult": size / avg_size if avg_size > 0 else 0,
-            })
+            walls.append(
+                {
+                    "price": price,
+                    "size": size,
+                    "dist_pct": dist_pct,
+                    "mult": size / avg_size if avg_size > 0 else 0,
+                }
+            )
     walls.sort(key=lambda w: w["size"], reverse=True)
     return walls[:5]
 
@@ -268,12 +284,13 @@ def _analyze_orderbook(ob: dict) -> dict:
     total_ask_vol = sum(s for _, s in asks)
     imbalance_pct = (
         (total_bid_vol - total_ask_vol) / (total_bid_vol + total_ask_vol) * 100
-        if (total_bid_vol + total_ask_vol) > 0 else 0
+        if (total_bid_vol + total_ask_vol) > 0
+        else 0
     )
     imb_label = (
-        "Bullish" if imbalance_pct > 10
-        else "Bearish" if imbalance_pct < -10
-        else "Neutral"
+        "Bullish"
+        if imbalance_pct > 10
+        else "Bearish" if imbalance_pct < -10 else "Neutral"
     )
 
     liq = {}
@@ -297,6 +314,7 @@ def _analyze_orderbook(ob: dict) -> dict:
 
 # ── Return distribution helpers ──────────────────────────────────────────────
 
+
 def _percentile(sorted_data: list, p: float) -> float:
     if not sorted_data:
         return 0.0
@@ -311,12 +329,14 @@ def _percentile(sorted_data: list, p: float) -> float:
 def _analyze_returns(closes: list, periods_per_day: int = 24) -> dict:
     if len(closes) < 3:
         return {"error": "insufficient data"}
-    returns = [(closes[i] - closes[i - 1]) / closes[i - 1] * 100 for i in range(1, len(closes))]
+    returns = [
+        (closes[i] - closes[i - 1]) / closes[i - 1] * 100 for i in range(1, len(closes))
+    ]
     sorted_r = sorted(returns)
     n = len(returns)
     mean = sum(returns) / n
     variance = sum((r - mean) ** 2 for r in returns) / n
-    std = variance ** 0.5
+    std = variance**0.5
     daily_vol = std * math.sqrt(periods_per_day)
     last_price = closes[-1]
     return {
@@ -346,11 +366,20 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     try:
         import asyncio
+
         minute_candles, candles_15m, short_candles, long_candles = await asyncio.gather(
-            client.market_data.get_candles(connector, pair, interval="1m", max_records=1440),
-            client.market_data.get_candles(connector, pair, interval="15m", max_records=100),
-            client.market_data.get_candles(connector, pair, interval="5m", max_records=100),
-            client.market_data.get_candles(connector, pair, interval="4h", max_records=100),
+            client.market_data.get_candles(
+                connector, pair, interval="1m", max_records=1440
+            ),
+            client.market_data.get_candles(
+                connector, pair, interval="15m", max_records=100
+            ),
+            client.market_data.get_candles(
+                connector, pair, interval="5m", max_records=100
+            ),
+            client.market_data.get_candles(
+                connector, pair, interval="4h", max_records=100
+            ),
         )
     except Exception as e:
         return f"Error fetching candles: {e}"
@@ -393,26 +422,38 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     except Exception:
         ob_data = {"error": "order_book unavailable"}
 
-    regimes = [short.get("regime", "unknown"), medium.get("regime", "unknown"), long_tf.get("regime", "unknown")]
-    regime_priority = {"volatile": 4, "trending_up": 3, "trending_down": 3, "ranging": 2, "quiet": 1}
+    regimes = [
+        short.get("regime", "unknown"),
+        medium.get("regime", "unknown"),
+        long_tf.get("regime", "unknown"),
+    ]
+    regime_priority = {
+        "volatile": 4,
+        "trending_up": 3,
+        "trending_down": 3,
+        "ranging": 2,
+        "quiet": 1,
+    }
     overall_regime = max(regimes, key=lambda r: regime_priority.get(r, 0))
 
     table_data = []
     for tf in [short, medium, long_tf]:
         if "error" in tf:
             continue
-        table_data.append({
-            "Timeframe": tf["timeframe"],
-            "Regime": tf["regime"],
-            "Price": tf["price"],
-            "Change%": tf["pct_change"],
-            "RSI": tf["rsi"],
-            "ADX": tf["adx"],
-            "ATR%": tf["atr_pct"],
-            "BBW": tf["bbw"],
-            "Vol Ratio": tf["vol_ratio"],
-            "vs SMA20": f"{tf['price_vs_sma20']}%",
-        })
+        table_data.append(
+            {
+                "Timeframe": tf["timeframe"],
+                "Regime": tf["regime"],
+                "Price": tf["price"],
+                "Change%": tf["pct_change"],
+                "RSI": tf["rsi"],
+                "ADX": tf["adx"],
+                "ATR%": tf["atr_pct"],
+                "BBW": tf["bbw"],
+                "Vol Ratio": tf["vol_ratio"],
+                "vs SMA20": f"{tf['price_vs_sma20']}%",
+            }
+        )
 
     summary_parts = [
         f"**Market Analysis: {pair} on {connector}**",
@@ -432,79 +473,128 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     summary = "\n".join(summary_parts)
 
     # Generate report
-    try:
-        import plotly.graph_objects as go
-        from condor.reports import ReportBuilder
-        builder = ReportBuilder(f"Market Analysis: {pair}")
-        builder.source("routine", "market_analyzer").tags(["market-making", "regime", pair.lower()])
+    import plotly.graph_objects as go
+    from condor.reports import ReportBuilder
 
-        builder.kpi("Overall Regime", overall_regime)
-        builder.kpi("Spread Rec.", _spread_recommendation(overall_regime))
-        builder.kpi("Price", f"${short['price']}" if "error" not in short else "N/A")
-        if funding_info:
-            builder.kpi("Funding Rate", funding_info.split(": ", 1)[-1])
-        if ob_data and "error" not in ob_data:
-            builder.kpi("Book Spread", f"{ob_data['spread_bps']:.1f} bps")
-            builder.kpi("OB Imbalance", f"{ob_data['imbalance_pct']:+.1f}% ({ob_data['imb_label']})")
-        if ret_dist and "error" not in ret_dist:
-            builder.kpi("Daily Vol", f"{ret_dist['daily_vol_pct']:.2f}%")
+    builder = ReportBuilder(f"Market Analysis: {pair}")
+    builder.source("routine", "market_analyzer").tags(
+        ["market-making", "regime", pair.lower()]
+    )
 
-        # Timeframe analysis table
-        builder.table(table_data, ["Timeframe", "Regime", "Price", "Change%", "RSI", "ADX", "ATR%", "BBW", "Vol Ratio", "vs SMA20"])
+    builder.kpi("Overall Regime", overall_regime)
+    builder.kpi("Spread Rec.", _spread_recommendation(overall_regime))
+    builder.kpi("Price", f"${short['price']}" if "error" not in short else "N/A")
+    if funding_info:
+        builder.kpi("Funding Rate", funding_info.split(": ", 1)[-1])
+    if ob_data and "error" not in ob_data:
+        builder.kpi("Book Spread", f"{ob_data['spread_bps']:.1f} bps")
+        builder.kpi(
+            "OB Imbalance", f"{ob_data['imbalance_pct']:+.1f}% ({ob_data['imb_label']})"
+        )
+    if ret_dist and "error" not in ret_dist:
+        builder.kpi("Daily Vol", f"{ret_dist['daily_vol_pct']:.2f}%")
 
-        # OB liquidity depth table
-        if ob_data and "error" not in ob_data:
-            liq_table = [
+    # Timeframe analysis table
+    builder.table(
+        table_data,
+        [
+            "Timeframe",
+            "Regime",
+            "Price",
+            "Change%",
+            "RSI",
+            "ADX",
+            "ATR%",
+            "BBW",
+            "Vol Ratio",
+            "vs SMA20",
+        ],
+    )
+
+    # OB liquidity depth table
+    if ob_data and "error" not in ob_data:
+        liq_table = [
+            {
+                "Range": f"±{pct:.0f}%",
+                "Bid Vol": f"{data['bid']:,.4f}",
+                "Ask Vol": f"{data['ask']:,.4f}",
+                "Total Vol": f"{data['total']:,.4f}",
+                "USD (approx)": f"${data['total'] * ob_data['mid']:,.2f}",
+            }
+            for pct, data in ob_data["liq"].items()
+        ]
+        builder.table(
+            liq_table, ["Range", "Bid Vol", "Ask Vol", "Total Vol", "USD (approx)"]
+        )
+
+        # Walls table
+        wall_rows = []
+        for w in ob_data["bid_walls"]:
+            wall_rows.append(
                 {
-                    "Range": f"±{pct:.0f}%",
-                    "Bid Vol": f"{data['bid']:,.4f}",
-                    "Ask Vol": f"{data['ask']:,.4f}",
-                    "Total Vol": f"{data['total']:,.4f}",
-                    "USD (approx)": f"${data['total'] * ob_data['mid']:,.2f}",
+                    "Side": "BID",
+                    "Price": f"${w['price']:,.4f}",
+                    "Size": f"{w['size']:,.4f}",
+                    "Dist%": f"{w['dist_pct']:.3f}%",
+                    "Strength": f"{w['mult']:.1f}x avg",
                 }
-                for pct, data in ob_data["liq"].items()
-            ]
-            builder.table(liq_table, ["Range", "Bid Vol", "Ask Vol", "Total Vol", "USD (approx)"])
+            )
+        for w in ob_data["ask_walls"]:
+            wall_rows.append(
+                {
+                    "Side": "ASK",
+                    "Price": f"${w['price']:,.4f}",
+                    "Size": f"{w['size']:,.4f}",
+                    "Dist%": f"{w['dist_pct']:.3f}%",
+                    "Strength": f"{w['mult']:.1f}x avg",
+                }
+            )
+        if wall_rows:
+            builder.table(wall_rows, ["Side", "Price", "Size", "Dist%", "Strength"])
 
-            # Walls table
-            wall_rows = []
-            for w in ob_data["bid_walls"]:
-                wall_rows.append({"Side": "BID", "Price": f"${w['price']:,.4f}", "Size": f"{w['size']:,.4f}", "Dist%": f"{w['dist_pct']:.3f}%", "Strength": f"{w['mult']:.1f}x avg"})
-            for w in ob_data["ask_walls"]:
-                wall_rows.append({"Side": "ASK", "Price": f"${w['price']:,.4f}", "Size": f"{w['size']:,.4f}", "Dist%": f"{w['dist_pct']:.3f}%", "Strength": f"{w['mult']:.1f}x avg"})
-            if wall_rows:
-                builder.table(wall_rows, ["Side", "Price", "Size", "Dist%", "Strength"])
-
-        # Return distribution histogram (1m candles)
-        if ret_dist and "error" not in ret_dist and ret_dist.get("returns"):
-            fig = go.Figure()
-            fig.add_trace(go.Histogram(
+    # Return distribution histogram (1m candles)
+    if ret_dist and "error" not in ret_dist and ret_dist.get("returns"):
+        fig = go.Figure()
+        fig.add_trace(
+            go.Histogram(
                 x=ret_dist["returns"],
                 nbinsx=40,
                 marker_color="#7c3aed",
                 opacity=0.8,
                 name="Returns",
-            ))
-            fig.add_vline(x=ret_dist["p5"], line_dash="dot", line_color="#f59e0b", annotation_text="p5")
-            fig.add_vline(x=ret_dist["p95"], line_dash="dot", line_color="#f59e0b", annotation_text="p95")
-            fig.add_vline(x=0, line_dash="solid", line_color="#6b7280", line_width=1)
-            fig.update_layout(
-                title=f"Return Distribution (1m, 24h) — {pair}",
-                xaxis_title="Return per candle (%)",
-                yaxis_title="Frequency",
-                template="plotly_dark",
-                height=350,
             )
-            builder.plotly(fig)
+        )
+        fig.add_vline(
+            x=ret_dist["p5"],
+            line_dash="dot",
+            line_color="#f59e0b",
+            annotation_text="p5",
+        )
+        fig.add_vline(
+            x=ret_dist["p95"],
+            line_dash="dot",
+            line_color="#f59e0b",
+            annotation_text="p95",
+        )
+        fig.add_vline(x=0, line_dash="solid", line_color="#6b7280", line_width=1)
+        fig.update_layout(
+            title=f"Return Distribution (1m, 24h) — {pair}",
+            xaxis_title="Return per candle (%)",
+            yaxis_title="Frequency",
+            template="plotly_dark",
+            height=350,
+        )
+        builder.plotly(fig)
 
-        # 15m trend chart: candlestick + EMA9 + SMA20
-        if candles_15m and len(candles_15m) >= 5:
-            ts_15m = candle_timestamps(candles_15m)
-            closes_15m = [float(c.get("close", 0)) for c in candles_15m]
-            ema9_series = _calc_ema_series(closes_15m, 9)
-            sma20_series = _calc_sma_series(closes_15m, 20)
-            fig_15m = go.Figure()
-            fig_15m.add_trace(go.Candlestick(
+    # 15m trend chart: candlestick + EMA9 + SMA20
+    if candles_15m and len(candles_15m) >= 5:
+        ts_15m = candle_timestamps(candles_15m)
+        closes_15m = [float(c.get("close", 0)) for c in candles_15m]
+        ema9_series = _calc_ema_series(closes_15m, 9)
+        sma20_series = _calc_sma_series(closes_15m, 20)
+        fig_15m = go.Figure()
+        fig_15m.add_trace(
+            go.Candlestick(
                 x=ts_15m,
                 open=[float(c.get("open", 0)) for c in candles_15m],
                 high=[float(c.get("high", 0)) for c in candles_15m],
@@ -513,39 +603,52 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 name="15m",
                 increasing_line_color="#22c55e",
                 decreasing_line_color="#ef4444",
-            ))
-            fig_15m.add_trace(go.Scatter(
-                x=ts_15m, y=ema9_series, mode="lines", name="EMA 9",
+            )
+        )
+        fig_15m.add_trace(
+            go.Scatter(
+                x=ts_15m,
+                y=ema9_series,
+                mode="lines",
+                name="EMA 9",
                 line=dict(color="#f59e0b", width=1.5),
-            ))
-            fig_15m.add_trace(go.Scatter(
-                x=ts_15m, y=sma20_series, mode="lines", name="SMA 20",
+            )
+        )
+        fig_15m.add_trace(
+            go.Scatter(
+                x=ts_15m,
+                y=sma20_series,
+                mode="lines",
+                name="SMA 20",
                 line=dict(color="#60a5fa", width=1.5, dash="dot"),
-            ))
-            fig_15m.update_layout(
-                title=f"15m Trend — {pair}",
-                xaxis_title="Time", yaxis_title="Price",
-                template="plotly_dark", height=450,
-                xaxis_rangeslider_visible=False,
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             )
-            builder.plotly(fig_15m)
+        )
+        fig_15m.update_layout(
+            title=f"15m Trend — {pair}",
+            xaxis_title="Time",
+            yaxis_title="Price",
+            template="plotly_dark",
+            height=450,
+            xaxis_rangeslider_visible=False,
+            legend=dict(
+                orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1
+            ),
+        )
+        builder.plotly(fig_15m)
 
-        if minute_candles and len(minute_candles) >= 5:
-            fig_fp = build_estimated_footprint_figure(
-                minute_candles,
-                title=f"Footprint Chart (1m, 24h) — {pair}",
-                candle_title="1m Candlestick (24h)",
-                profile_title="Volume Profile (24h)",
-                candle_name="1m",
-            )
-            if fig_fp is not None:
-                builder.plotly(fig_fp)
+    if minute_candles and len(minute_candles) >= 5:
+        fig_fp = build_estimated_footprint_figure(
+            minute_candles,
+            title=f"Footprint Chart (1m, 24h) — {pair}",
+            candle_title="1m Candlestick (24h)",
+            profile_title="Volume Profile (24h)",
+            candle_name="1m",
+        )
+        if fig_fp is not None:
+            builder.plotly(fig_fp)
 
-        builder.markdown(summary)
-        builder.manual_order()
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    builder.markdown(summary)
+    builder.manual_order()
+    await builder.save()
 
     return summary

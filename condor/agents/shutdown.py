@@ -203,7 +203,7 @@ async def _deterministic_baseline(
     Each stop is isolated so one failure never aborts the rest. Returns
     ``(stopped_count, failures)``.
     """
-    from condor.fetchers.executors import stop_executor
+    from condor.fetchers.executors import describe_executor_error, stop_executor
 
     running = await _get_running_executors(engine, client)
     stopped = 0
@@ -214,14 +214,15 @@ async def _deterministic_baseline(
             continue
         keep = _keep_position(ex, policy)
         try:
-            result = await stop_executor(client, ex_id, keep_position=keep)
-        except Exception as e:  # stop_executor already guards, but be defensive
-            failures.append(f"stop {ex_id}: {e}")
+            await stop_executor(client, ex_id, keep_position=keep)
+        except Exception as e:
+            # A raise is the only failure signal: these failures are read back
+            # by the operator and by the LLM cleanup pass, so keep the raw
+            # exception (which embeds the backend URL) out of them.
+            _, message = describe_executor_error(e)
+            failures.append(f"stop {ex_id}: {message}")
             continue
-        if isinstance(result, dict) and result.get("status") == "error":
-            failures.append(f"stop {ex_id}: {result.get('message')}")
-        else:
-            stopped += 1
+        stopped += 1
     return stopped, failures
 
 

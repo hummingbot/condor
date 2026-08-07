@@ -4,6 +4,7 @@ Main MCP server for Hummingbot API integration
 
 import asyncio
 import logging
+import os
 import sys
 from typing import Any, Literal
 
@@ -34,12 +35,6 @@ from mcp_servers.hummingbot_api.tools import history as history_tools
 from mcp_servers.hummingbot_api.tools import market_data as market_data_tools
 from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
-from mcp_servers.hummingbot_api.tools.backtesting import (
-    manage_backtest_tasks as manage_backtest_tasks_impl,
-)
-from mcp_servers.hummingbot_api.tools.backtesting import (
-    run_backtest as run_backtest_impl,
-)
 from mcp_servers.hummingbot_api.tools.executors import (
     manage_executors as manage_executors_impl,
 )
@@ -576,7 +571,11 @@ async def manage_bots(
     - status: Get status of all active bots (no additional params needed)
     - logs: Get detailed logs for a specific bot (requires bot_name)
     - stop_bot: Stop and archive a bot forever (requires bot_name)
-    - stop_controllers: Stop specific controllers in a bot (requires bot_name + controller_names)
+    - stop_controllers: Stop specific controllers in a bot (requires bot_name + controller_names).
+      Flips manual_kill_switch in the controller config and verifies the write; the bot picks it
+      up on its next config reload (~10s) and then closes that controller's executors. A stopped
+      controller keeps publishing performance, so confirm with the 'state' column of
+      action="status" (stopped/running), never by the controller still appearing in the table.
     - start_controllers: Start/resume specific controllers (requires bot_name + controller_names)
     - get_config: View current configs of a running bot (requires bot_name)
     - update_config: Modify config of a controller INSIDE a running bot in real-time (requires bot_name + config_name + config_data)
@@ -620,7 +619,9 @@ async def manage_bots(
         return (
             f"Active Bots Status Summary:\n"
             f"Total Active Bots: {result['total_bots']}\n\n"
-            f"{result['bots_table']}"
+            f"{result['bots_table']}\n\n"
+            f"controller state: running = active | stopped = kill switch on (no new entries) | "
+            f"error = performance report failed | unknown = controller config unreadable"
         )
 
     elif action == "logs":
@@ -930,101 +931,31 @@ async def explore_geckoterminal(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
-@handle_errors("run backtest")
-async def run_backtest(
-    config_name: str,
-    start_time: int,
-    end_time: int,
-    backtesting_resolution: str = "1m",
-    trade_cost: float = 0.0002,
-) -> str:
-    """Run a synchronous backtest on a saved controller config.
-
-    Resolves the config name to its full configuration, then runs a backtest
-    over the specified time range. Returns performance metrics immediately.
-
-    Args:
-        config_name: Name of a saved controller config (e.g., 'my_grid_config').
-            Use manage_controllers(action='list') to see available configs.
-        start_time: Start timestamp in seconds (Unix epoch)
-        end_time: End timestamp in seconds (Unix epoch)
-        backtesting_resolution: Candle resolution for the backtest. Options: '1m', '5m', '15m', '1h'. Default: '1m'.
-        trade_cost: Trading fee as decimal (default: 0.0002 = 0.06%)
-    """
-    client = await hummingbot_client.get_client()
-    result = await run_backtest_impl(
-        client=client,
-        config_name=config_name,
-        start_time=start_time,
-        end_time=end_time,
-        backtesting_resolution=backtesting_resolution,
-        trade_cost=trade_cost,
-    )
-    return result.get("formatted_output", str(result))
-
-
-@mcp.tool()
-@handle_errors("manage backtest tasks")
-async def manage_backtest_tasks(
-    action: Literal["submit", "list", "get", "delete"],
-    config_name: str | None = None,
-    task_id: str | None = None,
-    start_time: int | None = None,
-    end_time: int | None = None,
-    backtesting_resolution: str = "1m",
-    trade_cost: float = 0.0002,
-) -> str:
-    """Manage async backtesting tasks: submit background jobs, check status, get results, or delete.
-
-    Use this for long-running backtests that you don't want to wait for synchronously.
-
-    Actions:
-    - submit: Queue a new backtest task (requires config_name, start_time, end_time)
-    - list: List all backtest tasks with their status
-    - get: Get a specific task's status and results (requires task_id)
-    - delete: Cancel/delete a task (requires task_id)
-
-    Args:
-        action: Task action to perform
-        config_name: Controller config name (required for submit). Use manage_controllers(action='list') to see options.
-        task_id: Task ID returned from submit (required for get/delete)
-        start_time: Start timestamp in seconds (required for submit)
-        end_time: End timestamp in seconds (required for submit)
-        backtesting_resolution: Candle resolution. Options: '1m', '5m', '15m', '1h'. Default: '1m'.
-        trade_cost: Trading fee as decimal (default: 0.0002 = 0.06%)
-    """
-    client = await hummingbot_client.get_client()
-    result = await manage_backtest_tasks_impl(
-        client=client,
-        action=action,
-        config_name=config_name,
-        task_id=task_id,
-        start_time=start_time,
-        end_time=end_time,
-        backtesting_resolution=backtesting_resolution,
-        trade_cost=trade_cost,
-    )
-    return result.get("formatted_output", str(result))
-
-
 def _apply_cli_args():
-    """Parse CLI args and override settings if provided."""
+    """Override settings from the spawn: credentials via env, the rest via CLI.
+
+    The API username/password used to arrive as ``--username``/``--password``,
+    which put them in every local user's ``ps`` output (SEC-095). They now come
+    in on the environment, and they are applied HERE rather than in
+    ``_load_server_config`` on purpose: that loader prefers the cached
+    ``~/.hummingbot_mcp/server.yml`` and never reaches its own env fallbacks
+    once the file exists, so credentials injected for this spawn have to sit at
+    the same precedence layer the CLI args did — above the file.
+    """
     import argparse
+
+    if username := os.getenv("HUMMINGBOT_API_USERNAME"):
+        settings.api_username = username
+    if password := os.getenv("HUMMINGBOT_API_PASSWORD"):
+        settings.api_password = password
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--url")
-    parser.add_argument("--username")
-    parser.add_argument("--password")
     parser.add_argument("--server-name")
     args, _ = parser.parse_known_args()
 
     if args.url:
         settings.api_url = args.url
-    if args.username:
-        settings.api_username = args.username
-    if args.password:
-        settings.api_password = args.password
     if args.server_name:
         settings.server_name = args.server_name
 

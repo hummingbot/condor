@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 
 
 async def fetch_current_price(
-    client, connector_name: str, trading_pair: str, **_kw
+    client, connector_name: str = "", trading_pair: str = "", **_kw
 ) -> Optional[float]:
     """Fetch current price for a trading pair."""
     try:
@@ -124,7 +124,9 @@ def _usd_rate(quote: str, prices: Dict[str, float]) -> Optional[float]:
 
 
 def _normalize_tickers(
-    raw: Dict[str, Any], prices: Dict[str, float]
+    raw: Dict[str, Any],
+    prices: Dict[str, float],
+    rate_cache: Optional[Dict[str, Optional[float]]] = None,
 ) -> Tuple[Dict[str, Dict[str, Any]], float]:
     """Normalize one connector's raw tickers, adding `usd_volume`.
 
@@ -132,10 +134,17 @@ def _normalize_tickers(
     BTC-quoted pairs aren't comparable with USDT-quoted ones. Each quote asset is
     priced off `prices` — no extra API call.
 
+    Args:
+        rate_cache: Quote → USD rate memo. `_usd_rate` is pure in `(quote, prices)`
+            and its misses are O(pool), so callers normalizing several connectors
+            off the *same* `prices` pool should hand in one shared dict. Omit it
+            (a fresh memo per call) whenever `prices` differs between calls.
+
     Returns:
         ({pair: {price, base_volume, quote_volume, usd_volume}}, latest_timestamp)
     """
-    rate_cache: Dict[str, Optional[float]] = {}
+    if rate_cache is None:
+        rate_cache = {}
     tickers: Dict[str, Dict[str, Any]] = {}
     latest_ts = 0.0
 
@@ -203,10 +212,13 @@ async def fetch_ticker_pool(client, **_kw) -> Dict[str, Any]:
 
     connectors: Dict[str, Dict[str, Any]] = {}
     updated_at: Dict[str, Optional[float]] = {}
+    # One memo for the whole pool: `prices` is the same merged map for every
+    # connector, so a quote resolved once never needs resolving again.
+    rate_cache: Dict[str, Optional[float]] = {}
     for connector, raw in raw_by_connector.items():
         if not isinstance(raw, dict):
             continue
-        tickers, latest_ts = _normalize_tickers(raw, prices)
+        tickers, latest_ts = _normalize_tickers(raw, prices, rate_cache)
         connectors[connector] = tickers
         # `updated_at` is absent on older API versions — fall back to ticker timestamps.
         updated_at[connector] = (

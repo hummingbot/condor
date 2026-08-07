@@ -17,19 +17,27 @@ import remarkGfm from "remark-gfm";
 
 import {
   SessionActivity,
+  SessionBots,
+  SessionCanvasPanel,
   SessionExecutors,
+  SessionKpis,
   SessionOverview,
   SessionSnapshots,
 } from "@/components/agent/AgentSessionContent";
 import { MODE_STYLES } from "@/components/agent/modeStyles";
 import { ToolCallStatusIcon } from "@/components/chat/ToolCallStatus";
+import { ReportViewer } from "@/components/routines/ReportViewer";
 import { type ExperimentInfo, type SessionInfo, api } from "@/lib/api";
 import { formatCurrencyPnl, formatDateTime, formatToolName } from "@/lib/formatters";
 import { type ParsedJournal, type ParsedSnapshot, parseJournal, parseSnapshot } from "@/lib/parse-agent";
 
+// Two views, not three. "Activity" used to be a tab of its own holding the
+// decision log — the single best account of what the session did and why —
+// while Overview sat next to it showing "No executors for this session". The
+// decisions now open the Overview's narrative; Snapshots remains the per-tick
+// drill-down behind it.
 const SUB_TABS = [
   { id: "overview", label: "Overview", icon: LayoutList },
-  { id: "activity", label: "Activity", icon: Activity },
   { id: "snapshots", label: "Snapshots", icon: Camera },
 ] as const;
 type SubTabId = (typeof SUB_TABS)[number]["id"];
@@ -112,6 +120,7 @@ export function SessionReviewer({
   const [activeSubTab, setActiveSubTab] = useState<SubTabId>("overview");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [showSystemPrompt, setShowSystemPrompt] = useState(false);
+  const [showReport, setShowReport] = useState(false);
 
   // Build unified sidebar items
   const sidebarItems = useMemo<SidebarItem[]>(() => {
@@ -183,6 +192,31 @@ export function SessionReviewer({
   });
   const sessionPerf = sessionPerfData?.performance ?? null;
 
+  // The live report this session keeps — same numbers, plus the narrative, and
+  // until now reachable only through the global reports list where it read as a
+  // routine nobody had created.
+  const { data: reportData } = useQuery({
+    queryKey: ["strategy", slug, sslug, "session", selectedNum, "report"],
+    queryFn: () => api.getSessionReport(slug, sslug, selectedNum),
+    enabled: !isExperiment && selectedNum > 0,
+  });
+  const sessionReport = reportData?.report ?? null;
+
+  // Controller ids to stream and to filter open positions by. The `controllerIds`
+  // prop carries the running engines' agent_ids, which is right for a session
+  // trading executors directly and useless for one trading through bots: a bot's
+  // controllers tag their executors with their own config id and never with the
+  // agent_id. Adding the live controllers of the bots this session currently owns
+  // is what makes the WS stream and the positions table work in bot mode.
+  const sessionControllerIds = useMemo(() => {
+    const ids = new Set(controllerIds ?? []);
+    const live = new Set(sessionPerf?.bot_names ?? []);
+    for (const c of sessionPerf?.controllers ?? []) {
+      if (c.controller_id && live.has(c.bot_name)) ids.add(c.controller_id);
+    }
+    return Array.from(ids);
+  }, [controllerIds, sessionPerf?.bot_names, sessionPerf?.controllers]);
+
   const currentIdx = sidebarItems.findIndex(
     (s) => s.number === selectedNum && s.kind === selectedKind,
   );
@@ -193,6 +227,7 @@ export function SessionReviewer({
     setSelectedKind(item.kind);
     setActiveSubTab("overview");
     setShowSystemPrompt(false);
+    setShowReport(false);
   }, []);
 
   // Snapshot click from chart → navigate to snapshots tab with that tick
@@ -203,15 +238,19 @@ export function SessionReviewer({
     setActiveSubTab("snapshots");
   }, []);
 
-  // Keyboard: Escape only
+  // Keyboard: Escape only. With the report open it closes the report first —
+  // otherwise one keystroke would dismiss both it and the reviewer behind it.
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement) return;
-      if (e.key === "Escape") { onClose(); e.preventDefault(); }
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      if (showReport) setShowReport(false);
+      else onClose();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [onClose]);
+  }, [onClose, showReport]);
 
   // PnL for current session
   const pnl = sessionPerf?.total_pnl ?? 0;
@@ -531,21 +570,40 @@ export function SessionReviewer({
             ) : (
               <>
                 {activeSubTab === "overview" && (
+                  // Read top to bottom, this is the session's story: what it made,
+                  // what it ran, what is open, what it believed, what it decided.
                   <div className="space-y-4">
+                    <SessionKpis
+                      perf={sessionPerf}
+                      summary={parsedJournal.summary}
+                      hasReport={!!sessionReport}
+                      onOpenReport={() => setShowReport(true)}
+                    />
+                    <SessionOverview
+                      journal={parsedJournal}
+                      perf={sessionPerf}
+                      pnlSeries={sessionPerfData?.pnl_series}
+                    />
+                    <SessionBots perf={sessionPerf} />
                     <SessionExecutors
                       slug={slug}
                       sslug={sslug}
                       sessionNum={selectedNum}
                       serverName={serverName}
-                      controllerIds={controllerIds}
+                      controllerIds={sessionControllerIds}
                       onSnapshotClick={handleSnapshotClick}
-                      sessionSummary={parsedJournal.summary}
                       isLiveSession={isLiveSession}
+                      botMode={(sessionPerf?.bot_instances?.length ?? 0) > 0}
                     />
-                    <SessionOverview journal={parsedJournal} perf={sessionPerf} />
+                    <SessionCanvasPanel slug={slug} sslug={sslug} sessionNum={selectedNum} />
+                    <div>
+                      <h3 className="mb-2 flex items-center gap-2 px-1 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+                        <Activity className="h-3.5 w-3.5" /> Decisions
+                      </h3>
+                      <SessionActivity journal={parsedJournal} />
+                    </div>
                   </div>
                 )}
-                {activeSubTab === "activity" && <SessionActivity journal={parsedJournal} />}
                 {activeSubTab === "snapshots" && (
                   <SessionSnapshots slug={slug} sslug={sslug} sessionNum={selectedNum} initialTick={pendingSnapshotTick} />
                 )}
@@ -555,6 +613,20 @@ export function SessionReviewer({
         </div>
 
       </div>
+
+      {/* The session's live report, over the reviewer rather than in another
+          surface: it is the same session, rendered as the agent publishes it. */}
+      {showReport && sessionReport && (
+        <div className="absolute inset-0 z-10 flex flex-col bg-[var(--color-bg)] p-4">
+          <ReportViewer
+            report={sessionReport}
+            reports={[sessionReport]}
+            onSelect={() => {}}
+            onClose={() => setShowReport(false)}
+            allowFullscreen={false}
+          />
+        </div>
+      )}
     </div>
   );
 }

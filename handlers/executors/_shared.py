@@ -206,6 +206,7 @@ async def get_executors_client(
 
 from condor.fetchers.executors import (  # noqa: F811
     create_executor,
+    describe_executor_error,
     extract_executors_list,
     get_executor_detail,
     stop_executor,

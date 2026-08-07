@@ -20,7 +20,7 @@ from pydantic import BaseModel, Field
 from condor.runtime import PromptRequest, SessionInfo, SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import conversations
-from condor.runtime.binding import UnknownAgent
+from condor.runtime.binding import UnknownAgent, remember_model_choice
 from condor.runtime.sse import SSE_HEADERS, event_stream
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
@@ -85,7 +85,11 @@ async def session_options(user: WebUser = Depends(get_current_user)):
     is a real key.
     """
     from condor.agents.agent import AgentStore
-    from condor.preferences import get_custom_providers, load_user_data_for
+    from condor.preferences import (
+        get_active_agent_key,
+        get_custom_providers,
+        load_user_data_for,
+    )
     from handlers.agents._shared import AGENT_OPTIONS, DEFAULT_AGENT
 
     cm = get_config_manager()
@@ -116,10 +120,17 @@ async def session_options(user: WebUser = Depends(get_current_user)):
                 "name": a.name,
                 "description": a.description,
                 "when_to_consult": a.when_to_consult,
+                # The model it answers on when the user does not override one.
+                # Without it the picker could neither name the model behind a
+                # bound Agent nor mark which row is "back to its default".
+                "agent_key": a.agent_key,
             }
             for a in AgentStore().list_specialists()
         ],
-        "default_agent": DEFAULT_AGENT,
+        # Telegram's precedence (``_reclaim_default_agent``): the user's own
+        # pick wins over Condor's front matter, which is what makes a model
+        # chosen in an unbound chat stick across reloads.
+        "default_agent": get_active_agent_key(user.id) or DEFAULT_AGENT,
     }
 
 
@@ -250,9 +261,18 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
     # Unspecified fields keep their current value, so "new" is just a switch
     # to the same identity.
     agent_slug = info.agent_slug if body.agent_slug is None else body.agent_slug
+    # Inherit the outgoing model only when nobody is bound. Otherwise "" means
+    # "ask whoever is bound", which keeps binding to a *different* Agent from
+    # dragging the previous one's model along, and keeps a server-only switch
+    # from freezing the Agent onto the key it happened to resolve last.
+    agent_key = (
+        body.agent_key
+        if body.agent_key is not None
+        else ("" if agent_slug else info.agent_key)
+    )
     spec = SessionSpec(
         key=str(key),
-        agent_key=body.agent_key if body.agent_key is not None else info.agent_key,
+        agent_key=agent_key,
         user_id=info.user_id,
         # A pinned Agent still wins inside binding._resolve_agent — resolution
         # lives in one place, so nothing is special-cased here.
@@ -277,6 +297,11 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
     except Exception as exc:  # noqa: BLE001 - surfaced as an HTTP error
         log.exception("Failed to respawn session %s", key)
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # A non-empty key on the wire is a user opening the picker and choosing, so
+    # it outlives this session: on a bound specialist it becomes that Agent's
+    # default, on the unbound chat the user's own preference.
+    remember_model_choice(info.user_id, agent_slug, body.agent_key or "")
 
     if switching and info.conversation_id and body.server_name is not None:
         # The conversation, not the subprocess, is what a reload comes back to

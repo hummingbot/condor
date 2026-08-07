@@ -439,7 +439,8 @@ class PydanticAIClient:
       - "custom@venice:llama-3.3-70b" → any OpenAI-compatible API (Venice AI,
         Together, a local vLLM, ...). The "@venice" segment names one of the
         user's saved endpoints; base_url and api_key are resolved from it by
-        handlers/agents/session.py, with CUSTOM_LLM_* env vars as fallback.
+        ``condor.preferences.resolve_custom_endpoint``, with CUSTOM_LLM_* env
+        vars as fallback.
         The bare "custom:<model-id>" form (no endpoint name) is still accepted
         for configs written before endpoints were nameable.
     """
@@ -951,11 +952,15 @@ class PydanticAIClient:
 
                                     # Risk check via permission callback
                                     if self.permission_callback:
+                                        # Unparseable args stay None rather than
+                                        # collapsing to {}: the gate reads that
+                                        # as "unknown" and fails closed, where
+                                        # an empty dict would have read as a
+                                        # harmless no-argument call (SEC-093).
                                         tool_call_info = {
                                             "tool": tool_name,
                                             "title": tool_name,
-                                            "input": _tool_args_to_dict(part.args)
-                                            or {},
+                                            "input": _tool_args_to_dict(part.args),
                                         }
                                         options = [
                                             {"optionId": "allow", "kind": "allow_once"},

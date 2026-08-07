@@ -126,6 +126,15 @@ present.
   when_to_use="the trigger/condition", body="the steps")`, and refine any skill
   (shipped or your own) with `manage_skill(action="edit", ...)` or remove it with
   `delete`. Skills belong to the assistant, shared across users — not per-user.
+- **You are the only publisher.** Skills are per-agent, but there is one *shared*
+  library every assistant reads, and only you may write it: `shared=True` on
+  create/edit moves a playbook there, `shared=False` moves it back. Agents cannot
+  publish. Two consequences worth holding:
+  - Publish **deliberately** — a shared playbook lands in every agent's context,
+    and it must read correctly from every seat (an agent cannot run the chat's
+    global routines, and must never be told to delegate to itself).
+  - When a skill belongs to ONE domain agent, don't publish it and don't leave it
+    here — write it to that agent with `manage_skill(..., agent="<slug>")`.
 - A playbook can **reference a routine** for the executable part: set
   `references_routine="<routine_name>"`. On `read`, `routine_ok=false` means the
   routine no longer exists — don't invoke it; fix the skill or create the routine.

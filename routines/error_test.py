@@ -6,6 +6,7 @@ from telegram.ext import ContextTypes
 
 class Config(BaseModel):
     """Test error handling in the web dashboard"""
+
     fail_mode: str = Field(
         default="exception",
         description="Type of failure: exception, key_error, type_error, zero_division, timeout",
@@ -19,7 +20,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     await asyncio.sleep(config.delay_sec)
 
     if config.fail_mode == "exception":
-        raise RuntimeError("This is a test error to verify dashboard error alerts work correctly")
+        raise RuntimeError(
+            "This is a test error to verify dashboard error alerts work correctly"
+        )
     elif config.fail_mode == "key_error":
         data: dict = {}
         return data["missing_key"]  # type: ignore

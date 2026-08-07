@@ -169,7 +169,10 @@ def test_callback_cumulative_exposure_cancelled_same_tick():
 
 
 def _bot_call(action: str, **extra) -> dict:
-    return {"tool": "mcp__mcp-hummingbot__manage_bots", "input": {"action": action, **extra}}
+    return {
+        "tool": "mcp__mcp-hummingbot__manage_bots",
+        "input": {"action": action, **extra},
+    }
 
 
 def test_dry_run_blocks_manage_bots_deploy():
@@ -178,7 +181,9 @@ def test_dry_run_blocks_manage_bots_deploy():
     callback = auto_approve_with_risk_check(engine, state, execution_mode="dry_run")
 
     result = asyncio.run(
-        callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
+        callback(
+            _bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS
+        )
     )
     assert result["outcome"]["outcome"] == "cancelled"
 
@@ -216,7 +221,9 @@ def test_loop_mode_blocks_bot_deploy_without_loss_cap():
     callback = auto_approve_with_risk_check(engine, state, execution_mode="loop")
 
     result = asyncio.run(
-        callback(_bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS)
+        callback(
+            _bot_call("deploy", bot_name="x", controllers_config=["cfg"]), _OPTIONS
+        )
     )
     assert result["outcome"]["outcome"] == "cancelled"
 
@@ -305,3 +312,53 @@ def test_loop_mode_still_approves_bot_stop():
 
     result = asyncio.run(callback(_bot_call("stop_bot", bot_name="x"), _OPTIONS))
     assert result["outcome"]["outcome"] == "selected"
+
+
+# ---------------------------------------------------------------------------
+# controller_id is the ONLY link between a real position and the session that
+# opened it, and the model supplies it — so the gate checks the value, not just
+# that something is there.
+# ---------------------------------------------------------------------------
+
+
+def _tagged_call(controller_id) -> dict:
+    call = _create_call()
+    call["input"]["executor_config"]["controller_id"] = controller_id
+    return call
+
+
+def test_create_with_a_foreign_controller_id_is_cancelled():
+    """A mistyped tag would open a live position no session could ever claim."""
+    engine = RiskEngine(RiskLimits())
+    callback = auto_approve_with_risk_check(
+        engine, RiskState(), agent_id="acme.scalper_1"
+    )
+
+    outcome = asyncio.run(callback(_tagged_call("some_other_controller"), _OPTIONS))
+    assert outcome["outcome"]["outcome"] == "cancelled"
+
+
+def test_create_with_the_sessions_own_controller_id_is_allowed():
+    engine = RiskEngine(RiskLimits())
+    callback = auto_approve_with_risk_check(
+        engine, RiskState(), agent_id="acme.scalper_1"
+    )
+
+    outcome = asyncio.run(callback(_tagged_call("acme.scalper_1"), _OPTIONS))
+    assert outcome["outcome"]["outcome"] == "selected"
+
+
+def test_missing_controller_id_still_cancelled_without_an_agent_id():
+    """Consults/chat pass no agent_id and keep the presence-only check."""
+    engine = RiskEngine(RiskLimits())
+    callback = auto_approve_with_risk_check(engine, RiskState())
+
+    assert (
+        asyncio.run(callback(_tagged_call(""), _OPTIONS))["outcome"]["outcome"]
+        == "cancelled"
+    )
+    # ...but any non-empty tag passes, exactly as before.
+    assert (
+        asyncio.run(callback(_tagged_call("anything"), _OPTIONS))["outcome"]["outcome"]
+        == "selected"
+    )

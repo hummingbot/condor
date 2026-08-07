@@ -360,14 +360,28 @@ def test_engine_builds_a_ledger_in_controller_mode(tmp_path, monkeypatch):
 
     assert engine.ledger is not None
     assert engine.ledger.namespace == NS
+    assert engine.ledger.enforced
     assert engine.ledger.path == engine.session_dir / "owned_bots.json"
 
 
-def test_engine_executor_mode_has_no_ledger(tmp_path, monkeypatch):
+def test_engine_executor_mode_still_gets_an_unenforced_ledger(tmp_path, monkeypatch):
+    """Executor mode records what it deploys; it just isn't held to the namespace.
+
+    Skipping the ledger here is what let a session operate three bots and report
+    $0.00: with nothing recorded, every PnL surface fell back to searching
+    executors tagged with the agent_id, which a bot's controllers never carry.
+    """
     engine = _engine(tmp_path, monkeypatch, {"bot_name": ""})
 
-    assert engine.ledger is None
+    assert engine.ledger is not None
+    assert not engine.ledger.enforced
+    # Nothing deployed yet, so nothing is written — the file appears on first deploy.
     assert not (engine.session_dir / "owned_bots.json").exists()
+
+    engine.ledger.note_deploy("ema_trend_loop-20260807-045821")
+
+    assert engine.ledger.bases() == ["ema_trend_loop"]
+    assert (engine.session_dir / "owned_bots.json").exists()
 
 
 def test_engine_derives_the_bot_name_under_bot_mode(tmp_path, monkeypatch):
@@ -449,3 +463,54 @@ def test_tick_blocks_a_foreign_bot_and_journals_it(tmp_path, monkeypatch):
     # Drained: the same refusal is not journaled again next tick.
     engine._journal_ownership_violations(tick_num=2)
     assert engine.journal.read_full().count("ema_trend_loop") == 1
+
+
+# ---------------------------------------------------------------------------
+# Recording vs enforcement (PnL unification)
+#
+# A real session ran with bot_mode=auto and an empty bot_name, so it got no
+# ledger at all. Its strategy playbook told it to deploy bots anyway; it deployed
+# three, lost $1.46, and reported $0.00 on every structured surface for twenty
+# ticks because nothing had recorded what it deployed.
+# ---------------------------------------------------------------------------
+
+
+def test_unenforced_ledger_records_an_out_of_namespace_deploy(tmp_path):
+    """Not enforcing the namespace must not mean not writing the deploy down."""
+    ledger = BotLedger(NS, tmp_path, enforced=False)
+    outcome = _drive(_callback(ledger), _bot_call("deploy", "ema_trend_loop"))
+
+    assert outcome == "selected"
+    assert ledger.bases() == ["ema_trend_loop"]
+    assert ledger.owned()[0].origin == "deployed"
+    assert ledger.violations == []  # nothing was violated — the rule is off
+
+
+def test_unenforced_ledger_lets_other_bot_actions_through(tmp_path):
+    ledger = BotLedger(NS, tmp_path, enforced=False)
+
+    assert (
+        _drive(_callback(ledger), _bot_call("stop_bot", "someone_elses")) == "selected"
+    )
+    assert ledger.violations == []
+
+
+def test_enforced_flag_survives_a_reload(tmp_path):
+    BotLedger(NS, tmp_path, enforced=False).note_deploy("ema_trend_loop")
+
+    # A reader that does not restate the mode still sees what was persisted.
+    assert BotLedger(NS, tmp_path).to_dict()["enforced"] is False
+
+
+def test_prior_session_bases_reads_the_whole_lineage(tmp_path):
+    from condor.agents.ownership import prior_session_bases
+
+    sessions = tmp_path / "sessions"
+    BotLedger(NS, sessions / "session_1", enforced=False).note_deploy(
+        "ema_trend_loop-20260806-213931"
+    )
+    BotLedger(NS, sessions / "session_2", enforced=False).note_deploy("other_bot")
+
+    # Deploy suffixes are stripped, so a restart recognises the base it left running.
+    assert prior_session_bases(sessions) == {"ema_trend_loop", "other_bot"}
+    assert prior_session_bases(tmp_path / "nope") == set()

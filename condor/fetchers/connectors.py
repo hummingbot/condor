@@ -3,6 +3,8 @@
 import logging
 from typing import List
 
+from condor.fetchers._identifiers import validate_identifier
+
 logger = logging.getLogger(__name__)
 
 _DEX_PREFIXES = (
@@ -22,13 +24,26 @@ async def fetch_connectors(client, **_kw) -> List[str]:
 
 
 async def fetch_available_cex_connectors(
-    client, account_name: str = "master_account", **_kw
+    client, account_name: str = "master_account", strict: bool = False, **_kw
 ) -> List[str]:
     """Fetch CEX connectors with credentials configured for an account.
 
     Intersects configured connectors with actually-available connectors
     and filters to CEX only.
+
+    Args:
+        strict: Raise when the credentials request itself fails, instead of
+            reporting the account as having no connectors. Callers that cache
+            the answer want the distinction: an unreachable server is worth
+            retrying, "no credentials configured" is not.
+
+    Raises:
+        IdentifierError: if ``account_name`` is not a safe URL path segment.
     """
+    # Before the try: the except below turns everything into [], which would
+    # cache a bogus entry instead of surfacing the rejection.
+    validate_identifier(account_name, "account name")
+
     try:
         configured = await client.accounts.list_account_credentials(account_name)
 
@@ -42,5 +57,7 @@ async def fetch_available_cex_connectors(
             cex = [c for c in cex if c in available]
         return cex
     except Exception as e:
+        if strict:
+            raise
         logger.error("Error fetching connectors: %s", e, exc_info=True)
         return []

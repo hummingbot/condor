@@ -8,6 +8,8 @@ controller-mode block.
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from condor.agents.config import AgentConfig, load_full_config
 from condor.agents.performance import (
     AgentPerformance,
@@ -17,11 +19,19 @@ from condor.agents.performance import (
 from condor.fetchers.bot_performance import (
     _aggregate_by_bot,
     bot_executor_rows,
+    clear_snapshot_cache,
     extract_snapshots,
     fetch_all_bot_performance,
-    fetch_bot_performance,
-    resolve_bot,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_snapshot_cache_bleed():
+    """Isolate the per-server snapshot cache between tests."""
+    clear_snapshot_cache()
+    yield
+    clear_snapshot_cache()
+
 
 # ── Sample payloads ──
 
@@ -93,30 +103,157 @@ def test_extract_snapshots_shapes():
     assert extract_snapshots(None) == []
 
 
-def test_fetch_all_and_one_bot():
+def test_fetch_all_bot_performance_keys_by_bot():
     client = _FakeClient()
     allp = asyncio.run(fetch_all_bot_performance(client))
     assert set(allp) == {"river", "otherbot"}
-    one = asyncio.run(fetch_bot_performance(client, "river"))
-    assert one["realized_pnl_quote"] == 7.0
-    assert asyncio.run(fetch_bot_performance(client, "ghost")) is None
-    assert asyncio.run(fetch_bot_performance(client, "")) is None
+    assert allp["river"]["realized_pnl_quote"] == 7.0
 
 
-def test_fetch_bot_performance_resilient_to_errors():
-    class _Boom:
+# ── Whole-server snapshot coalescing ──
+#
+# get_latest_controller_performance() returns every bot on the server, so the
+# agents rollup — which fans one call per strategy into a single gather — used to
+# fire N byte-identical whole-server requests at once.
+
+
+class _CountingOrchestration:
+    def __init__(self, snapshots, delay=0.0):
+        self._snapshots = snapshots
+        self._delay = delay
+        self.calls = 0
+
+    async def get_latest_controller_performance(self, bot_name=None):
+        self.calls += 1
+        if self._delay:
+            await asyncio.sleep(self._delay)
+        return {"data": self._snapshots}
+
+
+class _ServerClient:
+    """Fake client that identifies its server via ``base_url``, like the real one."""
+
+    def __init__(self, base_url, snapshots=None, delay=0.0):
+        self.base_url = base_url
+        self.bot_orchestration = _CountingOrchestration(
+            SNAPSHOTS if snapshots is None else snapshots, delay
+        )
+
+    @property
+    def calls(self):
+        return self.bot_orchestration.calls
+
+
+def test_concurrent_callers_share_one_round_trip():
+    # In-flight coalescing, not just TTL: the fetch is still running when the
+    # other callers arrive, so they must join it rather than start their own.
+    client = _ServerClient("http://server-a:8000", delay=0.02)
+
+    async def _go():
+        return await asyncio.gather(
+            *[fetch_all_bot_performance(client) for _ in range(5)]
+        )
+
+    results = asyncio.run(_go())
+    assert client.calls == 1
+    assert all(set(r) == {"river", "otherbot"} for r in results)
+
+
+def test_staggered_callers_within_ttl_reuse_the_snapshot():
+    # The rollup's per-strategy calls do not always overlap exactly; the TTL keeps
+    # a staggered fan-out at one round-trip too.
+    client = _ServerClient("http://server-a:8000")
+
+    async def _go():
+        for _ in range(4):
+            await fetch_all_bot_performance(client)
+
+    asyncio.run(_go())
+    assert client.calls == 1
+
+
+def test_two_servers_never_share_a_snapshot():
+    a = _ServerClient(
+        "http://a:8000", snapshots=[_snapshot("river", "c1", 1.0, 0.0, 10.0)]
+    )
+    b = _ServerClient(
+        "http://b:8000", snapshots=[_snapshot("otherbot", "c2", 2.0, 0.0, 20.0)]
+    )
+
+    async def _go():
+        return await asyncio.gather(
+            fetch_all_bot_performance(a), fetch_all_bot_performance(b)
+        )
+
+    ra, rb = asyncio.run(_go())
+    assert set(ra) == {"river"}
+    assert set(rb) == {"otherbot"}
+    assert (a.calls, b.calls) == (1, 1)
+
+
+def test_failed_fetch_is_not_cached_and_still_propagates():
+    class _Flaky:
+        def __init__(self):
+            self.calls = 0
+
         async def get_latest_controller_performance(self, bot_name=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("api down")
+            return {"data": SNAPSHOTS}
+
+    client = SimpleNamespace(base_url="http://flaky:8000", bot_orchestration=_Flaky())
+
+    async def _go():
+        with pytest.raises(RuntimeError):
+            await fetch_all_bot_performance(client)
+        # The failure left nothing cached, so the next call really re-fetches.
+        return await fetch_all_bot_performance(client)
+
+    out = asyncio.run(_go())
+    assert client.bot_orchestration.calls == 2
+    assert set(out) == {"river", "otherbot"}
+
+
+def test_concurrent_waiters_all_see_the_failure():
+    class _Boom:
+        def __init__(self):
+            self.calls = 0
+
+        async def get_latest_controller_performance(self, bot_name=None):
+            self.calls += 1
+            await asyncio.sleep(0.02)
             raise RuntimeError("api down")
 
-    client = SimpleNamespace(bot_orchestration=_Boom())
-    assert asyncio.run(fetch_bot_performance(client, "river")) is None
+    client = SimpleNamespace(base_url="http://boom:8000", bot_orchestration=_Boom())
+
+    async def _go():
+        return await asyncio.gather(
+            *[fetch_all_bot_performance(client) for _ in range(3)],
+            return_exceptions=True,
+        )
+
+    out = asyncio.run(_go())
+    assert client.bot_orchestration.calls == 1
+    assert all(isinstance(r, RuntimeError) for r in out)
+
+
+def test_client_without_base_url_is_never_cached():
+    # An unidentifiable client (test doubles) must not share a blank key with
+    # unrelated servers — it bypasses the cache entirely.
+    a = _ServerClient("", snapshots=[_snapshot("river", "c1", 1.0, 0.0, 10.0)])
+    b = _ServerClient("", snapshots=[_snapshot("otherbot", "c2", 2.0, 0.0, 20.0)])
+    assert set(asyncio.run(fetch_all_bot_performance(a))) == {"river"}
+    assert set(asyncio.run(fetch_all_bot_performance(b))) == {"otherbot"}
+    assert set(asyncio.run(fetch_all_bot_performance(a))) == {"river"}
+    assert a.calls == 2
 
 
 # ── Suffix-tolerant resolution ──
 
 
 def _snap_with_positions(
-    bot_name, controller_id, timestamp, positions, status="running"
+    bot_name, controller_id, timestamp, positions, status="running", closes=None
 ):
     return {
         "bot_name": bot_name,
@@ -128,11 +265,14 @@ def _snap_with_positions(
             "unrealized_pnl_quote": 2.0,
             "volume_traded": 100.0,
             "positions_summary": positions,
+            "close_type_counts": closes or {},
         },
     }
 
 
-def test_resolve_bot_exact_and_suffix():
+def test_resolve_bots_exact_and_suffix():
+    from condor.fetchers.bot_performance import resolve_bots
+
     agg = _aggregate_by_bot(
         [
             _snap_with_positions(
@@ -148,15 +288,15 @@ def test_resolve_bot_exact_and_suffix():
         ]
     )
     # exact match wins outright
-    assert resolve_bot(agg, "other")["bot_name"] == "other"
+    assert resolve_bots(agg, ["other"])["other"]["bot_name"] == "other"
     # base name resolves to the freshest timestamped deploy
-    assert resolve_bot(agg, "dn-mm")["bot_name"] == "dn-mm-20260724-182221"
+    assert resolve_bots(agg, ["dn-mm"])["dn-mm"]["bot_name"] == "dn-mm-20260724-182221"
     # the hyphen boundary keeps a sibling base (dn-mmx) from matching dn-mm
-    assert resolve_bot(agg, "dn-mm")["bot_name"] != "dn-mmx-20260724-000000"
-    # no match → None; empty inputs → None
-    assert resolve_bot(agg, "ghost") is None
-    assert resolve_bot(agg, "") is None
-    assert resolve_bot({}, "dn-mm") is None
+    assert resolve_bots(agg, ["dn-mm"])["dn-mm"]["bot_name"] != "dn-mmx-20260724-000000"
+    # never deployed → absent from the result; empty inputs → nothing to resolve
+    assert resolve_bots(agg, ["ghost"]) == {}
+    assert resolve_bots(agg, [""]) == {}
+    assert resolve_bots({}, ["dn-mm"]) == {}
 
 
 # ── Executor rows from positions_summary ──
@@ -269,6 +409,75 @@ def test_merge_appends_bot_positions_as_rows():
     assert merged.unrealized_pnl == 2.0  # controller-level aggregate
 
 
+def test_aggregate_counts_only_round_trip_closes():
+    """EARLY_STOP is pmm re-quoting churn, not a trade — per controller and per bot."""
+    agg = _aggregate_by_bot(
+        [
+            _snap_with_positions(
+                "bot",
+                "c1",
+                "2026-07-24T18:00:00+00:00",
+                [],
+                closes={"CloseType.TAKE_PROFIT": 40, "CloseType.EARLY_STOP": 900},
+            ),
+            _snap_with_positions(
+                "bot",
+                "c2",
+                "2026-07-24T18:00:00+00:00",
+                [],
+                closes={"CloseType.STOP_LOSS": 10, "CloseType.POSITION_HOLD": 3},
+            ),
+        ]
+    )
+    assert agg["bot"]["closed_trades"] == 50
+    assert [c["closed_trades"] for c in agg["bot"]["controllers"]] == [40, 10]
+
+
+def test_bot_mode_trades_are_closes_not_open_positions():
+    """A bot with 50 real closes and 2 open positions reports 50 trades, not 2.
+
+    ``positions_summary`` only ever describes the currently-open book, so counting
+    its rows made a session that had closed hundreds of round trips report as many
+    trades as it happened to hold positions — while closed_count stayed 0.
+    """
+    agent_id = "dn.sess_1"
+    positions = [
+        {
+            "connector_name": "hyperliquid",
+            "trading_pair": pair,
+            "volume_traded_quote": 250.0,
+            "side": "TradeType.BUY",
+            "amount": 1.0,
+            "breakeven_price": 60.0,
+            "unrealized_pnl_quote": -0.5,
+            "cum_fees_quote": 0.3,
+        }
+        for pair in ("BTC-USD", "ETH-USD")
+    ]
+    snaps = [
+        _snap_with_positions(
+            "dn-mm-20260724-1",
+            "dn_CL_mm",
+            "2026-07-24T18:00:00+00:00",
+            positions,
+            closes={
+                "CloseType.TAKE_PROFIT": 40,
+                "CloseType.STOP_LOSS": 10,
+                "CloseType.EARLY_STOP": 900,
+            },
+        )
+    ]
+    client = _FakeClient(rows_by_id={}, snapshots=snaps)
+    perf = asyncio.run(fetch_agent_performance(client, agent_id, bot_names=["dn-mm"]))
+
+    assert perf.trade_count == 50
+    assert perf.closed_count == 50
+    assert perf.open_count == 2  # the live book, unchanged
+    # The snapshot says how many positions closed, not how they ended: unknown,
+    # which is not the same as a 0% win rate.
+    assert perf.win_rate is None
+
+
 def test_no_snapshot_leaves_executor_totals_unchanged():
     agent_id = "river.scalp_1"
     rows_by_id = {
@@ -320,30 +529,6 @@ def test_bot_name_round_trips_through_full_config(tmp_path):
 # ── Per-session history slicing ──
 
 
-def test_resolve_bot_instances_returns_all_matches_sorted():
-    from condor.fetchers.bot_performance import resolve_bot_instances
-
-    def _snap(name, ts):
-        return {
-            "bot_name": name,
-            "controller_id": "c",
-            "timestamp": ts,
-            "performance": {},
-        }
-
-    agg = _aggregate_by_bot(
-        [
-            _snap("dn-mm-20260101-000000", "2026-01-01T00:00:00"),
-            _snap("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
-            _snap("dn-mmx-20260724-000000", "2026-07-24T00:00:00"),
-            _snap("other", "2026-07-24T00:00:00"),
-        ]
-    )
-    got = resolve_bot_instances(agg, "dn-mm")
-    assert got == ["dn-mm-20260101-000000", "dn-mm-20260724-182221"]  # oldest→newest
-    assert resolve_bot_instances(agg, "nope") == []
-
-
 def _instances_agg(*names_ts):
     return _aggregate_by_bot(
         [
@@ -359,10 +544,7 @@ def _instances_agg(*names_ts):
 
 
 def test_partition_assigns_a_tagged_instance_to_its_own_base():
-    from condor.fetchers.bot_performance import (
-        partition_instances,
-        resolve_bot_instances,
-    )
+    from condor.fetchers.bot_performance import partition_instances
 
     agg = _instances_agg(
         ("brigado-ema_trend-20260731-100000", "2026-07-31T10:00:00"),
@@ -370,9 +552,8 @@ def test_partition_assigns_a_tagged_instance_to_its_own_base():
     )
     bases = ["brigado-ema_trend", "brigado-ema_trend-btc"]
 
-    # Asked one base at a time, the parent swallows its tagged sibling…
-    assert len(resolve_bot_instances(agg, "brigado-ema_trend")) == 2
-    # …but deciding over all owned bases at once, each instance lands on exactly one.
+    # Prefix-matching one base at a time, the parent would swallow its tagged
+    # sibling; deciding over all owned bases at once, each instance lands on one.
     assert partition_instances(agg, bases) == {
         "brigado-ema_trend": ["brigado-ema_trend-20260731-100000"],
         "brigado-ema_trend-btc": ["brigado-ema_trend-btc-20260731-101500"],
@@ -395,16 +576,14 @@ def test_partition_keeps_unowned_instances_out_and_orders_oldest_first():
 
 
 def test_resolve_bots_never_hands_the_same_aggregate_to_two_bases():
-    from condor.fetchers.bot_performance import resolve_bot, resolve_bots
+    from condor.fetchers.bot_performance import resolve_bots
 
     agg = _instances_agg(
         ("ns-bot-20260731-100000", "2026-07-31T10:00:00"),
         ("ns-bot-btc-20260731-101500", "2026-07-31T10:15:00"),
     )
-    # resolve_bot alone picks the freshest prefix match for BOTH bases…
-    assert resolve_bot(agg, "ns-bot")["bot_name"] == "ns-bot-btc-20260731-101500"
-    assert resolve_bot(agg, "ns-bot-btc")["bot_name"] == "ns-bot-btc-20260731-101500"
-    # …partition-aware resolution gives each base its own live instance.
+    # Freshest-prefix-match alone would give BOTH bases the …-btc instance;
+    # partition-aware resolution gives each base its own live instance.
     live = resolve_bots(agg, ["ns-bot", "ns-bot-btc"])
     assert live["ns-bot"]["bot_name"] == "ns-bot-20260731-100000"
     assert live["ns-bot-btc"]["bot_name"] == "ns-bot-btc-20260731-101500"
@@ -417,40 +596,45 @@ def test_resolve_bots_prefers_an_exact_deploy_over_a_newer_suffixed_one():
         ("dn-mm", "2026-01-01T00:00:00"),
         ("dn-mm-20260724-182221", "2026-07-24T18:22:21"),
     )
-    # Same rule resolve_bot applies: a bot deployed under the bare base wins.
+    # Exact beats freshest: a bot deployed under the bare base wins.
     assert resolve_bots(agg, ["dn-mm"])["dn-mm"]["bot_name"] == "dn-mm"
 
 
 def test_slice_history_tiles_exactly():
     from condor.fetchers.bot_performance import slice_history
 
-    # one instance, cumulative realized/volume/trades at t=10,20,30
+    # one instance, cumulative realized/volume/trades/fees at t=10,20,30
     hist = [
-        (10.0, 1.0, 100.0, 1.0),
-        (20.0, 3.0, 300.0, 4.0),
-        (30.0, 5.0, 500.0, 9.0),
+        (10.0, 1.0, 100.0, 1.0, 0.1),
+        (20.0, 3.0, 300.0, 4.0, 0.3),
+        (30.0, 5.0, 500.0, 9.0, 0.5),
     ]
     # window fully before → 0; fully after start baseline → final delta
-    assert slice_history([hist], 0, 5) == (0.0, 0.0, 0.0)
+    assert slice_history([hist], 0, 5) == (0.0, 0.0, 0.0, 0.0)
     # [0,20] captures rows at 10 and 20 → cum_at(20)-cum_at(0)=3
-    assert slice_history([hist], 0, 20) == (3.0, 300.0, 4.0)
+    assert slice_history([hist], 0, 20) == (3.0, 300.0, 4.0, 0.3)
     # [20,40] → cum_at(40)=final(5) - cum_at(20)=3 → 2
-    assert slice_history([hist], 20, 40) == (2.0, 200.0, 5.0)
+    assert slice_history([hist], 20, 40) == (2.0, 200.0, 5.0, pytest.approx(0.2))
     # tiling: [0,20)+[20,40) sums to the instance's full cumulative
     a = slice_history([hist], 0, 20)
     b = slice_history([hist], 20, 40)
-    assert (a[0] + b[0], a[1] + b[1], a[2] + b[2]) == (5.0, 500.0, 9.0)
+    assert (a[0] + b[0], a[1] + b[1], a[2] + b[2], a[3] + b[3]) == (
+        5.0,
+        500.0,
+        9.0,
+        pytest.approx(0.5),
+    )
 
 
 def test_slice_history_sums_multiple_instances():
     from condor.fetchers.bot_performance import slice_history
 
-    h1 = [(10.0, 2.0, 20.0, 1.0)]  # instance 1: +2 at t=10
-    h2 = [(15.0, 3.0, 30.0, 2.0)]  # instance 2: +3 at t=15
+    h1 = [(10.0, 2.0, 20.0, 1.0, 0.2)]  # instance 1: +2 at t=10
+    h2 = [(15.0, 3.0, 30.0, 2.0, 0.3)]  # instance 2: +3 at t=15
     # window covering both
-    assert slice_history([h1, h2], 0, 100) == (5.0, 50.0, 3.0)
+    assert slice_history([h1, h2], 0, 100) == (5.0, 50.0, 3.0, pytest.approx(0.5))
     # window covering only instance 1
-    assert slice_history([h1, h2], 0, 12) == (2.0, 20.0, 1.0)
+    assert slice_history([h1, h2], 0, 12) == (2.0, 20.0, 1.0, 0.2)
 
 
 def test_fetch_instance_history_sums_controllers_and_filters_trades():
@@ -487,10 +671,13 @@ def test_fetch_instance_history_sums_controllers_and_filters_trades():
     client = SimpleNamespace(bot_orchestration=_Client())
     hist = asyncio.run(fetch_instance_history(client, "bot-1"))
     assert len(hist) == 1  # both controllers summed into one timestamp
-    ts, realized, volume, trades = hist[0]
+    ts, realized, volume, trades, fees = hist[0]
     assert realized == 1.5  # 1.0 + 0.5
     assert volume == 140.0  # 100 + 40
     assert trades == 3.0  # TAKE_PROFIT 2 + STOP_LOSS 1; EARLY_STOP/FAILED excluded
+    # No cumulative fee column in this payload → 0, which is the signal callers
+    # use to fall back to the live open-position figure.
+    assert fees == 0.0
 
 
 # ── Provider wiring ──
@@ -501,9 +688,10 @@ def _capture_provider_fetch(monkeypatch) -> dict:
 
     captured: dict = {}
 
-    async def _fake_fetch(client, agent_id, bot_names=None):
+    async def _fake_fetch(client, agent_id, bot_names=None, since=0.0):
         captured["agent_id"] = agent_id
         captured["bot_names"] = bot_names
+        captured["since"] = since
         return _AP(agent_id=agent_id, bot_names=list(bot_names or []))
 
     monkeypatch.setattr(
@@ -525,7 +713,11 @@ def test_executors_provider_falls_back_to_config_bot_name(monkeypatch):
             agent_id="river.scalp_1",
         )
     )
-    assert captured == {"agent_id": "river.scalp_1", "bot_names": ["river"]}
+    assert captured == {
+        "agent_id": "river.scalp_1",
+        "bot_names": ["river"],
+        "since": 0.0,  # no ledger → no takeover instant → unsliced, as before
+    }
 
 
 def test_executors_provider_prefers_ledger_bases(monkeypatch):
@@ -582,3 +774,450 @@ def test_prompt_controller_block_present_iff_bot_name():
 
     without = _minimal_prompt({"execution_mode": "loop"})
     assert "[CONTROLLER MODE]" not in without
+
+
+# ── The live agent view and the dashboard must agree ──
+
+
+def _epoch_utc(iso: str) -> float:
+    from datetime import datetime
+
+    return datetime.fromisoformat(iso).timestamp()
+
+
+def test_adopted_bot_pnl_is_sliced_to_the_sessions_window():
+    """`since` scopes an inherited bot to what THIS session produced.
+
+    Without it the live tick merged the bot's whole lifetime aggregate, so a
+    session that adopted a long-running bot was told it had earned everything
+    the bot ever made — while the dashboard sliced the same bot per session.
+    """
+    from condor.agents.performance import fetch_agent_performance
+
+    inst = "ns-bot-20260701-000000"
+    snapshot = [
+        {
+            "bot_name": inst,
+            "controller_id": "c1",
+            "timestamp": "2026-07-04T00:00:00+00:00",
+            "status": "RUNNING",
+            "performance": {
+                "realized_pnl_quote": 100.0,  # lifetime
+                "unrealized_pnl_quote": 7.0,
+                "volume_traded": 5000.0,
+                "positions_summary": [],
+            },
+        }
+    ]
+    # The session took over at T2, by which point the bot had made $40.
+    history = [
+        {
+            "timestamp": ts,
+            "performance": {
+                "realized_pnl_quote": cum,
+                "volume_traded": vol,
+                "close_type_counts": {},
+            },
+        }
+        for ts, cum, vol in (
+            ("2026-07-01T00:00:00+00:00", 0.0, 0.0),
+            ("2026-07-03T00:00:00+00:00", 40.0, 2000.0),
+            ("2026-07-04T00:00:00+00:00", 100.0, 5000.0),
+        )
+    ]
+
+    class _Client:
+        base_url = "http://slice-test"
+
+        async def get_latest_controller_performance(self):
+            return snapshot
+
+        async def get_controller_performance_history(self, bot_name, interval, limit):
+            return {"data": history}
+
+    class _Executors:
+        async def search_executors(self, **_kw):
+            return []  # controller mode: nothing tagged with the agent_id
+
+    client = SimpleNamespace(
+        bot_orchestration=_Client(),
+        executors=_Executors(),
+        base_url="http://slice-test",
+    )
+    took_over = _epoch_utc("2026-07-03T00:00:00+00:00")
+
+    perf = asyncio.run(
+        fetch_agent_performance(
+            client, "ns.strat_2", bot_names=["ns-bot"], since=took_over
+        )
+    )
+
+    # $60 earned since the takeover, not the bot's lifetime $100.
+    assert perf.realized_pnl == 60.0
+    assert perf.volume == 3000.0
+    # The open book belongs to whoever runs the bot now — this session.
+    assert perf.unrealized_pnl == 7.0
+    assert perf.total_pnl == 67.0
+
+
+def test_without_since_the_lifetime_aggregate_is_still_used():
+    """A session that deployed the bot itself has no inherited PnL to strip."""
+    from condor.agents.performance import AgentPerformance, _merge_bot_perf
+
+    bot = {
+        "bot_name": "ns-bot",
+        "realized_pnl_quote": 100.0,
+        "unrealized_pnl_quote": 7.0,
+        "volume_traded": 5000.0,
+        "cum_fees_quote": 2.0,
+        "controllers": [],
+    }
+    perf = AgentPerformance(agent_id="ns.strat_1")
+    _merge_bot_perf(perf, bot)
+
+    assert perf.realized_pnl == 100.0
+    assert perf.volume == 5000.0
+    assert perf.fees == 2.0
+    assert perf.total_pnl == 107.0
+
+
+# ── PnL unification regressions ──
+# All three defects below were found together on one live session
+# (directional_trader.ema_trend_loop_1): it deployed three bots, lost $1.46, and
+# every structured surface reported $0.00 while the model's own MCP reads
+# reported the truth to Telegram. Each test pins one link of that chain.
+
+
+def _history_client(rows):
+    class _C:
+        async def get_controller_performance_history(self, **kwargs):
+            return {"data": rows}
+
+    return SimpleNamespace(bot_orchestration=_C())
+
+
+def _hist_row(ts, controller_id, realized, volume=0.0):
+    return {
+        "timestamp": ts,
+        "controller_id": controller_id,
+        "performance": {
+            "realized_pnl_quote": realized,
+            "volume_traded": volume,
+        },
+    }
+
+
+def test_history_carries_each_controller_forward_across_sparse_buckets():
+    """A bucket holding one controller is not the bot's total.
+
+    Above its native resolution the endpoint returns roughly one row per bucket
+    *in total*, so a multi-controller bot's controllers arrive round-robin.
+    Summing per timestamp read each bucket as the whole bot and produced a series
+    that lurched between one controller's cumulative and another's — which
+    slice_history then differenced into noise.
+    """
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    # BTC settles at -0.30, ETH at -0.70; never both in the same bucket.
+    rows = [
+        _hist_row("2026-08-06T22:00:00+00:00", "btc", 0.0),
+        _hist_row("2026-08-06T22:15:00+00:00", "eth", 0.0),
+        _hist_row("2026-08-06T22:30:00+00:00", "btc", -0.30),
+        _hist_row("2026-08-06T22:45:00+00:00", "eth", -0.70),
+        _hist_row("2026-08-06T23:00:00+00:00", "btc", -0.30),
+    ]
+    hist = asyncio.run(fetch_instance_history(_history_client(rows), "bot-1"))
+
+    # The bot total is the sum of the carried per-controller cumulatives, so it
+    # never regresses when the next bucket happens to carry the other controller.
+    assert [round(r[1], 4) for r in hist] == [0.0, 0.0, -0.30, -1.00, -1.00]
+
+
+def test_history_forward_carry_survives_a_controller_that_stops_reporting():
+    """A controller absent from later buckets keeps its last cumulative."""
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    rows = [
+        _hist_row("2026-08-06T22:00:00+00:00", "btc", -0.50, 100.0),
+        _hist_row("2026-08-06T22:15:00+00:00", "sol", 0.0, 0.0),
+        _hist_row("2026-08-06T22:30:00+00:00", "sol", 0.0, 0.0),
+    ]
+    hist = asyncio.run(fetch_instance_history(_history_client(rows), "bot-1"))
+
+    assert [round(r[1], 4) for r in hist] == [-0.50, -0.50, -0.50]
+    assert [round(r[2], 4) for r in hist] == [100.0, 100.0, 100.0]
+
+
+def test_partition_includes_archived_instances():
+    """A stopped bot's realized PnL is exactly what its session is judged on."""
+    from condor.fetchers.bot_performance import partition_instances
+
+    agg = _instances_agg(("ema_trend_loop-20260807-045821", "2026-08-07T04:58:21"))
+    archived = [
+        "ema_trend_loop-20260806-213931",
+        "ema_trend_loop-20260807-022130",
+        "some_other_bot-20260101-000000",
+    ]
+
+    assert partition_instances(agg, ["ema_trend_loop"], archived) == {
+        "ema_trend_loop": [
+            # Archived first: no snapshot timestamp, and the deploy suffix orders
+            # them chronologically among themselves.
+            "ema_trend_loop-20260806-213931",
+            "ema_trend_loop-20260807-022130",
+            "ema_trend_loop-20260807-045821",
+        ]
+    }
+
+
+def test_resolve_bots_sums_every_live_instance_of_a_base():
+    """Redeploying under a stable base name must not discard the earlier ones."""
+    from condor.fetchers.bot_performance import resolve_bots
+
+    agg = _aggregate_by_bot(
+        [
+            {
+                "bot_name": "dn-mm-20260724-100000",
+                "controller_id": "c",
+                "timestamp": "2026-07-24T10:00:00",
+                "performance": {"realized_pnl_quote": -3.0, "volume_traded": 100.0},
+            },
+            {
+                "bot_name": "dn-mm-20260724-182221",
+                "controller_id": "c",
+                "timestamp": "2026-07-24T18:22:21",
+                "performance": {"realized_pnl_quote": -1.0, "volume_traded": 50.0},
+            },
+        ]
+    )
+    merged = resolve_bots(agg, ["dn-mm"])["dn-mm"]
+
+    assert merged["realized_pnl_quote"] == -4.0
+    assert merged["volume_traded"] == 150.0
+    # Freshest still supplies the display name; nothing is dropped for it.
+    assert merged["bot_name"] == "dn-mm-20260724-182221"
+
+
+def test_archived_instance_names_come_from_database_paths():
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        fetch_archived_instances,
+    )
+
+    clear_archived_cache()
+
+    class _C:
+        async def list_databases(self):
+            return [
+                "bots/archived/ema_trend_loop-20260806-213931/data/"
+                "ema_trend_loop-20260806-213931.sqlite",
+                {"db_path": "bots/archived/x/data/other-20260101-000000.db"},
+                {"db_path": "bots/archived/y/data/broken.sqlite", "status": "error"},
+            ]
+
+    client = SimpleNamespace(archived_bots=_C(), base_url="")
+
+    assert asyncio.run(fetch_archived_instances(client)) == [
+        "ema_trend_loop-20260806-213931",
+        "other-20260101-000000",
+    ]
+
+
+def test_archived_instance_discovery_degrades_to_empty():
+    """A backend without the endpoint costs stopped bots, never running ones."""
+    from condor.fetchers.bot_performance import (
+        clear_archived_cache,
+        fetch_archived_instances,
+    )
+
+    clear_archived_cache()
+
+    class _C:
+        async def list_databases(self):
+            raise RuntimeError("no such endpoint")
+
+    client = SimpleNamespace(archived_bots=_C(), base_url="")
+
+    assert asyncio.run(fetch_archived_instances(client)) == []
+
+
+def test_a_stopped_bots_realized_pnl_reaches_the_agent():
+    """End-to-end: the exact shape that reported $0.00 for twenty ticks.
+
+    The session deployed a bot, stopped it, and deployed another. Nothing is
+    running, no executor carries the agent_id, and the whole loss lives in the
+    archived instances' history. Reporting $0 here is what sent the dashboard and
+    the live agent's core data into disagreement with the model's own MCP reads.
+    """
+    from condor.fetchers.bot_performance import clear_archived_cache
+
+    clear_archived_cache()
+
+    history = {
+        "ema_trend_loop-20260806-213931": [
+            _hist_row("2026-08-06T22:00:00+00:00", "btc", 0.0, 193.0),
+            _hist_row("2026-08-06T22:45:00+00:00", "btc", -0.3053, 386.19),
+            _hist_row("2026-08-07T00:02:00+00:00", "eth", -0.6953, 399.35),
+        ],
+        "ema_trend_loop-20260807-022130": [
+            _hist_row("2026-08-07T02:22:00+00:00", "btc", 0.0, 193.05),
+            _hist_row("2026-08-07T03:27:00+00:00", "btc", -0.4635, 385.84),
+        ],
+    }
+
+    class _Archived:
+        async def list_databases(self):
+            return [f"bots/archived/{n}/data/{n}.sqlite" for n in history]
+
+    class _Orch:
+        async def get_latest_controller_performance(self, bot_name=None):
+            return {"data": []}  # nothing running
+
+        async def get_controller_performance_history(
+            self, bot_name, interval, limit=None, cursor=None
+        ):
+            return {"data": history.get(bot_name, [])}
+
+    client = SimpleNamespace(
+        base_url="",
+        executors=_FakeExecutors({}),  # no executor carries the agent_id
+        bot_orchestration=_Orch(),
+        archived_bots=_Archived(),
+    )
+
+    perf = asyncio.run(
+        fetch_agent_performance(
+            client,
+            "directional_trader.ema_trend_loop_1",
+            bot_names=["ema_trend_loop"],
+            since=1786052340.0,  # 2026-08-06 21:39 UTC, the session's first tick
+        )
+    )
+
+    # -0.3053 + -0.6953 (first instance) + -0.4635 (second) — the figure the
+    # agent reported to Telegram, which no structured surface could see.
+    assert perf.realized_pnl == pytest.approx(-1.4641, abs=1e-4)
+    assert perf.total_pnl == pytest.approx(-1.4641, abs=1e-4)
+    assert perf.volume == pytest.approx(785.54 + 385.84, abs=1e-2)
+    # Resolved through archived history, so the base is not flagged as missing.
+    assert perf.unresolved_bases == []
+
+
+def test_a_base_with_no_instance_anywhere_is_flagged_not_zeroed():
+    """'No data' and 'traded flat' must not render alike."""
+    from condor.fetchers.bot_performance import clear_archived_cache
+
+    clear_archived_cache()
+
+    class _Archived:
+        async def list_databases(self):
+            return []
+
+    class _Orch:
+        async def get_latest_controller_performance(self, bot_name=None):
+            return {"data": []}
+
+        async def get_controller_performance_history(self, bot_name, **kw):
+            return {"data": []}
+
+    client = SimpleNamespace(
+        base_url="",
+        executors=_FakeExecutors({}),
+        bot_orchestration=_Orch(),
+        archived_bots=_Archived(),
+    )
+
+    perf = asyncio.run(
+        fetch_agent_performance(
+            client, "agent.strat_1", bot_names=["vanished_bot"], since=1786052340.0
+        )
+    )
+
+    assert perf.unresolved_bases == ["vanished_bot"]
+    assert perf.total_pnl == 0.0  # zero, but the caller now knows it is unknown
+
+
+def test_the_provider_says_when_a_bots_pnl_is_missing():
+    """The agent is told a floor, not a flat result — a floor it can go check."""
+    from condor.agents.providers.executors import ExecutorsProvider
+
+    perf = AgentPerformance(
+        agent_id="agent.strat_1",
+        bot_names=["vanished_bot"],
+        unresolved_bases=["vanished_bot"],
+    )
+
+    async def _fake(*a, **kw):
+        return perf
+
+    import condor.agents.performance as perf_mod
+
+    original = perf_mod.fetch_agent_performance
+    perf_mod.fetch_agent_performance = _fake
+    try:
+        result = asyncio.run(
+            ExecutorsProvider().execute(
+                object(), {"bot_name": "vanished_bot"}, agent_id="agent.strat_1"
+            )
+        )
+    finally:
+        perf_mod.fetch_agent_performance = original
+
+    assert "vanished_bot" in result.summary
+    assert "incomplete, not flat" in result.summary
+
+
+def test_pnl_series_is_continuous_across_a_redeploy():
+    """The curve is derived, so it is right for sessions the journal got wrong.
+
+    Per-tick journal snapshots record what the aggregator believed at the time —
+    permanently flat for a session that ran while it could not see its bots. This
+    series comes from the bots' own history, so it self-corrects, and it steps
+    rather than restarting at zero when the session redeploys under one base.
+    """
+    from condor.agents.performance import fetch_agent_pnl_series
+    from condor.fetchers.bot_performance import clear_archived_cache
+
+    clear_archived_cache()
+
+    history = {
+        "loop-20260806-213931": [
+            _hist_row("2026-08-06T22:00:00+00:00", "btc", 0.0, 193.0),
+            _hist_row("2026-08-06T22:45:00+00:00", "btc", -0.3053, 386.19),
+        ],
+        "loop-20260807-022130": [
+            _hist_row("2026-08-07T02:22:00+00:00", "btc", 0.0, 193.05),
+            _hist_row("2026-08-07T03:27:00+00:00", "btc", -0.4635, 385.84),
+        ],
+    }
+
+    class _Archived:
+        async def list_databases(self):
+            return [f"{n}.sqlite" for n in history]
+
+    class _Orch:
+        async def get_latest_controller_performance(self, bot_name=None):
+            return {"data": []}
+
+        async def get_controller_performance_history(self, bot_name, **kw):
+            return {"data": history.get(bot_name, [])}
+
+    client = SimpleNamespace(
+        base_url="", bot_orchestration=_Orch(), archived_bots=_Archived()
+    )
+
+    series = asyncio.run(fetch_agent_pnl_series(client, ["loop"], since=1786052340.0))
+
+    pnls = [round(p["pnl"], 4) for p in series]
+    # The second instance picks up where the first left off — it does not reset.
+    assert pnls == [0.0, -0.3053, -0.3053, -0.7688]
+    # And it ends where the KPI does.
+    assert pnls[-1] == pytest.approx(-0.3053 + -0.4635, abs=1e-4)
+
+
+def test_pnl_series_is_empty_without_an_owned_bot():
+    """An executor-only session has no bot history; the journal stays the source."""
+    from condor.agents.performance import fetch_agent_pnl_series
+
+    assert asyncio.run(fetch_agent_pnl_series(object(), [], since=1.0)) == []
+    assert asyncio.run(fetch_agent_pnl_series(object(), ["b"], since=0.0)) == []
