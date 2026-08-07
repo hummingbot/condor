@@ -106,7 +106,7 @@ tools as permission to substitute a broader or mutating surface.
 The only public routines are:
 
 - `lp_snapshot`: one current-controller portfolio, close-recovery, capacity,
-  Orca-candidate, and range-plan snapshot;
+  Orca-candidate, and selection-constraint snapshot;
 - `lp_swap`: one exact idempotent inventory transition or reconciliation;
 - `lp_create`: one exact guarded executor creation.
 
@@ -122,8 +122,10 @@ receipt, executor state, and current external evidence.
 
 ## Portfolio Invariants
 
-- Support up to the configured executor limit; the shipped Orca limit is three.
-- Prepare and create at most one new executor per tick.
+- Support up to the configured executor limit.
+- Prepare and create no more than the configured deployment limit per tick.
+- Treat shipped capacity, deployment, and scan values as defaults, never as
+  hardcoded policy.
 - Keep at most one active or reconciling executor per pool.
 - Attribute every candidate, swap, create, executor, stop, and cleanup
   independently, including when several executors share a base mint.

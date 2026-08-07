@@ -91,16 +91,37 @@ def test_resolve_runtime_rejects_invalid_controller_before_lookup(
         runtime.resolve_runtime(controller_id)
 
 
-def test_runtime_enforces_three_executor_and_one_deployment_contract():
-    assert (
-        runtime._validate_config(strategy_config(), "loop")["max_open_executors"] == 3
+def test_runtime_accepts_configurable_capacity_and_deployment_contract():
+    defaults = runtime._validate_config(strategy_config(), "loop")
+    assert defaults["max_open_executors"] == 3
+    assert defaults["max_slot_deployments_per_tick"] == 1
+    configured = runtime._validate_config(
+        strategy_config(
+            total_amount_quote=30,
+            max_open_executors=5,
+            max_slot_deployments_per_tick=2,
+            candidate_scan_limit=8,
+            risk_limits={
+                "max_position_size_quote": 30,
+                "max_open_executors": 5,
+                "max_drawdown_pct": -1,
+                "shutdown_drawdown_pct": -1,
+            },
+        ),
+        "loop",
     )
-    with pytest.raises(ValueError):
-        runtime._validate_config(strategy_config(max_open_executors=4), "loop")
+    assert configured["max_open_executors"] == 5
+    assert configured["max_slot_deployments_per_tick"] == 2
     with pytest.raises(ValueError):
         runtime._validate_config(
-            strategy_config(max_slot_deployments_per_tick=2), "loop"
+            strategy_config(
+                max_open_executors=1,
+                max_slot_deployments_per_tick=2,
+            ),
+            "loop",
         )
+    with pytest.raises(ValueError):
+        runtime._validate_config(strategy_config(candidate_scan_limit=0), "loop")
 
 
 def test_hummingbot_binding_and_balance_reads_are_exactly_scoped(tmp_path):

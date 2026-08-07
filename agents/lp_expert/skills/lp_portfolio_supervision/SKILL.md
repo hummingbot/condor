@@ -15,8 +15,9 @@ source: agent:lp_expert
    those values from broad tool reads.
 3. A slot is clean only when no opening, active, closing, cleanup-pending,
    uncertain, ambiguous, or failed-but-unreconciled resource still owns it.
-4. The portfolio may hold up to its configured limit, shipped as three, but may
-   prepare and create at most one new executor per tick.
+4. The portfolio may hold up to its configured limit and may prepare/create no
+   more than the current configured deployment limit per tick. Use the
+   snapshot's currently available deployment count, not shipped defaults.
 5. Apply per-executor age, take-profit, and stop-loss triggers independently.
    The session stop latch is portfolio-wide and cannot be cleared by judgment.
 6. For non-triggered executors, compare range condition, range distance, fee and
@@ -24,9 +25,10 @@ source: agent:lp_expert
    correlated exposure, and diversification.
 7. Keep at most one active or reconciling executor per pool. Executors sharing a
    base mint still own separate attributed inventory.
-8. Choose one portfolio action: deploy one new chain, close an ordered set of
-   exact targets, or HOLD. Serialize every mutation and stop the affected scope
-   when confirmation is missing.
+8. Choose one portfolio action: deploy an ordered bounded set of independent
+   chains, close an ordered set of exact targets, or HOLD. Within DEPLOY, finish
+   each preparation/create chain before starting the next. Stop the affected
+   scope when confirmation is missing.
 9. A closed slot remains quarantined until a following tick proves no material
    residual or confirms exact cleanup. Never release or reuse it from a broad
    balance change.

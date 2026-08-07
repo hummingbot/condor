@@ -376,12 +376,12 @@ class ReceiptStore:
         ]
 
     def admit_create(self, identity: OperationIdentity) -> dict[str, Any]:
-        """Atomically reserve the controller's one create admission for a tick."""
+        """Atomically reserve one configured create admission for this tick."""
 
         self._require_writable()
         if identity.operation_kind != "create":
             raise ValueError("create admission requires a create identity")
-        self._admit_once("create", identity.tick, identity.operation_id)
+        self._admit_within_limit("create", identity.tick, identity.operation_id)
         existing = self.read(identity)
         if existing is not None:
             return existing
@@ -393,44 +393,67 @@ class ReceiptStore:
         )
 
     def admit_preparation(self, identity: OperationIdentity) -> None:
-        """Atomically reserve the controller's one inventory preparation per tick."""
+        """Atomically reserve one configured preparation admission for this tick."""
 
         self._require_writable()
         if identity.operation_kind != "swap":
             raise ValueError("preparation admission requires a swap identity")
-        self._admit_once("preparation", identity.tick, identity.operation_id)
+        self._admit_within_limit("preparation", identity.tick, identity.operation_id)
 
-    def _admit_once(self, kind: str, tick: int, operation_id: str) -> None:
+    def _admit_within_limit(self, kind: str, tick: int, operation_id: str) -> None:
         self._require_writable()
+        limit = self.scope.config.get("max_slot_deployments_per_tick")
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("configured per-tick deployment limit is invalid")
         if self._directory is None:
-            key = (self.scope.controller_id, kind, tick)
-            existing = _MEMORY_ADMISSIONS.get(key)
-            if existing not in (None, operation_id):
-                raise ValueError(
-                    f"another {kind} operation is already admitted this tick"
+            matching = {
+                admitted
+                for (controller, admitted_kind, admitted_tick), admitted in (
+                    _MEMORY_ADMISSIONS.items()
                 )
-            _MEMORY_ADMISSIONS[key] = operation_id
+                if controller == self.scope.controller_id
+                and admitted_kind.startswith(f"{kind}:")
+                and admitted_tick == tick
+            }
+            if operation_id in matching:
+                return
+            if len(matching) >= limit:
+                raise ValueError(
+                    f"configured {kind} admission limit is reached this tick"
+                )
+            _MEMORY_ADMISSIONS[
+                (self.scope.controller_id, f"{kind}:{operation_id}", tick)
+            ] = operation_id
             return
         directory = self._directory / "admissions"
         if directory.exists() and directory.is_symlink():
             raise ValueError("operation admission directory must not be a symlink")
         directory.mkdir(mode=0o700, exist_ok=True)
-        path = directory / f"{kind}_tick_{tick}.json"
+        admitted = []
+        for existing_path in sorted(directory.glob(f"{kind}_tick_{tick}_*.json")):
+            if existing_path.is_symlink():
+                raise ValueError("operation admission must not be a symlink")
+            existing = json.loads(existing_path.read_text())
+            if (
+                not isinstance(existing, dict)
+                or existing.get("controller_id") != self.scope.controller_id
+                or existing.get("tick") != tick
+                or existing.get("kind") != kind
+                or not isinstance(existing.get("operation_id"), str)
+            ):
+                raise ValueError("operation admission content is invalid")
+            admitted.append(existing["operation_id"])
+        if operation_id in admitted:
+            return
+        if len(admitted) >= limit:
+            raise ValueError(f"configured {kind} admission limit is reached this tick")
+        path = directory / f"{kind}_tick_{tick}_{operation_id}.json"
         value = {
             "controller_id": self.scope.controller_id,
             "tick": tick,
             "kind": kind,
             "operation_id": operation_id,
         }
-        if path.exists():
-            if path.is_symlink():
-                raise ValueError("operation admission must not be a symlink")
-            existing = json.loads(path.read_text())
-            if existing != value:
-                raise ValueError(
-                    f"another {kind} operation is already admitted this tick"
-                )
-            return
         self._atomic_write(path, value, create_only=True)
 
     @classmethod

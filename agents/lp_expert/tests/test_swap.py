@@ -7,11 +7,26 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from conftest import POOL, SOL_MINT, WALLET, runtime_scope
+from conftest import (
+    POOL,
+    SOL_MINT,
+    WALLET,
+    pool_record,
+    runtime_scope,
+    strategy_config,
+)
 
 from agents.lp_expert.core import orca
 from agents.lp_expert.core.receipts import OperationIdentity
 from agents.lp_expert.routines import lp_swap
+
+
+def _candidate():
+    value, error = orca.normalize_record(pool_record(), "all", "volume24h", 1)
+    assert error is None
+    unique, rejected = orca.deduplicate([value])
+    assert not rejected
+    return orca.rank_pools(unique)[0]
 
 
 class Store:
@@ -20,6 +35,7 @@ class Store:
     next_identity_conflict = False
     next_preparation = None
     next_create_records = None
+    next_swap_records = None
     latest = None
 
     def __init__(self, scope):
@@ -29,6 +45,7 @@ class Store:
         self.identity_conflict = type(self).next_identity_conflict
         self.preparation = copy.deepcopy(type(self).next_preparation)
         self.create_records = copy.deepcopy(type(self).next_create_records or [])
+        self.swap_records = copy.deepcopy(type(self).next_swap_records or [])
         self.writes = []
         self.preparation_admissions = []
         type(self).latest = self
@@ -99,7 +116,9 @@ class Store:
     def list_records(self, operation_kind=None):
         if operation_kind == "create":
             return copy.deepcopy(self.create_records)
-        return []
+        if operation_kind == "swap":
+            return copy.deepcopy(self.swap_records)
+        return copy.deepcopy(self.create_records + self.swap_records)
 
 
 class Lock:
@@ -117,8 +136,8 @@ class GatewaySwap:
     def __init__(
         self,
         *,
-        quote_in="1.8",
-        quote_out="0.01",
+        quote_in="2.054723",
+        quote_out="0.011415132",
         execute_response=None,
         execute_error=None,
         status_response=None,
@@ -258,14 +277,9 @@ def _prep_config(**overrides):
         "controller_id": "lp_expert.orca_1",
         "operation_id": "prepare-operation-1",
         "reason": "inventory_preparation",
-        "pool_address": POOL,
-        "base_symbol": "SOL",
-        "base_mint": SOL_MINT,
-        "base_decimals": 9,
-        "amount": "0.01",
-        "slippage_pct": "1",
-        "max_quote_input": "2",
-        "plan_digest": "a" * 64,
+        "candidate": _candidate(),
+        "amount_quote": "4",
+        "range_half_width_pct": "10",
     }
     values.update(overrides)
     return lp_swap.Config(**values)
@@ -281,7 +295,6 @@ def _restoration_config(**overrides):
         "base_mint": SOL_MINT,
         "base_decimals": 9,
         "amount": "0.01",
-        "slippage_pct": "1",
         "attributed_base_amount": "0.01",
         "attribution_operation_id": "prepare-operation-1",
     }
@@ -299,7 +312,6 @@ def _cleanup_config(**overrides):
         "base_mint": SOL_MINT,
         "base_decimals": 9,
         "amount": "0.01",
-        "slippage_pct": "1",
         "attributed_base_amount": "0.01",
         "executor_id": "executor-closed",
         "position_id": "position-closed",
@@ -327,7 +339,12 @@ def _existing(config, *, phase, result=None, mutation_possible=True):
         account_name=scope.account_name,
         network=scope.network,
         wallet_address=scope.wallet_address,
-        intent=lp_swap._intent(config),
+        intent=lp_swap._intent(
+            lp_swap._resolve_request(
+                config,
+                SimpleNamespace(config=strategy_config()),
+            )
+        ),
     )
     now = "2026-08-06T00:00:00+00:00"
     return {
@@ -355,6 +372,7 @@ def _install(
     identity_conflict=False,
     preparation=None,
     create_records=None,
+    swap_records=None,
     mode="loop",
     stop_error=None,
 ):
@@ -369,6 +387,7 @@ def _install(
     Store.next_identity_conflict = identity_conflict
     Store.next_preparation = copy.deepcopy(preparation)
     Store.next_create_records = copy.deepcopy(create_records or [])
+    Store.next_swap_records = copy.deepcopy(swap_records or [])
     Store.latest = None
     Lock.entries = 0
     monkeypatch.setattr(lp_swap, "resolve_runtime", lambda _: scope)
@@ -392,6 +411,9 @@ def _install(
             ]
         )
 
+    async def refresh_candidate(candidate):
+        return copy.deepcopy(candidate)
+
     async def attach(payload, **_):
         return {**payload, "report_id": "swap-report", "report_error": None}
 
@@ -408,6 +430,7 @@ def _install(
     monkeypatch.setattr(lp_swap, "get_hummingbot_client", get_client)
     monkeypatch.setattr(lp_swap, "bind_wallet", bind)
     monkeypatch.setattr(lp_swap, "refresh_balances", refresh)
+    monkeypatch.setattr(lp_swap.orca, "refresh_candidate", refresh_candidate)
     monkeypatch.setattr(lp_swap, "ReceiptStore", Store)
     monkeypatch.setattr(lp_swap, "controller_mutation_lock", lambda _: Lock())
     monkeypatch.setattr(lp_swap, "read_prior_tick_stop", stop)
@@ -428,11 +451,14 @@ def test_preparation_swap_enforces_cap_and_serializes_one_mutation(
     result = _run(config)
 
     assert result["status"] == "confirmed"
-    assert result["receipt"]["input_amount"] == "1.8"
-    assert result["receipt"]["output_amount"] == "0.01"
+    assert result["receipt"]["input_amount"] == "2.054723"
+    assert result["receipt"]["output_amount"] == "0.011415132"
     assert result["retry_allowed"] is False
     assert len(client.gateway_swap.execute_calls) == 1
-    assert client.gateway_swap.execute_calls[0]["amount"] == config.amount
+    assert (
+        str(client.gateway_swap.execute_calls[0]["amount"])
+        == result["selection_plan"]["inventory"]["base_shortfall"]
+    )
     assert Store.latest.preparation_admissions == ["prepare-operation-1"]
     assert Lock.entries == 1
     assert result["report_id"] == "swap-report"
@@ -456,19 +482,18 @@ def test_preparation_quote_over_cap_is_rejected_before_submit(monkeypatch, tmp_p
     assert client.gateway_swap.execute_calls == []
 
 
-def test_preparation_declared_cap_cannot_exceed_frozen_executor_limit(
-    monkeypatch, tmp_path
-):
-    config = _prep_config(max_quote_input="5")
+def test_preparation_cap_is_derived_from_frozen_selection_plan(monkeypatch, tmp_path):
+    config = _prep_config()
     client = _install(monkeypatch, tmp_path, config=config)
 
     result = _run(config)
 
-    assert result["status"] == "rejected"
-    assert "frozen per-executor limit" in result["reason"]
-    assert result["mutation"] is False
-    assert client.gateway_swap.quote_calls == []
-    assert client.gateway_swap.execute_calls == []
+    assert result["status"] == "confirmed"
+    assert (
+        result["selection_plan"]["inventory"]["max_usdc_for_preparation_swap"]
+        == "2.075272"
+    )
+    assert client.gateway_swap.quote_calls[0]["slippage_pct"] == 1
 
 
 def test_sell_reserve_guard_blocks_exact_sol_attribution(monkeypatch, tmp_path):
@@ -504,8 +529,8 @@ def test_confirmed_operation_id_is_idempotent_and_never_resubmits(
     receipt = {
         "transaction_hash": "tx-existing",
         "status": "CONFIRMED",
-        "input_amount": "1.8",
-        "output_amount": "0.01",
+        "input_amount": "2.054723",
+        "output_amount": "0.011415132",
     }
     client = _install(
         monkeypatch,
@@ -555,8 +580,8 @@ def test_uncertain_operation_recovers_one_exact_gateway_history_match(
         {
             "transaction_hash": "tx-recovered",
             "status": "CONFIRMED",
-            "input_amount": "1.8",
-            "output_amount": "0.01",
+            "input_amount": "2.054723",
+            "output_amount": "0.011415132",
             "timestamp": "2026-08-06T00:00:01+00:00",
             "connector": "jupiter",
             "network": "solana-mainnet-beta",
@@ -587,8 +612,8 @@ def test_multiple_recovery_matches_are_manual_quarantine(monkeypatch, tmp_path):
     config = _prep_config()
     common = {
         "status": "CONFIRMED",
-        "input_amount": "1.8",
-        "output_amount": "0.01",
+        "input_amount": "2.054723",
+        "output_amount": "0.011415132",
         "timestamp": "2026-08-06T00:00:01+00:00",
         "connector": "jupiter",
         "network": "solana-mainnet-beta",
@@ -655,6 +680,57 @@ def test_other_uncertain_wallet_operation_blocks_swap(monkeypatch, tmp_path):
     assert "remains unresolved" in result["reason"]
     assert client.gateway_swap.quote_calls == []
     assert client.gateway_swap.execute_calls == []
+
+
+def test_second_preparation_waits_for_prior_confirmed_create(monkeypatch, tmp_path):
+    config = _prep_config(operation_id="prepare-operation-2")
+    client = _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        swap_records=[
+            {
+                "operation_id": "prepare-operation-1",
+                "phase": "confirmed",
+                "intent": {"reason": "inventory_preparation"},
+            }
+        ],
+    )
+
+    result = _run(config)
+
+    assert result["status"] == "manual_review"
+    assert "has not been consumed" in result["reason"]
+    assert client.gateway_swap.quote_calls == []
+    assert client.gateway_swap.execute_calls == []
+
+
+def test_second_preparation_can_follow_prior_confirmed_create(monkeypatch, tmp_path):
+    config = _prep_config(operation_id="prepare-operation-2")
+    client = _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        swap_records=[
+            {
+                "operation_id": "prepare-operation-1",
+                "phase": "confirmed",
+                "intent": {"reason": "inventory_preparation"},
+            }
+        ],
+        create_records=[
+            {
+                "operation_id": "create-operation-1",
+                "phase": "confirmed",
+                "intent": {"preparation_operation_id": "prepare-operation-1"},
+            }
+        ],
+    )
+
+    result = _run(config)
+
+    assert result["status"] == "confirmed"
+    assert len(client.gateway_swap.execute_calls) == 1
 
 
 def test_cleanup_sells_exact_residual_and_releases_capacity_only_on_confirmation(

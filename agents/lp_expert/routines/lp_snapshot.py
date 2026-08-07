@@ -12,13 +12,14 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from agents.lp_expert.core import orca
-from agents.lp_expert.core.planner import PlanRequest, build_plan
 from agents.lp_expert.core.portfolio import build_portfolio, fetch_all_executors
 from agents.lp_expert.core.receipts import ReceiptStore, read_prior_tick_stop
 from agents.lp_expert.core.reporting import TraceRecorder, attach_report
 from agents.lp_expert.core.runtime import (
     bind_wallet,
+    decimal_config,
     get_hummingbot_client,
+    integer_config,
     resolve_runtime,
 )
 
@@ -47,19 +48,12 @@ class Config(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     controller_id: StrictStr
     tick: StrictInt = Field(gt=0)
-    candidate_limit: StrictInt = Field(default=3, ge=1, le=5)
-    amount_quote: Decimal = Field(gt=0)
-    range_half_width_pct: Decimal = Field(gt=0)
-    prior_closes: list[PriorCloseEvidence] = Field(default_factory=list, max_length=3)
+    prior_closes: list[PriorCloseEvidence] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def identity(self) -> "Config":
         if not _CONTROLLER.fullmatch(self.controller_id):
             raise ValueError("controller_id must be an lp_expert.orca controller")
-        for field in ("amount_quote", "range_half_width_pct"):
-            value = Decimal(getattr(self, field))
-            if not value.is_finite():
-                raise ValueError(f"{field} must be finite")
         executor_ids = [item.executor_id for item in self.prior_closes]
         if len(executor_ids) != len(set(executor_ids)):
             raise ValueError("prior close executor identities must be unique")
@@ -84,28 +78,6 @@ Config.model_rebuild(
 )
 
 
-def _plan(
-    candidate: dict[str, Any], config: Config, limits: dict[str, Any]
-) -> dict[str, Any]:
-    token = candidate["token_a"]
-    return build_plan(
-        PlanRequest(
-            pool_address=candidate["pool_address"],
-            base_symbol=token["symbol"],
-            base_mint=token["mint"],
-            base_decimals=token["decimals"],
-            current_price=candidate["price"],
-            tick_spacing=candidate["tick_spacing"],
-            amount_quote=config.amount_quote,
-            range_half_width_pct=config.range_half_width_pct,
-            minimum_range_half_width_pct=limits["minimum_range_half_width_pct"],
-            maximum_range_half_width_pct=limits["maximum_range_half_width_pct"],
-            rebalance_threshold_pct=limits["rebalance_threshold_pct"],
-            max_slippage_pct=limits["max_slippage_pct"],
-        )
-    )
-
-
 async def run(config: Config, context: Any) -> str:
     trace = TraceRecorder()
     scope = None
@@ -115,11 +87,19 @@ async def run(config: Config, context: Any) -> str:
             scope = resolve_runtime(config.controller_id)
             if config.tick != scope.current_tick:
                 raise ValueError("requested tick is not the current engine tick")
+            max_open = integer_config(scope.config, "max_open_executors")
+            if len(config.prior_closes) > max_open:
+                raise ValueError(
+                    "prior close evidence exceeds current configured executor capacity"
+                )
+            candidate_limit = integer_config(scope.config, "candidate_scan_limit")
             facts.update(
                 {
                     "controller_id": scope.controller_id,
                     "execution_mode": scope.execution_mode,
                     "tick": scope.current_tick,
+                    "candidate_scan_limit": candidate_limit,
+                    "max_open_executors": max_open,
                 }
             )
         with trace.stage("client_and_wallet_binding") as facts:
@@ -225,7 +205,6 @@ async def run(config: Config, context: Any) -> str:
             "candidates": [],
         }
         token_rejections: list[dict[str, Any]] = []
-        plans: list[dict[str, Any]] = []
         with trace.stage("orca_candidate_scan") as facts:
             if not candidate_allowed:
                 facts.update(
@@ -239,17 +218,7 @@ async def run(config: Config, context: Any) -> str:
                     }
                 )
             else:
-                minimum = Decimal(str(scope.config["min_quote_per_executor"]))
-                maximum = Decimal(str(scope.config["max_quote_per_executor"]))
-                if not minimum <= config.amount_quote <= maximum:
-                    raise ValueError(
-                        "snapshot allocation is outside per-executor limits"
-                    )
-                if config.amount_quote > portfolio["remaining_quote_budget"]:
-                    raise ValueError(
-                        "snapshot allocation exceeds remaining quote budget"
-                    )
-                scan = await orca.scan_pools(config.candidate_limit)
+                scan = await orca.scan_pools(candidate_limit)
                 facts.update(scan["source_coverage"])
         with trace.stage("registered_token_filtering") as facts:
             if scan["status"] == "skipped":
@@ -271,18 +240,57 @@ async def run(config: Config, context: Any) -> str:
                         "rejected": len(token_rejections),
                     }
                 )
-        with trace.stage("candidate_plan_calculation") as facts:
-            if not scan["candidates"]:
-                facts.update({"_outcome": "skipped", "reason": "no valid candidates"})
-            else:
-                for candidate in scan["candidates"]:
-                    plans.append(
-                        {
-                            **candidate,
-                            "plan": _plan(candidate, config, dict(scope.config)),
-                        }
-                    )
-                facts["planned_candidates"] = len(plans)
+        minimum_allocation = decimal_config(
+            scope.config, "min_quote_per_executor", positive=True
+        )
+        capital_slots = int(portfolio["remaining_quote_budget"] // minimum_allocation)
+        configured_deployments = integer_config(
+            scope.config, "max_slot_deployments_per_tick"
+        )
+        available_deployments = (
+            min(
+                configured_deployments,
+                portfolio["available_slots"],
+                capital_slots,
+                len(scan["candidates"]),
+            )
+            if candidate_allowed
+            else 0
+        )
+        selection_constraints = {
+            "allocation_quote": {
+                "minimum": minimum_allocation,
+                "maximum": decimal_config(
+                    scope.config, "max_quote_per_executor", positive=True
+                ),
+                "remaining_portfolio_budget": portfolio["remaining_quote_budget"],
+            },
+            "range_half_width_pct": {
+                "minimum": decimal_config(
+                    scope.config,
+                    "minimum_range_half_width_pct",
+                    positive=True,
+                ),
+                "maximum": decimal_config(
+                    scope.config,
+                    "maximum_range_half_width_pct",
+                    positive=True,
+                ),
+            },
+            "maximum_slippage_pct": decimal_config(
+                scope.config, "max_slippage_pct", positive=True
+            ),
+            "configured_deployments_per_tick": configured_deployments,
+            "available_deployments_this_tick": available_deployments,
+        }
+        with trace.stage("candidate_selection_constraints") as facts:
+            facts.update(
+                {
+                    "candidate_count": len(scan["candidates"]),
+                    "capital_slots": capital_slots,
+                    "available_deployments": available_deployments,
+                }
+            )
         status = (
             "complete" if scan["status"] in {"complete", "skipped"} else "incomplete"
         )
@@ -300,10 +308,11 @@ async def run(config: Config, context: Any) -> str:
                 if key not in {"candidates", "deployable"}
             },
             "token_rejections": token_rejections,
-            "candidates": plans,
+            "selection_constraints": selection_constraints,
+            "candidates": scan["candidates"],
             "deployable": status == "complete"
             and candidate_allowed
-            and bool(plans)
+            and available_deployments > 0
             and scan["deployable"],
             "cleanup_tick": cleanup_tick,
         }

@@ -4,7 +4,7 @@ import asyncio
 from dataclasses import replace
 
 import pytest
-from conftest import POOL, SOL_MINT, WALLET, runtime_scope
+from conftest import POOL, SOL_MINT, WALLET, runtime_scope, strategy_config
 
 from agents.lp_expert.core import receipts
 
@@ -110,14 +110,22 @@ def test_uncertainty_is_durable_and_blocks_another_wallet_mutation(tmp_path):
         )
 
 
-def test_preparation_and_create_admission_are_one_per_tick(tmp_path):
-    store = receipts.ReceiptStore(runtime_scope(tmp_path, tick=4))
+def test_preparation_and_create_admission_follow_configured_tick_limit(tmp_path):
+    store = receipts.ReceiptStore(
+        runtime_scope(
+            tmp_path,
+            tick=4,
+            config=strategy_config(max_slot_deployments_per_tick=2),
+        )
+    )
     first = _identity(store, "preparation-one")
     second = _identity(store, "preparation-two")
+    third = _identity(store, "preparation-three")
     store.admit_preparation(first)
     store.admit_preparation(first)
-    with pytest.raises(ValueError, match="already admitted this tick"):
-        store.admit_preparation(second)
+    store.admit_preparation(second)
+    with pytest.raises(ValueError, match="limit is reached"):
+        store.admit_preparation(third)
 
     create_one = store.identity(
         operation_id="create-operation-one",
@@ -129,10 +137,16 @@ def test_preparation_and_create_admission_are_one_per_tick(tmp_path):
         operation_kind="create",
         intent={"pool_address": "pool-two"},
     )
+    create_three = store.identity(
+        operation_id="create-operation-three",
+        operation_kind="create",
+        intent={"pool_address": "pool-three"},
+    )
     assert store.admit_create(create_one)["phase"] == "admitted"
     assert store.admit_create(create_one)["phase"] == "admitted"
-    with pytest.raises(ValueError, match="already admitted this tick"):
-        store.admit_create(create_two)
+    assert store.admit_create(create_two)["phase"] == "admitted"
+    with pytest.raises(ValueError, match="limit is reached"):
+        store.admit_create(create_three)
 
 
 def test_controller_mutation_lock_serializes_same_controller():
@@ -163,13 +177,15 @@ def test_controller_mutation_lock_serializes_same_controller():
 def test_cleanup_requires_one_exact_prior_tick_native_stop(tmp_path):
     snapshots = tmp_path / "snapshots"
     snapshots.mkdir()
-    (snapshots / "snapshot_2.md").write_text("""### tool manage_executors
+    (snapshots / "snapshot_2.md").write_text(
+        """### tool manage_executors
 
 **Input:**
 ```json
 {"action":"stop","controller_id":"lp_expert.orca_1","executor_id":"executor-1","keep_position":false}
 ```
-""")
+"""
+    )
     scope = runtime_scope(tmp_path, tick=3)
 
     result = receipts.read_prior_tick_stop(scope, "executor-1", 2)

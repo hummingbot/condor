@@ -11,6 +11,7 @@ from conftest import (
     executor_row,
     pool_record,
     runtime_scope,
+    strategy_config,
 )
 
 from agents.lp_expert.core import orca, planner
@@ -22,24 +23,23 @@ def _candidate():
     assert error is None
     unique, rejected = orca.deduplicate([value])
     assert not rejected
-    candidate = orca.rank_pools(unique)[0]
-    plan = planner.build_plan(
-        planner.PlanRequest(
-            pool_address=POOL,
-            base_symbol="SOL",
-            base_mint=SOL_MINT,
-            base_decimals=9,
-            current_price="180",
-            tick_spacing=64,
-            amount_quote="4",
-            range_half_width_pct="10",
-            minimum_range_half_width_pct="0.5",
-            maximum_range_half_width_pct="20",
-            rebalance_threshold_pct="1",
-            max_slippage_pct="1",
-        )
+    return orca.rank_pools(unique)[0]
+
+
+def _selection_plan(candidate):
+    return planner.build_candidate_plan(
+        candidate,
+        amount_quote="4",
+        range_half_width_pct="10",
+        strategy_config={
+            "min_quote_per_executor": "3",
+            "max_quote_per_executor": "4",
+            "minimum_range_half_width_pct": "0.5",
+            "maximum_range_half_width_pct": "20",
+            "rebalance_threshold_pct": "1",
+            "max_slippage_pct": "1",
+        },
     )
-    return {**candidate, "plan": plan}
 
 
 class Store:
@@ -58,7 +58,7 @@ class Store:
         self.receipt_intent = receipt_intent
 
     def read_confirmed_swap(self, operation_id):
-        plan = _candidate()["plan"]
+        plan = _selection_plan(_candidate())
         return {
             "operation_id": operation_id,
             "phase": "confirmed",
@@ -67,7 +67,11 @@ class Store:
                 "reason": "inventory_preparation",
                 "side": "BUY",
                 "trading_pair": "SOL-USDC",
+                "pool_address": POOL,
                 "base_mint": SOL_MINT,
+                "plan_digest": plan["plan_digest"],
+                "amount_quote": "4",
+                "range_half_width_pct": "10",
             },
             "result": {
                 "receipt": {
@@ -101,6 +105,16 @@ class Store:
 
     def unresolved_operations(self):
         return copy.deepcopy(self.unresolved)
+
+    def list_records(self, operation_kind=None):
+        values = list(self.records.values())
+        if operation_kind is None:
+            return copy.deepcopy(values)
+        return [
+            copy.deepcopy(value)
+            for value in values
+            if value.get("operation_kind", "create") == operation_kind
+        ]
 
     def admit_create(self, identity):
         self.admissions.append(identity.operation_id)
@@ -230,29 +244,27 @@ def _config(candidate):
         tick=2,
         operation_id="create-operation-1",
         candidate=candidate,
-        snapshot_plan_digest=candidate["plan"]["plan_digest"],
+        amount_quote="4",
+        range_half_width_pct="10",
         preparation_operation_id="prepare-operation-1",
     )
 
 
 def _expected_executor_config(candidate):
-    snapshot = candidate["plan"]
-    final = planner.build_plan(
-        planner.PlanRequest(
-            pool_address=candidate["pool_address"],
-            base_symbol=candidate["token_a"]["symbol"],
-            base_mint=candidate["token_a"]["mint"],
-            base_decimals=candidate["token_a"]["decimals"],
-            current_price=candidate["price"],
-            tick_spacing=candidate["tick_spacing"],
-            amount_quote=snapshot["inputs"]["amount_quote"],
-            range_half_width_pct=snapshot["inputs"]["range_half_width_pct"],
-            minimum_range_half_width_pct="0.5",
-            maximum_range_half_width_pct="20",
-            rebalance_threshold_pct="1",
-            max_slippage_pct="1",
-            attributed_base_amount=snapshot["inventory"]["base_amount"],
-        )
+    snapshot = _selection_plan(candidate)
+    final = planner.build_candidate_plan(
+        candidate,
+        amount_quote="4",
+        range_half_width_pct="10",
+        strategy_config={
+            "min_quote_per_executor": "3",
+            "max_quote_per_executor": "4",
+            "minimum_range_half_width_pct": "0.5",
+            "maximum_range_half_width_pct": "20",
+            "rebalance_threshold_pct": "1",
+            "max_slippage_pct": "1",
+        },
+        attributed_base_amount=snapshot["inventory"]["base_amount"],
     )
     return {**final["executor_config"], "controller_id": "lp_expert.orca_1"}
 
@@ -266,8 +278,9 @@ def _install(
     refresh_error=None,
     existing=None,
     conflict=None,
+    config=None,
 ):
-    scope = runtime_scope(tmp_path, tick=2)
+    scope = runtime_scope(tmp_path, tick=2, config=config)
     client = SimpleNamespace(
         executors=executors or Executors(),
         gateway=Gateway(),
@@ -287,7 +300,7 @@ def _install(
     async def refresh(candidate):
         if refresh_error:
             raise refresh_error
-        return {key: value for key, value in candidate.items() if key != "plan"}
+        return copy.deepcopy(candidate)
 
     async def attach(payload, **_):
         return {**payload, "report_id": "create-report", "report_error": None}
@@ -343,7 +356,7 @@ def test_create_rejects_receipt_attributed_to_another_pool(monkeypatch, tmp_path
     result = _run(_config(candidate))
 
     assert result["status"] == "rejected_before_submit"
-    assert "not attributed to this candidate" in result["reason"]
+    assert "not attributed to this selection" in result["reason"]
     assert result["mutation"] is False
     assert client.executors.create_calls == []
 
@@ -395,6 +408,36 @@ def test_create_rejects_full_three_executor_capacity(monkeypatch, tmp_path):
     assert result["status"] == "rejected_before_submit"
     assert "capacity is full" in result["reason"]
     assert client.executors.create_calls == []
+
+
+def test_create_capacity_is_not_hardcoded_to_three(monkeypatch, tmp_path):
+    rows = [
+        executor_row(f"executor-{index}", pool_address=f"pool-{index}")
+        for index in range(1, 4)
+    ]
+    configured = strategy_config(
+        total_amount_quote=30,
+        max_open_executors=5,
+        max_slot_deployments_per_tick=2,
+        candidate_scan_limit=5,
+        risk_limits={
+            "max_position_size_quote": 30,
+            "max_open_executors": 5,
+            "max_drawdown_pct": -1,
+            "shutdown_drawdown_pct": -1,
+        },
+    )
+    client, _ = _install(
+        monkeypatch,
+        tmp_path,
+        executors=Executors(rows=rows),
+        config=configured,
+    )
+
+    result = _run(_config(_candidate()))
+
+    assert result["status"] == "confirmed"
+    assert len(client.executors.create_calls) == 1
 
 
 def test_create_rejects_aggregate_capital_before_capacity_is_full(

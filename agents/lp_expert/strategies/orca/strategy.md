@@ -11,6 +11,7 @@ default_config:
   total_amount_quote: 10
   max_open_executors: 3
   max_slot_deployments_per_tick: 1
+  candidate_scan_limit: 3
   min_quote_per_executor: 3
   max_quote_per_executor: 5
   max_slippage_pct: 1
@@ -98,7 +99,7 @@ mutation.
    - post-close verification due from an earlier tick;
    - global stop latch and mandatory per-executor close triggers;
    - healthy portfolio supervision;
-   - one new deployment when capacity is clean.
+   - one or more serialized deployments when capacity is clean.
 5. Choose `DEPLOY`, `CLOSE`, or `HOLD`.
 6. In loop mode, write exactly one journal entry. For a mutation it is the
    pre-mutation intent with exact controller, operation IDs, targets, ordered
@@ -135,35 +136,59 @@ DEPLOY is allowed only when the snapshot proves:
 - no session stop latch, unresolved mutation, pending cleanup, foreign live
   wallet scope, or conflicting wallet mutation;
 - fewer than the configured maximum current-controller executors;
-- clean aggregate capital and one available virtual slot;
+- clean aggregate capital and at least one available virtual slot;
 - no active or reconciling executor in the selected pool;
-- one technically complete registered-token Orca candidate and valid bounded
-  range/inventory plan.
+- at least one technically complete registered-token Orca candidate and
+  returned selection bounds.
 
-The shipped portfolio may hold three executors but may prepare and create only
-one new executor per tick. Do not treat this cap as a quota.
+The active frozen config controls executor capacity, candidate scan size, and
+the maximum deployments per tick. The shipped values are examples, not
+hardcoded policy. Never exceed
+`selection_constraints.available_deployments_this_tick`.
 
-1. Compare the compact candidate set and select one candidate or HOLD. The LLM
-   owns the candidate, allocation, and strategic range intent inside returned
-   limits.
-2. In loop mode, journal the exact candidate, plan identity, swap operation ID
-   when needed, and create operation ID before the first mutation.
-3. If the plan requires inventory preparation, call `lp_swap` once for the exact
-   bounded Jupiter BUY. Continue only from its exact confirmed attributed
-   receipt. `submitted` or any uncertain state ends mutation for this tick.
-4. Call `lp_create` once with the selected snapshot evidence and, when
-   applicable, the exact confirmed preparation receipt. It refreshes technical
-   feasibility, schema, capacity, exposure, pool occupancy, and balances before
-   one create.
+1. Compare the compact candidate set and select an ordered set of distinct
+   candidates, allocations, and strategic range half-widths inside the returned
+   bounds, or HOLD. The sum of selected allocations must fit the returned
+   remaining portfolio budget.
+2. In loop mode, journal every selected candidate and the ordered swap/create
+   operation IDs before the first mutation.
+3. For each selection in order, call `lp_swap` once for its exact bounded
+   Jupiter BUY. The routine derives token identity, base amount, quote cap,
+   slippage, and the deterministic selection plan from the candidate, selected
+   allocation/range, and frozen config. Continue only from its exact confirmed
+   attributed receipt.
+4. Immediately call `lp_create` for that same selection and preparation
+   operation. It reconstructs the selection plan, verifies the receipt, refreshes
+   price and token registration, replans, and revalidates schema, capacity,
+   exposure, pool occupancy, and balances before one create.
 5. If create reconciliation needs native evidence, use one exact
    `manage_executors(action="search", executor_id=...)` call for the returned
    identity. Never broaden the search or inspect residual-position summaries.
-6. A confirmed preparation BUY whose create was definitely rejected remains
+6. Start the next selection only after the prior create is confirmed. A
+   submitted, uncertain, ambiguous, manual-review, or rejected chain ends
+   deployment for the tick.
+7. A confirmed preparation BUY whose create was definitely rejected remains
    attributed inventory. Leave it quarantined for an exact restoration path;
-   do not prepare another candidate in the same tick.
+   do not prepare another candidate.
 
-Do not call a second candidate after deterministic rejection. A later tick may
-reassess an alternate from a fresh snapshot.
+A later tick may reassess an alternate from a fresh snapshot.
+
+### Exact routine inputs
+
+Use only these fields; do not copy derived plan or technical values into a
+routine request:
+
+- `lp_snapshot`: `controller_id`, `tick`, and `prior_closes`.
+- preparation `lp_swap`: `controller_id`, `operation_id`,
+  `reason="inventory_preparation"`, the unchanged selected `candidate`,
+  `amount_quote`, and `range_half_width_pct`.
+- `lp_create`: `controller_id`, `tick`, `operation_id`, the same unchanged
+  `candidate`, the same `amount_quote` and `range_half_width_pct`, and
+  `preparation_operation_id`.
+
+Do not send `candidate_limit`, `plan`, `plan_digest`, calculated base amount,
+quote cap, token identity fields, or slippage for preparation. Those values are
+derived and verified inside the routines from current frozen config.
 
 ## CLOSE — Stop Tick
 

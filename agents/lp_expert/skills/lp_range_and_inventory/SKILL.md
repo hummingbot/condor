@@ -13,18 +13,19 @@ math, balances, or swap receipts.
 1. Choose strategic range intent from current volatility, liquidity
    distribution, fee opportunity, expected holding horizon, active risk posture,
    and the candidate's role in the existing portfolio.
-2. Compare only range alternatives already bounded and tick-aligned by
-   `lp_snapshot`. Do not invent price bounds, ticks, token decimals, or
-   feasibility when routine evidence is incomplete.
+2. Select a range half-width only inside `lp_snapshot`'s returned bounds.
+   `lp_swap` constructs the initial tick-aligned plan and `lp_create` refreshes
+   it. Do not invent price bounds, ticks, token decimals, or feasibility.
 3. Treat the selected allocation as a maximum commitment. Hard capital,
    slippage, reserve, and range limits remain authoritative and cannot be widened
    by qualitative judgment.
 4. Ignore unrelated wallet inventory. A base amount is usable only when one
    exact current-session preparation receipt attributes it to the selected
    candidate.
-5. Use `lp_swap` only for the exact preparation or restoration transition
-   already selected by the Strategy. Never infer an amount from total wallet
-   balance.
+5. For preparation, pass only the unchanged candidate plus selected allocation
+   and range half-width. Let `lp_swap` derive the exact token identity, base
+   amount, quote cap, slippage, and plan. Never infer an amount from total
+   wallet balance.
 6. After a confirmed preparation swap, let `lp_create` refresh price, align the
    final range, validate amounts and schema, and decide technical admission.
    Interpret a changed valid range; do not bypass a deterministic rejection.

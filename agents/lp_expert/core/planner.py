@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from decimal import ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
@@ -123,6 +123,57 @@ class PlanRequest(BaseModel):
         if price <= 0:
             raise ValueError("current_price must be positive")
         return self
+
+
+def build_candidate_plan(
+    candidate: dict[str, Any],
+    *,
+    amount_quote: Decimal,
+    range_half_width_pct: Decimal,
+    strategy_config: Mapping[str, Any],
+    attributed_base_amount: Decimal | None = None,
+) -> dict[str, Any]:
+    """Build one selected candidate plan from current frozen Strategy bounds."""
+
+    if not isinstance(candidate, dict):
+        raise ValueError("selected candidate must be an object")
+    token = candidate.get("token_a")
+    if not isinstance(token, dict):
+        raise ValueError("selected candidate base-token identity is unavailable")
+    minimum = _decimal(
+        strategy_config.get("min_quote_per_executor"),
+        "configured minimum allocation",
+        positive=True,
+    )
+    maximum = _decimal(
+        strategy_config.get("max_quote_per_executor"),
+        "configured maximum allocation",
+        positive=True,
+    )
+    selected = _decimal(amount_quote, "selected amount_quote", positive=True)
+    if not minimum <= selected <= maximum:
+        raise ValueError("selected allocation is outside current configured bounds")
+    return build_plan(
+        PlanRequest(
+            pool_address=candidate.get("pool_address"),
+            base_symbol=token.get("symbol"),
+            base_mint=token.get("mint"),
+            base_decimals=token.get("decimals"),
+            current_price=candidate.get("price"),
+            tick_spacing=candidate.get("tick_spacing"),
+            amount_quote=selected,
+            range_half_width_pct=range_half_width_pct,
+            minimum_range_half_width_pct=strategy_config.get(
+                "minimum_range_half_width_pct"
+            ),
+            maximum_range_half_width_pct=strategy_config.get(
+                "maximum_range_half_width_pct"
+            ),
+            rebalance_threshold_pct=strategy_config.get("rebalance_threshold_pct"),
+            max_slippage_pct=strategy_config.get("max_slippage_pct"),
+            attributed_base_amount=attributed_base_amount,
+        )
+    )
 
 
 def _price_from_tick(tick: int, decimal_factor: float) -> Decimal:

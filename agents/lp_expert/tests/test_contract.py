@@ -68,6 +68,32 @@ def test_dynamic_discovery_has_exactly_three_public_routines():
     assert all(callable(info.run_fn) for info in discovered.values())
 
 
+def test_public_routine_schemas_keep_agent_inputs_small_and_explicit():
+    discovered = discover_routines_from_path(
+        ROOT / "routines", agent_slug="lp_expert", force_reload=True
+    )
+    schemas = {
+        name: info.config_class.model_json_schema() for name, info in discovered.items()
+    }
+    assert set(schemas["lp_snapshot"]["properties"]) == {
+        "controller_id",
+        "tick",
+        "prior_closes",
+    }
+    assert set(schemas["lp_create"]["properties"]) == {
+        "controller_id",
+        "tick",
+        "operation_id",
+        "candidate",
+        "amount_quote",
+        "range_half_width_pct",
+        "preparation_operation_id",
+    }
+    swap_fields = set(schemas["lp_swap"]["properties"])
+    assert {"candidate", "amount_quote", "range_half_width_pct"} <= swap_fields
+    assert {"slippage_pct", "plan", "plan_digest"} & swap_fields == set()
+
+
 def test_old_public_routine_modules_and_names_are_absent():
     public_files = {
         path.stem
@@ -131,7 +157,7 @@ def test_ordinary_complete_snapshot_path_reads_no_skill():
     assert "Read at most the one relevant playbook" in strategy
 
 
-def test_strategy_and_example_ship_three_executor_one_deployment_limits():
+def test_strategy_and_example_ship_configurable_capacity_defaults():
     _, strategy = _objects()
     engine = load_full_config(strategy.dir, strategy.default_config)
     example = yaml.safe_load(
@@ -140,6 +166,7 @@ def test_strategy_and_example_ship_three_executor_one_deployment_limits():
     for config in (strategy.default_config, engine, example):
         assert config["max_open_executors"] == 3
         assert config["max_slot_deployments_per_tick"] == 1
+        assert config["candidate_scan_limit"] == 3
         assert config["risk_limits"]["max_open_executors"] == 3
 
 
@@ -152,8 +179,11 @@ def test_prompt_has_only_three_routine_paths_and_next_tick_cleanup():
     assert "first following tick" in prompt
     assert "material attributable residual" in prompt
     assert "Never sell the wallet's total base balance" in compact
-    assert "at most one new executor per tick" in prompt
-    assert "limit is three" in prompt
+    assert "available_deployments_this_tick" in prompt
+    assert "Start the next selection only after the prior create is confirmed" in prompt
+    assert "Treat shipped capacity, deployment, and scan values as defaults" in prompt
+    assert "candidate_limit" in prompt
+    assert "do not send" in prompt.casefold()
 
 
 def test_dry_run_prompt_is_observation_only():

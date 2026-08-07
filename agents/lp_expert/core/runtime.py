@@ -35,6 +35,7 @@ _REQUIRED_CONFIG = {
     "total_amount_quote",
     "max_open_executors",
     "max_slot_deployments_per_tick",
+    "candidate_scan_limit",
     "min_quote_per_executor",
     "max_quote_per_executor",
     "max_slippage_pct",
@@ -155,8 +156,9 @@ def _validate_config(value: Any, mode: str) -> dict[str, Any]:
     total = decimal_config(value, "total_amount_quote", positive=True)
     minimum = decimal_config(value, "min_quote_per_executor", positive=True)
     maximum = decimal_config(value, "max_quote_per_executor", positive=True)
-    max_open = integer_config(value, "max_open_executors", maximum=3)
-    deployments = integer_config(value, "max_slot_deployments_per_tick", maximum=1)
+    max_open = integer_config(value, "max_open_executors")
+    deployments = integer_config(value, "max_slot_deployments_per_tick")
+    candidate_scan_limit = integer_config(value, "candidate_scan_limit")
     slippage = decimal_config(value, "max_slippage_pct", positive=True)
     reserve = decimal_config(value, "min_sol_reserve", positive=True)
     dust = decimal_config(value, "residual_base_dust_quote", non_negative=True)
@@ -180,14 +182,13 @@ def _validate_config(value: Any, mode: str) -> dict[str, Any]:
     risks = value.get("risk_limits")
     if not isinstance(risks, dict):
         raise ValueError("configured risk_limits are unavailable")
-    risk_open_raw = risks.get("max_open_executors")
     try:
         risk_position = Decimal(str(risks.get("max_position_size_quote")))
-        risk_open = int(risk_open_raw)
     except (TypeError, ValueError, ArithmeticError) as exc:
         raise ValueError(
             "configured position or open-executor risk is invalid"
         ) from exc
+    risk_open = integer_config(risks, "max_open_executors")
     try:
         soft_drawdown = Decimal(str(risks.get("max_drawdown_pct")))
         shutdown_drawdown = Decimal(str(risks.get("shutdown_drawdown_pct", -1)))
@@ -206,14 +207,13 @@ def _validate_config(value: Any, mode: str) -> dict[str, Any]:
     if (
         value.get("default_risk_posture")
         not in {"steady", "balanced", "opportunistic", "exploratory"}
-        or deployments != 1
+        or deployments > max_open
+        or candidate_scan_limit < deployments
         or minimum > maximum
         or maximum > total
-        or minimum * max_open > total
         or not risk_position.is_finite()
         or risk_position <= 0
         or total > risk_position
-        or isinstance(risk_open_raw, bool)
         or risk_open < max_open
         or not Decimal("0") < slippage <= Decimal("100")
         or reserve <= 0

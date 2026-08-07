@@ -10,7 +10,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
-from agents.lp_expert.core import reporting
+from agents.lp_expert.core import orca, reporting
+from agents.lp_expert.core.planner import build_candidate_plan
 from agents.lp_expert.core.portfolio import (
     NATIVE_SWAP_FAILED,
     NATIVE_SWAP_PENDING,
@@ -31,6 +32,7 @@ from agents.lp_expert.core.runtime import (
     bind_wallet,
     decimal_config,
     get_hummingbot_client,
+    integer_config,
     refresh_balances,
     resolve_runtime,
 )
@@ -54,15 +56,16 @@ class Config(BaseModel):
         "inventory_restoration",
         "post_close_residual_cleanup",
     ]
-    pool_address: StrictStr
-    base_symbol: StrictStr
-    base_mint: StrictStr
-    base_decimals: StrictInt = Field(ge=0, le=18)
-    amount: Decimal = Field(gt=0)
-    slippage_pct: Decimal = Field(gt=0, le=100)
+    candidate: dict[str, Any] | None = None
+    amount_quote: Decimal | None = Field(default=None, gt=0)
+    range_half_width_pct: Decimal | None = Field(default=None, gt=0)
+    pool_address: StrictStr | None = None
+    base_symbol: StrictStr | None = None
+    base_mint: StrictStr | None = None
+    base_decimals: StrictInt | None = Field(default=None, ge=0, le=18)
+    amount: Decimal | None = Field(default=None, gt=0)
     max_quote_input: Decimal | None = Field(default=None, gt=0)
     attributed_base_amount: Decimal | None = Field(default=None, gt=0)
-    plan_digest: StrictStr | None = None
     attribution_operation_id: StrictStr | None = None
     executor_id: StrictStr | None = None
     position_id: StrictStr | None = None
@@ -70,65 +73,75 @@ class Config(BaseModel):
 
     @model_validator(mode="after")
     def contract(self) -> "Config":
-        strings = (
-            self.controller_id,
-            self.operation_id,
-            self.pool_address,
-            self.base_symbol,
-            self.base_mint,
-        )
+        strings = (self.controller_id, self.operation_id)
         if not all(value and value == value.strip() for value in strings):
             raise ValueError("swap identity fields must be exact and non-empty")
-        if not self.amount.is_finite() or not self.slippage_pct.is_finite():
-            raise ValueError("swap amount and slippage must be finite")
-        if self.base_mint == QUOTE_MINT or self.base_symbol.upper() == "USDC":
-            raise ValueError("swap base must not be canonical USDC")
+        numeric = (
+            self.amount,
+            self.amount_quote,
+            self.range_half_width_pct,
+            self.max_quote_input,
+            self.attributed_base_amount,
+        )
+        if any(value is not None and not value.is_finite() for value in numeric):
+            raise ValueError("swap numeric values must be finite")
         if self.reason == "inventory_preparation":
             if (
-                self.max_quote_input is None
+                not isinstance(self.candidate, dict)
+                or self.amount_quote is None
+                or self.range_half_width_pct is None
+                or self.pool_address is not None
+                or self.base_symbol is not None
+                or self.base_mint is not None
+                or self.base_decimals is not None
+                or self.amount is not None
+                or self.max_quote_input is not None
                 or self.attributed_base_amount is not None
                 or self.attribution_operation_id is not None
                 or self.executor_id is not None
                 or self.position_id is not None
                 or self.closed_tick is not None
-                or not self.plan_digest
-                or len(self.plan_digest) != 64
-                or any(
-                    character not in "0123456789abcdef"
-                    for character in self.plan_digest
-                )
             ):
-                raise ValueError("inventory preparation identity is incomplete")
+                raise ValueError("inventory preparation selection is incomplete")
         elif self.reason == "inventory_restoration":
             if (
-                self.max_quote_input is not None
+                self.candidate is not None
+                or self.amount_quote is not None
+                or self.range_half_width_pct is not None
+                or self.max_quote_input is not None
                 or self.attributed_base_amount != self.amount
                 or not self.attribution_operation_id
                 or self.executor_id is not None
                 or self.position_id is not None
                 or self.closed_tick is not None
-                or self.plan_digest is not None
             ):
                 raise ValueError("inventory restoration attribution is incomplete")
         elif (
-            self.max_quote_input is not None
+            self.candidate is not None
+            or self.amount_quote is not None
+            or self.range_half_width_pct is not None
+            or self.max_quote_input is not None
             or self.attributed_base_amount != self.amount
             or self.attribution_operation_id is not None
             or not self.executor_id
             or not self.position_id
             or self.closed_tick is None
-            or self.plan_digest is not None
         ):
             raise ValueError("post-close cleanup attribution is incomplete")
+        if self.reason != "inventory_preparation":
+            identity = (self.pool_address, self.base_symbol, self.base_mint)
+            if (
+                not all(
+                    isinstance(value, str) and value and value == value.strip()
+                    for value in identity
+                )
+                or self.base_decimals is None
+                or self.amount is None
+            ):
+                raise ValueError("swap token identity is incomplete")
+            if self.base_mint == QUOTE_MINT or self.base_symbol.upper() == "USDC":
+                raise ValueError("swap base must not be canonical USDC")
         return self
-
-    @property
-    def side(self) -> Literal["BUY", "SELL"]:
-        return "BUY" if self.reason == "inventory_preparation" else "SELL"
-
-    @property
-    def trading_pair(self) -> str:
-        return f"{self.base_symbol}-USDC"
 
 
 # Agent-local routines are loaded from file without module registration.
@@ -138,8 +151,113 @@ Config.model_rebuild(
         "StrictInt": StrictInt,
         "Literal": Literal,
         "Decimal": Decimal,
+        "Any": Any,
     }
 )
+
+
+class SwapRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    controller_id: str
+    operation_id: str
+    reason: str
+    pool_address: str
+    base_symbol: str
+    base_mint: str
+    base_decimals: int
+    amount: Decimal
+    slippage_pct: Decimal
+    max_quote_input: Decimal | None
+    attributed_base_amount: Decimal | None
+    attribution_operation_id: str | None
+    executor_id: str | None
+    position_id: str | None
+    closed_tick: int | None
+    amount_quote: Decimal | None = None
+    range_half_width_pct: Decimal | None = None
+    plan: dict[str, Any] | None = None
+
+    @property
+    def side(self) -> Literal["BUY", "SELL"]:
+        return "BUY" if self.reason == "inventory_preparation" else "SELL"
+
+    @property
+    def trading_pair(self) -> str:
+        return f"{self.base_symbol}-USDC"
+
+    @property
+    def plan_digest(self) -> str | None:
+        return self.plan.get("plan_digest") if isinstance(self.plan, dict) else None
+
+
+# Agent-local routines are loaded from file without module registration.
+SwapRequest.model_rebuild(
+    _types_namespace={
+        "Decimal": Decimal,
+        "Any": Any,
+    }
+)
+
+
+def _resolve_request(config: Config, scope: RuntimeScope) -> SwapRequest:
+    """Derive technical swap values from one selected candidate and frozen policy."""
+
+    slippage = decimal_config(scope.config, "max_slippage_pct", positive=True)
+    if config.reason == "inventory_preparation":
+        plan = build_candidate_plan(
+            config.candidate,
+            amount_quote=config.amount_quote,
+            range_half_width_pct=config.range_half_width_pct,
+            strategy_config=scope.config,
+        )
+        identity = plan["identity"]
+        inventory = plan["inventory"]
+        amount = _decimal(
+            inventory["base_shortfall"], "planned base shortfall", positive=True
+        )
+        quote_cap = _decimal(
+            inventory["max_usdc_for_preparation_swap"],
+            "planned preparation quote cap",
+            positive=True,
+        )
+        return SwapRequest(
+            controller_id=config.controller_id,
+            operation_id=config.operation_id,
+            reason=config.reason,
+            pool_address=identity["pool_address"],
+            base_symbol=identity["base_symbol"],
+            base_mint=identity["base_mint"],
+            base_decimals=identity["base_decimals"],
+            amount=amount,
+            slippage_pct=slippage,
+            max_quote_input=quote_cap,
+            attributed_base_amount=None,
+            attribution_operation_id=None,
+            executor_id=None,
+            position_id=None,
+            closed_tick=None,
+            amount_quote=config.amount_quote,
+            range_half_width_pct=config.range_half_width_pct,
+            plan=plan,
+        )
+    return SwapRequest(
+        controller_id=config.controller_id,
+        operation_id=config.operation_id,
+        reason=config.reason,
+        pool_address=str(config.pool_address),
+        base_symbol=str(config.base_symbol),
+        base_mint=str(config.base_mint),
+        base_decimals=int(config.base_decimals),
+        amount=config.amount,
+        slippage_pct=slippage,
+        max_quote_input=None,
+        attributed_base_amount=config.attributed_base_amount,
+        attribution_operation_id=config.attribution_operation_id,
+        executor_id=config.executor_id,
+        position_id=config.position_id,
+        closed_tick=config.closed_tick,
+    )
 
 
 class _ManualReview(Exception):
@@ -257,7 +375,7 @@ def _quote_values(value: Any) -> tuple[Decimal, Decimal]:
 
 
 async def _quote(
-    client: Any, scope: RuntimeScope, config: Config
+    client: Any, scope: RuntimeScope, config: SwapRequest
 ) -> tuple[Any, Decimal, Decimal]:
     value = await client.gateway_swap.get_swap_quote(
         connector=scope.swap_connector,
@@ -273,7 +391,7 @@ async def _quote(
 
 def _receipt(
     value: Any,
-    config: Config,
+    config: SwapRequest,
     scope: RuntimeScope,
     *,
     require_identity: bool,
@@ -331,7 +449,7 @@ def _receipt(
     }
 
 
-def _receipt_issue(receipt: dict[str, Any], config: Config) -> str | None:
+def _receipt_issue(receipt: dict[str, Any], config: SwapRequest) -> str | None:
     try:
         amount_in = _decimal(
             receipt.get("input_amount"), "receipt input", positive=True
@@ -378,7 +496,7 @@ def _public_record(record: dict[str, Any] | None) -> dict[str, Any] | None:
 
 def _outcome_from_receipt(
     receipt: dict[str, Any],
-    config: Config,
+    config: SwapRequest,
 ) -> tuple[str, str, bool, str | None]:
     status = str(receipt.get("status") or "UNKNOWN").upper()
     if status in _CONFIRMED:
@@ -423,7 +541,7 @@ def _history_rows(value: Any) -> list[dict[str, Any]]:
 async def _search_history(
     client: Any,
     scope: RuntimeScope,
-    config: Config,
+    config: SwapRequest,
     record: dict[str, Any],
 ) -> list[dict[str, Any]]:
     attempted_at = _parse_time(record.get("created_at"))
@@ -461,7 +579,7 @@ async def _search_history(
 async def _refresh_receipt(
     client: Any,
     scope: RuntimeScope,
-    config: Config,
+    config: SwapRequest,
     receipt: dict[str, Any],
 ) -> dict[str, Any]:
     value = await client.gateway_swap.get_swap_status(receipt["transaction_hash"])
@@ -481,7 +599,7 @@ async def _refresh_receipt(
 async def _cleanup_post_transaction_refresh(
     client: Any,
     scope: RuntimeScope,
-    config: Config,
+    config: SwapRequest,
     receipt: dict[str, Any],
     trace: reporting.TraceRecorder,
 ) -> tuple[bool, dict[str, Any] | None, str | None]:
@@ -533,7 +651,7 @@ async def _cleanup_post_transaction_refresh(
 async def _cleanup_attribution(
     client: Any,
     scope: RuntimeScope,
-    config: Config,
+    config: SwapRequest,
 ) -> dict[str, Any]:
     try:
         prior_stop = read_prior_tick_stop(
@@ -589,7 +707,9 @@ async def _cleanup_attribution(
     }
 
 
-def _restoration_attribution(store: ReceiptStore, config: Config) -> dict[str, Any]:
+def _restoration_attribution(
+    store: ReceiptStore, config: SwapRequest
+) -> dict[str, Any]:
     preparation = store.read_confirmed_swap(str(config.attribution_operation_id))
     intent = preparation.get("intent")
     receipt = _record_receipt(preparation)
@@ -628,7 +748,7 @@ def _restoration_attribution(store: ReceiptStore, config: Config) -> dict[str, A
 
 
 async def _ensure_no_owned_pool_executor(
-    client: Any, scope: RuntimeScope, config: Config
+    client: Any, scope: RuntimeScope, config: SwapRequest
 ) -> None:
     for row in await fetch_all_executors(client, scope.account_name):
         try:
@@ -648,7 +768,73 @@ async def _ensure_no_owned_pool_executor(
             )
 
 
-def _intent(config: Config) -> dict[str, Any]:
+def _ensure_no_unconsumed_preparation(store: ReceiptStore, operation_id: str) -> None:
+    """Do not prepare a second inventory lot until the prior lot was consumed."""
+
+    create_records = store.list_records("create")
+    for record in store.list_records("swap"):
+        intent = record.get("intent")
+        if (
+            record.get("operation_id") == operation_id
+            or record.get("phase") != "confirmed"
+            or not isinstance(intent, dict)
+            or intent.get("reason") != "inventory_preparation"
+        ):
+            continue
+        consumers = [
+            create
+            for create in create_records
+            if isinstance(create.get("intent"), dict)
+            and create["intent"].get("preparation_operation_id")
+            == record.get("operation_id")
+        ]
+        if len(consumers) != 1 or consumers[0].get("phase") != "confirmed":
+            raise _ManualReview(
+                "a confirmed preparation has not been consumed by one confirmed "
+                "executor create"
+            )
+
+
+async def _ensure_preparation_capacity(
+    client: Any, scope: RuntimeScope, config: SwapRequest
+) -> dict[str, Any]:
+    """Revalidate portfolio capacity before buying selected LP inventory."""
+
+    normalized = [
+        normalize_executor(row)
+        for row in await fetch_all_executors(client, scope.account_name)
+    ]
+    active = [row for row in normalized if row["active"]]
+    foreign = [
+        row["executor_id"]
+        for row in active
+        if row["controller_id"] != scope.controller_id
+    ]
+    owned = [row for row in active if row["controller_id"] == scope.controller_id]
+    if foreign:
+        raise _ManualReview("foreign live executor overlaps the wallet scope")
+    if len(owned) >= integer_config(scope.config, "max_open_executors"):
+        raise ValueError("executor capacity is full")
+    if any(
+        row["pool_address"] == config.pool_address
+        or row["trading_pair"] == config.trading_pair
+        for row in owned
+    ):
+        raise ValueError("selected pool already has an active executor")
+    active_exposure = sum((row["exposure_quote"] for row in owned), Decimal(0))
+    selected = _decimal(config.amount_quote, "selected allocation", positive=True)
+    total = decimal_config(scope.config, "total_amount_quote", positive=True)
+    if active_exposure + selected > total:
+        raise ValueError("aggregate LP capital would exceed its configured limit")
+    return {
+        "active_executors": len(owned),
+        "active_exposure_quote": active_exposure,
+        "selected_allocation_quote": selected,
+        "total_allocation_limit_quote": total,
+    }
+
+
+def _intent(config: SwapRequest) -> dict[str, Any]:
     return {
         "reason": config.reason,
         "pool_address": config.pool_address,
@@ -670,6 +856,16 @@ def _intent(config: Config) -> dict[str, Any]:
         ),
         "slippage_pct": format(config.slippage_pct, "f"),
         "plan_digest": config.plan_digest,
+        "amount_quote": (
+            format(config.amount_quote, "f")
+            if config.amount_quote is not None
+            else None
+        ),
+        "range_half_width_pct": (
+            format(config.range_half_width_pct, "f")
+            if config.range_half_width_pct is not None
+            else None
+        ),
         "attribution_operation_id": config.attribution_operation_id,
         "executor_id": config.executor_id,
         "position_id": config.position_id,
@@ -680,7 +876,7 @@ def _intent(config: Config) -> dict[str, Any]:
 async def _recover(
     client: Any,
     scope: RuntimeScope,
-    config: Config,
+    config: SwapRequest,
     store: ReceiptStore,
     identity: OperationIdentity,
     record: dict[str, Any],
@@ -838,21 +1034,22 @@ async def _workflow(
     with trace.stage("runtime_resolution") as stage:
         scope = resolve_runtime(config.controller_id)
         state["scope"] = scope
+        request = _resolve_request(config, scope)
+        state["request"] = request
         stage.update(
             {
                 "controller_id": scope.controller_id,
                 "strategy": scope.strategy_slug,
                 "execution_mode": scope.execution_mode,
                 "current_tick": scope.current_tick,
+                "reason": request.reason,
+                "pool_address": request.pool_address,
+                "plan_digest": request.plan_digest,
             }
         )
-        if config.slippage_pct > decimal_config(
-            scope.config, "max_slippage_pct", positive=True
-        ):
-            raise ValueError("requested slippage exceeds frozen Strategy limit")
         if (
-            config.reason == "inventory_preparation"
-            and config.max_quote_input
+            request.reason == "inventory_preparation"
+            and request.max_quote_input
             > decimal_config(scope.config, "max_quote_per_executor", positive=True)
         ):
             raise ValueError(
@@ -873,9 +1070,9 @@ async def _workflow(
 
     store = ReceiptStore(scope)
     identity = store.identity(
-        operation_id=config.operation_id,
+        operation_id=request.operation_id,
         operation_kind="swap",
-        intent=_intent(config),
+        intent=_intent(request),
     )
     state.update({"store": store, "identity": identity})
 
@@ -884,7 +1081,7 @@ async def _workflow(
             try:
                 existing = store.read(identity)
             except ValueError as exc:
-                if store.read_by_id(config.operation_id) is not None:
+                if store.read_by_id(request.operation_id) is not None:
                     raise _ManualReview(
                         "existing swap operation identity conflicts with this request"
                     ) from exc
@@ -892,7 +1089,7 @@ async def _workflow(
             stage["phase"] = existing.get("phase") if existing else "absent"
         if existing is not None:
             recovered = await _recover(
-                client, scope, config, store, identity, existing, trace
+                client, scope, request, store, identity, existing, trace
             )
             if recovered is not None:
                 return recovered, scope
@@ -900,7 +1097,7 @@ async def _workflow(
         conflicts = [
             record
             for record in store.unresolved_operations()
-            if record.get("operation_id") != config.operation_id
+            if record.get("operation_id") != request.operation_id
         ]
         if conflicts:
             raise _ManualReview(
@@ -908,13 +1105,27 @@ async def _workflow(
                 f"{conflicts[0]['operation_id']} remains unresolved"
             )
 
+        if request.reason == "inventory_preparation":
+            _ensure_no_unconsumed_preparation(store, request.operation_id)
+            with trace.stage("selected_candidate_refresh") as stage:
+                refreshed = await orca.refresh_candidate(config.candidate)
+                stage.update(
+                    {
+                        "pool_address": refreshed["pool_address"],
+                        "refreshed_price": refreshed["price"],
+                        "identity_unchanged": True,
+                    }
+                )
+            with trace.stage("preparation_capacity_revalidation") as stage:
+                stage.update(await _ensure_preparation_capacity(client, scope, request))
+
         with trace.stage("token_registry") as stage:
             tokens = _token_rows(await client.gateway.get_network_tokens(scope.network))
             base = _require_registered_token(
                 tokens,
-                address=config.base_mint,
-                symbol=config.base_symbol,
-                decimals=config.base_decimals,
+                address=request.base_mint,
+                symbol=request.base_symbol,
+                decimals=request.base_decimals,
             )
             quote_token = _require_registered_token(
                 tokens,
@@ -925,15 +1136,17 @@ async def _workflow(
             stage.update({"base": base, "quote": quote_token})
 
         with trace.stage("attribution") as stage:
-            if config.reason == "post_close_residual_cleanup":
-                attribution = await _cleanup_attribution(client, scope, config)
-            elif config.reason == "inventory_restoration":
-                attribution = _restoration_attribution(store, config)
-                await _ensure_no_owned_pool_executor(client, scope, config)
+            if request.reason == "post_close_residual_cleanup":
+                attribution = await _cleanup_attribution(client, scope, request)
+            elif request.reason == "inventory_restoration":
+                attribution = _restoration_attribution(store, request)
+                await _ensure_no_owned_pool_executor(client, scope, request)
             else:
                 attribution = {
-                    "pool_address": config.pool_address,
-                    "plan_digest": config.plan_digest,
+                    "pool_address": request.pool_address,
+                    "plan_digest": request.plan_digest,
+                    "amount_quote": format(request.amount_quote, "f"),
+                    "range_half_width_pct": format(request.range_half_width_pct, "f"),
                 }
             stage.update(attribution)
 
@@ -941,7 +1154,7 @@ async def _workflow(
             balances = await refresh_balances(scope, client)
             sol_available = _balance(balances, symbol="SOL")
             base_available = _balance(
-                balances, symbol=config.base_symbol, mint=config.base_mint
+                balances, symbol=request.base_symbol, mint=request.base_mint
             )
             quote_available = _balance(
                 balances, symbol=scope.quote_symbol, mint=scope.quote_mint
@@ -955,7 +1168,7 @@ async def _workflow(
             )
 
         with trace.stage("quote") as stage:
-            _, amount_in, amount_out = await _quote(client, scope, config)
+            _, amount_in, amount_out = await _quote(client, scope, request)
             quote = {
                 "input_amount": format(amount_in, "f"),
                 "output_amount": format(amount_out, "f"),
@@ -968,21 +1181,21 @@ async def _workflow(
             )
             if sol_available < minimum_reserve:
                 raise ValueError("current SOL balance is below the required reserve")
-            if config.side == "BUY":
-                floor = config.amount * (
-                    Decimal(1) - config.slippage_pct / Decimal(100)
+            if request.side == "BUY":
+                floor = request.amount * (
+                    Decimal(1) - request.slippage_pct / Decimal(100)
                 )
                 if (
-                    amount_in > config.max_quote_input
+                    amount_in > request.max_quote_input
                     or amount_out < floor
                     or quote_available < amount_in
                 ):
                     raise ValueError("preparation quote, cap, or balance guard failed")
             else:
-                if amount_in != config.amount or base_available < config.amount:
+                if amount_in != request.amount or base_available < request.amount:
                     raise ValueError("restoration attribution or balance guard failed")
-                if config.base_symbol.upper() == "SOL" and (
-                    sol_available - config.amount < minimum_reserve
+                if request.base_symbol.upper() == "SOL" and (
+                    sol_available - request.amount < minimum_reserve
                 ):
                     raise ValueError("SELL would violate the required SOL reserve")
             dust = decimal_config(
@@ -995,7 +1208,7 @@ async def _workflow(
                     "quote_guard": "passed",
                 }
             )
-            if config.reason == "post_close_residual_cleanup" and amount_out <= dust:
+            if request.reason == "post_close_residual_cleanup" and amount_out <= dust:
                 record = store.write(
                     identity,
                     phase="rejected_before_submit",
@@ -1037,7 +1250,7 @@ async def _workflow(
             }, scope
 
         with trace.stage("operation_admission") as stage:
-            if config.reason == "inventory_preparation":
+            if request.reason == "inventory_preparation":
                 store.admit_preparation(identity)
             record = store.write(
                 identity,
@@ -1060,10 +1273,10 @@ async def _workflow(
                 client.gateway_swap.execute_swap(
                     connector=scope.swap_connector,
                     network=scope.network,
-                    trading_pair=config.trading_pair,
-                    side=config.side,
-                    amount=config.amount,
-                    slippage_pct=config.slippage_pct,
+                    trading_pair=request.trading_pair,
+                    side=request.side,
+                    amount=request.amount,
+                    slippage_pct=request.slippage_pct,
                     wallet_address=scope.wallet_address,
                 )
             )
@@ -1106,7 +1319,7 @@ async def _workflow(
                     "operation_state": _public_record(updated),
                 }, scope
             try:
-                receipt = _receipt(raw, config, scope, require_identity=False)
+                receipt = _receipt(raw, request, scope, require_identity=False)
             except Exception as exc:
                 reason = reporting.safe_error(
                     f"submitted swap receipt is invalid: {type(exc).__name__}: {exc}"
@@ -1151,7 +1364,7 @@ async def _workflow(
         ):
             with trace.stage("transaction_status_refresh") as stage:
                 try:
-                    receipt = await _refresh_receipt(client, scope, config, receipt)
+                    receipt = await _refresh_receipt(client, scope, request, receipt)
                     stage.update(
                         {
                             "transaction_hash": receipt["transaction_hash"],
@@ -1173,7 +1386,7 @@ async def _workflow(
                         "operation_state": _public_record(record),
                     }, scope
 
-        status, phase, retry_allowed, reason = _outcome_from_receipt(receipt, config)
+        status, phase, retry_allowed, reason = _outcome_from_receipt(receipt, request)
         record = store.write(
             identity,
             phase=phase,
@@ -1191,7 +1404,7 @@ async def _workflow(
         if status == "confirmed":
             release, diagnostic, refresh_error = (
                 await _cleanup_post_transaction_refresh(
-                    client, scope, config, receipt, trace
+                    client, scope, request, receipt, trace
                 )
             )
         with trace.stage("final_classification") as stage:
@@ -1291,6 +1504,14 @@ async def run(config: Config, context: Any) -> str:
 
     if config.reason == "post_close_residual_cleanup":
         payload.setdefault("capacity_release_allowed", False)
+
+    request = state.get("request")
+    if (
+        isinstance(request, SwapRequest)
+        and request.reason == "inventory_preparation"
+        and request.plan is not None
+    ):
+        payload.setdefault("selection_plan", request.plan)
 
     routine_input = config.model_dump(mode="json")
     links = {

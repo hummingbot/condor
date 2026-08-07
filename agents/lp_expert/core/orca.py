@@ -624,8 +624,8 @@ def _error_text(error: BaseException) -> str:
 
 async def scan_pools(limit: int) -> dict[str, Any]:
     """Fetch the four bounded discovery lenses and return compact neutral evidence."""
-    if isinstance(limit, bool) or not 1 <= limit <= 5:
-        raise ValueError("candidate limit must be between one and five")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+        raise ValueError("candidate limit must be a positive integer")
     specs = [(lens, discovery_request(lens)) for lens in DISCOVERY_LENSES]
     responses = await asyncio.gather(
         *(asyncio.to_thread(fetch_json, url) for _, url in specs),

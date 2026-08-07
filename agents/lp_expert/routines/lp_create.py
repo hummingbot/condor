@@ -11,11 +11,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
 from agents.lp_expert.core import orca
-from agents.lp_expert.core.planner import (
-    PlanRequest,
-    build_plan,
-    plan_digest,
-)
+from agents.lp_expert.core.planner import build_candidate_plan
 from agents.lp_expert.core.portfolio import (
     decimal_value,
     fetch_all_executors,
@@ -45,7 +41,8 @@ class Config(BaseModel):
     tick: StrictInt = Field(gt=0)
     operation_id: StrictStr = Field(min_length=8, max_length=128)
     candidate: dict[str, Any]
-    snapshot_plan_digest: StrictStr = Field(min_length=64, max_length=64)
+    amount_quote: Decimal = Field(gt=0)
+    range_half_width_pct: Decimal = Field(gt=0)
     preparation_operation_id: StrictStr = Field(min_length=8, max_length=128)
 
     @model_validator(mode="after")
@@ -58,6 +55,11 @@ class Config(BaseModel):
             raise ValueError("operation identity contains unsupported characters")
         if not isinstance(self.candidate, dict):
             raise ValueError("candidate must be a snapshot object")
+        if (
+            not self.amount_quote.is_finite()
+            or not self.range_half_width_pct.is_finite()
+        ):
+            raise ValueError("selected plan values must be finite")
         return self
 
 
@@ -66,51 +68,46 @@ Config.model_rebuild(
     _types_namespace={
         "StrictStr": StrictStr,
         "StrictInt": StrictInt,
+        "Decimal": Decimal,
         "Any": Any,
     }
 )
 
 
-def _snapshot_plan(config: Config) -> tuple[dict[str, Any], dict[str, Any]]:
-    value = config.candidate.get("plan")
-    if not isinstance(value, dict):
-        raise ValueError("candidate snapshot plan is unavailable")
-    embedded = value.get("plan_digest")
-    if embedded != config.snapshot_plan_digest or value.get("status") != "planned":
-        raise ValueError("snapshot plan digest is inconsistent")
-    plan = {
-        key: item
-        for key, item in value.items()
-        if key not in {"status", "plan_digest", "report_id", "report_error"}
-    }
-    if plan_digest(plan) != config.snapshot_plan_digest:
-        raise ValueError("snapshot plan content was modified")
-    identity = plan.get("identity")
-    inputs = plan.get("inputs")
-    if not isinstance(identity, dict) or not isinstance(inputs, dict):
-        raise ValueError("snapshot plan identity or inputs are unavailable")
-    return plan, inputs
-
-
 def _preparation(
     store: ReceiptStore,
-    operation_id: str,
-    candidate: dict[str, Any],
+    preparation_operation_id: str,
+    create_operation_id: str,
+    selection_plan: dict[str, Any],
 ) -> tuple[dict[str, Any], Decimal, Decimal]:
-    record = store.read_confirmed_swap(operation_id)
+    record = store.read_confirmed_swap(preparation_operation_id)
     intent = record.get("intent")
     result = record.get("result")
     receipt = result.get("receipt") if isinstance(result, dict) else None
     if not isinstance(intent, dict) or not isinstance(receipt, dict):
         raise ValueError("confirmed preparation receipt content is unavailable")
-    expected_pair = candidate.get("trading_pair")
+    expected = selection_plan["identity"]
+    inputs = selection_plan["inputs"]
     if (
         intent.get("reason") != "inventory_preparation"
         or str(intent.get("side") or "").upper() != "BUY"
-        or intent.get("trading_pair") != expected_pair
-        or intent.get("base_mint") != candidate.get("token_a", {}).get("mint")
+        or intent.get("pool_address") != expected["pool_address"]
+        or intent.get("trading_pair") != expected["trading_pair"]
+        or intent.get("base_mint") != expected["base_mint"]
+        or intent.get("plan_digest") != selection_plan["plan_digest"]
+        or intent.get("amount_quote") != str(inputs["amount_quote"])
+        or intent.get("range_half_width_pct") != str(inputs["range_half_width_pct"])
     ):
-        raise ValueError("preparation receipt is not attributed to this candidate")
+        raise ValueError("preparation receipt is not attributed to this selection")
+    consumers = [
+        value
+        for value in store.list_records("create")
+        if value.get("operation_id") != create_operation_id
+        and isinstance(value.get("intent"), dict)
+        and value["intent"].get("preparation_operation_id") == preparation_operation_id
+    ]
+    if consumers:
+        raise ValueError("preparation receipt is already assigned to another create")
     input_amount = decimal_value(
         receipt.get("input_amount"), "preparation quote input", positive=True
     )
@@ -291,7 +288,6 @@ async def run(config: Config, context: Any) -> str:
     mutation_possible = False
     links: dict[str, Any] = {
         "preparation_operation_id": config.preparation_operation_id,
-        "snapshot_plan_digest": config.snapshot_plan_digest,
     }
     payload: dict[str, Any]
     try:
@@ -301,19 +297,29 @@ async def run(config: Config, context: Any) -> str:
                 raise ValueError("requested tick is not the current engine tick")
             if scope.execution_mode == "dry_run":
                 raise ValueError("dry run cannot create an executor")
+            selection_plan = build_candidate_plan(
+                config.candidate,
+                amount_quote=config.amount_quote,
+                range_half_width_pct=config.range_half_width_pct,
+                strategy_config=scope.config,
+            )
+            links["selection_plan_digest"] = selection_plan["plan_digest"]
             facts.update(
                 {
                     "execution_mode": scope.execution_mode,
                     "tick": scope.current_tick,
+                    "selection_plan_digest": selection_plan["plan_digest"],
                 }
             )
         with trace.stage("client_wallet_and_receipt") as facts:
             client = await get_hummingbot_client(scope)
             scope = await bind_wallet(scope, client)
             store = ReceiptStore(scope)
-            snapshot_plan, snapshot_inputs = _snapshot_plan(config)
             preparation, quote_spent, attributed_base = _preparation(
-                store, config.preparation_operation_id, config.candidate
+                store,
+                config.preparation_operation_id,
+                config.operation_id,
+                selection_plan,
             )
             facts.update(
                 {
@@ -330,26 +336,12 @@ async def run(config: Config, context: Any) -> str:
             accepted, rejected = orca.filter_registered_tokens([refreshed], registry)
             if len(accepted) != 1 or rejected:
                 raise ValueError("refreshed candidate token is not exactly registered")
-            final_plan = build_plan(
-                PlanRequest(
-                    pool_address=refreshed["pool_address"],
-                    base_symbol=refreshed["token_a"]["symbol"],
-                    base_mint=refreshed["token_a"]["mint"],
-                    base_decimals=refreshed["token_a"]["decimals"],
-                    current_price=refreshed["price"],
-                    tick_spacing=refreshed["tick_spacing"],
-                    amount_quote=snapshot_inputs["amount_quote"],
-                    range_half_width_pct=snapshot_inputs["range_half_width_pct"],
-                    minimum_range_half_width_pct=scope.config[
-                        "minimum_range_half_width_pct"
-                    ],
-                    maximum_range_half_width_pct=scope.config[
-                        "maximum_range_half_width_pct"
-                    ],
-                    rebalance_threshold_pct=scope.config["rebalance_threshold_pct"],
-                    max_slippage_pct=scope.config["max_slippage_pct"],
-                    attributed_base_amount=attributed_base,
-                )
+            final_plan = build_candidate_plan(
+                refreshed,
+                amount_quote=config.amount_quote,
+                range_half_width_pct=config.range_half_width_pct,
+                strategy_config=scope.config,
+                attributed_base_amount=attributed_base,
             )
             executor_config = {
                 **final_plan["executor_config"],
@@ -379,9 +371,11 @@ async def run(config: Config, context: Any) -> str:
         intent = {
             "pool_address": executor_config["pool_address"],
             "trading_pair": executor_config["trading_pair"],
-            "snapshot_plan_digest": config.snapshot_plan_digest,
+            "selection_plan_digest": selection_plan["plan_digest"],
             "final_plan_digest": final_plan["plan_digest"],
             "preparation_operation_id": config.preparation_operation_id,
+            "amount_quote": format(config.amount_quote, "f"),
+            "range_half_width_pct": format(config.range_half_width_pct, "f"),
         }
         identity = store.identity(
             operation_id=config.operation_id,
@@ -650,6 +644,7 @@ async def run(config: Config, context: Any) -> str:
             "operation_id": config.operation_id,
             "controller_id": config.controller_id,
             "pool_address": executor_config["pool_address"],
+            "selection_plan": selection_plan,
             "final_plan": final_plan,
             **payload,
         }

@@ -14,6 +14,7 @@ from conftest import (
     pool_record,
     prior_close,
     runtime_scope,
+    strategy_config,
     terminal_row,
 )
 from pydantic import ValidationError
@@ -69,8 +70,10 @@ def _install(
     scan=True,
     stop_error=None,
     unresolved=None,
+    config=None,
+    candidate_count=1,
 ):
-    scope = runtime_scope(tmp_path, tick=tick)
+    scope = runtime_scope(tmp_path, tick=tick, config=config)
     session_config = tmp_path / "config.yml"
     session_config.write_text("execution_mode: loop\n")
     os.utime(session_config, (1_900, 1_900))
@@ -120,6 +123,15 @@ def _install(
         if not scan:
             raise AssertionError("candidate scan must be skipped")
         candidate = _candidate()
+        candidates = [
+            {
+                **copy.deepcopy(candidate),
+                "pool_address": (
+                    candidate["pool_address"] if index == 0 else f"pool-{index + 1}"
+                ),
+            }
+            for index in range(candidate_count)
+        ]
         return {
             "status": "complete",
             "deployable": True,
@@ -132,10 +144,10 @@ def _install(
                 "raw_records": 1,
                 "normalized_records": 1,
                 "valid_unique_pools": 1,
-                "returned_candidates": 1,
+                "returned_candidates": len(candidates),
             },
             "technical_rejections": {},
-            "candidates": [candidate],
+            "candidates": candidates,
         }
 
     monkeypatch.setattr(lp_snapshot.orca, "scan_pools", scan_pools)
@@ -146,9 +158,6 @@ def _config(*, tick=2, close=None, closes=None):
     return lp_snapshot.Config(
         controller_id="lp_expert.orca_1",
         tick=tick,
-        candidate_limit=3,
-        amount_quote="4",
-        range_half_width_pct="10",
         prior_closes=(
             list(closes) if closes is not None else ([] if close is None else [close])
         ),
@@ -167,7 +176,7 @@ def _run(config):
     return json.loads(asyncio.run(lp_snapshot.run(config, None)))
 
 
-def test_snapshot_flat_portfolio_returns_one_compact_deployable_plan(
+def test_snapshot_flat_portfolio_returns_candidates_and_dynamic_constraints(
     monkeypatch, tmp_path
 ):
     _, calls = _install(monkeypatch, tmp_path)
@@ -180,7 +189,10 @@ def test_snapshot_flat_portfolio_returns_one_compact_deployable_plan(
     assert result["portfolio"]["available_slots"] == 3
     assert result["deployable"] is True
     assert len(result["candidates"]) == 1
-    assert result["candidates"][0]["plan"]["plan_digest"]
+    assert "plan" not in result["candidates"][0]
+    assert result["selection_constraints"]["allocation_quote"]["minimum"] == "3"
+    assert result["selection_constraints"]["allocation_quote"]["maximum"] == "4"
+    assert result["selection_constraints"]["available_deployments_this_tick"] == 1
     assert calls == [3]
     assert result["report_id"] == "snapshot-report"
 
@@ -208,6 +220,37 @@ def test_snapshot_healthy_executor_preserves_remaining_capacity(monkeypatch, tmp
     assert result["portfolio"]["available_slots"] == 2
     assert result["portfolio"]["close_required_executor_ids"] == []
     assert result["deployable"] is True
+
+
+def test_snapshot_returns_multiple_deployments_from_frozen_config(
+    monkeypatch, tmp_path
+):
+    configured = strategy_config(
+        total_amount_quote=30,
+        max_open_executors=5,
+        max_slot_deployments_per_tick=2,
+        candidate_scan_limit=6,
+        risk_limits={
+            "max_position_size_quote": 30,
+            "max_open_executors": 5,
+            "max_drawdown_pct": -1,
+            "shutdown_drawdown_pct": -1,
+        },
+    )
+    _, calls = _install(
+        monkeypatch,
+        tmp_path,
+        config=configured,
+        candidate_count=2,
+    )
+
+    result = _run(_config())
+
+    assert calls == [6]
+    assert result["portfolio"]["available_slots"] == 5
+    assert len(result["candidates"]) == 2
+    assert result["selection_constraints"]["configured_deployments_per_tick"] == 2
+    assert result["selection_constraints"]["available_deployments_this_tick"] == 2
 
 
 def test_snapshot_triggered_executor_blocks_candidate_work(monkeypatch, tmp_path):
@@ -364,11 +407,12 @@ def test_snapshot_cleanup_ambiguity_is_manual_quarantine(monkeypatch, tmp_path):
     assert result["deployable"] is False
 
 
-def test_snapshot_prior_closes_are_unique_and_capped_at_three():
+def test_snapshot_prior_closes_are_unique_and_capped_by_runtime(monkeypatch, tmp_path):
     close = _snapshot_close()
     with pytest.raises(ValidationError, match="must be unique"):
         _config(closes=[close, close])
-    with pytest.raises(ValidationError):
+    _install(monkeypatch, tmp_path, scan=False)
+    result = _run(
         _config(
             closes=[
                 _snapshot_close(
@@ -378,6 +422,9 @@ def test_snapshot_prior_closes_are_unique_and_capped_at_three():
                 for index in range(4)
             ]
         )
+    )
+    assert result["status"] == "rejected"
+    assert "configured executor capacity" in result["reason"]
 
 
 def test_snapshot_classifies_multiple_prior_closes_independently(monkeypatch, tmp_path):
