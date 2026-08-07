@@ -22,6 +22,17 @@ RECONCILING = {"CLOSING", "SWAPPING", "FAILED"}
 NATIVE_SWAP_SUCCESS = {"CONFIRMED", "SUCCESS", "COMPLETED"}
 NATIVE_SWAP_PENDING = {"PENDING", "SUBMITTED", "SWAPPING", "UNKNOWN"}
 NATIVE_SWAP_FAILED = {"FAILED", "FAILURE", "ERROR", "REJECTED", "NOT_SUBMITTED"}
+_CREATE_NUMERIC_FIELDS = {
+    "base_amount",
+    "lower_limit_price",
+    "lower_price",
+    "quote_amount",
+    "upper_limit_price",
+    "upper_price",
+}
+_CREATE_BOOLEAN_FIELDS = {"keep_position"}
+_CREATE_NUMERIC_RELATIVE_TOLERANCE = Decimal("1e-12")
+_CREATE_NUMERIC_ABSOLUTE_TOLERANCE = Decimal("1e-12")
 
 
 def decimal_value(value: Any, label: str, *, positive: bool = False) -> Decimal:
@@ -125,6 +136,201 @@ def normalize_executor(row: dict[str, Any]) -> dict[str, Any]:
     else:
         normalized["exposure_quote"] = Decimal(0)
     return normalized
+
+
+def _comparison_value(value: Any) -> str | int | float | bool | None:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    return str(value)
+
+
+def _lp_side(value: Any) -> str | None:
+    raw = getattr(value, "value", value)
+    if isinstance(raw, bool):
+        return None
+    text = str(raw).strip().upper()
+    named = text.rsplit(".", 1)[-1]
+    if named in {"BUY", "SELL", "RANGE"}:
+        return named
+    try:
+        numeric = Decimal(text)
+    except Exception:
+        return None
+    if not numeric.is_finite() or numeric != numeric.to_integral_value():
+        return None
+    return {1: "BUY", 2: "SELL", 3: "RANGE"}.get(int(numeric))
+
+
+def _config_value_matches(key: str, observed: Any, expected: Any) -> bool:
+    if key == "side":
+        left = _lp_side(observed)
+        right = _lp_side(expected)
+        return left is not None and right is not None and left == right
+    if key in _CREATE_NUMERIC_FIELDS:
+        try:
+            left = Decimal(str(observed))
+            right = Decimal(str(expected))
+        except Exception:
+            return False
+        if not left.is_finite() or not right.is_finite():
+            return False
+        tolerance = max(
+            _CREATE_NUMERIC_ABSOLUTE_TOLERANCE,
+            max(abs(left), abs(right)) * _CREATE_NUMERIC_RELATIVE_TOLERANCE,
+        )
+        return abs(left - right) <= tolerance
+    if key in _CREATE_BOOLEAN_FIELDS:
+
+        def boolean(value: Any) -> bool | None:
+            if isinstance(value, bool):
+                return value
+            if isinstance(value, str) and value.casefold() in {"true", "false"}:
+                return value.casefold() == "true"
+            return None
+
+        left = boolean(observed)
+        right = boolean(expected)
+        return left is not None and right is not None and left is right
+    return str(observed) == str(expected)
+
+
+def classify_executor_create_request(
+    row: dict[str, Any],
+    executor_id: str,
+    controller_id: str,
+    executor_request: dict[str, Any],
+) -> dict[str, Any]:
+    """Classify exact create evidence without treating initialization as conflict."""
+
+    if (
+        not isinstance(executor_request, dict)
+        or executor_request.get("action") != "create"
+        or executor_request.get("executor_type") != "lp_executor"
+        or not isinstance(executor_request.get("account_name"), str)
+        or not executor_request["account_name"].strip()
+        or executor_request.get("controller_id") != controller_id
+    ):
+        return {
+            "outcome": "conflict",
+            "reason": "frozen native create request is invalid",
+            "missing_fields": [],
+            "mismatches": {},
+            "observed_status": None,
+            "observed_lifecycle": None,
+        }
+    expected = executor_request.get("executor_config")
+    if (
+        not isinstance(expected, dict)
+        or expected.get("type") != "lp_executor"
+        or expected.get("controller_id") != controller_id
+    ):
+        return {
+            "outcome": "conflict",
+            "reason": "frozen LP executor configuration is invalid",
+            "missing_fields": [],
+            "mismatches": {},
+            "observed_status": None,
+            "observed_lifecycle": None,
+        }
+
+    missing: set[str] = set()
+    mismatches: dict[str, dict[str, Any]] = {}
+    current = row.get("config") if isinstance(row, dict) else None
+    if not isinstance(row, dict):
+        missing.add("executor_detail")
+        row = {}
+    if not isinstance(current, dict):
+        missing.add("config")
+        current = {}
+
+    def compare_identity(
+        field: str,
+        values: set[str],
+        expected_value: str,
+    ) -> None:
+        if not values:
+            missing.add(field)
+        elif values != {expected_value}:
+            mismatches[field] = {
+                "expected": expected_value,
+                "observed": sorted(values),
+            }
+
+    ids = {
+        str(value).strip()
+        for value in (row.get("executor_id"), row.get("id"))
+        if value not in (None, "")
+    }
+    compare_identity("executor_id", ids, executor_id)
+    owners = {
+        str(value).strip()
+        for value in (row.get("controller_id"), current.get("controller_id"))
+        if value not in (None, "")
+    }
+    compare_identity("controller_id", owners, controller_id)
+    accounts = {
+        str(value).strip()
+        for value in (row.get("account_name"),)
+        if value not in (None, "")
+    }
+    compare_identity("account_name", accounts, executor_request["account_name"])
+    executor_types = {
+        str(value).strip()
+        for value in (
+            row.get("executor_type"),
+            row.get("type"),
+            current.get("type"),
+        )
+        if value not in (None, "")
+    }
+    compare_identity("executor_type", executor_types, "lp_executor")
+
+    status = str(row.get("status") or "").strip().upper()
+    if not status:
+        missing.add("status")
+    for key, expected_value in expected.items():
+        field = f"config.{key}"
+        if key not in current:
+            missing.add(field)
+        elif not _config_value_matches(key, current[key], expected_value):
+            mismatches[field] = {
+                "expected": _comparison_value(expected_value),
+                "observed": _comparison_value(current[key]),
+            }
+
+    lifecycle = (
+        str(_custom(row).get("state") or "").strip().upper()
+        if isinstance(row, dict)
+        else ""
+    )
+    common = {
+        "missing_fields": sorted(missing),
+        "mismatches": mismatches,
+        "observed_status": status or None,
+        "observed_lifecycle": lifecycle or None,
+    }
+    if mismatches:
+        return {
+            "outcome": "conflict",
+            "reason": (
+                "immutable executor identity or configuration differs from the "
+                "frozen create request"
+            ),
+            **common,
+        }
+    if missing:
+        return {
+            "outcome": "pending",
+            "reason": (
+                "exact executor detail is incomplete; reconcile the same ID later"
+            ),
+            **common,
+        }
+    return {
+        "outcome": "match",
+        "reason": "exact executor identity and frozen create configuration match",
+        **common,
+    }
 
 
 def _page(value: Any) -> tuple[list[dict[str, Any]], str | None]:

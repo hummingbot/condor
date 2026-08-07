@@ -110,6 +110,125 @@ def test_uncertainty_is_durable_and_blocks_another_wallet_mutation(tmp_path):
         )
 
 
+def test_emitted_admission_stays_quarantined_until_exact_reconciliation(tmp_path):
+    store = receipts.ReceiptStore(runtime_scope(tmp_path))
+    admitted = _identity(store, "admitted-operation")
+    store.write(
+        admitted,
+        phase="admitted",
+        mutation_possible=False,
+        result={"executor_request": {"action": "create"}},
+        create_only=True,
+    )
+
+    assert store.unresolved_wallet_operation()["operation_id"] == ("admitted-operation")
+    assert [row["operation_id"] for row in store.unresolved_operations()] == [
+        "admitted-operation"
+    ]
+
+
+def test_manual_review_blocks_snapshot_even_without_wallet_mutation(tmp_path):
+    store = receipts.ReceiptStore(runtime_scope(tmp_path))
+    operation = _identity(store, "manual-operation")
+    store.write(
+        operation,
+        phase="manual_review",
+        mutation_possible=False,
+        reason="exact intent conflicts",
+        create_only=True,
+    )
+
+    assert [row["operation_id"] for row in store.unresolved_operations()] == [
+        "manual-operation"
+    ]
+
+
+def test_confirmed_preparation_remains_unconsumed_until_create_or_restore(
+    tmp_path,
+):
+    store = receipts.ReceiptStore(runtime_scope(tmp_path))
+    preparation = _identity(store, "preparation-operation")
+    confirmed = store.write(
+        preparation,
+        phase="confirmed",
+        mutation_possible=True,
+        result={
+            "receipt": {
+                "transaction_hash": "tx-preparation",
+                "input_amount": "1.5",
+                "output_amount": "0.02",
+            }
+        },
+        create_only=True,
+    )
+
+    assert store.read_confirmed_preparation(preparation.operation_id) == confirmed
+    assert [row["operation_id"] for row in store.unconsumed_preparations()] == [
+        "preparation-operation"
+    ]
+
+    rejected_create = store.identity(
+        operation_id="create-operation-rejected",
+        operation_kind="create",
+        intent={"preparation_operation_id": preparation.operation_id},
+    )
+    store.write(
+        rejected_create,
+        phase="rejected_before_submit",
+        mutation_possible=False,
+        create_only=True,
+    )
+    assert len(store.unconsumed_preparations()) == 1
+
+    restoration = store.identity(
+        operation_id="restoration-operation",
+        operation_kind="swap",
+        intent={
+            "reason": "inventory_restoration",
+            "attribution_operation_id": preparation.operation_id,
+        },
+    )
+    store.write(
+        restoration,
+        phase="confirmed",
+        mutation_possible=True,
+        result={
+            "receipt": {
+                "transaction_hash": "tx-restoration",
+                "input_amount": "0.02",
+                "output_amount": "1.5",
+            }
+        },
+        create_only=True,
+    )
+    assert store.unconsumed_preparations() == []
+
+
+def test_confirmed_no_swap_allocation_has_no_restorable_residual(tmp_path):
+    store = receipts.ReceiptStore(runtime_scope(tmp_path))
+    preparation = _identity(
+        store,
+        "allocation-operation",
+        amount="0",
+        attributed_base_amount="0.02",
+    )
+    confirmed = store.write(
+        preparation,
+        phase="confirmed",
+        mutation_possible=False,
+        result={
+            "inventory_allocation": {
+                "source": "existing_wallet_balance",
+                "attributed_base_amount": "0.02",
+            }
+        },
+        create_only=True,
+    )
+
+    assert store.read_confirmed_preparation(preparation.operation_id) == confirmed
+    assert store.unconsumed_preparations() == []
+
+
 def test_preparation_and_create_admission_follow_configured_tick_limit(tmp_path):
     store = receipts.ReceiptStore(
         runtime_scope(
@@ -177,15 +296,13 @@ def test_controller_mutation_lock_serializes_same_controller():
 def test_cleanup_requires_one_exact_prior_tick_native_stop(tmp_path):
     snapshots = tmp_path / "snapshots"
     snapshots.mkdir()
-    (snapshots / "snapshot_2.md").write_text(
-        """### tool manage_executors
+    (snapshots / "snapshot_2.md").write_text("""### tool manage_executors
 
 **Input:**
 ```json
 {"action":"stop","controller_id":"lp_expert.orca_1","executor_id":"executor-1","keep_position":false}
 ```
-"""
-    )
+""")
     scope = runtime_scope(tmp_path, tick=3)
 
     result = receipts.read_prior_tick_stop(scope, "executor-1", 2)

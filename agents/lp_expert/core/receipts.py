@@ -17,7 +17,8 @@ from agents.lp_expert.core.runtime import RuntimeScope
 
 OperationKind = Literal["swap", "create"]
 
-_SAFE_OPERATION = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
+OPERATION_ID_PATTERN = r"^[A-Za-z0-9_-]{8,128}$"
+_SAFE_OPERATION = re.compile(OPERATION_ID_PATTERN)
 _PHASES = {
     "admitted",
     "rejected_before_submit",
@@ -272,6 +273,38 @@ class ReceiptStore:
             raise ValueError("confirmed preparation swap receipt is unavailable")
         return copy.deepcopy(value)
 
+    def read_confirmed_preparation(self, operation_id: str) -> dict[str, Any]:
+        """Return one confirmed preparation, including a no-swap allocation."""
+
+        value = self.read_by_id(operation_id)
+        intent = value.get("intent") if isinstance(value, dict) else None
+        result = value.get("result") if isinstance(value, dict) else None
+        receipt = result.get("receipt") if isinstance(result, dict) else None
+        allocation = (
+            result.get("inventory_allocation") if isinstance(result, dict) else None
+        )
+        has_swap = (
+            isinstance(receipt, dict)
+            and bool(receipt.get("transaction_hash"))
+            and receipt.get("input_amount") not in (None, "")
+            and receipt.get("output_amount") not in (None, "")
+        )
+        has_allocation = (
+            isinstance(allocation, dict)
+            and allocation.get("source") == "existing_wallet_balance"
+            and allocation.get("attributed_base_amount") not in (None, "")
+        )
+        if (
+            value is None
+            or value.get("operation_kind") != "swap"
+            or value.get("phase") != "confirmed"
+            or not isinstance(intent, dict)
+            or intent.get("reason") != "inventory_preparation"
+            or not (has_swap or has_allocation)
+        ):
+            raise ValueError("confirmed inventory preparation is unavailable")
+        return copy.deepcopy(value)
+
     def write(
         self,
         identity: OperationIdentity,
@@ -356,8 +389,13 @@ class ReceiptStore:
             value
             for value in self.list_records("swap")
             if value.get("operation_id") != exclude_operation_id
-            and value.get("phase") in _UNRESOLVED
-            and value.get("mutation_possible") is True
+            and (
+                value.get("phase") == "admitted"
+                or (
+                    value.get("phase") in _UNRESOLVED
+                    and value.get("mutation_possible") is True
+                )
+            )
         ]
         if len(matches) > 1:
             raise ValueError(
@@ -366,14 +404,76 @@ class ReceiptStore:
         return matches[0] if matches else None
 
     def unresolved_operations(self) -> list[dict[str, Any]]:
-        """Return all persisted operations that may still have mutated state."""
+        """Return operations requiring reconciliation or manual review."""
 
         return [
             value
             for value in self.list_records()
-            if value.get("phase") in _UNRESOLVED
-            and value.get("mutation_possible") is True
+            if value.get("phase") == "admitted"
+            or value.get("phase") in {"ambiguous", "manual_review"}
+            or (
+                value.get("phase") in _UNRESOLVED
+                and value.get("mutation_possible") is True
+            )
         ]
+
+    def unconsumed_preparations(self) -> list[dict[str, Any]]:
+        """Return exact confirmed swap output not consumed or restored.
+
+        A no-swap wallet allocation is deliberately excluded because it created
+        no residual inventory. Pending or uncertain create/restoration
+        operations remain represented by ``unresolved_operations`` and are not
+        made eligible for a competing restoration.
+        """
+
+        swaps = self.list_records("swap")
+        creates = self.list_records("create")
+        pending = {
+            "admitted",
+            "submitting",
+            "submitted",
+            "uncertain",
+            "ambiguous",
+            "manual_review",
+        }
+        result = []
+        for preparation in swaps:
+            intent = preparation.get("intent")
+            outcome = preparation.get("result")
+            receipt = outcome.get("receipt") if isinstance(outcome, dict) else None
+            if (
+                preparation.get("phase") != "confirmed"
+                or not isinstance(intent, dict)
+                or intent.get("reason") != "inventory_preparation"
+                or not isinstance(receipt, dict)
+                or not receipt.get("transaction_hash")
+                or receipt.get("output_amount") in (None, "")
+            ):
+                continue
+            operation_id = preparation.get("operation_id")
+            consumers = [
+                record
+                for record in creates
+                if isinstance(record.get("intent"), dict)
+                and record["intent"].get("preparation_operation_id") == operation_id
+            ]
+            if any(record.get("phase") == "confirmed" for record in consumers):
+                continue
+            if any(record.get("phase") in pending for record in consumers):
+                continue
+            restorations = [
+                record
+                for record in swaps
+                if isinstance(record.get("intent"), dict)
+                and record["intent"].get("reason") == "inventory_restoration"
+                and record["intent"].get("attribution_operation_id") == operation_id
+            ]
+            if any(record.get("phase") == "confirmed" for record in restorations):
+                continue
+            if any(record.get("phase") in pending for record in restorations):
+                continue
+            result.append(copy.deepcopy(preparation))
+        return result
 
     def admit_create(self, identity: OperationIdentity) -> dict[str, Any]:
         """Atomically reserve one configured create admission for this tick."""

@@ -27,7 +27,8 @@ def strategy_config(**overrides):
         "min_quote_per_executor": 3,
         "max_quote_per_executor": 4,
         "max_slippage_pct": 1,
-        "min_sol_reserve": 0.05,
+        "min_sol_reserve": 0.1,
+        "use_existing_base_inventory": True,
         "residual_base_dust_quote": 0.01,
         "minimum_range_half_width_pct": 0.5,
         "maximum_range_half_width_pct": 20,
@@ -101,6 +102,7 @@ def executor_row(
     }
     return {
         "executor_id": executor_id,
+        "account_name": "master_account",
         "controller_id": controller_id,
         "status": status,
         "is_active": active,
@@ -232,7 +234,8 @@ def fake_engine(tmp_path):
                 "min_quote_per_executor: 3",
                 "max_quote_per_executor: 4",
                 "max_slippage_pct: 1",
-                "min_sol_reserve: 0.05",
+                "min_sol_reserve: 0.1",
+                "use_existing_base_inventory: true",
                 "residual_base_dust_quote: 0.01",
                 "minimum_range_half_width_pct: 0.5",
                 "maximum_range_half_width_pct: 20",

@@ -1,37 +1,41 @@
 ---
 name: lp_pool_review
-description: Compare valid Orca snapshot candidates using MCDA, raw activity, Whirlpool mechanics, and portfolio fit without turning rank into a command.
-when_to_use: Read only when two or more valid lp_snapshot candidates are close, unusual, contradictory, or need deeper rank-override or diversification judgment than the Strategy fast path.
-references_routine: lp_snapshot
+description: Compare valid Orca pool-scan candidates using MCDA, raw activity, Whirlpool mechanics, and portfolio fit without turning rank into a command.
+when_to_use: Read only when two or more valid lp_pool_scan candidates are close, unusual, contradictory, or need deeper rank-override or diversification judgment than the Strategy fast path.
+references_routine: lp_pool_scan
 source: agent:lp_expert
 ---
 
 # LP Pool Review
 
-Use this playbook only after `lp_snapshot` has supplied technically valid current
+Use this playbook only after `lp_pool_scan` has supplied technically valid current
 evidence. It cannot repair incomplete coverage, identity, token registration, or
 range feasibility.
 
-1. Confirm canonical Orca orientation: token A is the base asset and token B is
-   canonical USDC. Treat exact pool address, mint, symbol, decimals, price
-   orientation, fee metadata, and `tick_spacing` as one identity.
+1. Confirm canonical Orca orientation: candidate `base` is ordered
+   `[symbol, mint, decimals]`, token A is that base asset, and token B is
+   canonical USDC. Treat `pool`, `base`, `price`, `spacing`, and `lens` as one
+   exact identity and pass the entire candidate unchanged.
 2. Remember that Orca Whirlpools use ticks and tick spacing, not Meteora-style
-   bins or strategy types. Let deterministic snapshot/create logic align and
+   bins or strategy types. Let deterministic swap/create logic align and
    validate tick bounds; do not estimate technical feasibility in prose.
-3. Compare the full returned candidate set using neutral MCDA components, raw
-   fees and volume, hourly and sustainable yield, activity persistence,
-   acceleration, turnover, price movement, confidence, and current portfolio
-   overlap.
+3. Compare the returned top-ranked candidate prefix using `rank`, `score`, `tvl`,
+   `yield_24h`, `yield_floor_h`, `accel_1h`, `turnover_24h`, `move_24h`,
+   `sources`, and current portfolio overlap. `mcda` is ordered
+   `[fee_productivity, recent_activity, price_stability, liquidity_depth,
+   execution_simplicity]`. When `transport_limited=true`, lower-ranked valid
+   pools remain in the human report but are not Agent trading authority.
 4. Treat neutral rank as comparison evidence, not an automatic selector. Prefer
    a lower-ranked candidate only when current evidence supports a more
    sustainable opportunity, better strategic range, or useful diversification.
 5. Reject only the candidate whose valid evidence has deteriorated. Do not turn
    one unsuitable pool into a portfolio-wide HOLD.
 6. Explain every rank override and candidate rejection with specific returned
-   facts. Venue categories describe evidence; they are not token-security
-   certification.
+   facts. Compact venue evidence is not token-security certification; the
+   full routine report is for human diagnosis, not extra execution authority.
 7. Return judgment only. Allocation, exact range feasibility, inventory
-   preparation, admission, and execution remain with the Strategy and routines.
+   preparation, and admission remain with the Strategy and routines; native
+   `manage_executors` performs only an unchanged routine-emitted transition.
 
 Risk posture changes evidence emphasis only. It cannot weaken technical gates or
 capital limits.

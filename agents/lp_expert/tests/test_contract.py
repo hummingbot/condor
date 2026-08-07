@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from agents.lp_expert.core.receipts import OPERATION_ID_PATTERN
 from condor.agents.agent import AgentStore
 from condor.agents.config import load_full_config
 from condor.agents.prompts import build_tick_prompt
@@ -13,7 +14,12 @@ from condor.memory.skills import SkillStore
 from routines.base import discover_routines_from_path
 
 ROOT = Path(__file__).resolve().parents[1]
-PUBLIC_ROUTINES = {"lp_snapshot", "lp_swap", "lp_create"}
+PUBLIC_ROUTINES = {
+    "lp_snapshot",
+    "lp_pool_scan",
+    "lp_order_request",
+    "lp_create",
+}
 SKILLS = {
     "lp_pool_review",
     "lp_range_and_inventory",
@@ -27,6 +33,7 @@ OLD_ROUTINES = {
     "lp_portfolio_limits",
     "solana_transaction_reconcile",
     "lp_create_guard",
+    "lp_swap",
 }
 OLD_SKILLS = {
     "hummingbot_mcp_operations",
@@ -59,7 +66,7 @@ def _prompt(mode: str) -> str:
     )
 
 
-def test_dynamic_discovery_has_exactly_three_public_routines():
+def test_dynamic_discovery_has_exactly_four_public_routines():
     discovered = discover_routines_from_path(
         ROOT / "routines", agent_slug="lp_expert", force_reload=True
     )
@@ -80,6 +87,10 @@ def test_public_routine_schemas_keep_agent_inputs_small_and_explicit():
         "tick",
         "prior_closes",
     }
+    assert set(schemas["lp_pool_scan"]["properties"]) == {
+        "controller_id",
+        "tick",
+    }
     assert set(schemas["lp_create"]["properties"]) == {
         "controller_id",
         "tick",
@@ -88,10 +99,26 @@ def test_public_routine_schemas_keep_agent_inputs_small_and_explicit():
         "amount_quote",
         "range_half_width_pct",
         "preparation_operation_id",
+        "lp_executor_id",
     }
-    swap_fields = set(schemas["lp_swap"]["properties"])
+    swap_fields = set(schemas["lp_order_request"]["properties"])
     assert {"candidate", "amount_quote", "range_half_width_pct"} <= swap_fields
+    assert "swap_executor_id" in swap_fields
     assert {"slippage_pct", "plan", "plan_digest"} & swap_fields == set()
+    assert (
+        schemas["lp_order_request"]["properties"]["operation_id"]["pattern"]
+        == OPERATION_ID_PATTERN
+    )
+    assert (
+        schemas["lp_create"]["properties"]["operation_id"]["pattern"]
+        == OPERATION_ID_PATTERN
+    )
+    assert (
+        schemas["lp_create"]["properties"]["preparation_operation_id"]["anyOf"][0][
+            "pattern"
+        ]
+        == OPERATION_ID_PATTERN
+    )
 
 
 def test_old_public_routine_modules_and_names_are_absent():
@@ -101,10 +128,12 @@ def test_old_public_routine_modules_and_names_are_absent():
         if not path.name.startswith("_")
     }
     assert public_files == PUBLIC_ROUTINES
-    for path in (
+    instruction_paths = [
         ROOT / "AGENT.md",
         ROOT / "strategies" / "orca" / "strategy.md",
-    ):
+        *sorted((ROOT / "skills").glob("*/SKILL.md")),
+    ]
+    for path in instruction_paths:
         content = path.read_text()
         assert not OLD_ROUTINES & set(content.replace("`", " ").split())
 
@@ -119,11 +148,46 @@ def test_agent_action_policy_is_narrow_and_explicit():
     }
     text = (ROOT / "AGENT.md").read_text()
     compact = " ".join(text.split())
-    assert "`run` only `lp_snapshot`, `lp_swap`, or `lp_create`" in text
-    assert "exact current-controller `search` and exact `stop` only" in text
-    assert "Never create, list schemas" in compact
+    assert (
+        "`run` only `lp_snapshot`, `lp_pool_scan`,\n"
+        "  `lp_order_request`, or `lp_create`"
+    ) in text
+    assert "exact `create` from a current routine's unchanged" in text
+    assert "Never invent or edit create fields" in compact
+    assert "direct Gateway mutation" in text
     assert "Never call `consult`" in text
     assert "Never call it in dry-run or run-once mode" in text
+    assert "Incomplete post-create detail remains `submitted`" in text
+    assert "Only an explicit mismatch in the exact executor ID" in text
+    assert (
+        '`manage_routines(action="run", name="lp_order_request")` cannot '
+        "create an executor, submit a swap, or transfer funds"
+    ) in compact
+
+
+def test_agent_routines_never_hide_native_swap_or_executor_creation():
+    swap_source = (ROOT / "routines" / "lp_order_request.py").read_text()
+    create_source = (ROOT / "routines" / "lp_create.py").read_text()
+
+    assert ".execute_swap(" not in swap_source
+    assert ".create_executor(" not in swap_source
+    assert ".create_executor(" not in create_source
+    assert "executor_request" in swap_source
+    assert "executor_request" in create_source
+    assert "never submit an executor or transfer" in swap_source
+
+
+def test_order_request_is_discovered_as_non_submitting():
+    discovered = discover_routines_from_path(
+        ROOT / "routines", agent_slug="lp_expert", force_reload=True
+    )
+    order_request = discovered["lp_order_request"]
+
+    assert order_request.category == "Non-Submitting LP Order Request"
+    assert (
+        order_request.description
+        == "Prepare a non-submitting order request or reconcile its exact returned ID."
+    )
 
 
 def test_skill_store_and_filesystem_have_exactly_four_relevant_skills():
@@ -153,7 +217,9 @@ def test_each_skill_is_routed_to_its_current_critical_path(name, required_terms)
 
 def test_ordinary_complete_snapshot_path_reads_no_skill():
     strategy = (ROOT / "strategies" / "orca" / "strategy.md").read_text()
-    assert "ordinary complete-snapshot paths are self-contained" in strategy
+    assert "ordinary complete portfolio-and-scan paths are self-contained" in (
+        " ".join(strategy.split())
+    )
     assert "Read at most the one relevant playbook" in strategy
 
 
@@ -170,7 +236,7 @@ def test_strategy_and_example_ship_configurable_capacity_defaults():
         assert config["risk_limits"]["max_open_executors"] == 3
 
 
-def test_prompt_has_only_three_routine_paths_and_next_tick_cleanup():
+def test_prompt_has_only_four_routine_paths_and_next_tick_cleanup():
     prompt = _prompt("loop")
     compact = " ".join(prompt.split())
     assert all(name in prompt for name in PUBLIC_ROUTINES)
@@ -179,11 +245,14 @@ def test_prompt_has_only_three_routine_paths_and_next_tick_cleanup():
     assert "first following tick" in prompt
     assert "material attributable residual" in prompt
     assert "Never sell the wallet's total base balance" in compact
-    assert "available_deployments_this_tick" in prompt
+    assert "second value in `selection_constraints.deployments`" in compact
     assert "Start the next selection only after the prior create is confirmed" in prompt
     assert "Treat shipped capacity, deployment, and scan values as defaults" in prompt
     assert "candidate_limit" in prompt
     assert "do not send" in prompt.casefold()
+    assert "^[A-Za-z0-9_-]{8,128}$" in prompt
+    assert "never copy the dotted controller ID verbatim" in prompt
+    assert "Never hardcode or reuse a session number, tick, pool" in compact
 
 
 def test_dry_run_prompt_is_observation_only():

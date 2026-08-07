@@ -32,12 +32,30 @@ source: agent:lp_expert
    snapshot proves the release condition.
 8. If one material base residual is exactly attributable after native
    restoration failed, was omitted, or incorrectly reported success, use
-   `lp_swap` once with a new cleanup operation ID to sell exactly that amount to
-   canonical USDC.
-9. Confirm the cleanup receipt and refreshed scoped evidence before releasing
-   capacity. An uncertain cleanup never permits a retry.
+   `lp_order_request` with a new cleanup operation ID to validate the exact
+   amount and emit one non-submitting `order_executor` request. Submit that
+   unchanged request once through `manage_executors`, then call
+   `lp_order_request` again with only the exact controller, operation ID, and
+   returned `swap_executor_id`. On a later tick, use snapshot
+   `reconcile.config` unchanged.
+9. Confirm the exact order executor, finalized Solana transaction
+   bound-wallet/mint balance deltas, and refreshed scoped evidence before
+   releasing capacity. The Gateway swap ledger and the executor's requested
+   amount are not confirmation authority. An uncertain native create or cleanup
+   never permits a retry.
 10. Never use total wallet balance, a broad balance delta, or same-mint inventory
     owned by another executor as the cleanup amount.
+
+## Failed deployment preparation
+
+11. If `lp_snapshot` returns `phase="confirmed_unconsumed"`, do not scan or
+    prepare another pool. Verify that its exact `prepared_inventory` identifies
+    finalized preparation-swap output, then journal and run the returned
+    `restore.config` unchanged.
+12. Restoration sells only the exact preparation receipt output. It never sells
+    the pre-existing wallet-base portion of a mixed allocation. A confirmed
+    no-swap allocation creates no residual and therefore has no restoration
+    capsule.
 
 Run-once cannot assume this following tick. A run-once stop whose native
 restoration is not proven clean requires manual post-close verification and may

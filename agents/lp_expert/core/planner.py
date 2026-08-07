@@ -1,5 +1,6 @@
 """Pure, deterministic Orca CLMM range and inventory planner."""
 
+import copy
 import hashlib
 import json
 import math
@@ -8,7 +9,10 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
-from agents.lp_expert.core.orca import USDC_MINT
+from agents.lp_expert.core.orca import (
+    USDC_MINT,
+    candidate_selection_identity,
+)
 
 NETWORK = "solana-mainnet-beta"
 LP_PROVIDER = "orca/clmm"
@@ -45,6 +49,76 @@ def plan_digest(plan: dict[str, Any]) -> str:
         _json_value(plan), separators=(",", ":"), sort_keys=True
     ).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def apply_existing_base_inventory(
+    plan: dict[str, Any],
+    attributed_base_amount: Decimal,
+) -> dict[str, Any]:
+    """Apply authorized wallet base to a fixed selection plan.
+
+    The selection's LP size stays unchanged. Existing base reduces only the
+    preparation shortfall and its quote budget; it is not represented as swap
+    output.
+    """
+
+    attributed = _decimal(
+        attributed_base_amount,
+        "attributed_base_amount",
+    )
+    if attributed < 0:
+        raise ValueError("attributed_base_amount must be non-negative")
+    adjusted = copy.deepcopy(plan)
+    inventory = adjusted["inventory"]
+    inputs = adjusted["inputs"]
+    identity = adjusted["identity"]
+    required_base = _decimal(
+        inventory["base_amount"],
+        "planned base amount",
+        positive=True,
+    )
+    effective = min(attributed, required_base)
+    shortfall = required_base - effective
+    price = _decimal(inputs["current_price"], "current_price", positive=True)
+    quote_amount = _decimal(
+        inventory["quote_amount"],
+        "planned quote amount",
+        positive=True,
+    )
+    allocation = _decimal(
+        inputs["amount_quote"],
+        "amount_quote",
+        positive=True,
+    )
+    decimals = int(identity["quote_decimals"])
+    estimate = _floor(shortfall * price, decimals)
+    if shortfall > 0:
+        cap = _floor(allocation - quote_amount - effective * price, decimals)
+        if cap < estimate:
+            raise ValueError(
+                "authorized existing base leaves insufficient preparation "
+                "slippage headroom"
+            )
+    else:
+        cap = Decimal(0)
+    inputs["attributed_base_amount"] = effective
+    inventory.update(
+        {
+            "base_shortfall": shortfall,
+            "estimated_usdc_for_preparation_swap": estimate,
+            "estimated_total_usdc": estimate + quote_amount,
+            "max_usdc_for_preparation_swap": cap,
+            "preparation_slippage_headroom_quote": cap - estimate,
+            "maximum_total_usdc": cap + quote_amount,
+            "inventory_ready": effective >= required_base,
+            "attribution_rule": (
+                "authorized scoped wallet base plus exact preparation-swap "
+                "output may satisfy LP base inventory"
+            ),
+        }
+    )
+    adjusted["plan_digest"] = plan_digest(adjusted)
+    return adjusted
 
 
 class PlanRequest(BaseModel):
@@ -135,11 +209,7 @@ def build_candidate_plan(
 ) -> dict[str, Any]:
     """Build one selected candidate plan from current frozen Strategy bounds."""
 
-    if not isinstance(candidate, dict):
-        raise ValueError("selected candidate must be an object")
-    token = candidate.get("token_a")
-    if not isinstance(token, dict):
-        raise ValueError("selected candidate base-token identity is unavailable")
+    identity = candidate_selection_identity(candidate)
     minimum = _decimal(
         strategy_config.get("min_quote_per_executor"),
         "configured minimum allocation",
@@ -155,12 +225,12 @@ def build_candidate_plan(
         raise ValueError("selected allocation is outside current configured bounds")
     return build_plan(
         PlanRequest(
-            pool_address=candidate.get("pool_address"),
-            base_symbol=token.get("symbol"),
-            base_mint=token.get("mint"),
-            base_decimals=token.get("decimals"),
-            current_price=candidate.get("price"),
-            tick_spacing=candidate.get("tick_spacing"),
+            pool_address=identity["pool_address"],
+            base_symbol=identity["base_symbol"],
+            base_mint=identity["base_mint"],
+            base_decimals=identity["base_decimals"],
+            current_price=identity["price"],
+            tick_spacing=identity["tick_spacing"],
             amount_quote=selected,
             range_half_width_pct=range_half_width_pct,
             minimum_range_half_width_pct=strategy_config.get(

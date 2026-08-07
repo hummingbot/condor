@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -95,6 +96,7 @@ def test_runtime_accepts_configurable_capacity_and_deployment_contract():
     defaults = runtime._validate_config(strategy_config(), "loop")
     assert defaults["max_open_executors"] == 3
     assert defaults["max_slot_deployments_per_tick"] == 1
+    assert defaults["use_existing_base_inventory"] is True
     configured = runtime._validate_config(
         strategy_config(
             total_amount_quote=30,
@@ -122,6 +124,11 @@ def test_runtime_accepts_configurable_capacity_and_deployment_contract():
         )
     with pytest.raises(ValueError):
         runtime._validate_config(strategy_config(candidate_scan_limit=0), "loop")
+    with pytest.raises(ValueError, match="must be a boolean"):
+        runtime._validate_config(
+            strategy_config(use_existing_base_inventory=1),
+            "loop",
+        )
 
 
 def test_hummingbot_binding_and_balance_reads_are_exactly_scoped(tmp_path):
@@ -229,6 +236,38 @@ def test_orca_registered_token_identity_is_exact():
     )
     assert accepted == []
     assert rejected[0]["reason"] == "registered_token_identity_conflict"
+
+
+def test_compact_candidate_preserves_planning_and_refresh_identity(monkeypatch):
+    candidate, error = orca.normalize_record(pool_record(), "all", "volume24h", 1)
+    assert error is None
+    unique, rejected = orca.deduplicate([candidate])
+    assert not rejected
+    ranked = orca.rank_pools(unique)[0]
+    compact = orca.compact_candidate(ranked)
+
+    assert len(json.dumps(compact, separators=(",", ":"))) < 400
+    assert compact["base"] == ["SOL", SOL_MINT, 9]
+    assert planner.build_candidate_plan(
+        compact,
+        amount_quote="4",
+        range_half_width_pct="10",
+        strategy_config=strategy_config(),
+    ) == planner.build_candidate_plan(
+        ranked,
+        amount_quote="4",
+        range_half_width_pct="10",
+        strategy_config=strategy_config(),
+    )
+
+    monkeypatch.setattr(
+        orca,
+        "fetch_json",
+        lambda _: {"data": [pool_record()]},
+    )
+    refreshed = asyncio.run(orca.refresh_candidate(compact))
+    assert refreshed["pool_address"] == POOL
+    assert refreshed["token_a"]["mint"] == SOL_MINT
 
 
 def test_plan_is_double_sided_bounded_and_digest_stable():

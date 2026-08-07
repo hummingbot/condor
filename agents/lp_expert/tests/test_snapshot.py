@@ -11,7 +11,6 @@ from conftest import (
     POOL,
     SOL_MINT,
     executor_row,
-    pool_record,
     prior_close,
     runtime_scope,
     strategy_config,
@@ -19,16 +18,8 @@ from conftest import (
 )
 from pydantic import ValidationError
 
-from agents.lp_expert.core import orca, portfolio
+from agents.lp_expert.core import portfolio
 from agents.lp_expert.routines import lp_snapshot
-
-
-def _candidate():
-    normalized, error = orca.normalize_record(pool_record(), "all", "volume24h", 1)
-    assert error is None
-    unique, rejected = orca.deduplicate([normalized])
-    assert not rejected
-    return orca.rank_pools(unique)[0]
 
 
 class Executors:
@@ -47,18 +38,6 @@ class Gateway:
         assert network == "solana-mainnet-beta"
         return {"default_wallet": "wallet-1"}
 
-    async def get_network_tokens(self, network):
-        assert network == "solana-mainnet-beta"
-        return {
-            "tokens": [
-                {
-                    "address": SOL_MINT,
-                    "symbol": "SOL",
-                    "decimals": 9,
-                }
-            ]
-        }
-
 
 def _install(
     monkeypatch,
@@ -67,11 +46,10 @@ def _install(
     rows=None,
     pages=None,
     tick=2,
-    scan=True,
     stop_error=None,
     unresolved=None,
+    unconsumed=None,
     config=None,
-    candidate_count=1,
 ):
     scope = runtime_scope(tmp_path, tick=tick, config=config)
     session_config = tmp_path / "config.yml"
@@ -92,7 +70,7 @@ def _install(
         return {**payload, "report_id": "snapshot-report", "report_error": None}
 
     monkeypatch.setattr(lp_snapshot, "attach_report", attach)
-    if unresolved is not None:
+    if unresolved is not None or unconsumed is not None:
 
         class ReadOnlyStore:
             def __init__(self, resolved_scope, *, read_only):
@@ -101,7 +79,11 @@ def _install(
 
             def unresolved_operations(self):
                 assert self.read_only is True
-                return copy.deepcopy(unresolved)
+                return copy.deepcopy(unresolved or [])
+
+            def unconsumed_preparations(self):
+                assert self.read_only is True
+                return copy.deepcopy(unconsumed or [])
 
         monkeypatch.setattr(lp_snapshot, "ReceiptStore", ReadOnlyStore)
 
@@ -116,42 +98,7 @@ def _install(
         }
 
     monkeypatch.setattr(lp_snapshot, "read_prior_tick_stop", read_stop)
-    scan_calls = []
-
-    async def scan_pools(limit):
-        scan_calls.append(limit)
-        if not scan:
-            raise AssertionError("candidate scan must be skipped")
-        candidate = _candidate()
-        candidates = [
-            {
-                **copy.deepcopy(candidate),
-                "pool_address": (
-                    candidate["pool_address"] if index == 0 else f"pool-{index + 1}"
-                ),
-            }
-            for index in range(candidate_count)
-        ]
-        return {
-            "status": "complete",
-            "deployable": True,
-            "source_coverage": {
-                "required_requests": 4,
-                "completed_requests": 4,
-                "requests": [],
-            },
-            "universe": {
-                "raw_records": 1,
-                "normalized_records": 1,
-                "valid_unique_pools": 1,
-                "returned_candidates": len(candidates),
-            },
-            "technical_rejections": {},
-            "candidates": candidates,
-        }
-
-    monkeypatch.setattr(lp_snapshot.orca, "scan_pools", scan_pools)
-    return client, scan_calls
+    return client
 
 
 def _config(*, tick=2, close=None, closes=None):
@@ -176,10 +123,20 @@ def _run(config):
     return json.loads(asyncio.run(lp_snapshot.run(config, None)))
 
 
-def test_snapshot_flat_portfolio_returns_candidates_and_dynamic_constraints(
+def _create_request(row):
+    return {
+        "action": "create",
+        "executor_type": "lp_executor",
+        "account_name": "master_account",
+        "controller_id": "lp_expert.orca_1",
+        "executor_config": copy.deepcopy(row["config"]),
+    }
+
+
+def test_snapshot_flat_portfolio_returns_scan_capacity_and_dynamic_constraints(
     monkeypatch, tmp_path
 ):
-    _, calls = _install(monkeypatch, tmp_path)
+    _install(monkeypatch, tmp_path)
 
     result = _run(_config())
 
@@ -187,13 +144,9 @@ def test_snapshot_flat_portfolio_returns_candidates_and_dynamic_constraints(
     assert result["mutation"] is False
     assert result["portfolio"]["active_count"] == 0
     assert result["portfolio"]["available_slots"] == 3
-    assert result["deployable"] is True
-    assert len(result["candidates"]) == 1
-    assert "plan" not in result["candidates"][0]
-    assert result["selection_constraints"]["allocation_quote"]["minimum"] == "3"
-    assert result["selection_constraints"]["allocation_quote"]["maximum"] == "4"
-    assert result["selection_constraints"]["available_deployments_this_tick"] == 1
-    assert calls == [3]
+    assert result["scan_allowed"] is True
+    assert result["selection_constraints"]["allocation_quote"] == ["3", "4", "12"]
+    assert result["selection_constraints"]["deployments"] == [1, 1]
     assert result["report_id"] == "snapshot-report"
 
 
@@ -219,7 +172,7 @@ def test_snapshot_healthy_executor_preserves_remaining_capacity(monkeypatch, tmp
     assert result["portfolio"]["active_count"] == 1
     assert result["portfolio"]["available_slots"] == 2
     assert result["portfolio"]["close_required_executor_ids"] == []
-    assert result["deployable"] is True
+    assert result["scan_allowed"] is True
 
 
 def test_snapshot_returns_multiple_deployments_from_frozen_config(
@@ -237,20 +190,12 @@ def test_snapshot_returns_multiple_deployments_from_frozen_config(
             "shutdown_drawdown_pct": -1,
         },
     )
-    _, calls = _install(
-        monkeypatch,
-        tmp_path,
-        config=configured,
-        candidate_count=2,
-    )
+    _install(monkeypatch, tmp_path, config=configured)
 
     result = _run(_config())
 
-    assert calls == [6]
     assert result["portfolio"]["available_slots"] == 5
-    assert len(result["candidates"]) == 2
-    assert result["selection_constraints"]["configured_deployments_per_tick"] == 2
-    assert result["selection_constraints"]["available_deployments_this_tick"] == 2
+    assert result["selection_constraints"]["deployments"] == [2, 2]
 
 
 def test_snapshot_triggered_executor_blocks_candidate_work(monkeypatch, tmp_path):
@@ -258,14 +203,12 @@ def test_snapshot_triggered_executor_blocks_candidate_work(monkeypatch, tmp_path
         monkeypatch,
         tmp_path,
         rows=[executor_row(net_pnl_pct="0.06")],
-        scan=False,
     )
 
     result = _run(_config())
 
     assert result["portfolio"]["close_required_executor_ids"] == ["executor-1"]
-    assert result["deployable"] is False
-    assert result["candidates"] == []
+    assert result["scan_allowed"] is False
 
 
 def test_snapshot_reconciling_executor_blocks_deployment(monkeypatch, tmp_path):
@@ -273,14 +216,13 @@ def test_snapshot_reconciling_executor_blocks_deployment(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         rows=[executor_row(state="CLOSING")],
-        scan=False,
     )
 
     result = _run(_config())
 
     assert result["portfolio"]["reconciling_executor_ids"] == ["executor-1"]
     assert result["portfolio"]["deployment_blocked"] is True
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
 
 
 def test_snapshot_foreign_active_executor_is_read_only_and_blocks_deploy(
@@ -290,7 +232,6 @@ def test_snapshot_foreign_active_executor_is_read_only_and_blocks_deploy(
         monkeypatch,
         tmp_path,
         rows=[executor_row("foreign", controller_id="foreign.agent_1")],
-        scan=False,
     )
 
     result = _run(_config())
@@ -298,7 +239,7 @@ def test_snapshot_foreign_active_executor_is_read_only_and_blocks_deploy(
     assert result["portfolio"]["active_count"] == 0
     assert result["portfolio"]["foreign_active_executor_ids"] == ["foreign"]
     assert result["portfolio"]["deployment_blocked"] is True
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
 
 
 def test_snapshot_follows_pagination_and_supports_three_executors(
@@ -317,12 +258,7 @@ def test_snapshot_follows_pagination_and_supports_three_executors(
             "next_cursor": None,
         },
     }
-    client, _ = _install(
-        monkeypatch,
-        tmp_path,
-        pages=pages,
-        scan=False,
-    )
+    client = _install(monkeypatch, tmp_path, pages=pages)
 
     result = _run(_config())
 
@@ -333,7 +269,7 @@ def test_snapshot_follows_pagination_and_supports_three_executors(
         "pool-three",
         "pool-two",
     ]
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
     assert [call["cursor"] for call in client.executors.calls] == [None, "second"]
 
 
@@ -359,15 +295,13 @@ def test_snapshot_following_tick_cleanup_is_prioritized_and_fail_closed(
         tmp_path,
         tick=2,
         rows=[row],
-        scan=False,
     )
 
     result = _run(_config(close=close))
 
     assert result["cleanup_tick"] is True
     assert result["portfolio"]["cleanups"][0]["status"] == expected
-    assert result["candidates"] == []
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
 
 
 def test_snapshot_rejects_cleanup_on_the_close_tick(monkeypatch, tmp_path):
@@ -377,7 +311,6 @@ def test_snapshot_rejects_cleanup_on_the_close_tick(monkeypatch, tmp_path):
         tmp_path,
         tick=2,
         rows=[terminal_row()],
-        scan=False,
     )
 
     result = _run(_config(close=close))
@@ -385,7 +318,7 @@ def test_snapshot_rejects_cleanup_on_the_close_tick(monkeypatch, tmp_path):
     assert result["status"] == "rejected"
     assert "requires a later tick" in result["reason"]
     assert result["mutation"] is False
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
 
 
 def test_snapshot_cleanup_ambiguity_is_manual_quarantine(monkeypatch, tmp_path):
@@ -396,7 +329,6 @@ def test_snapshot_cleanup_ambiguity_is_manual_quarantine(monkeypatch, tmp_path):
         monkeypatch,
         tmp_path,
         rows=[row],
-        scan=False,
     )
 
     result = _run(_config(close=close))
@@ -404,14 +336,14 @@ def test_snapshot_cleanup_ambiguity_is_manual_quarantine(monkeypatch, tmp_path):
     assert result["portfolio"]["cleanups"][0]["status"] == "manual_review"
     assert result["portfolio"]["cleanups"][0]["capacity_quarantined"] is True
     assert result["portfolio"]["deployment_blocked"] is True
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
 
 
 def test_snapshot_prior_closes_are_unique_and_capped_by_runtime(monkeypatch, tmp_path):
     close = _snapshot_close()
     with pytest.raises(ValidationError, match="must be unique"):
         _config(closes=[close, close])
-    _install(monkeypatch, tmp_path, scan=False)
+    _install(monkeypatch, tmp_path)
     result = _run(
         _config(
             closes=[
@@ -446,7 +378,7 @@ def test_snapshot_classifies_multiple_prior_closes_independently(monkeypatch, tm
         _snapshot_close("clean", pool_address="pool-clean"),
         _snapshot_close("residual", pool_address="pool-residual"),
     ]
-    _install(monkeypatch, tmp_path, rows=rows, scan=False)
+    _install(monkeypatch, tmp_path, rows=rows)
 
     result = _run(_config(closes=closes))
 
@@ -459,8 +391,7 @@ def test_snapshot_classifies_multiple_prior_closes_independently(monkeypatch, tm
         "cleanup_required",
     ]
     assert result["portfolio"]["quarantined_cleanup_executor_ids"] == ["residual"]
-    assert result["candidates"] == []
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
 
 
 def test_snapshot_missing_or_ambiguous_platform_stop_is_manual_quarantine(
@@ -470,7 +401,6 @@ def test_snapshot_missing_or_ambiguous_platform_stop_is_manual_quarantine(
         monkeypatch,
         tmp_path,
         rows=[terminal_row()],
-        scan=False,
         stop_error=ValueError("one exact prior-tick native stop intent was not proven"),
     )
 
@@ -481,8 +411,7 @@ def test_snapshot_missing_or_ambiguous_platform_stop_is_manual_quarantine(
     assert cleanup["capacity_quarantined"] is True
     assert "not proven" in cleanup["reason"]
     assert result["portfolio"]["deployment_blocked"] is True
-    assert result["candidates"] == []
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
 
 
 def test_snapshot_persisted_unresolved_operation_blocks_scan_and_deploy(
@@ -491,7 +420,6 @@ def test_snapshot_persisted_unresolved_operation_blocks_scan_and_deploy(
     _install(
         monkeypatch,
         tmp_path,
-        scan=False,
         unresolved=[
             {
                 "operation_id": "uncertain-swap-1",
@@ -500,6 +428,7 @@ def test_snapshot_persisted_unresolved_operation_blocks_scan_and_deploy(
                 "phase": "uncertain",
                 "mutation_possible": True,
                 "reason": "submission outcome unavailable",
+                "result": {"swap_executor_id": "native-order-1"},
             }
         ],
     )
@@ -513,8 +442,222 @@ def test_snapshot_persisted_unresolved_operation_blocks_scan_and_deploy(
             "tick": 1,
             "phase": "uncertain",
             "reason": "submission outcome unavailable",
+            "reconcile": {
+                "routine": "lp_order_request",
+                "config": {
+                    "controller_id": "lp_expert.orca_1",
+                    "operation_id": "uncertain-swap-1",
+                    "swap_executor_id": "native-order-1",
+                },
+            },
         }
     ]
     assert result["portfolio"]["deployment_blocked"] is True
-    assert result["candidates"] == []
-    assert result["deployable"] is False
+    assert result["scan_allowed"] is False
+
+
+def test_snapshot_blocks_scan_and_emits_exact_restoration_capsule(
+    monkeypatch, tmp_path
+):
+    preparation_id = f"lp_expert_orca_1-t1-{POOL}-prepare"
+    _install(
+        monkeypatch,
+        tmp_path,
+        unconsumed=[
+            {
+                "operation_id": preparation_id,
+                "operation_kind": "swap",
+                "tick": 1,
+                "phase": "confirmed",
+                "intent": {
+                    "reason": "inventory_preparation",
+                    "pool_address": POOL,
+                    "base_symbol": "SOL",
+                    "base_mint": SOL_MINT,
+                    "base_decimals": 9,
+                },
+                "result": {
+                    "receipt": {
+                        "transaction_hash": "tx-preparation",
+                        "output_amount": "0.020228969",
+                    }
+                },
+            }
+        ],
+    )
+
+    result = _run(_config())
+
+    unresolved = result["portfolio"]["unresolved_operations"][0]
+    assert unresolved["phase"] == "confirmed_unconsumed"
+    assert unresolved["prepared_inventory"]["amount"] == "0.020228969"
+    assert unresolved["restore"] == {
+        "routine": "lp_order_request",
+        "config": {
+            "controller_id": "lp_expert.orca_1",
+            "operation_id": (f"lp_expert_orca_1-t2-{POOL}-restore"),
+            "reason": "inventory_restoration",
+            "pool_address": POOL,
+            "base_symbol": "SOL",
+            "base_mint": SOL_MINT,
+            "base_decimals": 9,
+            "amount": "0.020228969",
+            "attributed_base_amount": "0.020228969",
+            "attribution_operation_id": preparation_id,
+        },
+    }
+    assert result["portfolio"]["deployment_blocked"] is True
+    assert result["scan_allowed"] is False
+
+
+def test_snapshot_recovers_legacy_admitted_create_from_one_exact_executor(
+    monkeypatch, tmp_path
+):
+    row = executor_row("executor-created")
+    _install(
+        monkeypatch,
+        tmp_path,
+        rows=[row],
+        unresolved=[
+            {
+                "operation_id": "admitted-create-1",
+                "operation_kind": "create",
+                "tick": 1,
+                "phase": "admitted",
+                "mutation_possible": False,
+                "result": {"executor_request": _create_request(row)},
+            }
+        ],
+    )
+
+    result = _run(_config())
+
+    assert result["portfolio"]["unresolved_operations"][0]["reconcile"] == {
+        "routine": "lp_create",
+        "config": {
+            "controller_id": "lp_expert.orca_1",
+            "operation_id": "admitted-create-1",
+            "lp_executor_id": "executor-created",
+        },
+    }
+    assert result["portfolio"]["deployment_blocked"] is True
+    assert result["scan_allowed"] is False
+
+
+def test_snapshot_recovers_create_from_equivalent_native_lp_values(
+    monkeypatch, tmp_path
+):
+    expected = executor_row("executor-created")
+    expected["config"].update(
+        {
+            "side": 3,
+            "lower_limit_price": "71.0821772893137114",
+            "upper_limit_price": "76.9098811113271891",
+            "keep_position": False,
+        }
+    )
+    observed = copy.deepcopy(expected)
+    observed["config"].update(
+        {
+            "side": "RANGE",
+            "lower_limit_price": 71.0821772893137,
+            "upper_limit_price": 76.9098811113272,
+        }
+    )
+    _install(
+        monkeypatch,
+        tmp_path,
+        rows=[observed],
+        unresolved=[
+            {
+                "operation_id": "admitted-create-1",
+                "operation_kind": "create",
+                "tick": 1,
+                "phase": "admitted",
+                "mutation_possible": False,
+                "result": {"executor_request": _create_request(expected)},
+            }
+        ],
+    )
+
+    result = _run(_config())
+
+    assert result["portfolio"]["unresolved_operations"][0]["reconcile"] == {
+        "routine": "lp_create",
+        "config": {
+            "controller_id": "lp_expert.orca_1",
+            "operation_id": "admitted-create-1",
+            "lp_executor_id": "executor-created",
+        },
+    }
+    assert result["portfolio"]["deployment_blocked"] is True
+    assert result["scan_allowed"] is False
+
+
+@pytest.mark.parametrize("match_count", [0, 2])
+def test_snapshot_does_not_guess_create_recovery_without_one_exact_match(
+    monkeypatch, tmp_path, match_count
+):
+    expected = executor_row("expected")
+    rows = []
+    if match_count == 0:
+        rows = [executor_row("different", pool_address="different-pool")]
+    else:
+        rows = [
+            executor_row("duplicate-one"),
+            executor_row("duplicate-two"),
+        ]
+    _install(
+        monkeypatch,
+        tmp_path,
+        rows=rows,
+        unresolved=[
+            {
+                "operation_id": "admitted-create-1",
+                "operation_kind": "create",
+                "tick": 1,
+                "phase": "admitted",
+                "mutation_possible": False,
+                "result": {"executor_request": _create_request(expected)},
+            }
+        ],
+    )
+
+    result = _run(_config())
+    unresolved = result["portfolio"]["unresolved_operations"][0]
+
+    assert "reconcile" not in unresolved
+    if match_count == 2:
+        assert "multiple live executors" in unresolved["reason"]
+    assert result["portfolio"]["deployment_blocked"] is True
+    assert result["scan_allowed"] is False
+
+
+def test_snapshot_waits_for_incomplete_create_recovery_detail(monkeypatch, tmp_path):
+    expected = executor_row("expected")
+    expected["config"]["upper_limit_price"] = "210"
+    incomplete = copy.deepcopy(expected)
+    incomplete["config"].pop("upper_limit_price")
+    _install(
+        monkeypatch,
+        tmp_path,
+        rows=[incomplete],
+        unresolved=[
+            {
+                "operation_id": "admitted-create-1",
+                "operation_kind": "create",
+                "tick": 1,
+                "phase": "admitted",
+                "mutation_possible": False,
+                "result": {"executor_request": _create_request(expected)},
+            }
+        ],
+    )
+
+    result = _run(_config())
+    unresolved = result["portfolio"]["unresolved_operations"][0]
+
+    assert "reconcile" not in unresolved
+    assert "detail is incomplete" in unresolved["reason"]
+    assert result["portfolio"]["deployment_blocked"] is True
+    assert result["scan_allowed"] is False

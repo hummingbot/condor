@@ -82,8 +82,8 @@ def test_attach_report_success_preserves_result_and_adds_metadata(monkeypatch):
     result = asyncio.run(
         reporting.attach_report(
             payload,
-            title="LP swap",
-            routine_name="lp_swap",
+            title="LP order request",
+            routine_name="lp_order_request",
             normalized_input={"operation_id": "operation-1"},
             trace=trace,
             links={"operation_id": "operation-1"},
@@ -95,7 +95,7 @@ def test_attach_report_success_preserves_result_and_adds_metadata(monkeypatch):
         "report_id": "report-123",
         "report_error": None,
     }
-    assert captured["routine_name"] == "lp_swap"
+    assert captured["routine_name"] == "lp_order_request"
     assert captured["normalized_input"] == {"operation_id": "operation-1"}
     assert captured["output"]["status"] == "confirmed"
     assert captured["links"] == {"operation_id": "operation-1"}
@@ -213,7 +213,7 @@ def test_saved_report_has_metadata_input_output_and_ordered_trace(monkeypatch):
     report_id = asyncio.run(
         reporting._save_report(
             title="LP routine",
-            routine_name="lp_swap",
+            routine_name="lp_order_request",
             version="1",
             normalized_input={"operation_id": "op-1", "wallet": "secret"},
             output={

@@ -614,6 +614,120 @@ def rank_pools(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return _round_tree(ranked)
 
 
+def compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Project one ranked Orca record into the model transport contract."""
+
+    token = candidate["token_a"]
+    lenses = [item for item in candidate["source_lenses"] if item in DISCOVERY_LENSES]
+    if not lenses:
+        raise ValueError("candidate source lens is unavailable")
+    components = candidate["mcda"]["components"]
+    return {
+        "pool": candidate["pool_address"],
+        # Fixed order: symbol, mint, decimals. The whole candidate is passed
+        # unchanged to downstream routines; the model never reconstructs it.
+        "base": [token["symbol"], token["mint"], token["decimals"]],
+        "price": candidate["price"],
+        "spacing": candidate["tick_spacing"],
+        "lens": lenses[0],
+        "sources": candidate["source_count"],
+        "rank": candidate["neutral_rank"],
+        "score": candidate["mcda"]["score"],
+        # Fixed order: fee productivity, recent activity, price stability,
+        # liquidity depth, and execution simplicity.
+        "mcda": [
+            components["fee_productivity"],
+            components["recent_activity"],
+            components["price_stability"],
+            components["liquidity_depth"],
+            components["execution_simplicity"],
+        ],
+        "tvl": candidate["tvl_usd"],
+        "yield_24h": candidate["fee_yield"]["24h"],
+        "yield_floor_h": candidate["sustainable_fee_yield_per_hour"],
+        "accel_1h": candidate["fee_yield_acceleration"]["1h"]["ratio_vs_24h"],
+        "turnover_24h": candidate["turnover"]["24h"],
+        "move_24h": candidate["price_change"]["24h"],
+    }
+
+
+def candidate_selection_identity(candidate: dict[str, Any]) -> dict[str, Any]:
+    """Read the exact technical identity from a full or compact candidate."""
+
+    if not isinstance(candidate, dict):
+        raise ValueError("selected candidate must be an object")
+    if "base" in candidate:
+        base = candidate.get("base")
+        if not isinstance(base, list) or len(base) != 3:
+            raise ValueError("compact candidate base identity is invalid")
+        symbol, mint, decimals = base
+        pool_address = candidate.get("pool")
+        price = candidate.get("price")
+        tick_spacing = candidate.get("spacing")
+        source_lens = candidate.get("lens")
+    else:
+        token_a = candidate.get("token_a")
+        token_b = candidate.get("token_b")
+        if not isinstance(token_a, dict) or not isinstance(token_b, dict):
+            raise ValueError("selected candidate token identity is unavailable")
+        symbol = token_a.get("symbol")
+        mint = token_a.get("mint")
+        decimals = token_a.get("decimals")
+        pool_address = candidate.get("pool_address")
+        price = candidate.get("price")
+        tick_spacing = candidate.get("tick_spacing")
+        lenses = candidate.get("source_lenses")
+        source_lens = (
+            next(
+                (
+                    item
+                    for item in lenses
+                    if isinstance(item, str) and item in DISCOVERY_LENSES
+                ),
+                None,
+            )
+            if isinstance(lenses, list)
+            else None
+        )
+        if (
+            token_b.get("symbol") != "USDC"
+            or token_b.get("mint") != USDC_MINT
+            or token_b.get("decimals") != 6
+            or candidate.get("trading_pair") != f"{symbol}-USDC"
+        ):
+            raise ValueError("selected candidate quote identity is not canonical USDC")
+    strings = (pool_address, symbol, mint)
+    if not all(
+        isinstance(value, str) and value and value == value.strip() for value in strings
+    ):
+        raise ValueError("selected candidate identity is incomplete")
+    if (
+        isinstance(decimals, bool)
+        or not isinstance(decimals, int)
+        or not 0 <= decimals <= 18
+    ):
+        raise ValueError("selected candidate base decimals are invalid")
+    if (
+        isinstance(tick_spacing, bool)
+        or not isinstance(tick_spacing, int)
+        or tick_spacing <= 0
+    ):
+        raise ValueError("selected candidate tick spacing is invalid")
+    if source_lens not in DISCOVERY_LENSES:
+        raise ValueError("candidate source lens is unsupported")
+    return {
+        "pool_address": pool_address,
+        "trading_pair": f"{symbol}-USDC",
+        "base_symbol": symbol,
+        "base_mint": mint,
+        "base_decimals": decimals,
+        "quote_mint": USDC_MINT,
+        "price": price,
+        "tick_spacing": tick_spacing,
+        "source_lens": source_lens,
+    }
+
+
 def _error_text(error: BaseException) -> str:
     if isinstance(error, HTTPError):
         return f"HTTP {error.code}"
@@ -741,28 +855,25 @@ def filter_registered_tokens(
 
 async def refresh_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     """Refetch the candidate's original bounded lens and validate exact identity."""
-    lenses = candidate.get("source_lenses")
-    if not isinstance(lenses, list) or not lenses:
-        raise ValueError("candidate source lens is unavailable")
-    lens = next((item for item in lenses if item in DISCOVERY_LENSES), None)
-    if lens is None:
-        raise ValueError("candidate source lens is unsupported")
-    response = await asyncio.to_thread(fetch_json, discovery_request(lens))
+    identity = candidate_selection_identity(candidate)
+    response = await asyncio.to_thread(
+        fetch_json, discovery_request(identity["source_lens"])
+    )
     matches = []
     for index, raw in enumerate(response["data"], 1):
-        normalized, _ = normalize_record(raw, "all", lens, index)
-        if normalized and normalized["pool_address"] == candidate.get("pool_address"):
+        normalized, _ = normalize_record(raw, "all", identity["source_lens"], index)
+        if normalized and normalized["pool_address"] == identity["pool_address"]:
             matches.append(normalized)
     if len(matches) != 1:
         raise ValueError("selected Orca pool was not uniquely refreshed")
     refreshed = matches[0]
     expected = (
-        candidate.get("pool_address"),
-        candidate.get("trading_pair"),
-        candidate.get("token_a", {}).get("mint"),
-        candidate.get("token_a", {}).get("decimals"),
-        candidate.get("token_b", {}).get("mint"),
-        candidate.get("tick_spacing"),
+        identity["pool_address"],
+        identity["trading_pair"],
+        identity["base_mint"],
+        identity["base_decimals"],
+        identity["quote_mint"],
+        identity["tick_spacing"],
     )
     observed = (
         refreshed["pool_address"],

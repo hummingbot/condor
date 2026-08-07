@@ -5,6 +5,7 @@ import copy
 import json
 from types import SimpleNamespace
 
+import pytest
 from conftest import (
     POOL,
     SOL_MINT,
@@ -50,7 +51,9 @@ class Store:
         self.scope = scope
         self.records = {}
         if type(self).next_existing is not None:
-            self.records["create-operation-1"] = copy.deepcopy(type(self).next_existing)
+            self.records["create-operation-1"] = _complete_existing_record(
+                type(self).next_existing
+            )
         self.conflict = copy.deepcopy(type(self).next_conflict)
         self.unresolved = []
         self.writes = []
@@ -61,6 +64,7 @@ class Store:
         plan = _selection_plan(_candidate())
         return {
             "operation_id": operation_id,
+            "tick": self.scope.current_tick,
             "phase": "confirmed",
             "intent": self.receipt_intent
             or {
@@ -74,22 +78,27 @@ class Store:
                 "range_half_width_pct": "10",
             },
             "result": {
+                "confirmed_tick": self.scope.current_tick,
+                "same_tick_lp_create_allowed": True,
                 "receipt": {
                     "transaction_hash": "tx-preparation",
                     "input_amount": plan["inventory"][
                         "estimated_usdc_for_preparation_swap"
                     ],
                     "output_amount": plan["inventory"]["base_amount"],
-                }
+                },
             },
         }
 
-    def identity(self, *, operation_id, operation_kind, intent):
+    def read_confirmed_preparation(self, operation_id):
+        return self.read_confirmed_swap(operation_id)
+
+    def identity(self, *, operation_id, operation_kind, intent, tick=None):
         return SimpleNamespace(
             operation_id=operation_id,
             operation_kind=operation_kind,
             intent=intent,
-            tick=self.scope.current_tick,
+            tick=self.scope.current_tick if tick is None else tick,
         )
 
     def read(self, identity):
@@ -132,6 +141,9 @@ class Store:
     ):
         value = {
             "operation_id": identity.operation_id,
+            "operation_kind": identity.operation_kind,
+            "tick": identity.tick,
+            "intent": copy.deepcopy(identity.intent),
             "phase": phase,
             "mutation_possible": mutation_possible,
             "result": result,
@@ -151,12 +163,14 @@ class Executors:
         create_error=None,
         create_response=None,
         recovery_rows=None,
+        detail_error=None,
     ):
         self.rows = copy.deepcopy(rows or [])
         self.schema_missing = schema_missing
         self.create_error = create_error
         self.create_response = create_response or {"executor_id": "executor-new"}
         self.recovery_rows = copy.deepcopy(recovery_rows)
+        self.detail_error = detail_error
         self.search_count = 0
         self.create_calls = []
         self.created_config = None
@@ -198,9 +212,12 @@ class Executors:
 
     async def get_executor(self, executor_id):
         assert executor_id == "executor-new"
+        if self.detail_error:
+            raise self.detail_error
         config = copy.deepcopy(self.created_config)
         return {
             "executor_id": executor_id,
+            "account_name": "master_account",
             "controller_id": config["controller_id"],
             "status": "RUNNING",
             "is_active": True,
@@ -219,23 +236,25 @@ class Gateway:
 
 
 class Portfolio:
+    def __init__(self, balances=None):
+        self.balances = copy.deepcopy(
+            balances
+            or [
+                {
+                    "symbol": "SOL",
+                    "mint": SOL_MINT,
+                    "available": "2",
+                },
+                {
+                    "symbol": "USDC",
+                    "mint": orca.USDC_MINT,
+                    "available": "20",
+                },
+            ]
+        )
+
     async def get_state(self, **_):
-        return {
-            "master_account": {
-                "solana-mainnet-beta": [
-                    {
-                        "symbol": "SOL",
-                        "mint": SOL_MINT,
-                        "available": "2",
-                    },
-                    {
-                        "symbol": "USDC",
-                        "mint": orca.USDC_MINT,
-                        "available": "20",
-                    },
-                ]
-            }
-        }
+        return {"master_account": {"solana-mainnet-beta": copy.deepcopy(self.balances)}}
 
 
 def _config(candidate):
@@ -248,6 +267,30 @@ def _config(candidate):
         range_half_width_pct="10",
         preparation_operation_id="prepare-operation-1",
     )
+
+
+@pytest.mark.parametrize("field", ["operation_id", "preparation_operation_id"])
+def test_create_rejects_dotted_controller_operation_ids_at_input(field):
+    values = _config(_candidate()).model_dump()
+    values[field] = "lp_expert.orca_17-t1-pool-create"
+
+    with pytest.raises(ValueError, match="String should match pattern"):
+        lp_create.Config(**values)
+
+
+def test_create_accepts_dynamic_receipt_safe_operation_ids():
+    values = _config(_candidate()).model_dump()
+    values.update(
+        {
+            "operation_id": f"lp_expert_orca_17-t1-{POOL}-create",
+            "preparation_operation_id": (f"lp_expert_orca_17-t1-{POOL}-prepare"),
+        }
+    )
+
+    config = lp_create.Config(**values)
+
+    assert config.operation_id.endswith("-create")
+    assert config.preparation_operation_id.endswith("-prepare")
 
 
 def _expected_executor_config(candidate):
@@ -269,6 +312,55 @@ def _expected_executor_config(candidate):
     return {**final["executor_config"], "controller_id": "lp_expert.orca_1"}
 
 
+def _complete_existing_record(record):
+    candidate = _candidate()
+    selection = _selection_plan(candidate)
+    executor_config = _expected_executor_config(candidate)
+    final = planner.build_candidate_plan(
+        candidate,
+        amount_quote="4",
+        range_half_width_pct="10",
+        strategy_config={
+            "min_quote_per_executor": "3",
+            "max_quote_per_executor": "4",
+            "minimum_range_half_width_pct": "0.5",
+            "maximum_range_half_width_pct": "20",
+            "rebalance_threshold_pct": "1",
+            "max_slippage_pct": "1",
+        },
+        attributed_base_amount=selection["inventory"]["base_amount"],
+    )
+    supplied_result = record.get("result")
+    result = {
+        "executor_request": {
+            "action": "create",
+            "executor_type": "lp_executor",
+            "account_name": "master_account",
+            "controller_id": "lp_expert.orca_1",
+            "executor_config": executor_config,
+        },
+        "selection_plan": selection,
+        "final_plan": final,
+        **(copy.deepcopy(supplied_result) if isinstance(supplied_result, dict) else {}),
+    }
+    return {
+        "operation_id": "create-operation-1",
+        "operation_kind": "create",
+        "tick": 2,
+        "intent": {
+            "pool_address": executor_config["pool_address"],
+            "trading_pair": executor_config["trading_pair"],
+            "selection_plan_digest": selection["plan_digest"],
+            "final_plan_digest": final["plan_digest"],
+            "preparation_operation_id": "prepare-operation-1",
+            "amount_quote": "4",
+            "range_half_width_pct": "10",
+        },
+        **copy.deepcopy(record),
+        "result": result,
+    }
+
+
 def _install(
     monkeypatch,
     tmp_path,
@@ -279,12 +371,13 @@ def _install(
     existing=None,
     conflict=None,
     config=None,
+    balances=None,
 ):
     scope = runtime_scope(tmp_path, tick=2, config=config)
     client = SimpleNamespace(
         executors=executors or Executors(),
         gateway=Gateway(),
-        portfolio=Portfolio(),
+        portfolio=Portfolio(balances),
     )
     Store.next_existing = copy.deepcopy(existing)
     Store.next_conflict = copy.deepcopy(conflict)
@@ -323,21 +416,243 @@ def test_create_refreshes_candidate_validates_receipt_and_confirms(
     candidate = _candidate()
     client, store = _install(monkeypatch, tmp_path)
 
-    result = _run(_config(candidate))
+    ready = _run(_config(candidate))
+
+    assert ready["status"] == "ready"
+    assert ready["mutation"] is False
+    assert ready["executor_request"]["executor_type"] == "lp_executor"
+    assert ready["executor_request"]["controller_id"] == "lp_expert.orca_1"
+    assert (
+        ready["executor_request"]["executor_config"]["controller_id"]
+        == "lp_expert.orca_1"
+    )
+    assert client.executors.create_calls == []
+    assert store.admissions == ["create-operation-1"]
+    assert [row["phase"] for row in store.writes] == ["admitted"]
+    client.executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
 
     assert result["status"] == "confirmed"
     assert result["executor_id"] == "executor-new"
     assert result["mutation"] is True
     assert result["retry_allowed"] is False
-    assert len(client.executors.create_calls) == 1
-    assert store.admissions == ["create-operation-1"]
+    assert client.executors.create_calls == []
     assert [row["phase"] for row in store.writes] == [
+        "admitted",
         "submitting",
         "submitted",
         "confirmed",
     ]
     assert result["final_plan"]["inventory"]["inventory_ready"] is True
     assert result["report_id"] == "create-report"
+
+
+def test_create_id_only_recovery_uses_frozen_request_without_market_refresh(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    executors = Executors()
+    client, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+
+    async def changed_market_must_not_be_read(_):
+        raise AssertionError("existing create recovery refreshed the market")
+
+    monkeypatch.setattr(
+        lp_create.orca,
+        "refresh_candidate",
+        changed_market_must_not_be_read,
+    )
+    recovery = lp_create.Config(
+        controller_id="lp_expert.orca_1",
+        operation_id="create-operation-1",
+        lp_executor_id="executor-new",
+    )
+
+    result = _run(recovery)
+
+    assert result["status"] == "confirmed"
+    assert result["executor_id"] == "executor-new"
+    assert result["recovery_source"] == "exact_frozen_executor_request"
+    assert result["final_plan"] == ready["final_plan"]
+    assert [row["phase"] for row in store.writes] == [
+        "admitted",
+        "submitting",
+        "submitted",
+        "confirmed",
+    ]
+
+
+def test_create_id_only_recovery_without_receipt_is_manual_review(
+    monkeypatch, tmp_path
+):
+    client, store = _install(monkeypatch, tmp_path)
+
+    result = _run(
+        lp_create.Config(
+            controller_id="lp_expert.orca_1",
+            operation_id="missing-create-operation",
+            lp_executor_id="executor-new",
+        )
+    )
+
+    assert result["status"] == "manual_review"
+    assert result["mutation"] is True
+    assert result["retry_allowed"] is False
+    assert client.executors.create_calls == []
+    assert store.writes == []
+
+
+def test_admitted_lp_create_is_not_reemitted_without_exact_executor_id(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    client, store = _install(monkeypatch, tmp_path)
+    ready = _run(_config(candidate))
+
+    replay = _run(_config(candidate))
+
+    assert replay["status"] == "admitted"
+    assert replay["retry_allowed"] is False
+    assert replay["executor_request"] == ready["executor_request"]
+    assert client.executors.create_calls == []
+    assert [row["phase"] for row in store.writes] == ["admitted"]
+
+
+def test_create_waits_for_native_risk_count_refresh_when_required(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    client, store = _install(monkeypatch, tmp_path)
+    original = store.read_confirmed_preparation
+
+    def preparation(operation_id):
+        record = original(operation_id)
+        record["result"]["same_tick_lp_create_allowed"] = False
+        return record
+
+    store.read_confirmed_preparation = preparation
+
+    result = _run(_config(candidate))
+
+    assert result["status"] == "rejected_before_submit"
+    assert "requires LP create on a later tick" in result["reason"]
+    assert result["mutation"] is False
+    assert client.executors.create_calls == []
+    assert store.admissions == []
+
+
+def test_create_can_continue_after_following_tick_swap_confirmation(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    client, store = _install(monkeypatch, tmp_path)
+    original = store.read_confirmed_preparation
+
+    def preparation(operation_id):
+        record = original(operation_id)
+        record["tick"] = 1
+        record["result"]["confirmed_tick"] = 2
+        record["result"]["same_tick_lp_create_allowed"] = False
+        return record
+
+    store.read_confirmed_preparation = preparation
+
+    result = _run(_config(candidate))
+
+    assert result["status"] == "ready"
+    assert result["mutation"] is False
+    assert result["executor_request"]["executor_type"] == "lp_executor"
+    assert store.admissions == ["create-operation-1"]
+    assert client.executors.create_calls == []
+
+
+def test_create_accepts_confirmed_existing_wallet_inventory_allocation(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    client, store = _install(monkeypatch, tmp_path)
+    base_plan = _selection_plan(candidate)
+    existing_base = base_plan["inventory"]["base_amount"]
+    selection = planner.apply_existing_base_inventory(
+        base_plan,
+        existing_base,
+    )
+
+    def preparation(operation_id):
+        assert operation_id == "prepare-operation-1"
+        return {
+            "operation_id": operation_id,
+            "tick": 2,
+            "phase": "confirmed",
+            "intent": {
+                "reason": "inventory_preparation",
+                "side": "BUY",
+                "trading_pair": "SOL-USDC",
+                "pool_address": POOL,
+                "base_mint": SOL_MINT,
+                "amount": "0",
+                "attributed_base_amount": str(existing_base),
+                "plan_digest": selection["plan_digest"],
+                "amount_quote": "4",
+                "range_half_width_pct": "10",
+            },
+            "result": {
+                "confirmed_tick": 2,
+                "same_tick_lp_create_allowed": True,
+                "inventory_allocation": {
+                    "source": "existing_wallet_balance",
+                    "attributed_base_amount": str(existing_base),
+                },
+            },
+        }
+
+    store.read_confirmed_preparation = preparation
+
+    result = _run(_config(candidate))
+
+    assert result["status"] == "ready"
+    assert result["mutation"] is False
+    assert result["executor_request"]["executor_type"] == "lp_executor"
+    assert result["final_plan"]["inventory"]["inventory_ready"] is True
+    assert store.admissions == ["create-operation-1"]
+    assert client.executors.create_calls == []
+
+
+def test_create_returns_field_specific_required_and_available_balances(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    client, store = _install(
+        monkeypatch,
+        tmp_path,
+        balances=[
+            {"symbol": "SOL", "mint": SOL_MINT, "available": "0.1"},
+            {
+                "symbol": "USDC",
+                "mint": orca.USDC_MINT,
+                "available": "0.5",
+            },
+        ],
+    )
+
+    result = _run(_config(candidate))
+
+    assert result["status"] == "rejected_before_submit"
+    assert "SOL balance for LP base and reserve" in result["reason"]
+    assert "USDC balance for LP quote leg" in result["reason"]
+    assert "required=" in result["reason"]
+    assert "available=0.5" in result["reason"]
+    assert store.admissions == []
+    assert client.executors.create_calls == []
 
 
 def test_create_rejects_receipt_attributed_to_another_pool(monkeypatch, tmp_path):
@@ -436,8 +751,8 @@ def test_create_capacity_is_not_hardcoded_to_three(monkeypatch, tmp_path):
 
     result = _run(_config(_candidate()))
 
-    assert result["status"] == "confirmed"
-    assert len(client.executors.create_calls) == 1
+    assert result["status"] == "ready"
+    assert client.executors.create_calls == []
 
 
 def test_create_rejects_aggregate_capital_before_capacity_is_full(
@@ -500,22 +815,304 @@ def test_create_rejects_same_pool_even_with_capacity(monkeypatch, tmp_path):
     assert client.executors.create_calls == []
 
 
-def test_create_timeout_is_uncertain_and_never_retried(monkeypatch, tmp_path):
+def test_create_detail_unavailable_is_submitted_and_never_retried(
+    monkeypatch, tmp_path
+):
     candidate = _candidate()
-    executors = Executors(create_error=TimeoutError("outcome unavailable"))
+    executors = Executors(detail_error=TimeoutError("outcome unavailable"))
     client, store = _install(
         monkeypatch,
         tmp_path,
         executors=executors,
     )
 
-    result = _run(_config(candidate))
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
+
+    assert result["status"] == "submitted"
+    assert result["mutation"] is True
+    assert result["retry_allowed"] is False
+    assert client.executors.create_calls == []
+    assert store.writes[-1]["phase"] == "submitted"
+
+
+def test_create_initializing_detail_is_submitted_then_confirms_same_id(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    executors = Executors()
+    client, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    complete_detail = executors.get_executor
+
+    async def initializing_detail(executor_id):
+        detail = await complete_detail(executor_id)
+        detail["config"].pop("upper_price")
+        return detail
+
+    executors.get_executor = initializing_detail
+    recovery = lp_create.Config(
+        controller_id="lp_expert.orca_1",
+        operation_id="create-operation-1",
+        lp_executor_id="executor-new",
+    )
+
+    pending = _run(recovery)
+
+    assert pending["status"] == "submitted"
+    assert pending["retry_allowed"] is False
+    assert pending["executor_match"]["outcome"] == "pending"
+    assert pending["executor_match"]["missing_fields"] == ["config.upper_price"]
+    assert store.writes[-1]["phase"] == "submitted"
+    assert client.executors.create_calls == []
+
+    executors.get_executor = complete_detail
+    confirmed = _run(recovery)
+
+    assert confirmed["status"] == "confirmed"
+    assert confirmed["executor_id"] == "executor-new"
+    assert confirmed["executor_match"]["outcome"] == "match"
+    assert store.writes[-1]["phase"] == "confirmed"
+    assert client.executors.create_calls == []
+
+
+def test_create_does_not_require_initialized_lifecycle_telemetry(monkeypatch, tmp_path):
+    candidate = _candidate()
+    executors = Executors()
+    client, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    complete_detail = executors.get_executor
+
+    async def detail_without_telemetry(executor_id):
+        detail = await complete_detail(executor_id)
+        detail.pop("timestamp")
+        detail["custom_info"] = {}
+        return detail
+
+    executors.get_executor = detail_without_telemetry
+
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["executor_match"]["outcome"] == "match"
+    assert result["executor_match"]["observed_lifecycle"] is None
+    assert store.writes[-1]["phase"] == "confirmed"
+    assert client.executors.create_calls == []
+
+
+@pytest.mark.parametrize("native_side", ["RANGE", "TradeType.RANGE", "3.0"])
+def test_create_matches_equivalent_native_numeric_representations(
+    monkeypatch, tmp_path, native_side
+):
+    candidate = _candidate()
+    executors = Executors()
+    client, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    complete_detail = executors.get_executor
+
+    async def normalized_detail(executor_id):
+        detail = await complete_detail(executor_id)
+        for field in (
+            "base_amount",
+            "lower_limit_price",
+            "lower_price",
+            "quote_amount",
+            "upper_limit_price",
+            "upper_price",
+        ):
+            detail["config"][field] = float(detail["config"][field])
+        detail["config"]["side"] = native_side
+        detail["config"]["keep_position"] = "false"
+        return detail
+
+    executors.get_executor = normalized_detail
+
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["executor_match"]["outcome"] == "match"
+    assert result["executor_match"]["mismatches"] == {}
+    assert store.writes[-1]["phase"] == "confirmed"
+    assert client.executors.create_calls == []
+
+
+def test_create_different_lp_side_remains_manual_review(monkeypatch, tmp_path):
+    candidate = _candidate()
+    executors = Executors()
+    client, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    complete_detail = executors.get_executor
+
+    async def conflicting_detail(executor_id):
+        detail = await complete_detail(executor_id)
+        detail["config"]["side"] = "BUY"
+        return detail
+
+    executors.get_executor = conflicting_detail
+
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
+
+    assert result["status"] == "manual_review"
+    assert result["executor_match"]["outcome"] == "conflict"
+    assert result["executor_match"]["mismatches"]["config.side"] == {
+        "expected": 3,
+        "observed": "BUY",
+    }
+    assert store.writes[-1]["phase"] == "manual_review"
+    assert client.executors.create_calls == []
+
+
+def test_create_numeric_difference_outside_tolerance_remains_manual_review(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    executors = Executors()
+    client, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    complete_detail = executors.get_executor
+
+    async def conflicting_detail(executor_id):
+        detail = await complete_detail(executor_id)
+        detail["config"]["lower_limit_price"] = (
+            float(detail["config"]["lower_limit_price"]) + 0.000001
+        )
+        return detail
+
+    executors.get_executor = conflicting_detail
+
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
+
+    assert result["status"] == "manual_review"
+    assert result["executor_match"]["outcome"] == "conflict"
+    assert "config.lower_limit_price" in result["executor_match"]["mismatches"]
+    assert store.writes[-1]["phase"] == "manual_review"
+    assert client.executors.create_calls == []
+
+
+def test_create_immutable_detail_conflict_remains_manual_review(monkeypatch, tmp_path):
+    candidate = _candidate()
+    executors = Executors()
+    client, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    complete_detail = executors.get_executor
+
+    async def conflicting_detail(executor_id):
+        detail = await complete_detail(executor_id)
+        detail["config"]["pool_address"] = "different-pool"
+        return detail
+
+    executors.get_executor = conflicting_detail
+
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
+
+    assert result["status"] == "manual_review"
+    assert result["retry_allowed"] is False
+    assert result["executor_match"]["outcome"] == "conflict"
+    assert result["executor_match"]["mismatches"]["config.pool_address"] == {
+        "expected": POOL,
+        "observed": "different-pool",
+    }
+    assert store.writes[-1]["phase"] == "manual_review"
+    assert client.executors.create_calls == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "mismatch"),
+    [
+        ("executor_id", "executor-other", "executor_id"),
+        ("controller_id", "other.agent_1", "controller_id"),
+        ("account_name", "other-account", "account_name"),
+        ("executor_type", "order_executor", "executor_type"),
+    ],
+)
+def test_create_identity_conflicts_remain_manual_review(
+    monkeypatch, tmp_path, field, value, mismatch
+):
+    candidate = _candidate()
+    executors = Executors()
+    client, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    complete_detail = executors.get_executor
+
+    async def conflicting_detail(executor_id):
+        detail = await complete_detail(executor_id)
+        detail[field] = value
+        return detail
+
+    executors.get_executor = conflicting_detail
+
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
+
+    assert result["status"] == "manual_review"
+    assert result["executor_match"]["outcome"] == "conflict"
+    assert mismatch in result["executor_match"]["mismatches"]
+    assert store.writes[-1]["phase"] == "manual_review"
+    assert client.executors.create_calls == []
+
+
+def test_create_recovery_cancellation_preserves_frozen_request_and_exact_id(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    executors = Executors(detail_error=asyncio.CancelledError())
+    _, store = _install(monkeypatch, tmp_path, executors=executors)
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+
+    result = _run(
+        lp_create.Config(
+            controller_id="lp_expert.orca_1",
+            operation_id="create-operation-1",
+            lp_executor_id="executor-new",
+        )
+    )
 
     assert result["status"] == "uncertain"
     assert result["mutation"] is True
     assert result["retry_allowed"] is False
-    assert len(client.executors.create_calls) == 1
     assert store.writes[-1]["phase"] == "uncertain"
+    assert store.writes[-1]["result"]["executor_id"] == "executor-new"
+    assert store.writes[-1]["result"]["executor_request"] == ready["executor_request"]
 
 
 def test_create_is_blocked_by_another_unresolved_current_session_operation(
@@ -538,49 +1135,28 @@ def test_create_is_blocked_by_another_unresolved_current_session_operation(
     assert client.executors.create_calls == []
 
 
-def test_create_recovers_one_exact_executor_after_lost_response(monkeypatch, tmp_path):
+def test_create_reconciles_one_exact_native_executor_id(monkeypatch, tmp_path):
     candidate = _candidate()
     baseline = executor_row("baseline", pool_address="other-pool")
-    executors = Executors(
-        rows=[baseline],
-        create_error=TimeoutError("response lost"),
-        recovery_rows=[baseline],
-    )
+    executors = Executors(rows=[baseline])
     client, store = _install(
         monkeypatch,
         tmp_path,
         executors=executors,
     )
 
-    original_create = executors.create_executor
-
-    async def create_and_prepare_match(**kwargs):
-        executors.created_config = copy.deepcopy(kwargs["executor_config"])
-        matching = {
-            "executor_id": "executor-recovered",
-            "controller_id": "lp_expert.orca_1",
-            "status": "RUNNING",
-            "is_active": True,
-            "timestamp": 2_000,
-            "net_pnl_pct": "0",
-            "net_pnl_quote": "0",
-            "config": {
-                "type": "lp_executor",
-                **copy.deepcopy(kwargs["executor_config"]),
-            },
-            "custom_info": {"state": "IN_RANGE"},
-        }
-        executors.recovery_rows = [baseline, matching]
-        return await original_create(**kwargs)
-
-    executors.create_executor = create_and_prepare_match
-
-    result = _run(_config(candidate))
+    ready = _run(_config(candidate))
+    executors.created_config = copy.deepcopy(
+        ready["executor_request"]["executor_config"]
+    )
+    result = _run(
+        _config(candidate).model_copy(update={"lp_executor_id": "executor-new"})
+    )
 
     assert result["status"] == "confirmed"
-    assert result["executor_id"] == "executor-recovered"
-    assert result["recovery_source"] == "exact_executor_search"
-    assert len(client.executors.create_calls) == 1
+    assert result["executor_id"] == "executor-new"
+    assert result["recovery_source"] == "exact_frozen_executor_request"
+    assert client.executors.create_calls == []
     assert store.writes[-1]["phase"] == "confirmed"
 
 
@@ -606,7 +1182,7 @@ def test_submitted_create_replays_exact_executor_detail_without_second_create(
 
     assert result["status"] == "confirmed"
     assert result["executor_id"] == "executor-new"
-    assert result["recovery_source"] == "exact_executor_detail"
+    assert result["recovery_source"] == "exact_frozen_executor_request"
     assert result["retry_allowed"] is False
     assert client.executors.create_calls == []
     assert store.writes[-1]["phase"] == "confirmed"
@@ -620,6 +1196,9 @@ def test_existing_create_intent_conflict_is_manual_review_without_resubmit(
         monkeypatch,
         tmp_path,
         conflict={
+            "operation_id": "create-operation-1",
+            "operation_kind": "create",
+            "tick": 2,
             "phase": "submitted",
             "mutation_possible": True,
             "result": {"executor_id": "executor-other"},

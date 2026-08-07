@@ -1,4 +1,4 @@
-"""One read-only LP portfolio, cleanup, candidate, and range-plan snapshot."""
+"""One read-only LP portfolio, cleanup, capacity, and range-bound snapshot."""
 
 from __future__ import annotations
 
@@ -11,10 +11,13 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
 
-from agents.lp_expert.core import orca
-from agents.lp_expert.core.portfolio import build_portfolio, fetch_all_executors
+from agents.lp_expert.core.portfolio import (
+    build_portfolio,
+    classify_executor_create_request,
+    fetch_all_executors,
+)
 from agents.lp_expert.core.receipts import ReceiptStore, read_prior_tick_stop
-from agents.lp_expert.core.reporting import TraceRecorder, attach_report
+from agents.lp_expert.core.reporting import TraceRecorder, attach_report, safe_error
 from agents.lp_expert.core.runtime import (
     bind_wallet,
     decimal_config,
@@ -24,8 +27,9 @@ from agents.lp_expert.core.runtime import (
 )
 
 CATEGORY = "Orca LP Decision Evidence"
-VERSION = "2"
+VERSION = "6"
 _CONTROLLER = re.compile(r"^lp_expert\.orca_(?:e)?[1-9]\d*$")
+_TRANSPORT_MAX_CHARS = 1_900
 
 
 class PriorCloseEvidence(BaseModel):
@@ -78,6 +82,310 @@ Config.model_rebuild(
 )
 
 
+def _compact_executor(executor: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        key: executor.get(key)
+        for key in (
+            "executor_id",
+            "status",
+            "lifecycle_state",
+            "pool_address",
+            "trading_pair",
+            "net_pnl_quote",
+            "net_pnl_ratio",
+            "exposure_quote",
+            "age_minutes",
+        )
+    }
+    if executor.get("triggered_by"):
+        result["triggered_by"] = executor["triggered_by"]
+    if executor.get("close_required"):
+        result["close_required"] = True
+    if executor.get("reconcile_required"):
+        result["reconcile_required"] = True
+    return result
+
+
+def _compact_cleanup(cleanup: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        key: cleanup.get(key)
+        for key in (
+            "status",
+            "executor_id",
+            "closed_tick",
+            "capacity_quarantined",
+            "residual_quote",
+        )
+        if key in cleanup
+    }
+    if cleanup.get("reason"):
+        result["reason"] = safe_error(cleanup["reason"], limit=160)
+    evidence = cleanup.get("evidence")
+    if isinstance(evidence, dict):
+        result["evidence"] = {
+            key: evidence.get(key)
+            for key in (
+                "position_address",
+                "pool_address",
+                "base_symbol",
+                "base_mint",
+                "base_decimals",
+                "residual_base_amount",
+                "native_swap_status",
+                "close_transaction_hash",
+            )
+        }
+    return result
+
+
+def _compact_unresolved_operation(
+    record: dict[str, Any],
+    controller_id: str,
+    executor_rows: list[dict[str, Any]],
+) -> dict[str, Any]:
+    item = {
+        key: record.get(key)
+        for key in ("operation_id", "operation_kind", "tick", "phase")
+    }
+    if record.get("reason"):
+        item["reason"] = safe_error(record["reason"], limit=120)
+    result = record.get("result")
+    swap_executor_id = (
+        str(result.get("swap_executor_id") or "").strip()
+        if isinstance(result, dict)
+        else ""
+    )
+    if record.get("operation_kind") == "swap" and swap_executor_id:
+        item["reconcile"] = {
+            "routine": "lp_order_request",
+            "config": {
+                "controller_id": controller_id,
+                "operation_id": record.get("operation_id"),
+                "swap_executor_id": swap_executor_id,
+            },
+        }
+    if (
+        record.get("operation_kind") == "create"
+        and record.get("phase") in {"admitted", "submitting", "submitted", "uncertain"}
+        and isinstance(result, dict)
+    ):
+        lp_executor_id = str(result.get("executor_id") or "").strip()
+        if not lp_executor_id and isinstance(result.get("executor_request"), dict):
+            matches = []
+            pending = []
+            for row in executor_rows:
+                candidate_id = str(
+                    row.get("executor_id") or row.get("id") or ""
+                ).strip()
+                if not candidate_id:
+                    continue
+                comparison = classify_executor_create_request(
+                    row,
+                    candidate_id,
+                    controller_id,
+                    result["executor_request"],
+                )
+                if comparison["outcome"] == "match":
+                    matches.append(candidate_id)
+                elif comparison["outcome"] == "pending":
+                    pending.append(candidate_id)
+            matches = sorted(set(matches))
+            if len(matches) == 1:
+                lp_executor_id = matches[0]
+            elif len(matches) > 1:
+                item["reason"] = (
+                    "multiple live executors match the frozen create request"
+                )
+            elif pending:
+                item["reason"] = (
+                    "candidate executor detail is incomplete for exact create recovery"
+                )
+        if lp_executor_id:
+            item["reconcile"] = {
+                "routine": "lp_create",
+                "config": {
+                    "controller_id": controller_id,
+                    "operation_id": record.get("operation_id"),
+                    "lp_executor_id": lp_executor_id,
+                },
+            }
+    return item
+
+
+def _unconsumed_preparation_capsule(
+    record: dict[str, Any],
+    *,
+    controller_id: str,
+    current_tick: int,
+) -> dict[str, Any]:
+    """Build one exact restoration instruction from a confirmed preparation."""
+
+    intent = record.get("intent")
+    result = record.get("result")
+    receipt = result.get("receipt") if isinstance(result, dict) else None
+    if not isinstance(intent, dict) or not isinstance(receipt, dict):
+        raise ValueError("unconsumed preparation evidence is incomplete")
+    pool_address = str(intent.get("pool_address") or "").strip()
+    safe_controller = controller_id.replace(".", "_")
+    safe_target = re.sub(r"[^A-Za-z0-9_-]", "_", pool_address)
+    operation_id = f"{safe_controller}-t{current_tick}-{safe_target}-restore"
+    if (
+        not pool_address
+        or safe_target != pool_address
+        or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", operation_id)
+    ):
+        raise ValueError("exact restoration operation ID cannot be derived safely")
+    amount = str(receipt.get("output_amount") or "").strip()
+    transaction_hash = str(receipt.get("transaction_hash") or "").strip()
+    if not amount or not transaction_hash:
+        raise ValueError("unconsumed preparation amount or transaction is missing")
+    return {
+        "operation_id": record.get("operation_id"),
+        "operation_kind": "swap",
+        "tick": record.get("tick"),
+        "phase": "confirmed_unconsumed",
+        "reason": (
+            "confirmed preparation inventory has no confirmed LP create or "
+            "restoration"
+        ),
+        "prepared_inventory": {
+            "pool_address": pool_address,
+            "base_symbol": intent.get("base_symbol"),
+            "base_mint": intent.get("base_mint"),
+            "base_decimals": intent.get("base_decimals"),
+            "amount": amount,
+            "preparation_transaction_hash": transaction_hash,
+        },
+        "restore": {
+            "routine": "lp_order_request",
+            "config": {
+                "controller_id": controller_id,
+                "operation_id": operation_id,
+                "reason": "inventory_restoration",
+                "pool_address": pool_address,
+                "base_symbol": intent.get("base_symbol"),
+                "base_mint": intent.get("base_mint"),
+                "base_decimals": intent.get("base_decimals"),
+                "amount": amount,
+                "attributed_base_amount": amount,
+                "attribution_operation_id": record.get("operation_id"),
+            },
+        },
+    }
+
+
+def _compact_portfolio(portfolio: dict[str, Any]) -> dict[str, Any]:
+    unresolved = []
+    for record in portfolio.get("unresolved_operations", []):
+        item = {
+            key: record.get(key)
+            for key in ("operation_id", "operation_kind", "tick", "phase")
+        }
+        if record.get("reason"):
+            item["reason"] = safe_error(record["reason"], limit=120)
+        if isinstance(record.get("reconcile"), dict):
+            item["reconcile"] = record["reconcile"]
+        if isinstance(record.get("restore"), dict):
+            item["restore"] = record["restore"]
+        if isinstance(record.get("prepared_inventory"), dict):
+            item["prepared_inventory"] = record["prepared_inventory"]
+        unresolved.append(item)
+    result = {
+        "session": portfolio.get("session"),
+        "executors": [
+            _compact_executor(item) for item in portfolio.get("executors", [])
+        ],
+        "foreign_active_executor_ids": portfolio.get("foreign_active_executor_ids", []),
+        "active_count": portfolio.get("active_count"),
+        "active_exposure_quote": portfolio.get("active_exposure_quote"),
+        "available_slots": portfolio.get("available_slots"),
+        "remaining_quote_budget": portfolio.get("remaining_quote_budget"),
+        "deployment_blocked": portfolio.get("deployment_blocked"),
+        "cleanups": [_compact_cleanup(item) for item in portfolio.get("cleanups", [])],
+        "close_required_executor_ids": portfolio.get("close_required_executor_ids", []),
+        "reconcile_required_executor_ids": portfolio.get(
+            "reconcile_required_executor_ids", []
+        ),
+        "unresolved_operations": unresolved,
+    }
+    for key in (
+        "occupied_pools",
+        "quarantined_cleanup_executor_ids",
+        "reconciling_executor_ids",
+    ):
+        if portfolio.get(key):
+            result[key] = portfolio[key]
+    return result
+
+
+def _compact_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "schema": "lp_snapshot.v1",
+        "status": payload.get("status"),
+        "controller_id": payload.get("controller_id"),
+        "tick": payload.get("tick"),
+        "mutation": False,
+        "retry_allowed": False,
+        "scan_allowed": bool(payload.get("scan_allowed")),
+        "cleanup_tick": bool(payload.get("cleanup_tick")),
+    }
+    if payload.get("reason"):
+        result["reason"] = safe_error(payload["reason"])
+    portfolio = payload.get("portfolio")
+    if isinstance(portfolio, dict):
+        result["portfolio"] = _compact_portfolio(portfolio)
+    constraints = payload.get("selection_constraints")
+    if isinstance(constraints, dict):
+        allocation = constraints["allocation_quote"]
+        range_width = constraints["range_half_width_pct"]
+        result["selection_constraints"] = {
+            "allocation_quote": [
+                allocation["minimum"],
+                allocation["maximum"],
+                allocation["remaining_portfolio_budget"],
+            ],
+            "range_half_width_pct": [
+                range_width["minimum"],
+                range_width["maximum"],
+            ],
+            "deployments": [
+                constraints["configured_deployments_per_tick"],
+                constraints["available_deployments_this_tick"],
+            ],
+        }
+    result["report_id"] = payload.get("report_id")
+    result["report_error"] = payload.get("report_error")
+    return result
+
+
+def _model_result(payload: dict[str, Any]) -> str:
+    compact = _compact_snapshot(payload)
+    encoded = json.dumps(compact, default=str, separators=(",", ":"))
+    if len(encoded) <= _TRANSPORT_MAX_CHARS:
+        return encoded
+    fallback = {
+        "schema": "lp_snapshot.v1",
+        "status": "incomplete",
+        "controller_id": payload.get("controller_id"),
+        "tick": payload.get("tick"),
+        "mutation": False,
+        "retry_allowed": False,
+        "scan_allowed": False,
+        "cleanup_tick": bool(payload.get("cleanup_tick")),
+        "reason": (
+            "compact snapshot exceeded the safe model transport budget; "
+            "HOLD and review the complete report"
+        ),
+        "report_id": payload.get("report_id"),
+        "report_error": (
+            safe_error(payload["report_error"], limit=200)
+            if payload.get("report_error")
+            else None
+        ),
+    }
+    return json.dumps(fallback, default=str, separators=(",", ":"))
+
+
 async def run(config: Config, context: Any) -> str:
     trace = TraceRecorder()
     scope = None
@@ -92,13 +400,11 @@ async def run(config: Config, context: Any) -> str:
                 raise ValueError(
                     "prior close evidence exceeds current configured executor capacity"
                 )
-            candidate_limit = integer_config(scope.config, "candidate_scan_limit")
             facts.update(
                 {
                     "controller_id": scope.controller_id,
                     "execution_mode": scope.execution_mode,
                     "tick": scope.current_tick,
-                    "candidate_scan_limit": candidate_limit,
                     "max_open_executors": max_open,
                 }
             )
@@ -109,30 +415,53 @@ async def run(config: Config, context: Any) -> str:
         with trace.stage("current_session_operation_reconciliation") as facts:
             receipt_store = ReceiptStore(scope, read_only=True)
             unresolved_records = receipt_store.unresolved_operations()
-            unresolved_operations = [
-                {
-                    key: record.get(key)
-                    for key in (
-                        "operation_id",
-                        "operation_kind",
-                        "tick",
-                        "phase",
-                        "reason",
-                    )
-                }
-                for record in unresolved_records
-            ]
+            unconsumed_preparations = receipt_store.unconsumed_preparations()
             facts.update(
                 {
-                    "unresolved_count": len(unresolved_operations),
+                    "unresolved_count": len(unresolved_records),
+                    "unconsumed_preparation_count": len(unconsumed_preparations),
                     "operation_ids": [
-                        record["operation_id"] for record in unresolved_operations
+                        record["operation_id"] for record in unresolved_records
                     ],
                 }
             )
         with trace.stage("executor_fetch_and_pagination") as facts:
             rows = await fetch_all_executors(client, scope.account_name)
             facts["executor_rows"] = len(rows)
+        with trace.stage("operation_recovery_capsules") as facts:
+            unresolved_operations = [
+                _compact_unresolved_operation(
+                    record,
+                    scope.controller_id,
+                    rows,
+                )
+                for record in unresolved_records
+            ]
+            unresolved_operations.extend(
+                _unconsumed_preparation_capsule(
+                    record,
+                    controller_id=scope.controller_id,
+                    current_tick=scope.current_tick,
+                )
+                for record in unconsumed_preparations
+            )
+            facts.update(
+                {
+                    "capsule_count": sum(
+                        isinstance(record.get("reconcile"), dict)
+                        for record in unresolved_operations
+                    ),
+                    "create_capsule_count": sum(
+                        record.get("operation_kind") == "create"
+                        and isinstance(record.get("reconcile"), dict)
+                        for record in unresolved_operations
+                    ),
+                    "restoration_capsule_count": sum(
+                        isinstance(record.get("restore"), dict)
+                        for record in unresolved_operations
+                    ),
+                }
+            )
         with trace.stage("prior_close_stop_lookup") as facts:
             prior_closes = []
             proof_errors = 0
@@ -188,7 +517,7 @@ async def run(config: Config, context: Any) -> str:
             if unresolved_operations:
                 portfolio["deployment_blocked"] = True
         cleanup_tick = bool(config.prior_closes)
-        candidate_allowed = (
+        scan_allowed = (
             not cleanup_tick
             and not unresolved_operations
             and not portfolio["deployment_blocked"]
@@ -196,50 +525,6 @@ async def run(config: Config, context: Any) -> str:
             and not portfolio["close_required_executor_ids"]
             and not portfolio["reconcile_required_executor_ids"]
         )
-        scan = {
-            "status": "skipped",
-            "deployable": False,
-            "source_coverage": None,
-            "universe": None,
-            "technical_rejections": {},
-            "candidates": [],
-        }
-        token_rejections: list[dict[str, Any]] = []
-        with trace.stage("orca_candidate_scan") as facts:
-            if not candidate_allowed:
-                facts.update(
-                    {
-                        "_outcome": "skipped",
-                        "reason": (
-                            "following_tick_cleanup_priority"
-                            if cleanup_tick
-                            else "portfolio_not_deployable"
-                        ),
-                    }
-                )
-            else:
-                scan = await orca.scan_pools(candidate_limit)
-                facts.update(scan["source_coverage"])
-        with trace.stage("registered_token_filtering") as facts:
-            if scan["status"] == "skipped":
-                facts.update({"_outcome": "skipped", "reason": "scan_not_run"})
-            elif scan["status"] != "complete":
-                facts.update(
-                    {"_outcome": "incomplete", "reason": "Orca coverage incomplete"}
-                )
-            else:
-                registry = await client.gateway.get_network_tokens(scope.network)
-                accepted, token_rejections = orca.filter_registered_tokens(
-                    scan["candidates"], registry
-                )
-                scan["candidates"] = accepted
-                scan["deployable"] = bool(accepted)
-                facts.update(
-                    {
-                        "accepted": len(accepted),
-                        "rejected": len(token_rejections),
-                    }
-                )
         minimum_allocation = decimal_config(
             scope.config, "min_quote_per_executor", positive=True
         )
@@ -252,9 +537,8 @@ async def run(config: Config, context: Any) -> str:
                 configured_deployments,
                 portfolio["available_slots"],
                 capital_slots,
-                len(scan["candidates"]),
             )
-            if candidate_allowed
+            if scan_allowed
             else 0
         )
         selection_constraints = {
@@ -283,37 +567,24 @@ async def run(config: Config, context: Any) -> str:
             "configured_deployments_per_tick": configured_deployments,
             "available_deployments_this_tick": available_deployments,
         }
-        with trace.stage("candidate_selection_constraints") as facts:
+        with trace.stage("deployment_selection_constraints") as facts:
             facts.update(
                 {
-                    "candidate_count": len(scan["candidates"]),
                     "capital_slots": capital_slots,
                     "available_deployments": available_deployments,
+                    "scan_allowed": scan_allowed,
                 }
             )
-        status = (
-            "complete" if scan["status"] in {"complete", "skipped"} else "incomplete"
-        )
         payload = {
-            "status": status,
+            "status": "complete",
             "controller_id": scope.controller_id,
             "tick": scope.current_tick,
             "observed_at": trace.finished_at.isoformat(),
             "mutation": False,
             "retry_allowed": False,
             "portfolio": portfolio,
-            "candidate_scan": {
-                key: value
-                for key, value in scan.items()
-                if key not in {"candidates", "deployable"}
-            },
-            "token_rejections": token_rejections,
             "selection_constraints": selection_constraints,
-            "candidates": scan["candidates"],
-            "deployable": status == "complete"
-            and candidate_allowed
-            and available_deployments > 0
-            and scan["deployable"],
+            "scan_allowed": scan_allowed and available_deployments > 0,
             "cleanup_tick": cleanup_tick,
         }
     except asyncio.CancelledError:
@@ -326,8 +597,7 @@ async def run(config: Config, context: Any) -> str:
             "mutation": False,
             "retry_allowed": False,
             "portfolio": None,
-            "candidates": [],
-            "deployable": False,
+            "scan_allowed": False,
         }
     except Exception as exc:
         payload = {
@@ -339,10 +609,9 @@ async def run(config: Config, context: Any) -> str:
             "mutation": False,
             "retry_allowed": False,
             "portfolio": None,
-            "candidates": [],
-            "deployable": False,
+            "scan_allowed": False,
         }
-    payload = await attach_report(
+    reported_payload = await attach_report(
         payload,
         title="LP Portfolio Snapshot",
         source="lp_snapshot",
@@ -356,4 +625,4 @@ async def run(config: Config, context: Any) -> str:
             ]
         },
     )
-    return json.dumps(payload, default=str, separators=(",", ":"), sort_keys=True)
+    return _model_result(reported_payload)

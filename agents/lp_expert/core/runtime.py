@@ -40,6 +40,7 @@ _REQUIRED_CONFIG = {
     "max_quote_per_executor",
     "max_slippage_pct",
     "min_sol_reserve",
+    "use_existing_base_inventory",
     "residual_base_dust_quote",
     "minimum_range_half_width_pct",
     "maximum_range_half_width_pct",
@@ -149,6 +150,8 @@ def _validate_config(value: Any, mode: str) -> dict[str, Any]:
         raise ValueError("frozen LP Strategy config is incomplete")
     if value.get("execution_mode") != mode:
         raise ValueError("frozen config conflicts with active execution mode")
+    if not isinstance(value.get("use_existing_base_inventory"), bool):
+        raise ValueError("configured use_existing_base_inventory must be a boolean")
     for key in ("server_name", "account_name"):
         if not isinstance(value.get(key), str) or not value[key].strip():
             raise ValueError(f"configured {key} is unavailable")
