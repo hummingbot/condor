@@ -15,11 +15,13 @@ class Settings:
     # Canonical key of the session that spawned this subprocess ("web:7:slot-1",
     # "tg:42", …). Empty when the server runs outside a session.
     session_key: str
-    # True when this subprocess belongs to a *background Condor worker* — the
-    # detached session `delegate` starts to author a routine (FEAT-032). The chat
-    # and the worker are the same agent record, so this flag is the only thing
-    # that tells them apart: it selects the worker framing in ``_build_instructions``
-    # and makes ``delegate(action="start")`` refuse to recurse.
+    # True when this subprocess is a *background delegation worker* — a detached
+    # session `delegate` started to carry one task unattended (FEAT-032). The
+    # interactive session and the worker resolve the same agent record, so this
+    # flag is the only thing that tells them apart: it selects the unattended
+    # framing in ``_build_instructions`` and makes ``delegate(action="start")``
+    # refuse to recurse. Every agent has this seat now, not just Condor, since an
+    # agent can start a delegation of itself (FEAT-041).
     delegate_worker: bool = False
 
     @property

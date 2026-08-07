@@ -83,7 +83,7 @@ def test_chat_instructions_are_untouched_by_the_flag(settings_obj, monkeypatch):
 def test_a_specialist_is_never_re_framed_as_a_condor_worker(
     settings_obj, monkeypatch, tmp_path
 ):
-    """A specialist already reads `_agent_base`; the flag must not override it."""
+    """A specialist reads its OWN worker framing — never the coordinator's."""
     from condor.agents.agent import identity_header
 
     monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
@@ -92,7 +92,90 @@ def test_a_specialist_is_never_re_framed_as_a_condor_worker(
 
     text = _instructions(settings_obj, monkeypatch, slug="backpack_mm", worker=True)
     assert identity_header("backpack_mm", "Backpack MM") in text
+    # Its own background seat (FEAT-041), not Condor's `_worker_base`.
+    assert text.startswith("You are a BACKGROUND WORKER instance of Backpack MM")
+    assert "instance of Condor" not in text
+    assert "Condor exposes reusable **skills**" not in text
+
+
+# ── FEAT-041: an agent can start a background copy of itself ──
+
+
+def _specialist_instructions(settings_obj, monkeypatch, tmp_path, *, worker: bool):
+    monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)
+    monkeypatch.setattr(strategy_module, "_DATA_ROOT", tmp_path)
+    _write_agent(tmp_path, "backpack_mm", name="Backpack MM")
+    return _instructions(settings_obj, monkeypatch, slug="backpack_mm", worker=worker)
+
+
+def test_interactive_agent_is_invited_to_spawn_a_copy_of_itself(
+    settings_obj, monkeypatch, tmp_path
+):
+    text = _specialist_instructions(settings_obj, monkeypatch, tmp_path, worker=False)
+
+    assert "SPAWN A BACKGROUND COPY OF YOURSELF" in text
+    # Named with its OWN slug: it is not in the [PEER AGENTS] roster, so a generic
+    # `agent="<slug>"` would read as "anyone but you".
+    assert 'delegate(action="start", agent="backpack_mm", task="...")' in text
     assert "BACKGROUND WORKER" not in text
+
+
+def test_the_background_copy_is_not_invited_to_spawn_another(
+    settings_obj, monkeypatch, tmp_path
+):
+    text = _specialist_instructions(settings_obj, monkeypatch, tmp_path, worker=True)
+
+    assert "SPAWN A BACKGROUND COPY OF YOURSELF" not in text
+    assert "NEVER spawn another copy of yourself" in text
+    # Handing work outside its domain to a peer stays open — only self recurses.
+    assert "You MAY consult a PEER agent" in text
+
+
+def test_a_background_agent_cannot_spawn_a_copy_of_itself(settings_obj, monkeypatch):
+    from mcp_servers.condor.tools import delegate as delegate_tool
+
+    monkeypatch.setattr(settings_obj, "agent_slug", "backpack_mm")
+    monkeypatch.setattr(settings_obj, "delegate_worker", True)
+    result = asyncio.run(
+        delegate_tool.delegate(action="start", agent="backpack_mm", task="sweep again")
+    )
+    assert "error" in result
+    assert "Self-delegation refused" in result["error"]
+    assert "task_id" not in result
+
+
+def test_a_background_agent_may_still_hand_work_to_a_peer(settings_obj, monkeypatch):
+    """The guard closes self-recursion, not the peer hand-off `_agent_base` invites."""
+    from mcp_servers.condor.tools import delegate as delegate_tool
+
+    monkeypatch.setattr(settings_obj, "agent_slug", "backpack_mm")
+    monkeypatch.setattr(settings_obj, "delegate_worker", True)
+
+    async def fake_call(method, path, payload=None):
+        return {"task_id": "brigado-delegate-abc", "status": "running"}
+
+    monkeypatch.setattr(delegate_tool, "call_main_api", fake_call)
+    result = asyncio.run(
+        delegate_tool.delegate(action="start", agent="brigado", task="go look")
+    )
+    assert result["task_id"] == "brigado-delegate-abc"
+
+
+def test_an_interactive_agent_may_spawn_a_copy_of_itself(settings_obj, monkeypatch):
+    from mcp_servers.condor.tools import delegate as delegate_tool
+
+    monkeypatch.setattr(settings_obj, "agent_slug", "backpack_mm")
+    monkeypatch.setattr(settings_obj, "delegate_worker", False)
+
+    async def fake_call(method, path, payload=None):
+        return {"task_id": "backpack_mm-delegate-abc", "status": "running"}
+
+    monkeypatch.setattr(delegate_tool, "call_main_api", fake_call)
+    result = asyncio.run(
+        delegate_tool.delegate(action="start", agent="backpack_mm", task="run a sweep")
+    )
+    assert result["task_id"] == "backpack_mm-delegate-abc"
+    assert "next_steps" in result
 
 
 # ── the guard: refusal lives in code, not in the prompt ──
@@ -190,7 +273,7 @@ def test_settings_parse_the_flag_off_by_default(monkeypatch):
     assert settings_module._parse_settings().delegate_worker is True
 
 
-# ── only Condor's own delegations get the worker seat ──
+# ── every delegation gets the worker seat ──
 
 
 def _delegated_worker_kwarg(monkeypatch, tmp_path, slug: str) -> bool:
@@ -246,6 +329,11 @@ def test_condor_delegation_gets_the_worker_seat(monkeypatch, tmp_path):
     assert _delegated_worker_kwarg(monkeypatch, tmp_path, "condor") is True
 
 
-def test_specialist_delegation_is_left_exactly_as_it_was(monkeypatch, tmp_path):
-    """`_agent_base` invites an agent to delegate long work on; don't contradict it."""
-    assert _delegated_worker_kwarg(monkeypatch, tmp_path, "backpack_mm") is False
+def test_specialist_delegation_gets_the_worker_seat_too(monkeypatch, tmp_path):
+    """FEAT-041: a specialist's background session needs the marker as well.
+
+    Without it the copy would read the interactive framing — inviting it to spawn
+    a copy of itself — and the guard in `tools/delegate.py` would have nothing to
+    key on.
+    """
+    assert _delegated_worker_kwarg(monkeypatch, tmp_path, "backpack_mm") is True

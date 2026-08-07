@@ -105,12 +105,24 @@ def _coordinator_base(routines_rule: str) -> str:
     )
 
 
-def _agent_base(slug: str, name: str) -> str:
+def _agent_base(slug: str, name: str, worker: bool = False) -> str:
     """Routing rules for a subprocess launched AS an Agent (``--agent-slug``).
 
     Same three-tier priority, read from the specialist's seat: its skills are
     its own playbooks (plus the ones Condor publishes), routine authoring is its
-    own work, and consulting is for work outside its domain — never for itself.
+    own work, and consulting a PEER is for work outside its domain.
+
+    An agent may also start a fresh BACKGROUND session of *itself* (FEAT-041).
+    That is not handing the work to someone else — the copy carries the same
+    identity, playbooks and memory — so it is the one form of delegation that
+    stays inside the agent's own domain, and the right move for a long
+    mechanical job (a sweep, a wide scan) that would otherwise fill the
+    interactive conversation.
+
+    ``worker`` marks that background seat. It reads the same identity and the
+    same playbooks; what changes is that it has no user to ask and must not
+    spawn a copy of itself in turn. The no-recursion line is a courtesy — the
+    actual stop is in ``tools/delegate.py``, because a prompt is not a guard.
     """
     from condor.agents.agent import identity_header
 
@@ -128,7 +140,33 @@ def _agent_base(slug: str, name: str) -> str:
         'then TEST it with `manage_routines(action="run", name="...")` and fix '
         "until the output is clean before reporting.\n"
     )
+    # FEAT-041: the same agent, in a second seat. Named explicitly with the
+    # agent's own slug because it is NOT in the [PEER AGENTS] index — an agent is
+    # not its own peer, and without this line the roster reads as "everyone but
+    # you", which is exactly how it used to refuse.
+    self_delegation_rule = (
+        "- SPAWN A BACKGROUND COPY OF YOURSELF for long work that is YOURS: "
+        f'`delegate(action="start", agent="{slug}", task="...")` starts a fresh '
+        "session of you — same identity, same playbooks, same memory — that runs "
+        "unattended until done and pings the user. Reach for it when the work is "
+        "long or mechanical (a parameter sweep, a wide scan, a batch of runs) and "
+        "would otherwise fill this conversation. This is NOT handing the work to "
+        "another agent and it is NOT outside your domain: it is you, working in "
+        'the background. Add `on_complete="resume"` to be handed the result in a '
+        "new turn here — then end your turn and continue when it arrives.\n"
+    )
+    worker_framing = (
+        f"You are a BACKGROUND WORKER instance of {name}: a detached session that "
+        "`delegate` started to carry ONE task to completion, unattended. There is "
+        "no user in the loop to ask — make the reasonable call, do the work "
+        "yourself, and report what you actually did and verified.\n"
+        "You must NEVER spawn another copy of yourself: "
+        f'`delegate(action="start", agent="{slug}", ...)` is refused for you in '
+        "code. Finish the task in this session (polling with "
+        '`delegate(action="get"/"list")` is fine).\n\n'
+    )
     return (
+        f"{worker_framing if worker else ''}"
         f"{identity_header(slug, name)}\n\n"
         "ROUTING RULE — you are the specialist, so domain work is yours to do. "
         "Before reaching for raw tools (including tools from other connected MCP "
@@ -139,6 +177,7 @@ def _agent_base(slug: str, name: str) -> str:
         '`manage_routines(action="run", name="X", config={})` instead of '
         "reimplementing it by hand.\n"
         f"{routines_rule}"
+        f"{'' if worker else self_delegation_rule}"
         "- You MAY consult a PEER agent listed below for work outside your own "
         'domain (`consult(agent="<slug>", task="...", context="...")`, or '
         '`delegate(action="start", agent="<slug>", task="...")` for a long '
@@ -176,6 +215,11 @@ def _build_instructions() -> str:
     marks the detached Condor that ``delegate`` starts to author a routine. It
     reads ``_worker_base`` — the coordinator text with authoring made its own job
     and delegation closed off.
+
+    A specialist has that background seat too (FEAT-041), since an agent can now
+    start a delegation of *itself*. It reads its own ``_agent_base`` in both
+    seats — ``worker=True`` swaps the "spawn a copy of yourself" invitation for
+    the unattended framing — never ``_worker_base``, which is Condor's.
     """
     from mcp_servers.condor.settings import settings
 
@@ -190,10 +234,11 @@ def _build_instructions() -> str:
             pass  # Unknown/unreadable slug degrades to the coordinator text.
 
     if agent:
-        base = _agent_base(slug, agent.name)
+        # A specialist reads its OWN framing in both seats — never Condor's
+        # `_worker_base`, which would tell it it is Condor. The flag only picks
+        # which half of `_agent_base` it gets (FEAT-041).
+        base = _agent_base(slug, agent.name, worker=settings.delegate_worker)
     elif settings.delegate_worker:
-        # Same record as the chat, different seat (FEAT-032): a specialist already
-        # reads `_agent_base`, so the flag only ever re-frames Condor itself.
         base = _worker_base()
     else:
         base = _chat_base()
@@ -287,9 +332,15 @@ async def delegate(
     - "get": Get a delegation's status + result/error (requires task_id).
     - "stop": Cancel a running delegation (requires task_id).
 
+    An agent may pass its OWN slug to start a background copy of itself (FEAT-041)
+    — same identity, playbooks and memory, running unattended on a long job while
+    the interactive session stays responsive. That copy cannot spawn a further copy
+    of itself; the recursion stops at depth one.
+
     Args:
         action: start | list | get | stop.
-        agent: Agent slug to delegate to (for start).
+        agent: Agent slug to delegate to (for start). Your own slug is allowed and
+            means "a background session of me".
         task: The one-off task, in plain language (for start).
         task_id: Delegation id returned by start (for get/stop).
         on_complete: What this conversation gets when the task ends (for start).
