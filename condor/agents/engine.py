@@ -690,6 +690,7 @@ class TickEngine:
                         executors=self._last_skill_data.get("all_executors")
                         or self._last_skill_data.get("executors")
                         or [],
+                        pnl_series=await self._pnl_series(),
                     )
                 except Exception:
                     log.exception(
@@ -745,6 +746,29 @@ class TickEngine:
                 self.agent_id,
                 ", ".join(self.ledger.bases()),
             )
+
+    async def _pnl_series(self) -> list[dict]:
+        """This session's realized curve for the live report, or ``[]``.
+
+        Only meaningful once the session owns a bot: an executor-only session has
+        no bot history to derive from and the report falls back to the journal's
+        snapshots. Best-effort — a charting input must never cost a tick.
+        """
+        if not self.ledger or not self.ledger.bases():
+            return []
+        try:
+            from .performance import fetch_agent_pnl_series
+
+            client = await self._get_client()
+            since = min(
+                (b.since for b in self.ledger.owned() if b.since > 0), default=0.0
+            )
+            return await fetch_agent_pnl_series(client, self.ledger.bases(), since)
+        except Exception:
+            log.warning(
+                "TickEngine %s: pnl series failed", self.agent_id, exc_info=True
+            )
+            return []
 
     def _journal_mode_mismatch(self, tick_num: int) -> None:
         """Flag a session configured for executors that is actually running bots.
@@ -972,7 +996,11 @@ class TickEngine:
             # operating bots earns through them, so naming them is the difference
             # between a number and an auditable one.
             "bot_names": sd.get("bot_names", []),
+            "bot_instances": sd.get("bot_instances", []),
             "unresolved_bases": sd.get("unresolved_bases", []),
+            "controllers": sd.get("controllers", []),
+            "close_type_counts": sd.get("close_type_counts", {}),
+            "fees_known": sd.get("fees_known", True),
             "frequency_sec": self.config.get("frequency_sec", 60),
             "server_name": self.config.get("server_name", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),

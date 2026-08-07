@@ -11,9 +11,15 @@ agent's own words with the tick it was last revised — so a stale thesis next t
 live numbers reads as stale rather than as fact.
 
 Attribution is the whole delivery mechanism: ``source_name`` is
-``"{agent_slug}.{strategy_slug}/session_{N}"``, which is exactly the prefix
-``GET /agents/{slug}/strategies/{sslug}/reports`` filters on, so the report
-appears in the strategy's ReportBrowser with no backend or frontend change.
+``"{agent_slug}.{strategy_slug}/session_{N}"``, which
+``GET /agents/{slug}/strategies/{sslug}/sessions/{N}/report`` matches exactly,
+so the session reviewer can open the report belonging to the session on screen.
+
+That match is the *only* handle tying a report to its session, and it was long
+the only thing that did not lead anywhere: the report browser builds its sidebar
+from the routine store, and a session report is not a routine, so the report
+surfaced solely in the global reports grid — as an entry that looked like a
+routine nobody had created.
 """
 
 from __future__ import annotations
@@ -62,6 +68,7 @@ class SessionReport:
         journal: Any,
         session_dir: Path | None,
         executors: list[dict] | None = None,
+        pnl_series: list[dict] | None = None,
     ) -> str | None:
         """Rebuild every block from current state and re-save in place."""
         self._live.clear()
@@ -72,8 +79,9 @@ class SessionReport:
 
         self._kpis(b, info)
         self._attribution(b, info)
+        self._controllers(b, info)
         self._narrative(b, session_dir)
-        self._equity_curve(b, journal)
+        self._equity_curve(b, journal, pnl_series)
         self._executors(b, executors or [])
         self._decisions(b, journal)
         self._belief_history(b, session_dir)
@@ -135,6 +143,54 @@ class SessionReport:
             )
 
     @staticmethod
+    def _controllers(b: Any, info: dict[str, Any]) -> None:
+        """Per-deploy, per-controller detail behind the KPIs.
+
+        "Total PnL -$1.46" over three redeploys says nothing about which leg lost
+        it. The controllers do, and the aggregate has carried them all along.
+
+        The deploy's state is derived from whether it is still in the live
+        snapshot — never from the controller's own ``status``, which the backend
+        reports as "running" for instances that were stopped hours ago.
+        """
+        controllers = [
+            c for c in (info.get("controllers") or []) if isinstance(c, dict)
+        ]
+        if not controllers:
+            return
+        live = {str(n) for n in (info.get("bot_names") or []) if n}
+
+        rows = []
+        for c in controllers:
+            closes = {k: v for k, v in (c.get("close_type_counts") or {}).items() if v}
+            bot = str(c.get("bot_name", "") or "")
+            rows.append(
+                {
+                    "Deploy": bot or "—",
+                    "State": "running" if bot in live else "stopped",
+                    "Controller": c.get("controller_id", "") or "—",
+                    "Realized": f"${float(c.get('realized_pnl_quote', 0) or 0):,.2f}",
+                    "Unrealized": f"${float(c.get('unrealized_pnl_quote', 0) or 0):,.2f}",
+                    "Volume": f"${float(c.get('volume_traded', 0) or 0):,.0f}",
+                    "Closes": (
+                        ", ".join(
+                            f"{k.replace('CloseType.', '').replace('_', ' ').lower()}"
+                            f" ×{v}"
+                            for k, v in closes.items()
+                        )
+                        or "—"
+                    ),
+                }
+            )
+        b.section(
+            "Bots & controllers",
+            "Every deploy this session operated and what each controller did. "
+            "State is derived from the live snapshot, not from the controller's "
+            "own status field — that one reads 'running' even for stopped bots.",
+        )
+        b.table(rows)
+
+    @staticmethod
     def _narrative(b: Any, session_dir: Path | None) -> None:
         sections = canvas_mod.read_sections(session_dir)
         revised = canvas_mod.last_revised_tick(session_dir)
@@ -158,11 +214,25 @@ class SessionReport:
         b.markdown("\n\n".join(parts))
 
     @staticmethod
-    def _equity_curve(b: Any, journal: Any) -> None:
-        try:
-            series = journal.get_pnl_series() if journal else []
-        except Exception:
-            series = []
+    def _equity_curve(
+        b: Any, journal: Any, pnl_series: list[dict] | None = None
+    ) -> None:
+        """Realized PnL over the session, from the bots' history where there is one.
+
+        ``pnl_series`` is derived from the same ownership window the KPIs are
+        sliced from, so the curve ends where the Realized KPI does. The journal's
+        per-tick snapshots are the fallback for executor-only sessions — and only
+        the fallback, because they record what the aggregator believed at each
+        tick rather than what the bots did.
+        """
+        series = pnl_series or []
+        title = "Realized PnL"
+        if not series:
+            title = "Equity curve"
+            try:
+                series = journal.get_pnl_series() if journal else []
+            except Exception:
+                series = []
         points = [p for p in series if p.get("timestamp")]
         if len(points) < 2:
             return
@@ -180,7 +250,7 @@ class SessionReport:
         )
         fig.add_hline(y=0, line_dash="dot", line_color="#64748b")
         fig.update_layout(
-            title="Equity curve",
+            title=title,
             height=360,
             margin=dict(l=60, r=30, t=60, b=40),
             hovermode="x unified",

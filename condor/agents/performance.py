@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from functools import partial
 from typing import Any
 
@@ -41,7 +42,24 @@ class AgentPerformance:
     # is a list; the merge is plain addition over disjoint sets and needs no
     # de-duplication as long as the bases are disjoint (see ``resolve_bots``).
     bot_names: list[str] = field(default_factory=list)
+    # Every instance that ever ran under an owned base, oldest deploy first —
+    # including the ones this session already stopped. ``bot_names`` names only the
+    # instances alive now, so a session that redeployed three times reported the
+    # last one and hid the two it had operated and wound down. Both are needed:
+    # the live names say what is running, this says what the session ran.
+    bot_instances: list[str] = field(default_factory=list)
     controllers: list[dict[str, Any]] = field(default_factory=list)
+    # Raw ``CloseType.X -> n`` breakdown across every operated controller.
+    # ``trade_count`` counts only round-trip closes, which reads a directional
+    # controller's risk stop (EARLY_STOP) as churn and reports 0 trades on a
+    # session that closed three positions. Nothing in the payload tells a market
+    # maker's re-quote from a directional stop, so the breakdown ships alongside
+    # the count instead of a heuristic guessing between them.
+    close_type_counts: dict[str, int] = field(default_factory=dict)
+    # False when ``fees`` is a floor rather than a figure: a backend that reports
+    # no cumulative fee column leaves bot-mode fees derivable only from open
+    # positions, so a flat bot sums to 0.0 — which is "unknown", not "free".
+    fees_known: bool = True
     # Owned bases that resolved to no instance at all — neither running nor
     # archived. Their contribution is unknown, not zero, and the two must not
     # render alike: a session whose bot has vanished reporting "$0.00" reads as
@@ -156,9 +174,11 @@ def _merge_bot_perf(
 
     if window is None:
         closes = int(bot.get("closed_trades", 0) or 0)
+        volume_added = float(bot.get("volume_traded", 0) or 0)
+        fees_added = float(bot.get("cum_fees_quote", 0) or 0)
         perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
-        perf.volume += float(bot.get("volume_traded", 0) or 0)
-        perf.fees += float(bot.get("cum_fees_quote", 0) or 0)
+        perf.volume += volume_added
+        perf.fees += fees_added
     else:
         realized, volume, trades, fees = window
         closes = int(round(trades))
@@ -166,7 +186,18 @@ def _merge_bot_perf(
         perf.volume += volume
         # A backend that reports no cumulative fee column slices to zero; the
         # live open-position figure is then the only one there is.
-        perf.fees += fees if fees else float(bot.get("cum_fees_quote", 0) or 0)
+        fees_added = fees if fees else float(bot.get("cum_fees_quote", 0) or 0)
+        volume_added = volume
+        perf.fees += fees_added
+
+    # Traded but charged nothing: the fee column is missing, not the fees.
+    if volume_added > 0 and fees_added == 0.0:
+        perf.fees_known = False
+
+    for ct, n in (bot.get("close_type_counts") or {}).items():
+        perf.close_type_counts[str(ct)] = perf.close_type_counts.get(str(ct), 0) + int(
+            n or 0
+        )
 
     perf.trade_count += closes
     perf.closed_count += closes
@@ -175,6 +206,79 @@ def _merge_bot_perf(
     perf.controllers = perf.controllers + list(bot.get("controllers", []))
     perf.executors = perf.executors + rows
     perf.open_count += len(open_rows)
+
+
+async def fetch_agent_pnl_series(
+    client: Any,
+    bot_names: list[str],
+    since: float,
+    until: float = 0.0,
+) -> list[dict[str, Any]]:
+    """This session's realized-PnL curve over its ownership window.
+
+    Reconstructed from the bots' own controller-performance history rather than
+    replayed from the per-tick journal snapshots. The snapshots are a *cache* of
+    whatever the aggregator believed at each tick, so a session that ticked while
+    the aggregator was blind to its bots holds a permanent record of flat zeros —
+    the KPI can be corrected, a written-down snapshot cannot. Deriving the curve
+    from the same history the KPI is sliced from means the two cannot disagree,
+    and a fix reaches every past session without rewriting any journal.
+
+    Realized only: the history carries no unrealized column, and a mark-to-market
+    line would in any case be a point-in-time value rather than something that
+    accrues. The final point therefore matches the KPI's *Realized*, not its
+    *Total*, whenever a position is still open.
+
+    Returns ``[{"timestamp": iso, "pnl": realized, "volume": volume}, …]``, empty
+    when the session owns no bot or the history is unavailable.
+    """
+    import time as _time
+
+    from condor.fetchers.bot_performance import (
+        fetch_all_bot_performance,
+        fetch_archived_instances,
+        fetch_base_histories,
+        slice_history,
+    )
+
+    bases = [b for b in (bot_names or []) if b]
+    if not client or not bases or since <= 0:
+        return []
+
+    end = until if until > 0 else _time.time()
+    try:
+        all_bot_perf = await fetch_all_bot_performance(client)
+    except Exception as e:
+        log.warning("pnl series: bot snapshot failed: %s", e)
+        all_bot_perf = {}
+    archived = await fetch_archived_instances(client)
+    try:
+        histories = await fetch_base_histories(
+            client, all_bot_perf, bases, since, end, extra_names=archived
+        )
+    except Exception as e:
+        log.warning("pnl series: history fetch failed: %s", e)
+        return []
+
+    instances = [h for hs in histories.values() for h in hs if h]
+    if not instances:
+        return []
+
+    # One point per instant any instance was sampled. Each is the whole session's
+    # cumulative at that moment, so the curve is continuous across a redeploy
+    # rather than restarting at zero with each new bot.
+    stamps = sorted({t for h in instances for t, *_ in h if since <= t <= end})
+    series: list[dict[str, Any]] = []
+    for t in stamps:
+        realized, volume, _trades, _fees = slice_history(instances, since, t)
+        series.append(
+            {
+                "timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
+                "pnl": realized,
+                "volume": volume,
+            }
+        )
+    return series
 
 
 def _merge_stopped_bot_perf(
@@ -195,6 +299,8 @@ def _merge_stopped_bot_perf(
     perf.realized_pnl += realized
     perf.volume += volume
     perf.fees += fees
+    if volume > 0 and fees == 0.0:
+        perf.fees_known = False
     perf.trade_count += closes
     perf.closed_count += closes
     perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
@@ -352,6 +458,10 @@ async def fetch_agent_performance_batch(
                 # An unresolved base (never deployed, or no snapshot yet) still
                 # names the bot the agent operates, as the single-bot path did.
                 out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)
+                # Everything ever deployed under the base, stopped instances
+                # included — the session operated them all, and the two this one
+                # wound down are exactly where its realized PnL came from.
+                out[aid].bot_instances.extend(instances.get(base) or [])
                 if bot:
                     _merge_bot_perf(out[aid], bot, windows.get(base))
                 elif base in windows:

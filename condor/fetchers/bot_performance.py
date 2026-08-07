@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import Counter
 from functools import partial
 from typing import Any, Iterable
 
@@ -91,6 +92,16 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
     positions are the only thing ``positions_summary`` describes, so without it a
     caller counting rows would read a bot's whole trading history as "however many
     positions happen to be open right now".
+
+    ``close_type_counts`` is carried through verbatim, per controller and summed
+    per bot. ``closed_trades`` deliberately counts only the round-trip close types
+    (see :data:`_TRADE_CLOSE_TYPES`), which is right for a market maker whose
+    EARLY_STOPs are order re-quoting and wrong for a directional controller whose
+    EARLY_STOP is the risk stop that closed the position. Nothing in this payload
+    distinguishes the two — ``controller_name`` comes back empty and an archived
+    instance has no config left to ask — so the raw breakdown travels alongside
+    the count and the reader decides. A session showing "0 trades" on six figures
+    of volume is then explicable rather than merely wrong.
     """
     agg: dict[str, dict] = {}
     for snap in snapshots:
@@ -109,6 +120,7 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
                 "volume_traded": 0.0,
                 "cum_fees_quote": 0.0,
                 "closed_trades": 0,
+                "close_type_counts": Counter(),
                 "num_controllers": 0,
                 "timestamp": "",
                 "controllers": [],
@@ -121,6 +133,12 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
         ]
         fees = sum(float(p.get("cum_fees_quote", 0) or 0) for p in positions)
         closes = count_trade_closes(perf)
+        close_types = {
+            str(k): int(v or 0)
+            for k, v in (perf.get("close_type_counts") or {}).items()
+            if isinstance(perf.get("close_type_counts"), dict) and int(v or 0) > 0
+        }
+        agg[bn]["close_type_counts"].update(close_types)
         agg[bn]["realized_pnl_quote"] += realized
         agg[bn]["unrealized_pnl_quote"] += unrealized
         agg[bn]["global_pnl_quote"] += realized + unrealized
@@ -135,6 +153,11 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
             agg[bn]["timestamp"] = ts
         agg[bn]["controllers"].append(
             {
+                # Which deploy this controller ran under. _merge_instance_aggregates
+                # concatenates the controller lists of every instance under a base,
+                # so without naming the instance here a redeployed bot's controllers
+                # all read as one undifferentiated set.
+                "bot_name": bn,
                 "controller_id": snap.get("controller_id", ""),
                 "controller_name": snap.get("controller_name", ""),
                 "connector": snap.get("connector", snap.get("connector_name", "")),
@@ -145,9 +168,14 @@ def _aggregate_by_bot(snapshots: list[dict]) -> dict[str, dict]:
                 "volume_traded": volume,
                 "cum_fees_quote": fees,
                 "closed_trades": closes,
+                "close_type_counts": close_types,
                 "positions_summary": positions,
             }
         )
+    # Plain dict on the way out: the aggregate is serialized to the web wire and a
+    # Counter is only an accumulation detail.
+    for bot in agg.values():
+        bot["close_type_counts"] = dict(bot["close_type_counts"])
     return agg
 
 
@@ -285,7 +313,10 @@ def _merge_instance_aggregates(bots: list[dict]) -> dict:
         return bots[0]
     merged = dict(bots[0])
     merged["controllers"] = list(bots[0].get("controllers", []))
+    merged["close_type_counts"] = dict(bots[0].get("close_type_counts") or {})
     for b in bots[1:]:
+        for ct, n in (b.get("close_type_counts") or {}).items():
+            merged["close_type_counts"][ct] = merged["close_type_counts"].get(ct, 0) + n
         for key in (
             "realized_pnl_quote",
             "unrealized_pnl_quote",

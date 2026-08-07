@@ -105,7 +105,11 @@ class ExecutorsProvider(BaseProvider):
                 # this dict, so a consumer that shows a total can show what the
                 # total is made of and whether any of it is missing.
                 "bot_names": perf.bot_names,
+                "bot_instances": perf.bot_instances,
                 "unresolved_bases": perf.unresolved_bases,
+                "controllers": perf.controllers,
+                "close_type_counts": perf.close_type_counts,
+                "fees_known": perf.fees_known,
             },
             summary="\n".join(lines),
         )

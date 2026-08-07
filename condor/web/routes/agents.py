@@ -160,6 +160,25 @@ class AgentPerformanceModel(BaseModel):
     open_count: int = 0
     closed_count: int = 0
     executors: list[dict[str, Any]] = []
+    # ── Bot-mode attribution ────────────────────────────────────────────────
+    # A session trading through bots earns nothing under its own agent_id: its
+    # executors live inside the bot instance's own database and never reach the
+    # agent_id-keyed table, and the only rows Condor can synthesize for them are
+    # the positions open right now. A flat bot therefore renders as a session that
+    # did nothing. These four fields carry what the aggregator already knew and
+    # this model used to drop on the floor — which bots ran, which controllers,
+    # what each closed, and whether the fee figure means anything.
+    #
+    # Populated by the per-session detail route, which resolves one session's
+    # ownership exactly. The strategy rollup leaves them empty (it distributes a
+    # bot's history across sessions rather than resolving instances per session)
+    # and sets only ``fees_known``.
+    bot_names: list[str] = []
+    bot_instances: list[str] = []
+    unresolved_bases: list[str] = []
+    controllers: list[dict[str, Any]] = []
+    close_type_counts: dict[str, int] = {}
+    fees_known: bool = True
 
 
 class StrategyPerformanceResponse(BaseModel):
@@ -589,6 +608,9 @@ async def _apply_bot_mode_pnl(
             s.closed_count += int(round(trades))
             s.fees += fees
             sliced_fees += fees
+            # Volume with no fee is a missing column, not a free trade.
+            if volume > 0 and fees == 0.0:
+                s.fees_known = False
             s.total_pnl = s.realized_pnl + s.unrealized_pnl
 
         # Live unrealized + open positions → the base's current owner, unless it
@@ -1590,7 +1612,10 @@ async def get_session_executors(
     user: WebUser = Depends(get_current_user),
 ):
     """Return executors + performance for a single session."""
-    from condor.agents.performance import fetch_agent_performance
+    from condor.agents.performance import (
+        fetch_agent_performance,
+        fetch_agent_pnl_series,
+    )
 
     strategy = _get_strategy(slug, sslug)
     agent_id = f"{_runkey(slug, sslug)}_{session_num}"
@@ -1603,6 +1628,7 @@ async def get_session_executors(
             "performance": AgentPerformanceModel(
                 agent_id=agent_id, session_num=session_num
             ).model_dump(),
+            "pnl_series": [],
         }
     # Bot-mode: the session operates named bots whose executors live in the bot
     # container, not the agent_id-keyed table. Merge the live positions of every
@@ -1639,8 +1665,36 @@ async def get_session_executors(
         open_count=perf.open_count,
         closed_count=perf.closed_count,
         executors=perf.executors,
+        bot_names=perf.bot_names,
+        bot_instances=perf.bot_instances,
+        unresolved_bases=perf.unresolved_bases,
+        controllers=perf.controllers,
+        # Base-lifetime, not window-sliced: the payload counts closes per
+        # controller with no timestamp to slice on. Equal to the session's own
+        # closes whenever the session deployed the bases it owns (the normal
+        # case); a superset when it adopted a base another session had traded.
+        # The UI labels it as the bots' breakdown for exactly that reason.
+        close_type_counts=perf.close_type_counts,
+        fees_known=perf.fees_known,
     )
-    return {"executors": perf.executors, "performance": model.model_dump()}
+    # The equity curve, sliced from the same ownership window as the figures
+    # above. The journal's per-tick snapshots are only what the aggregator
+    # believed at the time, so a session that ran while it was blind to its bots
+    # has a permanently flat record; this is derived and therefore self-correcting.
+    # A bot released mid-window stops the curve where the session stopped owning.
+    released = max((b.until for b in owned if b.until > 0), default=0.0)
+    try:
+        pnl_series = await fetch_agent_pnl_series(
+            client, bot_names or [b.base for b in owned], since, until=released
+        )
+    except Exception as e:
+        log.warning("pnl series for %s failed: %s", agent_id, e)
+        pnl_series = []
+    return {
+        "executors": perf.executors,
+        "performance": model.model_dump(),
+        "pnl_series": pnl_series,
+    }
 
 
 # ── Strategy lifecycle ──
@@ -1909,6 +1963,63 @@ async def get_journal(
     journal_path = session_dir / "journal.md"
     content = journal_path.read_text() if journal_path.exists() else ""
     return {"content": content}
+
+
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/canvas")
+async def get_session_canvas(
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
+):
+    """The agent's own thesis for this session, plus how it changed.
+
+    The canvas is the only artifact in a session that says *why* — the numbers
+    say what happened, the snapshots say what was called, and neither says what
+    the agent believed. It was written on every tick and read by nothing outside
+    the live report.
+
+    ``sections`` is the current text keyed by section; ``revisions`` is every
+    edit newest first, so a thesis can be read against the tick that changed it.
+    """
+    from condor.agents import canvas as canvas_mod
+
+    strategy = _get_strategy(slug, sslug)
+    session_dir = find_session_dir(strategy.dir, session_num)
+    if not session_dir:
+        raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
+    return {
+        "sections": canvas_mod.read_sections(session_dir),
+        "section_titles": canvas_mod.SECTION_TITLES,
+        "section_order": list(canvas_mod.CANVAS_SECTIONS),
+        "last_revised_tick": canvas_mod.last_revised_tick(session_dir),
+        "revisions": canvas_mod.recent_revisions(session_dir, limit=50),
+    }
+
+
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/report")
+async def get_session_report(
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
+):
+    """The live report ``SessionReport`` keeps for this session, if there is one.
+
+    Matched on the ``{run_key}/session_{N}`` source name the report is saved
+    under, which is the only handle tying a report to the session that produced
+    it. Returns ``{"report": null}`` rather than 404 for a session whose loop
+    predates the live report or never ticked — a missing report is a normal
+    state, not an error the caller should have to distinguish.
+    """
+    _get_strategy(slug, sslug)
+    from condor.reports import list_reports
+
+    run_key = _runkey(slug, sslug)
+    source = f"{run_key}/session_{session_num}"
+    reports, _total = list_reports(source_type="routine", search=run_key, limit=100)
+    matched = [r for r in reports if r.get("source_name", "") == source]
+    return {"report": ReportSummary(**matched[0]).model_dump() if matched else None}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/snapshots")
