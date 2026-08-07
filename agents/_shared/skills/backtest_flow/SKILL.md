@@ -21,8 +21,12 @@ the tooling but the judgement:
   overfitting checks, go/no-go — belongs to the `directional_trader` agent,
   whose `backtesting` playbook covers it. Delegate rather than improvising it.
 - **You are `directional_trader`** → backtesting is YOUR domain. Use your own
-  `backtesting` playbook, never delegate to yourself. Steps 1–2 below are still
-  a good intake checklist for what to pin down before running anything.
+  `backtesting` playbook; do not hand the judgement to another agent. Steps 1–2
+  below are still a good intake checklist for what to pin down before running
+  anything. For a long grid you do not want to run turn-by-turn, spawn a
+  background copy of yourself —
+  `delegate(action="start", agent="directional_trader", task="...")` — and let it
+  run the sweep unattended. That is still you: same playbooks, same thresholds.
 - **You are any other agent** → you can run these, and for a single backtest
   that is the right move. For a sweep, an overfitting check or a deploy
   decision, hand it over with
@@ -42,10 +46,12 @@ Once the user picks a config (or decides to create one), ask for:
 
 ### Step 3 — Run
 - **Single config** → run the `backtest_chart` routine directly
-- **Multiple configs, a parameter sweep, or "which is best?"** → delegate to the
-  `directional_trader` agent as a background task:
+- **Multiple configs, a parameter sweep, or "which is best?"** → run it as a
+  background task:
   `delegate(action="start", agent="directional_trader", task="...")`. It runs them,
-  applies the stability/overfitting rules, and pings the user when done.
+  applies the stability/overfitting rules, and pings the user when done. From
+  another seat that is a hand-off to the specialist; from `directional_trader`'s
+  own seat it is a background copy of itself — same call either way.
 
 ### Step 4 — Compare (optional)
 Every backtest is saved, whoever ran it — use the `backtest_compare` routine to
