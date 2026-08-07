@@ -29,14 +29,20 @@ async def call_main_api(
     if timeout is None:
         timeout = TIMEOUTS.mcp_call
 
+    host = BIND_HOST
+
     try:
-        ip = ipaddress.ip_address(BIND_HOST)
+        ip = ipaddress.ip_address(host)
+
+        if ip.is_unspecified:
+            host = "::1" if ip.version == 6 else "127.0.0.1"
+
         if ip.version == 6:
-            BIND_HOST = f"[{BIND_HOST}]"
+            host = f"[{host}]"
     except ValueError:
         pass
 
-    url = f"http://{BIND_HOST}:{BIND_PORT}/api/v1{path}"
+    url = f"http://{host}:{BIND_PORT}/api/v1{path}"
     token = create_jwt(settings.user_id, role="user")
     headers = {"Authorization": f"Bearer {token}"}
 
