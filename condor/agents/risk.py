@@ -314,7 +314,9 @@ def auto_approve_with_risk_check(
                 # Ownership first: an agent may only touch bots in its own
                 # namespace. Read-only actions (status/logs/get_config) are not
                 # in DANGEROUS_BOT_ACTIONS, so it still sees the whole fleet.
-                if ledger is not None:
+                # Only a session that declared controller mode is held to the
+                # namespace; every session still has its deploys recorded below.
+                if ledger is not None and ledger.enforced:
                     action = input_data.get("action", "")
                     if action in DANGEROUS_BOT_ACTIONS:
                         bot_name = input_data.get("bot_name", "") or ""

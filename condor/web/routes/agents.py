@@ -525,6 +525,7 @@ async def _apply_bot_mode_pnl(
     from condor.fetchers.bot_performance import (
         bot_executor_rows,
         fetch_all_bot_performance,
+        fetch_archived_instances,
         fetch_base_histories,
         resolve_bots,
         slice_history,
@@ -551,8 +552,13 @@ async def _apply_bot_mode_pnl(
         (since for lst in owners.values() for since, _, _ in lst if since > 0),
         default=0.0,
     )
+    # Archived instances carry the realized PnL of every bot a session stopped —
+    # the normal end state of a finished session, and invisible in the live
+    # snapshot. Same universe the live agent's own view uses, so the dashboard and
+    # the tick loop cannot disagree about what a session earned.
+    archived = await fetch_archived_instances(client)
     histories_by_base = await fetch_base_histories(
-        client, all_perf, bases, earliest, now
+        client, all_perf, bases, earliest, now, extra_names=archived
     )
 
     live = resolve_bots(all_perf, bases)

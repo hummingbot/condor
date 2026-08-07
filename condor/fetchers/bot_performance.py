@@ -21,7 +21,7 @@ import asyncio
 import logging
 import time
 from functools import partial
-from typing import Any
+from typing import Any, Iterable
 
 from condor.fetchers._pagination import collect_pages
 from condor.fetchers.executors import normalize_executor_side
@@ -225,7 +225,9 @@ async def fetch_all_bot_performance(client: Any) -> dict[str, dict]:
 
 
 def partition_instances(
-    all_bot_perf: dict[str, dict], bases: list[str]
+    all_bot_perf: dict[str, dict],
+    bases: list[str],
+    extra_names: Iterable[str] = (),
 ) -> dict[str, list[str]]:
     """Assign every deployed instance to the LONGEST owned base that prefixes it.
 
@@ -237,42 +239,152 @@ def partition_instances(
     each instance's PnL is counted under exactly one base and a session operating
     several bots gets a truthful sum.
 
+    ``extra_names`` widens the universe beyond the live snapshot — archived
+    instances, which is where a stopped bot's realized PnL lives. Discovery is the
+    only thing that was live-only: the controller-performance history endpoint
+    serves a stopped instance as readily as a running one, so a base whose bots
+    were all stopped used to resolve to nothing and report $0 rather than the loss
+    it actually took.
+
     Returns one entry per base (possibly empty), each instance list ordered oldest
-    first.
+    first — by snapshot ``timestamp`` where there is one, else by name, which for
+    a shared base is the same order since the ``-YYYYMMDD-HHMMSS`` deploy suffix
+    sorts chronologically.
     """
     out: dict[str, list[str]] = {b: [] for b in bases if b}
-    if not all_bot_perf or not out:
+    if not out:
+        return out
+    universe = {*all_bot_perf, *(n for n in extra_names if n)}
+    if not universe:
         return out
     longest_first = sorted(out, key=len, reverse=True)
-    for name in all_bot_perf:
+    for name in universe:
         for base in longest_first:
             if name == base or name.startswith(f"{base}-"):
                 out[base].append(name)
                 break
     for names in out.values():
-        names.sort(key=lambda k: (str(all_bot_perf[k].get("timestamp", "")), k))
+        names.sort(key=lambda k: (str(all_bot_perf.get(k, {}).get("timestamp", "")), k))
     return out
+
+
+def _merge_instance_aggregates(bots: list[dict]) -> dict:
+    """Sum several live instance aggregates of one base into a single aggregate.
+
+    A base that was redeployed while an earlier instance still ran, or that simply
+    runs more than one instance, has its figures spread across them. Taking only
+    the freshest — as this did before — silently dropped every other instance's
+    PnL, so a strategy that redeploys under a stable base name under-reported by
+    exactly the amount its previous instances earned.
+
+
+    ``bots[0]`` names the result: the caller orders the list so the instance whose
+    name should represent the base comes first. Only the figures are pooled.
+    """
+    if len(bots) == 1:
+        return bots[0]
+    merged = dict(bots[0])
+    merged["controllers"] = list(bots[0].get("controllers", []))
+    for b in bots[1:]:
+        for key in (
+            "realized_pnl_quote",
+            "unrealized_pnl_quote",
+            "global_pnl_quote",
+            "volume_traded",
+            "cum_fees_quote",
+            "closed_trades",
+            "num_controllers",
+        ):
+            merged[key] = (merged.get(key, 0) or 0) + (b.get(key, 0) or 0)
+        merged["controllers"] += list(b.get("controllers", []))
+        if str(b.get("timestamp", "")) > str(merged.get("timestamp", "")):
+            merged["timestamp"] = b.get("timestamp", "")
+    return merged
 
 
 def resolve_bots(all_bot_perf: dict[str, dict], bases: list[str]) -> dict[str, dict]:
-    """Live aggregate per base, partition-aware.
+    """Live aggregate per base, partition-aware and summed across its instances.
 
     A bot deploys under an instance name with a timestamp suffix appended
     (``dn-CL-BRENTOIL-mm`` → ``dn-CL-BRENTOIL-mm-20260724-182221``), while the
-    strategy config only knows the stable base name. Each base resolves to the
-    exact name if it was deployed under it, else to its freshest instance (ISO
-    ``timestamp`` strings sort chronologically, so a re-launched bot resolves to
-    its most recent deploy). Applying that rule within each base's own partition
-    means an owned parent never resolves to a sibling's instance and two owned
-    bases never hand back the same aggregate twice. Bases with no deployed
-    instance are absent from the result.
+    strategy config only knows the stable base name. Every *live* instance under a
+    base contributes, so a base running several at once reports their sum rather
+    than whichever happened to be freshest. The base is still *named* after its
+    exact deploy where there is one, else its freshest instance — that rule now
+    only picks a label, not which instance's PnL survives.
+
+    Deliberately live-only: this is the source for unrealized PnL and the open
+    position book, which belong to whoever is running right now. Realized PnL from
+    stopped instances comes through :func:`fetch_base_histories`, whose universe
+    includes archived names. Bases with no live instance are absent from the
+    result.
     """
     out: dict[str, dict] = {}
     for base, insts in partition_instances(all_bot_perf, bases).items():
-        if not insts:
+        live = [i for i in insts if i in all_bot_perf]
+        if not live:
             continue
-        out[base] = all_bot_perf[base if base in insts else insts[-1]]
+        # Name-bearer first: _merge_instance_aggregates keeps bots[0]'s bot_name.
+        head = base if base in live else live[-1]
+        ordered = [all_bot_perf[head]] + [all_bot_perf[i] for i in live if i != head]
+        out[base] = _merge_instance_aggregates(ordered)
     return out
+
+
+# Archived-bot discovery. The listing is a set of sqlite paths, one per stopped
+# instance, and changes only when a bot is stopped — a short TTL is plenty and
+# keeps the per-tick rollup from re-listing on every call.
+_ARCHIVED_TTL = 60.0
+_archived_cache: dict[str, tuple[float, list[str]]] = {}
+
+
+def _archived_name(db_path: str) -> str:
+    """Instance name out of an archived database path."""
+    name = str(db_path).rsplit("/", 1)[-1]
+    for suffix in (".sqlite", ".db"):
+        if name.endswith(suffix):
+            return name[: -len(suffix)]
+    return name
+
+
+async def fetch_archived_instances(client: Any) -> list[str]:
+    """Names of stopped/archived bot instances on this server.
+
+    Best-effort: a backend without the archived-bots endpoint, or one that errors,
+    yields ``[]`` and the caller falls back to live-only discovery — which
+    under-reports stopped bots but is never wrong about running ones.
+    """
+    key = _server_key(client)
+    entry = _archived_cache.get(key) if key else None
+    if entry is not None and time.monotonic() - entry[0] <= _ARCHIVED_TTL:
+        return entry[1]
+    try:
+        databases = await client.archived_bots.list_databases()
+    except Exception as e:
+        logger.debug("fetch_archived_instances failed: %s", e)
+        return []
+    names: list[str] = []
+    for db in databases or []:
+        if isinstance(db, str):
+            path = db
+        elif isinstance(db, dict):
+            if db.get("status") == "error":
+                continue
+            path = db.get("db_path") or db.get("path") or ""
+        else:
+            continue
+        name = _archived_name(path)
+        if name:
+            names.append(name)
+    names = sorted(set(names))
+    if key:
+        _archived_cache[key] = (time.monotonic(), names)
+    return names
+
+
+def clear_archived_cache() -> None:
+    """Drop the cached archived-instance listing (tests, server reconfiguration)."""
+    _archived_cache.clear()
 
 
 def _iso_to_epoch(ts: Any) -> float | None:
@@ -342,14 +454,26 @@ async def fetch_instance_history(
     """Return one bot instance's cumulative history as sorted rows.
 
     Each row is ``(ts_epoch, cum_realized_quote, cum_volume, cum_trades, cum_fees)``
-    with the per-controller snapshots at each timestamp summed to a bot-instance
-    total, so a single- and multi-controller bot are handled identically.
+    — the bot-instance total, obtained by carrying each controller's own
+    cumulative forward and summing the carried values at every sampled instant.
     ``cum_trades`` counts real closes (``close_type_counts`` minus retry/abort
     noise). ``cum_fees`` is taken only from a genuinely cumulative
     ``cum_fees_quote``; the per-open-position fees ``_aggregate_by_bot`` derives are
     a point-in-time figure whose differences are meaningless, so they are not used
     here and the column stays 0 when the backend omits the cumulative field (see
     :func:`slice_history`'s callers, which fall back in that case).
+
+    The forward-carry is what makes this correct, and summing the rows that share
+    a timestamp — as this did before — is what made it wrong. The endpoint returns
+    roughly one row per bucket *in total*, not one per bucket per controller, so
+    above its native resolution a multi-controller bot's controllers appear in
+    round-robin: a three-controller bot sampled at 15m yields buckets holding BTC
+    alone, then ETH alone. Summing per timestamp then reads each bucket as "the
+    bot's total", producing a series that lurches between one controller's
+    cumulative and another's — and since :func:`slice_history` differences that
+    series, the result was not merely imprecise but arbitrary. Carrying each
+    controller's last known cumulative forward reconstructs the true bot total
+    from whatever subset each bucket happens to carry.
 
     Walks the endpoint's cursor to exhaustion (or ``max_rows``) rather than
     keeping whatever fits in one page. ``limit`` is a *row* budget and rows are
@@ -396,26 +520,56 @@ async def fetch_instance_history(
         logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
         return []
 
-    by_ts: dict[str, list[float]] = {}
+    # One cumulative series per controller. A repeated (controller, timestamp)
+    # keeps the last value read, which is what the endpoint means by re-reporting
+    # a bucket.
+    by_controller: dict[str, dict[float, tuple[float, float, float, float]]] = {}
+    # Rows carrying no controller_id cannot be told apart by name, so the nth
+    # anonymous row at a timestamp is treated as the nth controller. Without this
+    # they would all collapse onto one key and overwrite each other, turning a
+    # multi-controller bucket into whichever row happened to be read last.
+    anon_seen: dict[float, int] = {}
     for r in rows:
-        ts = r.get("timestamp")
+        epoch = _iso_to_epoch(r.get("timestamp"))
+        if epoch is None:
+            continue
+        cid = str(r.get("controller_id", "") or "")
+        if not cid:
+            n = anon_seen.get(epoch, 0)
+            anon_seen[epoch] = n + 1
+            cid = f"#{n}"
         perf = r.get("performance") or {}
-        realized = float(perf.get("realized_pnl_quote", 0) or 0)
-        volume = float(perf.get("volume_traded", 0) or 0)
-        trades = count_trade_closes(perf)
-        fees = float(perf.get("cum_fees_quote", 0) or 0)
-        acc = by_ts.setdefault(str(ts), [0.0, 0.0, 0.0, 0.0])
-        acc[0] += realized
-        acc[1] += volume
-        acc[2] += trades
-        acc[3] += fees
+        by_controller.setdefault(cid, {})[epoch] = (
+            float(perf.get("realized_pnl_quote", 0) or 0),
+            float(perf.get("volume_traded", 0) or 0),
+            float(count_trade_closes(perf)),
+            float(perf.get("cum_fees_quote", 0) or 0),
+        )
+    if not by_controller:
+        return []
+
+    series = {cid: sorted(samples.items()) for cid, samples in by_controller.items()}
+    # Advanced monotonically with the merged timeline, so the whole carry is one
+    # linear pass over the rows rather than a scan per controller per instant.
+    cursor = {cid: -1 for cid in series}
+    carried = {cid: (0.0, 0.0, 0.0, 0.0) for cid in series}
 
     out: list[tuple[float, float, float, float, float]] = []
-    for ts, (realized, volume, trades, fees) in by_ts.items():
-        epoch = _iso_to_epoch(ts)
-        if epoch is not None:
-            out.append((epoch, realized, volume, trades, fees))
-    out.sort()
+    for epoch in sorted({e for samples in series.values() for e, _ in samples}):
+        for cid, samples in series.items():
+            i = cursor[cid]
+            while i + 1 < len(samples) and samples[i + 1][0] <= epoch:
+                i += 1
+            if i != cursor[cid]:
+                cursor[cid] = i
+                carried[cid] = samples[i][1]
+        realized = volume = trades = fees = 0.0
+        for r_c, v_c, t_c, f_c in carried.values():
+            realized += r_c
+            volume += v_c
+            trades += t_c
+            fees += f_c
+        out.append((epoch, realized, volume, trades, fees))
     return out
 
 
@@ -474,6 +628,7 @@ async def fetch_base_histories(
     bases: list[str],
     earliest: float,
     now: float,
+    extra_names: Iterable[str] = (),
 ) -> dict[str, list[list[tuple[float, float, float, float, float]]]]:
     """``{base: [history per deployed instance]}`` covering ``[earliest, now]``.
 
@@ -481,8 +636,12 @@ async def fetch_base_histories(
     ``MAX_CONCURRENT_HISTORY_FETCHES`` at a time. A fetch that raises degrades to
     the empty list :func:`fetch_instance_history` already returns on API error, so
     one bad instance costs its own history rather than the whole rollup.
+
+    ``extra_names`` are instances to consider beyond the live snapshot — archived
+    ones, whose realized PnL is exactly what a stopped bot contributes and is
+    otherwise invisible.
     """
-    instances_by_base = partition_instances(all_bot_perf, bases)
+    instances_by_base = partition_instances(all_bot_perf, bases, extra_names)
     all_instances = sorted({i for lst in instances_by_base.values() for i in lst})
     if len(all_instances) > MAX_HISTORY_INSTANCES:
         logger.warning(
@@ -497,7 +656,32 @@ async def fetch_base_histories(
     # back to 1970 would coarsen every bot to daily buckets. Cap the span at what
     # the finest ladder rung can hold and let the cap warning speak if it bites.
     span = now - earliest if earliest > 0 else _INTERVAL_LADDER[0][1] * 500
-    interval = choose_interval(max(span, 0.0))
+
+    # Budget the ladder against the rows the walk can actually hold, not one page
+    # of them. Rows are per (bucket, controller), so the *bucket* budget is the row
+    # cap divided by the busiest instance's controller count. Costing a page meant
+    # coarsening past ~41h of 5m samples when the walk could hold ten times that,
+    # and every rung above the endpoint's native resolution loses controllers (see
+    # :func:`fetch_instance_history`) — so staying fine longer is strictly better.
+    controllers = max(
+        (
+            int(all_bot_perf.get(i, {}).get("num_controllers", 0) or 0)
+            for i in all_instances
+        ),
+        default=1,
+    )
+    interval = choose_interval(
+        max(span, 0.0), limit=max(1, MAX_HISTORY_ROWS // max(1, controllers))
+    )
+    if interval != _INTERVAL_LADDER[0][0] and controllers > 1:
+        logger.warning(
+            "bot history: %d-controller instances sampled at %s (span %.1fh) — "
+            "above the endpoint's native resolution controllers are returned "
+            "round-robin, so per-session figures are approximate",
+            controllers,
+            interval,
+            span / 3600.0,
+        )
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_HISTORY_FETCHES)
 

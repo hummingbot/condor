@@ -42,6 +42,11 @@ class AgentPerformance:
     # de-duplication as long as the bases are disjoint (see ``resolve_bots``).
     bot_names: list[str] = field(default_factory=list)
     controllers: list[dict[str, Any]] = field(default_factory=list)
+    # Owned bases that resolved to no instance at all — neither running nor
+    # archived. Their contribution is unknown, not zero, and the two must not
+    # render alike: a session whose bot has vanished reporting "$0.00" reads as
+    # "traded flat" when it means "cannot see the bot".
+    unresolved_bases: list[str] = field(default_factory=list)
 
     @property
     def bot_name(self) -> str:
@@ -172,6 +177,29 @@ def _merge_bot_perf(
     perf.open_count += len(open_rows)
 
 
+def _merge_stopped_bot_perf(
+    perf: AgentPerformance,
+    window: tuple[float, float, float, float],
+) -> None:
+    """Fold a stopped bot's sliced window into ``perf``.
+
+    The live-snapshot counterpart of :func:`_merge_bot_perf` has nothing to work
+    with once a bot is archived — there is no aggregate, no open book and no
+    controller breakdown, only the history it left behind. That history is the
+    whole point: a session is judged on what it realized, and stopping the bot is
+    the normal way a session ends. Everything an open position would contribute
+    (unrealized PnL, executor rows) is correctly absent.
+    """
+    realized, volume, trades, fees = window
+    closes = int(round(trades))
+    perf.realized_pnl += realized
+    perf.volume += volume
+    perf.fees += fees
+    perf.trade_count += closes
+    perf.closed_count += closes
+    perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
+
+
 def _build_perf_from_rows(
     agent_id: str,
     rows: list[dict[str, Any]],
@@ -281,7 +309,9 @@ async def fetch_agent_performance_batch(
 
         from condor.fetchers.bot_performance import (
             fetch_all_bot_performance,
+            fetch_archived_instances,
             fetch_base_histories,
+            partition_instances,
             resolve_bots,
             slice_history,
         )
@@ -291,18 +321,22 @@ async def fetch_agent_performance_batch(
         except Exception as e:
             log.warning("fetch_all_bot_performance failed: %s", e)
             all_bot_perf = {}
+        # Stopped instances still hold the realized PnL they earned, and a session
+        # that stopped its bot before the rollup ran would otherwise report $0.
+        archived = await fetch_archived_instances(client)
         now = time.time()
         for aid, bases in wanted.items():
             # Resolved per agent over ALL its bases at once, so an owned parent
             # never resolves to a tagged sibling's instance and no bot is merged
             # into the same agent twice.
             live = resolve_bots(all_bot_perf, bases)
+            instances = partition_instances(all_bot_perf, bases, archived)
             start = float((since or {}).get(aid, 0.0) or 0.0)
             windows: dict[str, tuple[float, float, float, float]] = {}
-            if start > 0 and all_bot_perf:
+            if start > 0 and (all_bot_perf or archived):
                 try:
                     histories = await fetch_base_histories(
-                        client, all_bot_perf, bases, start, now
+                        client, all_bot_perf, bases, start, now, extra_names=archived
                     )
                     windows = {
                         base: slice_history(hs, start, now)
@@ -320,4 +354,17 @@ async def fetch_agent_performance_batch(
                 out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)
                 if bot:
                     _merge_bot_perf(out[aid], bot, windows.get(base))
+                elif base in windows:
+                    # Stopped: no live snapshot to merge, but the window over its
+                    # archived history is exactly what this session realized on it.
+                    _merge_stopped_bot_perf(out[aid], windows[base])
+                if not instances.get(base):
+                    out[aid].unresolved_bases.append(base)
+            if out[aid].unresolved_bases:
+                log.warning(
+                    "agent %s owns bases with no live or archived instance: %s — "
+                    "their PnL is unknown, not zero",
+                    aid,
+                    ", ".join(out[aid].unresolved_bases),
+                )
     return out

@@ -109,6 +109,7 @@ class TickEngine:
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
+    _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
     # Session canvas + live report (FEAT-036). Both None for experiments, which
     # keep no journal and therefore no narrative to render.
     _session_report: "SessionReport | None" = field(
@@ -173,15 +174,18 @@ class TickEngine:
                 agent_dir=strategy_dir,
             )
 
-        # The ledger only exists in controller mode: an executor-mode agent never
-        # touches a bot, so it gets no ownership enforcement and writes no file.
-        if self.config["bot_name"]:
-            namespace = bot_namespace(self.agent.slug, self.strategy.slug)
-            self.ledger = BotLedger(
-                namespace,
-                self.session_dir,
-                declared=declared_names(self.config, namespace),
-            )
+        # Every session gets a ledger. Declaring a bot_name decides whether the
+        # namespace rule is *enforced*, not whether deploys are *recorded*: an
+        # agent in executor mode can still call manage_bots (nothing stops it, and
+        # strategy playbooks routinely tell it to), and an unrecorded deploy is a
+        # bot whose PnL no surface can attribute to the session that placed it.
+        namespace = bot_namespace(self.agent.slug, self.strategy.slug)
+        self.ledger = BotLedger(
+            namespace,
+            self.session_dir,
+            declared=declared_names(self.config, namespace),
+            enforced=bool(self.config["bot_name"]),
+        )
 
         # The canvas and its report exist only for loop sessions: an experiment
         # has no session dir to write a canvas to and no history worth charting.
@@ -637,6 +641,7 @@ class TickEngine:
             )
 
             self._journal_ownership_violations(tick_num)
+            self._journal_mode_mismatch(tick_num)
 
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
             skill_volume = self._last_skill_data.get("total_volume", 0.0)
@@ -700,11 +705,17 @@ class TickEngine:
             )
 
     async def _adopt_running_bots(self, client) -> None:
-        """Record the bots in our namespace that are already live (FEAT-017).
+        """Record the bots already live that belong to us (FEAT-017).
 
         Runs once, on the first tick — not in ``__post_init__``, which is sync and
         must not do network I/O. Reaching the API is best-effort: a failure means
         "own nothing yet" and is retried on the next tick, never fatal.
+
+        A namespace-enforcing session recognises its bots by name. One that does
+        not enforce has no such proof, so it adopts by *lineage* instead: a live
+        bot whose base an earlier session of this same strategy recorded owning is
+        this strategy's bot, and the session that just replaced that one inherits
+        it. Both rules are conservative — an unrecognised bot is left alone.
         """
         if self._adoption_done or self.ledger is None:
             return
@@ -716,9 +727,16 @@ class TickEngine:
             log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
             return
 
+        from .ownership import prior_session_bases, strip_deploy_suffix
+
+        inherited: set[str] = set()
+        if not self.ledger.enforced and self.session_dir is not None:
+            inherited = prior_session_bases(self.session_dir.parent)
+
         now = time.time()
         for instance_name in all_perf:
-            if self.ledger.owns(instance_name):
+            base = strip_deploy_suffix(instance_name)
+            if self.ledger.owns(instance_name) or base in inherited:
                 self.ledger.adopt(instance_name, now)
         self._adoption_done = True
         if self.ledger.bases():
@@ -727,6 +745,40 @@ class TickEngine:
                 self.agent_id,
                 ", ".join(self.ledger.bases()),
             )
+
+    def _journal_mode_mismatch(self, tick_num: int) -> None:
+        """Flag a session configured for executors that is actually running bots.
+
+        The config says how the session will trade; the strategy playbook says what
+        the model will do — and nothing reconciles them. A session left in executor
+        mode whose playbook says ``manage_bots(action="deploy", …)`` deploys bots
+        that no namespace protects, and before the ledger recorded them, no PnL
+        surface could attribute either. It is recorded now, so the numbers are
+        right; this says so once rather than leaving the operator to wonder why an
+        executor-mode agent reports a bot's PnL.
+        """
+        if self._mode_mismatch_noted or not self.journal or self.ledger is None:
+            return
+        if self.ledger.enforced or not self.ledger.bases():
+            return
+        self._mode_mismatch_noted = True
+        bases = ", ".join(self.ledger.bases())
+        log.warning(
+            "TickEngine %s: configured bot_mode=%s with no bot_name (executor "
+            "mode) but operates bots: %s — set bot_mode='bot' to enforce the "
+            "'%s' namespace on them",
+            self.agent_id,
+            self.config.get("bot_mode", "auto"),
+            bases,
+            self.ledger.namespace,
+        )
+        self.journal.append_error(
+            f"Config/behaviour mismatch: session runs in executor mode "
+            f"(bot_name empty) but deployed bots: {bases}. Their PnL IS "
+            f"attributed to this session, but they are outside the "
+            f"'{self.ledger.namespace}' namespace and so are not ownership-"
+            f"protected. Set bot_mode='bot' to enforce it."
+        )
 
     def _journal_ownership_violations(self, tick_num: int) -> None:
         """Surface refused bot calls in the journal.
@@ -916,6 +968,11 @@ class TickEngine:
             "total_volume": sd.get("total_volume", summary.get("total_volume", 0)),
             "total_exposure": sd.get("total_exposure", summary["total_exposure"]),
             "open_executors": len(sd.get("executors", [])) or summary["open_executors"],
+            # What the PnL above is made of, and what it is missing. A session
+            # operating bots earns through them, so naming them is the difference
+            # between a number and an auditable one.
+            "bot_names": sd.get("bot_names", []),
+            "unresolved_bases": sd.get("unresolved_bases", []),
             "frequency_sec": self.config.get("frequency_sec", 60),
             "server_name": self.config.get("server_name", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),

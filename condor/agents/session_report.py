@@ -71,6 +71,7 @@ class SessionReport:
         b.manual_order()
 
         self._kpis(b, info)
+        self._attribution(b, info)
         self._narrative(b, session_dir)
         self._equity_curve(b, journal)
         self._executors(b, executors or [])
@@ -97,6 +98,41 @@ class SessionReport:
         b.kpi("Volume", f"${float(info.get('total_volume', 0.0) or 0.0):,.0f}")
         b.kpi("Open Executors", str(info.get("open_executors", 0)))
         b.kpi("Ticks", str(info.get("tick_count", 0)))
+
+    @staticmethod
+    def _attribution(b: Any, info: dict[str, Any]) -> None:
+        """Say where the KPIs came from, and flag what they are missing.
+
+        The KPIs above are the aggregate from ``condor.agents.performance`` — the
+        same figures the dashboard and the tick's own core-data block read, so all
+        three agree by construction. What they cannot show on their own is
+        *coverage*: a session trading through bots earns nothing under its own
+        ``agent_id``, so "Total PnL $0.00" is equally the shape of a flat session
+        and of one whose bots are invisible. Naming the bots settles which.
+        """
+        bots = [str(n) for n in (info.get("bot_names") or []) if n]
+        missing = [str(n) for n in (info.get("unresolved_bases") or []) if n]
+        if not bots and not missing:
+            return  # pure executor session: the agent_id tag is the whole story
+
+        if missing:
+            b.section(
+                "⚠️ Incomplete — PnL above excludes some bots",
+                "No live or archived instance was found for "
+                + ", ".join(f"`{n}`" for n in missing)
+                + ". The figures above are a FLOOR, not a flat result — whatever "
+                "these bots did is not in them. Check them before drawing any "
+                "conclusion from the totals.",
+            )
+        else:
+            b.section(
+                "Attribution",
+                "PnL above covers this session's own executors plus the bots it "
+                "operates: " + ", ".join(f"`{n}`" for n in bots) + ". Bots stopped "
+                "earlier in the session are included — their realized PnL comes "
+                "from the archived instance history, sliced to this session's "
+                "ownership window.",
+            )
 
     @staticmethod
     def _narrative(b: Any, session_dir: Path | None) -> None:
