@@ -46,6 +46,11 @@ AGENT_OPTIONS: dict[str, dict[str, Any]] = {
     # preferences (condor/preferences.py, shared with the web dashboard) and
     # the stored agent_llm becomes "custom@<endpoint>:<model-id>".
     "custom:": {"label": "Custom — OpenAI-compatible API", "picker": True},
+    # DeepSeek (OpenAI-compatible). Either point OPENAI_BASE_URL at DeepSeek
+    # with OPENAI_API_KEY set to your DeepSeek key, or add DeepSeek as a Custom
+    # endpoint via /agent → Change LLM → Custom — OpenAI-compatible API.
+    "openai:deepseek-v4-pro": {"label": "DeepSeek V4 Pro"},
+    "openai:deepseek-v4-flash": {"label": "DeepSeek V4 Flash"},
 }
 
 

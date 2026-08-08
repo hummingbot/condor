@@ -244,6 +244,13 @@ OPENROUTER_API_KEY=sk-or-...             # Optional, unlocks the OpenRouter LLM 
 > models it finds. Endpoints are saved per user under a short nickname, and the
 > selected model is stored as `custom@<nickname>:<model-id>`.
 >
+> **DeepSeek:** Add `OPENAI_BASE_URL=https://api.deepseek.com` and
+> `OPENAI_API_KEY=sk-...` (your [DeepSeek key](https://platform.deepseek.com/api_keys))
+> to `.env`, then pick **DeepSeek V4 Pro** or **DeepSeek V4 Flash** in
+> `/agent → Change LLM`. These options route through the OpenAI-compatible
+> client, so no extra binary is needed. You can also add DeepSeek as a Custom
+> endpoint with base URL `https://api.deepseek.com` and the same key.
+>
 > Optional environment variables:
 > ```bash
 > CUSTOM_LLM_BASE_URL=https://api.venice.ai/api/v1   # Headless fallback, no UI setup

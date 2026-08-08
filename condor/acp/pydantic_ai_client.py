@@ -602,16 +602,23 @@ class PydanticAIClient:
                 model_id, OpenAIProvider(openai_client=openai_client)
             )
 
-        # OpenAI with custom base_url (vLLM, TGI, etc.)
-        if prefix == "openai" and base_url:
-            openai_client = AsyncOpenAI(
-                base_url=base_url,
-                api_key="not-needed",
-                timeout=_local_timeout,
-            )
-            return _make_openai_compat_model(
-                model_id, OpenAIProvider(openai_client=openai_client)
-            )
+        # OpenAI-compatible endpoints (vLLM, TGI, DeepSeek, etc.)
+        # OPENAI_BASE_URL routes any openai:* model to a compatible cloud API
+        # (e.g. DeepSeek); OPENAI_API_KEY supplies the key when set. Without it,
+        # a config-supplied base_url is used for local servers, and a bare
+        # openai:* resolves through pydantic-ai's standard OpenAI resolution.
+        if prefix == "openai":
+            base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+            if base_url:
+                api_key = os.environ.get("OPENAI_API_KEY") or "not-needed"
+                openai_client = AsyncOpenAI(
+                    base_url=base_url,
+                    api_key=api_key,
+                    timeout=_local_timeout,
+                )
+                return _make_openai_compat_model(
+                    model_id, OpenAIProvider(openai_client=openai_client)
+                )
 
         # Standard pydantic-ai resolution (openai, groq, anthropic, google)
         from pydantic_ai.models import infer_model

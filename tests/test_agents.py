@@ -621,6 +621,32 @@ def test_claude_acp_takes_acp_path_not_pydantic_ai():
     assert is_pydantic_ai_model("ollama:qwen3:32b") is True
 
 
+def test_deepseek_options_use_pydantic_ai_path():
+    from condor.acp.pydantic_ai_client import is_pydantic_ai_model
+
+    assert is_pydantic_ai_model("openai:deepseek-v4-pro") is True
+    assert is_pydantic_ai_model("openai:deepseek-v4-flash") is True
+
+
+def test_agent_options_include_deepseek():
+    from handlers.agents._shared import AGENT_OPTIONS
+
+    assert AGENT_OPTIONS["openai:deepseek-v4-pro"]["label"] == "DeepSeek V4 Pro"
+    assert AGENT_OPTIONS["openai:deepseek-v4-flash"]["label"] == "DeepSeek V4 Flash"
+
+
+def test_openai_compatible_model_honors_openai_base_url_and_key(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-deepseek")
+
+    client = PydanticAIClient(model="openai:deepseek-v4-flash")
+    model = client._build_model()
+
+    provider_client = model.client
+    assert str(provider_client.base_url).rstrip("/") == "https://api.deepseek.com"
+    assert provider_client.api_key == "sk-test-deepseek"
+
+
 # ── consult endpoint authorization (SEC-035) ──
 
 
