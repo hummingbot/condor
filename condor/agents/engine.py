@@ -578,7 +578,7 @@ class TickEngine:
             self._pending_directives.clear()
 
         # 6. Create a fresh agent client per tick (clean context window)
-        acp_client = await self._create_client(risk_state)
+        acp_client = await self._create_client(risk_state, client)
         self._active_client = acp_client
 
         response_chunks: list[str] = []
@@ -835,7 +835,7 @@ class TickEngine:
     # ------------------------------------------------------------------
 
     async def _create_client(
-        self, risk_state: RiskState
+        self, risk_state: RiskState, price_client: Any
     ) -> "ACPClient | PydanticAIClient":
         """Build an ACP or PydanticAI client (does NOT start it).
 
@@ -863,6 +863,7 @@ class TickEngine:
             execution_mode=mode,
             ledger=self.ledger,
             agent_id=self.agent_id,
+            price_client=price_client,
         )
 
         agent_key = self._agent_key()

@@ -8,6 +8,7 @@ safe tool calls and blocks dangerous ones that violate risk limits.
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -125,7 +126,10 @@ class RiskEngine:
         return state
 
     def check_executor_action(
-        self, tool_call: dict, current_state: RiskState
+        self,
+        tool_call: dict,
+        current_state: RiskState,
+        planned_amount_quote: float | None = None,
     ) -> tuple[bool, str]:
         """Check if an executor creation is within risk limits.
 
@@ -154,11 +158,13 @@ class RiskEngine:
                 f"Max open executors ({self.limits.max_open_executors}) reached",
             )
 
-        # Check position size
-        config = input_data.get("executor_config", {})
-        amount = float(
-            config.get("total_amount_quote", 0) or config.get("amount", 0) or 0
-        )
+        if (
+            planned_amount_quote is None
+            or not math.isfinite(planned_amount_quote)
+            or planned_amount_quote <= 0
+        ):
+            return False, "Planned quote exposure is unavailable"
+        amount = planned_amount_quote
 
         if current_state.total_exposure + amount > self.limits.max_position_size_quote:
             return False, (
@@ -225,6 +231,7 @@ def auto_approve_with_risk_check(
     execution_mode: str = "loop",
     ledger: "BotLedger | None" = None,
     agent_id: str = "",
+    price_client: Any = None,
 ):
     """Build a permission callback that auto-approves safe tools and risk-checks dangerous ones.
 
@@ -301,8 +308,18 @@ def auto_approve_with_risk_check(
                         )
                         return {"outcome": {"outcome": "cancelled"}}
 
+                planned_amount_quote = None
+                if action == "create":
+                    try:
+                        planned_amount_quote = await _planned_amount_quote(
+                            input_data, price_client
+                        )
+                    except Exception as exc:
+                        log.warning("Blocked executor create: %s", exc)
+                        return {"outcome": {"outcome": "cancelled"}}
+
                 allowed, reason = risk_engine.check_executor_action(
-                    tool_call, risk_state
+                    tool_call, risk_state, planned_amount_quote
                 )
                 if not allowed:
                     log.warning("Risk engine blocked tool call: %s", reason)
@@ -358,3 +375,55 @@ def auto_approve_with_risk_check(
         return {"outcome": {"outcome": "cancelled"}}
 
     return callback
+
+
+async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> float:
+    """Value a supported executor create in its quote token."""
+
+    config = input_data.get("executor_config") or {}
+    executor_type = (
+        input_data.get("executor_type")
+        or config.get("type")
+        or config.get("executor_type")
+    )
+
+    if "total_amount_quote" in config:
+        amount = float(config["total_amount_quote"])
+    elif executor_type == "dca_executor":
+        amounts = [float(value) for value in config.get("amounts_quote", [])]
+        if any(not math.isfinite(value) or value <= 0 for value in amounts):
+            raise ValueError("amounts_quote must contain positive finite numbers")
+        amount = sum(amounts)
+    elif executor_type in {"order_executor", "position_executor", "lp_executor"}:
+        base = float(
+            config.get("base_amount", 0)
+            if executor_type == "lp_executor"
+            else config.get("amount", 0)
+        )
+        quote = float(config.get("quote_amount", 0))
+        if base < 0 or quote < 0:
+            raise ValueError("executor amounts cannot be negative")
+        if base:
+            if client is None:
+                raise ValueError("Hummingbot price client is unavailable")
+            from condor.fetchers.market_data import fetch_current_price
+
+            price = await fetch_current_price(
+                client,
+                config.get("connector_name", ""),
+                config.get("trading_pair", ""),
+            )
+            if price is None:
+                raise ValueError("reference price is unavailable")
+            price = float(price)
+            if not math.isfinite(price) or price <= 0:
+                raise ValueError("reference price must be a positive finite number")
+            amount = quote + base * price
+        else:
+            amount = quote
+    else:
+        raise ValueError(f"unsupported executor type: {executor_type or 'unknown'}")
+
+    if not math.isfinite(amount) or amount <= 0:
+        raise ValueError("planned quote amount must be a positive finite number")
+    return amount
