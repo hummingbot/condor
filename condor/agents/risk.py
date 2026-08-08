@@ -387,9 +387,7 @@ async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> floa
         or config.get("executor_type")
     )
 
-    if "total_amount_quote" in config:
-        amount = float(config["total_amount_quote"])
-    elif executor_type == "dca_executor":
+    if executor_type == "dca_executor":
         amounts = [float(value) for value in config.get("amounts_quote", [])]
         if any(not math.isfinite(value) or value <= 0 for value in amounts):
             raise ValueError("amounts_quote must contain positive finite numbers")
@@ -421,6 +419,8 @@ async def _planned_amount_quote(input_data: dict[str, Any], client: Any) -> floa
             amount = quote + base * price
         else:
             amount = quote
+    elif executor_type in {"grid_executor", "twap_executor"}:
+        amount = float(config["total_amount_quote"])
     else:
         raise ValueError(f"unsupported executor type: {executor_type or 'unknown'}")
 

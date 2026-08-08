@@ -26,6 +26,7 @@ def _create_call(amount: float = 100.0) -> dict:
             "action": "create",
             "executor_config": {
                 "controller_id": "test_controller",
+                "type": "grid_executor",
                 "total_amount_quote": amount,
             },
         },
@@ -125,10 +126,14 @@ class _PriceClient:
     [
         ("grid_executor", {"total_amount_quote": 12}, 12),
         ("twap_executor", {"total_amount_quote": 13}, 13),
-        ("dca_executor", {"amounts_quote": [4, 5]}, 9),
-        ("order_executor", {"amount": 3}, 6),
-        ("position_executor", {"amount": 4}, 8),
-        ("lp_executor", {"base_amount": 3, "quote_amount": 4}, 10),
+        ("dca_executor", {"amounts_quote": [4, 5], "total_amount_quote": 1}, 9),
+        ("order_executor", {"amount": 3, "total_amount_quote": 1}, 6),
+        ("position_executor", {"amount": 4, "total_amount_quote": 0}, 8),
+        (
+            "lp_executor",
+            {"base_amount": 3, "quote_amount": 4, "total_amount_quote": 1},
+            10,
+        ),
     ],
 )
 def test_planned_amount_quote_uses_each_executor_capital_field(
