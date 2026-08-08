@@ -27,7 +27,19 @@ _web_port_raw = os.environ.get("WEB_PORT", "").strip()
 if _web_url_raw:
     WEB_URL = _web_url_raw.rstrip("/")
     _parsed = urlparse(WEB_URL)
-    WEB_PORT = _parsed.port or (443 if _parsed.scheme == "https" else 80)
+
+    if _parsed.port:
+        WEB_PORT = _parsed.port
+    elif _web_port_raw:
+        WEB_PORT = int(_web_port_raw)
+    else:
+        WEB_PORT = 443 if _parsed.scheme == "https" else 80
 else:
     WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
     WEB_URL = f"http://localhost:{WEB_PORT}"
+
+_bind_host_raw = os.environ.get("BIND_HOST", "").strip()
+_bind_port_raw = os.environ.get("BIND_PORT", "").strip()
+
+BIND_HOST = str(_bind_host_raw) if _bind_host_raw else "0.0.0.0"
+BIND_PORT = int(_bind_port_raw) if _bind_port_raw else WEB_PORT
