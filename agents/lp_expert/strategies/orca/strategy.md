@@ -8,6 +8,12 @@ default_config:
   frequency_sec: 60
   account_name: master_account
   default_risk_posture: balanced
+  min_pool_tvl_usd: 10000
+  risk_profile_tvl_targets:
+    steady: 100000
+    balanced: 50000
+    opportunistic: 25000
+    exploratory: 10000
   total_amount_quote: 10
   max_open_executors: 3
   max_slot_deployments_per_tick: 1
@@ -66,7 +72,13 @@ slippage, ownership, or mutation limits.
 Resolve `steady`, `balanced`, `opportunistic`, or `exploratory` from explicit
 session context. Otherwise use configured `default_risk_posture`. Ambiguous or
 contradictory language falls back to the configured default or HOLD. State the
-posture in the decision. It changes comparison judgment only.
+posture in the decision. `min_pool_tvl_usd` is a universal hard eligibility
+floor that no posture or context can lower. Every configured
+`risk_profile_tvl_targets` value must remain at or above that floor and targets
+must be ordered from `steady` through `exploratory`. A context-selected stricter
+posture raises the comparison target; a looser context never lowers the
+configured default posture's target. The effective target changes comparison
+judgment only and does not replace the hard floor.
 
 ## Skill Routing
 
@@ -110,7 +122,8 @@ mutation.
    confirmed.
 5. If and only if `scan_allowed=true` and deployment remains under
    consideration, run `lp_pool_scan` exactly once for the same controller and
-   tick. Require complete source coverage and preserve its report metadata.
+   tick. Require complete source coverage, enforce the configured hard TVL
+   floor, and preserve its report metadata.
 6. Choose `DEPLOY`, `CLOSE`, or `HOLD`.
 7. In loop mode, write exactly one journal entry. For a mutation it is the
    pre-mutation intent with exact controller, operation IDs, targets, ordered
@@ -149,8 +162,8 @@ DEPLOY is allowed only when the snapshot and pool scan prove:
 - fewer than the configured maximum current-controller executors;
 - clean aggregate capital and at least one available virtual slot;
 - no active or reconciling executor in the selected pool;
-- at least one technically complete registered-token Orca candidate and
-  returned selection bounds.
+- at least one technically complete Orca candidate without a Gateway metadata
+  conflict and at or above `min_pool_tvl_usd`, plus returned selection bounds.
 
 The active frozen config controls executor capacity, the ranked scan universe,
 and the maximum deployments per tick. The pool-scan transport ceiling controls
@@ -167,14 +180,27 @@ in `selection_constraints.deployments`.
    `yield_24h`, `yield_floor_h`, `accel_1h`, `turnover_24h`, `move_24h`,
    source coverage, and current portfolio overlap. `transport_limited=true`
    means lower-ranked valid pools were omitted for response size; it does not
-   make the returned prefix incomplete.
+   make the returned prefix incomplete. Missing Gateway registration does not
+   reduce or reorder this Orca candidate prefix; it is resolved only after one
+   candidate is selected. Compact `tvl_policy` is ordered
+   `[configured_default_posture, hard_minimum_tvl_usd,
+   configured_profile_target_tvl_usd]`; candidate `tvl_x` is current TVL divided
+   by the hard floor. Apply the stricter effective posture target described
+   above without changing neutral MCDA rank.
 2. In loop mode, journal every selected candidate and the ordered swap/create
    operation IDs before the first mutation. Derive them from the exact current
    controller, tick, full pool address, and transition using the Agent's
    operation-ID contract; never copy the dotted controller ID verbatim.
 3. For each selection in order, call `lp_order_request` with no
-   `swap_executor_id`. The routine derives token identity, base amount, quote
-   cap, slippage, and the deterministic selection plan. When
+   `swap_executor_id`. The routine refreshes the candidate and, when the
+   selected base mint is absent from Gateway, registers only its exact Orca
+   mint/symbol/decimals tuple and verifies it before continuing. Dry run reports
+   the proposed registration without changing Gateway. A metadata conflict,
+   symbol collision, or unverifiable registration outcome ends the chain. The
+   routine also refreshes TVL and rejects preparation before token registration
+   or swapping when the hard floor is no longer met. It then derives token
+   identity, base amount, quote cap, slippage, and the deterministic selection
+   plan. When
    `use_existing_base_inventory=true`, it may authorize only currently
    available base, capped at the selected LP requirement. For SOL it first
    subtracts `min_sol_reserve`. A full allocation returns
@@ -212,12 +238,12 @@ in `selection_constraints.deployments`.
    range, and preparation-ID authority. Add the current tick and a new create
    operation ID, then call `lp_create` without `lp_executor_id`. It combines
    authorized existing base with only exact finalized swap output, reconstructs
-   the selection plan, refreshes price and token registration, replans, and
-   revalidates schema, capacity, exposure, pool occupancy, reserve, and
-   field-specific balances. `status="ready"` includes one exact `lp_executor`
-   `executor_request`; the routine does not create it. If a legacy confirmed
-   receipt lacks `deployment_input`, HOLD rather than rebuilding it from a
-   report.
+   the selection plan, refreshes price, TVL, and token registration, replans,
+   and revalidates the hard TVL floor, schema, capacity, exposure, pool
+   occupancy, reserve, and field-specific balances. `status="ready"` includes
+   one exact `lp_executor` `executor_request`; the routine does not create it.
+   If a legacy confirmed receipt lacks `deployment_input`, HOLD rather than
+   rebuilding it from a report.
 8. Pass that entire LP `executor_request` unchanged to `manage_executors` once,
    require one returned executor ID, then call `lp_create` again with only the
    current `controller_id`, original `operation_id`, and returned

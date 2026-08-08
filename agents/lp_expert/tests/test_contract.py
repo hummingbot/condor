@@ -233,6 +233,13 @@ def test_strategy_and_example_ship_configurable_capacity_defaults():
         assert config["max_open_executors"] == 3
         assert config["max_slot_deployments_per_tick"] == 1
         assert config["candidate_scan_limit"] == 3
+        assert config["min_pool_tvl_usd"] == 10_000
+        assert config["risk_profile_tvl_targets"] == {
+            "steady": 100_000,
+            "balanced": 50_000,
+            "opportunistic": 25_000,
+            "exploratory": 10_000,
+        }
         assert config["risk_limits"]["max_open_executors"] == 3
 
 

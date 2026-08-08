@@ -9,8 +9,9 @@ source: agent:lp_expert
 # LP Pool Review
 
 Use this playbook only after `lp_pool_scan` has supplied technically valid current
-evidence. It cannot repair incomplete coverage, identity, token registration, or
-range feasibility.
+evidence. It cannot repair incomplete coverage, identity, Gateway metadata
+conflicts, or range feasibility. A merely absent Gateway token is preparation
+work for the selected candidate, not pool-quality evidence.
 
 1. Confirm canonical Orca orientation: candidate `base` is ordered
    `[symbol, mint, decimals]`, token A is that base asset, and token B is
@@ -21,7 +22,10 @@ range feasibility.
    validate tick bounds; do not estimate technical feasibility in prose.
 3. Compare the returned top-ranked candidate prefix using `rank`, `score`, `tvl`,
    `yield_24h`, `yield_floor_h`, `accel_1h`, `turnover_24h`, `move_24h`,
-   `sources`, and current portfolio overlap. `mcda` is ordered
+   `sources`, `tvl_x`, the configured TVL policy, and current portfolio overlap.
+   The hard TVL floor cannot be waived. A stricter context may raise the
+   configured default posture target, while a looser context cannot lower it.
+   `mcda` is ordered
    `[fee_productivity, recent_activity, price_stability, liquidity_depth,
    execution_simplicity]`. When `transport_limited=true`, lower-ranked valid
    pools remain in the human report but are not Agent trading authority.

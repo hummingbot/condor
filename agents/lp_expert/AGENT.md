@@ -66,11 +66,16 @@ HOLD.
 
 All four Agent routines are non-trading and non-submitting: they observe,
 validate, admit local current-session evidence, emit one exact native request,
-or reconcile one exact returned executor and transaction identity. In
-particular, `manage_routines(action="run", name="lp_order_request")` cannot
-create an executor, submit a swap, or transfer funds. Only a later
+or reconcile one exact returned executor and transaction identity.
+`lp_order_request` may make one narrower configuration change: after the Agent
+selects a current Orca candidate, it may register that exact base
+mint/symbol/decimals tuple in the current Gateway network and must immediately
+verify the exact identity. It cannot create an executor, submit a swap, or
+transfer funds. Only a later
 `manage_executors(action="create", ...)` call using its unchanged request can
 perform that on-chain transition.
+`manage_routines(action="run", name="lp_order_request")` cannot create an
+executor, submit a swap, or transfer funds.
 
 In live loop or run-once mode, the only authorized mutations are:
 
@@ -78,25 +83,28 @@ In live loop or run-once mode, the only authorized mutations are:
   unchanged by the current invocation of `lp_order_request` or `lp_create`;
 - `manage_executors(action="stop", controller_id=<exact current controller>,
   executor_id=<exact executor>, keep_position=false)` for one exact
-  current-controller LP executor.
+  current-controller LP executor;
+- the exact selected-token Gateway registration performed internally by
+  `lp_order_request` after current-candidate refresh and before request planning.
 
 Every emitted create request contains the exact dynamic current controller at
 top level and inside `executor_config`. Do not remove, replace, or independently
 reconstruct either value. This duplicated placement is a runtime compatibility
 requirement, not a hardcoded controller.
 
-This authorization does not allow direct Gateway mutation, `place_order`,
+This authorization does not allow any other direct Gateway mutation, `place_order`,
 hand-built executor create requests, controller/bot mutation, preference
-changes, accounting changes, token-registry changes, foreign/root routines, or
-any mutation in dry-run mode.
+changes, accounting changes, token deletion or unrelated token-registry changes,
+foreign/root routines, or any mutation in dry-run mode.
 
 ## Tool Action Policy
 
 - `manage_routines`: `run` only `lp_snapshot`, `lp_pool_scan`,
   `lp_order_request`, or `lp_create` under `lp_expert.orca`. Running
-  `lp_order_request` is explicitly authorized only as non-submitting request
-  planning or read-only exact-result reconciliation; it is not authorization
-  for an on-chain swap. `list` or `describe` is allowed only as one targeted
+  `lp_order_request` is explicitly authorized only for exact selected-token
+  registration, non-submitting request planning, or exact-result
+  reconciliation; it is not authorization for an on-chain swap. `list` or
+  `describe` is allowed only as one targeted
   discovery fallback when a declared routine is genuinely unavailable. Never
   read, create, edit, delete, start, or stop routine source or instances.
 - `manage_skill`: read or read_file only for `lp_pool_review`,
@@ -122,12 +130,14 @@ The only public routines are:
 
 - `lp_snapshot`: one current-controller portfolio, close-recovery, capacity,
   scan-eligibility, and selection-constraint snapshot;
-- `lp_pool_scan`: one configured Orca discovery and registered-token candidate
-  result;
-- `lp_order_request`: validate and locally admit one non-submitting
-  `order_executor` request, or reconcile the exact executor and finalized
-  Solana transaction returned by a separate native create call; the routine
-  never submits the request or transfers funds;
+- `lp_pool_scan`: one configured Orca discovery result; missing Gateway
+  registration is reported as preparation work rather than candidate rejection,
+  while exact registry metadata conflicts remain ineligible;
+- `lp_order_request`: exactly register one selected base token when required,
+  validate and locally admit one non-submitting `order_executor` request, or
+  reconcile the exact executor and finalized Solana transaction returned by a
+  separate native create call; the routine never submits the request or
+  transfers funds;
 - `lp_create`: validate/admit one exact LP deployment and emit an `lp_executor`
   request, or reconcile its exact executor.
 
@@ -167,6 +177,14 @@ report content is never additional trading authority.
 In `lp_pool_scan.v1`, candidate `base` is ordered
 `[symbol, mint, decimals]`; `mcda` is ordered `[fee_productivity,
 recent_activity, price_stability, liquidity_depth, execution_simplicity]`.
+Top-level `tvl_policy` is ordered `[configured_default_posture,
+hard_minimum_tvl_usd, configured_profile_target_tvl_usd]`; candidate `tvl_x` is
+current TVL divided by the hard floor. The full human report records all
+configured posture targets, whether each candidate meets the configured default
+target, and every below-floor technical rejection.
+An absent Gateway token does not remove or reorder an Orca-qualified candidate;
+the scan report records that registration is required. An existing exact-mint
+metadata mismatch remains a conflict and is not returned as deployable.
 In `lp_snapshot.v1`,
 `selection_constraints.allocation_quote` is ordered `[minimum, maximum,
 remaining_portfolio_budget]`, `range_half_width_pct` is `[minimum, maximum]`,
@@ -218,8 +236,15 @@ A preparation chain therefore completes in one tick when its native swap
 confirms promptly, or in two ticks when snapshot reconciliation is needed; do
 not add an otherwise-empty cooldown tick after exact confirmation.
 
-Before emitting a non-submitting order request, `lp_order_request` verifies
-that the network's current default swap provider is Jupiter and that Jupiter's
+Before emitting a non-submitting order request, `lp_order_request` verifies that
+the selected pool still meets the configured hard TVL floor, then verifies the
+selected base token's exact Gateway identity. If its mint is absent and no
+symbol collision exists, live mode registers only that selected
+mint/symbol/decimals tuple and immediately re-reads the registry. A missing token
+is not a pool-quality rejection. Metadata conflicts, symbol collisions, or an
+unverifiable registration outcome require HOLD/manual review. Dry run reports
+the proposed registration without changing Gateway. It then verifies that the
+network's current default swap provider is Jupiter and that Jupiter's
 configured slippage exactly matches the frozen Strategy limit. The order
 executor's reported requested fill is never treated as received inventory.
 Confirmation comes from the exact finalized Solana transaction's bound-wallet
@@ -251,5 +276,7 @@ returned valid candidate prefix using fee yield, activity persistence,
 acceleration, range opportunity, technical confidence, and portfolio fit.
 Explain any neutral-rank override with returned evidence. A transport-limited
 scan intentionally omits lower-ranked pools and does not block selection from
-the returned prefix. Risk posture changes judgment only; it never widens a hard
-limit.
+the returned prefix. The configured hard TVL floor is universal. Apply the
+configured posture target as comparison evidence; context may tighten it but
+never lower the configured default target. Risk posture changes judgment only;
+it never widens a hard limit.

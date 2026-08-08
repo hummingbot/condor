@@ -98,16 +98,24 @@ def fetch_json(url: str) -> dict[str, Any]:
     raise RuntimeError("unreachable Orca retry state")
 
 
-def discovery_request(lens: str) -> str:
+def _minimum_tvl(value: Any) -> float:
+    result = _number(value)
+    if result is None or result <= 0:
+        raise ValueError("minimum pool TVL must be a positive finite number")
+    return result
+
+
+def discovery_request(lens: str, minimum_tvl_usd: Any) -> str:
     if lens not in DISCOVERY_LENSES:
         raise ValueError("unsupported Orca discovery lens")
+    minimum_tvl = _minimum_tvl(minimum_tvl_usd)
     query = urlencode(
         {
             "sortBy": lens,
             "sortDirection": "desc",
             "stats": ",".join(WINDOWS),
             "size": 100,
-            "minTvl": 0,
+            "minTvl": format(minimum_tvl, ".15g"),
         }
     )
     url = f"{BASE_URL}/pools?{query}"
@@ -299,8 +307,10 @@ def normalize_record(
     category: str,
     lens: str,
     source_index: int,
+    minimum_tvl_usd: Any,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Normalize one record before deduplication and apply technical gates only."""
+    minimum_tvl = _minimum_tvl(minimum_tvl_usd)
     if not isinstance(raw, dict):
         return None, "record_not_object"
     try:
@@ -360,6 +370,8 @@ def normalize_record(
         )
         if price <= 0 or tvl <= 0 or tick_spacing <= 0:
             raise ValueError("nonpositive_pool_metric")
+        if tvl < minimum_tvl:
+            raise ValueError("below_min_pool_tvl")
         if fee_rate is None and fee_tier is None:
             raise ValueError("missing_fee_metadata")
         if warning is not False:
@@ -622,7 +634,7 @@ def compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
     if not lenses:
         raise ValueError("candidate source lens is unavailable")
     components = candidate["mcda"]["components"]
-    return {
+    result = {
         "pool": candidate["pool_address"],
         # Fixed order: symbol, mint, decimals. The whole candidate is passed
         # unchanged to downstream routines; the model never reconstructs it.
@@ -649,6 +661,9 @@ def compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "turnover_24h": candidate["turnover"]["24h"],
         "move_24h": candidate["price_change"]["24h"],
     }
+    if "tvl_floor_multiple" in candidate:
+        result["tvl_x"] = candidate["tvl_floor_multiple"]
+    return result
 
 
 def candidate_selection_identity(candidate: dict[str, Any]) -> dict[str, Any]:
@@ -736,11 +751,12 @@ def _error_text(error: BaseException) -> str:
     return f"{type(error).__name__}: {error}"
 
 
-async def scan_pools(limit: int) -> dict[str, Any]:
+async def scan_pools(limit: int, minimum_tvl_usd: Any) -> dict[str, Any]:
     """Fetch the four bounded discovery lenses and return compact neutral evidence."""
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("candidate limit must be a positive integer")
-    specs = [(lens, discovery_request(lens)) for lens in DISCOVERY_LENSES]
+    minimum_tvl = _minimum_tvl(minimum_tvl_usd)
+    specs = [(lens, discovery_request(lens, minimum_tvl)) for lens in DISCOVERY_LENSES]
     responses = await asyncio.gather(
         *(asyncio.to_thread(fetch_json, url) for _, url in specs),
         return_exceptions=True,
@@ -771,7 +787,13 @@ async def scan_pools(limit: int) -> dict[str, Any]:
         )
         for raw in records:
             source_index += 1
-            record, reason = normalize_record(raw, "all", lens, source_index)
+            record, reason = normalize_record(
+                raw,
+                "all",
+                lens,
+                source_index,
+                minimum_tvl,
+            )
             if record is None:
                 rejections[reason or "unknown_rejection"] += 1
             else:
@@ -783,6 +805,7 @@ async def scan_pools(limit: int) -> dict[str, Any]:
     return {
         "status": "complete" if complete else "incomplete",
         "deployable": complete and bool(ranked),
+        "minimum_tvl_usd": minimum_tvl,
         "source_coverage": {
             "required_requests": len(specs),
             "completed_requests": sum(row["status"] == "complete" for row in requests),
@@ -853,19 +876,32 @@ def filter_registered_tokens(
     return accepted, rejected
 
 
-async def refresh_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
+async def refresh_candidate(
+    candidate: dict[str, Any], minimum_tvl_usd: Any
+) -> dict[str, Any]:
     """Refetch the candidate's original bounded lens and validate exact identity."""
+    minimum_tvl = _minimum_tvl(minimum_tvl_usd)
     identity = candidate_selection_identity(candidate)
     response = await asyncio.to_thread(
-        fetch_json, discovery_request(identity["source_lens"])
+        fetch_json,
+        discovery_request(identity["source_lens"], minimum_tvl),
     )
     matches = []
     for index, raw in enumerate(response["data"], 1):
-        normalized, _ = normalize_record(raw, "all", identity["source_lens"], index)
+        normalized, _ = normalize_record(
+            raw,
+            "all",
+            identity["source_lens"],
+            index,
+            minimum_tvl,
+        )
         if normalized and normalized["pool_address"] == identity["pool_address"]:
             matches.append(normalized)
     if len(matches) != 1:
-        raise ValueError("selected Orca pool was not uniquely refreshed")
+        raise ValueError(
+            "selected Orca pool was not uniquely refreshed at or above "
+            f"minimum TVL {format(minimum_tvl, '.15g')} USD"
+        )
     refreshed = matches[0]
     expected = (
         identity["pool_address"],

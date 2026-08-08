@@ -32,12 +32,13 @@ from agents.lp_expert.core.reporting import TraceRecorder, attach_report, safe_e
 from agents.lp_expert.core.runtime import (
     bind_wallet,
     get_hummingbot_client,
+    pool_tvl_policy,
     refresh_balances,
     resolve_runtime,
 )
 
 CATEGORY = "Orca LP Creation"
-VERSION = "6"
+VERSION = "7"
 _CONTROLLER = re.compile(r"^lp_expert\.orca_(?:e)?[1-9]\d*$")
 
 
@@ -811,7 +812,11 @@ async def run(config: Config, context: Any) -> str:
                     }
                 )
             with trace.stage("candidate_refresh_and_replan") as facts:
-                refreshed = await orca.refresh_candidate(config.candidate)
+                tvl_policy = pool_tvl_policy(scope.config)
+                refreshed = await orca.refresh_candidate(
+                    config.candidate,
+                    tvl_policy["minimum_tvl_usd"],
+                )
                 registry = await client.gateway.get_network_tokens(scope.network)
                 accepted, rejected = orca.filter_registered_tokens(
                     [refreshed], registry
@@ -853,6 +858,14 @@ async def run(config: Config, context: Any) -> str:
                     {
                         "pool_address": refreshed["pool_address"],
                         "refreshed_price": refreshed["price"],
+                        "refreshed_tvl_usd": refreshed["tvl_usd"],
+                        "minimum_tvl_usd": tvl_policy["minimum_tvl_usd"],
+                        "default_risk_posture": tvl_policy["default_risk_posture"],
+                        "profile_target_tvl_usd": tvl_policy["profile_target_tvl_usd"],
+                        "meets_profile_target": (
+                            Decimal(str(refreshed["tvl_usd"]))
+                            >= tvl_policy["profile_target_tvl_usd"]
+                        ),
                         "final_plan_digest": final_plan["plan_digest"],
                     }
                 )

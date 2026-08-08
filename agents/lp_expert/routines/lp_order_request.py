@@ -1,4 +1,4 @@
-"""Prepare or reconcile one exact native order-executor request without submitting it."""
+"""Register one selected token; never submit an executor or transfer funds."""
 
 from __future__ import annotations
 
@@ -38,12 +38,13 @@ from agents.lp_expert.core.runtime import (
     decimal_config,
     get_hummingbot_client,
     integer_config,
+    pool_tvl_policy,
     refresh_balances,
     resolve_runtime,
 )
 
 CATEGORY = "Non-Submitting LP Order Request"
-VERSION = "4"
+VERSION = "6"
 
 _CONFIRMED = {"CONFIRMED", "SUCCESS", "COMPLETED"}
 _FAILED = {"FAILED", "ERROR", "REVERTED", "DROPPED"}
@@ -512,12 +513,22 @@ def _token_address(value: dict[str, Any]) -> str:
     ).strip()
 
 
-def _require_registered_token(
+def _registered_token_or_none(
     rows: list[dict[str, Any]], *, address: str, symbol: str, decimals: int
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     exact = [row for row in rows if _token_address(row) == address]
-    if len(exact) != 1:
+    if len(exact) > 1:
         raise ValueError(f"registered token identity for {symbol} is not unique")
+    collisions = [
+        item
+        for item in rows
+        if str(item.get("symbol") or "").strip().casefold() == symbol.casefold()
+        and _token_address(item) != address
+    ]
+    if collisions:
+        raise ValueError(f"registered token symbol {symbol} is ambiguous")
+    if not exact:
+        return None
     row = exact[0]
     found_symbol = str(row.get("symbol") or "").strip()
     found_decimals = row.get("decimals")
@@ -527,21 +538,32 @@ def _require_registered_token(
         or int(found_decimals) != decimals
     ):
         raise ValueError(f"registered token metadata for {symbol} conflicts")
-    collisions = [
-        item
-        for item in rows
-        if str(item.get("symbol") or "").strip().casefold() == symbol.casefold()
-        and _token_address(item) != address
-    ]
-    if collisions:
-        raise ValueError(f"registered token symbol {symbol} is ambiguous")
     return {"address": address, "symbol": found_symbol, "decimals": decimals}
 
 
+def _require_registered_token(
+    rows: list[dict[str, Any]], *, address: str, symbol: str, decimals: int
+) -> dict[str, Any]:
+    result = _registered_token_or_none(
+        rows,
+        address=address,
+        symbol=symbol,
+        decimals=decimals,
+    )
+    if result is None:
+        raise ValueError(f"registered token identity for {symbol} is unavailable")
+    return result
+
+
 def _balance(
-    rows: list[dict[str, Any]], *, symbol: str, mint: str | None = None
+    rows: list[dict[str, Any]],
+    *,
+    symbol: str,
+    mint: str | None = None,
+    missing_exact_is_zero: bool = False,
 ) -> Decimal:
-    found: list[Decimal] = []
+    exact: list[Decimal] = []
+    by_symbol: list[tuple[str, Decimal]] = []
     any_mint = False
     for row in rows:
         row_symbol = str(row.get("token") or row.get("symbol") or "").strip()
@@ -553,12 +575,34 @@ def _balance(
         )
         if amount is None:
             continue
-        if (mint and row_mint == mint) or (
-            not mint and row_symbol.casefold() == symbol.casefold()
-        ):
-            found.append(_decimal(amount, f"{symbol} available balance"))
-    if mint and not found and not any_mint:
-        return _balance(rows, symbol=symbol)
+        parsed = _decimal(amount, f"{symbol} available balance")
+        if row_symbol.casefold() == symbol.casefold():
+            by_symbol.append((row_mint, parsed))
+        if mint and row_mint == mint:
+            exact.append(parsed)
+
+    if mint:
+        conflicting = [
+            amount for row_mint, amount in by_symbol if row_mint and row_mint != mint
+        ]
+        unscoped = [amount for row_mint, amount in by_symbol if not row_mint]
+        if exact and (conflicting or unscoped):
+            raise ValueError(f"{symbol} balance is not uniquely scoped")
+        if conflicting:
+            raise ValueError(f"{symbol} balance conflicts with the selected mint")
+        if exact:
+            found = exact
+        elif by_symbol and not any_mint:
+            found = [amount for _, amount in by_symbol]
+        elif by_symbol:
+            raise ValueError(f"{symbol} balance is not uniquely scoped")
+        elif missing_exact_is_zero:
+            return Decimal(0)
+        else:
+            found = []
+    else:
+        found = [amount for _, amount in by_symbol]
+
     if len(found) != 1 or found[0] < 0:
         raise ValueError(f"{symbol} balance is not uniquely scoped")
     return found[0]
@@ -582,6 +626,7 @@ def _authorized_existing_base(
         balances,
         symbol=identity["base_symbol"],
         mint=identity["base_mint"],
+        missing_exact_is_zero=True,
     )
     reserve = decimal_config(scope.config, "min_sol_reserve", positive=True)
     if not scope.config["use_existing_base_inventory"]:
@@ -2024,11 +2069,23 @@ async def _workflow(
         if request.reason == "inventory_preparation":
             _ensure_no_unconsumed_preparation(store, request.operation_id)
             with trace.stage("selected_candidate_refresh") as stage:
-                refreshed = await orca.refresh_candidate(config.candidate)
+                tvl_policy = pool_tvl_policy(scope.config)
+                refreshed = await orca.refresh_candidate(
+                    config.candidate,
+                    tvl_policy["minimum_tvl_usd"],
+                )
                 stage.update(
                     {
                         "pool_address": refreshed["pool_address"],
                         "refreshed_price": refreshed["price"],
+                        "refreshed_tvl_usd": refreshed["tvl_usd"],
+                        "minimum_tvl_usd": tvl_policy["minimum_tvl_usd"],
+                        "default_risk_posture": tvl_policy["default_risk_posture"],
+                        "profile_target_tvl_usd": tvl_policy["profile_target_tvl_usd"],
+                        "meets_profile_target": (
+                            Decimal(str(refreshed["tvl_usd"]))
+                            >= tvl_policy["profile_target_tvl_usd"]
+                        ),
                         "identity_unchanged": True,
                     }
                 )
@@ -2043,7 +2100,7 @@ async def _workflow(
 
         with trace.stage("token_registry") as stage:
             tokens = _token_rows(await client.gateway.get_network_tokens(scope.network))
-            base = _require_registered_token(
+            base = _registered_token_or_none(
                 tokens,
                 address=request.base_mint,
                 symbol=request.base_symbol,
@@ -2055,7 +2112,120 @@ async def _workflow(
                 symbol=scope.quote_symbol,
                 decimals=scope.quote_decimals,
             )
-            stage.update({"base": base, "quote": quote_token})
+            registration = None
+            if base is None:
+                registration = {
+                    "status": "proposed",
+                    "network": scope.network,
+                    "token": {
+                        "address": request.base_mint,
+                        "symbol": request.base_symbol,
+                        "decimals": request.base_decimals,
+                    },
+                    "mutation": False,
+                }
+                state["token_registration"] = registration
+                if scope.execution_mode == "dry_run":
+                    stage.update(
+                        {
+                            "_outcome": "proposed",
+                            "registration_required": True,
+                            "token": registration["token"],
+                            "quote": quote_token,
+                        }
+                    )
+                    return {
+                        "status": "not_submitted",
+                        "mutation": False,
+                        "mutation_classification": "rejected_before_submit",
+                        "retry_allowed": False,
+                        "reason": (
+                            "dry run cannot register the selected Gateway token"
+                        ),
+                        "proposed_token_registration": registration,
+                        "capacity_release_allowed": False,
+                    }, scope
+
+                registration["status"] = "submitting"
+                registration["mutation"] = True
+                state["mutation_possible"] = True
+                add_error = None
+                try:
+                    await client.gateway.add_token(
+                        network_id=scope.network,
+                        address=request.base_mint,
+                        symbol=request.base_symbol,
+                        decimals=request.base_decimals,
+                        name=request.base_symbol,
+                    )
+                except Exception as exc:
+                    add_error = reporting.safe_error(f"{type(exc).__name__}: {exc}")
+                try:
+                    tokens = _token_rows(
+                        await client.gateway.get_network_tokens(scope.network)
+                    )
+                    base = _registered_token_or_none(
+                        tokens,
+                        address=request.base_mint,
+                        symbol=request.base_symbol,
+                        decimals=request.base_decimals,
+                    )
+                    quote_token = _require_registered_token(
+                        tokens,
+                        address=scope.quote_mint,
+                        symbol=scope.quote_symbol,
+                        decimals=scope.quote_decimals,
+                    )
+                except Exception as exc:
+                    registration.update(
+                        {
+                            "status": "uncertain",
+                            "verification_error": reporting.safe_error(
+                                f"{type(exc).__name__}: {exc}"
+                            ),
+                        }
+                    )
+                    stage.update(
+                        {
+                            "_outcome": "uncertain",
+                            "registration": registration,
+                        }
+                    )
+                    raise _ManualReview(
+                        "selected Gateway token registration could not be "
+                        "verified exactly"
+                    ) from exc
+                if base is None:
+                    registration.update(
+                        {
+                            "status": "uncertain",
+                            **({"submission_error": add_error} if add_error else {}),
+                        }
+                    )
+                    stage.update(
+                        {
+                            "_outcome": "uncertain",
+                            "registration": registration,
+                        }
+                    )
+                    raise _ManualReview(
+                        "selected Gateway token registration outcome is uncertain"
+                    )
+                registration.update(
+                    {
+                        "status": "confirmed",
+                        "mutation": True,
+                        **({"submission_warning": add_error} if add_error else {}),
+                    }
+                )
+                state["mutation_possible"] = False
+            stage.update(
+                {
+                    "base": base,
+                    "quote": quote_token,
+                    "registration": registration,
+                }
+            )
 
         with trace.stage("attribution") as stage:
             if request.reason == "post_close_residual_cleanup":
@@ -2081,7 +2251,10 @@ async def _workflow(
             balances = await refresh_balances(scope, client)
             sol_available = _balance(balances, symbol="SOL")
             base_available = _balance(
-                balances, symbol=request.base_symbol, mint=request.base_mint
+                balances,
+                symbol=request.base_symbol,
+                mint=request.base_mint,
+                missing_exact_is_zero=True,
             )
             quote_available = _balance(
                 balances, symbol=scope.quote_symbol, mint=scope.quote_mint
@@ -2385,7 +2558,7 @@ async def _workflow(
 
 
 async def run(config: Config, context: Any) -> str:
-    """Prepare or reconcile one order request; never submit an executor or transfer."""
+    """Register the selected token and prepare/reconcile without transferring."""
 
     trace = reporting.TraceRecorder()
     state: dict[str, Any] = {"mutation_possible": False}
@@ -2447,6 +2620,14 @@ async def run(config: Config, context: Any) -> str:
         }
 
     request = state.get("request")
+    registration = state.get("token_registration")
+    if isinstance(registration, dict):
+        payload.setdefault("token_registration", registration)
+        payload.setdefault(
+            "configuration_mutation",
+            registration.get("status") == "confirmed"
+            and registration.get("mutation") is True,
+        )
     if (
         isinstance(request, SwapRequest)
         and request.reason == "post_close_residual_cleanup"

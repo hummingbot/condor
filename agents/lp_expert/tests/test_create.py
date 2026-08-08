@@ -20,7 +20,13 @@ from agents.lp_expert.routines import lp_create
 
 
 def _candidate():
-    value, error = orca.normalize_record(pool_record(), "all", "volume24h", 1)
+    value, error = orca.normalize_record(
+        pool_record(),
+        "all",
+        "volume24h",
+        1,
+        10_000,
+    )
     assert error is None
     unique, rejected = orca.deduplicate([value])
     assert not rejected
@@ -390,7 +396,8 @@ def _install(
     async def bind(value, _):
         return value
 
-    async def refresh(candidate):
+    async def refresh(candidate, minimum_tvl_usd):
+        assert minimum_tvl_usd == 10_000
         if refresh_error:
             raise refresh_error
         return copy.deepcopy(candidate)
@@ -463,7 +470,8 @@ def test_create_id_only_recovery_uses_frozen_request_without_market_refresh(
         ready["executor_request"]["executor_config"]
     )
 
-    async def changed_market_must_not_be_read(_):
+    async def changed_market_must_not_be_read(_, minimum_tvl_usd):
+        assert minimum_tvl_usd == 10_000
         raise AssertionError("existing create recovery refreshed the market")
 
     monkeypatch.setattr(

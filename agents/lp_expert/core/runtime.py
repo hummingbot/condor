@@ -32,6 +32,8 @@ _REQUIRED_CONFIG = {
     "server_name",
     "account_name",
     "default_risk_posture",
+    "min_pool_tvl_usd",
+    "risk_profile_tvl_targets",
     "total_amount_quote",
     "max_open_executors",
     "max_slot_deployments_per_tick",
@@ -53,6 +55,7 @@ _REQUIRED_CONFIG = {
     "session_stop_loss_net_pnl_ratio",
     "risk_limits",
 }
+RISK_POSTURES = ("steady", "balanced", "opportunistic", "exploratory")
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,6 +148,32 @@ def integer_config(
     return int(number)
 
 
+def pool_tvl_policy(config: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the validated hard TVL floor and configured posture targets."""
+
+    minimum = decimal_config(config, "min_pool_tvl_usd", positive=True)
+    posture = config.get("default_risk_posture")
+    targets = config.get("risk_profile_tvl_targets")
+    if posture not in RISK_POSTURES:
+        raise ValueError("configured default risk posture is invalid")
+    if not isinstance(targets, dict) or set(targets) != set(RISK_POSTURES):
+        raise ValueError("configured risk-profile TVL targets are invalid")
+    parsed = {
+        name: decimal_config(targets, name, positive=True) for name in RISK_POSTURES
+    }
+    if any(target < minimum for target in parsed.values()) or any(
+        parsed[left] < parsed[right]
+        for left, right in zip(RISK_POSTURES, RISK_POSTURES[1:])
+    ):
+        raise ValueError("configured risk-profile TVL targets are inconsistent")
+    return {
+        "minimum_tvl_usd": minimum,
+        "default_risk_posture": posture,
+        "profile_target_tvl_usd": parsed[posture],
+        "profile_targets_tvl_usd": parsed,
+    }
+
+
 def _validate_config(value: Any, mode: str) -> dict[str, Any]:
     if not isinstance(value, dict) or not _REQUIRED_CONFIG <= set(value):
         raise ValueError("frozen LP Strategy config is incomplete")
@@ -182,6 +211,7 @@ def _validate_config(value: Any, mode: str) -> dict[str, Any]:
     session_stop_loss = decimal_config(
         value, "session_stop_loss_net_pnl_ratio", positive=True
     )
+    pool_tvl_policy(value)
     risks = value.get("risk_limits")
     if not isinstance(risks, dict):
         raise ValueError("configured risk_limits are unavailable")
@@ -208,9 +238,7 @@ def _validate_config(value: Any, mode: str) -> dict[str, Any]:
         or shutdown_drawdown >= soft_drawdown
     )
     if (
-        value.get("default_risk_posture")
-        not in {"steady", "balanced", "opportunistic", "exploratory"}
-        or deployments > max_open
+        deployments > max_open
         or candidate_scan_limit < deployments
         or minimum > maximum
         or maximum > total

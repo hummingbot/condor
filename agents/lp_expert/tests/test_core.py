@@ -97,6 +97,18 @@ def test_runtime_accepts_configurable_capacity_and_deployment_contract():
     assert defaults["max_open_executors"] == 3
     assert defaults["max_slot_deployments_per_tick"] == 1
     assert defaults["use_existing_base_inventory"] is True
+    assert defaults["min_pool_tvl_usd"] == 10_000
+    assert runtime.pool_tvl_policy(defaults) == {
+        "minimum_tvl_usd": Decimal("10000"),
+        "default_risk_posture": "balanced",
+        "profile_target_tvl_usd": Decimal("50000"),
+        "profile_targets_tvl_usd": {
+            "steady": Decimal("100000"),
+            "balanced": Decimal("50000"),
+            "opportunistic": Decimal("25000"),
+            "exploratory": Decimal("10000"),
+        },
+    }
     configured = runtime._validate_config(
         strategy_config(
             total_amount_quote=30,
@@ -129,6 +141,34 @@ def test_runtime_accepts_configurable_capacity_and_deployment_contract():
             strategy_config(use_existing_base_inventory=1),
             "loop",
         )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"min_pool_tvl_usd": 0},
+        {"risk_profile_tvl_targets": {"balanced": 50_000}},
+        {
+            "risk_profile_tvl_targets": {
+                "steady": 100_000,
+                "balanced": 50_000,
+                "opportunistic": 25_000,
+                "exploratory": 9_999,
+            }
+        },
+        {
+            "risk_profile_tvl_targets": {
+                "steady": 40_000,
+                "balanced": 50_000,
+                "opportunistic": 25_000,
+                "exploratory": 10_000,
+            }
+        },
+    ],
+)
+def test_runtime_rejects_invalid_pool_tvl_policy(overrides):
+    with pytest.raises(ValueError):
+        runtime._validate_config(strategy_config(**overrides), "loop")
 
 
 def test_hummingbot_binding_and_balance_reads_are_exactly_scoped(tmp_path):
@@ -191,7 +231,7 @@ def test_orca_discovery_uses_exactly_four_bounded_lenses(monkeypatch):
         lambda url: calls.append(url) or {"data": [pool_record()]},
     )
 
-    result = asyncio.run(orca.scan_pools(3))
+    result = asyncio.run(orca.scan_pools(3, 10_000))
 
     assert tuple(orca.DISCOVERY_LENSES) == (
         "yieldovertvl24h",
@@ -200,9 +240,28 @@ def test_orca_discovery_uses_exactly_four_bounded_lenses(monkeypatch):
         "volume7d",
     )
     assert len(calls) == 4
+    assert all("minTvl=10000" in url for url in calls)
     assert result["source_coverage"]["required_requests"] == 4
     assert result["source_coverage"]["completed_requests"] == 4
     assert result["deployable"] is True
+    assert result["minimum_tvl_usd"] == 10_000
+
+
+def test_orca_rejects_pool_below_configured_tvl_floor_locally(monkeypatch):
+    record = pool_record()
+    record["tvlUsdc"] = 9_999
+    monkeypatch.setattr(
+        orca,
+        "fetch_json",
+        lambda _: {"data": [record]},
+    )
+
+    result = asyncio.run(orca.scan_pools(3, 10_000))
+
+    assert result["status"] == "complete"
+    assert result["deployable"] is False
+    assert result["universe"]["valid_unique_pools"] == 0
+    assert result["technical_rejections"]["below_min_pool_tvl"] == 4
 
 
 def test_orca_incomplete_discovery_fails_closed(monkeypatch):
@@ -213,7 +272,7 @@ def test_orca_incomplete_discovery_fails_closed(monkeypatch):
 
     monkeypatch.setattr(orca, "fetch_json", fetch)
 
-    result = asyncio.run(orca.scan_pools(3))
+    result = asyncio.run(orca.scan_pools(3, 10_000))
 
     assert result["status"] == "incomplete"
     assert result["deployable"] is False
@@ -221,7 +280,13 @@ def test_orca_incomplete_discovery_fails_closed(monkeypatch):
 
 
 def test_orca_registered_token_identity_is_exact():
-    candidate, error = orca.normalize_record(pool_record(), "all", "volume24h", 1)
+    candidate, error = orca.normalize_record(
+        pool_record(),
+        "all",
+        "volume24h",
+        1,
+        10_000,
+    )
     assert error is None
     accepted, rejected = orca.filter_registered_tokens(
         [candidate],
@@ -239,7 +304,13 @@ def test_orca_registered_token_identity_is_exact():
 
 
 def test_compact_candidate_preserves_planning_and_refresh_identity(monkeypatch):
-    candidate, error = orca.normalize_record(pool_record(), "all", "volume24h", 1)
+    candidate, error = orca.normalize_record(
+        pool_record(),
+        "all",
+        "volume24h",
+        1,
+        10_000,
+    )
     assert error is None
     unique, rejected = orca.deduplicate([candidate])
     assert not rejected
@@ -265,9 +336,27 @@ def test_compact_candidate_preserves_planning_and_refresh_identity(monkeypatch):
         "fetch_json",
         lambda _: {"data": [pool_record()]},
     )
-    refreshed = asyncio.run(orca.refresh_candidate(compact))
+    refreshed = asyncio.run(orca.refresh_candidate(compact, 10_000))
     assert refreshed["pool_address"] == POOL
     assert refreshed["token_a"]["mint"] == SOL_MINT
+
+
+def test_selected_candidate_refresh_rejects_tvl_below_floor(monkeypatch):
+    candidate, error = orca.normalize_record(
+        pool_record(),
+        "all",
+        "volume24h",
+        1,
+        10_000,
+    )
+    assert error is None
+    compact = orca.compact_candidate(orca.rank_pools([candidate])[0])
+    deteriorated = pool_record()
+    deteriorated["tvlUsdc"] = 9_999
+    monkeypatch.setattr(orca, "fetch_json", lambda _: {"data": [deteriorated]})
+
+    with pytest.raises(ValueError, match="minimum TVL 10000 USD"):
+        asyncio.run(orca.refresh_candidate(compact, 10_000))
 
 
 def test_plan_is_double_sided_bounded_and_digest_stable():

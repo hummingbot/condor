@@ -4,6 +4,12 @@ server_name: local
 account_name: master_account
 trading_context: ""
 default_risk_posture: balanced
+min_pool_tvl_usd: 10000
+risk_profile_tvl_targets:
+  steady: 100000
+  balanced: 50000
+  opportunistic: 25000
+  exploratory: 10000
 total_amount_quote: 10
 max_open_executors: 3
 max_slot_deployments_per_tick: 1

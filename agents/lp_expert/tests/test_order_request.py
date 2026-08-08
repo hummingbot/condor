@@ -24,7 +24,13 @@ from agents.lp_expert.routines import lp_order_request
 
 
 def _candidate():
-    value, error = orca.normalize_record(pool_record(), "all", "volume24h", 1)
+    value, error = orca.normalize_record(
+        pool_record(),
+        "all",
+        "volume24h",
+        1,
+        10_000,
+    )
     assert error is None
     unique, rejected = orca.deduplicate([value])
     assert not rejected
@@ -217,9 +223,29 @@ class GatewaySwap:
 
 
 class Gateway:
-    def __init__(self, slippage="1", swap_provider="jupiter/router"):
+    def __init__(
+        self,
+        slippage="1",
+        swap_provider="jupiter/router",
+        tokens=None,
+        add_error=None,
+    ):
         self.slippage = slippage
         self.swap_provider = swap_provider
+        self.tokens = (
+            [
+                {"address": SOL_MINT, "symbol": "SOL", "decimals": 9},
+                {
+                    "address": orca.USDC_MINT,
+                    "symbol": "USDC",
+                    "decimals": 6,
+                },
+            ]
+            if tokens is None
+            else copy.deepcopy(tokens)
+        )
+        self.add_error = add_error
+        self.add_calls = []
 
     async def get_network_config(self, network):
         assert network == "solana-mainnet-beta"
@@ -234,16 +260,19 @@ class Gateway:
 
     async def get_network_tokens(self, network):
         assert network == "solana-mainnet-beta"
-        return {
-            "tokens": [
-                {"address": SOL_MINT, "symbol": "SOL", "decimals": 9},
-                {
-                    "address": orca.USDC_MINT,
-                    "symbol": "USDC",
-                    "decimals": 6,
-                },
-            ]
-        }
+        return {"tokens": copy.deepcopy(self.tokens)}
+
+    async def add_token(self, **kwargs):
+        self.add_calls.append(copy.deepcopy(kwargs))
+        if self.add_error:
+            raise self.add_error
+        self.tokens.append(
+            {
+                "address": kwargs["address"],
+                "symbol": kwargs["symbol"],
+                "decimals": kwargs["decimals"],
+            }
+        )
 
 
 class Executors:
@@ -702,7 +731,8 @@ def _install(
             ]
         )
 
-    async def refresh_candidate(candidate):
+    async def refresh_candidate(candidate, minimum_tvl_usd):
+        assert minimum_tvl_usd == 10_000
         return copy.deepcopy(candidate)
 
     async def attach(payload, **_):
@@ -860,6 +890,233 @@ def test_existing_inventory_can_be_disabled_by_frozen_config(monkeypatch, tmp_pa
     assert client.gateway_swap.quote_calls
 
 
+def test_selected_unregistered_token_is_registered_before_preparation(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    candidate["token_a"] = {
+        "symbol": "NEW",
+        "mint": "new-token-mint",
+        "decimals": 9,
+    }
+    candidate["trading_pair"] = "NEW-USDC"
+    config = _prep_config(candidate=candidate)
+    gateway = Gateway(
+        tokens=[
+            {
+                "address": orca.USDC_MINT,
+                "symbol": "USDC",
+                "decimals": 6,
+            }
+        ]
+    )
+    client = _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        gateway=gateway,
+        balances=[
+            {"symbol": "SOL", "mint": SOL_MINT, "available": "2"},
+            {
+                "symbol": "USDC",
+                "mint": orca.USDC_MINT,
+                "available": "10",
+            },
+        ],
+    )
+
+    result = _run(config)
+
+    assert result["status"] == "ready"
+    assert result["token_registration"]["status"] == "confirmed"
+    assert result["configuration_mutation"] is True
+    assert gateway.add_calls == [
+        {
+            "network_id": "solana-mainnet-beta",
+            "address": "new-token-mint",
+            "symbol": "NEW",
+            "decimals": 9,
+            "name": "NEW",
+        }
+    ]
+    assert client.gateway_swap.quote_calls
+
+
+def test_tvl_deterioration_blocks_registration_and_preparation(monkeypatch, tmp_path):
+    candidate = _candidate()
+    candidate["token_a"] = {
+        "symbol": "NEW",
+        "mint": "new-token-mint",
+        "decimals": 9,
+    }
+    candidate["trading_pair"] = "NEW-USDC"
+    config = _prep_config(candidate=candidate)
+    gateway = Gateway(
+        tokens=[
+            {
+                "address": orca.USDC_MINT,
+                "symbol": "USDC",
+                "decimals": 6,
+            }
+        ]
+    )
+    client = _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        gateway=gateway,
+    )
+
+    async def below_floor(_, minimum_tvl_usd):
+        assert minimum_tvl_usd == 10_000
+        raise ValueError("selected Orca pool is below minimum TVL 10000 USD")
+
+    monkeypatch.setattr(lp_order_request.orca, "refresh_candidate", below_floor)
+
+    result = _run(config)
+
+    assert result["status"] == "rejected"
+    assert "below minimum TVL 10000 USD" in result["reason"]
+    assert result["mutation"] is False
+    assert gateway.add_calls == []
+    assert client.gateway_swap.quote_calls == []
+
+
+def test_dry_run_only_proposes_selected_token_registration(monkeypatch, tmp_path):
+    candidate = _candidate()
+    candidate["token_a"] = {
+        "symbol": "NEW",
+        "mint": "new-token-mint",
+        "decimals": 9,
+    }
+    candidate["trading_pair"] = "NEW-USDC"
+    config = _prep_config(candidate=candidate)
+    gateway = Gateway(
+        tokens=[
+            {
+                "address": orca.USDC_MINT,
+                "symbol": "USDC",
+                "decimals": 6,
+            }
+        ]
+    )
+    _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        gateway=gateway,
+        mode="dry_run",
+        balances=[
+            {"symbol": "SOL", "mint": SOL_MINT, "available": "2"},
+            {
+                "symbol": "USDC",
+                "mint": orca.USDC_MINT,
+                "available": "10",
+            },
+        ],
+    )
+
+    result = _run(config)
+
+    assert result["status"] == "not_submitted"
+    assert result["mutation"] is False
+    assert result["proposed_token_registration"]["status"] == "proposed"
+    assert gateway.add_calls == []
+
+
+def test_selected_token_symbol_collision_is_rejected_without_registration(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    candidate["token_a"] = {
+        "symbol": "NEW",
+        "mint": "new-token-mint",
+        "decimals": 9,
+    }
+    candidate["trading_pair"] = "NEW-USDC"
+    config = _prep_config(candidate=candidate)
+    gateway = Gateway(
+        tokens=[
+            {
+                "address": "different-token-mint",
+                "symbol": "NEW",
+                "decimals": 9,
+            },
+            {
+                "address": orca.USDC_MINT,
+                "symbol": "USDC",
+                "decimals": 6,
+            },
+        ]
+    )
+    _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        gateway=gateway,
+        balances=[
+            {"symbol": "SOL", "mint": SOL_MINT, "available": "2"},
+            {
+                "symbol": "USDC",
+                "mint": orca.USDC_MINT,
+                "available": "10",
+            },
+        ],
+    )
+
+    result = _run(config)
+
+    assert result["status"] == "rejected"
+    assert result["mutation"] is False
+    assert "symbol NEW is ambiguous" in result["reason"]
+    assert gateway.add_calls == []
+
+
+def test_unverified_selected_token_registration_requires_manual_review(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    candidate["token_a"] = {
+        "symbol": "NEW",
+        "mint": "new-token-mint",
+        "decimals": 9,
+    }
+    candidate["trading_pair"] = "NEW-USDC"
+    config = _prep_config(candidate=candidate)
+    gateway = Gateway(
+        tokens=[
+            {
+                "address": orca.USDC_MINT,
+                "symbol": "USDC",
+                "decimals": 6,
+            }
+        ],
+        add_error=TimeoutError("registration timed out"),
+    )
+    _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        gateway=gateway,
+        balances=[
+            {"symbol": "SOL", "mint": SOL_MINT, "available": "2"},
+            {
+                "symbol": "USDC",
+                "mint": orca.USDC_MINT,
+                "available": "10",
+            },
+        ],
+    )
+
+    result = _run(config)
+
+    assert result["status"] == "manual_review"
+    assert result["mutation"] is True
+    assert result["token_registration"]["status"] == "uncertain"
+    assert result["retry_allowed"] is False
+    assert Store.latest.writes[-1]["phase"] == "manual_review"
+
+
 def test_partial_existing_sol_reduces_only_the_preparation_shortfall(
     monkeypatch, tmp_path
 ):
@@ -905,6 +1162,79 @@ def test_partial_existing_sol_reduces_only_the_preparation_shortfall(
         str(initial["inventory"]["base_shortfall"])
     )
     assert client.gateway_swap.quote_calls
+
+
+def test_missing_selected_token_balance_is_zero_and_preparation_can_continue(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    candidate["token_a"] = {
+        "symbol": "ZEC",
+        "mint": "zec-token-mint",
+        "decimals": 8,
+    }
+    candidate["trading_pair"] = "ZEC-USDC"
+    config = _prep_config(candidate=candidate)
+    policy = strategy_config(use_existing_base_inventory=True)
+    plan = planner.build_candidate_plan(
+        candidate,
+        amount_quote=config.amount_quote,
+        range_half_width_pct=config.range_half_width_pct,
+        strategy_config=policy,
+    )
+    gateway = Gateway(
+        tokens=[
+            {
+                "address": "zec-token-mint",
+                "symbol": "ZEC",
+                "decimals": 8,
+            },
+            {
+                "address": orca.USDC_MINT,
+                "symbol": "USDC",
+                "decimals": 6,
+            },
+        ]
+    )
+    client = _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        gateway=gateway,
+        gateway_swap=GatewaySwap(
+            quote_in=plan["inventory"]["estimated_usdc_for_preparation_swap"],
+            quote_out=plan["inventory"]["base_shortfall"],
+        ),
+        strategy=policy,
+        balances=[
+            {"token": "SOL", "available_units": "0.58"},
+            {"token": "USDC", "available_units": "10"},
+        ],
+    )
+
+    result = _run(config)
+
+    assert result["status"] == "ready", result
+    assert result["mutation"] is False
+    assert result["executor_request"]["executor_config"]["trading_pair"] == ("ZEC-USDC")
+    assert result["selection_plan"]["inputs"]["attributed_base_amount"] == "0"
+    assert client.gateway_swap.quote_calls
+
+
+def test_selected_token_balance_with_wrong_mint_remains_rejected():
+    with pytest.raises(ValueError, match="conflicts with the selected mint"):
+        lp_order_request._balance(
+            [
+                {
+                    "symbol": "ZEC",
+                    "mint": "different-zec-mint",
+                    "available": "1",
+                }
+            ],
+            symbol="ZEC",
+            mint="selected-zec-mint",
+            missing_exact_is_zero=True,
+        )
 
 
 def test_preparation_requires_swap_input_plus_future_lp_quote_balance(
