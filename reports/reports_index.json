@@ -1,33 +1,5 @@
 [
   {
-    "id": "abdc66",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_000950_lp_portfolio_snapshot_abdc66.html",
-    "created_at": "2026-08-09T00:09:50.342820+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "4ac73e",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_001619_lp_portfolio_snapshot_4ac73e.html",
-    "created_at": "2026-08-09T00:16:19.338806+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
     "id": "321a44",
     "title": "LP Portfolio Snapshot",
     "filename": "20260809_002218_lp_portfolio_snapshot_321a44.html",
@@ -1400,6 +1372,34 @@
       "agent",
       "session",
       "lp_expert"
+    ],
+    "agent": "condor"
+  },
+  {
+    "id": "89237b",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260809_172541_lp_agent_lite_metrics_snapshot_diagnosti_89237b.html",
+    "created_at": "2026-08-09T17:25:41.337047+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "c119f4",
+    "title": "lp_agent_lite · orca · session 1",
+    "filename": "20260809_172604_lp_agent_lite_orca_session_1_c119f4.html",
+    "created_at": "2026-08-09T17:26:04.719955+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_1",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
     ],
     "agent": "condor"
   }

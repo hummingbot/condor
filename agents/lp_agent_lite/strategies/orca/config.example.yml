@@ -1,0 +1,49 @@
+# Copy to config.yml, then set the exact local account and wallet before live use.
+# These values seed a new run; each loop session receives its own frozen copy.
+server_name: local
+execution_mode: dry_run
+frequency_sec: 60
+max_ticks: 0
+account_name: master_account
+wallet_address: null
+network: solana-mainnet-beta
+lp_provider: orca/clmm
+swap_provider: jupiter/router
+quote_token_symbol: USDC
+quote_token_mint: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+quote_token_decimals: 6
+trading_context: ''
+
+total_amount_quote: 10
+max_amount_quote_per_lp_position: 5
+capital_headroom_pct: 5
+max_active_lp_positions: 3
+max_lp_deployments_per_tick: 1
+
+orca_stats_indexing_lag_seconds: 90
+max_slippage_pct: 1
+min_pool_tvl_usd: 10000
+candidate_scan_limit: 4
+mcda_weights:
+  fee_productivity: 0.4
+  recent_activity: 0.25
+  price_stability: 0.15
+  liquidity_depth: 0.1
+  execution_simplicity: 0.1
+minimum_range_half_width_pct: 0.5
+maximum_range_half_width_pct: 20
+
+position_take_profit_net_pnl_ratio: 0.05
+position_stop_loss_net_pnl_ratio: 0.05
+position_time_limit_minutes: 1440
+session_take_profit_net_pnl_ratio: 0.05
+session_stop_loss_net_pnl_ratio: 0.05
+session_time_limit_minutes: 1440
+
+residual_base_dust_quote: 0.01
+min_sol_reserve: 0.1
+risk_limits:
+  max_position_size_quote: 10
+  max_open_executors: 4
+  max_drawdown_pct: -1
+  shutdown_drawdown_pct: -1
