@@ -17,7 +17,8 @@ math, balances, or swap receipts.
    `selection_constraints.range_half_width_pct` is ordered
    `[minimum, maximum]`; `allocation_quote` is
    `[minimum, maximum, remaining_portfolio_budget]`.
-   `lp_order_request` constructs the initial tick-aligned plan and `lp_create`
+   `lp_order_request` constructs the initial tick-aligned plan and
+   `lp_executor_request`
    refreshes it. Do not invent price bounds, ticks, token decimals, or
    feasibility.
 3. Treat the selected allocation as a maximum commitment. Hard capital,
@@ -39,7 +40,7 @@ math, balances, or swap receipts.
    transaction's exact bound-wallet and token-mint deltas.
 6. After a confirmed preparation transaction or confirmed no-swap wallet
    allocation, use its returned `deployment_input` unchanged and let
-   `lp_create` refresh price, align the final range, validate amounts and
+   `lp_executor_request` refresh price, align the final range, validate amounts and
    schema, and decide technical admission. Existing attributed base and exact
    finalized swap output may be combined; requested order amount or broad
    wallet deltas may not substitute for either source.
@@ -47,6 +48,10 @@ math, balances, or swap receipts.
    identity using only controller, operation ID, and `lp_executor_id`.
    Admission freezes the exact final request; reconciliation restores that
    request from its current-session receipt and must not refresh or replan.
+   When executor capacity defers create to the following tick, run snapshot
+   `continue_create.config` unchanged; it identifies the same preparation and
+   lets the routine load the frozen deployment input without repeating it in the
+   model response.
    Interpret a changed valid range before admission; do not bypass a
    deterministic rejection.
 7. If a plan is no longer strategically suitable before create, leave the exact

@@ -18,7 +18,7 @@ PUBLIC_ROUTINES = {
     "lp_snapshot",
     "lp_pool_scan",
     "lp_order_request",
-    "lp_create",
+    "lp_executor_request",
 }
 SKILLS = {
     "lp_pool_review",
@@ -27,6 +27,7 @@ SKILLS = {
     "lp_close_and_recovery",
 }
 OLD_ROUTINES = {
+    "lp_create",
     "orca_pool_scan",
     "clmm_position_plan",
     "gateway_swap",
@@ -91,7 +92,7 @@ def test_public_routine_schemas_keep_agent_inputs_small_and_explicit():
         "controller_id",
         "tick",
     }
-    assert set(schemas["lp_create"]["properties"]) == {
+    assert set(schemas["lp_executor_request"]["properties"]) == {
         "controller_id",
         "tick",
         "operation_id",
@@ -110,13 +111,13 @@ def test_public_routine_schemas_keep_agent_inputs_small_and_explicit():
         == OPERATION_ID_PATTERN
     )
     assert (
-        schemas["lp_create"]["properties"]["operation_id"]["pattern"]
+        schemas["lp_executor_request"]["properties"]["operation_id"]["pattern"]
         == OPERATION_ID_PATTERN
     )
     assert (
-        schemas["lp_create"]["properties"]["preparation_operation_id"]["anyOf"][0][
-            "pattern"
-        ]
+        schemas["lp_executor_request"]["properties"]["preparation_operation_id"][
+            "anyOf"
+        ][0]["pattern"]
         == OPERATION_ID_PATTERN
     )
 
@@ -150,7 +151,7 @@ def test_agent_action_policy_is_narrow_and_explicit():
     compact = " ".join(text.split())
     assert (
         "`run` only `lp_snapshot`, `lp_pool_scan`,\n"
-        "  `lp_order_request`, or `lp_create`"
+        "  `lp_order_request`, or `lp_executor_request`"
     ) in text
     assert "exact `create` from a current routine's unchanged" in text
     assert "Never invent or edit create fields" in compact
@@ -167,13 +168,13 @@ def test_agent_action_policy_is_narrow_and_explicit():
 
 def test_agent_routines_never_hide_native_swap_or_executor_creation():
     swap_source = (ROOT / "routines" / "lp_order_request.py").read_text()
-    create_source = (ROOT / "routines" / "lp_create.py").read_text()
+    request_source = (ROOT / "routines" / "lp_executor_request.py").read_text()
 
     assert ".execute_swap(" not in swap_source
     assert ".create_executor(" not in swap_source
-    assert ".create_executor(" not in create_source
+    assert ".create_executor(" not in request_source
     assert "executor_request" in swap_source
-    assert "executor_request" in create_source
+    assert "executor_request" in request_source
     assert "never submit an executor or transfer" in swap_source
 
 
@@ -187,6 +188,19 @@ def test_order_request_is_discovered_as_non_submitting():
     assert (
         order_request.description
         == "Prepare a non-submitting order request or reconcile its exact returned ID."
+    )
+
+
+def test_lp_executor_request_is_discovered_as_non_submitting():
+    discovered = discover_routines_from_path(
+        ROOT / "routines", agent_slug="lp_expert", force_reload=True
+    )
+    request = discovered["lp_executor_request"]
+
+    assert request.category == "Non-Submitting LP Executor Request"
+    assert request.description == (
+        "Freeze a non-submitting LP executor request or reconcile its exact ID; "
+        "never submit."
     )
 
 
@@ -247,7 +261,12 @@ def test_prompt_has_only_four_routine_paths_and_next_tick_cleanup():
     prompt = _prompt("loop")
     compact = " ".join(prompt.split())
     assert all(name in prompt for name in PUBLIC_ROUTINES)
-    assert not any(name in prompt for name in OLD_ROUTINES)
+    assert (
+        "lp_executor_request: Freeze a non-submitting LP executor request or "
+        "reconcile its exact ID; never submit."
+    ) in prompt
+    assert not any(f"`{name}`" in prompt for name in OLD_ROUTINES)
+    assert not any(f'name="{name}"' in prompt for name in OLD_ROUTINES)
     assert "The close tick never submits residual cleanup" in prompt
     assert "first following tick" in prompt
     assert "material attributable residual" in prompt

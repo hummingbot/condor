@@ -4,7 +4,7 @@ import copy
 import hashlib
 import json
 import math
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_DOWN, ROUND_UP, Decimal
 from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
@@ -32,6 +32,11 @@ def _decimal(value: Any, label: str, *, positive: bool = False) -> Decimal:
 def _floor(value: Decimal, decimals: int) -> Decimal:
     quantum = Decimal(1).scaleb(-decimals)
     return value.quantize(quantum, rounding=ROUND_DOWN)
+
+
+def _ceil(value: Decimal, decimals: int) -> Decimal:
+    quantum = Decimal(1).scaleb(-decimals)
+    return value.quantize(quantum, rounding=ROUND_UP)
 
 
 def _json_value(value: Any) -> Any:
@@ -333,20 +338,33 @@ def build_plan(config: PlanRequest) -> dict[str, Any]:
         else None
     )
     slippage_ratio = config.max_slippage_pct / 100
+    debit_multiplier = Decimal(1) + slippage_ratio
     if attributed is None:
         commitment_per_liquidity = (
-            base_per_liquidity * price * (1 + slippage_ratio) + quote_per_liquidity
+            base_per_liquidity * price * debit_multiplier + quote_per_liquidity
         )
         liquidity = config.amount_quote / commitment_per_liquidity
     else:
+        # Gateway converts the nominal LP amounts into Orca tokenMaxA/tokenMaxB
+        # debits. Keep both maximum debits inside the attributed inventory and
+        # selected capital rather than allocating 100% of either to the nominal
+        # executor amounts.
         liquidity = min(
-            config.amount_quote / value_per_liquidity,
-            attributed / base_per_liquidity,
+            config.amount_quote / (value_per_liquidity * debit_multiplier),
+            attributed / (base_per_liquidity * debit_multiplier),
         )
     base_amount = _floor(liquidity * base_per_liquidity, config.base_decimals)
     quote_amount = _floor(liquidity * quote_per_liquidity, config.quote_decimals)
     if base_amount <= 0 or quote_amount <= 0:
         raise ValueError("allocation is too small for a double-sided position")
+    maximum_base_debit = _ceil(
+        base_amount * debit_multiplier,
+        config.base_decimals,
+    )
+    maximum_quote_debit = _ceil(
+        quote_amount * debit_multiplier,
+        config.quote_decimals,
+    )
     attributed = attributed or Decimal(0)
     base_shortfall = max(Decimal(0), base_amount - attributed)
     swap_quote_estimate = _floor(base_shortfall * price, config.quote_decimals)
@@ -393,6 +411,10 @@ def build_plan(config: PlanRequest) -> dict[str, Any]:
         "inventory": {
             "base_amount": base_amount,
             "quote_amount": quote_amount,
+            "maximum_base_debit": maximum_base_debit,
+            "maximum_quote_debit": maximum_quote_debit,
+            "base_debit_headroom": maximum_base_debit - base_amount,
+            "quote_debit_headroom": maximum_quote_debit - quote_amount,
             "base_shortfall": base_shortfall,
             "estimated_usdc_for_preparation_swap": swap_quote_estimate,
             "estimated_total_usdc": swap_quote_estimate + quote_amount,
@@ -402,7 +424,7 @@ def build_plan(config: PlanRequest) -> dict[str, Any]:
             "schema_native_valuation_price": valuation_price,
             "schema_native_exposure_quote": declared_exposure,
             "capital_dust_quote": config.amount_quote - declared_exposure,
-            "inventory_ready": attributed >= base_amount,
+            "inventory_ready": attributed >= maximum_base_debit,
             "attribution_rule": "only exact preparation-swap output counts as base inventory",
         },
         "executor_config": {

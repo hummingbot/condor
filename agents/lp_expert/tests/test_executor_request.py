@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -16,7 +17,7 @@ from conftest import (
 )
 
 from agents.lp_expert.core import orca, planner
-from agents.lp_expert.routines import lp_create
+from agents.lp_expert.routines import lp_executor_request
 
 
 def _candidate():
@@ -67,7 +68,8 @@ class Store:
         self.receipt_intent = receipt_intent
 
     def read_confirmed_swap(self, operation_id):
-        plan = _selection_plan(_candidate())
+        candidate = _candidate()
+        plan = _selection_plan(candidate)
         return {
             "operation_id": operation_id,
             "tick": self.scope.current_tick,
@@ -86,6 +88,12 @@ class Store:
             "result": {
                 "confirmed_tick": self.scope.current_tick,
                 "same_tick_lp_create_allowed": True,
+                "deployment_input": {
+                    "candidate": candidate,
+                    "amount_quote": "4",
+                    "range_half_width_pct": "10",
+                    "preparation_operation_id": operation_id,
+                },
                 "receipt": {
                     "transaction_hash": "tx-preparation",
                     "input_amount": plan["inventory"][
@@ -264,7 +272,7 @@ class Portfolio:
 
 
 def _config(candidate):
-    return lp_create.Config(
+    return lp_executor_request.Config(
         controller_id="lp_expert.orca_1",
         tick=2,
         operation_id="create-operation-1",
@@ -281,7 +289,7 @@ def test_create_rejects_dotted_controller_operation_ids_at_input(field):
     values[field] = "lp_expert.orca_17-t1-pool-create"
 
     with pytest.raises(ValueError, match="String should match pattern"):
-        lp_create.Config(**values)
+        lp_executor_request.Config(**values)
 
 
 def test_create_accepts_dynamic_receipt_safe_operation_ids():
@@ -293,7 +301,7 @@ def test_create_accepts_dynamic_receipt_safe_operation_ids():
         }
     )
 
-    config = lp_create.Config(**values)
+    config = lp_executor_request.Config(**values)
 
     assert config.operation_id.endswith("-create")
     assert config.preparation_operation_id.endswith("-prepare")
@@ -388,7 +396,7 @@ def _install(
     Store.next_existing = copy.deepcopy(existing)
     Store.next_conflict = copy.deepcopy(conflict)
     store = Store(scope, receipt_intent=receipt_intent)
-    monkeypatch.setattr(lp_create, "resolve_runtime", lambda _: scope)
+    monkeypatch.setattr(lp_executor_request, "resolve_runtime", lambda _: scope)
 
     async def get_client(_):
         return client
@@ -402,19 +410,50 @@ def _install(
             raise refresh_error
         return copy.deepcopy(candidate)
 
-    async def attach(payload, **_):
+    async def attach(payload, **details):
+        store.report_payload = copy.deepcopy(payload)
+        store.report_input = copy.deepcopy(details["routine_input"])
+        store.report_trace = copy.deepcopy(details["trace"].events)
         return {**payload, "report_id": "create-report", "report_error": None}
 
-    monkeypatch.setattr(lp_create, "get_hummingbot_client", get_client)
-    monkeypatch.setattr(lp_create, "bind_wallet", bind)
-    monkeypatch.setattr(lp_create, "ReceiptStore", lambda _: store)
-    monkeypatch.setattr(lp_create.orca, "refresh_candidate", refresh)
-    monkeypatch.setattr(lp_create, "attach_report", attach)
+    monkeypatch.setattr(lp_executor_request, "get_hummingbot_client", get_client)
+    monkeypatch.setattr(lp_executor_request, "bind_wallet", bind)
+    monkeypatch.setattr(lp_executor_request, "ReceiptStore", lambda _: store)
+    monkeypatch.setattr(lp_executor_request.orca, "refresh_candidate", refresh)
+    monkeypatch.setattr(lp_executor_request, "attach_report", attach)
     return client, store
 
 
 def _run(config):
-    return json.loads(asyncio.run(lp_create.run(config, None)))
+    raw = asyncio.run(lp_executor_request.run(config, None))
+    assert len(raw) <= lp_executor_request._TRANSPORT_MAX_CHARS
+    result = json.loads(raw)
+    assert result["transport_complete"] is True
+    return result
+
+
+def test_oversized_executor_result_returns_valid_hold_capsule():
+    raw = lp_executor_request._model_result(
+        {
+            "status": "ready",
+            "operation_id": "create-operation-1",
+            "controller_id": "lp_expert.orca_1",
+            "mutation": False,
+            "mutation_classification": "admitted",
+            "retry_allowed": False,
+            "executor_request": {"oversized": "x" * 2_000},
+            "report_id": "create-report",
+            "report_error": None,
+        }
+    )
+
+    result = json.loads(raw)
+
+    assert len(raw) <= lp_executor_request._TRANSPORT_MAX_CHARS
+    assert result["status"] == "ready"
+    assert result["transport_complete"] is False
+    assert result["retry_allowed"] is False
+    assert "executor_request" not in result
 
 
 def test_create_refreshes_candidate_validates_receipt_and_confirms(
@@ -455,7 +494,8 @@ def test_create_refreshes_candidate_validates_receipt_and_confirms(
         "submitted",
         "confirmed",
     ]
-    assert result["final_plan"]["inventory"]["inventory_ready"] is True
+    assert store.report_payload["final_plan"]["inventory"]["inventory_ready"] is True
+    assert "final_plan" not in result
     assert result["report_id"] == "create-report"
 
 
@@ -466,6 +506,7 @@ def test_create_id_only_recovery_uses_frozen_request_without_market_refresh(
     executors = Executors()
     client, store = _install(monkeypatch, tmp_path, executors=executors)
     ready = _run(_config(candidate))
+    frozen_final_plan = copy.deepcopy(store.report_payload["final_plan"])
     executors.created_config = copy.deepcopy(
         ready["executor_request"]["executor_config"]
     )
@@ -475,11 +516,11 @@ def test_create_id_only_recovery_uses_frozen_request_without_market_refresh(
         raise AssertionError("existing create recovery refreshed the market")
 
     monkeypatch.setattr(
-        lp_create.orca,
+        lp_executor_request.orca,
         "refresh_candidate",
         changed_market_must_not_be_read,
     )
-    recovery = lp_create.Config(
+    recovery = lp_executor_request.Config(
         controller_id="lp_expert.orca_1",
         operation_id="create-operation-1",
         lp_executor_id="executor-new",
@@ -490,7 +531,7 @@ def test_create_id_only_recovery_uses_frozen_request_without_market_refresh(
     assert result["status"] == "confirmed"
     assert result["executor_id"] == "executor-new"
     assert result["recovery_source"] == "exact_frozen_executor_request"
-    assert result["final_plan"] == ready["final_plan"]
+    assert store.report_payload["final_plan"] == frozen_final_plan
     assert [row["phase"] for row in store.writes] == [
         "admitted",
         "submitting",
@@ -505,7 +546,7 @@ def test_create_id_only_recovery_without_receipt_is_manual_review(
     client, store = _install(monkeypatch, tmp_path)
 
     result = _run(
-        lp_create.Config(
+        lp_executor_request.Config(
             controller_id="lp_expert.orca_1",
             operation_id="missing-create-operation",
             lp_executor_id="executor-new",
@@ -519,7 +560,7 @@ def test_create_id_only_recovery_without_receipt_is_manual_review(
     assert store.writes == []
 
 
-def test_admitted_lp_create_is_not_reemitted_without_exact_executor_id(
+def test_admitted_lp_executor_request_is_not_reemitted_without_exact_executor_id(
     monkeypatch, tmp_path
 ):
     candidate = _candidate()
@@ -583,6 +624,51 @@ def test_create_can_continue_after_following_tick_swap_confirmation(
     assert client.executors.create_calls == []
 
 
+def test_create_compact_continuation_loads_frozen_preparation_input(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    client, store = _install(monkeypatch, tmp_path)
+    original = store.read_confirmed_preparation
+
+    def preparation(operation_id):
+        record = original(operation_id)
+        record["tick"] = 1
+        record["result"]["confirmed_tick"] = 1
+        record["result"]["same_tick_lp_create_allowed"] = False
+        record["result"]["deployment_input"] = {
+            "candidate": candidate,
+            "amount_quote": "4",
+            "range_half_width_pct": "10",
+            "preparation_operation_id": operation_id,
+        }
+        return record
+
+    store.read_confirmed_preparation = preparation
+    compact = lp_executor_request.Config(
+        controller_id="lp_expert.orca_1",
+        tick=2,
+        operation_id="continued-create-operation",
+        preparation_operation_id="prepare-operation-1",
+    )
+
+    result = _run(compact)
+
+    assert result["status"] == "ready"
+    assert result["executor_request"]["executor_type"] == "lp_executor"
+    assert store.admissions == ["continued-create-operation"]
+    assert store.report_input == {
+        "controller_id": "lp_expert.orca_1",
+        "tick": 2,
+        "operation_id": "continued-create-operation",
+        "preparation_operation_id": "prepare-operation-1",
+    }
+    assert any(
+        stage["stage"] == "continued_deployment_input" for stage in store.report_trace
+    )
+    assert client.executors.create_calls == []
+
+
 def test_create_accepts_confirmed_existing_wallet_inventory_allocation(
     monkeypatch, tmp_path
 ):
@@ -630,7 +716,7 @@ def test_create_accepts_confirmed_existing_wallet_inventory_allocation(
     assert result["status"] == "ready"
     assert result["mutation"] is False
     assert result["executor_request"]["executor_type"] == "lp_executor"
-    assert result["final_plan"]["inventory"]["inventory_ready"] is True
+    assert store.report_payload["final_plan"]["inventory"]["inventory_ready"] is True
     assert store.admissions == ["create-operation-1"]
     assert client.executors.create_calls == []
 
@@ -659,6 +745,53 @@ def test_create_returns_field_specific_required_and_available_balances(
     assert "USDC balance for LP quote leg" in result["reason"]
     assert "required=" in result["reason"]
     assert "available=0.5" in result["reason"]
+    assert store.admissions == []
+    assert store.writes[-1]["phase"] == "rejected_before_submit"
+    assert store.writes[-1]["intent"]["preparation_operation_id"] == (
+        "prepare-operation-1"
+    )
+    assert result["retry_allowed"] is False
+    assert "restore the exact preparation output" in result["next_action"]
+    assert client.executors.create_calls == []
+
+
+def test_create_balance_gate_requires_slippage_adjusted_maximum_debit(
+    monkeypatch, tmp_path
+):
+    candidate = _candidate()
+    selection = _selection_plan(candidate)
+    final = planner.build_candidate_plan(
+        candidate,
+        amount_quote="4",
+        range_half_width_pct="10",
+        strategy_config=strategy_config(),
+        attributed_base_amount=selection["inventory"]["base_amount"],
+    )
+    nominal_base = final["executor_config"]["base_amount"]
+    maximum_base_debit = final["inventory"]["maximum_base_debit"]
+    reserve = Decimal(str(strategy_config()["min_sol_reserve"]))
+    client, store = _install(
+        monkeypatch,
+        tmp_path,
+        balances=[
+            {
+                "symbol": "SOL",
+                "mint": SOL_MINT,
+                "available": str(reserve + Decimal(nominal_base)),
+            },
+            {
+                "symbol": "USDC",
+                "mint": orca.USDC_MINT,
+                "available": "20",
+            },
+        ],
+    )
+
+    result = _run(_config(candidate))
+
+    assert Decimal(maximum_base_debit) > Decimal(nominal_base)
+    assert result["status"] == "rejected_before_submit"
+    assert f"required={reserve + Decimal(maximum_base_debit)}" in result["reason"]
     assert store.admissions == []
     assert client.executors.create_calls == []
 
@@ -867,7 +1000,7 @@ def test_create_initializing_detail_is_submitted_then_confirms_same_id(
         return detail
 
     executors.get_executor = initializing_detail
-    recovery = lp_create.Config(
+    recovery = lp_executor_request.Config(
         controller_id="lp_expert.orca_1",
         operation_id="create-operation-1",
         lp_executor_id="executor-new",
@@ -1108,7 +1241,7 @@ def test_create_recovery_cancellation_preserves_frozen_request_and_exact_id(
     )
 
     result = _run(
-        lp_create.Config(
+        lp_executor_request.Config(
             controller_id="lp_expert.orca_1",
             operation_id="create-operation-1",
             lp_executor_id="executor-new",

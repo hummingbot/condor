@@ -116,10 +116,14 @@ mutation.
    When an unresolved operation contains `reconcile`, run its named routine
    once with `reconcile.config` unchanged. Do not scan, reconstruct missing
    inputs, or consult a report first.
+   When it contains `continue_create`, journal the exact create intent in loop
+   mode and run `continue_create.routine` once with
+   `continue_create.config` unchanged. The routine loads the frozen candidate,
+   allocation, and range from the preparation receipt.
    When it contains `restore`, journal the exact restoration intent in loop
    mode and run `restore.routine` once with `restore.config` unchanged. A
-   confirmed unconsumed preparation blocks scanning until that restoration is
-   confirmed.
+   confirmed pending preparation blocks scanning until its create or
+   restoration path is confirmed.
 5. If and only if `scan_allowed=true` and deployment remains under
    consideration, run `lp_pool_scan` exactly once for the same controller and
    tick. Require complete source coverage, enforce the configured hard TVL
@@ -228,15 +232,18 @@ in `selection_constraints.deployments`.
    Field-specific failures report required and available amounts.
 6. If preparation remains submitted, end the deployment chain for this tick.
    On the following tick, reconcile it first from snapshot `reconcile.config`;
-   once confirmed, `lp_create` may proceed in that same second tick because it
+   once confirmed, `lp_executor_request` may proceed in that same second tick because it
    freshly revalidates native schema, executor capacity, exposure, pool
    occupancy, and balances. If `same_tick_lp_create_allowed=false` on the
    original admission, do not create in that original tick. Run-once
    preparation is rejected before submission when it would require a follow-up.
-7. For either a confirmed swap receipt or a confirmed no-swap wallet
+7. For a same-tick confirmed swap receipt or a confirmed no-swap wallet
    allocation, use its exact `deployment_input` as candidate, allocation,
    range, and preparation-ID authority. Add the current tick and a new create
-   operation ID, then call `lp_create` without `lp_executor_id`. It combines
+   operation ID, then call `lp_executor_request` without `lp_executor_id`. For a
+   following-tick deferred create, run the snapshot's compact
+   `continue_create.config` unchanged instead; the routine loads that same
+   immutable deployment input from the preparation receipt. It combines
    authorized existing base with only exact finalized swap output, reconstructs
    the selection plan, refreshes price, TVL, and token registration, replans,
    and revalidates the hard TVL floor, schema, capacity, exposure, pool
@@ -245,7 +252,7 @@ in `selection_constraints.deployments`.
    If a legacy confirmed receipt lacks `deployment_input`, HOLD rather than
    rebuilding it from a report.
 8. Pass that entire LP `executor_request` unchanged to `manage_executors` once,
-   require one returned executor ID, then call `lp_create` again with only the
+   require one returned executor ID, then call `lp_executor_request` again with only the
    current `controller_id`, original `operation_id`, and returned
    `lp_executor_id`. The admitted receipt restores the complete frozen request;
    reconciliation must not refresh price or rebuild the plan. Continue only
@@ -258,9 +265,11 @@ in `selection_constraints.deployments`.
 9. Start the next selection only after the prior create is confirmed. A
    submitted, uncertain, ambiguous, manual-review, or rejected chain ends
    deployment for the tick.
-10. A confirmed preparation BUY whose create was definitely rejected remains
+10. A confirmed preparation BUY with no create attempt remains a pending create;
+    the next snapshot returns `continue_create`, not restoration. If its create
+    was definitely rejected before submission, the prepared output remains
     attributed inventory. On the next snapshot it appears as
-    `phase="confirmed_unconsumed"` with exact `prepared_inventory` and a
+    `phase="confirmed_pending_restore"` with exact `prepared_inventory` and a
     `restore` capsule. Run that capsule unchanged before scanning. Only actual
     preparation-swap output is restored; pre-existing wallet base is never
     mislabeled as residual inventory.
@@ -280,10 +289,13 @@ routine request:
 - reconciliation `lp_order_request`: only `controller_id`, the same
   `operation_id`, and the exact returned `swap_executor_id`, preferably copied
   unchanged from snapshot `reconcile.config`.
-- new `lp_create` admission: `controller_id`, `tick`, `operation_id`, the same
+- new `lp_executor_request` admission: `controller_id`, `tick`, `operation_id`, the same
   unchanged `candidate`, the same `amount_quote` and
   `range_half_width_pct`, and `preparation_operation_id`.
-- reconciliation `lp_create`: only `controller_id`, the same `operation_id`,
+- deferred `lp_executor_request` admission: run snapshot
+  `continue_create.config` unchanged; it contains only `controller_id`, current
+  `tick`, new `operation_id`, and `preparation_operation_id`.
+- reconciliation `lp_executor_request`: only `controller_id`, the same `operation_id`,
   and the exact returned `lp_executor_id`, preferably copied unchanged from
   snapshot `reconcile.config`.
 
@@ -370,7 +382,7 @@ ambiguous attribution, or an action outside this Strategy.
 
 ## Human-Review Trace
 
-Every `lp_snapshot`, `lp_pool_scan`, `lp_order_request`, and `lp_create`
+Every `lp_snapshot`, `lp_pool_scan`, `lp_order_request`, and `lp_executor_request`
 invocation produces one routine-specific report covering sanitized input,
 structured output, ordered debug stages, timing, and error/uncertainty
 classification. The snapshot report retains full portfolio evidence; the

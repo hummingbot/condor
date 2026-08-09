@@ -48,10 +48,13 @@ source: agent:lp_expert
 
 ## Failed deployment preparation
 
-11. If `lp_snapshot` returns `phase="confirmed_unconsumed"`, do not scan or
-    prepare another pool. Verify that its exact `prepared_inventory` identifies
-    finalized preparation-swap output, then journal and run the returned
-    `restore.config` unchanged.
+11. A confirmed preparation with no create attempt remains
+    `confirmed_pending_create`; run its `continue_create.config` instead of
+    restoring it. If `lp_snapshot` returns `confirmed_pending_restore` after an
+    explicit pre-submit create rejection, do not scan or prepare another pool.
+    Verify that its exact `prepared_inventory` identifies finalized
+    preparation-swap output, then journal and run the returned `restore.config`
+    unchanged.
 12. Restoration sells only the exact preparation receipt output. It never sells
     the pre-existing wallet-base portion of a mixed allocation. A confirmed
     no-swap allocation creates no residual and therefore has no restoration

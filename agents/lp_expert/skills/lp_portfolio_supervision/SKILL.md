@@ -17,9 +17,12 @@ source: agent:lp_expert
    uncertain, ambiguous, or failed-but-unreconciled resource still owns it.
    If snapshot supplies an unresolved operation's `reconcile.config`, run it
    unchanged before scanning or considering another mutation; do not rebuild it
-   from a journal or report. If it supplies `restore.config` for confirmed
-   unconsumed preparation output, restore that exact output before scanning;
-   never include pre-existing wallet base. For a legacy admitted create without a recorded
+   from a journal or report. If it supplies `continue_create.config` for a
+   confirmed preparation with no create attempt, continue that LP admission
+   first; the routine restores its frozen selection from the preparation
+   receipt. If it supplies `restore.config` after a create was definitely
+   rejected, restore that exact output before scanning; never include
+   pre-existing wallet base. For a legacy admitted create without a recorded
    executor ID, accept a snapshot recovery capsule only when one and only one
    current-controller executor matches the complete frozen request; zero or
    multiple matches remain quarantined.

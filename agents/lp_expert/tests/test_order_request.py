@@ -736,6 +736,7 @@ def _install(
         return copy.deepcopy(candidate)
 
     async def attach(payload, **_):
+        Store.latest.report_payload = copy.deepcopy(payload)
         return {**payload, "report_id": "swap-report", "report_error": None}
 
     async def solana_receipt(_client, resolved_scope, request, transaction_hash):
@@ -777,12 +778,39 @@ def _install(
 
 
 def _run(config):
-    return json.loads(asyncio.run(lp_order_request.run(config, None)))
+    raw = asyncio.run(lp_order_request.run(config, None))
+    assert len(raw) <= lp_order_request._TRANSPORT_MAX_CHARS
+    result = json.loads(raw)
+    assert result["transport_complete"] is True
+    return result
+
+
+def test_oversized_order_result_returns_valid_hold_capsule():
+    config = _prep_config()
+    raw = lp_order_request._model_result(
+        {
+            "status": "ready",
+            "mutation": False,
+            "mutation_classification": "admitted",
+            "retry_allowed": False,
+            "executor_request": {"oversized": "x" * 2_000},
+            "report_id": "swap-report",
+            "report_error": None,
+        },
+        config,
+    )
+
+    result = json.loads(raw)
+
+    assert len(raw) <= lp_order_request._TRANSPORT_MAX_CHARS
+    assert result["status"] == "ready"
+    assert result["transport_complete"] is False
+    assert result["retry_allowed"] is False
+    assert "executor_request" not in result
 
 
 def _reconcile_ready(client, config, ready, executor_id="swap-order"):
     Store.next_existing = copy.deepcopy(Store.latest.existing)
-    Store.next_existing["tick"] = ready["operation_state"]["tick"]
     if config.executor_id and client.executors.detail is not None:
         client.executors.details[config.executor_id] = copy.deepcopy(
             client.executors.detail
@@ -811,8 +839,9 @@ def test_preparation_swap_enforces_cap_and_serializes_one_mutation(
     assert executor_config["side"] == 1
     assert (
         executor_config["amount"]
-        == ready["selection_plan"]["inventory"]["base_shortfall"]
+        == Store.latest.report_payload["selection_plan"]["inventory"]["base_shortfall"]
     )
+    assert "selection_plan" not in ready
     assert client.gateway_swap.execute_calls == []
     assert Store.latest.preparation_admissions == ["prepare-operation-1"]
     assert Lock.entries == 1
@@ -827,6 +856,24 @@ def test_preparation_swap_enforces_cap_and_serializes_one_mutation(
     assert result["retry_allowed"] is False
     assert client.gateway_swap.execute_calls == []
     assert result["report_id"] == "swap-report"
+
+
+def test_preparation_accepts_compact_scan_candidate(monkeypatch, tmp_path):
+    candidate = orca.compact_candidate(_candidate())
+    config = _prep_config(candidate=candidate)
+    _install(monkeypatch, tmp_path, config=config)
+
+    async def refresh_candidate(selected, minimum_tvl_usd):
+        assert selected == candidate
+        assert minimum_tvl_usd == 10_000
+        return _candidate()
+
+    monkeypatch.setattr(lp_order_request.orca, "refresh_candidate", refresh_candidate)
+
+    result = _run(config)
+
+    assert result["status"] == "ready"
+    assert result["executor_request"]["executor_config"]["trading_pair"] == "SOL-USDC"
 
 
 def test_existing_sol_above_reserve_skips_preparation_swap(monkeypatch, tmp_path):
@@ -857,7 +904,7 @@ def test_existing_sol_above_reserve_skips_preparation_swap(monkeypatch, tmp_path
     assert result["inventory_allocation"]["source"] == ("existing_wallet_balance")
     assert result["inventory_allocation"]["minimum_sol_reserve"] == "0.1"
     assert result["inventory_allocation"]["attributed_base_amount"] == (
-        result["selection_plan"]["inventory"]["base_amount"]
+        Store.latest.report_payload["selection_plan"]["inventory"]["base_amount"]
     )
     assert result["deployment_input"]["preparation_operation_id"] == (
         config.operation_id
@@ -886,7 +933,12 @@ def test_existing_inventory_can_be_disabled_by_frozen_config(monkeypatch, tmp_pa
     result = _run(config)
 
     assert result["status"] == "ready"
-    assert result["selection_plan"]["inputs"]["attributed_base_amount"] == "0"
+    assert (
+        Store.latest.report_payload["selection_plan"]["inputs"][
+            "attributed_base_amount"
+        ]
+        == "0"
+    )
     assert client.gateway_swap.quote_calls
 
 
@@ -1156,7 +1208,14 @@ def test_partial_existing_sol_reduces_only_the_preparation_shortfall(
     result = _run(config)
 
     assert result["status"] == "ready"
-    assert result["selection_plan"]["inputs"]["attributed_base_amount"] == ("0.005")
+    assert (
+        str(
+            Store.latest.report_payload["selection_plan"]["inputs"][
+                "attributed_base_amount"
+            ]
+        )
+        == "0.005"
+    )
     assert result["executor_request"]["executor_config"]["amount"] == str(shortfall)
     assert Decimal(str(shortfall)) < Decimal(
         str(initial["inventory"]["base_shortfall"])
@@ -1217,7 +1276,12 @@ def test_missing_selected_token_balance_is_zero_and_preparation_can_continue(
     assert result["status"] == "ready", result
     assert result["mutation"] is False
     assert result["executor_request"]["executor_config"]["trading_pair"] == ("ZEC-USDC")
-    assert result["selection_plan"]["inputs"]["attributed_base_amount"] == "0"
+    assert (
+        Store.latest.report_payload["selection_plan"]["inputs"][
+            "attributed_base_amount"
+        ]
+        == "0"
+    )
     assert client.gateway_swap.quote_calls
 
 
@@ -1290,7 +1354,7 @@ def test_following_tick_reconciles_from_compact_ids_and_persisted_intent(
     assert result["status"] == "confirmed"
     assert result["swap_executor_id"] == "native-order-1"
     assert result["deployment_input"] == {
-        "candidate": config.candidate,
+        "candidate": lp_order_request._candidate_capsule(config.candidate),
         "amount_quote": "4",
         "range_half_width_pct": "10",
         "preparation_operation_id": config.operation_id,
@@ -1351,13 +1415,48 @@ def test_preparation_cap_is_derived_from_frozen_selection_plan(monkeypatch, tmp_
 
     assert result["status"] == "ready"
     assert (
-        result["selection_plan"]["inventory"]["max_usdc_for_preparation_swap"]
+        Store.latest.report_payload["selection_plan"]["inventory"][
+            "max_usdc_for_preparation_swap"
+        ]
         == "2.075272"
     )
     assert client.gateway_swap.quote_calls[0]["slippage_pct"] == 1
 
 
-def test_swap_rejects_when_executor_slippage_differs_from_strategy(
+def test_swap_accepts_executor_slippage_below_strategy_maximum(monkeypatch, tmp_path):
+    config = _prep_config()
+    client = _install(
+        monkeypatch,
+        tmp_path,
+        config=config,
+        strategy=strategy_config(
+            max_slippage_pct=3,
+            use_existing_base_inventory=False,
+        ),
+        gateway=Gateway(slippage="1"),
+    )
+    captured = {}
+
+    async def attach(payload, **kwargs):
+        captured["trace"] = kwargs["trace"]
+        return {**payload, "report_id": "swap-report", "report_error": None}
+
+    monkeypatch.setattr(lp_order_request.reporting, "attach_report", attach)
+
+    result = _run(config)
+
+    assert result["status"] == "ready"
+    preflight = next(
+        event
+        for event in captured["trace"].events
+        if event["stage"] == "native_order_executor_preflight"
+    )
+    assert preflight["facts"]["executor_slippage_pct"] == Decimal("1")
+    assert preflight["facts"]["max_slippage_pct"] == Decimal("3")
+    assert client.gateway_swap.execute_calls == []
+
+
+def test_swap_rejects_when_executor_slippage_exceeds_strategy_maximum(
     monkeypatch, tmp_path
 ):
     config = _prep_config()
@@ -1371,7 +1470,7 @@ def test_swap_rejects_when_executor_slippage_differs_from_strategy(
     result = _run(config)
 
     assert result["status"] == "rejected"
-    assert "slippage conflicts" in result["reason"]
+    assert "slippage exceeds" in result["reason"]
     assert result["mutation"] is False
     assert client.gateway_swap.execute_calls == []
 
@@ -1393,7 +1492,7 @@ def test_swap_rejects_when_network_default_is_not_jupiter(monkeypatch, tmp_path)
     assert client.gateway_swap.execute_calls == []
 
 
-def test_swap_rejects_known_condor_base_amount_risk_misinterpretation(
+def test_swap_accepts_large_base_amount_when_quote_exposure_is_bounded(
     monkeypatch, tmp_path
 ):
     candidate = _candidate()
@@ -1408,9 +1507,10 @@ def test_swap_rejects_known_condor_base_amount_risk_misinterpretation(
 
     result = _run(config)
 
-    assert result["status"] == "rejected"
-    assert "base amount as quote exposure" in result["reason"]
+    assert result["status"] == "ready"
     assert result["mutation"] is False
+    assert Decimal(result["executor_request"]["executor_config"]["amount"]) > 10
+    assert Store.latest.report_payload["quote"]["input_amount"] == "2.04"
     assert client.gateway_swap.execute_calls == []
 
 
@@ -1638,13 +1738,13 @@ def test_late_order_confirmation_allows_second_tick_lp_create(monkeypatch, tmp_p
     config = _prep_config()
     client = _install(monkeypatch, tmp_path, config=config)
     ready = _run(config)
-    ready["operation_state"]["tick"] = 1
+    Store.latest.existing["tick"] = 1
 
     result = _reconcile_ready(client, config, ready)
 
     assert result["status"] == "confirmed"
     assert result["same_tick_lp_create_allowed"] is True
-    assert result["operation_state"]["result"]["confirmed_tick"] == 2
+    assert Store.latest.existing["result"]["confirmed_tick"] == 2
 
 
 def test_other_uncertain_wallet_operation_blocks_swap(monkeypatch, tmp_path):

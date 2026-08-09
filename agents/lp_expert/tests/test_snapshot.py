@@ -49,6 +49,7 @@ def _install(
     stop_error=None,
     unresolved=None,
     unconsumed=None,
+    creates=None,
     config=None,
 ):
     scope = runtime_scope(tmp_path, tick=tick, config=config)
@@ -67,6 +68,7 @@ def _install(
     monkeypatch.setattr(portfolio.time, "time", lambda: 2_000)
 
     async def attach(payload, **_):
+        client.report_payload = copy.deepcopy(payload)
         return {**payload, "report_id": "snapshot-report", "report_error": None}
 
     monkeypatch.setattr(lp_snapshot, "attach_report", attach)
@@ -84,6 +86,11 @@ def _install(
             def unconsumed_preparations(self):
                 assert self.read_only is True
                 return copy.deepcopy(unconsumed or [])
+
+            def list_records(self, operation_kind=None):
+                assert self.read_only is True
+                assert operation_kind == "create"
+                return copy.deepcopy(creates or [])
 
         monkeypatch.setattr(lp_snapshot, "ReceiptStore", ReadOnlyStore)
 
@@ -120,7 +127,9 @@ def _snapshot_close(*args, **kwargs):
 
 
 def _run(config):
-    return json.loads(asyncio.run(lp_snapshot.run(config, None)))
+    raw = asyncio.run(lp_snapshot.run(config, None))
+    assert len(raw) <= lp_snapshot._TRANSPORT_MAX_CHARS
+    return json.loads(raw)
 
 
 def _create_request(row):
@@ -242,18 +251,37 @@ def test_snapshot_foreign_active_executor_is_read_only_and_blocks_deploy(
     assert result["scan_allowed"] is False
 
 
-def test_snapshot_follows_pagination_and_supports_three_executors(
+def test_snapshot_follows_pagination_and_supports_realistic_three_executors(
     monkeypatch, tmp_path
 ):
+    executor_ids = [character * 44 for character in ("A", "B", "C")]
+    pool_addresses = [character * 44 for character in ("D", "E", "F")]
     pages = {
         None: {
-            "data": [executor_row("one", pool_address="pool-one")],
+            "data": [
+                executor_row(
+                    executor_ids[0],
+                    pool_address=pool_addresses[0],
+                    net_pnl_pct="0.010123160378947211",
+                    net_pnl_quote="0.03967283217344371",
+                )
+            ],
             "next_cursor": "second",
         },
         "second": {
             "data": [
-                executor_row("two", pool_address="pool-two"),
-                executor_row("three", pool_address="pool-three"),
+                executor_row(
+                    executor_ids[1],
+                    pool_address=pool_addresses[1],
+                    net_pnl_pct="0.0009146456020296545",
+                    net_pnl_quote="0.0026971136627925874",
+                ),
+                executor_row(
+                    executor_ids[2],
+                    pool_address=pool_addresses[2],
+                    net_pnl_pct="0.004190770639074312",
+                    net_pnl_quote="0.011559348005873547",
+                ),
             ],
             "next_cursor": None,
         },
@@ -262,13 +290,29 @@ def test_snapshot_follows_pagination_and_supports_three_executors(
 
     result = _run(_config())
 
+    assert result["status"] == "complete"
     assert result["portfolio"]["active_count"] == 3
     assert result["portfolio"]["available_slots"] == 0
-    assert result["portfolio"]["occupied_pools"] == [
-        "pool-one",
-        "pool-three",
-        "pool-two",
-    ]
+    assert result["portfolio"]["occupied_pools"] == pool_addresses
+    assert len(result["portfolio"]["executors"]) == 3
+    assert all(
+        set(executor)
+        == {
+            "executor_id",
+            "status",
+            "lifecycle_state",
+            "trading_pair",
+            "net_pnl_ratio",
+        }
+        for executor in result["portfolio"]["executors"]
+    )
+    assert all(
+        "pool_address" in executor
+        and "net_pnl_quote" in executor
+        and "exposure_quote" in executor
+        and "age_minutes" in executor
+        for executor in client.report_payload["portfolio"]["executors"]
+    )
     assert result["scan_allowed"] is False
     assert [call["cursor"] for call in client.executors.calls] == [None, "second"]
 
@@ -456,7 +500,70 @@ def test_snapshot_persisted_unresolved_operation_blocks_scan_and_deploy(
     assert result["scan_allowed"] is False
 
 
-def test_snapshot_blocks_scan_and_emits_exact_restoration_capsule(
+def test_snapshot_continues_confirmed_preparation_before_restoring(
+    monkeypatch, tmp_path
+):
+    preparation_id = f"lp_expert_orca_1-t1-{POOL}-prepare"
+    client = _install(
+        monkeypatch,
+        tmp_path,
+        rows=[
+            executor_row("executor-one", pool_address="pool-one"),
+            executor_row("executor-two", pool_address="pool-two"),
+        ],
+        unconsumed=[
+            {
+                "operation_id": preparation_id,
+                "operation_kind": "swap",
+                "tick": 1,
+                "phase": "confirmed",
+                "intent": {
+                    "reason": "inventory_preparation",
+                    "pool_address": POOL,
+                    "base_symbol": "SOL",
+                    "base_mint": SOL_MINT,
+                    "base_decimals": 9,
+                },
+                "result": {
+                    "confirmed_tick": 1,
+                    "same_tick_lp_create_allowed": False,
+                    "deployment_input": {
+                        "candidate": {"pool_address": POOL},
+                        "amount_quote": "3",
+                        "range_half_width_pct": "10",
+                        "preparation_operation_id": preparation_id,
+                    },
+                    "receipt": {
+                        "transaction_hash": "tx-preparation",
+                        "output_amount": "0.020228969",
+                    },
+                },
+            }
+        ],
+    )
+
+    result = _run(_config())
+
+    unresolved = result["portfolio"]["unresolved_operations"][0]
+    assert result["status"] == "complete"
+    assert unresolved["phase"] == "confirmed_pending_create"
+    assert unresolved["continue_create"] == {
+        "routine": "lp_executor_request",
+        "config": {
+            "controller_id": "lp_expert.orca_1",
+            "tick": 2,
+            "operation_id": f"lp_expert_orca_1-t2-{POOL}-create",
+            "preparation_operation_id": preparation_id,
+        },
+    }
+    assert "restore" not in unresolved
+    assert "executors" not in result["portfolio"]
+    assert len(client.report_payload["portfolio"]["executors"]) == 2
+    assert result["portfolio"]["deployment_blocked"] is True
+    assert result["scan_allowed"] is False
+
+
+def test_snapshot_blocks_scan_and_emits_exact_restoration_after_create_rejection(
     monkeypatch, tmp_path
 ):
     preparation_id = f"lp_expert_orca_1-t1-{POOL}-prepare"
@@ -484,12 +591,24 @@ def test_snapshot_blocks_scan_and_emits_exact_restoration_capsule(
                 },
             }
         ],
+        creates=[
+            {
+                "operation_id": f"lp_expert_orca_1-t1-{POOL}-create",
+                "operation_kind": "create",
+                "tick": 1,
+                "phase": "rejected_before_submit",
+                "mutation_possible": False,
+                "intent": {
+                    "preparation_operation_id": preparation_id,
+                },
+            }
+        ],
     )
 
     result = _run(_config())
 
     unresolved = result["portfolio"]["unresolved_operations"][0]
-    assert unresolved["phase"] == "confirmed_unconsumed"
+    assert unresolved["phase"] == "confirmed_pending_restore"
     assert unresolved["prepared_inventory"]["amount"] == "0.020228969"
     assert unresolved["restore"] == {
         "routine": "lp_order_request",
@@ -533,7 +652,7 @@ def test_snapshot_recovers_legacy_admitted_create_from_one_exact_executor(
     result = _run(_config())
 
     assert result["portfolio"]["unresolved_operations"][0]["reconcile"] == {
-        "routine": "lp_create",
+        "routine": "lp_executor_request",
         "config": {
             "controller_id": "lp_expert.orca_1",
             "operation_id": "admitted-create-1",
@@ -583,7 +702,7 @@ def test_snapshot_recovers_create_from_equivalent_native_lp_values(
     result = _run(_config())
 
     assert result["portfolio"]["unresolved_operations"][0]["reconcile"] == {
-        "routine": "lp_create",
+        "routine": "lp_executor_request",
         "config": {
             "controller_id": "lp_expert.orca_1",
             "operation_id": "admitted-create-1",

@@ -1,4 +1,4 @@
-"""Plan or reconcile one exact native Orca LP executor creation."""
+"""Validate or reconcile one exact native Orca LP executor request; never submit."""
 
 from __future__ import annotations
 
@@ -37,13 +37,14 @@ from agents.lp_expert.core.runtime import (
     resolve_runtime,
 )
 
-CATEGORY = "Orca LP Creation"
-VERSION = "7"
+CATEGORY = "Non-Submitting LP Executor Request"
+VERSION = "9"
 _CONTROLLER = re.compile(r"^lp_expert\.orca_(?:e)?[1-9]\d*$")
+_TRANSPORT_MAX_CHARS = 1_900
 
 
 class Config(BaseModel):
-    """Admit a frozen LP plan or reconcile one admitted native executor."""
+    """Freeze a non-submitting LP executor request or reconcile its exact ID; never submit."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
     controller_id: StrictStr
@@ -73,22 +74,33 @@ class Config(BaseModel):
             or self.lp_executor_id != self.lp_executor_id.strip()
         ):
             raise ValueError("LP executor identity must be exact and non-empty")
-        deployment_fields = (
-            self.tick,
+        plan_fields = (
             self.candidate,
             self.amount_quote,
             self.range_half_width_pct,
-            self.preparation_operation_id,
         )
-        supplied = [value is not None for value in deployment_fields]
-        if any(supplied) and not all(supplied):
+        supplied_plan = [value is not None for value in plan_fields]
+        if any(supplied_plan) and not all(supplied_plan):
             raise ValueError(
-                "tick, candidate, amount_quote, range_half_width_pct, and "
-                "preparation_operation_id must be supplied together"
+                "candidate, amount_quote, and range_half_width_pct must be "
+                "supplied together"
             )
-        if not any(supplied) and self.lp_executor_id is None:
+        if (self.tick is None) != (self.preparation_operation_id is None):
             raise ValueError(
-                "create admission inputs or an exact lp_executor_id are required"
+                "tick and preparation_operation_id must be supplied together"
+            )
+        if any(supplied_plan) and self.tick is None:
+            raise ValueError(
+                "a complete executor request requires tick and "
+                "preparation_operation_id"
+            )
+        if self.tick is not None and not any(supplied_plan) and self.lp_executor_id:
+            raise ValueError(
+                "compact preparation continuation cannot include lp_executor_id"
+            )
+        if self.tick is None and self.lp_executor_id is None:
+            raise ValueError(
+                "executor request inputs or an exact lp_executor_id are required"
             )
         if self.candidate is not None and not isinstance(self.candidate, dict):
             raise ValueError("candidate must be a snapshot object")
@@ -106,6 +118,10 @@ class Config(BaseModel):
     @property
     def recovery_only(self) -> bool:
         return self.tick is None
+
+    @property
+    def continuation_only(self) -> bool:
+        return self.tick is not None and self.candidate is None
 
 
 # Agent-local routines are loaded from file without module registration.
@@ -209,6 +225,36 @@ def _preparation(
         existing_base + swapped_base,
         selection_plan,
     )
+
+
+def _continued_deployment_input(
+    store: ReceiptStore,
+    preparation_operation_id: str,
+) -> tuple[dict[str, Any], Decimal, Decimal]:
+    """Load the immutable deployment choice from one confirmed preparation."""
+
+    record = store.read_confirmed_preparation(preparation_operation_id)
+    result = record.get("result")
+    deployment = result.get("deployment_input") if isinstance(result, dict) else None
+    if (
+        not isinstance(deployment, dict)
+        or deployment.get("preparation_operation_id") != preparation_operation_id
+        or not isinstance(deployment.get("candidate"), dict)
+    ):
+        raise ValueError(
+            "confirmed preparation lacks exact deployment continuation input"
+        )
+    amount_quote = decimal_value(
+        deployment.get("amount_quote"),
+        "continued allocation",
+        positive=True,
+    )
+    range_half_width_pct = decimal_value(
+        deployment.get("range_half_width_pct"),
+        "continued range half width",
+        positive=True,
+    )
+    return copy.deepcopy(deployment["candidate"]), amount_quote, range_half_width_pct
 
 
 def _schema_fields(value: Any) -> set[str]:
@@ -322,6 +368,18 @@ def _validate_replay_inputs(
     """Validate a full replay without refreshing or changing the admitted plan."""
 
     if config.recovery_only:
+        return None
+    if config.continuation_only:
+        if (
+            config.tick != record.get("tick")
+            or not isinstance(record.get("intent"), dict)
+            or config.preparation_operation_id
+            != record["intent"].get("preparation_operation_id")
+        ):
+            raise ValueError(
+                "existing create operation identity conflicts with the "
+                "continued request"
+            )
         return None
     if (
         config.tick != record.get("tick")
@@ -603,7 +661,9 @@ async def _locked_create_preflight(
     base_symbol = final_plan["identity"]["base_symbol"]
     base_mint = final_plan["identity"]["base_mint"]
     required_base = decimal_value(
-        executor_config["base_amount"], "executor base amount", positive=True
+        final_plan["inventory"]["maximum_base_debit"],
+        "executor maximum base debit",
+        positive=True,
     )
     available_base = _balance(balances, base_symbol, base_mint)
     available_quote = _balance(balances, scope.quote_symbol, scope.quote_mint)
@@ -644,6 +704,8 @@ async def _locked_create_preflight(
     return {
         "active_executors": len(owned),
         "active_exposure_quote": active_exposure,
+        "required_base": required_base,
+        "required_quote": required_quote,
         "available_base": available_base,
         "available_quote": available_quote,
         "available_sol": available_sol,
@@ -662,12 +724,70 @@ def _native_executor_request(
     }
 
 
+def _model_result(payload: dict[str, Any]) -> str:
+    compact = {
+        key: payload[key]
+        for key in (
+            "status",
+            "operation_id",
+            "controller_id",
+            "pool_address",
+            "mutation",
+            "mutation_classification",
+            "retry_allowed",
+            "executor_id",
+            "executor_request",
+            "recovery_source",
+            "executor_match",
+            "reason",
+            "next_action",
+            "report_id",
+            "report_error",
+        )
+        if key in payload
+    }
+    compact["transport_complete"] = True
+    if compact.get("reason"):
+        compact["reason"] = safe_error(compact["reason"], limit=300)
+    if compact.get("report_error"):
+        compact["report_error"] = safe_error(compact["report_error"], limit=200)
+    encoded = json.dumps(compact, default=str, separators=(",", ":"), sort_keys=True)
+    if len(encoded) <= _TRANSPORT_MAX_CHARS:
+        return encoded
+    fallback = {
+        key: compact.get(key)
+        for key in (
+            "status",
+            "operation_id",
+            "controller_id",
+            "pool_address",
+            "mutation",
+            "mutation_classification",
+            "executor_id",
+            "report_id",
+            "report_error",
+        )
+    }
+    fallback.update(
+        {
+            "retry_allowed": False,
+            "transport_complete": False,
+            "reason": (
+                "essential LP executor result exceeded the safe model transport "
+                "budget; HOLD and review the complete report"
+            ),
+        }
+    )
+    return json.dumps(fallback, default=str, separators=(",", ":"), sort_keys=True)
+
+
 async def run(config: Config, context: Any) -> str:
     trace = TraceRecorder()
     scope = None
     store = None
     identity = None
     mutation_possible = False
+    rejection_result: dict[str, Any] | None = None
     links: dict[str, Any] = {}
     payload: dict[str, Any]
     try:
@@ -752,15 +872,40 @@ async def run(config: Config, context: Any) -> str:
                 raise ValueError(
                     "new create admission must use the current engine tick"
                 )
+            candidate = config.candidate
+            amount_quote = config.amount_quote
+            range_half_width_pct = config.range_half_width_pct
+            if config.continuation_only:
+                with trace.stage("continued_deployment_input") as facts:
+                    candidate, amount_quote, range_half_width_pct = (
+                        _continued_deployment_input(
+                            store,
+                            config.preparation_operation_id,
+                        )
+                    )
+                    facts.update(
+                        {
+                            "preparation_operation_id": (
+                                config.preparation_operation_id
+                            ),
+                            "source": "confirmed_preparation_receipt",
+                        }
+                    )
+            if (
+                not isinstance(candidate, dict)
+                or amount_quote is None
+                or range_half_width_pct is None
+            ):
+                raise ValueError("complete executor request input is unavailable")
             with trace.stage("selection_and_preparation_authority") as facts:
                 preparation, quote_spent, attributed_base, selection_plan = (
                     _preparation(
                         store,
                         config.preparation_operation_id,
                         config.operation_id,
-                        candidate=config.candidate,
-                        amount_quote=config.amount_quote,
-                        range_half_width_pct=config.range_half_width_pct,
+                        candidate=candidate,
+                        amount_quote=amount_quote,
+                        range_half_width_pct=range_half_width_pct,
                         strategy_config=scope.config,
                     )
                 )
@@ -814,7 +959,7 @@ async def run(config: Config, context: Any) -> str:
             with trace.stage("candidate_refresh_and_replan") as facts:
                 tvl_policy = pool_tvl_policy(scope.config)
                 refreshed = await orca.refresh_candidate(
-                    config.candidate,
+                    candidate,
                     tvl_policy["minimum_tvl_usd"],
                 )
                 registry = await client.gateway.get_network_tokens(scope.network)
@@ -827,8 +972,8 @@ async def run(config: Config, context: Any) -> str:
                     )
                 final_plan = build_candidate_plan(
                     refreshed,
-                    amount_quote=config.amount_quote,
-                    range_half_width_pct=config.range_half_width_pct,
+                    amount_quote=amount_quote,
+                    range_half_width_pct=range_half_width_pct,
                     strategy_config=scope.config,
                     attributed_base_amount=attributed_base,
                 )
@@ -837,8 +982,8 @@ async def run(config: Config, context: Any) -> str:
                     "controller_id": scope.controller_id,
                 }
                 required_quote = decimal_value(
-                    executor_config["quote_amount"],
-                    "executor quote amount",
+                    final_plan["inventory"]["maximum_quote_debit"],
+                    "executor maximum quote debit",
                     positive=True,
                 )
                 amount_quote = decimal_value(
@@ -869,15 +1014,19 @@ async def run(config: Config, context: Any) -> str:
                         "final_plan_digest": final_plan["plan_digest"],
                     }
                 )
+            rejection_result = {
+                "selection_plan": selection_plan,
+                "final_plan": final_plan,
+            }
             intent = {
                 "pool_address": executor_config["pool_address"],
                 "trading_pair": executor_config["trading_pair"],
                 "selection_plan_digest": selection_plan["plan_digest"],
                 "final_plan_digest": final_plan["plan_digest"],
                 "preparation_operation_id": config.preparation_operation_id,
-                "amount_quote": format(config.amount_quote, "f"),
+                "amount_quote": format(amount_quote, "f"),
                 "range_half_width_pct": format(
-                    config.range_half_width_pct,
+                    range_half_width_pct,
                     "f",
                 ),
             }
@@ -939,7 +1088,8 @@ async def run(config: Config, context: Any) -> str:
                     "executor_request": executor_request,
                     "next_action": (
                         "call manage_executors once with executor_request, then "
-                        "invoke lp_create again with the returned lp_executor_id"
+                        "invoke lp_executor_request again with the returned "
+                        "lp_executor_id"
                     ),
                 }
             payload = {
@@ -1005,28 +1155,63 @@ async def run(config: Config, context: Any) -> str:
                 prior_operation = store.read_by_id(config.operation_id)
             except Exception:
                 prior_operation = None
+        rejection_reason = f"{type(exc).__name__}: {exc}"
+        if (
+            prior_operation is None
+            and store is not None
+            and identity is not None
+            and config.lp_executor_id is None
+        ):
+            try:
+                prior_operation = store.write(
+                    identity,
+                    phase="rejected_before_submit",
+                    mutation_possible=False,
+                    result=rejection_result,
+                    reason=rejection_reason,
+                    create_only=True,
+                )
+            except Exception:
+                prior_operation = None
         if prior_operation is not None:
             prior_result = (
                 prior_operation.get("result")
                 if isinstance(prior_operation.get("result"), dict)
                 else {}
             )
-            payload = {
-                "status": "manual_review",
-                "operation_id": config.operation_id,
-                "controller_id": config.controller_id,
-                **(
-                    {"executor_id": prior_result["executor_id"]}
-                    if prior_result.get("executor_id")
-                    else {}
-                ),
-                "reason": (
-                    "an existing create operation could not be safely reconciled: "
-                    f"{type(exc).__name__}: {exc}"
-                ),
-                "mutation": bool(prior_operation.get("mutation_possible")),
-                "retry_allowed": False,
-            }
+            if (
+                prior_operation.get("phase") == "rejected_before_submit"
+                and prior_operation.get("mutation_possible") is False
+            ):
+                payload = {
+                    "status": "rejected_before_submit",
+                    "operation_id": config.operation_id,
+                    "controller_id": config.controller_id,
+                    "reason": rejection_reason,
+                    "mutation": False,
+                    "retry_allowed": False,
+                    "next_action": (
+                        "restore the exact preparation output returned by the "
+                        "next lp_snapshot"
+                    ),
+                }
+            else:
+                payload = {
+                    "status": "manual_review",
+                    "operation_id": config.operation_id,
+                    "controller_id": config.controller_id,
+                    **(
+                        {"executor_id": prior_result["executor_id"]}
+                        if prior_result.get("executor_id")
+                        else {}
+                    ),
+                    "reason": (
+                        "an existing create operation could not be safely "
+                        f"reconciled: {rejection_reason}"
+                    ),
+                    "mutation": bool(prior_operation.get("mutation_possible")),
+                    "retry_allowed": False,
+                }
         else:
             payload = {
                 "status": (
@@ -1036,18 +1221,18 @@ async def run(config: Config, context: Any) -> str:
                 ),
                 "operation_id": config.operation_id,
                 "controller_id": config.controller_id,
-                "reason": f"{type(exc).__name__}: {exc}",
+                "reason": rejection_reason,
                 "mutation": config.lp_executor_id is not None,
                 "retry_allowed": config.lp_executor_id is None,
             }
     payload = await attach_report(
         payload,
-        title="LP Executor Creation",
-        source="lp_create",
+        title="Non-Submitting LP Executor Request",
+        source="lp_executor_request",
         version=VERSION,
         routine_input=config.model_dump(mode="json", exclude_none=True),
         trace=trace,
         scope=scope,
         links=links,
     )
-    return json.dumps(payload, default=str, separators=(",", ":"), sort_keys=True)
+    return _model_result(payload)

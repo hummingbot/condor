@@ -118,7 +118,7 @@ def test_report_failure_never_changes_authoritative_outcome(monkeypatch):
         reporting.attach_report(
             payload,
             title="LP create",
-            routine_name="lp_create",
+            routine_name="lp_executor_request",
             normalized_input={"operation_id": "create-1"},
             trace=trace,
         )

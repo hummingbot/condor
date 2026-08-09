@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from decimal import Decimal
 from typing import Any, Literal
@@ -44,7 +45,8 @@ from agents.lp_expert.core.runtime import (
 )
 
 CATEGORY = "Non-Submitting LP Order Request"
-VERSION = "6"
+VERSION = "8"
+_TRANSPORT_MAX_CHARS = 1_900
 
 _CONFIRMED = {"CONFIRMED", "SUCCESS", "COMPLETED"}
 _FAILED = {"FAILED", "ERROR", "REVERTED", "DROPPED"}
@@ -253,6 +255,12 @@ SwapRequest.model_rebuild(
 )
 
 
+def _candidate_capsule(candidate: dict[str, Any]) -> dict[str, Any]:
+    if "base" in candidate:
+        return copy.deepcopy(candidate)
+    return orca.compact_candidate(candidate)
+
+
 def _resolve_request(
     config: Config,
     scope: RuntimeScope,
@@ -311,7 +319,7 @@ def _resolve_request(
             amount_quote=config.amount_quote,
             range_half_width_pct=config.range_half_width_pct,
             plan=plan,
-            candidate=config.candidate,
+            candidate=_candidate_capsule(config.candidate),
         )
     return SwapRequest(
         controller_id=config.controller_id,
@@ -1320,7 +1328,6 @@ async def _validate_order_executor_surface(
     scope: RuntimeScope,
     config: SwapRequest,
     *,
-    active_exposure_quote: Decimal,
     effective_executor_count: int,
 ) -> dict[str, Any]:
     request = _order_executor_request(scope, config)
@@ -1355,9 +1362,9 @@ async def _validate_order_executor_surface(
         "Jupiter executor slippage",
         positive=True,
     )
-    if executor_slippage != config.slippage_pct:
+    if executor_slippage > config.slippage_pct:
         raise ValueError(
-            "Jupiter executor slippage conflicts with the frozen Strategy limit"
+            "Jupiter executor slippage exceeds the frozen Strategy maximum"
         )
 
     limits = scope.config.get("risk_limits")
@@ -1371,14 +1378,6 @@ async def _validate_order_executor_surface(
     risk_executor_limit = integer_config(limits, "max_open_executors")
     if effective_executor_count >= risk_executor_limit:
         raise ValueError("native Condor executor capacity is full")
-    # The checked-out risk callback interprets OrderExecutorConfig.amount as
-    # quote exposure even though it is base units. Fail before the native call
-    # when that known interpretation would reject this exact request.
-    if active_exposure_quote + config.amount > risk_quote_limit:
-        raise ValueError(
-            "native Condor risk would interpret order base amount as quote "
-            "exposure and reject this swap"
-        )
     return {
         "executor_request": request,
         "swap_provider": swap_provider,
@@ -2359,7 +2358,7 @@ async def _workflow(
                 "deployment_input": deployment_input,
                 "same_tick_lp_create_allowed": True,
                 "next_action": (
-                    "invoke lp_create with deployment_input and a new create "
+                    "invoke lp_executor_request with deployment_input and a new create "
                     "operation_id; no order executor is required"
                 ),
                 "capacity_release_allowed": False,
@@ -2480,10 +2479,6 @@ async def _workflow(
                 client,
                 scope,
                 request,
-                active_exposure_quote=_decimal(
-                    capacity["active_exposure_quote"],
-                    "active LP exposure",
-                ),
                 effective_executor_count=effective_executor_count,
             )
             executor_request = surface["executor_request"]
@@ -2504,6 +2499,7 @@ async def _workflow(
                     "executor_type": "order_executor",
                     "swap_provider": surface["swap_provider"],
                     "executor_slippage_pct": surface["executor_slippage_pct"],
+                    "max_slippage_pct": request.slippage_pct,
                     "native_risk_quote_limit": surface["risk_quote_limit"],
                     "effective_native_executor_count": effective_executor_count,
                     "same_tick_lp_create_allowed": same_tick_lp_create_allowed,
@@ -2555,6 +2551,81 @@ async def _workflow(
             "capacity_release_allowed": False,
             "operation_state": _public_record(record),
         }, scope
+
+
+def _model_result(payload: dict[str, Any], config: Config) -> str:
+    evidence_fields = (
+        (
+            "inventory_allocation",
+            "deployment_input",
+            "receipt",
+            "executor_request",
+            "proposed_executor_request",
+            "proposed_deployment_input",
+        )
+        if config.reason in {None, "inventory_preparation"}
+        else (
+            "attribution",
+            "receipt",
+            "executor_request",
+            "proposed_executor_request",
+        )
+    )
+    compact = {
+        "operation_id": config.operation_id,
+        "controller_id": config.controller_id,
+        **{
+            key: payload[key]
+            for key in (
+                "status",
+                "mutation",
+                "mutation_classification",
+                "retry_allowed",
+                "swap_executor_id",
+                *evidence_fields,
+                "same_tick_lp_create_allowed",
+                "capacity_release_allowed",
+                "post_transaction_refresh",
+                "capacity_release_reason",
+                "token_registration",
+                "proposed_token_registration",
+                "configuration_mutation",
+                "reason",
+                "next_action",
+                "report_id",
+                "report_error",
+            )
+            if key in payload
+        },
+        "transport_complete": True,
+    }
+    if compact.get("reason"):
+        compact["reason"] = reporting.safe_error(compact["reason"], limit=300)
+    if compact.get("report_error"):
+        compact["report_error"] = reporting.safe_error(
+            compact["report_error"], limit=200
+        )
+    encoded = json.dumps(compact, default=str, separators=(",", ":"), sort_keys=True)
+    if len(encoded) <= _TRANSPORT_MAX_CHARS:
+        return encoded
+    fallback = {
+        "status": compact.get("status"),
+        "operation_id": config.operation_id,
+        "controller_id": config.controller_id,
+        "mutation": bool(compact.get("mutation")),
+        "mutation_classification": compact.get("mutation_classification"),
+        "retry_allowed": False,
+        "swap_executor_id": compact.get("swap_executor_id"),
+        "capacity_release_allowed": False,
+        "transport_complete": False,
+        "reason": (
+            "essential LP order result exceeded the safe model transport budget; "
+            "HOLD and review the complete report"
+        ),
+        "report_id": compact.get("report_id"),
+        "report_error": compact.get("report_error"),
+    }
+    return json.dumps(fallback, default=str, separators=(",", ":"), sort_keys=True)
 
 
 async def run(config: Config, context: Any) -> str:
@@ -2673,4 +2744,4 @@ async def run(config: Config, context: Any) -> str:
         links=links,
         scope=scope,
     )
-    return json.dumps(payload, default=str, separators=(",", ":"), sort_keys=True)
+    return _model_result(payload, config)

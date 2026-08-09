@@ -27,7 +27,7 @@ from agents.lp_expert.core.runtime import (
 )
 
 CATEGORY = "Orca LP Decision Evidence"
-VERSION = "6"
+VERSION = "8"
 _CONTROLLER = re.compile(r"^lp_expert\.orca_(?:e)?[1-9]\d*$")
 _TRANSPORT_MAX_CHARS = 1_900
 
@@ -89,12 +89,8 @@ def _compact_executor(executor: dict[str, Any]) -> dict[str, Any]:
             "executor_id",
             "status",
             "lifecycle_state",
-            "pool_address",
             "trading_pair",
-            "net_pnl_quote",
             "net_pnl_ratio",
-            "exposure_quote",
-            "age_minutes",
         )
     }
     if executor.get("triggered_by"):
@@ -202,7 +198,7 @@ def _compact_unresolved_operation(
                 )
         if lp_executor_id:
             item["reconcile"] = {
-                "routine": "lp_create",
+                "routine": "lp_executor_request",
                 "config": {
                     "controller_id": controller_id,
                     "operation_id": record.get("operation_id"),
@@ -212,13 +208,32 @@ def _compact_unresolved_operation(
     return item
 
 
+def _transition_operation_id(
+    controller_id: str,
+    current_tick: int,
+    pool_address: str,
+    transition: str,
+) -> str:
+    safe_controller = controller_id.replace(".", "_")
+    safe_target = re.sub(r"[^A-Za-z0-9_-]", "_", pool_address)
+    operation_id = f"{safe_controller}-t{current_tick}-{safe_target}-{transition}"
+    if (
+        not pool_address
+        or safe_target != pool_address
+        or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", operation_id)
+    ):
+        raise ValueError(f"exact {transition} operation ID cannot be derived safely")
+    return operation_id
+
+
 def _unconsumed_preparation_capsule(
     record: dict[str, Any],
     *,
     controller_id: str,
     current_tick: int,
+    create_records: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Build one exact restoration instruction from a confirmed preparation."""
+    """Build the next exact create or restoration preparation instruction."""
 
     intent = record.get("intent")
     result = record.get("result")
@@ -226,28 +241,28 @@ def _unconsumed_preparation_capsule(
     if not isinstance(intent, dict) or not isinstance(receipt, dict):
         raise ValueError("unconsumed preparation evidence is incomplete")
     pool_address = str(intent.get("pool_address") or "").strip()
-    safe_controller = controller_id.replace(".", "_")
-    safe_target = re.sub(r"[^A-Za-z0-9_-]", "_", pool_address)
-    operation_id = f"{safe_controller}-t{current_tick}-{safe_target}-restore"
-    if (
-        not pool_address
-        or safe_target != pool_address
-        or not re.fullmatch(r"[A-Za-z0-9_-]{8,128}", operation_id)
-    ):
-        raise ValueError("exact restoration operation ID cannot be derived safely")
     amount = str(receipt.get("output_amount") or "").strip()
     transaction_hash = str(receipt.get("transaction_hash") or "").strip()
     if not amount or not transaction_hash:
         raise ValueError("unconsumed preparation amount or transaction is missing")
-    return {
+    preparation_operation_id = record.get("operation_id")
+    consumers = [
+        candidate
+        for candidate in create_records
+        if isinstance(candidate.get("intent"), dict)
+        and candidate["intent"].get("preparation_operation_id")
+        == preparation_operation_id
+    ]
+    if any(
+        candidate.get("phase") != "rejected_before_submit"
+        or candidate.get("mutation_possible") is not False
+        for candidate in consumers
+    ):
+        raise ValueError("unconsumed preparation has conflicting create evidence")
+    capsule = {
         "operation_id": record.get("operation_id"),
         "operation_kind": "swap",
         "tick": record.get("tick"),
-        "phase": "confirmed_unconsumed",
-        "reason": (
-            "confirmed preparation inventory has no confirmed LP create or "
-            "restoration"
-        ),
         "prepared_inventory": {
             "pool_address": pool_address,
             "base_symbol": intent.get("base_symbol"),
@@ -256,22 +271,95 @@ def _unconsumed_preparation_capsule(
             "amount": amount,
             "preparation_transaction_hash": transaction_hash,
         },
-        "restore": {
-            "routine": "lp_order_request",
-            "config": {
-                "controller_id": controller_id,
-                "operation_id": operation_id,
-                "reason": "inventory_restoration",
-                "pool_address": pool_address,
-                "base_symbol": intent.get("base_symbol"),
-                "base_mint": intent.get("base_mint"),
-                "base_decimals": intent.get("base_decimals"),
-                "amount": amount,
-                "attributed_base_amount": amount,
-                "attribution_operation_id": record.get("operation_id"),
-            },
-        },
     }
+    if not consumers:
+        deployment = result.get("deployment_input")
+        if (
+            not isinstance(deployment, dict)
+            or deployment.get("preparation_operation_id") != preparation_operation_id
+            or not isinstance(deployment.get("candidate"), dict)
+            or deployment.get("amount_quote") in (None, "")
+            or deployment.get("range_half_width_pct") in (None, "")
+        ):
+            capsule.update(
+                {
+                    "phase": "manual_review",
+                    "reason": (
+                        "confirmed preparation lacks exact deployment "
+                        "continuation input"
+                    ),
+                }
+            )
+            return capsule
+        confirmed_tick = result.get("confirmed_tick")
+        if (
+            result.get("same_tick_lp_create_allowed") is False
+            and confirmed_tick == current_tick
+        ):
+            capsule.update(
+                {
+                    "phase": "confirmed_pending_create",
+                    "reason": "LP create continuation is due on the following tick",
+                }
+            )
+            return capsule
+        capsule.update(
+            {
+                "phase": "confirmed_pending_create",
+                "reason": (
+                    "confirmed preparation has not yet entered LP create admission"
+                ),
+                "continue_create": {
+                    "routine": "lp_executor_request",
+                    "config": {
+                        "controller_id": controller_id,
+                        "tick": current_tick,
+                        "operation_id": _transition_operation_id(
+                            controller_id,
+                            current_tick,
+                            pool_address,
+                            "create",
+                        ),
+                        "preparation_operation_id": preparation_operation_id,
+                    },
+                },
+            }
+        )
+        return capsule
+    rejected_tick = max(int(candidate["tick"]) for candidate in consumers)
+    capsule.update(
+        {
+            "phase": "confirmed_pending_restore",
+            "reason": (
+                "LP create was rejected before submission; restore exact "
+                "preparation output"
+            ),
+            "restore": {
+                "routine": "lp_order_request",
+                "config": {
+                    "controller_id": controller_id,
+                    "operation_id": _transition_operation_id(
+                        controller_id,
+                        current_tick,
+                        pool_address,
+                        "restore",
+                    ),
+                    "reason": "inventory_restoration",
+                    "pool_address": pool_address,
+                    "base_symbol": intent.get("base_symbol"),
+                    "base_mint": intent.get("base_mint"),
+                    "base_decimals": intent.get("base_decimals"),
+                    "amount": amount,
+                    "attributed_base_amount": amount,
+                    "attribution_operation_id": record.get("operation_id"),
+                },
+            },
+        }
+    )
+    if rejected_tick >= current_tick:
+        capsule.pop("restore")
+        capsule["reason"] = "exact restoration is due on the following tick"
+    return capsule
 
 
 def _compact_portfolio(portfolio: dict[str, Any]) -> dict[str, Any]:
@@ -287,14 +375,13 @@ def _compact_portfolio(portfolio: dict[str, Any]) -> dict[str, Any]:
             item["reconcile"] = record["reconcile"]
         if isinstance(record.get("restore"), dict):
             item["restore"] = record["restore"]
+        if isinstance(record.get("continue_create"), dict):
+            item["continue_create"] = record["continue_create"]
         if isinstance(record.get("prepared_inventory"), dict):
             item["prepared_inventory"] = record["prepared_inventory"]
         unresolved.append(item)
     result = {
         "session": portfolio.get("session"),
-        "executors": [
-            _compact_executor(item) for item in portfolio.get("executors", [])
-        ],
         "foreign_active_executor_ids": portfolio.get("foreign_active_executor_ids", []),
         "active_count": portfolio.get("active_count"),
         "active_exposure_quote": portfolio.get("active_exposure_quote"),
@@ -308,6 +395,10 @@ def _compact_portfolio(portfolio: dict[str, Any]) -> dict[str, Any]:
         ),
         "unresolved_operations": unresolved,
     }
+    if not unresolved:
+        result["executors"] = [
+            _compact_executor(item) for item in portfolio.get("executors", [])
+        ]
     for key in (
         "occupied_pools",
         "quarantined_cleanup_executor_ids",
@@ -335,7 +426,10 @@ def _compact_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     if isinstance(portfolio, dict):
         result["portfolio"] = _compact_portfolio(portfolio)
     constraints = payload.get("selection_constraints")
-    if isinstance(constraints, dict):
+    portfolio_unresolved = (
+        portfolio.get("unresolved_operations") if isinstance(portfolio, dict) else None
+    )
+    if isinstance(constraints, dict) and not portfolio_unresolved:
         allocation = constraints["allocation_quote"]
         range_width = constraints["range_half_width_pct"]
         result["selection_constraints"] = {
@@ -363,6 +457,52 @@ def _model_result(payload: dict[str, Any]) -> str:
     encoded = json.dumps(compact, default=str, separators=(",", ":"))
     if len(encoded) <= _TRANSPORT_MAX_CHARS:
         return encoded
+    portfolio = compact.get("portfolio")
+    unresolved = (
+        portfolio.get("unresolved_operations") if isinstance(portfolio, dict) else None
+    )
+    if isinstance(unresolved, list) and len(unresolved) == 1:
+        operation = unresolved[0]
+        action = next(
+            (
+                {key: operation[key]}
+                for key in ("reconcile", "continue_create", "restore")
+                if isinstance(operation.get(key), dict)
+            ),
+            {},
+        )
+        recovery = {
+            "schema": "lp_snapshot.v1",
+            "status": compact.get("status"),
+            "controller_id": compact.get("controller_id"),
+            "tick": compact.get("tick"),
+            "mutation": False,
+            "retry_allowed": False,
+            "scan_allowed": False,
+            "cleanup_tick": compact.get("cleanup_tick"),
+            "portfolio": {
+                "active_count": portfolio.get("active_count"),
+                "available_slots": portfolio.get("available_slots"),
+                "deployment_blocked": True,
+                "unresolved_operations": [
+                    {
+                        key: operation.get(key)
+                        for key in (
+                            "operation_id",
+                            "operation_kind",
+                            "tick",
+                            "phase",
+                        )
+                    }
+                    | action
+                ],
+            },
+            "report_id": compact.get("report_id"),
+            "report_error": compact.get("report_error"),
+        }
+        encoded = json.dumps(recovery, default=str, separators=(",", ":"))
+        if len(encoded) <= _TRANSPORT_MAX_CHARS:
+            return encoded
     fallback = {
         "schema": "lp_snapshot.v1",
         "status": "incomplete",
@@ -416,6 +556,7 @@ async def run(config: Config, context: Any) -> str:
             receipt_store = ReceiptStore(scope, read_only=True)
             unresolved_records = receipt_store.unresolved_operations()
             unconsumed_preparations = receipt_store.unconsumed_preparations()
+            create_records = receipt_store.list_records("create")
             facts.update(
                 {
                     "unresolved_count": len(unresolved_records),
@@ -442,6 +583,7 @@ async def run(config: Config, context: Any) -> str:
                     record,
                     controller_id=scope.controller_id,
                     current_tick=scope.current_tick,
+                    create_records=create_records,
                 )
                 for record in unconsumed_preparations
             )
@@ -454,6 +596,10 @@ async def run(config: Config, context: Any) -> str:
                     "create_capsule_count": sum(
                         record.get("operation_kind") == "create"
                         and isinstance(record.get("reconcile"), dict)
+                        for record in unresolved_operations
+                    ),
+                    "continuation_capsule_count": sum(
+                        isinstance(record.get("continue_create"), dict)
                         for record in unresolved_operations
                     ),
                     "restoration_capsule_count": sum(

@@ -256,7 +256,7 @@ class ReceiptStore:
         return value
 
     def read_confirmed_swap(self, operation_id: str) -> dict[str, Any]:
-        """Return one exact confirmed swap for lp_create attribution."""
+        """Return one exact confirmed swap for LP executor request attribution."""
 
         value = self.read_by_id(operation_id)
         result = value.get("result") if isinstance(value, dict) else None

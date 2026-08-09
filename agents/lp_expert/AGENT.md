@@ -80,7 +80,8 @@ executor, submit a swap, or transfer funds.
 In live loop or run-once mode, the only authorized mutations are:
 
 - `manage_executors(action="create", ...)` using an `executor_request` emitted
-  unchanged by the current invocation of `lp_order_request` or `lp_create`;
+  unchanged by the current invocation of `lp_order_request` or
+  `lp_executor_request`;
 - `manage_executors(action="stop", controller_id=<exact current controller>,
   executor_id=<exact executor>, keep_position=false)` for one exact
   current-controller LP executor;
@@ -100,7 +101,7 @@ foreign/root routines, or any mutation in dry-run mode.
 ## Tool Action Policy
 
 - `manage_routines`: `run` only `lp_snapshot`, `lp_pool_scan`,
-  `lp_order_request`, or `lp_create` under `lp_expert.orca`. Running
+  `lp_order_request`, or `lp_executor_request` under `lp_expert.orca`. Running
   `lp_order_request` is explicitly authorized only for exact selected-token
   registration, non-submitting request planning, or exact-result
   reconciliation; it is not authorization for an on-chain swap. `list` or
@@ -138,8 +139,9 @@ The only public routines are:
   reconcile the exact executor and finalized Solana transaction returned by a
   separate native create call; the routine never submits the request or
   transfers funds;
-- `lp_create`: validate/admit one exact LP deployment and emit an `lp_executor`
-  request, or reconcile its exact executor.
+- `lp_executor_request`: validate and freeze one exact non-submitting
+  `lp_executor` request, or reconcile its exact returned executor; the routine
+  never creates an executor or changes on-chain liquidity.
 
 Every `operation_id`, `preparation_operation_id`, and
 `attribution_operation_id` must match `^[A-Za-z0-9_-]{8,128}$`. Build each ID
@@ -166,6 +168,15 @@ and a bounded ordered debug trace with timing and uncertainty classification.
 Preserve the metadata beside the related candidate, operation, or executor in
 the final response.
 
+The model-facing `lp_order_request` and `lp_executor_request` results are valid
+JSON capped below the native transport ceiling. Require
+`transport_complete=true` and the exact next-action capsule: `executor_request`
+for admission, or the returned executor/receipt/deployment identity for
+reconciliation. Full selection plans, final plans, and operation records stay in
+the current-session receipt and human report; never reconstruct them from a
+truncated result. If `transport_complete=false` or an essential capsule is
+missing, HOLD and use only exact-identity reconciliation.
+
 `lp_snapshot.v1` contains portfolio/capacity evidence and compact exact
 current-session reconciliation instructions, but no pool-discovery candidates.
 `lp_pool_scan.v1` uses its response budget for candidates. The scan ranks the
@@ -189,24 +200,33 @@ In `lp_snapshot.v1`,
 `selection_constraints.allocation_quote` is ordered `[minimum, maximum,
 remaining_portfolio_budget]`, `range_half_width_pct` is `[minimum, maximum]`,
 and `deployments` is `[configured, available_this_tick]`. Pass the whole
-selected candidate unchanged to `lp_order_request` and `lp_create`.
+selected candidate unchanged to `lp_order_request` and `lp_executor_request`.
 
 An unresolved operation may include an exact `reconcile.routine` and
-`reconcile.config`. Run that configuration unchanged before scanning or taking
-another portfolio action. Swap reconciliation contains only the current
+`reconcile.config`. A confirmed preparation awaiting its first LP create may
+instead include `continue_create.routine` and `continue_create.config`. Run the
+returned configuration unchanged before scanning or taking another portfolio
+action. Swap reconciliation contains only the current
 controller, durable operation ID, and exact returned swap executor ID. Create
 reconciliation contains only the current controller, durable operation ID, and
 exact LP executor ID. The create ID may come from its receipt or from
 `lp_snapshot` only when exactly one current-controller executor matches the
 complete frozen create request. The routine recovers every other immutable
 input from the current-session operation receipt. Never expand either capsule
-from journal prose, a report, or memory.
+from journal prose, a report, or memory. A create-continuation capsule contains
+only the current controller, current tick, a new create operation ID, and the
+preparation operation ID; `lp_executor_request` restores candidate, allocation,
+and range from that exact current-session receipt.
 
-A confirmed preparation swap that has neither one confirmed LP create nor one
-confirmed restoration appears as `phase="confirmed_unconsumed"` with exact
-`prepared_inventory` and `restore.routine` / `restore.config`. It blocks
-scanning. In loop mode journal the restoration, then run that configuration
-unchanged. Never derive a replacement amount from the current wallet balance.
+A confirmed preparation swap with no create attempt appears as
+`phase="confirmed_pending_create"` with exact `prepared_inventory` and, when
+eligible, `continue_create`. Continue LP creation before considering
+restoration. Only after `lp_executor_request` durably records
+`rejected_before_submit` does the following snapshot return
+`phase="confirmed_pending_restore"` with exact `restore.routine` /
+`restore.config`. Both states block scanning. In loop mode journal and run the
+returned configuration unchanged. Never derive a replacement amount from the
+current wallet balance.
 
 When frozen `use_existing_base_inventory=true`, `lp_order_request` may allocate
 available wallet base to a selected LP. SOL allocation is capped at
@@ -222,7 +242,7 @@ receipt, executor state, and current external evidence.
 `status="ready"` means no mutation occurred. Call the returned
 `executor_request` once through `manage_executors`; require one returned
 executor ID. Reconcile `lp_order_request` with only `controller_id`,
-`operation_id`, and that `swap_executor_id`; reconcile `lp_create` with only
+`operation_id`, and that `swap_executor_id`; reconcile `lp_executor_request` with only
 `controller_id`, `operation_id`, and that `lp_executor_id`. Create admission
 freezes the exact LP request; reconciliation reads it before any market refresh
 and never rebuilds it from current pricing. A create error, cancelled call, or response
@@ -244,8 +264,8 @@ mint/symbol/decimals tuple and immediately re-reads the registry. A missing toke
 is not a pool-quality rejection. Metadata conflicts, symbol collisions, or an
 unverifiable registration outcome require HOLD/manual review. Dry run reports
 the proposed registration without changing Gateway. It then verifies that the
-network's current default swap provider is Jupiter and that Jupiter's
-configured slippage exactly matches the frozen Strategy limit. The order
+network's current default swap provider is Jupiter and that Jupiter's positive
+configured slippage does not exceed the frozen Strategy maximum. The order
 executor's reported requested fill is never treated as received inventory.
 Confirmation comes from the exact finalized Solana transaction's bound-wallet
 and token-mint balance deltas, including the native fee; the Gateway swap

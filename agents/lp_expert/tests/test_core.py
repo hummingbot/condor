@@ -385,6 +385,38 @@ def test_plan_is_double_sided_bounded_and_digest_stable():
     assert first["plan_digest"] == second["plan_digest"]
 
 
+def test_attributed_inventory_reserves_orca_maximum_token_debits():
+    attributed_base = Decimal("0.08400717")
+    request = planner.PlanRequest(
+        pool_address=POOL,
+        base_symbol="GMEx",
+        base_mint="Xsf9mBktVB9BSU5kf4nHxPq5hCBJ2j2ui3ecFGxPRGc",
+        base_decimals=8,
+        current_price="19.701982802069136",
+        tick_spacing=128,
+        amount_quote="3",
+        range_half_width_pct="3",
+        minimum_range_half_width_pct="0.5",
+        maximum_range_half_width_pct="20",
+        rebalance_threshold_pct="1",
+        max_slippage_pct="3",
+        attributed_base_amount=attributed_base,
+    )
+
+    plan = planner.build_plan(request)
+    inventory = plan["inventory"]
+    base_amount = Decimal(inventory["base_amount"])
+    quote_amount = Decimal(inventory["quote_amount"])
+    maximum_base_debit = Decimal(inventory["maximum_base_debit"])
+    maximum_quote_debit = Decimal(inventory["maximum_quote_debit"])
+
+    assert base_amount < attributed_base
+    assert maximum_base_debit <= attributed_base
+    assert maximum_base_debit == planner._ceil(base_amount * Decimal("1.03"), 8)
+    assert maximum_quote_debit == planner._ceil(quote_amount * Decimal("1.03"), 6)
+    assert inventory["inventory_ready"] is True
+
+
 def test_fetch_all_executors_follows_every_page_and_rejects_cursor_loops():
     class Executors:
         def __init__(self):
