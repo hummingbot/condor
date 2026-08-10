@@ -28,6 +28,17 @@ type ViewMode = "grid" | "table";
 
 const VIEW_STORAGE_KEY = "routines_view_mode";
 
+/**
+ * How many run chips the strip shows before it folds.
+ *
+ * The strip keeps every run this process still holds, which is the right
+ * behaviour — a 30s one-shot that failed has to be findable — but on a busy
+ * day that is dozens of chips pushing the routines themselves off the screen.
+ * Anything still live is exempt from the cap: those are the only chips with a
+ * Stop button, so hiding one would hide the action.
+ */
+const RUNS_COLLAPSED_LIMIT = 8;
+
 export function Routines() {
   const { server } = useServer();
   const qc = useQueryClient();
@@ -135,6 +146,29 @@ export function Routines() {
 
   const isLive = (status: string) =>
     status === "running" || status === "scheduled";
+
+  const [showAllRuns, setShowAllRuns] = useState(false);
+
+  // The chips actually on screen: every live run, then the newest finished ones
+  // up to the cap. Picked as a set and re-filtered through the sorted list so
+  // expanding does not reshuffle the chips already under the cursor.
+  const visibleInstances = useMemo(() => {
+    if (showAllRuns || recentInstances.length <= RUNS_COLLAPSED_LIMIT) {
+      return recentInstances;
+    }
+    const keep = new Set(
+      recentInstances
+        .filter((i) => i.status === "running" || i.status === "scheduled")
+        .map((i) => i.instance_id),
+    );
+    for (const i of recentInstances) {
+      if (keep.size >= RUNS_COLLAPSED_LIMIT) break;
+      keep.add(i.instance_id);
+    }
+    return recentInstances.filter((i) => keep.has(i.instance_id));
+  }, [recentInstances, showAllRuns]);
+
+  const hiddenRunCount = recentInstances.length - visibleInstances.length;
 
   // Latest execution time (epoch ms) per routine, from instance runs.
   const lastRunByRoutine = useMemo(() => {
@@ -310,9 +344,12 @@ export function Routines() {
           <div>
             <h2 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
               Runs
+              <span className="ml-1.5 font-medium opacity-60">
+                {recentInstances.length}
+              </span>
             </h2>
             <div className="flex flex-wrap gap-2">
-              {recentInstances.map((inst) => (
+              {visibleInstances.map((inst) => (
                 <div
                   key={inst.instance_id}
                   className="group flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 transition-all hover:border-[var(--color-primary)]/30"
@@ -365,6 +402,22 @@ export function Routines() {
                   )}
                 </div>
               ))}
+              {hiddenRunCount > 0 && (
+                <button
+                  onClick={() => setShowAllRuns(true)}
+                  className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/30 hover:text-[var(--color-text)]"
+                >
+                  +{hiddenRunCount} more
+                </button>
+              )}
+              {showAllRuns && recentInstances.length > RUNS_COLLAPSED_LIMIT && (
+                <button
+                  onClick={() => setShowAllRuns(false)}
+                  className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/30 hover:text-[var(--color-text)]"
+                >
+                  Show less
+                </button>
+              )}
             </div>
           </div>
         )}

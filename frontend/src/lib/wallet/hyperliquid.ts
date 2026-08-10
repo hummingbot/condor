@@ -76,6 +76,27 @@ const DOMAIN_TYPE = [
 // reuse the name and replace the prior agent, which is fine — the latest agent key is the credential.
 export const MAX_AGENT_NAME = 16;
 
+// ── Agent validity ──
+// Hyperliquid expires an approved agent quickly unless the approval asks for longer: the expiry is
+// encoded in the *name*, by appending " valid_until {epoch-ms}" (the suffix is parsed off, so the
+// wallet still shows up under the plain name). Without it the agent dies almost immediately, which
+// is why a Condor connection used to stop trading after a day. 180 days is the protocol maximum, so
+// that's what we ask for — minus a few minutes, because the cap is checked against Hyperliquid's
+// clock at processing time and a browser clock running even seconds fast would blow past it.
+export const AGENT_VALIDITY_DAYS = 180; // Hyperliquid's maximum
+const CAP_SAFETY_MARGIN_MS = 10 * 60 * 1000;
+const AGENT_VALIDITY_MS = AGENT_VALIDITY_DAYS * 24 * 60 * 60 * 1000 - CAP_SAFETY_MARGIN_MS;
+
+/** Epoch-ms this connection's agent wallet will expire at, from now. */
+export function agentValidUntil(): number {
+  return Date.now() + AGENT_VALIDITY_MS;
+}
+
+/** The on-chain agent name: the user-visible name plus the expiry suffix Hyperliquid parses. */
+export function withValidUntil(agentName: string, validUntil: number): string {
+  return `${agentName} valid_until ${validUntil}`;
+}
+
 /** Local creation date YYYYMMDD (8 chars). */
 function creationStamp(): string {
   const d = new Date();
@@ -188,6 +209,8 @@ export interface HyperliquidConnection {
   mainAddress: string;
   agentAddress: string;
   agentPrivateKey: string;
+  /** Epoch-ms the agent wallet expires at — after this the stored key stops trading. */
+  validUntil: number;
 }
 
 /**
@@ -213,19 +236,23 @@ export async function connectHyperliquid(opts: {
   const agentPrivateKey = generatePrivateKey();
   const agentAddress = privateKeyToAccount(agentPrivateKey).address;
 
-  // 1. Authorise the agent wallet (trade-only, no withdrawals).
+  // 1. Authorise the agent wallet (trade-only, no withdrawals) for the full 179 days. The expiry
+  //    rides along in the name, so sign and submit the suffixed form — the typed data and the action
+  //    must carry the exact same string or the signature won't verify.
   onStep?.("approve-agent");
+  const validUntil = agentValidUntil();
+  const onChainAgentName = withValidUntil(agentName, validUntil);
   const aaNonce = nextNonce();
   await signAndSubmit(
     provider,
     mainAddress,
-    buildApproveAgentTypedData(agentAddress, agentName, aaNonce),
+    buildApproveAgentTypedData(agentAddress, onChainAgentName, aaNonce),
     {
       type: "approveAgent",
       hyperliquidChain: HL_CHAIN,
       signatureChainId: HL_SIGNATURE_CHAIN_ID,
       agentAddress,
-      agentName,
+      agentName: onChainAgentName,
       nonce: aaNonce,
     },
   );
@@ -254,7 +281,27 @@ export async function connectHyperliquid(opts: {
     });
   }
 
-  return { mainAddress, agentAddress, agentPrivateKey };
+  return { mainAddress, agentAddress, agentPrivateKey, validUntil };
+}
+
+/**
+ * The expiry Hyperliquid actually recorded for `agentAddress`, as epoch-ms — `null` if the agent has
+ * no expiry, `undefined` if it isn't approved (or already pruned). `extraAgents` is unauthenticated;
+ * use it to check what lifetime a connection really got.
+ */
+export async function getHyperliquidAgentExpiry(
+  userAddress: string,
+  agentAddress: string,
+): Promise<number | null | undefined> {
+  const res = await fetch(HL_INFO_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ type: "extraAgents", user: userAddress }),
+  });
+  if (!res.ok) throw new Error(`Hyperliquid agent lookup failed (HTTP ${res.status}).`);
+  const agents = (await res.json()) as { address: string; name: string; validUntil: number | null }[];
+  return (agents || []).find((a) => a.address.toLowerCase() === agentAddress.toLowerCase())
+    ?.validUntil;
 }
 
 /**
