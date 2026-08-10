@@ -775,7 +775,18 @@ def main() -> None:
     application.add_error_handler(error_handler)
 
     # Run TG bot + web server concurrently in a manual event loop
-    asyncio.run(_run_dual(application))
+    try:
+        asyncio.run(_run_dual(application))
+    finally:
+        # /update asks for a restart by signalling a normal shutdown, so the
+        # re-exec happens here: after the loop is gone and teardown has flushed
+        # state and reaped subprocesses. In a `finally` because a restart is
+        # still the right outcome even if a shutdown step blew up on the way
+        # out. Replacing the image in place keeps the tmux pane alive.
+        from utils.updater import exec_restart, restart_pending
+
+        if restart_pending():
+            exec_restart()  # never returns
 
 
 async def _run_dual(application: Application) -> None:
@@ -815,9 +826,17 @@ async def _run_dual(application: Application) -> None:
 
     if ADMIN_USER_ID:
         try:
+            # Report the version we came up on: after a /update restart this is
+            # the confirmation that the new commit is the one actually running.
+            from utils.updater import get_current_branch, get_local_commit
+
+            branch, commit = await asyncio.gather(
+                get_current_branch(), get_local_commit()
+            )
+            version = f" ({branch} @ {commit})" if commit else ""
             await application.bot.send_message(
                 chat_id=int(ADMIN_USER_ID),
-                text="Condor is online and ready.",
+                text=f"Condor is online and ready.{version}",
             )
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")

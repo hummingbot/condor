@@ -12,7 +12,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from utils.auth import admin_required
-from utils.telegram_formatters import escape_markdown_v2
+from utils.telegram_formatters import escape_markdown_v2, escape_markdown_v2_code
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ async def _check_and_show(message_or_query, context: ContextTypes.DEFAULT_TYPE) 
             remote = escape_markdown_v2(condor_info["remote_commit"])
             behind = condor_info["commits_behind"]
             log_lines = condor_info["commit_log"].split("\n")[:5]
-            log_display = "\n".join(escape_markdown_v2(line) for line in log_lines)
+            log_display = "\n".join(escape_markdown_v2_code(line) for line in log_lines)
             if behind > 5:
                 log_display += f"\n_\\.\\.\\.and {behind - 5} more_"
             sections.append(
@@ -114,7 +114,7 @@ async def _check_and_show(message_or_query, context: ContextTypes.DEFAULT_TYPE) 
                 hb_remote = escape_markdown_v2(hb_git["remote_commit"])
                 hb_behind = hb_git["commits_behind"]
                 hb_log_lines = hb_git["commit_log"].split("\n")[:5]
-                hb_log_display = "\n".join(escape_markdown_v2(l) for l in hb_log_lines)
+                hb_log_display = "\n".join(escape_markdown_v2_code(l) for l in hb_log_lines)
                 if hb_behind > 5:
                     hb_log_display += f"\n_\\.\\.\\.and {hb_behind - 5} more_"
                 sections.append(
@@ -193,58 +193,133 @@ async def handle_update_callback(
         await _do_restart(query, context)
 
 
-async def _do_update(query, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Pull Condor updates, install deps, and restart."""
-    from utils.updater import install_dependencies, pull_updates, restart_process
+async def _progress(query, text: str) -> None:
+    """Show the current step. Plain text: no escaping to get wrong mid-flow."""
+    try:
+        await query.edit_message_text(text)
+    except Exception as e:
+        # A failed progress edit (message unchanged, too old) must never abort
+        # an update that is otherwise going fine.
+        logger.debug("Could not update progress message: %s", e)
 
-    await query.edit_message_text("Pulling latest changes...")
 
+def _tail(output: str, max_lines: int = 15, max_chars: int = 1500) -> str:
+    """Last few lines of command output — build logs are far past Telegram's limit."""
+    text = (output or "").strip() or "(no output)"
+    lines = text.split("\n")
+    if len(lines) > max_lines:
+        lines = ["..."] + lines[-max_lines:]
+    text = "\n".join(lines)
+    if len(text) > max_chars:
+        text = "..." + text[-max_chars:]
+    return text
+
+
+async def _fail(
+    query, title: str, detail: str, note: str | None = None, retry_restart: bool = False
+) -> None:
+    """Render a failed step, with the tail of whatever the command printed."""
+    text = f"*{escape_markdown_v2(title)}*\n\n```\n{escape_markdown_v2_code(_tail(detail))}\n```"
+    if note:
+        text += f"\n{escape_markdown_v2(note)}"
+
+    keyboard = []
+    if retry_restart:
+        keyboard.append(
+            [InlineKeyboardButton("Restart Anyway", callback_data="admin:update_restart")]
+        )
+    keyboard.append([InlineKeyboardButton("Back", callback_data="admin:update_check")])
+
+    await query.edit_message_text(
+        text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+
+
+async def _update_condor(query) -> bool:
+    """Pull Condor, sync deps, rebuild the dashboard if the pull touched it.
+
+    Returns True when the process is ready to restart. On failure it renders the
+    error itself and returns False.
+    """
+    from utils.updater import (
+        build_frontend,
+        frontend_needs_build,
+        get_local_commit_full,
+        install_dependencies,
+        pull_updates,
+    )
+
+    before = await get_local_commit_full()
+
+    await _progress(query, "Pulling Condor updates...")
     success, msg = await pull_updates()
     if not success:
-        text = f"*Update failed*\n\n`{escape_markdown_v2(msg)}`"
-        keyboard = [
-            [InlineKeyboardButton("Back", callback_data="admin:update_check")],
-        ]
-        await query.edit_message_text(
-            text, parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
+        await _fail(query, "Condor pull failed", msg)
+        return False
 
-    await query.edit_message_text("Installing dependencies...")
+    after = await get_local_commit_full()
 
+    await _progress(query, "Installing dependencies...")
     success, dep_msg = await install_dependencies()
     if not success:
-        text = f"*Dependencies failed*\n\n`{escape_markdown_v2(dep_msg)}`\n\nCode was pulled but deps failed\\. Fix manually and restart\\."
-        keyboard = [
-            [InlineKeyboardButton("Retry Restart", callback_data="admin:update_restart")],
-        ]
-        await query.edit_message_text(
-            text, parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
+        await _fail(
+            query, "Dependencies failed", dep_msg,
+            note="Code was pulled but deps failed. Fix it manually before restarting.",
+            retry_restart=True,
         )
-        return
+        return False
 
-    await query.edit_message_text("Restarting Condor...")
+    # The Makefile builds the frontend before starting; an in-place update has
+    # to do it here or the dashboard keeps serving the previous bundle.
+    if await frontend_needs_build(before, after):
+        await _progress(query, "Building the dashboard (this can take a minute)...")
+        success, build_msg = await build_frontend()
+        if not success:
+            await _fail(
+                query, "Dashboard build failed", build_msg,
+                note=(
+                    "Code and deps are updated, but the dashboard would come back "
+                    "on the previous bundle."
+                ),
+                retry_restart=True,
+            )
+            return False
 
-    # Small delay so the message is sent before restart
+    return True
+
+
+async def _restart_now(query) -> None:
+    """Send the last message, then hand the process over to a clean restart."""
+    from utils.updater import request_restart
+
+    await _progress(query, "Restarting Condor...")
+    # Let Telegram flush the edit before the shutdown starts.
     await asyncio.sleep(1)
-    restart_process()
+    request_restart()
+
+
+async def _do_update(query, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Pull Condor updates, install deps, rebuild the dashboard, and restart."""
+    if await _update_condor(query):
+        await _restart_now(query)
 
 
 async def _do_update_hb(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Update hummingbot-api: git pull + docker compose rebuild."""
     from utils.updater import update_hb_api
 
-    await query.edit_message_text("Pulling hummingbot\\-api...")
+    await _progress(query, "Updating hummingbot-api...")
 
     success, msg = await update_hb_api()
 
-    if success:
-        text = f"*Hummingbot API updated\\!*\n\n`{escape_markdown_v2(msg)}`"
-    else:
-        text = f"*HB API update failed*\n\n`{escape_markdown_v2(msg)}`"
+    if not success:
+        await _fail(query, "HB API update failed", msg)
+        return
 
+    text = (
+        f"*Hummingbot API updated*\n\n"
+        f"```\n{escape_markdown_v2_code(_tail(msg))}\n```"
+    )
     keyboard = [
         [InlineKeyboardButton("Back", callback_data="admin:update_check")],
     ]
@@ -256,74 +331,23 @@ async def _do_update_hb(query, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _do_update_all(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Update hummingbot-api first, then Condor + restart."""
-    from utils.updater import (
-        install_dependencies,
-        pull_updates,
-        restart_process,
-        update_hb_api,
-    )
+    from utils.updater import update_hb_api
 
-    # 1. Update hb-api
-    await query.edit_message_text("Updating hummingbot\\-api...")
+    # HB API first: it restarts its own containers, and Condor reconnects to it
+    # on the way back up.
+    await _progress(query, "Updating hummingbot-api...")
     hb_ok, hb_msg = await update_hb_api()
-
     if not hb_ok:
-        text = f"*HB API update failed*\n\n`{escape_markdown_v2(hb_msg)}`\n\nCondor update skipped\\."
-        keyboard = [
-            [InlineKeyboardButton("Back", callback_data="admin:update_check")],
-        ]
-        await query.edit_message_text(
-            text, parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
+        await _fail(query, "HB API update failed", hb_msg, note="Condor update skipped.")
         return
 
-    # 2. Update Condor
-    await query.edit_message_text("Pulling Condor updates...")
-    success, msg = await pull_updates()
-    if not success:
-        text = (
-            f"*HB API updated, but Condor pull failed*\n\n"
-            f"`{escape_markdown_v2(msg)}`"
-        )
-        keyboard = [
-            [InlineKeyboardButton("Back", callback_data="admin:update_check")],
-        ]
-        await query.edit_message_text(
-            text, parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    await query.edit_message_text("Installing dependencies...")
-    success, dep_msg = await install_dependencies()
-    if not success:
-        text = (
-            f"*Both repos pulled, but deps failed*\n\n"
-            f"`{escape_markdown_v2(dep_msg)}`\n\n"
-            f"Fix manually and restart\\."
-        )
-        keyboard = [
-            [InlineKeyboardButton("Retry Restart", callback_data="admin:update_restart")],
-        ]
-        await query.edit_message_text(
-            text, parse_mode="MarkdownV2",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-        return
-
-    await query.edit_message_text("Restarting Condor...")
-    await asyncio.sleep(1)
-    restart_process()
+    if await _update_condor(query):
+        await _restart_now(query)
 
 
 async def _do_restart(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Force restart without pulling."""
-    from utils.updater import restart_process
-
-    await query.edit_message_text("Restarting Condor...")
-    await asyncio.sleep(1)
-    restart_process()
+    await _restart_now(query)
 
 
 async def _periodic_update_check(context: ContextTypes.DEFAULT_TYPE) -> None:
