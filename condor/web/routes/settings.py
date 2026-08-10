@@ -294,10 +294,26 @@ async def add_gateway_wallet(
         raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
+        # The SDK's add_gateway_wallet always sets the new wallet as the chain default
+        # (the API's set_default flag isn't exposed in the client), so to honor
+        # set_default=False we capture the current default and restore it after adding.
+        previous_default = None
+        if not req.set_default:
+            wallets = await client.accounts.list_gateway_wallets()
+            for group in wallets:
+                if group.get("chain") == req.chain:
+                    previous_default = group.get("default_address") or None
+                    break
+
         result = await client.accounts.add_gateway_wallet(
             chain=req.chain,
             private_key=req.private_key,
         )
+
+        if previous_default and previous_default != result.get("address"):
+            await client.accounts.set_default_gateway_wallet(
+                chain=req.chain, address=previous_default
+            )
         return {"added": True, "wallet": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

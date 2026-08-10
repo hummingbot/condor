@@ -512,6 +512,7 @@ class GatewayPullRequest(BaseModel):
 class AddGatewayWalletRequest(BaseModel):
     chain: str
     private_key: str
+    set_default: bool = True
 
 
 class AddCredentialRequest(BaseModel):

@@ -1702,7 +1702,7 @@ export const api = {
       `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
     ),
 
-  addGatewayWallet: (server: string, data: { chain: string; private_key: string }) =>
+  addGatewayWallet: (server: string, data: { chain: string; private_key: string; set_default?: boolean }) =>
     apiFetch<{ added: boolean; wallet: { address?: string } }>(
       `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
       { method: "POST", body: JSON.stringify(data) },

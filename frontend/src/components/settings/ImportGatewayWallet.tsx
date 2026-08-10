@@ -1,4 +1,4 @@
-import { AlertCircle, Check, Loader2, ShieldAlert } from "lucide-react";
+import { AlertCircle, Check, Loader2 } from "lucide-react";
 import { useMemo, useState } from "react";
 import { privateKeyToAccount } from "viem/accounts";
 
@@ -37,6 +37,7 @@ export function ImportGatewayWallet({
   onDone: () => void;
 }) {
   const [key, setKey] = useState("");
+  const [setDefault, setSetDefault] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [importedAddress, setImportedAddress] = useState<string | null>(null);
@@ -65,7 +66,11 @@ export function ImportGatewayWallet({
     try {
       const privateKey =
         chain === "ethereum" && !trimmed.startsWith("0x") ? `0x${trimmed}` : trimmed;
-      const res = await api.addGatewayWallet(server, { chain, private_key: privateKey });
+      const res = await api.addGatewayWallet(server, {
+        chain,
+        private_key: privateKey,
+        set_default: setDefault,
+      });
       setImportedAddress(res.wallet?.address ?? derived ?? "");
       setKey("");
       window.setTimeout(onDone, 1500);
@@ -135,13 +140,16 @@ export function ImportGatewayWallet({
             )}
           </div>
 
-          <div className="flex items-start gap-2 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] p-2.5 text-xs text-[var(--color-text-muted)]">
-            <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-            <span>
-              Prefer a dedicated trading wallet funded with only what you intend to trade, rather
-              than your main wallet.
-            </span>
-          </div>
+          <label className="flex cursor-pointer items-center gap-2 text-xs text-[var(--color-text)]">
+            <input
+              type="checkbox"
+              checked={setDefault}
+              onChange={(e) => setSetDefault(e.target.checked)}
+              disabled={saving}
+              className="h-3.5 w-3.5 accent-[var(--color-primary)]"
+            />
+            Set as default wallet for this chain
+          </label>
 
           {error && (
             <div className="flex items-start gap-2 rounded-md border border-[var(--color-red)]/30 bg-red-500/5 p-2.5 text-xs text-[var(--color-red)]">
