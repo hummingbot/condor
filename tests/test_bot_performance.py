@@ -776,6 +776,34 @@ def test_prompt_controller_block_present_iff_bot_name():
     assert "[CONTROLLER MODE]" not in without
 
 
+def test_controller_mode_base_rules_do_not_contradict_the_controller_block():
+    """The top-of-prompt rule must name the surface the session actually trades on.
+
+    A controller-mode tick used to open with "Trade ONLY via
+    manage_executors(action='create')" and then close with "Do NOT create
+    standalone executors" — two opposite orders in one prompt.
+    """
+    with_bot = _minimal_prompt({"bot_name": "river", "execution_mode": "loop"})
+    assert 'Trade ONLY via manage_executors(action="create")' not in with_bot
+    assert "steering the controllers" in with_bot
+    # The tools it trades with are preloaded, not discovered mid-tick.
+    assert "mcp__mcp-hummingbot__manage_controllers" in with_bot
+    assert "mcp__mcp-hummingbot__manage_bots" in with_bot
+    # Executor mode keeps the strict executor-only rule.
+    without = _minimal_prompt({"execution_mode": "loop"})
+    assert 'Trade ONLY via manage_executors(action="create")' in without
+    assert "mcp__mcp-hummingbot__manage_controllers" not in without
+
+
+def test_controller_id_hint_is_executor_mode_only():
+    """`controller_id` is an executor arg; in controller mode it is noise."""
+    with_bot = _minimal_prompt({"bot_name": "river", "execution_mode": "loop"})
+    assert "controller_id" not in with_bot
+
+    without = _minimal_prompt({"execution_mode": "loop"})
+    assert 'Pass controller_id="river.scalp_1"' in without
+
+
 # ── The live agent view and the dashboard must agree ──
 
 
