@@ -220,11 +220,11 @@ class GatewayContainerRequest(BaseModel):
         "The Hummingbot API runs Gateway secured (TLS + mTLS) and manages the "
         "certificates/passphrase itself using its own CONFIG_PASSWORD (hummingbot-api "
         "SEC-048), so no passphrase is needed here. "
-        "Fields: image (Docker image, default: hummingbot/gateway:latest), "
+        "Fields: image (Docker image, default: hummingbot/gateway:development), "
         "port (exposed port, default: 15888).",
         examples=[
             {
-                "image": "hummingbot/gateway:latest",
+                "image": "hummingbot/gateway:development",
                 "port": 15888,
             }
         ],
