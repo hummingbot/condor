@@ -1,15 +1,10 @@
-import { AlertCircle, ArrowLeft, Check, Loader2, ShieldAlert } from "lucide-react";
+import { AlertCircle, Check, Loader2, ShieldAlert } from "lucide-react";
 import { useMemo, useState } from "react";
 import { privateKeyToAccount } from "viem/accounts";
 
 import { api } from "@/lib/api";
 
 export type WalletChain = "solana" | "ethereum";
-
-const CHAIN_LABEL: Record<WalletChain, string> = {
-  solana: "Solana",
-  ethereum: "Ethereum",
-};
 
 // Browser wallets (Phantom, MetaMask, Rabby) never expose private keys to websites — that's by
 // design, and why this flow is a manual export + paste instead of a one-click "Connect".
@@ -84,25 +79,6 @@ export function ImportGatewayWallet({
 
   return (
     <div className="space-y-4">
-      <button
-        onClick={onBack}
-        disabled={saving}
-        className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] disabled:opacity-40"
-      >
-        <ArrowLeft className="h-3.5 w-3.5" /> Back
-      </button>
-
-      <div>
-        <h2 className="text-lg font-semibold text-[var(--color-text)]">
-          Connect {CHAIN_LABEL[chain]} Wallet
-        </h2>
-        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
-          Gateway signs DEX transactions on your server, so it needs the wallet's private key.
-          Browser wallets never share private keys with apps — export the key manually and paste it
-          below. It is sent to your Hummingbot API server and stored encrypted by Gateway.
-        </p>
-      </div>
-
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3">
         <p className="mb-1.5 text-xs font-medium text-[var(--color-text)]">
           Where to find your private key

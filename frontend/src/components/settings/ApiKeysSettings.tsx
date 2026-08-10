@@ -24,7 +24,6 @@ type Step =
   | "select-exchange"
   | "fill-fields"
   | "connect-hyperliquid"
-  | "select-wallet-chain"
   | "import-wallet";
 
 const isHyperliquid = (name: string) => name.startsWith("hyperliquid");
@@ -47,9 +46,9 @@ const INITIAL_FLOW: AddFlowState = {
   values: {},
 };
 
-const WALLET_CHAINS: { chain: WalletChain; label: string; hint: string }[] = [
-  { chain: "solana", label: "Connect Solana", hint: "Import a key exported from Phantom" },
-  { chain: "ethereum", label: "Connect Ethereum", hint: "Import a key exported from MetaMask or Rabby" },
+const WALLET_CHAINS: { chain: WalletChain; label: string }[] = [
+  { chain: "solana", label: "Solana" },
+  { chain: "ethereum", label: "Ethereum/EVM" },
 ];
 
 // Substrings that mark a connector config field as a sensitive credential.
@@ -93,6 +92,15 @@ export function ApiKeysSettings() {
     enabled: !!server,
     retry: false,
   });
+
+  // Same key as GatewaySettings so the status is shared/cached across tabs.
+  const { data: gatewayStatus } = useQuery({
+    queryKey: ["gateway-status", server],
+    queryFn: () => api.getGatewayStatus(server!),
+    enabled: !!server,
+    retry: false,
+  });
+  const gatewayRunning = gatewayStatus?.running === true;
 
   const { data: connectorsData, isLoading: loadingConnectors } = useQuery({
     queryKey: ["settings-connectors", server, flow.connectorType],
@@ -269,7 +277,7 @@ export function ApiKeysSettings() {
 
   // ── Add wallet flow ──
 
-  if (flow.step === "select-wallet-chain") {
+  if (flow.step === "import-wallet" && flow.walletChain) {
     return (
       <div className="space-y-4">
         <button
@@ -278,40 +286,43 @@ export function ApiKeysSettings() {
         >
           <ArrowLeft className="h-3.5 w-3.5" /> Back
         </button>
-        <h3 className="text-sm font-semibold text-[var(--color-text)]">Add Wallet to Gateway</h3>
-        <p className="text-xs text-[var(--color-text-muted)]">
-          Gateway holds the wallet key on your server so agents and strategies can sign DEX
-          transactions. Pick the chain to connect.
-        </p>
-        <div className="grid grid-cols-2 gap-3">
-          {WALLET_CHAINS.map(({ chain, label, hint }) => (
+        <div>
+          <h2 className="text-lg font-semibold text-[var(--color-text)]">Add Wallet to Gateway</h2>
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+            Gateway signs DEX transactions on your server, so it needs the wallet's private key.
+            Browser wallets never share private keys with apps — export the key manually and paste
+            it below. It is sent to your Hummingbot API server and stored encrypted by Gateway.
+          </p>
+        </div>
+
+        {/* Chain tabs */}
+        <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
+          {WALLET_CHAINS.map(({ chain, label }) => (
             <button
               key={chain}
-              onClick={() => setFlow({ ...flow, step: "import-wallet", walletChain: chain })}
-              className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 text-left transition-colors hover:border-[var(--color-border-hover)]"
+              onClick={() => setFlow({ ...flow, walletChain: chain })}
+              className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                flow.walletChain === chain
+                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              }`}
             >
-              <span className="flex items-center gap-2 text-sm font-medium text-[var(--color-text)]">
-                <Wallet className="h-4 w-4 text-[var(--color-text-muted)]" /> {label}
-              </span>
-              <p className="mt-1 text-xs text-[var(--color-text-muted)]">{hint}</p>
+              {label}
             </button>
           ))}
         </div>
-      </div>
-    );
-  }
 
-  if (flow.step === "import-wallet" && flow.walletChain) {
-    return (
-      <ImportGatewayWallet
-        server={server}
-        chain={flow.walletChain}
-        onBack={() => setFlow({ ...INITIAL_FLOW, step: "select-wallet-chain" })}
-        onDone={() => {
-          invalidateWallets();
-          setFlow(INITIAL_FLOW);
-        }}
-      />
+        <ImportGatewayWallet
+          key={flow.walletChain}
+          server={server}
+          chain={flow.walletChain}
+          onBack={() => setFlow(INITIAL_FLOW)}
+          onDone={() => {
+            invalidateWallets();
+            setFlow(INITIAL_FLOW);
+          }}
+        />
+      </div>
     );
   }
 
@@ -465,8 +476,10 @@ export function ApiKeysSettings() {
         </p>
         <div className="flex items-center gap-2">
           <button
-            onClick={() => setFlow({ ...INITIAL_FLOW, step: "select-wallet-chain" })}
-            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-border-hover)] hover:bg-[var(--color-surface-hover)]"
+            onClick={() => setFlow({ ...INITIAL_FLOW, step: "import-wallet", walletChain: "solana" })}
+            disabled={!gatewayRunning}
+            title={gatewayRunning ? undefined : "Gateway is not running — start it from the Gateway tab."}
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-border-hover)] hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
           >
             <Wallet className="h-3.5 w-3.5" /> Add Wallet
           </button>
