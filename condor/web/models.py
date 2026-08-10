@@ -509,6 +509,11 @@ class GatewayPullRequest(BaseModel):
     image: str = "hummingbot/gateway:development"
 
 
+class AddGatewayWalletRequest(BaseModel):
+    chain: str
+    private_key: str
+
+
 class AddCredentialRequest(BaseModel):
     connector_name: str
     credentials: dict[str, Any]

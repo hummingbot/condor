@@ -9,6 +9,7 @@ from config_manager import ServerPermission, get_config_manager
 from condor.web.auth import get_current_user
 from condor.web.models import (
     AddCredentialRequest,
+    AddGatewayWalletRequest,
     AddServerRequest,
     CredentialInfo,
     GatewayPullRequest,
@@ -259,6 +260,63 @@ async def gateway_logs(
     try:
         logs = await client.gateway.get_logs()
         return {"logs": logs}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ── Gateway Wallets ──
+
+
+@router.get("/gateway/wallets")
+async def list_gateway_wallets(
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        wallets = await client.accounts.list_gateway_wallets()
+        return {"wallets": wallets}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/gateway/wallets")
+async def add_gateway_wallet(
+    req: AddGatewayWalletRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        result = await client.accounts.add_gateway_wallet(
+            chain=req.chain,
+            private_key=req.private_key,
+        )
+        return {"added": True, "wallet": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/gateway/wallets/{chain}/{address}")
+async def remove_gateway_wallet(
+    chain: str,
+    address: str,
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        result = await client.accounts.remove_gateway_wallet(chain=chain, address=address)
+        return {"deleted": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

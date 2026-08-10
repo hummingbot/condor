@@ -752,6 +752,13 @@ export interface CredentialInfo {
   connector_type: string;
 }
 
+export interface GatewayWalletGroup {
+  chain: string;
+  walletAddresses: string[];
+  default_address?: string;
+  [key: string]: unknown;
+}
+
 export interface ConnectorInfo {
   name: string;
   type: string;
@@ -1689,6 +1696,23 @@ export const api = {
 
   getGatewayLogs: (server: string) =>
     apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
+
+  getGatewayWallets: (server: string) =>
+    apiFetch<{ wallets: GatewayWalletGroup[] }>(
+      `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
+    ),
+
+  addGatewayWallet: (server: string, data: { chain: string; private_key: string }) =>
+    apiFetch<{ added: boolean; wallet: { address?: string } }>(
+      `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  removeGatewayWallet: (server: string, chain: string, address: string) =>
+    apiFetch<{ deleted: boolean }>(
+      `/api/v1/settings/gateway/wallets/${encodeURIComponent(chain)}/${encodeURIComponent(address)}?server=${encodeURIComponent(server)}`,
+      { method: "DELETE" },
+    ),
 
   getCredentials: (server: string) =>
     apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),
