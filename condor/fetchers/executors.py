@@ -42,8 +42,19 @@ def get_executor_type(executor: Dict[str, Any]) -> str:
     """Determine executor type from its data.
 
     Returns the executor type label (e.g. 'grid', 'position', 'order', 'dca', 'lp').
+
+    Never raises: this runs while building every display row, so an executor
+    whose ``config`` is explicitly ``null`` (a shape the backend does emit) must
+    degrade to ``unknown`` for that one row instead of taking down the whole
+    listing.
     """
-    config = executor.get("config", executor)
+    # ``config`` is often present *and* null, so a ``dict.get`` default is not
+    # enough -- it only covers the absent key. Same isinstance guard as
+    # :func:`build_executor_row`, falling back to the executor itself so a row
+    # that carries its fields at the top level still resolves as before.
+    config = executor.get("config")
+    if not isinstance(config, dict):
+        config = executor
     for source in (config, executor):
         ex_type = source.get("type", "") or source.get("executor_type", "")
         if isinstance(ex_type, str) and ex_type:
