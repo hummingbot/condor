@@ -80,7 +80,9 @@ For each open position, read its current value and decide exit. Value it in SOL:
 percentage_to_remove=100)`** if ANY fires:
 - `pnl_pct ≥ take_profit_pct` (TP) or `pnl_pct ≤ −stop_loss_pct` (SL);
 - **fee-APR decay**: pool `fee_tvl_ratio.24h` annualized < `min_fee_apr_pct` (the fee flow that
-  justified the IL exposure has dried up — from `easya_graduation_monitor`/the Meteora API);
+  justified the IL exposure has dried up — from `easya_graduation_monitor`/the Meteora API).
+  UNITS: `fee_tvl_ratio.24h` is ALREADY a percent per 24h (5.22 = 5.22%/day) — annualize as
+  `× 365` only, never `× 365 × 100`;
 - **drawdown**: token price down ≥ `drawdown_pct` from your entry price;
 - **max hold**: position age ≥ `max_hold_hours`;
 - **honeypot regression**: a fresh sellability quote (skill gate 1) now fails → exit at any price you

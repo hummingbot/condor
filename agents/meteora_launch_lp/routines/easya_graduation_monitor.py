@@ -14,8 +14,10 @@ liquidity. See AGENT.md.
 Note: early LP here is directional-long the token (you must buy the base token to pair it with SOL),
 so size small and capped.
 """
+import io
 import logging
 import time
+from datetime import datetime, timezone
 
 import aiohttp
 from pydantic import BaseModel, Field
@@ -30,6 +32,92 @@ CONNECTOR = "meteora"
 NETWORK = "solana-mainnet-beta"  # hummingbot-api / Gateway network id for manage_amm
 SOL_MINT = "So11111111111111111111111111111111111111112"
 EASYA_MINT_SUFFIX = "EASY"  # EasyA vanity-suffix marker on graduated token mints
+
+
+GECKO_OHLCV = "https://api.geckoterminal.com/api/v2/networks/solana/pools/{pool}/ohlcv/hour"
+
+
+async def _fetch_ohlcv(session: aiohttp.ClientSession, pool: str, hours: float) -> tuple[list[dict], str]:
+    """Hourly OHLCV bars covering the pool's whole post-graduation life.
+
+    Primary: GeckoTerminal (up to 1000 hourly bars, price in USD). Fallback: the Meteora
+    DAMM v2 data API's native OHLCV (price in SOL), which caps at ~10 bars per response,
+    so a coarse timeframe is chosen to still span the pool's age.
+    Returns (bars, price_unit) where bars are {timestamp, open, high, low, close, volume}.
+    """
+    limit = max(12, min(int(hours) + 4, 1000))
+    try:
+        async with session.get(GECKO_OHLCV.format(pool=pool), params={"limit": limit},
+                               timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 200:
+                ol = (await resp.json())["data"]["attributes"]["ohlcv_list"]
+                if ol:
+                    bars = [{"timestamp": b[0], "open": b[1], "high": b[2], "low": b[3],
+                             "close": b[4], "volume": b[5]} for b in reversed(ol)]
+                    return bars, "USD"
+    except Exception as e:
+        logger.warning(f"easya_graduation_monitor: GeckoTerminal OHLCV failed for {pool}: {e}")
+
+    # Fallback: Meteora native (≈10 bars max) — pick a timeframe wide enough to span the age.
+    timeframe = "1h" if hours <= 10 else "2h" if hours <= 20 else "4h" if hours <= 40 else "12h"
+    try:
+        async with session.get(f"{DAMM_V2_API}/{pool}/ohlcv", params={"timeframe": timeframe},
+                               timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status != 200:
+                return [], ""
+            return (await resp.json()).get("data", []), "SOL"
+    except Exception as e:
+        logger.warning(f"easya_graduation_monitor: Meteora OHLCV failed for {pool}: {e}")
+        return [], ""
+
+
+def _build_chart(top: dict, bars: list[dict], price_unit: str = "SOL") -> tuple[bytes | None, object]:
+    """Price + volume panel for the top graduation — shows the post-graduation
+    dump/stabilization path the agent must wait out before LPing."""
+    if not bars:
+        return None, None
+    try:
+        import plotly.graph_objects as go
+        from plotly.subplots import make_subplots
+    except ImportError:
+        return None, None
+
+    ts = [datetime.fromtimestamp(b["timestamp"], tz=timezone.utc) for b in bars]
+    fig = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                        row_heights=[0.72, 0.28], vertical_spacing=0.04)
+    fig.add_trace(go.Candlestick(
+        x=ts, open=[b["open"] for b in bars], high=[b["high"] for b in bars],
+        low=[b["low"] for b in bars], close=[b["close"] for b in bars],
+        increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
+        name=f"Price ({price_unit})", showlegend=False,
+    ), row=1, col=1)
+    fig.add_trace(go.Bar(
+        x=ts, y=[b["volume"] for b in bars],
+        marker_color="#8664c6", name="Volume", showlegend=False,
+    ), row=2, col=1)
+    fig.update_layout(
+        title=dict(
+            text=(f"{top['pair']} — post-graduation price path "
+                  f"(age {top['age_h']:.0f}h · TVL ${top['tvl']:,.0f} · "
+                  f"fee yield 24h {top['fee_yield24h']:.2f}%)"),
+            font=dict(size=14, color="#ffffff"), x=0.5, xanchor="center"),
+        height=560, width=1100,
+        paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+        font=dict(size=11, color="#e0e0e0"),
+        margin=dict(l=70, r=30, t=70, b=40),
+        xaxis_rangeslider_visible=False,
+        yaxis=dict(title=f"Price ({price_unit})", showgrid=True, gridcolor="#2a2a3e",
+                   tickformat=".2e"),
+        yaxis2=dict(title=f"Vol ({price_unit})", showgrid=False),
+        xaxis2=dict(showgrid=False),
+    )
+    try:
+        buf = io.BytesIO()
+        fig.write_image(buf, format="png", scale=2)
+        return buf.getvalue(), fig
+    except Exception as e:
+        logger.warning(f"easya_graduation_monitor: PNG export failed: {e}")
+        return None, fig
 
 
 class Config(BaseModel):
@@ -119,7 +207,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             "#": i,
             "Pair": c["pair"],
             "Age(h)": f"{c['age_h']:.1f}",
-            "FeeYield": f"{c['fee_yield24h'] * 100:.1f}%",
+            "FeeYield": f"{c['fee_yield24h']:.2f}%",
             "TVL": f"${c['tvl']:,.0f}",
             "Vol24h": f"${c['vol24h']:,.0f}",
             "Verified": "yes" if c["verified"] else "no",
@@ -139,9 +227,48 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"capped size (directional-long the token). Journal the position_address."
     )
 
+    # Price/volume panel for the top graduation — the visual gate for "has the dump cleared?"
+    top_c = ranked[0]
+    async with aiohttp.ClientSession() as session:
+        bars, price_unit = await _fetch_ohlcv(session, top_c["pool"], top_c["age_h"])
+    chart_bytes, plotly_fig = _build_chart(top_c, bars, price_unit)
+
+    chat_id = getattr(context, "_chat_id", None)
+    if chart_bytes and chat_id and context.bot:
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_id, photo=io.BytesIO(chart_bytes),
+                caption=f"{top_c['pair']} — post-graduation price path ({top_c['age_h']:.0f}h)",
+            )
+        except Exception as e:
+            logger.warning(f"easya_graduation_monitor: failed to send chart to Telegram: {e}")
+
+    try:
+        from condor.reports import ReportBuilder
+
+        builder = ReportBuilder("EasyA Graduation Monitor")
+        builder.source("routine", "easya_graduation_monitor").tags(
+            ["meteora", "damm-v2", "easya", "launch"])
+        builder.kpi("Graduations found", str(len(ranked)))
+        builder.kpi("Top fee yield 24h", top["FeeYield"])
+        builder.kpi("Top age", f"{top['Age(h)']}h")
+        builder.markdown(
+            f"EasyA graduations into Meteora DAMM v2 in the last {config.max_age_hours:.0f}h "
+            f"(min TVL ${config.min_tvl_usd:,.0f}, min vol24h ${config.min_vol24h_usd:,.0f}). "
+            f"Gate each on sellability, safety, and post-dump demand before LPing."
+        )
+        if plotly_fig is not None:
+            builder.plotly(plotly_fig)
+        builder.table(rows)
+        builder.manual_order()
+        await builder.save()
+    except Exception as e:
+        logger.warning(f"easya_graduation_monitor: report save failed: {e}")
+
     try:
         from routines.base import RoutineResult
-        return RoutineResult(text=summary, table_data=rows, table_columns=columns)
+        return RoutineResult(text=summary, table_data=rows, table_columns=columns,
+                             chart_image=chart_bytes)
     except Exception:
         lines = [summary, ""]
         for r in rows:

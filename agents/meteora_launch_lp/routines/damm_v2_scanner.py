@@ -14,6 +14,7 @@ Related DAMM v2 endpoints for deeper analysis (not used here, available to the a
 The scanner deliberately skips pools with an active fee scheduler (base fee often starts near 99%
 and decays — a token-launch trap) unless include_launch_pools is set.
 """
+import io
 import logging
 
 import aiohttp
@@ -34,6 +35,66 @@ _QUOTE_MINTS = {
     "USDT": "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB",
 }
 _WINDOWS = {"1h", "2h", "4h", "12h", "24h"}
+_WINDOW_HOURS = {"1h": 1, "2h": 2, "4h": 4, "12h": 12, "24h": 24}
+
+
+def _apr(fee_yield: float, window: str) -> float:
+    """Annualize a window fee yield into a fee APR %.
+
+    The Meteora API's fee_tvl_ratio is ALREADY a percentage per window
+    (verified: fees.24h / tvl × 100 == fee_tvl_ratio.24h), so only scale by
+    windows-per-year.
+    """
+    return fee_yield * (8760 / _WINDOW_HOURS.get(window, 24))
+
+
+def _build_chart(ranked: list[dict], window: str) -> tuple[bytes | None, object]:
+    """Horizontal fee-APR bar chart of the ranked pools (PNG bytes + plotly fig)."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError:
+        return None, None
+
+    pools = list(reversed(ranked))
+    n = len(pools)
+    labels, texts, vals, colors = [], [], [], []
+    for i, c in enumerate(pools):
+        rank = n - i
+        detail = (f"TVL ${c['tvl']:,.0f} · vol {window} ${c['vol_win']:,.0f} · "
+                  f"fee {c['base_fee_pct']:.2f}%")
+        labels.append(f"#{rank}  {c['pair']}<br>"
+                      f"<span style='color:#8b949e;font-size:9px'>{detail}</span>")
+        apr = _apr(c["fee_yield"], window)
+        vals.append(apr)
+        texts.append(f"{apr:,.0f}%")
+        colors.append("#d4a017" if rank <= 3 else "#8664c6")
+
+    fig = go.Figure(go.Bar(
+        y=labels, x=vals, orientation="h",
+        marker=dict(color=colors, line=dict(width=0)),
+        text=texts, textposition="outside",
+        textfont=dict(size=11, color="#ffffff", family="monospace"),
+        hovertemplate="<b>%{y}</b><br>Fee APR: %{text}<extra></extra>",
+        showlegend=False,
+    ))
+    fig.update_layout(
+        title=dict(text=f"Meteora DAMM v2 — Fee APR (annualized from {window} fees/TVL)",
+                   font=dict(size=15, color="#ffffff"), x=0.5, xanchor="center"),
+        height=max(450, n * 52 + 130), width=1100,
+        paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+        font=dict(size=11, color="#e0e0e0"),
+        margin=dict(l=300, r=90, t=70, b=40), bargap=0.3,
+        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False,
+                   range=[0, (max(vals) if vals else 1) * 1.18]),
+        yaxis=dict(showgrid=False, tickfont=dict(color="#e0e0e0", size=11)),
+    )
+    try:
+        buf = io.BytesIO()
+        fig.write_image(buf, format="png", scale=2)
+        return buf.getvalue(), fig
+    except Exception as e:
+        logger.warning(f"damm_v2_scanner: PNG export failed: {e}")
+        return None, fig
 
 
 class Config(BaseModel):
@@ -127,7 +188,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         rows.append({
             "#": i,
             "Pair": c["pair"],
-            "FeeYield": f"{c['fee_yield'] * 100:.3f}%",
+            "FeeYield": f"{c['fee_yield']:.3f}%",
             "BaseFee": f"{c['base_fee_pct']:.3f}%",
             "TVL": f"${c['tvl']:,.0f}",
             f"Vol{window}": f"${c['vol_win']:,.0f}",
@@ -148,9 +209,44 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"{'included' if config.include_launch_pools else 'excluded'}."
     )
 
+    chart_bytes, plotly_fig = _build_chart(ranked, window)
+
+    chat_id = getattr(context, "_chat_id", None)
+    if chart_bytes and chat_id and context.bot:
+        try:
+            await context.bot.send_photo(
+                chat_id=chat_id, photo=io.BytesIO(chart_bytes),
+                caption=f"DAMM v2 fee-APR ranking — top {len(ranked)} {quote}-quoted pools",
+            )
+        except Exception as e:
+            logger.warning(f"damm_v2_scanner: failed to send chart to Telegram: {e}")
+
+    try:
+        from condor.reports import ReportBuilder
+
+        builder = ReportBuilder("DAMM v2 Fee-Yield Scanner")
+        builder.source("routine", "damm_v2_scanner").tags(["meteora", "damm-v2", "lp", "yield"])
+        builder.kpi("Pools ranked", str(len(ranked)))
+        builder.kpi("Top fee APR", f"{_apr(ranked[0]['fee_yield'], window):,.0f}%")
+        builder.kpi("Top pool TVL", f"${ranked[0]['tvl']:,.0f}")
+        builder.markdown(
+            f"{quote}-quoted Meteora DAMM v2 pools ranked by {window} fees/TVL "
+            f"({len(candidates)} candidates passed filters; min TVL ${config.min_tvl_usd:,.0f}, "
+            f"verified_only={config.verified_only}, launch pools "
+            f"{'included' if config.include_launch_pools else 'excluded'})."
+        )
+        if plotly_fig is not None:
+            builder.plotly(plotly_fig)
+        builder.table(rows)
+        builder.manual_order()
+        await builder.save()
+    except Exception as e:
+        logger.warning(f"damm_v2_scanner: report save failed: {e}")
+
     try:
         from routines.base import RoutineResult
-        return RoutineResult(text=summary, table_data=rows, table_columns=columns)
+        return RoutineResult(text=summary, table_data=rows, table_columns=columns,
+                             chart_image=chart_bytes)
     except Exception:
         lines = [summary, ""]
         for r in rows:
