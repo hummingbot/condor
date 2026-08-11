@@ -11,6 +11,8 @@ tools:
 - manage_controllers
 - manage_bots
 - manage_routines
+- manage_trading_agent
+- trading_agent_journal_read
 - manage_skill
 - send_notification
 when_to_consult: When the user asks about quoting on the XRP Ledger DEX — whether a

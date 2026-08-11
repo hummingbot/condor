@@ -11,6 +11,9 @@ tools:
 - get_portfolio_overview
 - get_market_data
 - search_history
+- manage_routines
+- manage_trading_agent
+- trading_agent_journal_read
 - manage_memory
 - manage_skill
 when_to_consult: When the user asks which Solana memecoin pools to LP now, how to rank

@@ -164,56 +164,23 @@ Only if the user wants the agent to act autonomously. The agent can already loop
 this step — `start_agent(strategy_id="<agent_slug>")` ticks a default playbook driven by
 its AGENT.md — but that default is deliberately generic. A **strategy** is the specific
 tick playbook the engine runs in a **session**, and it is what you want for anything that
-trades. Make clear the loop does NOT have to trade — define the tick task however the
-user wants:
+trades.
 
-- read routine X's output and **decide whether to trade** (create/stop executors),
-- or just **send a report / notification**,
-- or watch a condition and act only when it's met,
+**How a strategy is authored, dry-run and launched lives in the shared `strategy_builder`
+playbook — read it (`manage_skill(action="read", name="strategy_builder")`) and follow it,
+passing `agent_slug="<agent_slug>"`.** It is the single source of truth, and it is shared
+precisely so an agent can give *itself* a loop without coming back through you. Don't
+restate its mechanics here; your job at this step is only to:
 
-…running at a **frequency the user sets** (`frequency_sec`).
+- decide **with the user** whether a dedicated strategy is warranted at all,
+- make clear the loop does NOT have to trade — it can read routine X's output and decide
+  to trade, send a report, or watch a condition — at a **frequency the user sets**
+  (`frequency_sec`),
+- then run `strategy_builder` for the agent you just created.
 
-If the loop creates executors, BEFORE writing the strategy fetch the schema for every
-executor type it will use — `manage_executors(executor_type="grid_strike")`, etc. — and
-embed the required fields/types directly into the instructions; the tick LLM has no other
-way to learn them. Same for any controller config it manages (`manage_controllers`).
-
-```
-manage_trading_agent(
-    action="create_strategy",
-    agent_slug="<agent_slug>",             # the agent must already exist
-    name="BRL MM",
-    description="…",
-    instructions="<tick system prompt>",
-    # agent_key omitted → inherits the owning agent's model; overridable at launch
-    config={"connector_name": "binance", "frequency_sec": 60,
-            "total_amount_quote": 100, "execution_mode": "loop"}
-)
-```
-
-Strategy instructions (the tick system prompt) MUST include: **Objective**; **Analysis**
-(which routine to call by name and how to read it); **Decision logic** (act / report /
-hold); and — only if it trades — an **Executor config** with the FULL schema (every
-required field, type, range, ordering rule), **Parameter inference** (how to derive
-prices/side/TP from routine output + market data), **Risk rules** (max position, position
-limits, stop behaviour), and **Error recovery** (on a failed create, re-fetch the schema,
-fix, retry once, journal it).
-
-**Dry run before live** (if it trades):
-```
-manage_trading_agent(action="start_agent", strategy_id="<agent_slug.strategy_slug>",
-    config={"execution_mode": "dry_run", "agent_key": "ollama:llama3.1",
-            "trading_context": "Trade BTC-USDT on binance_perpetual",
-            "frequency_sec": 60, "total_amount_quote": 100,
-            "risk_limits": {"max_position_size_quote": 200, "max_open_executors": 3}})
-```
-Review with `trading_agent_journal_read(agent_id=…, section="run:1")`: routines called
-right, decision logic sound, conditional language ("would place…"), no real create/stop
-calls, risk rules respected. Don't go live until the user is satisfied.
-
-**Go live:** offer `run_once` (single live tick), `loop` (continuous), or `loop` +
-`max_ticks`. Confirm the live model, start, confirm it's running, give monitoring
-commands. Always include risk limits when a loop agent can trade.
+If the agent is capable enough to author its own loop, prefer handing it the job:
+`consult(agent="<agent_slug>", task="give yourself a loop that …")`. It reads the same
+shared playbook and knows its own domain better than you do.
 
 ## Monitoring existing agents
 1. `manage_trading_agent(action="list_agent_definitions")` — all agents, with their
