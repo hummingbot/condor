@@ -1,26 +1,38 @@
 import type { ExecutorType } from "@/components/executor/types";
 
 /**
- * What a connector can do in the trade panel.
+ * What a venue can do in the trade panel.
  *
- * DEX-ness is **not** guessed from the name here. The backend already carries four
- * mutually inconsistent connector predicates (prefix lists, substring lists, live
- * gateway lookups) that disagree on cases like `binance-smart-chain`; a fifth one
- * in the frontend would silently drift the same way, and the symptom would be "the
- * chart is blank and Grid is offered on a DEX". Instead the server tells us which
- * connectors are gateway networks (`GET /market/gateway-networks`, already
- * intersected with the set Condor can chart) and this module classifies by
- * membership in that list.
+ * This is the one place that maps *facts about a venue* to *UI decisions*, and the
+ * facts arrive from the server as independent traits (`GET /market/venues`) rather
+ * than being guessed here. Nothing about a venue is inferred from its name: the
+ * backend already carries four mutually inconsistent connector predicates (prefix
+ * lists, substring lists, live gateway lookups) that disagree on cases like
+ * `binance-smart-chain`, and a fifth one in the frontend would drift the same way.
+ *
+ * It is also not inferred from *one* trait standing in for several. The panel asks
+ * four different questions — which executor tabs exist, which execution strategies
+ * exist, whether the Hummingbot market endpoints are called, and where the current
+ * price comes from — and they do not have a common answer. `xrpl` is the venue that
+ * proves it: a first-class Hummingbot connector with a real order book whose charts
+ * nonetheless come from GeckoTerminal. A `cex`/`dex` binary keyed on chart source
+ * silently strips its book; two independent traits cannot.
  *
  * The executor-type and strategy maps below *are* frontend literals, deliberately:
  * they are a UI product decision about which tabs and options to render, not a
  * server fact, and they are changed by whoever changes the tabs.
  */
 
-export type ConnectorKind = "cex" | "dex";
+/** A venue's independent traits, as `GET /market/venues` reports them. */
+export interface VenueTraits {
+  name: string;
+  /** `/market/trading-rules`, `/market/order-book`, `/market/tickers`, `/market/prices` answer. */
+  hummingbotMarketData: boolean;
+  /** This venue can take an `lp_executor` CLMM position. */
+  clmmLp: boolean;
+}
 
 export interface ConnectorCapabilities {
-  kind: ConnectorKind;
   /** Executor types this venue supports. */
   executorTypes: ExecutorType[];
   /** Allowed `execution_strategy` values (subset of OrderConfigPanel's options). */
@@ -29,37 +41,56 @@ export interface ConnectorCapabilities {
   hasOrderBook: boolean;
   /** Whether `/market/trading-rules` answers — pair list + price precision. */
   hasTradingRules: boolean;
+  /** Whether `/market/prices` answers — otherwise the price comes off the candle stream. */
+  hasRestPrice: boolean;
+  /** Whether the LP tab is offered. */
+  supportsLp: boolean;
 }
 
-const CEX_CAPABILITIES: ConnectorCapabilities = {
-  kind: "cex",
-  executorTypes: ["order", "position", "grid", "dca"],
-  orderStrategies: ["MARKET", "LIMIT", "LIMIT_MAKER", "LIMIT_CHASER"],
-  hasOrderBook: true,
-  hasTradingRules: true,
-};
-
-// A gateway swap has no resting order book to post to, so MARKET is the only
-// execution strategy that means anything. `lp` is the CLMM liquidity position —
-// the second, and only other, executor a gateway network supports.
-const DEX_CAPABILITIES: ConnectorCapabilities = {
-  kind: "dex",
-  executorTypes: ["order", "lp"],
-  orderStrategies: ["MARKET"],
-  hasOrderBook: false,
-  hasTradingRules: false,
+/**
+ * The traits assumed for a venue we have no answer for — including every venue
+ * before the query resolves. Full Hummingbot capabilities: the status quo for every
+ * venue the panel handled before DEX support existed, so the pending state never
+ * flashes DEX-restricted UI.
+ */
+const UNKNOWN_VENUE: VenueTraits = {
+  name: "",
+  hummingbotMarketData: true,
+  clmmLp: false,
 };
 
 /**
- * Capabilities of `connector`, given the gateway networks this server exposes.
+ * Capabilities of `connector`, given what the server says about the venues.
  *
- * An unknown connector — or any connector at all before the gateway-networks
- * query resolves — is treated as a CEX, which is the status quo behavior for
- * every venue the panel handled before DEX support existed.
+ * Each UI consequence is traced to the single trait that justifies it, and the two
+ * traits are read independently — that is what stops an order-book venue from being
+ * offered an LP tab, and a swap venue from being denied one.
  */
 export function connectorCapabilities(
   connector: string,
-  gatewayNetworks: string[],
+  venues: VenueTraits[] | Map<string, VenueTraits>,
 ): ConnectorCapabilities {
-  return gatewayNetworks.includes(connector) ? DEX_CAPABILITIES : CEX_CAPABILITIES;
+  const traits =
+    (venues instanceof Map
+      ? venues.get(connector)
+      : venues.find((v) => v.name === connector)) ?? UNKNOWN_VENUE;
+
+  // Without a Hummingbot market feed there is no resting order book to post to, so
+  // MARKET is the only execution strategy that means anything, and the executors
+  // that manage resting orders (position/grid/dca) have nothing to manage.
+  const executorTypes: ExecutorType[] = traits.hummingbotMarketData
+    ? ["order", "position", "grid", "dca"]
+    : ["order"];
+  if (traits.clmmLp) executorTypes.push("lp");
+
+  return {
+    executorTypes,
+    orderStrategies: traits.hummingbotMarketData
+      ? ["MARKET", "LIMIT", "LIMIT_MAKER", "LIMIT_CHASER"]
+      : ["MARKET"],
+    hasOrderBook: traits.hummingbotMarketData,
+    hasTradingRules: traits.hummingbotMarketData,
+    hasRestPrice: traits.hummingbotMarketData,
+    supportsLp: traits.clmmLp,
+  };
 }

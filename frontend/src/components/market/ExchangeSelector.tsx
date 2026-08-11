@@ -5,7 +5,12 @@ interface ExchangeSelectorProps {
   connectors: string[];
   value: string;
   onChange: (v: string) => void;
-  /** Connectors that are gateway DEX networks — listed under their own heading. */
+  /**
+   * Venues with no Hummingbot market feed — listed under their own heading and
+   * formatted as chain ids. Fed by `!hummingbotMarketData`, not by gateway-network
+   * membership: `xrpl` is a gateway-adjacent id that trades through a real order
+   * book, so it belongs in the exchange group and reads as `Xrpl`.
+   */
   dexConnectors?: string[];
 }
 

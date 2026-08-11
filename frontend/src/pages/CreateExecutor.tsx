@@ -147,42 +147,46 @@ export function CreateExecutor() {
     cursor: "row-resize",
   });
 
-  const { data: connectors = [], isPending: connectorsPending } = useQuery({
-    queryKey: ["connected-exchanges", server],
-    queryFn: () => api.getConnectedExchanges(server!),
-    enabled: !!server,
-  });
-
-  // `connected-exchanges` is CEX-only by contract and has other callers, so the
-  // gateway networks arrive on their own endpoint and the panel merges the two.
-  const { data: gatewayNetworks = [], isPending: networksPending } = useQuery({
-    queryKey: ["gateway-networks", server],
-    queryFn: () => api.getGatewayNetworks(server!),
+  // One query, one answer: every venue the panel can offer, each with the traits
+  // the UI decisions below rest on. The server dedups (a venue in both of its input
+  // lists is a Hummingbot connector), so there is no merge to get wrong here.
+  const { data: venues = [], isPending: venuesPending } = useQuery({
+    queryKey: ["venues", server],
+    queryFn: () => api.getVenues(server!),
     enabled: !!server,
     staleTime: 5 * 60 * 1000,
   });
 
-  // Both halves of the dropdown have to be in before the panel may *correct* a
-  // selection: judging a persisted DEX network against the CEX list alone would
-  // bounce it to connectors[0] on every reload, and switch its tab to Order.
-  const listsReady = !!server && !connectorsPending && !networksPending;
+  // The list has to be in before the panel may *correct* a selection: judging a
+  // persisted venue against an empty list would bounce it on every reload and
+  // switch its tab to Order.
+  const listsReady = !!server && !venuesPending;
 
-  // Deduplicated: `is_cex_connector` still calls `binance-smart-chain` a CEX, so a
-  // network can legitimately appear in both lists.
+  // Order-book venues first, then swap-only ones — the grouping ExchangeSelector
+  // renders, and it keeps allConnectors[0] (the reset fallback) a tradable venue
+  // rather than whichever chain sorts first alphabetically.
   const allConnectors = useMemo(
-    () => [...new Set([...connectors, ...gatewayNetworks])],
-    [connectors, gatewayNetworks],
+    () => [
+      ...venues.filter((v) => v.hummingbotMarketData).map((v) => v.name),
+      ...venues.filter((v) => !v.hummingbotMarketData).map((v) => v.name),
+    ],
+    [venues],
+  );
+
+  const dexConnectors = useMemo(
+    () => venues.filter((v) => !v.hummingbotMarketData).map((v) => v.name),
+    [venues],
   );
 
   const caps = useMemo(
-    () => connectorCapabilities(connector, gatewayNetworks),
-    [connector, gatewayNetworks],
+    () => connectorCapabilities(connector, venues),
+    [connector, venues],
   );
 
-  // Pool resolution only means something for a gateway network, so the query is off
-  // for a CEX rather than asking about a pair that has no pool. Declared above the
-  // connector/pair propagation effects that dispatch into it.
-  const lpConfig = useLpConfig(server ?? null, connector, pair, caps.kind === "dex");
+  // Pool resolution only means something where an LP position can exist, so the
+  // query is off elsewhere rather than asking about a pair that has no pool.
+  // Declared above the connector/pair propagation effects that dispatch into it.
+  const lpConfig = useLpConfig(server ?? null, connector, pair, caps.supportsLp);
 
   // WS for executor data (candle streams are managed by candleStore)
   const wsChannels = useMemo(
@@ -218,8 +222,8 @@ export function CreateExecutor() {
     setSelectedExecutorId(null);
   }, [connector, pair]);
 
-  // Sync connector to the merged list. Validating against the CEX list alone would
-  // bounce a selected DEX network back to connectors[0] on every render.
+  // Sync connector to the offered venues. A venue the server no longer reports
+  // cannot stay selected, or the panel queries endpoints for a venue that is gone.
   useEffect(() => {
     if (listsReady && allConnectors.length && !allConnectors.includes(connector)) {
       gridDispatch({ type: "SET_CONNECTOR", value: allConnectors[0] });
@@ -260,14 +264,14 @@ export function CreateExecutor() {
     lpConfig.dispatch({ type: "SET_PAIR", value: pair });
   }, [pair]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Current price. /market/prices is a Hummingbot API call with no DEX answer, so a
-  // gateway network reads the last close off the candle stream instead. The store is
+  // Current price. /market/prices only answers for a Hummingbot connector, so a
+  // venue without that trait reads the last close off the candle stream instead. The store is
   // a singleton over one shared channel and TradeChart already subscribes with these
   // exact arguments, so this costs no extra connection.
   const { data: priceData } = useQuery({
     queryKey: ["price", server, connector, pair],
     queryFn: () => api.getPrice(server!, connector, pair),
-    enabled: !!server && !!connector && !!pair && caps.kind === "cex",
+    enabled: !!server && !!connector && !!pair && caps.hasRestPrice,
     refetchInterval: 5000,
   });
 
@@ -278,10 +282,9 @@ export function CreateExecutor() {
     gridState.interval,
   );
 
-  const currentPrice =
-    caps.kind === "dex"
-      ? (sharedCandles[sharedCandles.length - 1]?.close ?? null)
-      : (priceData?.mid_price ?? null);
+  const currentPrice = !caps.hasRestPrice
+    ? (sharedCandles[sharedCandles.length - 1]?.close ?? null)
+    : (priceData?.mid_price ?? null);
 
 
   // Price precision
@@ -455,14 +458,14 @@ export function CreateExecutor() {
               connectors={allConnectors}
               value={connector}
               onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
-              dexConnectors={gatewayNetworks}
+              dexConnectors={dexConnectors}
             />
           </div>
         </div>
 
         {/* Price ticker */}
         <div className="flex flex-1 items-center px-4 py-2">
-          <PriceTicker server={server} connector={connector} pair={pair} hasRestPrice={caps.hasOrderBook} />
+          <PriceTicker server={server} connector={connector} pair={pair} hasRestPrice={caps.hasRestPrice} />
         </div>
 
         {/* Interval + Range */}

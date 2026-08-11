@@ -267,6 +267,13 @@ export interface MarketPrice {
  * a pool address by hand. `current_price` is the base priced in quote — the scale
  * every LP bound is expressed in — and is null when GeckoTerminal reports no price.
  */
+/** Wire shape of `GET /market/venues`; mapped to `VenueTraits` on the way in. */
+interface WireVenue {
+  name: string;
+  hummingbot_market_data: boolean;
+  clmm_lp: boolean;
+}
+
 export interface DexPoolInfo {
   pool_address: string | null;
   dex_id: string | null;
@@ -1198,11 +1205,17 @@ export const api = {
   getConnectedExchanges: (server: string) =>
     apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`),
 
-  /** Chartable gateway DEX networks — the trade panel's DEX half of the dropdown. */
-  getGatewayNetworks: (server: string) =>
-    apiFetch<{ networks: string[] }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/market/gateway-networks`,
-    ).then((r) => r.networks),
+  /** Venues the trade panel can offer, with the traits each UI decision rests on. */
+  getVenues: (server: string) =>
+    apiFetch<{ venues: WireVenue[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/venues`,
+    ).then((r) =>
+      (r.venues ?? []).map((v) => ({
+        name: v.name,
+        hummingbotMarketData: !!v.hummingbot_market_data,
+        clmmLp: !!v.clmm_lp,
+      })),
+    ),
 
   getDexPool: (server: string, connector: string, pair: string) =>
     apiFetch<DexPoolInfo>(
