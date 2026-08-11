@@ -29,9 +29,6 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
-# The telemetry collector (FEAT-024, telemetry_server/). Kept out of a normal
-# install: a bot that only *emits* telemetry has no use for a database driver.
-telemetry-server = ["asyncpg"]
 
 [tool.isort]
 profile = "black"
