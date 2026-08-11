@@ -1179,6 +1179,12 @@ export const api = {
   getConnectedExchanges: (server: string) =>
     apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`),
 
+  /** Chartable gateway DEX networks — the trade panel's DEX half of the dropdown. */
+  getGatewayNetworks: (server: string) =>
+    apiFetch<{ networks: string[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/gateway-networks`,
+    ).then((r) => r.networks),
+
   getPrice: (server: string, connector: string, pair: string) =>
     apiFetch<MarketPrice>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/prices?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,

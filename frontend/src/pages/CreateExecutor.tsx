@@ -29,6 +29,7 @@ import { PositionConfigPanel, usePositionConfig } from "@/components/executor/Po
 import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
 import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPanel";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
+import { useCandleStore } from "@/hooks/useCandleStore";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
@@ -36,6 +37,7 @@ import { useRates } from "@/hooks/useRates";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
+import { connectorCapabilities } from "@/lib/connector-capabilities";
 import type { ExecutorType } from "@/components/executor/types";
 import {
   gridReducer,
@@ -141,11 +143,37 @@ export function CreateExecutor() {
     cursor: "row-resize",
   });
 
-  const { data: connectors = [] } = useQuery({
+  const { data: connectors = [], isPending: connectorsPending } = useQuery({
     queryKey: ["connected-exchanges", server],
     queryFn: () => api.getConnectedExchanges(server!),
     enabled: !!server,
   });
+
+  // `connected-exchanges` is CEX-only by contract and has other callers, so the
+  // gateway networks arrive on their own endpoint and the panel merges the two.
+  const { data: gatewayNetworks = [], isPending: networksPending } = useQuery({
+    queryKey: ["gateway-networks", server],
+    queryFn: () => api.getGatewayNetworks(server!),
+    enabled: !!server,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  // Both halves of the dropdown have to be in before the panel may *correct* a
+  // selection: judging a persisted DEX network against the CEX list alone would
+  // bounce it to connectors[0] on every reload, and switch its tab to Order.
+  const listsReady = !!server && !connectorsPending && !networksPending;
+
+  // Deduplicated: `is_cex_connector` still calls `binance-smart-chain` a CEX, so a
+  // network can legitimately appear in both lists.
+  const allConnectors = useMemo(
+    () => [...new Set([...connectors, ...gatewayNetworks])],
+    [connectors, gatewayNetworks],
+  );
+
+  const caps = useMemo(
+    () => connectorCapabilities(connector, gatewayNetworks),
+    [connector, gatewayNetworks],
+  );
 
   // WS for executor data (candle streams are managed by candleStore)
   const wsChannels = useMemo(
@@ -158,7 +186,7 @@ export function CreateExecutor() {
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
     useMainControllerData(server, connector, pair);
 
-  const rulesData = useTradingRules(server ?? "", connector);
+  const rulesData = useTradingRules(server ?? "", connector, caps.hasTradingRules);
 
   // Currency conversion for chart tooltip values
   const quoteCurrency = pair.split("-")[1] || "USDT";
@@ -181,12 +209,21 @@ export function CreateExecutor() {
     setSelectedExecutorId(null);
   }, [connector, pair]);
 
-  // Sync connector to filtered list
+  // Sync connector to the merged list. Validating against the CEX list alone would
+  // bounce a selected DEX network back to connectors[0] on every render.
   useEffect(() => {
-    if (connectors.length && !connectors.includes(connector)) {
-      gridDispatch({ type: "SET_CONNECTOR", value: connectors[0] });
+    if (listsReady && allConnectors.length && !allConnectors.includes(connector)) {
+      gridDispatch({ type: "SET_CONNECTOR", value: allConnectors[0] });
     }
-  }, [connectors, connector]);
+  }, [listsReady, allConnectors, connector]);
+
+  // Executor types the venue does not support cannot stay selected (Grid on a CEX
+  // → pick a DEX → land on Order).
+  useEffect(() => {
+    if (listsReady && !caps.executorTypes.includes(executorType)) {
+      handleTypeChange("order");
+    }
+  }, [listsReady, caps, executorType]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset pair when connector changes
   useEffect(() => {
@@ -212,15 +249,28 @@ export function CreateExecutor() {
     dcaConfig.dispatch({ type: "SET_PAIR", value: pair });
   }, [pair]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Current price
+  // Current price. /market/prices is a Hummingbot API call with no DEX answer, so a
+  // gateway network reads the last close off the candle stream instead. The store is
+  // a singleton over one shared channel and TradeChart already subscribes with these
+  // exact arguments, so this costs no extra connection.
   const { data: priceData } = useQuery({
     queryKey: ["price", server, connector, pair],
     queryFn: () => api.getPrice(server!, connector, pair),
-    enabled: !!server && !!connector && !!pair,
+    enabled: !!server && !!connector && !!pair && caps.kind === "cex",
     refetchInterval: 5000,
   });
 
-  const currentPrice = priceData?.mid_price ?? null;
+  const { candles: sharedCandles } = useCandleStore(
+    server ?? null,
+    connector,
+    pair,
+    gridState.interval,
+  );
+
+  const currentPrice =
+    caps.kind === "dex"
+      ? (sharedCandles[sharedCandles.length - 1]?.close ?? null)
+      : (priceData?.mid_price ?? null);
 
   // Price precision
   const pricePrecision = useMemo(() => {
@@ -231,6 +281,10 @@ export function CreateExecutor() {
     if (inc >= 1) return 0;
     return Math.max(0, Math.ceil(-Math.log10(inc)));
   }, [rulesData, pair]);
+
+  // Depth and Markets have no DEX answer. Derived rather than reset in an effect, so
+  // a CEX selection is remembered and comes back when the user returns to a CEX.
+  const activePanel = caps.hasOrderBook ? rightPanel : "config";
 
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
@@ -372,19 +426,21 @@ export function CreateExecutor() {
             connector={connector}
             value={pair}
             onChange={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
+            hasTradingRules={caps.hasTradingRules}
           />
           <div className="relative border-l border-[var(--color-border)]">
             <ExchangeSelector
-              connectors={connectors}
+              connectors={allConnectors}
               value={connector}
               onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
+              dexConnectors={gatewayNetworks}
             />
           </div>
         </div>
 
         {/* Price ticker */}
         <div className="flex flex-1 items-center px-4 py-2">
-          <PriceTicker server={server} connector={connector} pair={pair} />
+          <PriceTicker server={server} connector={connector} pair={pair} hasRestPrice={caps.hasOrderBook} />
         </div>
 
         {/* Interval + Range */}
@@ -505,7 +561,7 @@ export function CreateExecutor() {
             <button
               onClick={() => setRightPanel("config")}
               className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                rightPanel === "config"
+                activePanel === "config"
                   ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               }`}
@@ -513,10 +569,11 @@ export function CreateExecutor() {
               <Settings2 className="h-3.5 w-3.5" />
               Execute
             </button>
+            {caps.hasOrderBook && (
             <button
               onClick={() => setRightPanel("depth")}
               className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                rightPanel === "depth"
+                activePanel === "depth"
                   ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               }`}
@@ -524,10 +581,12 @@ export function CreateExecutor() {
               <BarChart3 className="h-3.5 w-3.5" />
               Data
             </button>
+            )}
+            {caps.hasOrderBook && (
             <button
               onClick={() => setRightPanel("markets")}
               className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                rightPanel === "markets"
+                activePanel === "markets"
                   ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               }`}
@@ -535,14 +594,15 @@ export function CreateExecutor() {
               <List className="h-3.5 w-3.5" />
               Markets
             </button>
+            )}
           </div>
 
-          {rightPanel === "config" ? (
+          {activePanel === "config" ? (
             <>
               {/* Type Tabs */}
               <div className="border-b border-[var(--color-border)]">
                 <div className="flex">
-                  {TYPE_TABS.map((tab) => (
+                  {TYPE_TABS.filter((t) => caps.executorTypes.includes(t.value)).map((tab) => (
                     <button
                       key={tab.value}
                       onClick={() => handleTypeChange(tab.value)}
@@ -568,7 +628,7 @@ export function CreateExecutor() {
                   <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                 )}
                 {executorType === "order" && (
-                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} />
                 )}
                 {executorType === "dca" && (
                   <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
@@ -596,7 +656,7 @@ export function CreateExecutor() {
                 </button>
               </div>
             </>
-          ) : rightPanel === "depth" ? (
+          ) : activePanel === "depth" ? (
             <MarketDepthPanel server={server} connector={connector} pair={pair} />
           ) : (
             <MarketsPanel

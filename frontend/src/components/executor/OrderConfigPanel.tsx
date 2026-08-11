@@ -1,4 +1,4 @@
-import { useMemo, useReducer } from "react";
+import { useEffect, useMemo, useReducer } from "react";
 import { Sparkles } from "lucide-react";
 
 import {
@@ -179,12 +179,32 @@ interface Props {
   currentPrice: number | null;
   isSpot?: boolean;
   pair?: string;
+  /**
+   * Execution strategies this venue allows. A gateway swap has no resting order
+   * book, so a DEX passes `["MARKET"]`. Defaults to all of them.
+   */
+  strategies?: string[];
 }
 
-export function OrderConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair }: Props) {
+export function OrderConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair, strategies }: Props) {
   const d = dispatch as FieldDispatch;
-  const needsPrice = state.execution_strategy === "LIMIT" || state.execution_strategy === "LIMIT_MAKER";
-  const isChaser = state.execution_strategy === "LIMIT_CHASER";
+  const options = strategies
+    ? STRATEGY_OPTIONS.filter((o) => strategies.includes(o.value))
+    : STRATEGY_OPTIONS;
+
+  // A strategy carried over from another venue (LIMIT on binance → solana) has to
+  // fall back, or the panel would submit a strategy the venue cannot honor.
+  const allowed = options.some((o) => o.value === state.execution_strategy);
+  useEffect(() => {
+    if (!allowed) {
+      d({ type: "SET_FIELD", field: "execution_strategy", value: "MARKET" });
+    }
+  }, [allowed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const needsPrice =
+    allowed &&
+    (state.execution_strategy === "LIMIT" || state.execution_strategy === "LIMIT_MAKER");
+  const isChaser = allowed && state.execution_strategy === "LIMIT_CHASER";
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
@@ -207,7 +227,7 @@ export function OrderConfigPanel({ state, dispatch, validation, currentPrice, is
           value={state.execution_strategy}
           field="execution_strategy"
           dispatch={d}
-          options={STRATEGY_OPTIONS}
+          options={options}
         />
         <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
         {!isSpot && (

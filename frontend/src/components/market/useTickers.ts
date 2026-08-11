@@ -6,12 +6,15 @@ import { api, type Ticker } from "@/lib/api";
 /**
  * 24h tickers for a connector, already sorted by USD volume (highest first) by the
  * backend. Shared by PairSelector and MarketsPanel so both hit one cached query.
+ *
+ * @param enabled Pass false for venues with no ticker endpoint (gateway DEX
+ *   networks), where the request would only 502.
  */
-export function useTickers(server: string, connector: string) {
+export function useTickers(server: string, connector: string, enabled = true) {
   const { data, isLoading, isFetching } = useQuery({
     queryKey: ["tickers", server, connector],
     queryFn: () => api.getTickers(server, connector),
-    enabled: !!server && !!connector,
+    enabled: !!server && !!connector && enabled,
     staleTime: 60 * 1000,
     refetchInterval: 60 * 1000,
   });
