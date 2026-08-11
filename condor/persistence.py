@@ -124,9 +124,7 @@ class SafePicklePersistence(PicklePersistence):
             self.conversations = data.get("conversations", {})
             self.user_data = data.get("user_data", {})
             self.chat_data = data.get("chat_data", {})
-            self.bot_data = data.get(
-                "bot_data", self.context_types.bot_data()
-            )
+            self.bot_data = data.get("bot_data", self.context_types.bot_data())
             self.callback_data = data.get("callback_data", None)
         else:
             # Both files missing or corrupt – start fresh

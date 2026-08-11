@@ -57,7 +57,8 @@ async def show_pools_menu(
             else:
                 # Filter to only default networks
                 networks_to_show = [
-                    n for n in all_networks
+                    n
+                    for n in all_networks
                     if extract_network_id(n) in default_network_ids
                 ][:20]
                 showing_defaults = True
@@ -89,14 +90,14 @@ async def show_pools_menu(
                     [
                         InlineKeyboardButton(
                             f"🌐 All Networks ({len(all_networks)})",
-                            callback_data="gateway_pool_all_networks"
+                            callback_data="gateway_pool_all_networks",
                         )
                     ],
                     [
                         InlineKeyboardButton(
                             "« Back to Gateway", callback_data="config_gateway"
                         )
-                    ]
+                    ],
                 ]
             else:
                 count_escaped = escape_markdown_v2(str(len(all_networks)))
@@ -651,9 +652,7 @@ async def remove_pool(
             chat_id, preferred_server=get_active_server(context.user_data)
         )
         await client.gateway.delete_network_pool(
-            network_id=network_id,
-            address=pool_address,
-            pool_type=pool_type
+            network_id=network_id, address=pool_address, pool_type=pool_type
         )
 
         network_escaped = escape_markdown_v2(network_id)

@@ -5,7 +5,6 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from config_manager import ServerPermission, get_config_manager
 from condor.web.auth import get_current_user
 from condor.web.models import (
     AddCredentialRequest,
@@ -17,6 +16,7 @@ from condor.web.models import (
     UpdateServerRequest,
     WebUser,
 )
+from config_manager import ServerPermission, get_config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +48,7 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
     accessible = cm.list_accessible_servers(user.id)
 
     from condor.server_data_service import ServerDataType, get_server_data_service
+
     sds = get_server_data_service()
 
     # Fetch status for all servers concurrently (uses SDS cache, instant if warm)
@@ -61,13 +62,15 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
     for (name, cfg), status in zip(accessible.items(), statuses):
         perm = cm.get_server_permission(user.id, name)
         online = status.get("status") == "online"
-        results.append(ServerInfo(
-            name=name,
-            host=cfg.get("host", ""),
-            port=cfg.get("port", 0),
-            online=online,
-            permission=perm.value if perm else "trader",
-        ))
+        results.append(
+            ServerInfo(
+                name=name,
+                host=cfg.get("host", ""),
+                port=cfg.get("port", 0),
+                online=online,
+                permission=perm.value if perm else "trader",
+            )
+        )
 
     return sorted(results, key=lambda s: (not s.online, s.name))
 
@@ -206,10 +209,12 @@ async def gateway_start(
         raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
-        result = await client.gateway.start({
-            "image": req.image,
-            "port": req.port,
-        })
+        result = await client.gateway.start(
+            {
+                "image": req.image,
+                "port": req.port,
+            }
+        )
         return {"started": True, "result": result}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -271,12 +276,16 @@ async def get_voice_settings(user: WebUser = Depends(get_current_user)):
     """Get voice/transcription preferences for the current user."""
     cm = get_config_manager()
     prefs = cm.get_user_preferences(user.id)
-    voice = prefs.get("voice", {
-        "whisper_model": "small",
-        "language": None,
-        "auto_send": True,
-    })
-    from condor.preferences import WHISPER_MODELS, VOICE_LANGUAGES
+    voice = prefs.get(
+        "voice",
+        {
+            "whisper_model": "small",
+            "language": None,
+            "auto_send": True,
+        },
+    )
+    from condor.preferences import VOICE_LANGUAGES, WHISPER_MODELS
+
     return {
         "voice": voice,
         "available_models": WHISPER_MODELS,
@@ -292,11 +301,14 @@ async def update_voice_settings(
     """Update voice/transcription preferences."""
     cm = get_config_manager()
     prefs = cm.get_user_preferences(user.id)
-    voice = prefs.get("voice", {
-        "whisper_model": "small",
-        "language": None,
-        "auto_send": True,
-    })
+    voice = prefs.get(
+        "voice",
+        {
+            "whisper_model": "small",
+            "language": None,
+            "auto_send": True,
+        },
+    )
     allowed_keys = {"whisper_model", "language", "auto_send"}
     for key in allowed_keys:
         if key in body:
@@ -304,6 +316,7 @@ async def update_voice_settings(
 
     # Validate whisper_model
     from condor.preferences import WHISPER_MODELS
+
     if voice.get("whisper_model") not in WHISPER_MODELS:
         voice["whisper_model"] = "base"
 
@@ -336,10 +349,16 @@ async def list_credentials(
                 if isinstance(item, str):
                     credentials.append({"connector_name": item, "connector_type": ""})
                 elif isinstance(item, dict):
-                    credentials.append({
-                        "connector_name": item.get("connector_name", item.get("name", "")),
-                        "connector_type": item.get("connector_type", item.get("type", "")),
-                    })
+                    credentials.append(
+                        {
+                            "connector_name": item.get(
+                                "connector_name", item.get("name", "")
+                            ),
+                            "connector_type": item.get(
+                                "connector_type", item.get("type", "")
+                            ),
+                        }
+                    )
         return {"credentials": credentials}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -360,16 +379,28 @@ async def list_connectors(
     sds = get_server_data_service()
     raw = await sds.get_or_fetch(server, ServerDataType.ALL_CONNECTORS)
     if raw is None:
-        raise HTTPException(status_code=502, detail="Cannot fetch connectors from server")
+        raise HTTPException(
+            status_code=502, detail="Cannot fetch connectors from server"
+        )
 
     # API returns plain strings — filter out testnet/gateway connectors
-    names = [c for c in raw if isinstance(c, str) and "testnet" not in c.lower() and "sandbox" not in c.lower() and "/" not in c]
+    names = [
+        c
+        for c in raw
+        if isinstance(c, str)
+        and "testnet" not in c.lower()
+        and "sandbox" not in c.lower()
+        and "/" not in c
+    ]
     if type:
         if type.lower() == "perpetual":
             names = [c for c in names if "perpetual" in c.lower()]
         else:
             names = [c for c in names if "perpetual" not in c.lower()]
-    connectors = [{"name": c, "type": "perpetual" if "perpetual" in c.lower() else "spot"} for c in names]
+    connectors = [
+        {"name": c, "type": "perpetual" if "perpetual" in c.lower() else "spot"}
+        for c in names
+    ]
     return {"connectors": connectors}
 
 
@@ -408,6 +439,7 @@ async def add_credential(
         )
         # Invalidate configured connectors cache
         from condor.server_data_service import ServerDataType, get_server_data_service
+
         get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
         return {"added": True, "result": result}
     except Exception as e:
@@ -431,6 +463,7 @@ async def delete_credential(
         )
         # Invalidate configured connectors + portfolio caches so the removed key disappears immediately
         from condor.server_data_service import ServerDataType, get_server_data_service
+
         sds = get_server_data_service()
         sds.invalidate(server, ServerDataType.CONNECTORS)
         sds.invalidate(server, ServerDataType.PORTFOLIO)

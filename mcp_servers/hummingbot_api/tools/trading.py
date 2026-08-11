@@ -6,9 +6,13 @@ managing positions and setting account configurations.
 
 For order placement and cancellation, use `manage_executors` with `order_executor` type.
 """
+
 from typing import Any, Literal
 
-from mcp_servers.hummingbot_api.formatters import format_orders_as_table, format_positions_as_table
+from mcp_servers.hummingbot_api.formatters import (
+    format_orders_as_table,
+    format_positions_as_table,
+)
 
 
 async def set_position_mode_and_leverage(
@@ -48,7 +52,9 @@ async def set_position_mode_and_leverage(
             raise ValueError("Invalid position mode. Must be 'HEDGE' or 'ONE-WAY'")
 
         position_mode_result = await client.trading.set_position_mode(
-            account_name=account_name, connector_name=connector_name, position_mode=position_mode
+            account_name=account_name,
+            connector_name=connector_name,
+            position_mode=position_mode,
         )
         results["position_mode"] = position_mode_result
 

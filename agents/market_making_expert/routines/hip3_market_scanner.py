@@ -7,6 +7,7 @@ import math
 import aiohttp
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
+
 from config_manager import get_client
 
 logger = logging.getLogger(__name__)

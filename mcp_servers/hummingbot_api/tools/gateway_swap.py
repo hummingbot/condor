@@ -5,6 +5,7 @@ Handles DEX trading operations via Hummingbot Gateway:
 - Swap quote/execute (Router: Jupiter, 0x)
 - Swap search and status tracking
 """
+
 import logging
 from decimal import Decimal
 from typing import Any
@@ -15,7 +16,9 @@ from mcp_servers.hummingbot_api.schemas import GatewaySwapRequest
 logger = logging.getLogger("hummingbot-mcp")
 
 
-async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict[str, Any]:
+async def manage_gateway_swaps(
+    client: Any, request: GatewaySwapRequest
+) -> dict[str, Any]:
     """
     Manage Gateway swap operations: quote, execute, search, and status tracking.
 
@@ -47,7 +50,9 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
 
         # Parse trading pair
         if "-" not in request.trading_pair:
-            raise ToolError(f"Invalid trading_pair format. Expected 'BASE-QUOTE', got '{request.trading_pair}'")
+            raise ToolError(
+                f"Invalid trading_pair format. Expected 'BASE-QUOTE', got '{request.trading_pair}'"
+            )
 
         result = await client.gateway_swap.get_swap_quote(
             connector=request.connector,
@@ -55,7 +60,7 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
             trading_pair=request.trading_pair,
             side=request.side,
             amount=Decimal(request.amount),
-            slippage_pct=Decimal(request.slippage_pct or "1.0")
+            slippage_pct=Decimal(request.slippage_pct or "1.0"),
         )
 
         return {
@@ -63,7 +68,7 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
             "trading_pair": request.trading_pair,
             "side": request.side,
             "amount": request.amount,
-            "result": result
+            "result": result,
         }
 
     # ============================================
@@ -84,7 +89,9 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
 
         # Parse trading pair
         if "-" not in request.trading_pair:
-            raise ToolError(f"Invalid trading_pair format. Expected 'BASE-QUOTE', got '{request.trading_pair}'")
+            raise ToolError(
+                f"Invalid trading_pair format. Expected 'BASE-QUOTE', got '{request.trading_pair}'"
+            )
 
         result = await client.gateway_swap.execute_swap(
             connector=request.connector,
@@ -93,7 +100,7 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
             side=request.side,
             amount=Decimal(request.amount),
             slippage_pct=Decimal(request.slippage_pct or "1.0"),
-            wallet_address=request.wallet_address
+            wallet_address=request.wallet_address,
         )
 
         return {
@@ -102,7 +109,7 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
             "side": request.side,
             "amount": request.amount,
             "wallet_address": request.wallet_address or "(default)",
-            "result": result
+            "result": result,
         }
 
     # ============================================
@@ -117,7 +124,7 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
         return {
             "action": "get_status",
             "transaction_hash": request.transaction_hash,
-            "result": result
+            "result": result,
         }
 
     # ============================================
@@ -125,10 +132,7 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
     # ============================================
     elif request.action == "search":
         # Build search filters
-        search_params = {
-            "limit": request.limit or 50,
-            "offset": request.offset or 0
-        }
+        search_params = {"limit": request.limit or 50, "offset": request.offset or 0}
 
         # Add optional filters
         if request.search_network:
@@ -150,12 +154,14 @@ async def manage_gateway_swaps(client: Any, request: GatewaySwapRequest) -> dict
 
         return {
             "action": "search",
-            "filters": {k: v for k, v in search_params.items() if k not in ["limit", "offset"]},
+            "filters": {
+                k: v for k, v in search_params.items() if k not in ["limit", "offset"]
+            },
             "pagination": {
                 "limit": search_params["limit"],
-                "offset": search_params["offset"]
+                "offset": search_params["offset"],
             },
-            "result": result
+            "result": result,
         }
 
     else:

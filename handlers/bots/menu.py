@@ -951,9 +951,7 @@ async def handle_confirm_stop_controller(
         keyboard = [
             [
                 InlineKeyboardButton("▶️ Restart", callback_data="bots:start_ctrl"),
-                InlineKeyboardButton(
-                    "⬅️ Back to Bot", callback_data="bots:back_to_bot"
-                ),
+                InlineKeyboardButton("⬅️ Back to Bot", callback_data="bots:back_to_bot"),
             ]
         ]
 

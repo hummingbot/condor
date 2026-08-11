@@ -48,7 +48,11 @@ from ._shared import (
     set_executor_config,
 )
 
-ORDER_TYPE_LABELS = {ORDER_TYPE_MARKET: "MARKET", ORDER_TYPE_LIMIT: "LIMIT", ORDER_TYPE_LIMIT_MAKER: "LIMIT_MAKER"}
+ORDER_TYPE_LABELS = {
+    ORDER_TYPE_MARKET: "MARKET",
+    ORDER_TYPE_LIMIT: "LIMIT",
+    ORDER_TYPE_LIMIT_MAKER: "LIMIT_MAKER",
+}
 
 logger = logging.getLogger(__name__)
 
@@ -94,8 +98,12 @@ def _format_config_block(config: Dict[str, Any]) -> str:
 
     coerce_tp = config.get("coerce_tp_to_step", False)
     keep_position = config.get("keep_position", False)
-    open_ot = ORDER_TYPE_LABELS.get(config.get("open_order_type", ORDER_TYPE_LIMIT), "LIMIT")
-    tp_ot = ORDER_TYPE_LABELS.get(config.get("take_profit_order_type", ORDER_TYPE_LIMIT), "LIMIT")
+    open_ot = ORDER_TYPE_LABELS.get(
+        config.get("open_order_type", ORDER_TYPE_LIMIT), "LIMIT"
+    )
+    tp_ot = ORDER_TYPE_LABELS.get(
+        config.get("take_profit_order_type", ORDER_TYPE_LIMIT), "LIMIT"
+    )
 
     lines = [
         f"side={side_label}",
@@ -449,7 +457,9 @@ async def handle_pair_input(
             pair = correct_pair
         else:
             # Fallback: Get correctly formatted pair from trading rules
-            trading_rules = await get_trading_rules(context.user_data, client, connector)
+            trading_rules = await get_trading_rules(
+                context.user_data, client, connector
+            )
             fallback_pair = get_correct_pair_format(trading_rules, pair)
             if fallback_pair:
                 pair = fallback_pair
@@ -849,7 +859,11 @@ async def handle_config_input(
 
         # Handle order type fields: accept MARKET/LIMIT/LIMIT_MAKER or 1/2/3
         if key in ("open_order_type", "take_profit_order_type"):
-            ot_map = {"market": ORDER_TYPE_MARKET, "limit": ORDER_TYPE_LIMIT, "limit_maker": ORDER_TYPE_LIMIT_MAKER}
+            ot_map = {
+                "market": ORDER_TYPE_MARKET,
+                "limit": ORDER_TYPE_LIMIT,
+                "limit_maker": ORDER_TYPE_LIMIT_MAKER,
+            }
             val_lower = value.lower()
             if val_lower in ot_map:
                 updates[key] = ot_map[val_lower]
@@ -977,7 +991,9 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "triple_barrier_config": {
             "take_profit": config.get("take_profit", 0.0002),
             "open_order_type": config.get("open_order_type", ORDER_TYPE_LIMIT),
-            "take_profit_order_type": config.get("take_profit_order_type", ORDER_TYPE_LIMIT),
+            "take_profit_order_type": config.get(
+                "take_profit_order_type", ORDER_TYPE_LIMIT
+            ),
         },
     }
 

@@ -47,7 +47,12 @@ def get_executor_type(executor: Dict[str, Any]) -> str:
     for source in (config, executor):
         ex_type = source.get("type", "") or source.get("executor_type", "")
         if isinstance(ex_type, str) and ex_type:
-            label = ex_type.lower().replace("_executor", "").replace("executor", "").strip("_")
+            label = (
+                ex_type.lower()
+                .replace("_executor", "")
+                .replace("executor", "")
+                .strip("_")
+            )
             if label:
                 return label
     if "start_price" in config and "end_price" in config:
@@ -86,8 +91,13 @@ def normalize_executor_side(raw: Any) -> str:
 def get_executor_pnl(executor: Dict[str, Any]) -> float:
     """Extract PnL from an executor response."""
     for key in (
-        "net_pnl_quote", "pnl_quote", "unrealized_pnl_quote",
-        "realized_pnl_quote", "net_pnl", "pnl", "close_pnl",
+        "net_pnl_quote",
+        "pnl_quote",
+        "unrealized_pnl_quote",
+        "realized_pnl_quote",
+        "net_pnl",
+        "pnl",
+        "close_pnl",
     ):
         val = executor.get(key)
         if val is not None and val != 0:

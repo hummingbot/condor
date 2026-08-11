@@ -4,6 +4,7 @@ Generic table builder for consistent table formatting across the codebase.
 This module provides the TableBuilder class and ColumnDef dataclass that standardize
 table creation, reducing code duplication across all formatters.
 """
+
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -100,7 +101,11 @@ class ColumnDef:
 
         # Truncate if too long
         if len(value) > self.width:
-            value = value[:self.width - 3] + "..." if self.width > 3 else value[:self.width]
+            value = (
+                value[: self.width - 3] + "..."
+                if self.width > 3
+                else value[: self.width]
+            )
 
         # Apply alignment
         if self.align == "right":
@@ -143,7 +148,7 @@ class TableBuilder:
         columns: list[ColumnDef],
         separator_char: str = "-",
         column_separator: str = " | ",
-        empty_message: str = "No data found."
+        empty_message: str = "No data found.",
     ):
         """
         Initialize the table builder.
@@ -171,7 +176,7 @@ class TableBuilder:
         for col in self.columns:
             header = col.name
             if len(header) > col.width:
-                header = header[:col.width]
+                header = header[: col.width]
             cells.append(header.ljust(col.width))
         return self.column_separator.join(cells)
 
@@ -180,7 +185,9 @@ class TableBuilder:
         cells = [col.format_cell(item) for col in self.columns]
         return self.column_separator.join(cells)
 
-    def build(self, data: list[dict[str, Any]], empty_message: str | None = None) -> str:
+    def build(
+        self, data: list[dict[str, Any]], empty_message: str | None = None
+    ) -> str:
         """
         Build the complete table string.
 
@@ -201,10 +208,7 @@ class TableBuilder:
         return f"{header}\n{separator}\n" + "\n".join(rows)
 
     def build_with_title(
-        self,
-        data: list[dict[str, Any]],
-        title: str,
-        empty_message: str | None = None
+        self, data: list[dict[str, Any]], title: str, empty_message: str | None = None
     ) -> str:
         """
         Build table with a title above it.
@@ -226,7 +230,7 @@ class TableBuilder:
 def create_simple_table(
     data: list[dict[str, Any]],
     column_config: list[tuple[str, str, int]],
-    empty_message: str = "No data found."
+    empty_message: str = "No data found.",
 ) -> str:
     """
     Convenience function to create a simple table without defining ColumnDef objects.
@@ -248,6 +252,8 @@ def create_simple_table(
         Alice      | 30
         Bob        | 25
     """
-    columns = [ColumnDef(name=name, key=key, width=width) for name, key, width in column_config]
+    columns = [
+        ColumnDef(name=name, key=key, width=width) for name, key, width in column_config
+    ]
     builder = TableBuilder(columns, empty_message=empty_message)
     return builder.build(data)

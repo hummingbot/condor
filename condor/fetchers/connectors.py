@@ -8,7 +8,13 @@ from condor.fetchers._identifiers import validate_identifier
 logger = logging.getLogger(__name__)
 
 _DEX_PREFIXES = (
-    "solana", "ethereum", "polygon", "arbitrum", "base", "optimism", "avalanche",
+    "solana",
+    "ethereum",
+    "polygon",
+    "arbitrum",
+    "base",
+    "optimism",
+    "avalanche",
 )
 
 

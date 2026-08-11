@@ -28,19 +28,11 @@ from .base import (
     truncate_string,
 )
 
-# Table builder for creating consistent tables
-from .table_builder import ColumnDef, TableBuilder, create_simple_table
-
 # Bot formatters
-from .bots import format_active_bots_as_table, format_bot_logs_as_table, format_controller_state
-
-# Gateway formatters
-from .gateway import (
-    format_amm_result,
-    format_gateway_clmm_pool_result,
-    format_gateway_config_result,
-    format_gateway_container_result,
-    format_gateway_swap_result,
+from .bots import (
+    format_active_bots_as_table,
+    format_bot_logs_as_table,
+    format_controller_state,
 )
 
 # Executor formatters
@@ -54,6 +46,15 @@ from .executors import (
     format_positions_summary,
 )
 
+# Gateway formatters
+from .gateway import (
+    format_amm_result,
+    format_gateway_clmm_pool_result,
+    format_gateway_config_result,
+    format_gateway_container_result,
+    format_gateway_swap_result,
+)
+
 # Market data formatters
 from .market_data import (
     format_candles_as_table,
@@ -63,6 +64,9 @@ from .market_data import (
 
 # Portfolio formatters
 from .portfolio import format_portfolio_as_table
+
+# Table builder for creating consistent tables
+from .table_builder import ColumnDef, TableBuilder, create_simple_table
 
 # Trading formatters
 from .trading import format_orders_as_table, format_positions_as_table

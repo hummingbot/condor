@@ -14,6 +14,7 @@ Related DAMM v2 endpoints for deeper analysis (not used here, available to the a
 The scanner deliberately skips pools with an active fee scheduler (base fee often starts near 99%
 and decays — a token-launch trap) unless include_launch_pools is set.
 """
+
 import logging
 
 import aiohttp
@@ -39,14 +40,28 @@ _WINDOWS = {"1h", "2h", "4h", "12h", "24h"}
 class Config(BaseModel):
     """Rank Meteora DAMM v2 pools by fee yield (fees/TVL) for AMM LP entry."""
 
-    quote_asset: str = Field(default="SOL", description="Quote token to require on one side: SOL, USDC, or USDT")
-    query: str | None = Field(default=None, description="Optional search (token symbol/name/address), e.g. 'JUP'")
-    ranking_window: str = Field(default="24h", description="Fee-yield window: 1h, 2h, 4h, 12h, or 24h")
+    quote_asset: str = Field(
+        default="SOL",
+        description="Quote token to require on one side: SOL, USDC, or USDT",
+    )
+    query: str | None = Field(
+        default=None,
+        description="Optional search (token symbol/name/address), e.g. 'JUP'",
+    )
+    ranking_window: str = Field(
+        default="24h", description="Fee-yield window: 1h, 2h, 4h, 12h, or 24h"
+    )
     top_n: int = Field(default=10, description="Number of ranked pools to return")
     min_tvl_usd: float = Field(default=25000.0, description="Minimum pool TVL in USD")
-    include_launch_pools: bool = Field(default=False, description="Include active-fee-scheduler (launch) pools")
-    verified_only: bool = Field(default=True, description="Require both tokens verified")
-    exclude_pools: list[str] = Field(default=[], description="Pool addresses to exclude (already held)")
+    include_launch_pools: bool = Field(
+        default=False, description="Include active-fee-scheduler (launch) pools"
+    )
+    verified_only: bool = Field(
+        default=True, description="Require both tokens verified"
+    )
+    exclude_pools: list[str] = Field(
+        default=[], description="Pool addresses to exclude (already held)"
+    )
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -70,7 +85,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(DAMM_V2_API, params=params, timeout=aiohttp.ClientTimeout(total=20)) as resp:
+            async with session.get(
+                DAMM_V2_API, params=params, timeout=aiohttp.ClientTimeout(total=20)
+            ) as resp:
                 if resp.status != 200:
                     return f"damm_v2_scanner: Meteora DAMM v2 API returned HTTP {resp.status}"
                 payload = await resp.json()
@@ -93,50 +110,69 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         cfg = p.get("pool_config", {}) or {}
         if not config.include_launch_pools and cfg.get("is_fee_scheduler_active"):
             continue  # skip launch pools whose base fee starts ~99%
-        if config.verified_only and not (tx.get("is_verified") and ty.get("is_verified")):
+        if config.verified_only and not (
+            tx.get("is_verified") and ty.get("is_verified")
+        ):
             continue
 
         # Base = the side that is NOT the quote asset.
         base, quote_tok = (ty, tx) if tx.get("address") == quote_mint else (tx, ty)
         fee_yield = float((p.get("fee_tvl_ratio") or {}).get(window) or 0)
-        candidates.append({
-            "pool": p.get("address"),
-            "pair": p.get("name") or f"{base.get('symbol','?')}-{quote_tok.get('symbol','?')}",
-            "base_symbol": base.get("symbol") or base.get("address", "")[:6],
-            "quote_symbol": quote_tok.get("symbol") or quote,
-            "base_mint": base.get("address"),
-            "quote_mint": quote_tok.get("address"),
-            "base_fee_pct": float(cfg.get("base_fee_pct") or 0),
-            "tvl": float(p.get("tvl") or 0),
-            "vol_win": float((p.get("volume") or {}).get(window) or 0),
-            "fee_yield": fee_yield,
-            "price": float(p.get("current_price") or 0),
-        })
+        candidates.append(
+            {
+                "pool": p.get("address"),
+                "pair": p.get("name")
+                or f"{base.get('symbol','?')}-{quote_tok.get('symbol','?')}",
+                "base_symbol": base.get("symbol") or base.get("address", "")[:6],
+                "quote_symbol": quote_tok.get("symbol") or quote,
+                "base_mint": base.get("address"),
+                "quote_mint": quote_tok.get("address"),
+                "base_fee_pct": float(cfg.get("base_fee_pct") or 0),
+                "tvl": float(p.get("tvl") or 0),
+                "vol_win": float((p.get("volume") or {}).get(window) or 0),
+                "fee_yield": fee_yield,
+                "price": float(p.get("current_price") or 0),
+            }
+        )
 
     if not candidates:
-        return (f"damm_v2_scanner: no {quote}-quoted DAMM v2 pools passed the filters "
-                f"(min TVL ${config.min_tvl_usd:,.0f}, verified_only={config.verified_only}, "
-                f"launch_pools={config.include_launch_pools}).")
+        return (
+            f"damm_v2_scanner: no {quote}-quoted DAMM v2 pools passed the filters "
+            f"(min TVL ${config.min_tvl_usd:,.0f}, verified_only={config.verified_only}, "
+            f"launch_pools={config.include_launch_pools})."
+        )
 
     candidates.sort(key=lambda c: c["fee_yield"], reverse=True)
     ranked = candidates[: config.top_n]
 
-    columns = ["#", "Pair", "FeeYield", "BaseFee", "TVL", f"Vol{window}", "Price", "Pool", "BaseMint"]
+    columns = [
+        "#",
+        "Pair",
+        "FeeYield",
+        "BaseFee",
+        "TVL",
+        f"Vol{window}",
+        "Price",
+        "Pool",
+        "BaseMint",
+    ]
     rows = []
     for i, c in enumerate(ranked, 1):
-        rows.append({
-            "#": i,
-            "Pair": c["pair"],
-            "FeeYield": f"{c['fee_yield'] * 100:.3f}%",
-            "BaseFee": f"{c['base_fee_pct']:.3f}%",
-            "TVL": f"${c['tvl']:,.0f}",
-            f"Vol{window}": f"${c['vol_win']:,.0f}",
-            "Price": f"{c['price']:.4g}",
-            "Pool": c["pool"],
-            "BaseMint": c["base_mint"],
-            # manage_amm hints (constant across rows): connector=meteora, network=solana-mainnet-beta.
-            "quote_mint": c["quote_mint"],
-        })
+        rows.append(
+            {
+                "#": i,
+                "Pair": c["pair"],
+                "FeeYield": f"{c['fee_yield'] * 100:.3f}%",
+                "BaseFee": f"{c['base_fee_pct']:.3f}%",
+                "TVL": f"${c['tvl']:,.0f}",
+                f"Vol{window}": f"${c['vol_win']:,.0f}",
+                "Price": f"{c['price']:.4g}",
+                "Pool": c["pool"],
+                "BaseMint": c["base_mint"],
+                # manage_amm hints (constant across rows): connector=meteora, network=solana-mainnet-beta.
+                "quote_mint": c["quote_mint"],
+            }
+        )
 
     top = rows[0]
     summary = (
@@ -150,10 +186,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     try:
         from routines.base import RoutineResult
+
         return RoutineResult(text=summary, table_data=rows, table_columns=columns)
     except Exception:
         lines = [summary, ""]
         for r in rows:
-            lines.append(f"{r['#']}. {r['Pair']} | yield {r['FeeYield']} | fee {r['BaseFee']} | "
-                         f"TVL {r['TVL']} | pool {r['Pool']} | base {r['BaseMint']}")
+            lines.append(
+                f"{r['#']}. {r['Pair']} | yield {r['FeeYield']} | fee {r['BaseFee']} | "
+                f"TVL {r['TVL']} | pool {r['Pool']} | base {r['BaseMint']}"
+            )
         return "\n".join(lines)

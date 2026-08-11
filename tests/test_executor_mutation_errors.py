@@ -29,10 +29,7 @@ from condor.fetchers.executors import (
     stop_executor,
 )
 from condor.web.models import CreateExecutorRequest, WebUser
-from condor.web.routes.executors import (
-    create_executor_endpoint,
-    stop_executor_endpoint,
-)
+from condor.web.routes.executors import create_executor_endpoint, stop_executor_endpoint
 
 # The internal address a shared-server trader must never be shown.
 BACKEND_URL = "http://10.0.0.7:8000/executors/create"

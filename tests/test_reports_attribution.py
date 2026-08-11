@@ -188,9 +188,7 @@ def _sourceless_routine(name: str = "probe"):
         await b.save()
         return "done"
 
-    return SimpleNamespace(
-        name=name, source="global", config_class=Config, run_fn=run
-    )
+    return SimpleNamespace(name=name, source="global", config_class=Config, run_fn=run)
 
 
 def test_store_run_stamps_the_source_when_the_routine_forgot_it(reports_dir):

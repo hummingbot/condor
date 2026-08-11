@@ -46,9 +46,7 @@ from mcp_servers.hummingbot_api.tools.gateway import (
 from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_container as manage_gateway_container_impl,
 )
-from mcp_servers.hummingbot_api.tools.gateway_amm import (
-    manage_amm_impl,
-)
+from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
     explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
 )

@@ -49,7 +49,10 @@ def test_current_price_precedence_is_the_union_of_both_chains():
         "close_price": 3.0,
         "held_position_orders": [{"price": 4.0}],
     }
-    assert build_executor_row({"current_price": 1.0, "custom_info": ci})["current_price"] == 1.0
+    assert (
+        build_executor_row({"current_price": 1.0, "custom_info": ci})["current_price"]
+        == 1.0
+    )
     assert build_executor_row({"custom_info": ci})["current_price"] == 2.0
     assert (
         build_executor_row(

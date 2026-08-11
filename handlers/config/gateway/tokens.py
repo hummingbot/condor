@@ -7,7 +7,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ..user_preferences import get_active_server
-from ._shared import escape_markdown_v2, extract_network_id, get_default_networks, logger
+from ._shared import (
+    escape_markdown_v2,
+    extract_network_id,
+    get_default_networks,
+    logger,
+)
 
 # Gateway network ID -> GeckoTerminal network ID mapping
 NETWORK_TO_GECKO = {
@@ -70,7 +75,8 @@ async def show_tokens_menu(
             else:
                 # Filter to only default networks
                 networks_to_show = [
-                    n for n in all_networks
+                    n
+                    for n in all_networks
                     if extract_network_id(n) in default_network_ids
                 ][:20]
                 showing_defaults = True
@@ -103,14 +109,14 @@ async def show_tokens_menu(
                     [
                         InlineKeyboardButton(
                             f"🌐 All Networks ({len(all_networks)})",
-                            callback_data="gateway_token_all_networks"
+                            callback_data="gateway_token_all_networks",
                         )
                     ],
                     [
                         InlineKeyboardButton(
                             "« Back to Gateway", callback_data="config_gateway"
                         )
-                    ]
+                    ],
                 ]
             else:
                 count_escaped = escape_markdown_v2(str(len(all_networks)))

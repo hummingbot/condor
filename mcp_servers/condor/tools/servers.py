@@ -15,13 +15,15 @@ def list_servers() -> dict:
         if not server:
             continue
         perm = cm.get_server_permission(settings.user_id, name)
-        servers.append({
-            "name": name,
-            "host": server["host"],
-            "port": server["port"],
-            "permission": perm.value if perm else "unknown",
-            "is_active": name == active_server,
-        })
+        servers.append(
+            {
+                "name": name,
+                "host": server["host"],
+                "port": server["port"],
+                "permission": perm.value if perm else "unknown",
+                "is_active": name == active_server,
+            }
+        )
     return {"servers": servers, "active_server": active_server}
 
 

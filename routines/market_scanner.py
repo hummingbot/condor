@@ -390,6 +390,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     text = format_results(classified, config.lookback_hours)
 
     import plotly.graph_objects as go
+
     from condor.reports import ReportBuilder
 
     def _to_table(items):

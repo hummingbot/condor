@@ -6,6 +6,7 @@ a human-readable markdown file with embedded YAML blocks.
 
 Preferences are stored at: ~/.hummingbot_mcp/executor_preferences.md
 """
+
 import logging
 import re
 from pathlib import Path
@@ -143,7 +144,9 @@ class ExecutorPreferencesManager:
         # Create default preferences file if it doesn't exist
         if not self.preferences_path.exists():
             self._write_template()
-            logger.info(f"Created default executor preferences at {self.preferences_path}")
+            logger.info(
+                f"Created default executor preferences at {self.preferences_path}"
+            )
 
     def _write_template(self) -> None:
         """Write the default template to the preferences file."""
@@ -169,7 +172,7 @@ class ExecutorPreferencesManager:
             Dictionary mapping executor type to its configuration
         """
         # Pattern to match YAML code blocks
-        yaml_pattern = r'```yaml\s*\n([\s\S]*?)```'
+        yaml_pattern = r"```yaml\s*\n([\s\S]*?)```"
 
         defaults = {}
         matches = re.findall(yaml_pattern, content)
@@ -244,12 +247,14 @@ class ExecutorPreferencesManager:
         merged_config = {**existing_defaults, **config}
 
         # Create the new YAML block
-        new_yaml = yaml.dump({executor_type: merged_config}, default_flow_style=False, sort_keys=False)
+        new_yaml = yaml.dump(
+            {executor_type: merged_config}, default_flow_style=False, sort_keys=False
+        )
         new_block = f"```yaml\n{new_yaml}```"
 
         # Pattern to find the existing block for this executor type
         # Look for ```yaml followed by the executor type key
-        pattern = rf'```yaml\s*\n{re.escape(executor_type)}:[\s\S]*?```'
+        pattern = rf"```yaml\s*\n{re.escape(executor_type)}:[\s\S]*?```"
 
         if re.search(pattern, content):
             # Replace existing block
@@ -260,23 +265,22 @@ class ExecutorPreferencesManager:
             section_header = f"### {executor_type.replace('_', ' ').title()} Defaults"
             if section_header in content:
                 # Find the section and add after the header
-                pattern = rf'({re.escape(section_header)}\s*\n\n)```yaml[\s\S]*?```'
+                pattern = rf"({re.escape(section_header)}\s*\n\n)```yaml[\s\S]*?```"
                 if re.search(pattern, content):
-                    content = re.sub(pattern, rf'\1{new_block}', content)
+                    content = re.sub(pattern, rf"\1{new_block}", content)
                 else:
                     # Section exists but no yaml block, add it
                     content = content.replace(
-                        section_header,
-                        f"{section_header}\n\n{new_block}"
+                        section_header, f"{section_header}\n\n{new_block}"
                     )
             else:
                 # No section found, append before the footer
-                footer_pattern = r'\n---\s*\n\*Last updated:'
+                footer_pattern = r"\n---\s*\n\*Last updated:"
                 if re.search(footer_pattern, content):
                     content = re.sub(
                         footer_pattern,
                         f"\n### {executor_type.replace('_', ' ').title()} Defaults\n\n{new_block}\n\n---\n\n*Last updated:",
-                        content
+                        content,
                     )
                 else:
                     # Just append at the end
@@ -284,17 +288,18 @@ class ExecutorPreferencesManager:
 
         # Update the last updated timestamp
         from datetime import datetime
+
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         content = re.sub(
-            r'\*Last updated:.*\*',
-            f'*Last updated: {timestamp}*',
-            content
+            r"\*Last updated:.*\*", f"*Last updated: {timestamp}*", content
         )
 
         self._write_content(content)
         logger.info(f"Updated defaults for {executor_type}")
 
-    def merge_with_defaults(self, executor_type: str, user_config: dict[str, Any]) -> dict[str, Any]:
+    def merge_with_defaults(
+        self, executor_type: str, user_config: dict[str, Any]
+    ) -> dict[str, Any]:
         """Merge user configuration with stored defaults.
 
         User-provided values take precedence over defaults.

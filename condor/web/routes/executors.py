@@ -8,7 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 
-from config_manager import get_config_manager
+from condor.fetchers.executors import (
+    EXECUTORS_POLL_MAX,
+    MAX_EXECUTORS_FETCH,
+    describe_executor_error,
+)
+from condor.fetchers.executors import extract_executors_list as _extract_executors_list
+from condor.fetchers.executors import fetch_all_executors, summarize_executors_by_quote
 from condor.web.auth import get_current_user
 from condor.web.models import (
     CreateExecutorRequest,
@@ -16,14 +22,7 @@ from condor.web.models import (
     ExecutorPeriodSummary,
     WebUser,
 )
-from condor.fetchers.executors import (
-    describe_executor_error,
-    fetch_all_executors,
-    extract_executors_list as _extract_executors_list,
-    summarize_executors_by_quote,
-    EXECUTORS_POLL_MAX,
-    MAX_EXECUTORS_FETCH,
-)
+from config_manager import get_config_manager
 
 router = APIRouter(tags=["executors"])
 
@@ -71,7 +70,12 @@ async def list_executors(
     trading_pair: str = Query(default="", description="Filter by trading pair"),
     status: str = Query(default="", description="Filter by status"),
     controller_id: str = Query(default="", description="Filter by controller id"),
-    limit: int = Query(default=0, ge=0, le=MAX_EXECUTORS_FETCH, description="Max executors to return (0 = default SDS cache)"),
+    limit: int = Query(
+        default=0,
+        ge=0,
+        le=MAX_EXECUTORS_FETCH,
+        description="Max executors to return (0 = default SDS cache)",
+    ),
     user: WebUser = Depends(get_current_user),
 ):
     cm = get_config_manager()
@@ -105,7 +109,9 @@ async def list_executors(
             raise _executor_error("Failed to fetch executors", e)
     else:
         try:
-            result = await get_server_data_service().get_or_fetch(name, ServerDataType.EXECUTORS)
+            result = await get_server_data_service().get_or_fetch(
+                name, ServerDataType.EXECUTORS
+            )
         except Exception as e:
             logger.exception("Failed to fetch executors for server %s", name)
             raise _executor_error("Failed to fetch executors", e)
@@ -399,7 +405,10 @@ async def get_positions_held(
     else:
         positions = []
 
-    return {"positions": positions, "summary": result if isinstance(result, dict) else {}}
+    return {
+        "positions": positions,
+        "summary": result if isinstance(result, dict) else {},
+    }
 
 
 @router.delete("/servers/{name}/executors/positions/{connector}/{pair}")

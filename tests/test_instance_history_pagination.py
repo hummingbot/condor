@@ -157,7 +157,9 @@ def test_no_warning_when_the_walk_completes(caplog):
 
     assert len(hist) == 10
     assert len(handler.calls) == 1  # short page ends the walk
-    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == []
+    assert [
+        r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING
+    ] == []
 
 
 def test_stops_when_the_api_echoes_the_cursor_back():

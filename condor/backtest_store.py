@@ -3,6 +3,7 @@
 Each backtest is stored as an individual JSON file under data/backtests/.
 A lightweight index (_index.json) tracks task_id -> server mapping for fast listing.
 """
+
 from __future__ import annotations
 
 import json
@@ -23,7 +24,9 @@ class BacktestStore:
     def __init__(self, data_dir: Path = _DATA_DIR) -> None:
         self._dir = data_dir
         self._index_path = data_dir / "_index.json"
-        self._index: dict[str, dict[str, str]] = {}  # task_id -> {server, ...light meta}
+        self._index: dict[str, dict[str, str]] = (
+            {}
+        )  # task_id -> {server, ...light meta}
         self._dir.mkdir(parents=True, exist_ok=True)
         self._load_index()
         self._migrate_legacy()
@@ -111,7 +114,11 @@ class BacktestStore:
                 task_id = path.stem
                 self._index[task_id] = {
                     "server": data.get("server", ""),
-                    "config": data.get("config", {}).get("id", "") if isinstance(data.get("config"), dict) else "",
+                    "config": (
+                        data.get("config", {}).get("id", "")
+                        if isinstance(data.get("config"), dict)
+                        else ""
+                    ),
                 }
             except Exception:
                 logger.warning("Skipping corrupt backtest file %s", path)
@@ -126,13 +133,19 @@ class BacktestStore:
             if not isinstance(legacy_data, dict) or not legacy_data:
                 _LEGACY_FILE.unlink()
                 return
-            logger.info("Migrating %d backtest results from legacy store", len(legacy_data))
+            logger.info(
+                "Migrating %d backtest results from legacy store", len(legacy_data)
+            )
             for task_id, entry in legacy_data.items():
                 server = entry.pop("server", "")
                 self._write_file(task_id, {"server": server, **entry})
                 self._index[task_id] = {
                     "server": server,
-                    "config": entry.get("config", {}).get("id", "") if isinstance(entry.get("config"), dict) else "",
+                    "config": (
+                        entry.get("config", {}).get("id", "")
+                        if isinstance(entry.get("config"), dict)
+                        else ""
+                    ),
                 }
             self._persist_index()
             # Remove legacy file after successful migration

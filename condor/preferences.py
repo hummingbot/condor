@@ -1220,7 +1220,8 @@ def remove_custom_provider(user_data: Dict, name: str) -> bool:
 def unique_provider_name(user_data: Dict, suggested: str) -> str:
     """Return ``suggested`` (sanitized), suffixed with -2, -3, ... if taken."""
     existing = {
-        sanitize_provider_name(p.get("name", "")) for p in get_custom_providers(user_data)
+        sanitize_provider_name(p.get("name", ""))
+        for p in get_custom_providers(user_data)
     }
     base = sanitize_provider_name(suggested)
     if base not in existing:

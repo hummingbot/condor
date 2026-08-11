@@ -1,16 +1,22 @@
 """
 Gateway management tools for Hummingbot MCP Server
 """
+
 import logging
 from typing import Any
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
-from mcp_servers.hummingbot_api.schemas import GatewayConfigRequest, GatewayContainerRequest
+from mcp_servers.hummingbot_api.schemas import (
+    GatewayConfigRequest,
+    GatewayContainerRequest,
+)
 
 logger = logging.getLogger("hummingbot-mcp")
 
 
-async def manage_gateway_container(client: Any, request: GatewayContainerRequest) -> dict[str, Any]:
+async def manage_gateway_container(
+    client: Any, request: GatewayContainerRequest
+) -> dict[str, Any]:
     """Manage Gateway container lifecycle operations.
 
     Supports:
@@ -22,10 +28,7 @@ async def manage_gateway_container(client: Any, request: GatewayContainerRequest
     """
     if request.action == "get_status":
         result = await client.gateway.get_status()
-        return {
-            "action": "get_status",
-            "status": result
-        }
+        return {"action": "get_status", "status": result}
 
     elif request.action == "start":
         if not request.config:
@@ -38,7 +41,7 @@ async def manage_gateway_container(client: Any, request: GatewayContainerRequest
         return {
             "action": "start",
             "message": "Gateway started successfully",
-            "result": result
+            "result": result,
         }
 
     elif request.action == "stop":
@@ -46,7 +49,7 @@ async def manage_gateway_container(client: Any, request: GatewayContainerRequest
         return {
             "action": "stop",
             "message": "Gateway stopped successfully",
-            "result": result
+            "result": result,
         }
 
     elif request.action == "restart":
@@ -55,22 +58,20 @@ async def manage_gateway_container(client: Any, request: GatewayContainerRequest
             "action": "restart",
             "message": "Gateway restarted successfully",
             "result": result,
-            "config_updated": request.config is not None
+            "config_updated": request.config is not None,
         }
 
     elif request.action == "get_logs":
         result = await client.gateway.get_logs(tail=request.tail or 100)
-        return {
-            "action": "get_logs",
-            "tail": request.tail or 100,
-            "logs": result
-        }
+        return {"action": "get_logs", "tail": request.tail or 100, "logs": result}
 
     else:
         raise ToolError(f"Unknown action: {request.action}")
 
 
-async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> dict[str, Any]:
+async def manage_gateway_config(
+    client: Any, request: GatewayConfigRequest
+) -> dict[str, Any]:
     """Manage Gateway configuration for chains, networks, tokens, connectors, pools, and wallets.
 
     Resource Types:
@@ -86,14 +87,12 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
     # ============================================
     if request.resource_type == "chains":
         if request.action != "list":
-            raise ToolError(f"Only 'list' action is supported for chains, got: {request.action}")
+            raise ToolError(
+                f"Only 'list' action is supported for chains, got: {request.action}"
+            )
 
         result = await client.gateway.list_chains()
-        return {
-            "resource_type": "chains",
-            "action": "list",
-            "result": result
-        }
+        return {"resource_type": "chains", "action": "list", "result": result}
 
     # ============================================
     # NETWORKS
@@ -101,11 +100,7 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
     elif request.resource_type == "networks":
         if request.action == "list":
             result = await client.gateway.list_networks()
-            return {
-                "resource_type": "networks",
-                "action": "list",
-                "result": result
-            }
+            return {"resource_type": "networks", "action": "list", "result": result}
 
         elif request.action == "get":
             if not request.network_id:
@@ -116,24 +111,25 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 "resource_type": "networks",
                 "action": "get",
                 "network_id": request.network_id,
-                "result": result
+                "result": result,
             }
 
         elif request.action == "update":
             if not request.network_id:
                 raise ToolError("network_id is required for 'update' network action")
             if not request.config_updates:
-                raise ToolError("config_updates is required for 'update' network action")
+                raise ToolError(
+                    "config_updates is required for 'update' network action"
+                )
 
             result = await client.gateway.update_network_config(
-                request.network_id,
-                request.config_updates
+                request.network_id, request.config_updates
             )
             return {
                 "resource_type": "networks",
                 "action": "update",
                 "network_id": request.network_id,
-                "result": result
+                "result": result,
             }
 
         else:
@@ -151,15 +147,14 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 raise ToolError("network_id is required for 'list' tokens action")
 
             result = await client.gateway.get_network_tokens(
-                request.network_id,
-                search=request.search
+                request.network_id, search=request.search
             )
             return {
                 "resource_type": "tokens",
                 "action": "list",
                 "network_id": request.network_id,
                 "search": request.search,
-                "result": result
+                "result": result,
             }
 
         elif request.action == "add":
@@ -177,7 +172,7 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 address=request.token_address,
                 symbol=request.token_symbol,
                 decimals=request.token_decimals,
-                name=request.token_name
+                name=request.token_name,
             )
             return {
                 "resource_type": "tokens",
@@ -187,9 +182,9 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                     "address": request.token_address,
                     "symbol": request.token_symbol,
                     "decimals": request.token_decimals,
-                    "name": request.token_name
+                    "name": request.token_name,
                 },
-                "result": result
+                "result": result,
             }
 
         elif request.action == "delete":
@@ -199,15 +194,14 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 raise ToolError("token_address is required for 'delete' token action")
 
             result = await client.gateway.delete_token(
-                network_id=request.network_id,
-                token_address=request.token_address
+                network_id=request.network_id, token_address=request.token_address
             )
             return {
                 "resource_type": "tokens",
                 "action": "delete",
                 "network_id": request.network_id,
                 "token_address": request.token_address,
-                "result": result
+                "result": result,
             }
 
         elif request.action == "save":
@@ -221,15 +215,14 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 raise ToolError("token_address is required for 'save' token action")
 
             result = await client.gateway.save_network_token(
-                network_id=request.network_id,
-                token_address=request.token_address
+                network_id=request.network_id, token_address=request.token_address
             )
             return {
                 "resource_type": "tokens",
                 "action": "save",
                 "network_id": request.network_id,
                 "token_address": request.token_address,
-                "result": result
+                "result": result,
             }
 
         else:
@@ -244,11 +237,7 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
     elif request.resource_type == "connectors":
         if request.action == "list":
             result = await client.gateway.list_connectors()
-            return {
-                "resource_type": "connectors",
-                "action": "list",
-                "result": result
-            }
+            return {"resource_type": "connectors", "action": "list", "result": result}
 
         elif request.action == "get":
             if not request.connector_name:
@@ -259,24 +248,27 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 "resource_type": "connectors",
                 "action": "get",
                 "connector_name": request.connector_name,
-                "result": result
+                "result": result,
             }
 
         elif request.action == "update":
             if not request.connector_name:
-                raise ToolError("connector_name is required for 'update' connector action")
+                raise ToolError(
+                    "connector_name is required for 'update' connector action"
+                )
             if not request.config_updates:
-                raise ToolError("config_updates is required for 'update' connector action")
+                raise ToolError(
+                    "config_updates is required for 'update' connector action"
+                )
 
             result = await client.gateway.update_connector_config(
-                request.connector_name,
-                request.config_updates
+                request.connector_name, request.config_updates
             )
             return {
                 "resource_type": "connectors",
                 "action": "update",
                 "connector_name": request.connector_name,
-                "result": result
+                "result": result,
             }
 
         else:
@@ -300,14 +292,14 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 network_id=request.network_id,
                 connector=request.connector_name,  # Optional filter
                 pool_type=request.pool_type,  # Optional filter
-                search=request.search  # Optional search
+                search=request.search,  # Optional search
             )
             return {
                 "resource_type": "pools",
                 "action": "list",
                 "network_id": request.network_id,
                 "connector": request.connector_name,
-                "result": result
+                "result": result,
             }
 
         elif request.action == "add":
@@ -329,7 +321,7 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 pool_type=request.pool_type,
                 address=request.pool_address,
                 base=request.pool_base,
-                quote=request.pool_quote
+                quote=request.pool_quote,
             )
             return {
                 "resource_type": "pools",
@@ -340,9 +332,9 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                     "type": request.pool_type,
                     "base": request.pool_base,
                     "quote": request.pool_quote,
-                    "address": request.pool_address
+                    "address": request.pool_address,
                 },
-                "result": result
+                "result": result,
             }
 
         elif request.action == "delete":
@@ -357,14 +349,14 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
             result = await client.gateway.delete_network_pool(
                 network_id=request.network_id,
                 address=request.pool_address,
-                pool_type=request.pool_type
+                pool_type=request.pool_type,
             )
             return {
                 "resource_type": "pools",
                 "action": "delete",
                 "network_id": request.network_id,
                 "pool_address": request.pool_address,
-                "result": result
+                "result": result,
             }
 
         elif request.action == "save":
@@ -378,15 +370,14 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 raise ToolError("pool_address is required for 'save' pool action")
 
             result = await client.gateway.save_network_pool(
-                network_id=request.network_id,
-                pool_address=request.pool_address
+                network_id=request.network_id, pool_address=request.pool_address
             )
             return {
                 "resource_type": "pools",
                 "action": "save",
                 "network_id": request.network_id,
                 "pool_address": request.pool_address,
-                "result": result
+                "result": result,
             }
 
         else:
@@ -406,14 +397,13 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 raise ToolError("private_key is required for 'add' wallet action")
 
             result = await client.accounts.add_gateway_wallet(
-                chain=request.chain,
-                private_key=request.private_key
+                chain=request.chain, private_key=request.private_key
             )
             return {
                 "resource_type": "wallets",
                 "action": "add",
                 "chain": request.chain,
-                "result": result
+                "result": result,
             }
 
         elif request.action == "delete":
@@ -423,15 +413,14 @@ async def manage_gateway_config(client: Any, request: GatewayConfigRequest) -> d
                 raise ToolError("wallet_address is required for 'delete' wallet action")
 
             result = await client.accounts.remove_gateway_wallet(
-                chain=request.chain,
-                address=request.wallet_address
+                chain=request.chain, address=request.wallet_address
             )
             return {
                 "resource_type": "wallets",
                 "action": "delete",
                 "chain": request.chain,
                 "wallet_address": request.wallet_address,
-                "result": result
+                "result": result,
             }
 
         else:

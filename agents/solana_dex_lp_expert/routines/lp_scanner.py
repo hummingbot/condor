@@ -16,12 +16,14 @@ Diversification: pass `exclude_pools` (held pool addresses) and/or `exclude_mint
 hold — the agent should never open a 2nd slot on the same pool or token.
 """
 
-import logging
 import asyncio
+import logging
 import re
+
 import aiohttp
 from pydantic import BaseModel, Field, field_validator
 from telegram.ext import ContextTypes
+
 from config_manager import get_client
 from handlers.dex.geckoterminal import _extract_pool_data
 

@@ -50,7 +50,6 @@ from handlers.agents.menu import (
     _custom_manage_keyboard,
 )
 
-
 # -- agent_key routing --
 
 
@@ -210,10 +209,16 @@ def test_active_agent_key_round_trips_through_preferences():
 def test_legacy_custom_llm_is_migrated():
     # The first iteration stored one endpoint in raw user_data, outside the
     # preference system. It should move across on first read, once.
-    user_data = {"custom_llm": {"base_url": "https://api.venice.ai/api/v1", "api_key": "sk-old"}}
+    user_data = {
+        "custom_llm": {"base_url": "https://api.venice.ai/api/v1", "api_key": "sk-old"}
+    }
     providers = get_custom_providers(user_data)
     assert providers == [
-        {"name": "Venice", "base_url": "https://api.venice.ai/api/v1", "api_key": "sk-old"}
+        {
+            "name": "Venice",
+            "base_url": "https://api.venice.ai/api/v1",
+            "api_key": "sk-old",
+        }
     ]
     assert "custom_llm" not in user_data
     assert get_custom_providers(user_data) == providers
@@ -228,8 +233,14 @@ def test_normalize_base_url_variants():
         == "https://api.venice.ai/api/v1"
     )
     assert normalize_base_url("api.venice.ai/api/v1/") == "https://api.venice.ai/api/v1"
-    assert normalize_base_url(" https://x.example/v1/chat/completions ") == "https://x.example/v1"
-    assert normalize_base_url("http://localhost:8000/v1/models") == "http://localhost:8000/v1"
+    assert (
+        normalize_base_url(" https://x.example/v1/chat/completions ")
+        == "https://x.example/v1"
+    )
+    assert (
+        normalize_base_url("http://localhost:8000/v1/models")
+        == "http://localhost:8000/v1"
+    )
 
 
 def test_normalize_base_url_rejects_garbage():
@@ -252,7 +263,9 @@ def test_normalize_base_url_blocks_metadata_endpoints():
 def test_normalize_base_url_allows_local_servers_by_default():
     # Local model servers are the most common use of this feature
     assert normalize_base_url("http://localhost:8000/v1") == "http://localhost:8000/v1"
-    assert normalize_base_url("http://192.168.1.5:1234/v1") == "http://192.168.1.5:1234/v1"
+    assert (
+        normalize_base_url("http://192.168.1.5:1234/v1") == "http://192.168.1.5:1234/v1"
+    )
 
 
 def test_normalize_base_url_strict_mode_blocks_private(monkeypatch):
@@ -569,7 +582,12 @@ def test_fetch_models_unreachable():
 def test_fetch_models_reports_when_only_non_chat_models_exist():
     async def models_handler(request: web.Request) -> web.Response:
         return web.json_response(
-            {"data": [{"id": "bge-m3", "type": "embedding"}, {"id": "flux", "type": "image"}]}
+            {
+                "data": [
+                    {"id": "bge-m3", "type": "embedding"},
+                    {"id": "flux", "type": "image"},
+                ]
+            }
         )
 
     async def scenario():

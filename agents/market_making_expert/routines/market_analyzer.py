@@ -2,10 +2,12 @@
 
 import logging
 import math
+
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
-from config_manager import get_client
+
 from condor.reports.footprint import build_estimated_footprint_figure, candle_timestamps
+from config_manager import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -474,6 +476,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # Generate report
     import plotly.graph_objects as go
+
     from condor.reports import ReportBuilder
 
     builder = ReportBuilder(f"Market Analysis: {pair}")

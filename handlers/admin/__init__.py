@@ -9,11 +9,7 @@ from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from config_manager import (
-    ServerPermission,
-    UserRole,
-    get_config_manager,
-)
+from config_manager import ServerPermission, UserRole, get_config_manager
 from utils.auth import admin_required
 from utils.telegram_formatters import escape_markdown_v2
 
