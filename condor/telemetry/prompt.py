@@ -23,8 +23,8 @@ _TEXT = (
     "Never included: API keys, wallet addresses, server names or URLs, "
     "trading pairs, amounts, balances, positions, prompts or agent replies, "
     "and no Telegram id or username.\n\n"
-    "Full details in PRIVACY.md at the root of the repo. "
-    "You can change this any time from the dashboard settings."
+    "Full details in PRIVACY.md at the root of the repo, which also says how "
+    "to change or withdraw this answer at any time."
 )
 
 
@@ -113,15 +113,15 @@ async def callback_handler(update, context) -> None:
         if chosen == consent.PING:
             await query.edit_message_text(
                 "Thanks. Condor will only report that this install exists and "
-                "which version it runs. Change it any time in the dashboard "
-                "settings; details in PRIVACY.md."
+                "which version it runs. PRIVACY.md says how to change or "
+                "withdraw this."
             )
         else:
             await query.edit_message_text(
                 "Thanks. Condor will send anonymous usage and reliability "
                 "events. No keys, addresses, pairs, amounts or prompts ever "
-                "leave this machine. Change it any time in the dashboard "
-                "settings; details in PRIVACY.md."
+                "leave this machine. PRIVACY.md says how to change or withdraw "
+                "this."
             )
     except Exception:  # noqa: BLE001
         log.exception("Telemetry consent callback failed")

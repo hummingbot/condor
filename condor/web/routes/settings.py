@@ -607,3 +607,59 @@ async def delete_custom_provider(
     if not remove_custom_provider(load_user_data_for(user.id), name):
         raise HTTPException(status_code=404, detail=f"No saved endpoint '{name}'")
     return {"deleted": True, "name": name}
+
+
+# ── Telemetry (FEAT-023) ──
+
+
+@router.get("/telemetry")
+async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
+    """What this install has agreed to, and whether it could send anything.
+
+    ``endpoint_configured`` is the honest answer to "is this thing on": with no
+    ``CONDOR_TELEMETRY_URL`` set — the shipped state — nothing can be
+    transmitted no matter what the consent says, and events only accumulate in
+    a capped local file.
+    """
+    from condor.telemetry import consent, emitter, outbox
+
+    return {
+        "consent": consent.state(),
+        "level": consent.level(),
+        "env_overridden": consent.env_overridden(),
+        "endpoint_configured": bool(outbox.endpoint()),
+        "pending_events": emitter.buffered(),
+        "privacy_doc": "PRIVACY.md",
+    }
+
+
+@router.put("/telemetry")
+async def set_telemetry_settings(
+    level: str = Query(..., description="off | ping | usage"),
+    user: WebUser = Depends(get_current_user),
+):
+    """Change the install's telemetry level. Admin only, and reversible.
+
+    Setting ``off`` is a withdrawal, not a pause: the buffer and the outbox are
+    deleted, so nothing already recorded can be sent later.
+    """
+    from condor.telemetry import consent
+
+    cm = get_config_manager()
+    if not cm.is_admin(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Telemetry is an install-wide setting; only the admin can change it",
+        )
+    if level not in consent.LEVELS:
+        raise HTTPException(
+            status_code=400, detail=f"level must be one of {', '.join(consent.LEVELS)}"
+        )
+    if consent.env_overridden():
+        raise HTTPException(
+            status_code=409,
+            detail="CONDOR_TELEMETRY is set in the environment and overrides this setting",
+        )
+
+    applied = consent.set_level(level)
+    return {"level": applied, "consent": consent.state()}
