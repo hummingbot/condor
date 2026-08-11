@@ -127,6 +127,73 @@ async def get_gateway_networks(name: str, user: WebUser = Depends(get_current_us
     return {"networks": result or []}
 
 
+_NO_POOL = {
+    "pool_address": None,
+    "dex_id": None,
+    "lp_provider": None,
+    "lp_supported": False,
+    "current_price": None,
+    "base_symbol": None,
+    "quote_symbol": None,
+}
+
+
+@router.get("/servers/{name}/market/dex-pool")
+async def get_dex_pool(
+    name: str,
+    connector: str = Query(
+        ..., description="Gateway network, e.g. solana-mainnet-beta"
+    ),
+    trading_pair: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    """The pool a DEX pair trades in, and whether an LP position can be opened in it.
+
+    Makes explicit the choice the chart already makes implicitly: candles for a DEX
+    pair come from whichever pool ``resolve_pool_info`` picks, and the LP panel has
+    to name that same pool. ``lp_provider`` is the ``dex/trading_type`` string an
+    ``lp_executor`` requires, and is ``None`` with ``lp_supported: false`` whenever
+    the deepest pool is not on one of the five CLMM venues — a router pool, a plain
+    AMM, or Uniswap v4. That is a 200, not an error: the panel's answer to it is to
+    ask for a pool address by hand, which is a state to render rather than a failure
+    to handle.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from handlers.dex.pool_data import lp_provider_for_dex, resolve_pool_info
+
+    try:
+        info = await resolve_pool_info(connector, trading_pair)
+    except Exception as e:
+        logger.warning(
+            "Pool resolution failed connector=%s pair=%s: %s",
+            connector,
+            trading_pair,
+            e,
+        )
+        return dict(_NO_POOL)
+
+    address = str((info or {}).get("address") or "")
+    # A resolved address that does not look like one would be handed straight back
+    # to /market/candles and the executor config, so it is refused here instead.
+    if not info or not _POOL_ADDRESS_RE.match(address):
+        return dict(_NO_POOL)
+
+    dex_id = str(info.get("dex_id") or "")
+    provider = lp_provider_for_dex(dex_id, connector)
+    return {
+        "pool_address": address,
+        "dex_id": dex_id or None,
+        "lp_provider": provider,
+        "lp_supported": provider is not None,
+        "current_price": info.get("current_price"),
+        "base_symbol": info.get("base_symbol"),
+        "quote_symbol": info.get("quote_symbol"),
+    }
+
+
 @router.get("/servers/{name}/market/prices", response_model=MarketPriceResponse)
 async def get_price(
     name: str,

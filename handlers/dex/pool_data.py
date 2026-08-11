@@ -14,6 +14,7 @@ functions rather than building GeckoTerminal URLs themselves.
 
 import logging
 import math
+import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -24,6 +25,39 @@ from config_manager import get_client
 from ._shared import evict_expired, get_cached, set_cached
 
 logger = logging.getLogger(__name__)
+
+# CLMM venues an ``lp_executor`` can open a position on: (brand, the qualifiers its
+# GeckoTerminal dex id must carry, the gecko networks it exists on). Deliberately
+# separate from LIQUIDITY_SUPPORTED_DEXES below, which answers a different question
+# (can Condor draw Telegram's liquidity-bin chart) and compares gecko network ids
+# against chain *names*, so it is false for every Uniswap pool on Ethereum.
+_CLMM_VENUES: Tuple[Tuple[str, List[str], set], ...] = (
+    # Gecko's `meteora` is DLMM and `orca` is Whirlpools — both already the
+    # concentrated product, so any qualifier means a different pool type.
+    ("meteora", [], {"solana"}),
+    ("orca", [], {"solana"}),
+    # Plain `raydium` is the constant-product AMM v4; only `raydium-clmm` is CLMM.
+    ("raydium", ["clmm"], {"solana"}),
+    ("uniswap", ["v3"], {"eth", "arbitrum", "base", "polygon_pos", "optimism", "bsc"}),
+    ("pancakeswap", ["v3"], {"bsc", "eth", "base", "arbitrum"}),
+)
+
+# Chain suffixes gecko tacks onto a dex id (`uniswap-v3-base`). They say where the
+# venue is, not which product it is, so they are dropped before matching.
+_CHAIN_TOKENS = {
+    "solana",
+    "ethereum",
+    "eth",
+    "base",
+    "arbitrum",
+    "bsc",
+    "polygon",
+    "pos",
+    "optimism",
+    "avalanche",
+}
+
+_DEX_ID_SPLIT_RE = re.compile(r"[-_]")
 
 # Supported DEXes for liquidity data (via gateway CLMM)
 LIQUIDITY_SUPPORTED_DEXES = {
@@ -171,8 +205,14 @@ def _gecko_client() -> GeckoTerminalAsyncClient:
 # cannot grow them without limit.
 _TOKEN_CACHE_MAX = 512
 _token_symbol_cache: Dict[Tuple[str, str], Tuple[float, str]] = {}
-_token_pool_cache: Dict[Tuple[str, str, str], Tuple[float, str]] = {}
-_pair_pool_cache: Dict[Tuple[str, str, str], Tuple[float, Tuple[str, bool]]] = {}
+# Both hold normalized pool dicts, and an empty dict for "asked, there is no such
+# pool" — a real answer worth caching, unlike a failed lookup, which is not cached
+# at all. The address-only forms (fetch_token_top_pool, fetch_pair_top_pool) read
+# these same entries.
+_token_pool_cache: Dict[Tuple[str, str, str], Tuple[float, Dict[str, Any]]] = {}
+_pair_pool_cache: Dict[
+    Tuple[str, str, str], Tuple[float, Tuple[Dict[str, Any], bool]]
+] = {}
 
 
 def _ttl_get(cache: dict, key: tuple, ttl: float) -> Optional[Any]:
@@ -223,22 +263,27 @@ def _pool_quote_symbols(name: Any) -> List[str]:
     return [p.strip().upper() for p in str(name or "").split("/") if p.strip()]
 
 
-async def fetch_token_top_pool(mint: str, network: str, quote: str) -> str:
-    """Address of the token's highest-volume pool **quoted in ``quote``**.
+async def fetch_token_top_pool_info(
+    mint: str, network: str, quote: str
+) -> Optional[Dict[str, Any]]:
+    """The token's highest-volume pool **quoted in ``quote``**, normalized.
 
-    Used as a fallback when an executor's own ``pool_address`` yields no candles
-    (a closed slot, a pool that never had one recorded). The quote match is not
-    cosmetic: candles are requested with ``currency="token"``, so prices come back
-    denominated in the pool's quote token. Charting a token/USDC pool underneath a
-    token/SOL position would silently draw the right shape on the wrong scale, so
-    a pool that does not match returns "" and the chart stays empty instead.
+    The quote match is not cosmetic: candles are requested with ``currency="token"``,
+    so prices come back denominated in the pool's quote token. Charting a token/USDC
+    pool underneath a token/SOL position would silently draw the right shape on the
+    wrong scale, so a pool that does not match yields ``None`` and the chart stays
+    empty instead.
+
+    ``None`` distinguishes "no answer yet" from "asked and there is none": a
+    no-match *is* cached (as ``{}``), a failed lookup is not, so a GeckoTerminal
+    blip cannot pin an empty answer for the cache's full hour.
     """
     gnet = get_gecko_network(network)
     want = (quote or "").strip().upper()
     key = (gnet, mint, want)
     cached = _ttl_get(_token_pool_cache, key, TOKEN_POOL_TTL)
     if cached is not None:
-        return cached
+        return cached or None
 
     try:
         pools = await _gecko_client().get_top_pools_by_network_token(gnet, mint)
@@ -246,26 +291,42 @@ async def fetch_token_top_pool(mint: str, network: str, quote: str) -> str:
         # Includes the KeyError geckoterminal_py raises post-processing an empty
         # result set. Not cached — a transient failure must not pin "" for an hour.
         logger.info("top-pool lookup failed mint=%s net=%s: %s", mint, gnet, e)
-        return ""
+        return None
 
-    address = ""
+    info: Dict[str, Any] = {}
     try:
         # Rows arrive sorted by 24h volume, so the first quote match is the deepest.
         for row in pools.to_dict("records"):
             if want and want not in _pool_quote_symbols(row.get("name")):
                 continue
-            address = str(row.get("address") or "")
-            if address:
-                break
+            if not str(row.get("address") or ""):
+                continue
+            info = normalize_pool_data(row, source="gecko")
+            _fill_pool_pair_fields(info, network, row)
+            break
     except Exception as e:
         logger.info("top-pool parse failed mint=%s net=%s: %s", mint, gnet, e)
-        return ""
+        return None
 
-    _ttl_put(_token_pool_cache, key, address, TOKEN_POOL_TTL)
-    return address
+    _ttl_put(_token_pool_cache, key, info, TOKEN_POOL_TTL)
+    return info or None
 
 
-async def fetch_pair_top_pool(base: str, quote: str, network: str) -> Tuple[str, bool]:
+async def fetch_token_top_pool(mint: str, network: str, quote: str) -> str:
+    """Address of the token's highest-volume pool **quoted in ``quote``**.
+
+    Used as a fallback when an executor's own ``pool_address`` yields no candles
+    (a closed slot, a pool that never had one recorded). The address form of
+    :func:`fetch_token_top_pool_info`, which is all the candle path needs; the LP
+    panel wants the venue and price too and shares this function's cache entry.
+    """
+    info = await fetch_token_top_pool_info(mint, network, quote)
+    return str((info or {}).get("address") or "")
+
+
+async def fetch_pair_top_pool_info(
+    base: str, quote: str, network: str
+) -> Tuple[Optional[Dict[str, Any]], bool]:
     """Deepest pool trading ``base``/``quote`` on ``network``, found by *symbol*.
 
     For venues that quote tickers rather than addresses (see
@@ -276,21 +337,22 @@ async def fetch_pair_top_pool(base: str, quote: str, network: str) -> Tuple[str,
     GeckoTerminal UI shows first.
 
     Returns:
-        ``(pool_address, inverted)``. ``inverted`` is True when the pool is quoted
+        ``(pool_info, inverted)``. ``inverted`` is True when the pool is quoted
         the other way round (pair ``XRP-RLUSD`` against a ``RLUSD / XRP`` pool);
-        the caller must then read the quote token's price series, not the base's.
-        ``("", False)`` when nothing matches — an empty chart beats a chart drawn
-        on the wrong pair.
+        the caller must then read the quote token's price series, not the base's,
+        and ``pool_info``'s pair fields are reported as the *caller* asked for
+        them, not as the pool names them. ``(None, False)`` when nothing matches —
+        an empty chart beats a chart drawn on the wrong pair.
     """
     gnet = get_gecko_network(network)
     b, q = (base or "").strip().upper(), (quote or "").strip().upper()
     if not b or not q:
-        return "", False
+        return None, False
 
     key = (gnet, b, q)
     cached = _ttl_get(_pair_pool_cache, key, TOKEN_POOL_TTL)
     if cached is not None:
-        return cached
+        return (cached[0] or None), cached[1]
 
     try:
         # Both symbols in the query: GeckoTerminal matches them against the pool
@@ -301,9 +363,9 @@ async def fetch_pair_top_pool(base: str, quote: str, network: str) -> Tuple[str,
     except Exception as e:
         # Not cached — a blip must not pin "no pool" for the full hour.
         logger.info("pair-pool search failed %s-%s net=%s: %s", b, q, gnet, e)
-        return "", False
+        return None, False
 
-    best: Tuple[str, bool] = ("", False)
+    best: Tuple[Dict[str, Any], bool] = ({}, False)
     best_volume = -1.0
     try:
         for row in data.get("data") or []:
@@ -322,13 +384,140 @@ async def fetch_pair_top_pool(base: str, quote: str, network: str) -> Tuple[str,
                 continue
             volume = _get_nested_float(attrs, "volume_usd", "h24") or 0.0
             if volume > best_volume:
-                best, best_volume = (address, inverted), volume
+                flat = _flatten_search_pool(row)
+                info = normalize_pool_data(flat, source="gecko")
+                _fill_pool_pair_fields(
+                    info, network, flat["attributes"], inverted=inverted
+                )
+                best, best_volume = (info, inverted), volume
     except Exception as e:
         logger.info("pair-pool parse failed %s-%s net=%s: %s", b, q, gnet, e)
-        return "", False
+        return None, False
 
     _ttl_put(_pair_pool_cache, key, best, TOKEN_POOL_TTL)
-    return best
+    return (best[0] or None), best[1]
+
+
+async def fetch_pair_top_pool(base: str, quote: str, network: str) -> Tuple[str, bool]:
+    """``(pool_address, inverted)`` for a symbol-quoted pair.
+
+    The address form of :func:`fetch_pair_top_pool_info`, which is all the candle
+    path needs; both share the same cache entry.
+    """
+    info, inverted = await fetch_pair_top_pool_info(base, quote, network)
+    return str((info or {}).get("address") or ""), inverted
+
+
+def _flatten_search_pool(row: Dict[str, Any]) -> Dict[str, Any]:
+    """Lift a ``search/pools`` row's venue onto its attributes.
+
+    The top-pools *token* endpoint carries ``dex_id`` as a column, but
+    ``search/pools`` puts the venue in ``relationships.dex.data.id`` instead. The
+    LP panel's whole question is which venue the pool is on, so the two shapes have
+    to agree before :func:`normalize_pool_data` sees them.
+    """
+    attrs = dict(row.get("attributes") or {})
+    if not attrs.get("dex_id"):
+        dex = ((row.get("relationships") or {}).get("dex") or {}).get("data") or {}
+        attrs["dex_id"] = str(dex.get("id") or "unknown")
+    return {"id": row.get("id", ""), "attributes": attrs}
+
+
+def _fill_pool_pair_fields(
+    info: Dict[str, Any],
+    network: str,
+    attrs: Dict[str, Any],
+    inverted: bool = False,
+) -> None:
+    """Add the pair fields the LP panel needs, in place.
+
+    GeckoTerminal reports no token *symbol* on a pool row (only the ``"SOL / USDC"``
+    display name) and prices in USD or as a quote-token ratio depending on the
+    endpoint — and ``normalize_pool_data`` keeps neither ratio, hence ``attrs``, the
+    row it was built from. This fills ``base_symbol`` / ``quote_symbol`` /
+    ``current_price`` — base priced in quote, the scale every LP bound is expressed
+    in — and pins ``network`` to what the caller asked for rather than
+    ``normalize_pool_data``'s ``"solana"`` default.
+    """
+    base_sym, quote_sym = extract_pair_from_name(str(info.get("name") or ""))
+    ratio = _get_nested_float(attrs, "base_token_price_quote_token")
+    if ratio is None:
+        base_usd = _get_nested_float(attrs, "base_token_price_usd")
+        quote_usd = _get_nested_float(attrs, "quote_token_price_usd")
+        if base_usd and quote_usd:
+            ratio = base_usd / quote_usd
+
+    if inverted:
+        base_sym, quote_sym = quote_sym, base_sym
+        ratio = (1 / ratio) if ratio else None
+
+    info["base_symbol"] = base_sym.upper()
+    info["quote_symbol"] = quote_sym.upper()
+    info["current_price"] = ratio
+    info["network"] = network
+
+
+async def resolve_pool_info(
+    network: str, trading_pair: str
+) -> Optional[Dict[str, Any]]:
+    """The pool a trading pair trades in, normalized, or ``None``.
+
+    Mirrors ``condor.dex_candles._resolve_pool``'s branching — a base that *is* a
+    mint resolves through the token's top pools, a ticker base through a symbol
+    search — so the LP panel names the same pool the chart is drawn from rather
+    than resolving pools by a second mechanism.
+
+    It differs in one direction only: ``_resolve_pool`` restricts the symbol
+    branch to ``SYMBOL_PAIR_NETWORKS``, so a ticker pair like ``SOL-USDC`` on
+    Solana resolves here but not there (the chart stays blank while the panel
+    still names a pool). Pointing ``_resolve_pool`` at this function would close
+    that gap; it is a change to the candle path and deliberately not made here.
+    """
+    # Lazy, like dex_candles' own import of this module: one definition of what an
+    # on-chain address looks like, and no import cycle between the two.
+    from condor.dex_candles import ADDRESS_RE
+
+    base, _, quote = str(trading_pair or "").partition("-")
+    base, quote = base.strip(), quote.strip()
+    if not base or not quote:
+        return None
+
+    if ADDRESS_RE.match(base):
+        return await fetch_token_top_pool_info(base, network, quote)
+
+    info, _inverted = await fetch_pair_top_pool_info(base, quote, network)
+    return info
+
+
+def lp_provider_for_dex(dex_id: str, network: str) -> Optional[str]:
+    """``"meteora/clmm"``-style LP provider for a GeckoTerminal dex id, or ``None``.
+
+    ``None`` means the pool is not one an ``lp_executor`` can add liquidity to, and
+    the caller is expected to report that dead end rather than guess: the API
+    rejects an ``lp_provider`` that does not match the pool, so a wrong answer here
+    becomes a failed executor.
+
+    Matching is by (brand, product) because GeckoTerminal's dex ids are not a
+    stable vocabulary and brand alone is not the position model. Uniswap V3 is
+    ``uniswap_v3`` on Ethereum, ``uniswap-v3-base`` on Base and
+    ``uniswap_v3_arbitrum`` on Arbitrum; ``uniswap-v4-ethereum`` and
+    ``meteora-damm-v2`` share a brand with a supported venue but not its mechanics;
+    and plain ``raydium`` is the constant-product AMM, while only ``raydium-clmm``
+    is the concentrated pool the ``raydium/clmm`` connector drives.
+    """
+    tokens = [t for t in _DEX_ID_SPLIT_RE.split((dex_id or "").strip().lower()) if t]
+    if not tokens:
+        return None
+    brand, qualifiers = tokens[0], [t for t in tokens[1:] if t not in _CHAIN_TOKENS]
+    for name, required, networks in _CLMM_VENUES:
+        if brand != name:
+            continue
+        if qualifiers != required:
+            return None
+        if get_gecko_network(network) not in networks:
+            return None
+        return f"{name}/clmm"
+    return None
 
 
 def can_fetch_liquidity(dex_id: str, network: str = None) -> bool:
