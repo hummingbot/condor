@@ -440,26 +440,35 @@ async def handle_pair_input(
             context.user_data, client, connector, pair
         )
 
-        if not is_valid:
-            await _show_pair_suggestions(
-                update, context, pair, error_msg, suggestions, connector
-            )
-            return
-
-        # Use the correct pair format returned by validation
-        if correct_pair:
-            pair = correct_pair
-        else:
+        if is_valid and not correct_pair:
             # Fallback: Get correctly formatted pair from trading rules
             trading_rules = await get_trading_rules(
                 context.user_data, client, connector
             )
-            fallback_pair = get_correct_pair_format(trading_rules, pair)
-            if fallback_pair:
-                pair = fallback_pair
+            correct_pair = get_correct_pair_format(trading_rules, pair)
 
     except Exception as e:
-        logger.warning(f"Could not validate trading pair: {e}")
+        # Fail closed: anything that breaks around the validator leaves the pair
+        # unvalidated, so it must not reach the config. The user gets the same
+        # surface as an explicitly invalid pair.
+        logger.warning(f"Could not validate trading pair '{pair}' on {connector}: {e}")
+        is_valid = False
+        error_msg = (
+            f"Could not reach {connector} to validate the pair. "
+            "Try again in a moment."
+        )
+        suggestions = []
+        correct_pair = None
+
+    if not is_valid:
+        await _show_pair_suggestions(
+            update, context, pair, error_msg, suggestions, connector
+        )
+        return
+
+    # Use the correct pair format resolved during validation
+    if correct_pair:
+        pair = correct_pair
 
     config["trading_pair"] = pair
     set_executor_config(context, config)
