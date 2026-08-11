@@ -1,0 +1,75 @@
+# The collector stack: ingest, its database, and the dashboards.
+#
+# Only `collector` is meant to be reachable from the internet, and only through
+# a reverse proxy that terminates TLS. Postgres and Grafana are bound to
+# loopback: Grafana is the one component here with a login and a session cookie,
+# and it has no business sharing an exposure with an endpoint whose whole design
+# is that anyone may POST to it.
+#
+#   docker compose -f telemetry_server/docker-compose.yml up -d
+#
+# Set POSTGRES_PASSWORD and GRAFANA_PASSWORD in an .env file beside this one.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: telemetry
+      POSTGRES_USER: telemetry
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - telemetry-db:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telemetry -d telemetry"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  collector:
+    build:
+      context: ..
+      dockerfile: telemetry_server/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      TELEMETRY_DSN: postgresql://telemetry:${POSTGRES_PASSWORD}@postgres:5432/telemetry
+      # X-Forwarded-For is only believed because there really is a proxy in
+      # front here. Leave this unset on a directly-exposed deployment.
+      TELEMETRY_TRUSTED_PROXY: "true"
+      TELEMETRY_RETENTION_DAYS: "90"
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\""]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      TELEMETRY_DB_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana:/etc/grafana/provisioning/datasources:ro
+      # The five queries, readable inside the container so a panel can be built
+      # by pasting one in. They are the deliverable; the panels are decoration.
+      - ./queries:/etc/telemetry-queries:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  telemetry-db:
+  grafana-data:
