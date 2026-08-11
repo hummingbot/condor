@@ -7,6 +7,7 @@ import {
   BarChart3,
   CheckCircle,
   Copy,
+  Droplets,
   Grid3X3,
   Layers,
   List,
@@ -28,6 +29,7 @@ import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfig
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
 import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
 import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPanel";
+import { LPConfigPanel, useLpConfig } from "@/components/executor/LPConfigPanel";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { useServer } from "@/hooks/useServer";
@@ -56,6 +58,7 @@ const TYPE_TABS: { value: ExecutorType; label: string; icon: React.ReactNode }[]
   { value: "position", label: "Position", icon: <TrendingUp className="h-3.5 w-3.5" /> },
   { value: "grid", label: "Grid", icon: <Grid3X3 className="h-3.5 w-3.5" /> },
   { value: "dca", label: "DCA", icon: <Layers className="h-3.5 w-3.5" /> },
+  { value: "lp", label: "LP", icon: <Droplets className="h-3.5 w-3.5" /> },
 ];
 
 const TYPE_LABELS: Record<ExecutorType, string> = {
@@ -63,6 +66,7 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   position: "Position Executor",
   order: "Order Executor",
   dca: "DCA Executor",
+  lp: "LP Executor",
 };
 
 // ── Page ──
@@ -175,6 +179,11 @@ export function CreateExecutor() {
     [connector, gatewayNetworks],
   );
 
+  // Pool resolution only means something for a gateway network, so the query is off
+  // for a CEX rather than asking about a pair that has no pool. Declared above the
+  // connector/pair propagation effects that dispatch into it.
+  const lpConfig = useLpConfig(server ?? null, connector, pair, caps.kind === "dex");
+
   // WS for executor data (candle streams are managed by candleStore)
   const wsChannels = useMemo(
     () => server ? [`executors:${server}`] : [],
@@ -241,12 +250,14 @@ export function CreateExecutor() {
     positionConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
     orderConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
     dcaConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
+    lpConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
   }, [connector]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     positionConfig.dispatch({ type: "SET_PAIR", value: pair });
     orderConfig.dispatch({ type: "SET_PAIR", value: pair });
     dcaConfig.dispatch({ type: "SET_PAIR", value: pair });
+    lpConfig.dispatch({ type: "SET_PAIR", value: pair });
   }, [pair]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Current price. /market/prices is a Hummingbot API call with no DEX answer, so a
@@ -272,6 +283,7 @@ export function CreateExecutor() {
       ? (sharedCandles[sharedCandles.length - 1]?.close ?? null)
       : (priceData?.mid_price ?? null);
 
+
   // Price precision
   const pricePrecision = useMemo(() => {
     if (!rulesData?.rules) return undefined;
@@ -293,8 +305,9 @@ export function CreateExecutor() {
       case "position": return positionConfig.validation;
       case "order": return orderConfig.validation;
       case "dca": return dcaConfig.validation;
+      case "lp": return lpConfig.validation;
     }
-  }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation]);
+  }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
 
   // Chart props depend on active type
   const chartProps = useMemo(() => {
@@ -311,8 +324,9 @@ export function CreateExecutor() {
       case "position": return positionConfig.chartProps;
       case "order": return orderConfig.chartProps;
       case "dca": return dcaConfig.chartProps;
+      case "lp": return lpConfig.chartProps;
     }
-  }, [executorType, gridState, positionConfig.chartProps, orderConfig.chartProps, dcaConfig.chartProps]);
+  }, [executorType, gridState, positionConfig.chartProps, orderConfig.chartProps, dcaConfig.chartProps, lpConfig.chartProps]);
 
   // Chart price set handler
   const handlePriceSet = useMemo(
@@ -330,6 +344,9 @@ export function CreateExecutor() {
           break;
         case "dca":
           dcaConfig.handleChartPriceSet(field, price);
+          break;
+        case "lp":
+          lpConfig.handleChartPriceSet(field, price);
           break;
       }
     },
@@ -381,6 +398,10 @@ export function CreateExecutor() {
         case "dca":
           payload = dcaConfig.buildPayload(connector, pair, isSpot);
           break;
+        case "lp":
+          // No isSpot: an LP position has no leverage, and connector is the network.
+          payload = lpConfig.buildPayload(connector, pair);
+          break;
       }
 
       return api.createExecutor(server, payload);
@@ -392,6 +413,7 @@ export function CreateExecutor() {
         case "position": positionConfig.save(); break;
         case "order": orderConfig.save(); break;
         case "dca": dcaConfig.save(); break;
+        case "lp": lpConfig.save(); break;
       }
       // Show success modal
       setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
@@ -632,6 +654,9 @@ export function CreateExecutor() {
                 )}
                 {executorType === "dca" && (
                   <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                )}
+                {executorType === "lp" && (
+                  <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} />
                 )}
               </div>
 

@@ -349,11 +349,22 @@ export function TradeChart({
           detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${escapeHtml(value)}</span></div>`;
         };
 
-        // Grid-specific details
-        if (o.type === "grid" && o.gridBox) {
-          addRow("Start Price", fmtPrice(o.gridBox.startPrice));
-          addRow("End Price", fmtPrice(o.gridBox.endPrice));
-          if (o.gridBox.limitPrice) addRow("Limit Price", fmtPrice(o.gridBox.limitPrice));
+        // Range-box details. Any executor drawn as a box describes itself by its
+        // bounds, not by an entry→exit pair; only the labels differ per type.
+        if (o.gridBox) {
+          if (o.type === "lp") {
+            // startPrice is the box's upper edge (see computeLpOverlay).
+            addRow("Upper Price", fmtPrice(o.gridBox.startPrice));
+            addRow("Lower Price", fmtPrice(o.gridBox.endPrice));
+            const cfgLower = Number(cfg.lower_limit_price);
+            if (o.gridBox.limitPrice) addRow("Upper Limit", fmtPrice(o.gridBox.limitPrice));
+            if (cfgLower > 0) addRow("Lower Limit", fmtPrice(cfgLower));
+            if (cfg.lp_provider != null) addRow("Provider", String(cfg.lp_provider));
+          } else {
+            addRow("Start Price", fmtPrice(o.gridBox.startPrice));
+            addRow("End Price", fmtPrice(o.gridBox.endPrice));
+            if (o.gridBox.limitPrice) addRow("Limit Price", fmtPrice(o.gridBox.limitPrice));
+          }
         } else if (o.entryPrice && o.entryPrice > 0) {
           addRow("Entry", fmtPrice(o.entryPrice));
           if (o.exitPrice && o.exitPrice > 0 && o.exitPrice !== o.entryPrice) {

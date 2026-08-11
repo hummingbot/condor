@@ -405,6 +405,12 @@ export function DetailPanel({
   const config = executor.config || {};
   const isPosition = executor.type === "position";
   const isGrid = executor.type === "grid";
+  const isLp = executor.type === "lp";
+  // A CLMM position is snapped to the venue's bins, so the on-chain bounds differ
+  // from the requested ones. Show where the liquidity actually sits.
+  const custom = executor.custom_info || {};
+  const lpLower = custom.lower_price ?? custom.price_lower ?? config.lower_price;
+  const lpUpper = custom.upper_price ?? custom.price_upper ?? config.upper_price;
 
   // Parse triple_barrier_config (may be a JSON string or object)
   const tripleBarrier: Record<string, unknown> = (() => {
@@ -667,6 +673,81 @@ export function DetailPanel({
                   <div>
                     <div className="text-[var(--color-text-muted)] text-xs mb-0.5">TP Order Type</div>
                     <div className="font-medium text-xs">{String(tripleBarrier.take_profit_order_type)}</div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* LP-specific details */}
+          {isLp && (
+            <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4 space-y-3">
+              <h3 className="text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
+                LP Details
+              </h3>
+              <div className="grid grid-cols-2 gap-3 text-sm">
+                {lpLower != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Lower Price</div>
+                    <div className="font-medium tabular-nums">{formatPrice(Number(lpLower))}</div>
+                  </div>
+                )}
+                {lpUpper != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Upper Price</div>
+                    <div className="font-medium tabular-nums">{formatPrice(Number(lpUpper))}</div>
+                  </div>
+                )}
+                {config.lower_limit_price != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Lower Limit</div>
+                    <div className="font-medium tabular-nums text-[var(--color-red)]">
+                      {formatPrice(Number(config.lower_limit_price))}
+                    </div>
+                  </div>
+                )}
+                {config.upper_limit_price != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Upper Limit</div>
+                    <div className="font-medium tabular-nums text-[var(--color-red)]">
+                      {formatPrice(Number(config.upper_limit_price))}
+                    </div>
+                  </div>
+                )}
+                {config.lp_provider != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Provider</div>
+                    <div className="font-medium text-xs">{String(config.lp_provider)}</div>
+                  </div>
+                )}
+                {custom.in_range != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Range Status</div>
+                    <div className="font-medium text-xs">{String(custom.in_range)}</div>
+                  </div>
+                )}
+                {config.base_amount != null && Number(config.base_amount) > 0 && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Base Amount</div>
+                    <div className="font-medium tabular-nums">{String(config.base_amount)}</div>
+                  </div>
+                )}
+                {config.quote_amount != null && Number(config.quote_amount) > 0 && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Quote Amount</div>
+                    <div className="font-medium tabular-nums">{String(config.quote_amount)}</div>
+                  </div>
+                )}
+                {config.pool_address != null && (
+                  <div className="col-span-2">
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Pool</div>
+                    <div className="font-mono text-[11px] break-all">{String(config.pool_address)}</div>
+                  </div>
+                )}
+                {config.keep_position != null && (
+                  <div>
+                    <div className="text-[var(--color-text-muted)] text-xs mb-0.5">Keep Position</div>
+                    <div className="font-medium">{String(config.keep_position) === "true" ? "Yes" : "No"}</div>
                   </div>
                 )}
               </div>

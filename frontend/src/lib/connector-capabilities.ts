@@ -19,18 +19,10 @@ import type { ExecutorType } from "@/components/executor/types";
 
 export type ConnectorKind = "cex" | "dex";
 
-/**
- * An executor type a *venue* supports, which is not yet the same set as the tabs
- * the panel implements: `"lp"` has no entry in `TYPE_TABS` until FEAT-042 adds
- * one. Keeping it out of `ExecutorType` leaves that union meaning "a tab this
- * panel can render", so the exhaustive switches over it stay exhaustive.
- */
-export type SupportedExecutorType = ExecutorType | "lp";
-
 export interface ConnectorCapabilities {
   kind: ConnectorKind;
   /** Executor types this venue supports. */
-  executorTypes: SupportedExecutorType[];
+  executorTypes: ExecutorType[];
   /** Allowed `execution_strategy` values (subset of OrderConfigPanel's options). */
   orderStrategies: string[];
   /** Whether `/market/order-book` and `/market/tickers` answer — depth + markets tabs. */
@@ -48,9 +40,8 @@ const CEX_CAPABILITIES: ConnectorCapabilities = {
 };
 
 // A gateway swap has no resting order book to post to, so MARKET is the only
-// execution strategy that means anything. `lp` is listed from day one; the tab
-// list filters against TYPE_TABS, so it simply finds no entry until FEAT-042
-// adds one.
+// execution strategy that means anything. `lp` is the CLMM liquidity position —
+// the second, and only other, executor a gateway network supports.
 const DEX_CAPABILITIES: ConnectorCapabilities = {
   kind: "dex",
   executorTypes: ["order", "lp"],

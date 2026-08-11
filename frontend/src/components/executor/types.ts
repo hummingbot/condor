@@ -1,11 +1,12 @@
-export type ExecutorType = "grid" | "position" | "order" | "dca";
-
-export const EXECUTOR_TYPES: { value: ExecutorType; label: string; icon: string }[] = [
-  { value: "grid", label: "Grid", icon: "Grid3X3" },
-  { value: "position", label: "Position", icon: "TrendingUp" },
-  { value: "order", label: "Order", icon: "ArrowUpDown" },
-  { value: "dca", label: "DCA", icon: "Layers" },
-];
+/**
+ * An executor type the trade panel implements a tab for.
+ *
+ * This is the single union: `connectorCapabilities` reports which of these a venue
+ * supports, `TYPE_TABS` / `TYPE_LABELS` render them, and four switches in
+ * `CreateExecutor` are exhaustive over it — so adding a member here is what makes
+ * the compiler point at every site that has to learn about it.
+ */
+export type ExecutorType = "grid" | "position" | "order" | "dca" | "lp";
 
 export interface ExtraLine {
   price: number;

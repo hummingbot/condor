@@ -258,6 +258,25 @@ export interface MarketPrice {
   best_ask: number;
 }
 
+/**
+ * The pool a DEX pair trades in — the same one the chart's candles come from.
+ *
+ * `lp_supported` is false, with a null `lp_provider`, whenever the deepest pool is
+ * not one an `lp_executor` can add liquidity to (a router, a plain AMM, Uniswap
+ * v4). That is a normal answer, not an error: the LP panel responds by asking for
+ * a pool address by hand. `current_price` is the base priced in quote — the scale
+ * every LP bound is expressed in — and is null when GeckoTerminal reports no price.
+ */
+export interface DexPoolInfo {
+  pool_address: string | null;
+  dex_id: string | null;
+  lp_provider: string | null;
+  lp_supported: boolean;
+  current_price: number | null;
+  base_symbol: string | null;
+  quote_symbol: string | null;
+}
+
 export interface OrderBookLevel {
   price: number;
   amount: number;
@@ -1184,6 +1203,11 @@ export const api = {
     apiFetch<{ networks: string[] }>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/gateway-networks`,
     ).then((r) => r.networks),
+
+  getDexPool: (server: string, connector: string, pair: string) =>
+    apiFetch<DexPoolInfo>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/dex-pool?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
+    ),
 
   getPrice: (server: string, connector: string, pair: string) =>
     apiFetch<MarketPrice>(
