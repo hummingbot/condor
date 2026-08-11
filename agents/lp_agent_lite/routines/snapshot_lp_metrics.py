@@ -14,6 +14,7 @@ from agents.lp_agent_lite.routines._reporting import DiagnosticTrace, report_res
 
 CATEGORY = "Orca LP Metrics"
 _CONTROLLER = re.compile(r"^lp_agent_lite\.orca_(?P<suffix>e?[1-9]\d*)$")
+_ADDRESS = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _TARGET_CHARS = 1_700
 
 
@@ -28,7 +29,6 @@ class PositionMetric(BaseModel):
     executor_id: StrictStr | None = Field(default=None, min_length=1, max_length=128)
     position_address: StrictStr = Field(min_length=1, max_length=64)
     pool_address: StrictStr = Field(min_length=1, max_length=64)
-    position_mint: StrictStr | None = Field(default=None, min_length=1, max_length=64)
     state: Literal["active", "closing", "closed", "untracked", "foreign", "ambiguous"]
     age_minutes: Decimal | None = Field(default=None, ge=0)
     base_amount: Decimal | None = Field(default=None, ge=0)
@@ -61,10 +61,12 @@ class ResidualMetric(BaseModel):
     mint: StrictStr = Field(min_length=1, max_length=64)
     amount: Decimal = Field(ge=0)
     value_quote: Decimal | None = Field(default=None, ge=0)
-    status: Literal["clean", "cleanup", "unattributed"]
+    status: Literal["prepared", "clean", "cleanup", "unattributed"]
 
     @model_validator(mode="after")
     def finite_numbers(self):
+        if not _ADDRESS.fullmatch(self.mint):
+            raise ValueError("residual mint must be a Solana address")
         if not _finite(self.amount) or not _finite(self.value_quote):
             raise ValueError("residual metrics must be finite")
         return self
@@ -76,7 +78,14 @@ class LastMutation(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     kind: Literal["register", "prepare", "open", "close", "cleanup", "stop"]
     identity: StrictStr = Field(min_length=1, max_length=128)
-    status: StrictStr = Field(min_length=1, max_length=64)
+    status: Literal[
+        "rejected_before_submit",
+        "submitted",
+        "confirmed",
+        "uncertain",
+        "ambiguous",
+        "unavailable",
+    ]
     transaction: StrictStr | None = Field(default=None, min_length=1, max_length=128)
 
 
@@ -128,14 +137,18 @@ def _resolve(config: Config) -> dict[str, Any]:
         engine.config.get("execution_mode") if isinstance(engine.config, dict) else None
     )
     strategy = getattr(engine, "strategy", None)
-    if (
-        mode not in {"dry_run", "run_once", "loop"}
-        or getattr(getattr(engine, "agent", None), "slug", None) != "lp_agent_lite"
-        or getattr(engine, "agent_id", None) != config.controller_id
-        or getattr(strategy, "slug", None) != "orca"
-        or getattr(engine, "status", None) != "running"
-    ):
-        raise ValueError("active Condor identity, mode, or lifecycle is invalid")
+    if mode not in {"dry_run", "run_once", "loop"}:
+        raise ValueError("active Condor execution mode is invalid")
+    if getattr(getattr(engine, "agent", None), "slug", None) != "lp_agent_lite":
+        raise ValueError("active Condor Agent identity is invalid")
+    if getattr(engine, "agent_id", None) != config.controller_id:
+        raise ValueError("active Condor controller identity is invalid")
+    if getattr(strategy, "slug", None) != "orca":
+        raise ValueError("active Condor Strategy identity is invalid")
+    if getattr(engine, "is_running", False) is not True:
+        raise ValueError("active Condor lifecycle is not running")
+    if getattr(engine, "_active_client", None) is None:
+        raise ValueError("no Condor tick is currently in flight")
     suffix = match.group("suffix")
     if mode == "loop":
         if suffix.startswith("e"):
@@ -223,7 +236,6 @@ def _build(config: Config, scope: dict[str, Any]) -> dict[str, Any]:
             "eid",
             "pos",
             "pool",
-            "mint",
             "state",
             "age_min",
             "base",
@@ -237,7 +249,6 @@ def _build(config: Config, scope: dict[str, Any]) -> dict[str, Any]:
                 row.executor_id,
                 row.position_address,
                 row.pool_address,
-                row.position_mint,
                 row.state,
                 _decimal(row.age_minutes),
                 _decimal(row.base_amount),
@@ -255,6 +266,7 @@ def _build(config: Config, scope: dict[str, Any]) -> dict[str, Any]:
             for row in residuals
         ],
         "r_omit": 0,
+        "last_cols": ["kind", "identity", "status", "transaction"],
         "last": (
             None
             if config.last is None

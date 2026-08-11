@@ -17,7 +17,6 @@ def _position(index=1, **changes):
         "executor_id": f"executor-{index}",
         "position_address": str(index + 1) * 32,
         "pool_address": "8" * 32,
-        "position_mint": "9" * 32,
         "state": "active",
         "age_minutes": "12.5",
         "base_amount": "0.1",
@@ -75,9 +74,11 @@ def _engine(tmp_path, *, mode="loop", tick_count=1, session_number=7):
             else f"lp_agent_lite.orca_e{session_number}"
         ),
         status="running",
+        is_running=True,
         journal=SimpleNamespace(tick_count=tick_count) if mode == "loop" else None,
         session_dir=session_dir if mode == "loop" else None,
         _last_tick_at=1_600.0,
+        _active_client=object(),
     )
 
 
@@ -111,6 +112,7 @@ def test_loop_snapshot_uses_current_session_clock_and_writes_same_json(
     assert Decimal(result["session"]["age_min"]) == Decimal("10")
     assert result["session"]["pnl_q"] == "0.25"
     assert result["wallet"] == {"quote": "9.75", "sol": "0.2"}
+    assert result["last_cols"] == ["kind", "identity", "status", "transaction"]
     assert result["status"] == "complete"
     assert result["mutation"] is False
     assert result["artifact_write"] is True
@@ -187,6 +189,36 @@ def test_stale_tick_and_wrong_mode_identity_write_nothing(monkeypatch, tmp_path)
     assert not (engine.session_dir / "metrics").exists()
 
 
+def test_pause_requested_during_inflight_tick_still_allows_snapshot(
+    monkeypatch, tmp_path
+):
+    engine = _engine(tmp_path)
+    engine.status = "paused"
+    _install(monkeypatch, engine)
+
+    _, result = _run(_config())
+
+    assert result["status"] == "complete"
+    assert result["artifact_write"] is True
+
+
+def test_idle_or_stopped_engine_writes_nothing(monkeypatch, tmp_path):
+    engine = _engine(tmp_path)
+    engine._active_client = None
+    _install(monkeypatch, engine)
+
+    _, idle = _run(_config())
+    assert idle["status"] == "unavailable"
+    assert "currently in flight" in idle["reason"]
+
+    engine._active_client = object()
+    engine.is_running = False
+    _, stopped = _run(_config())
+    assert stopped["status"] == "unavailable"
+    assert "lifecycle is not running" in stopped["reason"]
+    assert not (engine.session_dir / "metrics").exists()
+
+
 def test_untracked_direct_orca_position_has_exact_position_and_null_executor(
     monkeypatch, tmp_path
 ):
@@ -195,10 +227,10 @@ def test_untracked_direct_orca_position_has_exact_position_and_null_executor(
     untracked = _position(executor_id=None, state="untracked")
     _, result = _run(_config(positions=[untracked]))
 
-    row = result["p"][0]
-    assert row[0] is None
-    assert row[1] == untracked["position_address"]
-    assert row[4] == "untracked"
+    row = dict(zip(result["p_cols"], result["p"][0], strict=True))
+    assert row["eid"] is None
+    assert row["pos"] == untracked["position_address"]
+    assert row["state"] == "untracked"
 
 
 def test_tracked_state_without_executor_and_nonfinite_numbers_are_rejected():
@@ -208,6 +240,63 @@ def test_tracked_state_without_executor_and_nonfinite_numbers_are_rejected():
         _config(session_pnl_quote="NaN")
     with pytest.raises(ValidationError):
         _config(exit_state="wind_down")
+
+
+def test_position_mint_is_not_a_metrics_input():
+    assert "position_mint" not in routine.PositionMetric.model_fields
+    with pytest.raises(ValidationError):
+        _config(positions=[_position(position_mint="9" * 32)])
+
+
+def test_prepared_residual_and_rejected_open_use_declared_shapes(monkeypatch, tmp_path):
+    engine = _engine(tmp_path)
+    _install(monkeypatch, engine)
+    prepared = {
+        "mint": "7" * 32,
+        "amount": "491.261473",
+        "value_quote": "1.34",
+        "status": "prepared",
+    }
+    last = {
+        "kind": "open",
+        "identity": "failed-lp-executor",
+        "status": "rejected_before_submit",
+    }
+
+    _, result = _run(_config(residuals=[prepared], last=last))
+
+    residual = dict(zip(result["r_cols"], result["r"][0], strict=True))
+    mutation = dict(zip(result["last_cols"], result["last"], strict=True))
+    assert residual == {
+        "mint": prepared["mint"],
+        "amount": "491.261473",
+        "value_q": "1.34",
+        "status": "prepared",
+    }
+    assert mutation == {
+        "kind": "open",
+        "identity": "failed-lp-executor",
+        "status": "rejected_before_submit",
+        "transaction": None,
+    }
+
+
+def test_metrics_reject_symbol_map_and_raw_native_mutation_status():
+    with pytest.raises(ValidationError):
+        _config(residuals={"PUMP": "491.261473"})
+    with pytest.raises(ValidationError):
+        _config(
+            residuals=[
+                {
+                    "mint": "PUMP",
+                    "amount": "491.261473",
+                    "value_quote": "1.34",
+                    "status": "prepared",
+                }
+            ]
+        )
+    with pytest.raises(ValidationError):
+        _config(last={"kind": "open", "identity": "executor", "status": "FAILED"})
 
 
 def test_large_current_tick_snapshot_uses_deterministic_bounded_prefix(
@@ -223,9 +312,10 @@ def test_large_current_tick_snapshot_uses_deterministic_bounded_prefix(
         )
         for index in range(1, 11)
     ]
+    mint_prefixes = "ABCDEFGHJK"
     residuals = [
         {
-            "mint": chr(65 + index) * 32,
+            "mint": mint_prefixes[index] * 32,
             "amount": "1",
             "value_quote": "1",
             "status": "cleanup",

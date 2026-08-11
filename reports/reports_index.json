@@ -1,1128 +1,5 @@
 [
   {
-    "id": "321a44",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_002218_lp_portfolio_snapshot_321a44.html",
-    "created_at": "2026-08-09T00:22:18.956523+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "9cdad7",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_002827_lp_portfolio_snapshot_9cdad7.html",
-    "created_at": "2026-08-09T00:28:27.044733+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "9c25fb",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_003431_lp_portfolio_snapshot_9c25fb.html",
-    "created_at": "2026-08-09T00:34:31.104099+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "7fae4a",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_004025_lp_portfolio_snapshot_7fae4a.html",
-    "created_at": "2026-08-09T00:40:25.542578+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "778f92",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_004632_lp_portfolio_snapshot_778f92.html",
-    "created_at": "2026-08-09T00:46:32.914070+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "0ff80b",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_005249_lp_portfolio_snapshot_0ff80b.html",
-    "created_at": "2026-08-09T00:52:49.097523+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "dde45d",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_005846_lp_portfolio_snapshot_dde45d.html",
-    "created_at": "2026-08-09T00:58:46.572813+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "55ebb8",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_010508_lp_portfolio_snapshot_55ebb8.html",
-    "created_at": "2026-08-09T01:05:08.610704+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "d529e6",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_011118_lp_portfolio_snapshot_d529e6.html",
-    "created_at": "2026-08-09T01:11:18.996801+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "45b3b1",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_011723_lp_portfolio_snapshot_45b3b1.html",
-    "created_at": "2026-08-09T01:17:23.032643+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "d1e2e2",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_012341_lp_portfolio_snapshot_d1e2e2.html",
-    "created_at": "2026-08-09T01:23:41.650512+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "8df60c",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_012950_lp_portfolio_snapshot_8df60c.html",
-    "created_at": "2026-08-09T01:29:50.439733+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "16f0f3",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_013547_lp_portfolio_snapshot_16f0f3.html",
-    "created_at": "2026-08-09T01:35:47.844134+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "2a2fed",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_014156_lp_portfolio_snapshot_2a2fed.html",
-    "created_at": "2026-08-09T01:41:56.384541+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "f8fe1d",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_014833_lp_portfolio_snapshot_f8fe1d.html",
-    "created_at": "2026-08-09T01:48:33.078671+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "0b2d3b",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_015436_lp_portfolio_snapshot_0b2d3b.html",
-    "created_at": "2026-08-09T01:54:36.065340+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "f6dff1",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_020039_lp_portfolio_snapshot_f6dff1.html",
-    "created_at": "2026-08-09T02:00:39.484254+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "ea5b45",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_020638_lp_portfolio_snapshot_ea5b45.html",
-    "created_at": "2026-08-09T02:06:38.986937+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "68208c",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_021248_lp_portfolio_snapshot_68208c.html",
-    "created_at": "2026-08-09T02:12:48.510816+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "af533a",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_021851_lp_portfolio_snapshot_af533a.html",
-    "created_at": "2026-08-09T02:18:51.859491+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "b8ba5d",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_022454_lp_portfolio_snapshot_b8ba5d.html",
-    "created_at": "2026-08-09T02:24:54.799723+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "ec2d4b",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_023045_lp_portfolio_snapshot_ec2d4b.html",
-    "created_at": "2026-08-09T02:30:45.127827+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "350584",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_023649_lp_portfolio_snapshot_350584.html",
-    "created_at": "2026-08-09T02:36:49.460693+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "7c5273",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_024253_lp_portfolio_snapshot_7c5273.html",
-    "created_at": "2026-08-09T02:42:53.893877+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "22bdfa",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_024911_lp_portfolio_snapshot_22bdfa.html",
-    "created_at": "2026-08-09T02:49:11.426814+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "6fdc5b",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_025509_lp_portfolio_snapshot_6fdc5b.html",
-    "created_at": "2026-08-09T02:55:09.479814+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "f4578f",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_030101_lp_portfolio_snapshot_f4578f.html",
-    "created_at": "2026-08-09T03:01:01.859679+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "c12f8b",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_030703_lp_portfolio_snapshot_c12f8b.html",
-    "created_at": "2026-08-09T03:07:03.740957+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "64ffbf",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_031306_lp_portfolio_snapshot_64ffbf.html",
-    "created_at": "2026-08-09T03:13:06.773939+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "2bdb25",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_031921_lp_portfolio_snapshot_2bdb25.html",
-    "created_at": "2026-08-09T03:19:21.208568+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "f01be4",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_032523_lp_portfolio_snapshot_f01be4.html",
-    "created_at": "2026-08-09T03:25:23.845666+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "c2ab6f",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_033131_lp_portfolio_snapshot_c2ab6f.html",
-    "created_at": "2026-08-09T03:31:31.320430+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "436be2",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_033728_lp_portfolio_snapshot_436be2.html",
-    "created_at": "2026-08-09T03:37:28.877920+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "3f6340",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_040322_lp_portfolio_snapshot_3f6340.html",
-    "created_at": "2026-08-09T04:03:22.322289+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "0c49f7",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_040914_lp_portfolio_snapshot_0c49f7.html",
-    "created_at": "2026-08-09T04:09:14.491363+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "d5d740",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_041503_lp_portfolio_snapshot_d5d740.html",
-    "created_at": "2026-08-09T04:15:03.097560+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "edd033",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_042045_lp_portfolio_snapshot_edd033.html",
-    "created_at": "2026-08-09T04:20:45.882762+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "73ddf3",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_042645_lp_portfolio_snapshot_73ddf3.html",
-    "created_at": "2026-08-09T04:26:45.335655+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "5b8163",
-    "title": "lp_expert · orca · session 39",
-    "filename": "20260808_171445_lp_expert_orca_session_39_5b8163.html",
-    "created_at": "2026-08-08T17:14:45.783500+00:00",
-    "source_type": "routine",
-    "source_name": "lp_expert.orca/session_39",
-    "tags": [
-      "agent",
-      "session",
-      "lp_expert"
-    ],
-    "agent": "condor",
-    "updated_at": "2026-08-09T04:27:11.310971+00:00"
-  },
-  {
-    "id": "378b5c",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_043444_lp_portfolio_snapshot_378b5c.html",
-    "created_at": "2026-08-09T04:34:44.692586+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "90a28b",
-    "title": "Orca LP Pool Scan",
-    "filename": "20260809_043453_orca_lp_pool_scan_90a28b.html",
-    "created_at": "2026-08-09T04:34:53.045725+00:00",
-    "source_type": "routine",
-    "source_name": "lp_pool_scan",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-pool-scan"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "b33cb4",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_043600_lp_order_request_planning_and_evidence_b33cb4.html",
-    "created_at": "2026-08-09T04:36:00.262439+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "f1212b",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_043628_lp_order_request_planning_and_evidence_f1212b.html",
-    "created_at": "2026-08-09T04:36:28.120293+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "dcfd73",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_044216_lp_portfolio_snapshot_dcfd73.html",
-    "created_at": "2026-08-09T04:42:16.574441+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "c0fc02",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_044242_lp_order_request_planning_and_evidence_c0fc02.html",
-    "created_at": "2026-08-09T04:42:42.106780+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "a094e7",
-    "title": "Non-Submitting LP Executor Request",
-    "filename": "20260809_044305_non_submitting_lp_executor_request_a094e7.html",
-    "created_at": "2026-08-09T04:43:05.086245+00:00",
-    "source_type": "routine",
-    "source_name": "lp_executor_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-executor-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "3db3b3",
-    "title": "Non-Submitting LP Executor Request",
-    "filename": "20260809_044331_non_submitting_lp_executor_request_3db3b3.html",
-    "created_at": "2026-08-09T04:43:31.564142+00:00",
-    "source_type": "routine",
-    "source_name": "lp_executor_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-executor-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "87c43e",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_044953_lp_portfolio_snapshot_87c43e.html",
-    "created_at": "2026-08-09T04:49:53.894475+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "4ca0ed",
-    "title": "Orca LP Pool Scan",
-    "filename": "20260809_045007_orca_lp_pool_scan_4ca0ed.html",
-    "created_at": "2026-08-09T04:50:07.985094+00:00",
-    "source_type": "routine",
-    "source_name": "lp_pool_scan",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-pool-scan"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "f40438",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_045107_lp_order_request_planning_and_evidence_f40438.html",
-    "created_at": "2026-08-09T04:51:07.294103+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "f33440",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_045126_lp_order_request_planning_and_evidence_f33440.html",
-    "created_at": "2026-08-09T04:51:26.743550+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "5f7717",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_045814_lp_portfolio_snapshot_5f7717.html",
-    "created_at": "2026-08-09T04:58:14.566414+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "2eee7b",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_045840_lp_order_request_planning_and_evidence_2eee7b.html",
-    "created_at": "2026-08-09T04:58:40.041730+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "baeb01",
-    "title": "Non-Submitting LP Executor Request",
-    "filename": "20260809_045903_non_submitting_lp_executor_request_baeb01.html",
-    "created_at": "2026-08-09T04:59:03.554414+00:00",
-    "source_type": "routine",
-    "source_name": "lp_executor_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-executor-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "a9d4e1",
-    "title": "Non-Submitting LP Executor Request",
-    "filename": "20260809_045947_non_submitting_lp_executor_request_a9d4e1.html",
-    "created_at": "2026-08-09T04:59:47.854707+00:00",
-    "source_type": "routine",
-    "source_name": "lp_executor_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-executor-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "95d778",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_050610_lp_portfolio_snapshot_95d778.html",
-    "created_at": "2026-08-09T05:06:10.866945+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "71e7b7",
-    "title": "Orca LP Pool Scan",
-    "filename": "20260809_050620_orca_lp_pool_scan_71e7b7.html",
-    "created_at": "2026-08-09T05:06:20.374057+00:00",
-    "source_type": "routine",
-    "source_name": "lp_pool_scan",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-pool-scan"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "a453fe",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_050734_lp_order_request_planning_and_evidence_a453fe.html",
-    "created_at": "2026-08-09T05:07:34.384962+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "031d92",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_050834_lp_order_request_planning_and_evidence_031d92.html",
-    "created_at": "2026-08-09T05:08:34.961998+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "47dfd3",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_051525_lp_portfolio_snapshot_47dfd3.html",
-    "created_at": "2026-08-09T05:15:25.765548+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "a4f3c0",
-    "title": "LP Order Request Planning and Evidence",
-    "filename": "20260809_051540_lp_order_request_planning_and_evidence_a4f3c0.html",
-    "created_at": "2026-08-09T05:15:40.996576+00:00",
-    "source_type": "routine",
-    "source_name": "lp_order_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-order-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "d3b334",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_052519_lp_portfolio_snapshot_d3b334.html",
-    "created_at": "2026-08-09T05:25:19.155667+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "b63994",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_053347_lp_portfolio_snapshot_b63994.html",
-    "created_at": "2026-08-09T05:33:47.944775+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "af4daf",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_054124_lp_portfolio_snapshot_af4daf.html",
-    "created_at": "2026-08-09T05:41:24.412693+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "a53028",
-    "title": "Non-Submitting LP Executor Request",
-    "filename": "20260809_054203_non_submitting_lp_executor_request_a53028.html",
-    "created_at": "2026-08-09T05:42:03.859263+00:00",
-    "source_type": "routine",
-    "source_name": "lp_executor_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-executor-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "325b65",
-    "title": "Non-Submitting LP Executor Request",
-    "filename": "20260809_054226_non_submitting_lp_executor_request_325b65.html",
-    "created_at": "2026-08-09T05:42:26.778737+00:00",
-    "source_type": "routine",
-    "source_name": "lp_executor_request",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-executor-request"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "cb7d84",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_054914_lp_portfolio_snapshot_cb7d84.html",
-    "created_at": "2026-08-09T05:49:14.083010+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "14f72d",
-    "title": "Orca LP Pool Scan",
-    "filename": "20260809_054926_orca_lp_pool_scan_14f72d.html",
-    "created_at": "2026-08-09T05:49:26.124880+00:00",
-    "source_type": "routine",
-    "source_name": "lp_pool_scan",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-pool-scan"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "8215ce",
-    "title": "LP Wizard State",
-    "filename": "20260809_055019_lp_wizard_state_8215ce.html",
-    "created_at": "2026-08-09T05:50:19.666814+00:00",
-    "source_type": "routine",
-    "source_name": "lp_wizard/state",
-    "tags": [
-      "lp_wizard",
-      "orca",
-      "lp",
-      "state",
-      "sample"
-    ],
-    "agent": "lp_wizard"
-  },
-  {
-    "id": "e8b987",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_055706_lp_portfolio_snapshot_e8b987.html",
-    "created_at": "2026-08-09T05:57:06.651819+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "bfb8e4",
-    "title": "Orca LP Pool Scan",
-    "filename": "20260809_055713_orca_lp_pool_scan_bfb8e4.html",
-    "created_at": "2026-08-09T05:57:13.184783+00:00",
-    "source_type": "routine",
-    "source_name": "lp_pool_scan",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-pool-scan"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "25cfd0",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_060337_lp_portfolio_snapshot_25cfd0.html",
-    "created_at": "2026-08-09T06:03:37.939285+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "ac4cd9",
-    "title": "Orca LP Pool Scan",
-    "filename": "20260809_060348_orca_lp_pool_scan_ac4cd9.html",
-    "created_at": "2026-08-09T06:03:48.324083+00:00",
-    "source_type": "routine",
-    "source_name": "lp_pool_scan",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-pool-scan"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "9ab3fc",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_061048_lp_portfolio_snapshot_9ab3fc.html",
-    "created_at": "2026-08-09T06:10:48.123945+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "05eb54",
-    "title": "Orca LP Pool Scan",
-    "filename": "20260809_061055_orca_lp_pool_scan_05eb54.html",
-    "created_at": "2026-08-09T06:10:55.669669+00:00",
-    "source_type": "routine",
-    "source_name": "lp_pool_scan",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-pool-scan"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "60ed7e",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_061735_lp_portfolio_snapshot_60ed7e.html",
-    "created_at": "2026-08-09T06:17:35.915912+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "4e2281",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_062556_lp_portfolio_snapshot_4e2281.html",
-    "created_at": "2026-08-09T06:25:56.252735+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "27accc",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_063246_lp_portfolio_snapshot_27accc.html",
-    "created_at": "2026-08-09T06:32:46.199811+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "83437c",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_063840_lp_portfolio_snapshot_83437c.html",
-    "created_at": "2026-08-09T06:38:40.320340+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
-    "id": "65e871",
-    "title": "LP Portfolio Snapshot",
-    "filename": "20260809_064452_lp_portfolio_snapshot_65e871.html",
-    "created_at": "2026-08-09T06:44:52.967494+00:00",
-    "source_type": "routine",
-    "source_name": "lp_snapshot",
-    "tags": [
-      "lp-expert",
-      "routine-trace",
-      "lp-snapshot"
-    ],
-    "agent": "lp_expert"
-  },
-  {
     "id": "59c79e",
     "title": "lp_expert · orca · session 40",
     "filename": "20260809_043641_lp_expert_orca_session_40_59c79e.html",
@@ -1402,5 +279,1132 @@
       "lp_agent_lite"
     ],
     "agent": "condor"
+  },
+  {
+    "id": "400a59",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260809_172817_lp_agent_lite_orca_pool_scan_diagnostic_400a59.html",
+    "created_at": "2026-08-09T17:28:17.682443+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "38c678",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260809_172820_lp_agent_lite_metrics_snapshot_diagnosti_38c678.html",
+    "created_at": "2026-08-09T17:28:20.090932+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "1805be",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260809_172853_lp_agent_lite_gateway_token_registration_1805be.html",
+    "created_at": "2026-08-09T17:28:53.371478+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "206c65",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260809_172933_lp_agent_lite_lp_requirements_diagnostic_206c65.html",
+    "created_at": "2026-08-09T17:29:33.526388+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "bc487e",
+    "title": "lp_agent_lite · orca · session 2",
+    "filename": "20260809_173006_lp_agent_lite_orca_session_2_bc487e.html",
+    "created_at": "2026-08-09T17:30:06.525473+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_2",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
+    ],
+    "agent": "condor"
+  },
+  {
+    "id": "bb2c6b",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_041727_lp_agent_lite_metrics_snapshot_diagnosti_bb2c6b.html",
+    "created_at": "2026-08-10T04:17:27.728621+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "581a6f",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_042021_lp_agent_lite_metrics_snapshot_diagnosti_581a6f.html",
+    "created_at": "2026-08-10T04:20:21.076295+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "16ad78",
+    "title": "lp_agent_lite · orca · session 3",
+    "filename": "20260810_041749_lp_agent_lite_orca_session_3_16ad78.html",
+    "created_at": "2026-08-10T04:17:49.203615+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_3",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
+    ],
+    "agent": "condor",
+    "updated_at": "2026-08-10T04:20:34.054668+00:00"
+  },
+  {
+    "id": "f9d153",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_042453_lp_agent_lite_metrics_snapshot_diagnosti_f9d153.html",
+    "created_at": "2026-08-10T04:24:53.189228+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "20fa22",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_042456_lp_agent_lite_orca_pool_scan_diagnostic_20fa22.html",
+    "created_at": "2026-08-10T04:24:56.929719+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "1f87b0",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_042538_lp_agent_lite_gateway_token_registration_1f87b0.html",
+    "created_at": "2026-08-10T04:25:38.441315+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "c94608",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_042541_lp_agent_lite_lp_requirements_diagnostic_c94608.html",
+    "created_at": "2026-08-10T04:25:41.563173+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "b44eb1",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_043009_lp_agent_lite_metrics_snapshot_diagnosti_b44eb1.html",
+    "created_at": "2026-08-10T04:30:09.875406+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "f9799e",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_043756_lp_agent_lite_metrics_snapshot_diagnosti_f9799e.html",
+    "created_at": "2026-08-10T04:37:56.042644+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "9b918f",
+    "title": "lp_agent_lite · orca · session 4",
+    "filename": "20260810_042722_lp_agent_lite_orca_session_4_9b918f.html",
+    "created_at": "2026-08-10T04:27:22.171429+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_4",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
+    ],
+    "agent": "condor",
+    "updated_at": "2026-08-10T04:38:11.959951+00:00"
+  },
+  {
+    "id": "d60b51",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_050332_lp_agent_lite_metrics_snapshot_diagnosti_d60b51.html",
+    "created_at": "2026-08-10T05:03:32.017788+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "788745",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_050647_lp_agent_lite_metrics_snapshot_diagnosti_788745.html",
+    "created_at": "2026-08-10T05:06:47.220986+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "baeec9",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_050658_lp_agent_lite_orca_pool_scan_diagnostic_baeec9.html",
+    "created_at": "2026-08-10T05:06:58.625475+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "25924d",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_050741_lp_agent_lite_gateway_token_registration_25924d.html",
+    "created_at": "2026-08-10T05:07:41.389021+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "af4cd3",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_050751_lp_agent_lite_lp_requirements_diagnostic_af4cd3.html",
+    "created_at": "2026-08-10T05:07:51.626065+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "16f05d",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_051303_lp_agent_lite_metrics_snapshot_diagnosti_16f05d.html",
+    "created_at": "2026-08-10T05:13:03.728881+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "7ca35e",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_051714_lp_agent_lite_metrics_snapshot_diagnosti_7ca35e.html",
+    "created_at": "2026-08-10T05:17:14.340100+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "4df0c7",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_052059_lp_agent_lite_metrics_snapshot_diagnosti_4df0c7.html",
+    "created_at": "2026-08-10T05:20:59.549164+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "b26920",
+    "title": "lp_agent_lite · orca · session 5",
+    "filename": "20260810_050400_lp_agent_lite_orca_session_5_b26920.html",
+    "created_at": "2026-08-10T05:04:00.694802+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_5",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
+    ],
+    "agent": "condor",
+    "updated_at": "2026-08-10T05:21:19.019776+00:00"
+  },
+  {
+    "id": "f33fa2",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_055913_lp_agent_lite_metrics_snapshot_diagnosti_f33fa2.html",
+    "created_at": "2026-08-10T05:59:13.418808+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "0f566c",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_055917_lp_agent_lite_orca_pool_scan_diagnostic_0f566c.html",
+    "created_at": "2026-08-10T05:59:17.501325+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "b4818f",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_060009_lp_agent_lite_gateway_token_registration_b4818f.html",
+    "created_at": "2026-08-10T06:00:09.189027+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "725845",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_060015_lp_agent_lite_lp_requirements_diagnostic_725845.html",
+    "created_at": "2026-08-10T06:00:15.205011+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "0b12da",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_060607_lp_agent_lite_metrics_snapshot_diagnosti_0b12da.html",
+    "created_at": "2026-08-10T06:06:07.887199+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "a8a622",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_060621_lp_agent_lite_orca_pool_scan_diagnostic_a8a622.html",
+    "created_at": "2026-08-10T06:06:21.924079+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "203538",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_060720_lp_agent_lite_lp_requirements_diagnostic_203538.html",
+    "created_at": "2026-08-10T06:07:20.332696+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "015157",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_061241_lp_agent_lite_orca_pool_scan_diagnostic_015157.html",
+    "created_at": "2026-08-10T06:12:41.768352+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "9768fd",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_061245_lp_agent_lite_metrics_snapshot_diagnosti_9768fd.html",
+    "created_at": "2026-08-10T06:12:45.146299+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "422dde",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_061341_lp_agent_lite_lp_requirements_diagnostic_422dde.html",
+    "created_at": "2026-08-10T06:13:41.529879+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "2d9427",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_061831_lp_agent_lite_metrics_snapshot_diagnosti_2d9427.html",
+    "created_at": "2026-08-10T06:18:31.830749+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "08757b",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_062222_lp_agent_lite_metrics_snapshot_diagnosti_08757b.html",
+    "created_at": "2026-08-10T06:22:22.711243+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "f4b74d",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_062952_lp_agent_lite_metrics_snapshot_diagnosti_f4b74d.html",
+    "created_at": "2026-08-10T06:29:52.886656+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "0c7566",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_063355_lp_agent_lite_metrics_snapshot_diagnosti_0c7566.html",
+    "created_at": "2026-08-10T06:33:55.814201+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "6f8900",
+    "title": "lp_agent_lite · orca · session 6",
+    "filename": "20260810_060235_lp_agent_lite_orca_session_6_6f8900.html",
+    "created_at": "2026-08-10T06:02:35.850640+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_6",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
+    ],
+    "agent": "condor",
+    "updated_at": "2026-08-10T06:34:35.724698+00:00"
+  },
+  {
+    "id": "ede9df",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_065714_lp_agent_lite_metrics_snapshot_diagnosti_ede9df.html",
+    "created_at": "2026-08-10T06:57:14.858230+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "bf325b",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_065725_lp_agent_lite_orca_pool_scan_diagnostic_bf325b.html",
+    "created_at": "2026-08-10T06:57:25.325759+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "c6a859",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_065836_lp_agent_lite_gateway_token_registration_c6a859.html",
+    "created_at": "2026-08-10T06:58:36.199034+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "214ae6",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_070214_lp_agent_lite_orca_pool_scan_diagnostic_214ae6.html",
+    "created_at": "2026-08-10T07:02:14.524491+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "697741",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_070220_lp_agent_lite_metrics_snapshot_diagnosti_697741.html",
+    "created_at": "2026-08-10T07:02:20.114403+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "6cca0e",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_070334_lp_agent_lite_gateway_token_registration_6cca0e.html",
+    "created_at": "2026-08-10T07:03:34.043451+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "c2b808",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_070337_lp_agent_lite_lp_requirements_diagnostic_c2b808.html",
+    "created_at": "2026-08-10T07:03:37.672614+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "4237c8",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_070806_lp_agent_lite_orca_pool_scan_diagnostic_4237c8.html",
+    "created_at": "2026-08-10T07:08:06.533532+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "bb5b7a",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_070809_lp_agent_lite_metrics_snapshot_diagnosti_bb5b7a.html",
+    "created_at": "2026-08-10T07:08:09.076890+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "55f3d3",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_070911_lp_agent_lite_gateway_token_registration_55f3d3.html",
+    "created_at": "2026-08-10T07:09:11.193682+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "a682f4",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_070920_lp_agent_lite_lp_requirements_diagnostic_a682f4.html",
+    "created_at": "2026-08-10T07:09:20.800804+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "ae3e01",
+    "title": "lp_agent_lite · orca · session 7",
+    "filename": "20260810_065846_lp_agent_lite_orca_session_7_ae3e01.html",
+    "created_at": "2026-08-10T06:58:46.051701+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_7",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
+    ],
+    "agent": "condor",
+    "updated_at": "2026-08-10T07:09:58.268748+00:00"
+  },
+  {
+    "id": "a54af1",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_095618_lp_agent_lite_orca_pool_scan_diagnostic_a54af1.html",
+    "created_at": "2026-08-10T09:56:18.154901+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "9777f7",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_095620_lp_agent_lite_metrics_snapshot_diagnosti_9777f7.html",
+    "created_at": "2026-08-10T09:56:20.762978+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "0c983a",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_095733_lp_agent_lite_gateway_token_registration_0c983a.html",
+    "created_at": "2026-08-10T09:57:33.413658+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "e57858",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_100033_lp_agent_lite_metrics_snapshot_diagnosti_e57858.html",
+    "created_at": "2026-08-10T10:00:33.908889+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "1627e0",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_100038_lp_agent_lite_orca_pool_scan_diagnostic_1627e0.html",
+    "created_at": "2026-08-10T10:00:38.186947+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "4d7847",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_100052_lp_agent_lite_gateway_token_registration_4d7847.html",
+    "created_at": "2026-08-10T10:00:52.930538+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "3f2c85",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_100113_lp_agent_lite_lp_requirements_diagnostic_3f2c85.html",
+    "created_at": "2026-08-10T10:01:13.529573+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "a476ef",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_100156_lp_agent_lite_lp_requirements_diagnostic_a476ef.html",
+    "created_at": "2026-08-10T10:01:56.566706+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "618e17",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_100646_lp_agent_lite_metrics_snapshot_diagnosti_618e17.html",
+    "created_at": "2026-08-10T10:06:46.742939+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "7a6de4",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_100651_lp_agent_lite_orca_pool_scan_diagnostic_7a6de4.html",
+    "created_at": "2026-08-10T10:06:51.628664+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "095204",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_100731_lp_agent_lite_lp_requirements_diagnostic_095204.html",
+    "created_at": "2026-08-10T10:07:31.494932+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "c2379b",
+    "title": "lp_agent_lite · orca · session 8",
+    "filename": "20260810_095744_lp_agent_lite_orca_session_8_c2379b.html",
+    "created_at": "2026-08-10T09:57:44.458845+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_8",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
+    ],
+    "agent": "condor",
+    "updated_at": "2026-08-10T10:07:56.774146+00:00"
+  },
+  {
+    "id": "6c6961",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_102836_lp_agent_lite_orca_pool_scan_diagnostic_6c6961.html",
+    "created_at": "2026-08-10T10:28:36.934739+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "93ce1c",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_102839_lp_agent_lite_metrics_snapshot_diagnosti_93ce1c.html",
+    "created_at": "2026-08-10T10:28:39.650742+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "e13589",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_102921_lp_agent_lite_lp_requirements_diagnostic_e13589.html",
+    "created_at": "2026-08-10T10:29:21.795064+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "a0b314",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_102925_lp_agent_lite_gateway_token_registration_a0b314.html",
+    "created_at": "2026-08-10T10:29:25.116555+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "c637f2",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_103423_lp_agent_lite_metrics_snapshot_diagnosti_c637f2.html",
+    "created_at": "2026-08-10T10:34:23.584810+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "1f8146",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_103439_lp_agent_lite_orca_pool_scan_diagnostic_1f8146.html",
+    "created_at": "2026-08-10T10:34:39.305025+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "30136b",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_103527_lp_agent_lite_gateway_token_registration_30136b.html",
+    "created_at": "2026-08-10T10:35:27.708012+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "3eee33",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_103827_lp_agent_lite_metrics_snapshot_diagnosti_3eee33.html",
+    "created_at": "2026-08-10T10:38:27.966688+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "1222e1",
+    "title": "LP Agent Lite — Orca Pool Scan Diagnostic",
+    "filename": "20260810_103837_lp_agent_lite_orca_pool_scan_diagnostic_1222e1.html",
+    "created_at": "2026-08-10T10:38:37.926671+00:00",
+    "source_type": "routine",
+    "source_name": "scan_orca_pools",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "scan-orca-pools"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "eea74d",
+    "title": "LP Agent Lite — Gateway Token Registration Diagnostic",
+    "filename": "20260810_103849_lp_agent_lite_gateway_token_registration_eea74d.html",
+    "created_at": "2026-08-10T10:38:49.934037+00:00",
+    "source_type": "routine",
+    "source_name": "register_gateway_token",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "register-gateway-token"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "057b36",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_103905_lp_agent_lite_lp_requirements_diagnostic_057b36.html",
+    "created_at": "2026-08-10T10:39:05.829538+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "9313c6",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_104851_lp_agent_lite_metrics_snapshot_diagnosti_9313c6.html",
+    "created_at": "2026-08-10T10:48:51.864655+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "0907a4",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_104918_lp_agent_lite_lp_requirements_diagnostic_0907a4.html",
+    "created_at": "2026-08-10T10:49:18.917063+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "6838c8",
+    "title": "LP Agent Lite — LP Requirements Diagnostic",
+    "filename": "20260810_104936_lp_agent_lite_lp_requirements_diagnostic_6838c8.html",
+    "created_at": "2026-08-10T10:49:36.881575+00:00",
+    "source_type": "routine",
+    "source_name": "calculate_lp_requirements",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "calculate-lp-requirements"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "1fe541",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_105517_lp_agent_lite_metrics_snapshot_diagnosti_1fe541.html",
+    "created_at": "2026-08-10T10:55:17.963083+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
+  },
+  {
+    "id": "f92724",
+    "title": "lp_agent_lite · orca · session 9",
+    "filename": "20260810_103124_lp_agent_lite_orca_session_9_f92724.html",
+    "created_at": "2026-08-10T10:31:24.592807+00:00",
+    "source_type": "routine",
+    "source_name": "lp_agent_lite.orca/session_9",
+    "tags": [
+      "agent",
+      "session",
+      "lp_agent_lite"
+    ],
+    "agent": "condor",
+    "updated_at": "2026-08-10T11:04:54.577736+00:00"
+  },
+  {
+    "id": "3c4ef7",
+    "title": "LP Agent Lite — Metrics Snapshot Diagnostic",
+    "filename": "20260810_110408_lp_agent_lite_metrics_snapshot_diagnosti_3c4ef7.html",
+    "created_at": "2026-08-10T11:04:08.589575+00:00",
+    "source_type": "routine",
+    "source_name": "snapshot_lp_metrics",
+    "tags": [
+      "lp-agent-lite",
+      "diagnostic",
+      "snapshot-lp-metrics"
+    ],
+    "agent": "lp_agent_lite"
   }
 ]

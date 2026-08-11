@@ -20,6 +20,8 @@ def _config(**overrides):
         "max_amount_quote_per_lp_position": "5",
         "remaining_session_quote": "10",
         "capital_headroom_pct": "5",
+        "lp_open_balance_buffer_pct": "2",
+        "allow_base_preparation": True,
         "current_price": "100",
         "lower_price": "90",
         "upper_price": "110",
@@ -45,13 +47,16 @@ def _run(config):
 def test_sizes_to_headroom_and_returns_preparation_shortfall():
     result = _run(_config())
 
-    assert result["status"] == "feasible"
+    assert result["status"] == "preparation_required"
     assert result["feasible"] is True
     assert Decimal(result["authorization_quote"]) == Decimal("5")
     assert Decimal(result["usable_budget_quote"]) == Decimal("4.75")
     assert Decimal(result["budget_used_quote"]) <= Decimal("4.75")
     assert Decimal(result["budget_headroom_quote"]) >= Decimal("0.25")
-    assert Decimal(result["base_shortfall"]) > 0
+    assert result["lp_open_balance_buffer_pct"] == "2"
+    assert result["allow_base_preparation"] is True
+    assert Decimal(result["base_shortfall"]) == Decimal(result["base_balance_required"])
+    assert Decimal(result["quote_balance_required"]) <= Decimal("10")
     assert Decimal(result["base_amount"]).as_tuple().exponent >= -9
     assert Decimal(result["quote_amount"]).as_tuple().exponent >= -6
     assert result["limiting_side"] == "budget"
@@ -73,10 +78,65 @@ def test_uses_tightest_cap_and_current_inventory_without_exact_plan_failure():
         )
     )
 
-    assert result["status"] == "feasible"
+    assert result["status"] == "preparation_required"
     assert Decimal(result["authorization_quote"]) == Decimal("3")
     assert Decimal(result["budget_used_quote"]) <= Decimal("2.85")
     assert result["limiting_side"] in {"budget", "inventory", "quote_balance"}
+
+
+def test_post_preparation_sizes_down_to_buffered_actual_balances():
+    result = _run(
+        _config(
+            allow_base_preparation=False,
+            available_base="0.01",
+            available_quote="10",
+        )
+    )
+
+    assert result["status"] == "feasible"
+    assert result["allow_base_preparation"] is False
+    assert result["limiting_side"] == "base_balance"
+    assert result["base_shortfall"] == "0"
+    assert Decimal(result["base_balance_required"]) <= Decimal("0.01")
+    assert Decimal(result["quote_balance_required"]) <= Decimal("10")
+
+
+def test_post_preparation_never_requests_dust_top_up():
+    result = _run(
+        _config(
+            allow_base_preparation=False,
+            available_base="0",
+        )
+    )
+
+    assert result["status"] == "infeasible"
+    assert result["feasible"] is False
+    assert result["base_shortfall"] == "0"
+
+
+def test_session_9_pump_balance_is_downsized_below_buffered_wallet_limit():
+    result = _run(
+        _config(
+            selected_allocation_quote="2.95",
+            max_amount_quote_per_lp_position="3",
+            remaining_session_quote="7.1197205061097595",
+            current_price="0.00274291826924525",
+            lower_price="0.00252348480770563",
+            upper_price="0.00296235173078487",
+            tick_spacing=16,
+            available_base="491.261473",
+            available_quote="10.4368",
+            base_decimals=6,
+            quote_decimals=6,
+            allow_base_preparation=False,
+        )
+    )
+
+    assert result["status"] == "feasible"
+    assert result["limiting_side"] == "base_balance"
+    assert Decimal(result["base_amount"]) < Decimal("490.176165")
+    assert Decimal(result["base_balance_required"]) <= Decimal("491.261473")
+    assert Decimal(result["quote_balance_required"]) <= Decimal("10.4368")
 
 
 def test_tiny_valid_authorization_becomes_structured_infeasible():
@@ -109,6 +169,8 @@ def test_zero_remaining_budget_is_an_ordinary_structured_shortage():
         {"current_price": "nan"},
         {"available_base": "-1"},
         {"capital_headroom_pct": "100"},
+        {"lp_open_balance_buffer_pct": "6"},
+        {"allow_base_preparation": 1},
         {"lower_price": "101"},
         {"tick_spacing": True},
         {"base_decimals": 19},

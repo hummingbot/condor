@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -49,7 +50,12 @@ def _envelope(rows, *, next_cursor=None):
 
 
 def _config(**changes):
-    values = {"wallet_address": WALLET, "position_address": POSITION}
+    values = {
+        "wallet_address": WALLET,
+        "position_address": POSITION,
+        "expected_pool_address": POOL,
+        "mutation_started_at": 900,
+    }
     values.update(changes)
     return routine.Config(**values)
 
@@ -77,18 +83,19 @@ def _install(monkeypatch, summary, history):
     return calls
 
 
-def test_matching_active_summary_and_history_are_complete(monkeypatch):
+def test_matching_active_summary_and_history_are_still_active(monkeypatch):
     calls = _install(
         monkeypatch,
         _envelope([_summary()]),
         _envelope([_history()]),
     )
-    result = _run(_config(expected_pool_address=POOL))
+    result = _run(_config())
 
     assert result["source"] == "orca_stats_api"
     assert result["consistency"] == "eventual"
     assert result["status"] == "complete"
     assert result["indexed_state"] == "active"
+    assert result["close_outcome"] == "still_active"
     assert result["consensus"] is True
     assert result["event"][:4] == ["open_position", 1_000, SIGNATURE, POOL]
     assert calls == [
@@ -105,17 +112,21 @@ def test_matching_active_summary_and_history_are_complete(monkeypatch):
     ]
 
 
-def test_matching_close_is_indexed_closed_not_onchain_absence(monkeypatch):
+def test_post_mutation_close_wins_even_inside_indexing_window(monkeypatch):
     _install(
         monkeypatch,
-        _envelope([_summary("close_position", 1_100)]),
-        _envelope([_history("close_position", 1_100)]),
+        _envelope([_summary("close_position", 980)]),
+        _envelope([_history("close_position", 980)]),
     )
-    result = _run(_config())
+    monkeypatch.setattr(routine.time, "time", lambda: 1_000)
+    result = _run(_config(mutation_started_at=950))
 
     assert result["status"] == "complete"
     assert result["indexed_state"] == "closed"
+    assert result["close_outcome"] == "closed"
     assert result["consensus"] is True
+    assert result["lag"]["window_elapsed"] is False
+    assert result["lag"]["caught_up"] is True
     assert result["mutation"] is False
 
 
@@ -128,12 +139,11 @@ def test_mutation_inside_indexing_window_is_degraded_and_not_caught_up(
         _envelope([_history("open_position", 800)]),
     )
     monkeypatch.setattr(routine.time, "time", lambda: 1_000)
-    result = _run(
-        _config(expected_action_type="close_position", mutation_started_at=950)
-    )
+    result = _run(_config(mutation_started_at=950))
 
     assert result["status"] == "degraded"
     assert result["indexed_state"] == "active"
+    assert result["close_outcome"] == "pending_index"
     assert result["lag"] == {
         "assumed_seconds": 90,
         "window_elapsed": False,
@@ -142,7 +152,7 @@ def test_mutation_inside_indexing_window_is_degraded_and_not_caught_up(
     }
 
 
-def test_matching_expected_action_after_lag_is_caught_up(monkeypatch):
+def test_matching_close_after_lag_is_caught_up(monkeypatch):
     _install(
         monkeypatch,
         _envelope([_summary("close_position", 1_900)]),
@@ -152,15 +162,27 @@ def test_matching_expected_action_after_lag_is_caught_up(monkeypatch):
     result = _run(
         _config(
             expected_pool_address=POOL,
-            expected_action_type="close_position",
             mutation_started_at=1_900,
         )
     )
 
     assert result["status"] == "complete"
     assert result["indexed_state"] == "closed"
+    assert result["close_outcome"] == "closed"
     assert result["lag"]["window_elapsed"] is True
     assert result["lag"]["caught_up"] is True
+
+
+def test_transport_limit_fails_closed_with_deterministic_outcome():
+    result = json.loads(routine._dump({"padding": "x" * 2_000}))
+
+    assert result == {
+        "schema": "lp_agent_lite.orca_position_index.v1",
+        "status": "unavailable",
+        "reason": "transport_limit",
+        "close_outcome": "unavailable",
+        "mutation": False,
+    }
 
 
 def test_endpoint_disagreement_is_uncertain_not_false_state(monkeypatch):
@@ -173,16 +195,18 @@ def test_endpoint_disagreement_is_uncertain_not_false_state(monkeypatch):
 
     assert result["status"] == "degraded"
     assert result["indexed_state"] == "uncertain"
+    assert result["close_outcome"] == "uncertain"
     assert result["consensus"] is False
     assert "event" not in result
 
 
-def test_two_empty_exact_results_mean_not_indexed_not_absent(monkeypatch):
+def test_two_empty_exact_results_remain_uncertain_not_absence(monkeypatch):
     _install(monkeypatch, _envelope([]), _envelope([]))
     result = _run(_config())
 
-    assert result["status"] == "complete"
+    assert result["status"] == "degraded"
     assert result["indexed_state"] == "not_indexed"
+    assert result["close_outcome"] == "uncertain"
     assert result["consensus"] is True
 
 
@@ -196,6 +220,7 @@ def test_one_available_endpoint_is_degraded_evidence(monkeypatch):
 
     assert result["status"] == "degraded"
     assert result["indexed_state"] == "active"
+    assert result["close_outcome"] == "uncertain"
     assert result["consensus"] is False
     assert result["api"]["history"] == "unavailable"
     assert result["errors"] == {"history": "timeout"}
@@ -211,6 +236,7 @@ def test_both_endpoints_unavailable_fail_closed(monkeypatch):
 
     assert result["status"] == "unavailable"
     assert result["indexed_state"] == "uncertain"
+    assert result["close_outcome"] == "unavailable"
     assert result["errors"] == {"summary": "timeout", "history": "http_503"}
 
 
@@ -224,6 +250,7 @@ def test_expected_pool_mismatch_invalidates_consensus(monkeypatch):
 
     assert result["status"] == "degraded"
     assert result["indexed_state"] == "uncertain"
+    assert result["close_outcome"] == "uncertain"
     assert result["consensus"] is False
 
 
@@ -236,13 +263,45 @@ def test_history_cursor_is_exposed_without_expanding_response(monkeypatch):
     result = _run(_config())
 
     assert result["status"] == "complete"
+    assert result["close_outcome"] == "still_active"
     assert result["api"]["history_more"] is True
 
 
-def test_config_requires_exact_identity_and_paired_mutation_context():
+def test_config_requires_exact_identity_and_close_context():
     with pytest.raises(ValidationError):
-        routine.Config(wallet_address=WALLET, position_address="not-an-address")
+        _config(position_address="not-an-address")
     with pytest.raises(ValidationError):
-        _config(expected_action_type="open_position")
+        routine.Config(
+            wallet_address=WALLET,
+            position_address=POSITION,
+            mutation_started_at=900,
+        )
     with pytest.raises(ValidationError):
-        _config(mutation_started_at=1_000)
+        routine.Config(
+            wallet_address=WALLET,
+            position_address=POSITION,
+            expected_pool_address=POOL,
+        )
+    with pytest.raises(ValidationError):
+        _config(expected_action_type="close_position")
+
+
+def test_config_validates_through_condor_dynamic_agent_routine_discovery():
+    from routines.base import discover_routines_from_path
+
+    routines_dir = Path(routine.__file__).parent
+    discovered = discover_routines_from_path(
+        routines_dir, agent_slug="lp_agent_lite", force_reload=True
+    )
+
+    config = discovered["inspect_orca_positions"].config_class(
+        wallet_address=WALLET,
+        position_address=POSITION,
+        expected_pool_address=POOL,
+        mutation_started_at=900,
+    )
+
+    assert config.wallet_address == WALLET
+    assert config.position_address == POSITION
+    assert config.expected_pool_address == POOL
+    assert config.mutation_started_at == 900

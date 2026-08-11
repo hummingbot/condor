@@ -17,6 +17,13 @@ report is a human diagnostic copy of sanitized input, output, and trace;
 `report_id` and `report_error` do not affect rank, coverage, candidate validity,
 or permission to deploy, and report failure never justifies another scan.
 
+Before comparison, parse only exact injected execution-learning records with
+`BLACKLIST_POOL=<pool>` and `BLACKLIST_TOKEN=<base_mint>`. Exclude the exact
+pool and every candidate with that exact BASE mint before selection. Ignore
+malformed records and all general learning prose. A blacklist is persistent
+exclusion evidence only; it supplies no price, quality, ownership, or mutation
+authority.
+
 ## Establish Evidence Quality
 
 1. Confirm the scan used current `min_pool_tvl_usd`, `candidate_scan_limit`, and

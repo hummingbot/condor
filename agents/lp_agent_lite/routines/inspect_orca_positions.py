@@ -1,13 +1,11 @@
-"""Read one exact wallet/position's indexed Orca open or close event."""
-
-from __future__ import annotations
+"""Reconcile one failed close from an exact wallet/position's Orca events."""
 
 import asyncio
 import json
 import math
 import re
 import time
-from typing import Any, Literal
+from typing import Any
 
 import aiohttp
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
@@ -25,17 +23,14 @@ _ACTION = re.compile(r"^[a-z][a-z0-9_]{0,47}$")
 
 
 class Config(BaseModel):
-    """Check one exact wallet/position pair in Orca's indexed PnL history."""
+    """Reconcile one failed close for an exact wallet/position/pool."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     wallet_address: StrictStr = Field(min_length=32, max_length=44)
     position_address: StrictStr = Field(min_length=32, max_length=44)
-    expected_pool_address: StrictStr | None = Field(
-        default=None, min_length=32, max_length=44
-    )
-    expected_action_type: Literal["open_position", "close_position"] | None = None
-    mutation_started_at: StrictInt | None = Field(default=None, gt=0)
+    expected_pool_address: StrictStr = Field(min_length=32, max_length=44)
+    mutation_started_at: StrictInt = Field(gt=0)
     indexing_lag_seconds: StrictInt = Field(default=90, ge=30, le=600)
     timestamp_tolerance_seconds: StrictInt = Field(default=5, ge=0, le=30)
     history_limit: StrictInt = Field(default=20, ge=2, le=100)
@@ -48,12 +43,8 @@ class Config(BaseModel):
             self.position_address,
             self.expected_pool_address,
         ):
-            if value is not None and not _ADDRESS.fullmatch(value):
+            if not _ADDRESS.fullmatch(value):
                 raise ValueError("wallet, position, and pool must be Solana addresses")
-        if (self.expected_action_type is None) != (self.mutation_started_at is None):
-            raise ValueError(
-                "expected_action_type and mutation_started_at must be supplied together"
-            )
         return self
 
 
@@ -65,6 +56,7 @@ def _dump(payload: dict[str, Any]) -> str:
                 "schema": "lp_agent_lite.orca_position_index.v1",
                 "status": "unavailable",
                 "reason": "transport_limit",
+                "close_outcome": "unavailable",
                 "mutation": False,
             },
             separators=(",", ":"),
@@ -199,7 +191,7 @@ async def run(config: Config, context: Any) -> str:
     trace.record(
         "requests_planned",
         sources=["summary", "history"],
-        expected_action=config.expected_action_type,
+        expected_action="close_position",
     )
     params = {
         "wallet": config.wallet_address,
@@ -250,11 +242,7 @@ async def run(config: Config, context: Any) -> str:
             )
             event = latest_history if consensus else None
 
-    pool_matches = (
-        event is None
-        or config.expected_pool_address is None
-        or event["pool"] == config.expected_pool_address
-    )
+    pool_matches = event is None or event["pool"] == config.expected_pool_address
     if not pool_matches:
         consensus = False
         event = None
@@ -267,26 +255,37 @@ async def run(config: Config, context: Any) -> str:
         indexed_state = "active"
 
     now = int(time.time())
-    caught_up = None
-    window_elapsed = None
-    wait_remaining = None
-    if config.mutation_started_at is not None:
-        window_end = config.mutation_started_at + config.indexing_lag_seconds
-        wait_remaining = max(0, window_end - now)
-        window_elapsed = wait_remaining == 0
-        caught_up = bool(
-            consensus
-            and event is not None
-            and event["action"] == config.expected_action_type
-            and event["timestamp"]
-            >= config.mutation_started_at - config.timestamp_tolerance_seconds
-        )
+    window_end = config.mutation_started_at + config.indexing_lag_seconds
+    wait_remaining = max(0, window_end - now)
+    window_elapsed = wait_remaining == 0
+    caught_up = bool(
+        consensus
+        and event is not None
+        and event["action"] == "close_position"
+        and event["timestamp"]
+        >= config.mutation_started_at - config.timestamp_tolerance_seconds
+    )
 
     if not parsed:
+        close_outcome = "unavailable"
         status = "unavailable"
-    elif len(parsed) == 2 and consensus and pool_matches and caught_up is not False:
+    elif len(parsed) == 2 and consensus and pool_matches and caught_up:
+        close_outcome = "closed"
+        status = "complete"
+    elif not window_elapsed:
+        close_outcome = "pending_index"
+        status = "degraded"
+    elif (
+        len(parsed) == 2
+        and consensus
+        and pool_matches
+        and event is not None
+        and indexed_state == "active"
+    ):
+        close_outcome = "still_active"
         status = "complete"
     else:
+        close_outcome = "uncertain"
         status = "degraded"
 
     payload: dict[str, Any] = {
@@ -297,6 +296,7 @@ async def run(config: Config, context: Any) -> str:
         "wallet": config.wallet_address,
         "position": config.position_address,
         "indexed_state": indexed_state,
+        "close_outcome": close_outcome,
         "consensus": consensus,
         "api": {
             "summary": "ok" if "summary" in parsed else "unavailable",
@@ -335,18 +335,18 @@ async def run(config: Config, context: Any) -> str:
                 "fees_usd",
             )
         ]
-    if config.expected_action_type is not None:
-        payload["expected"] = [
-            config.expected_action_type,
-            config.mutation_started_at,
-            config.expected_pool_address,
-        ]
+    payload["expected"] = [
+        "close_position",
+        config.mutation_started_at,
+        config.expected_pool_address,
+    ]
     if errors:
         payload["errors"] = errors
     trace.record(
         "indexed_events_reconciled",
         status=status,
         indexed_state=indexed_state,
+        close_outcome=close_outcome,
         consensus=consensus,
         caught_up=caught_up,
         errors=errors,

@@ -1,4 +1,4 @@
-"""Calculate floored LP legs and BASE shortfall for one selected Orca range."""
+"""Calculate buffered LP legs and BASE shortfall for one selected Orca range."""
 
 from __future__ import annotations
 
@@ -11,6 +11,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictBool,
     StrictInt,
     field_validator,
     model_validator,
@@ -29,6 +30,7 @@ _NUMERIC_FIELDS = (
     "max_amount_quote_per_lp_position",
     "remaining_session_quote",
     "capital_headroom_pct",
+    "lp_open_balance_buffer_pct",
     "current_price",
     "lower_price",
     "upper_price",
@@ -46,6 +48,8 @@ class Config(BaseModel):
     max_amount_quote_per_lp_position: Decimal = Field(gt=0)
     remaining_session_quote: Decimal = Field(ge=0)
     capital_headroom_pct: Decimal = Field(ge=0, lt=100)
+    lp_open_balance_buffer_pct: Decimal = Field(ge=0, lt=100)
+    allow_base_preparation: StrictBool
     current_price: Decimal = Field(gt=0)
     lower_price: Decimal = Field(gt=0)
     upper_price: Decimal = Field(gt=0)
@@ -72,6 +76,10 @@ class Config(BaseModel):
     def valid_range(self) -> "Config":
         if not self.lower_price < self.current_price < self.upper_price:
             raise ValueError("prices must satisfy lower < current < upper")
+        if self.lp_open_balance_buffer_pct > self.capital_headroom_pct:
+            raise ValueError(
+                "lp_open_balance_buffer_pct cannot exceed capital_headroom_pct"
+            )
         return self
 
 
@@ -80,6 +88,7 @@ Config.model_rebuild(
     _types_namespace={
         "Any": Any,
         "Decimal": Decimal,
+        "StrictBool": StrictBool,
         "StrictInt": StrictInt,
     }
 )
@@ -88,6 +97,11 @@ Config.model_rebuild(
 def _floor(value: Decimal, decimals: int) -> Decimal:
     unit = Decimal(1).scaleb(-decimals)
     return value.quantize(unit, rounding=ROUND_FLOOR)
+
+
+def _ceil(value: Decimal, decimals: int) -> Decimal:
+    unit = Decimal(1).scaleb(-decimals)
+    return value.quantize(unit, rounding=ROUND_CEILING)
 
 
 def _text(value: Decimal) -> str:
@@ -198,6 +212,9 @@ async def run(config: Config, context: Any) -> str:
             usable_budget = authorization * (
                 Decimal(1) - config.capital_headroom_pct / Decimal(100)
             )
+            open_balance_factor = Decimal(1) + (
+                config.lp_open_balance_buffer_pct / Decimal(100)
+            )
 
             sqrt_price = config.current_price.sqrt()
             sqrt_lower = aligned_lower.sqrt()
@@ -215,8 +232,13 @@ async def run(config: Config, context: Any) -> str:
                     + config.available_base * config.current_price
                 )
                 / value_per_liquidity,
-                "quote_balance": config.available_quote / quote_per_liquidity,
+                "quote_balance": config.available_quote
+                / (quote_per_liquidity * open_balance_factor),
             }
+            if not config.allow_base_preparation:
+                limits["base_balance"] = config.available_base / (
+                    base_per_liquidity * open_balance_factor
+                )
             limiting_side, liquidity = min(limits.items(), key=lambda item: item[1])
 
             available_base = _floor(config.available_base, config.base_decimals)
@@ -224,20 +246,48 @@ async def run(config: Config, context: Any) -> str:
             quote_amount = _floor(
                 liquidity * quote_per_liquidity, config.quote_decimals
             )
-            base_shortfall = max(base_amount - available_base, Decimal(0))
+            available_quote = _floor(config.available_quote, config.quote_decimals)
+            base_balance_required = _ceil(
+                base_amount * open_balance_factor, config.base_decimals
+            )
+            quote_balance_required = _ceil(
+                quote_amount * open_balance_factor, config.quote_decimals
+            )
+            base_shortfall = (
+                max(base_balance_required - available_base, Decimal(0))
+                if config.allow_base_preparation
+                else Decimal(0)
+            )
             budget_used = base_amount * config.current_price + quote_amount
             budget_headroom = max(authorization - budget_used, Decimal(0))
-            feasible = base_amount > 0 and quote_amount > 0 and budget_used > 0
+            balances_cover_open = quote_balance_required <= available_quote and (
+                config.allow_base_preparation or base_balance_required <= available_base
+            )
+            feasible = (
+                base_amount > 0
+                and quote_amount > 0
+                and budget_used > 0
+                and balances_cover_open
+            )
+            status = (
+                "preparation_required"
+                if feasible and base_shortfall > 0
+                else "feasible" if feasible else "infeasible"
+            )
 
             payload = {
                 "schema": _SCHEMA,
-                "status": "feasible" if feasible else "infeasible",
+                "status": status,
                 "feasible": feasible,
                 "authorization_quote": _text(authorization),
                 "usable_budget_quote": _text(usable_budget),
+                "lp_open_balance_buffer_pct": _text(config.lp_open_balance_buffer_pct),
+                "allow_base_preparation": config.allow_base_preparation,
                 "base_amount": _text(base_amount),
                 "quote_amount": _text(quote_amount),
                 "base_shortfall": _text(base_shortfall),
+                "base_balance_required": _text(base_balance_required),
+                "quote_balance_required": _text(quote_balance_required),
                 "budget_used_quote": _text(budget_used),
                 "budget_headroom_quote": _text(budget_headroom),
                 "limiting_side": limiting_side if feasible else "precision",

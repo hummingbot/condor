@@ -1,17 +1,19 @@
 ---
 name: orca_lp_operations
-description: Operate one exact Orca LP lifecycle through native executors, post-lag Orca Stats reconciliation, quote restoration, and progress-gated retry without a local controller.
-when_to_use: Read before preparation, LP open or close, residual cleanup, graceful wind-down, or reconciliation of any submitted, uncertain, failed, or HAPI-missing LP operation.
+description: Operate one exact Orca LP lifecycle through native executors, failed-close Orca Stats reconciliation, quote restoration, and progress-gated retry without a local controller.
+when_to_use: Read before preparation, LP open or close, residual cleanup, graceful wind-down, or reconciliation of a failed LP operation.
 source: agent:lp_agent_lite
 ---
 
 # Orca LP Operations
 
 This is a reactive playbook, not a state machine. Begin every use from the exact
-current controller, frozen config, and fresh executor and wallet evidence. For
-one known position, compare Orca Stats exact `summary` with exact-filtered
-`history` after the configured indexing delay. Earlier intent narrows what to
-reconcile but never replaces current evidence.
+current controller, frozen config, and fresh executor and wallet evidence. Use
+Orca Stats only after a failed or uncertain close: compare exact `summary` with
+exact-filtered `history` for the already-known position after the configured
+indexing delay. Do not use it to discover or reconcile an LP open. An exact
+coherent current-controller executor is sufficient for normal supervision.
+Earlier intent narrows what to reconcile but never replaces current evidence.
 
 Each Lite routine attempts a Condor diagnostic report only after its result is
 final. Read the compact JSON result itself for operational truth. Its
@@ -32,17 +34,19 @@ decision and never justifies repeating an operation.
   `lp_agent_lite.orca_N` controller.
 
 Mutate only an exact current-controller executor. Older, foreign, and untracked
-positions are observation-only and still consume wallet capacity. Shared-wallet
-balances are aggregate feasibility facts, never per-position ownership.
+positions are observation-only; they do not consume the current-session target
+or executor risk count, but their inventory reduces available wallet balances.
+Shared-wallet balances are aggregate feasibility facts, never per-position
+ownership.
 
 The configured deployment quota counts LP create calls only. Registration,
 preparation BUY, LP create, cleanup SELL, and Agent stop remain separate and are
 not combined in one tick. In loop mode only, one `CLOSE` decision may stop a
 bounded set of independently triggered exact current-session LPs sequentially,
-up to `max_active_lp_positions`. Journal the exact target set once, refresh after
-each stop, and end the batch on uncertainty. Never run stops concurrently or
-combine that close batch with another transition category. `WIND_DOWN` is a
-posture, not a tool action.
+up to `risk_limits.max_open_executors`. Journal the exact target set once,
+refresh after each stop, and end the batch on uncertainty. Never run stops
+concurrently or combine that close batch with another transition category.
+`WIND_DOWN` is a posture, not a tool action.
 
 ## Token Orientation And Order Semantics
 
@@ -61,24 +65,29 @@ config before constructing any native request:
 - every executor's top-level account is `<config.account_name>`.
 
 Reject a reversed/uncertain pair or amount unit. Read the current executor
-schema before create and use only fields it accepts. Do not invent a `slippage`
-field. The checked-out native `order_executor` schema has no per-call slippage
-field, so its existence or a familiar connector default is not proof. Submit a
-preparation or cleanup swap only when the live schema exposes a supported bound
-or authoritative current provider/connector evidence proves the applied ceiling
-is no greater than `max_slippage_pct`. Otherwise classify native swap execution
-as `unsupported`, choose `HOLD`, and name the missing evidence. Never weaken the
-configured cap to make the swap possible.
+schema before create and use only fields it accepts. Preparation BUYs and cleanup
+SELLs use a native current-controller `order_executor` exclusively. Trust the
+configured Gateway/Jupiter execution path's internal slippage protection. Do not
+invent or pass a `slippage` field, do not request a separate swap quote, and
+never call `manage_gateway_swaps` for any action.
 
 ## Preparation
 
 1. Require one selected and natively verified Orca pool, exact token registry
-   truth, clean de-duplicated lifecycle capacity, and current capital/reserve
-   evidence.
-2. Run `calculate_lp_requirements` for the selected pool/range. Use its floored
-   amounts and exact base shortfall; do not reconstruct them from prose.
-3. If a material shortfall exists, record one loop intent and submit one native
-   current-controller market `order_executor`. Pass exact `controller_id` and
+   truth, available current-session executor risk capacity, and current
+   capital/reserve evidence.
+2. Immediately refresh the exact selected Orca pool through native
+   `explore_dex_pools(action="get_pool_info")`; require its exact orientation,
+   finite positive current price, and tick spacing. Run
+   `calculate_lp_requirements` for the selected pool/range with those mechanics,
+   configured `lp_open_balance_buffer_pct`, and
+   `allow_base_preparation=true`. Use its floored amounts and buffered exact
+   base shortfall; do not reconstruct them from prose or substitute
+   scanner/GeckoTerminal prices.
+3. If a material shortfall exists, record one loop intent containing the exact
+   pool, BASE mint, pair, requested BASE shortfall, and configured receive
+   threshold, then submit one native current-controller market
+   `order_executor`. Pass exact `controller_id` and
    `account_name=<config.account_name>` at tool top level. Its config uses
    `type="order_executor"`, `connector_name=<config.network>`,
    `trading_pair="BASE-<config.quote_token_symbol>"`, `side=1`,
@@ -86,10 +95,36 @@ configured cap to make the swap possible.
    `execution_strategy="MARKET"`, subject to the live schema.
 4. Retain its exact executor ID and fetch that exact executor. If it is
    nonterminal, submitted, or uncertain, end the tick and reconcile later. If
-   terminal, refresh the wallet; a requested or reported `executed_amount_base`
-   is not authoritative received inventory.
+   confirmed terminal, require positive `executed_amount_base`. For the
+   checked-out Gateway connector this is the realized received BASE derived from
+   settled token changes. Refresh the wallet for spendable LP inventory; do not
+   require the realized amount to equal the request.
 5. End the tick. On a later tick, refresh wallet balances, pool price, and range
-   composition and run the calculator again. Never swap and open in one tick.
+   composition and run the calculator again with
+   `allow_base_preparation=false`. Fit the LP to the actual balances while
+   preserving capital headroom and the configured per-token open buffer. A small
+   receive difference is normal: downsize to a meaningful feasible LP instead
+   of declaring preparation failed or submitting a dust top-up swap. Never swap
+   and open in one tick.
+
+Compare the journaled preparation order's positive requested BASE amount with
+the confirmed executor's positive realized `executed_amount_base`:
+
+```text
+receive_difference_pct =
+  abs(executed_amount_base - requested_base_amount) / requested_base_amount * 100
+```
+
+At or below `preparation_receive_difference_blacklist_pct`, use the realized
+amount and continue with fresh sizing. Strictly above it, require exact matching
+controller, executor, pool, pair, BASE mint, the same positive requested amount,
+and non-contradictory wallet evidence; then `HOLD`, exclude that pool and BASE
+mint immediately, and write one
+`category="execution"` learning exactly as
+`BLACKLIST_POOL=<pool> BLACKLIST_TOKEN=<base_mint> DIFF_PCT=<value>
+LIMIT_PCT=<configured_limit>`. Equality never blacklists. Missing, zero,
+nonterminal, uncertain, ambiguous, or contradictory evidence never blacklists;
+reconcile instead.
 
 If preparation is confirmed but LP creation becomes authoritatively impossible,
 restore only the exact attributable prepared base amount to configured QUOTE.
@@ -97,13 +132,21 @@ Never infer restoration amount from total wallet balance.
 
 ## LP Open
 
-1. Immediately before submit, refresh native wallet, executor, and every known
-   exact-position fact; require capacity below the configured cap and no
-   unresolved open.
-2. Record loop intent with that observed baseline, exact pool/range, calculated
-   amounts, controller, and reason.
-3. Read the live `lp_executor` schema. If schema retrieval or validation is
+1. Immediately before submit, require the latest calculator result used
+   `allow_base_preparation=false` after any confirmed preparation and that its
+   `base_balance_required` and `quote_balance_required` fit the refreshed wallet.
+   Refresh native wallet and executor facts; require the current-session
+   open-executor count below `risk_limits.max_open_executors` and no unresolved
+   open.
+2. Read the live `lp_executor` schema. If schema retrieval or validation is
    unavailable, `HOLD`; never rely on skipped validation.
+3. After validation and immediately before submit, record loop intent with the
+   exact pool/range, calculated amounts, controller, and reason. Refresh the
+   native wallet again after validation and persist that baseline in the action
+   text as exact `base_mint`, `pre_base_balance`, `quote_mint`, and
+   `pre_quote_balance` key/value fields. Use plain decimal spendable balances at
+   their current native token precision; planned LP deposit amounts are not
+   baseline substitutes.
 4. Submit at most one create with the exact current controller and
    `account_name=<config.account_name>` at tool top level, plus
    `executor_type="lp_executor"`. Inside `executor_config`, use
@@ -116,34 +159,16 @@ Never infer restoration amount from total wallet balance.
    DEX/provider name for `connector_name` or put top-level authority only inside
    config.
 5. Record returned executor, transaction, and position identities immediately.
-   Refresh executor and wallet evidence. Once the exact position is known, run
-   `inspect_orca_positions` after the configured Stats indexing window with the
-   wallet, position, pool, intended action, and pre-submit mutation timestamp as
-   integer Unix epoch seconds.
+   Refresh executor and wallet evidence. If the exact current-controller
+   executor coherently reports the position and lifecycle, supervise it directly.
+   Do not call `inspect_orca_positions` for an LP open.
 
 One create call consumes the per-tick deployment quota even when rejected by
 schema or Gateway simulation. Do not submit a second pool that tick.
 
-## Reconcile Open Evidence
-
-Use the three independent surfaces together:
-
-| Executor/HAPI | Orca Stats after lag | Interpretation |
-| --- | --- | --- |
-| Exact current executor | Summary/history agree on matching indexed open | Supervise after all identities agree |
-| Missing row/executor | Matching indexed open | Open effect exists; never retry; count and quarantine if native lifecycle support is absent |
-| Authoritative pre-submit rejection or finalized failed transaction | Empty, old, or not indexed | Terminal no-effect may permit a corrected later-tick attempt; Stats absence contributes no proof |
-| Partial, contradictory, still indexing, or several identities | Disagreement or uncertain | No retry; read-only reconciliation/manual review |
-
-Matching Stats evidence proves that Orca's event index associates the exact
-wallet, position, pool, and action; the history row also supplies the
-transaction signature. Combine it with the exact
-executor or finalized transaction before current-session attribution. Empty
-results are `not_indexed`, never authoritative absence.
-
 ## Progress-Gated Retry
 
-Never treat an executor `failed` label as retry permission. Classify the result:
+Classify the result:
 
 - `rejected_before_submit`: no mutation was submitted;
 - `submitted` or `confirmed`: an external identity/effect exists;
@@ -151,18 +176,34 @@ Never treat an executor `failed` label as retry permission. Classify the result:
 - `ambiguous`: several or contradictory matches exist;
 - `unavailable`: required truth is incomplete or unreachable.
 
-Only a terminal no-effect result may be retried, and no earlier than a later
-tick. It must come from authoritative pre-submit rejection or a finalized failed
-transaction—not an empty or lagging Stats response. Require no active/submitted
-matching executor, refreshed balances, registry, pool/range, capital, capacity,
-reserve, and exit facts, plus a material correction or proven transient
-recovery. Never repeat an identical request against unchanged facts and never
-use a global retry counter.
+For LP open only, reconcile once on the first later tick with one exact
+executor-detail read and one fresh wallet read. A result is
+`rejected_before_submit` when the exact current-controller executor is terminal
+`FAILED`, has no position address, reports zero native actual LP base/quote
+amounts at token precision, and fresh balances for journaled `base_mint` and
+`quote_mint` equal `pre_base_balance` and `pre_quote_balance`. Normalize exact
+decimals to each mint's freshly verified native precision. Do not treat
+requested/configured amounts or initial-amount fallback fields as actual LP
+amounts.
 
-An insufficient-funds `TransferChecked` Gateway simulation is safe no-effect
-only when no Solana transaction was submitted. Refresh actual balances, retain
-headroom, recalculate, correct the shortfall, and wait for the next tick. If the
-position instead exists on Orca, reconciliation replaces retry.
+When those gates pass, continue in that same reconciliation tick: refresh all
+remaining admission facts, rerun sizing with `allow_base_preparation=false`,
+and submit one corrected OPEN after its sole action intent is written. Do not
+spend a separate `HOLD` tick merely recording the classification. That intent
+names the failed executor, states `rejected_before_submit`, records the corrected
+range/amounts, and persists a new four-field wallet baseline. At least one of
+the corrected `base_amount` or `quote_amount` must be lower than the failed
+request at token precision, both buffered requirements must fit, and no
+arbitrary percentage reduction is required.
+
+Any position address, nonzero native actual LP amount, or exact-mint balance
+change is `uncertain` and forbids retry. Missing any of the four journal fields
+or an actual-amount observation is `unavailable` and remains `HOLD`; metrics are
+never a baseline substitute. Do not call Orca Stats, require transaction
+evidence, search the same logs again, or promise exact-position recovery without
+an address. The failed create consumed its original tick's quota, so the one
+corrected create occurs only on this or another later tick and consumes that
+tick's quota. Never repeat an identical request.
 
 ## Per-Position Close
 
@@ -175,15 +216,21 @@ position instead exists on Orca, reconciliation replaces retry.
    wallet after each result; stop the batch immediately if any result is not a
    proven non-ambiguous submission/confirmation. Each native stop may internally
    perform remove-liquidity and its close-out swap.
-4. Reconcile each executor independently and require matching post-lag Stats
-   `close_position` summary/history. Never repeat a possibly submitted stop.
+4. If a close is terminal `FAILED` or its effect remains uncertain, run
+   close-only `inspect_orca_positions` for that exact known position. Pass the
+   required exact wallet, position, pool, mutation-start Unix timestamp, and
+   configured lag; there is no action selector. Consume `close_outcome`
+   deterministically: `closed` forbids another stop; `still_active` permits a
+   corrected close no earlier than a later tick; and `pending_index`,
+   `uncertain`, or `unavailable` remains `HOLD`. Never repeat a possibly
+   submitted close without this classification.
 5. Indexed close consensus proves the indexed lifecycle effect but not token
    delivery or quote restoration. Refresh wallet balances and native results.
 
-If Orca Stats shows an active position without the HAPI row required by native
-close, do not adopt or hide a direct Gateway mutation inside a routine. Count
-it, quarantine conflicting deployment, and request manual exact-position
-recovery through Gateway or Orca UI.
+If Orca Stats shows an active position without an exact native executor that can
+own and close it, do not adopt or hide a direct Gateway mutation inside a
+routine. Count it, quarantine conflicting deployment, and request manual
+exact-position recovery through Gateway or Orca UI.
 
 ## Quote Restoration
 
@@ -232,4 +279,4 @@ exact-current `stop_agent`.
 
 An external kill or manual hard stop bypasses this path and therefore requires
 manual inspection and cleanup. A later session may observe the remains for
-capacity but never adopt, close, or clean them.
+balance and attribution safety but never adopt, close, or clean them.
