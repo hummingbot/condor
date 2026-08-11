@@ -179,10 +179,30 @@ async def pull_updates(repo_dir: str = CONDOR_DIR) -> tuple[bool, str]:
             "Cannot update: there are uncommitted changes. Please commit or stash first.",
         )
 
+    # The sha we are leaving, so a successful pull can report what it moved.
+    before = await get_local_commit(repo_dir)
+
     # Pull
     rc, output = await _run_git("pull", "origin", branch, repo_dir=repo_dir)
     if rc != 0:
         return False, f"Pull failed:\n{output}"
+
+    # Version adoption telemetry (FEAT-023): two short shas and how far behind
+    # this install had drifted. Only for the Condor repo itself, and a no-op
+    # unless the admin opted in.
+    try:
+        after = await get_local_commit(repo_dir)
+        if repo_dir == CONDOR_DIR and before and after and before != after:
+            _, behind = await _run_git(
+                "rev-list", "--count", f"{before}..{after}", repo_dir=repo_dir
+            )
+            from condor.telemetry import taps as telemetry_taps
+
+            telemetry_taps.version_change(
+                before, after, int(behind) if behind.strip().isdigit() else 0
+            )
+    except Exception:
+        logger.debug("Could not record version change", exc_info=True)
 
     return True, output
 

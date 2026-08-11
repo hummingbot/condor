@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from condor.runtime.timeouts import TIMEOUTS
+from condor.telemetry import taps as telemetry_taps
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,12 @@ class ConfirmationStatus(str, Enum):
     APPROVED = "approved"
     DENIED = "denied"
     TIMEOUT = "timeout"
+
+
+def _tool_of(pending: "PendingConfirmation") -> str:
+    """The tool name out of a tool_call payload, for telemetry only."""
+    call = pending.tool_call or {}
+    return str(call.get("name") or call.get("kind") or "unknown")
 
 
 @dataclass
@@ -184,6 +191,9 @@ class ConfirmationRegistry:
         )
         pending.selected_option_id = option_id
         pending._event.set()
+        # Which tool was asked about and what was decided (FEAT-023). Never the
+        # summary, the arguments or who decided.
+        telemetry_taps.confirmation(_tool_of(pending), "allow" if approved else "deny")
         return True
 
     def get(self, confirmation_id: str) -> PendingConfirmation | None:
@@ -236,6 +246,7 @@ class ConfirmationRegistry:
             ):
                 pending.status = ConfirmationStatus.TIMEOUT
                 pending._event.set()  # wake any waiter immediately
+                telemetry_taps.confirmation(_tool_of(pending), "timeout")
             elif pending.status is not ConfirmationStatus.PENDING:
                 # Give the waiter a grace period to read the outcome first.
                 if now - pending.expires_at > CLEANUP_INTERVAL:

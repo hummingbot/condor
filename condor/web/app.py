@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+from condor.telemetry.taps import web_tap
 from condor.web.routes import (
     agents,
     archived,
@@ -61,6 +62,12 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # Usage telemetry (FEAT-023). Reports the matched route *template*
+    # (`/api/v1/bots/{name}`), never the URL, so cardinality is bounded by our
+    # own router and no path parameter — a bot name, a server name, a report id
+    # — is ever read. No-op unless the admin opted in.
+    app.middleware("http")(web_tap)
 
     # ── API routes ──
     app.include_router(auth.router, prefix="/api/v1")

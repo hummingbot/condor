@@ -17,6 +17,7 @@ from typing import Any
 
 import condor.reports as reports
 from condor import routine_hooks
+from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     RoutineResult,
     discover_routines,
@@ -412,6 +413,7 @@ class RoutineStore:
         failed_status: str | None = None,
         fire_hooks: bool = True,
         agent: str = "",
+        trigger: str = "other",
     ) -> None:
         """Run a routine once, store the result, update instance metadata, fire hooks.
 
@@ -478,6 +480,20 @@ class RoutineStore:
                     "error": error_msg,
                 }
             )
+
+        # Usage telemetry (FEAT-023): whether it ran, how it was triggered and
+        # how long it took. The routine's own name only when the file ships in
+        # this repo — a user's private routine is called `custom` — and never
+        # its config, its output or its error text.
+        telemetry_taps.routine_run(
+            routine=telemetry_taps.shipped_routine_name(
+                (routine.name or "").split("/")[-1]
+            ),
+            kind="continuous" if getattr(routine, "continuous", False) else "oneshot",
+            trigger=trigger,
+            duration_ms=int(duration * 1000),
+            ok=not failed,
+        )
 
         await self._report_run(instance_id, summary, error_msg)
 
@@ -547,6 +563,7 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
         agent: str = "",
+        trigger: str = "manual",
     ) -> None:
         await self._execute_and_record(
             instance_id,
@@ -557,6 +574,7 @@ class RoutineStore:
             status_after="completed",
             failed_status="failed",
             agent=agent,
+            trigger=trigger,
         )
 
     async def start_continuous(
@@ -618,6 +636,7 @@ class RoutineStore:
             status_after="stopped",
             fire_hooks=False,
             agent=agent,
+            trigger="manual",
         )
 
     async def schedule(
@@ -670,6 +689,7 @@ class RoutineStore:
                     server_name,
                     user_id,
                     status_after="scheduled",
+                    trigger="schedule",
                 )
                 # A cancel that lands mid-run is swallowed (and recorded) by
                 # _execute_and_record; stop() removed the instance, so bail out

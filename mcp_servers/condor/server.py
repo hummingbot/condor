@@ -6,6 +6,7 @@ All business logic lives in mcp_servers.condor.tools.*
 
 from mcp.server.fastmcp import FastMCP
 
+from condor.telemetry import taps as telemetry_taps
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import consult as consult_tool
@@ -282,6 +283,7 @@ mcp = FastMCP("condor", instructions=_build_instructions())
 
 @mcp.tool()
 @handle_errors("consult agent")
+@telemetry_taps.tracked("consult")
 async def consult(agent: str, task: str, context: str = "") -> dict:
     """Consult a specialized domain agent and get its answer.
 
@@ -303,6 +305,7 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
 
 @mcp.tool()
 @handle_errors("delegate task")
+@telemetry_taps.tracked("delegate")
 async def delegate(
     action: str,
     agent: str = "",
@@ -359,6 +362,7 @@ async def delegate(
 
 @mcp.tool()
 @handle_errors("send notification")
+@telemetry_taps.tracked("send_notification")
 async def send_notification(
     text: str,
     parse_mode: str = "Markdown",
@@ -377,6 +381,7 @@ async def send_notification(
 
 @mcp.tool()
 @handle_errors("manage routines")
+@telemetry_taps.tracked("manage_routines")
 async def manage_routines(
     action: str,
     name: str | None = None,
@@ -451,6 +456,7 @@ async def manage_routines(
 
 @mcp.tool()
 @handle_errors("manage servers")
+@telemetry_taps.tracked("manage_servers")
 async def manage_servers(
     action: str,
     name: str | None = None,
@@ -473,6 +479,7 @@ async def manage_servers(
 
 @mcp.tool()
 @handle_errors("get user context")
+@telemetry_taps.tracked("get_user_context")
 async def get_user_context() -> dict:
     """Get the current user's context within Condor.
 
@@ -487,6 +494,7 @@ async def get_user_context() -> dict:
 
 @mcp.tool()
 @handle_errors("get available models")
+@telemetry_taps.tracked("get_available_models")
 async def get_available_models(
     openrouter_query: str = "", openrouter_limit: int = 20
 ) -> dict:
@@ -543,6 +551,7 @@ async def get_available_models(
 
 @mcp.tool()
 @handle_errors("manage trading agent")
+@telemetry_taps.tracked("manage_trading_agent")
 async def manage_trading_agent(
     action: str,
     agent_id: str | None = None,
@@ -657,6 +666,7 @@ async def manage_trading_agent(
 
 @mcp.tool()
 @handle_errors("manage memory")
+@telemetry_taps.tracked("manage_memory")
 async def manage_memory(
     action: str,
     name: str | None = None,
@@ -710,6 +720,7 @@ async def manage_memory(
 
 @mcp.tool()
 @handle_errors("manage skill")
+@telemetry_taps.tracked("manage_skill")
 async def manage_skill(
     action: str,
     name: str | None = None,
@@ -818,6 +829,7 @@ async def manage_skill(
 
 @mcp.tool()
 @handle_errors("manage notes")
+@telemetry_taps.tracked("manage_notes")
 async def manage_notes(
     action: str,
     key: str | None = None,
@@ -855,6 +867,7 @@ async def manage_notes(
 
 @mcp.tool()
 @handle_errors("journal read")
+@telemetry_taps.tracked("trading_agent_journal_read")
 async def trading_agent_journal_read(
     agent_id: str,
     section: str = "recent",
@@ -882,6 +895,7 @@ async def trading_agent_journal_read(
 
 @mcp.tool()
 @handle_errors("journal write")
+@telemetry_taps.tracked("trading_agent_journal_write")
 async def trading_agent_journal_write(
     agent_id: str,
     entry_type: str,
@@ -933,4 +947,15 @@ async def trading_agent_journal_write(
 
 
 if __name__ == "__main__":
+    # This server runs in its own process, spawned by the agent: a different
+    # interpreter, a different heap, and no job_queue. hosted=False makes emit()
+    # append to `spool.<pid>.jsonl`, which the host process drains and deletes.
+    # Still a no-op unless the install opted in.
+    try:
+        from condor import telemetry
+
+        telemetry.init(hosted=False)
+    except Exception:  # noqa: BLE001 - never block the server on telemetry
+        pass
+
     mcp.run()

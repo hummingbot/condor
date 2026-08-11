@@ -59,18 +59,6 @@ def _quiet(fn):
     return wrapper
 
 
-def _quiet_async(fn):
-    @functools.wraps(fn)
-    async def wrapper(*args, **kwargs):
-        try:
-            return await fn(*args, **kwargs)
-        except Exception:  # noqa: BLE001
-            log.debug("Telemetry tap %s failed", fn.__name__, exc_info=True)
-            return None
-
-    return wrapper
-
-
 def _on() -> bool:
     from condor.telemetry import consent
 
@@ -251,9 +239,14 @@ def _route_action(request) -> tuple[str, str] | None:
     return module, verb
 
 
-@_quiet_async
 async def web_tap(request, call_next):
-    """ASGI middleware: one ``action`` per API call, with its status code."""
+    """ASGI middleware: one ``action`` per API call, with its status code.
+
+    Deliberately not wrapped in a swallow-everything decorator: ``call_next``
+    must be allowed to raise, or an unhandled route exception would surface as
+    "no response returned" instead of the 500 it is. Only the observation is
+    guarded.
+    """
     response = await call_next(request)
     try:
         if _on() and str(request.url.path).startswith("/api/"):

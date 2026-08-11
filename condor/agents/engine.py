@@ -28,6 +28,7 @@ from condor.acp.client import (
 )
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from condor.runtime.registry_file import LoopState
+from condor.telemetry import taps as telemetry_taps
 
 from .agent import Agent
 from .journal import JournalManager, next_experiment_number, next_session_number
@@ -110,6 +111,9 @@ class TickEngine:
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
+    # Why the loop ended, for the strategy_run telemetry event: "user" unless
+    # something in the loop set it first.
+    _last_stop_reason: str = field(default="user", init=False, repr=False)
     # Session canvas + live report (FEAT-036). Both None for experiments, which
     # keep no journal and therefore no narrative to render.
     _session_report: "SessionReport | None" = field(
@@ -261,6 +265,13 @@ class TickEngine:
         # from there; the gap in between belongs to no session, which is the truth.
         if self.ledger is not None:
             self.ledger.release()
+        # Shape of the session for telemetry (FEAT-023): mode, cadence and tick
+        # count. Never the playbook, the journal, the pairs or the positions.
+        telemetry_taps.strategy_run(
+            self.config,
+            ticks=getattr(self.journal, "tick_count", 0) or 0,
+            stopped_by=self._last_stop_reason,
+        )
         if self.journal:
             self.journal.close()
         _supervisor().unregister(self.agent_id, LoopState.STOPPED)
@@ -282,6 +293,7 @@ class TickEngine:
         if self._shutting_down:
             return
         self._shutting_down = True
+        self._last_stop_reason = "shutdown"
         # Halt the loop so no next/concurrent tick fights the winddown.
         self._running = False
         self._paused = True
@@ -394,6 +406,7 @@ class TickEngine:
                         label,
                     )
                     await self._notify(f"Agent {self.agent_id}: {label} complete.")
+                    self._last_stop_reason = "complete"
                     self._running = False
                     _supervisor().unregister(self.agent_id, LoopState.COMPLETED)
                     return
@@ -409,6 +422,7 @@ class TickEngine:
                     await self._notify(
                         f"Agent {self.agent_id}: completed {max_ticks} ticks (max_ticks limit)."
                     )
+                    self._last_stop_reason = "max_ticks"
                     self._running = False
                     self.journal.close()
                     _supervisor().unregister(self.agent_id, LoopState.COMPLETED)
