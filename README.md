@@ -22,8 +22,11 @@ A Telegram bot for monitoring and trading with Hummingbot via the **Hummingbot A
 - **Bot Monitoring** - Track active Hummingbot trading bots with real-time status and metrics
 - **CLOB Trading** - Place orders on centralized exchanges (Binance, Bybit, etc.) with interactive menus
 - **DEX Trading** - Swap tokens and manage CLMM liquidity positions via Gateway
+- **Web Dashboard** - Browser UI (via **`/web`**) with a live trade panel that covers both CEX and DEX venues: order book trading, DEX swaps, and CLMM liquidity positions created and drawn directly on the chart
 - **Configuration** - Manage API servers, exchange credentials, and Gateway through Telegram (`/servers`, `/keys`, `/gateway`)
 - **AI Assistant** - Natural language trading help via **`/agent`** (optional OpenAI or OpenRouter keys, or any custom OpenAI-compatible endpoint like Venice AI; MCP tools when configured)
+- **AI Agents** - Domain agents that can be consulted, delegated to, or run on a loop — each can author its own tick strategy (analysis order, decision rules, risk limits) and run it autonomously with dry-run support
+- **Issue Reporting** - A **Report an issue** button in the web dashboard prefills a GitHub issue draft (with opt-in, review-before-send diagnostics) that you submit from your own GitHub account
 
 ## What you need
 
@@ -412,7 +415,7 @@ See `flows/` directory for detailed command flow documentation:
 - **Docs**: https://condor.hummingbot.org
 - **Installation guide**: https://condor.hummingbot.org/getting-started/installing
 - **Tailscale guide**: https://hummingbot.org/hummingbot-api/tailscale/
-- **Issues**: https://github.com/hummingbot/condor/issues
+- **Issues**: https://github.com/hummingbot/condor/issues — or use the **Report an issue** button in the web dashboard to prefill a bug report or feature request with diagnostics
 
 ---
 
