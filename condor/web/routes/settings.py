@@ -16,6 +16,7 @@ from condor.web.models import (
     UpdateServerRequest,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import ServerPermission, get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -35,8 +36,15 @@ def _require_owner(cm, user_id: int, server_name: str):
 async def _get_client(cm, server_name: str):
     try:
         return await cm.get_client(server_name)
-    except Exception as e:
+    except ValueError as e:
+        # The config manager's own rejection ("no such server"). Its text names
+        # nothing the caller did not already type, so it can be shown as-is.
         raise HTTPException(status_code=502, detail=f"Cannot connect to server: {e}")
+    except Exception as e:
+        # Anything else came off the wire, and its string carries the backend
+        # address — log it, show the caller only the safe description.
+        logger.exception("Cannot connect to server '%s'", server_name)
+        raise upstream_error("Cannot connect to server", e)
 
 
 # ── Servers ──
@@ -179,7 +187,8 @@ async def gateway_pull(
         result = await client.docker.pull_image(image_name, tag)
         return {"pulled": True, "image": req.image, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to pull gateway image '%s' on '%s'", req.image, server)
+        raise upstream_error("Failed to pull gateway image", e)
 
 
 @router.get("/gateway/pull-status")
@@ -195,7 +204,8 @@ async def gateway_pull_status(
         result = await client.docker.get_pull_status()
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to fetch gateway pull status from '%s'", server)
+        raise upstream_error("Failed to fetch pull status", e)
 
 
 @router.post("/gateway/start")
@@ -217,7 +227,8 @@ async def gateway_start(
         )
         return {"started": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to start gateway on '%s'", server)
+        raise upstream_error("Failed to start gateway", e)
 
 
 @router.post("/gateway/stop")
@@ -233,7 +244,8 @@ async def gateway_stop(
         result = await client.gateway.stop()
         return {"stopped": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to stop gateway on '%s'", server)
+        raise upstream_error("Failed to stop gateway", e)
 
 
 @router.post("/gateway/restart")
@@ -249,7 +261,8 @@ async def gateway_restart(
         result = await client.gateway.restart()
         return {"restarted": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to restart gateway on '%s'", server)
+        raise upstream_error("Failed to restart gateway", e)
 
 
 @router.get("/gateway/logs")
@@ -265,7 +278,8 @@ async def gateway_logs(
         logs = await client.gateway.get_logs()
         return {"logs": logs}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to fetch gateway logs from '%s'", server)
+        raise upstream_error("Failed to fetch gateway logs", e)
 
 
 # ── Voice Preferences ──
@@ -361,7 +375,8 @@ async def list_credentials(
                     )
         return {"credentials": credentials}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to list credentials on '%s'", server)
+        raise upstream_error("Failed to list credentials", e)
 
 
 @router.get("/connectors")
@@ -418,7 +433,10 @@ async def connector_config_map(
         config_map = await client.connectors.get_config_map(name)
         return {"config_map": config_map}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(
+            "Failed to fetch config map for connector '%s' on '%s'", name, server
+        )
+        raise upstream_error("Failed to fetch connector config map", e)
 
 
 @router.post("/credentials")
@@ -443,7 +461,10 @@ async def add_credential(
         get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
         return {"added": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(
+            "Failed to add credentials for '%s' on '%s'", req.connector_name, server
+        )
+        raise upstream_error("Failed to add credentials", e)
 
 
 @router.delete("/credentials/{connector}")
@@ -469,7 +490,10 @@ async def delete_credential(
         sds.invalidate(server, ServerDataType.PORTFOLIO)
         return {"deleted": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(
+            "Failed to delete credentials for '%s' on '%s'", connector, server
+        )
+        raise upstream_error("Failed to delete credentials", e)
 
 
 # ── Custom OpenAI-compatible LLM endpoints ──

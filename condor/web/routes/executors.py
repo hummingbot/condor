@@ -8,11 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 
-from condor.fetchers.executors import (
-    EXECUTORS_POLL_MAX,
-    MAX_EXECUTORS_FETCH,
-    describe_executor_error,
-)
+from condor.fetchers.executors import EXECUTORS_POLL_MAX, MAX_EXECUTORS_FETCH
 from condor.fetchers.executors import extract_executors_list as _extract_executors_list
 from condor.fetchers.executors import fetch_all_executors, summarize_executors_by_quote
 from condor.web.auth import get_current_user
@@ -22,6 +18,7 @@ from condor.web.models import (
     ExecutorPeriodSummary,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 router = APIRouter(tags=["executors"])
@@ -43,24 +40,6 @@ _PERIOD_TTLS: dict[str, int] = {"1D": 60, "1W": 300, "1M": 900}
 
 # (server, period) -> (computed_at, summary). Bounded by servers x periods.
 _summary_cache: dict[tuple[str, str], tuple[float, ExecutorPeriodSummary]] = {}
-
-
-def _executor_error(action: str, exc: Exception) -> HTTPException:
-    """Map an executor call failure to an HTTPException that leaks nothing.
-
-    An upstream 4xx is the caller's own bad request and stays a 400; anything
-    else — an upstream 5xx, a timeout, a refused connection — is the gateway
-    failing, so 502. The detail carries the API's message but never the raw
-    exception, whose string embeds the backend URL and port.
-
-    Reads go through this too, not only mutations: the listing endpoints are the
-    dashboard's hottest path, so any backend blip is the most reachable way for
-    that address to reach a browser. Callers log the exception before raising —
-    the address belongs in the server log, not in the response.
-    """
-    status, message = describe_executor_error(exc)
-    code = 400 if status is not None and 400 <= status < 500 else 502
-    return HTTPException(status_code=code, detail=f"{action}: {message}")
 
 
 @router.get("/servers/{name}/executors", response_model=list[ExecutorInfo])
@@ -106,7 +85,7 @@ async def list_executors(
             result = executors_list
         except Exception as e:
             logger.exception("Failed to fetch executors for server %s", name)
-            raise _executor_error("Failed to fetch executors", e)
+            raise upstream_error("Failed to fetch executors", e)
     else:
         try:
             result = await get_server_data_service().get_or_fetch(
@@ -114,7 +93,7 @@ async def list_executors(
             )
         except Exception as e:
             logger.exception("Failed to fetch executors for server %s", name)
-            raise _executor_error("Failed to fetch executors", e)
+            raise upstream_error("Failed to fetch executors", e)
         if result is None:
             raise HTTPException(status_code=502, detail="Failed to fetch executors")
 
@@ -198,7 +177,7 @@ async def list_executors_page(
                 rows = await fetch_all_executors(client, max_items=offset + limit + 1)
             except Exception as e:
                 logger.exception("Failed to page executors for server %s", name)
-                raise _executor_error("Failed to fetch executors", e)
+                raise upstream_error("Failed to fetch executors", e)
             return _offset_page(rows, offset, limit)
         # Cold cache on the first page: fall through to opaque API cursors,
         # which page the rest of the scroll in one request each.
@@ -220,7 +199,7 @@ async def list_executors_page(
         result = await client.executors.search_executors(**kwargs)
     except Exception as e:
         logger.exception("Failed to page executors for server %s", name)
-        raise _executor_error("Failed to fetch executors", e)
+        raise upstream_error("Failed to fetch executors", e)
 
     page = _extract_executors_list(result)
     next_cursor = None
@@ -321,7 +300,7 @@ async def executors_summary(
         executors = await fetch_all_executors(client)
     except Exception as e:
         logger.exception("Failed to summarize executors for server %s", name)
-        raise _executor_error("Failed to fetch executors", e)
+        raise upstream_error("Failed to fetch executors", e)
 
     summary = await _usd_summary(
         name, period, summarize_executors_by_quote(executors, now - window)
@@ -350,7 +329,7 @@ async def create_executor_endpoint(
     try:
         result = await create_executor(client, config, account_name=body.account_name)
     except Exception as e:
-        raise _executor_error("Failed to create executor", e)
+        raise upstream_error("Failed to create executor", e)
     executor_id = ""
     if isinstance(result, dict):
         executor_id = str(result.get("executor_id") or result.get("id") or "")
@@ -375,7 +354,7 @@ async def stop_executor_endpoint(
     try:
         result = await stop_executor(client, executor_id, keep_position=keep_position)
     except Exception as e:
-        raise _executor_error("Failed to stop executor", e)
+        raise upstream_error("Failed to stop executor", e)
     return {"status": "ok", "result": result}
 
 
@@ -393,7 +372,7 @@ async def get_positions_held(
         result = await client.executors.get_positions_summary()
     except Exception as e:
         logger.exception("Failed to fetch held positions for server %s", name)
-        raise _executor_error("Failed to fetch positions", e)
+        raise upstream_error("Failed to fetch positions", e)
 
     # Normalize: extract positions list from various shapes
     if isinstance(result, dict):
@@ -436,5 +415,5 @@ async def clear_position_held(
         )
     except Exception as e:
         logger.exception("Failed to clear held position on server %s", name)
-        raise _executor_error("Failed to clear position", e)
+        raise upstream_error("Failed to clear position", e)
     return {"status": "ok", "result": result}

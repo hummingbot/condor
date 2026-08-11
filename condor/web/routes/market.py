@@ -42,6 +42,7 @@ from condor.web.models import (
     TradingRulesResponse,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 
 router = APIRouter(tags=["market"])
 
@@ -81,7 +82,8 @@ async def get_connectors(name: str, user: WebUser = Depends(get_current_user)):
             name, ServerDataType.CANDLE_CONNECTORS
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to fetch candle connectors from '%s'", name)
+        raise upstream_error("Failed to fetch connectors", e)
     return result
 
 
@@ -99,7 +101,8 @@ async def get_connected_exchanges(name: str, user: WebUser = Depends(get_current
             name, ServerDataType.CONNECTORS
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to fetch connected exchanges from '%s'", name)
+        raise upstream_error("Failed to fetch connectors", e)
     return result or []
 
 
@@ -220,7 +223,10 @@ async def get_price(
             trading_pair=trading_pair,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to fetch price for %s on %s of '%s'", trading_pair, connector, name
+        )
+        raise upstream_error("Failed to fetch price", e)
 
     if result is None:
         raise HTTPException(status_code=502, detail="Failed to fetch price")
@@ -260,7 +266,8 @@ async def get_rates(
     try:
         rates = await resolve(name, trading_pairs, connector=body.get("connector"))
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to resolve rates on '%s'", name)
+        raise upstream_error("Failed to fetch rates", e)
 
     return RatesResponse(rates=rates)
 
@@ -290,7 +297,10 @@ async def get_trading_rules(
             name, ServerDataType.TRADING_RULES, connector_name=connector
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to fetch trading rules for '%s' on '%s'", connector, name
+        )
+        raise upstream_error("Failed to fetch trading rules", e)
 
     if not isinstance(result, dict):
         return TradingRulesResponse(connector=connector, rules=[])
@@ -328,7 +338,8 @@ async def get_tickers(
     try:
         result = await get_connector_tickers(name, connector)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to fetch tickers for '%s' on '%s'", connector, name)
+        raise upstream_error("Failed to fetch tickers", e)
 
     if not isinstance(result, dict):
         return TickersResponse(connector=connector, tickers=[])
@@ -366,7 +377,13 @@ async def get_order_book(
             connector_name=connector, trading_pair=trading_pair
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception(
+            "Failed to fetch order book for %s on %s of '%s'",
+            trading_pair,
+            connector,
+            name,
+        )
+        raise upstream_error("Failed to fetch order book", e)
 
     bids = []
     asks = []
@@ -505,7 +522,13 @@ async def get_candles(
                 connector, trading_pair, interval, limit
             )
         except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
+            logger.exception(
+                "Failed to fetch candles for %s on %s of '%s'",
+                trading_pair,
+                connector,
+                name,
+            )
+            raise upstream_error("Failed to fetch candles", e)
 
     candles_raw = (
         result

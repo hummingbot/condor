@@ -16,6 +16,7 @@ from condor.web.models import (
     ControllerPerformanceSnapshot,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -136,8 +137,8 @@ async def get_bot_runs(
     try:
         result, perf_by_bot = await asyncio.gather(_fetch_runs(), _fetch_perf())
     except Exception as e:
-        logger.warning("Failed to fetch bot runs from '%s': %s", name, e)
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to fetch bot runs from '%s'", name)
+        raise upstream_error("Failed to fetch bot runs", e)
 
     runs_list = _extract_runs_list(result)
 
@@ -165,8 +166,8 @@ async def delete_bot_run(
     try:
         result = await client.bot_orchestration.delete_bot_run(bot_run_id)
     except Exception as e:
-        logger.warning("Failed to delete bot run %d from '%s': %s", bot_run_id, name, e)
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to delete bot run %d from '%s'", bot_run_id, name)
+        raise upstream_error("Failed to delete bot run", e)
 
     return {"deleted": True, "bot_run_id": bot_run_id, "result": result}
 
