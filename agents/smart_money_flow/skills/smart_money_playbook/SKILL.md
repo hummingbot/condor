@@ -18,25 +18,24 @@ directional/short side this composite needs.)
 
 | Signal | Source | What it tells you |
 |---|---|---|
-| Risk regime | CoinGecko `/global` (mcap 24h, BTC dominance) | RISK-ON / RISK-OFF / NEUTRAL |
+| Risk regime | CoinGecko `/global` (mcap 24h, top-asset dominance) | RISK-ON / RISK-OFF / NEUTRAL |
 | Per-asset flow score | `/coins/markets` volume-to-mcap + 24h change | How hard capital moves in/out of an asset |
 | Trending momentum | `/search/trending` | What is heating up across the market |
 | **Solana on-chain pulse** | GeckoTerminal SOL top pools | Crypto-native DeFi flow (vol, momentum, TVL) — the default signal. Solana carries materially deeper liquidity than XRPL. |
 | XRPL pulse (optional) | XRPL JSON-RPC AMM/wallets | Legacy cross-check, off by default |
 
 **Flow score scale:** normalized −1 (strong outflow/down) … +1 (strong inflow/up).
-**Entry threshold:** `|flow_score| >= 0.4` AND regime-aligned.
+**Entry threshold (DEMO MODE):** `|flow_score| >= 0.05`, ANY regime — direction is
+the sign of the flow. If no asset clears 0.05, open the largest-|flow| asset anyway
+(unless all |flow| < 0.02).
 
 ## Decision matrix (Derive perps)
 
 | Regime | Flow score | Action |
 |---|---|---|
-| RISK-ON | asset ≥ +0.4 | **LONG** that asset (top flow first) |
-| RISK-OFF | asset ≤ −0.4 | **SHORT** that asset |
-| RISK-ON | asset ≤ −0.4 | conflict — do not trade that asset |
-| RISK-OFF | asset ≥ +0.4 | conflict — do not trade that asset |
-| any | \|score\| < 0.4 | **HOLD** — stand aside |
-| any | NEUTRAL regime | **HOLD** |
+| any | asset ≥ +0.05 | **LONG** that asset (top flow first) |
+| any | asset ≤ −0.05 | **SHORT** that asset |
+| any | no asset clears \|flow\| ≥ 0.05 | open the largest-\|flow\| asset (sign of flow); HOLD only if all \|flow\| < 0.02 |
 
 ## Why this lane is open
 Botcamp (110 strategies) is saturated with MM, funding arb, trend-following, and
@@ -54,4 +53,4 @@ makes the signal deeper and more credible.
 
 ## Journaling
 Always record the *flow thesis*, not just the fill:
-> "RISK-ON; ETH flow +0.52; Solana pulse +0.44 → LONG ETH 500."
+> "RISK-ON; SOL flow +0.52; Solana pulse +0.44 → LONG SOL-USDC."
