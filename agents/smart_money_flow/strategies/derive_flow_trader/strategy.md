@@ -55,43 +55,94 @@ default_trading_context: |
   DeFi flow (GeckoTerminal), not XRPL.
 ---
 
-# Derive Flow Trader — Playbook
+# Derive Flow Trader — Playbook (what to do, step by step)
 
-You are the **loop strategy** for the Smart-Money Flow agent, trading
-**perpetuals on Derive** (`derive_perpetual`). Each tick you:
+You are the **loop strategy** for the Smart-Money Flow agent. Your identity,
+edge, and risk philosophy live in the agent file; this playbook is the exact
+procedure for every tick. Follow it precisely — the risk gate enforces the
+limits, so your job is to read the flow and size honestly.
 
-1. **Run the flow read.** Call `manage_routines(action="run", routine="onchain_flow")`.
-   It returns a `LONG` / `SHORT` / `HOLD` direction, the best-flow asset, the
-   Solana on-chain pulse, and a cross-market context table, plus a dashboard.
-2. **Filter (DEMO MODE — take a position every tick unless flat-risk).** Trade
-   **SOL-USDC only** — the only market this strategy trades. With no open
-   position:
-   - `LONG`: asset `flow_score >= +0.05` (any regime — ignore RISK-ON/RISK-OFF/NEUTRAL)
-   - `SHORT`: asset `flow_score <= -0.05` (any regime)
-   - Fallback: if no asset clears |flow| >= 0.05, open on the asset with the
-     largest |flow_score| anyway (direction = sign of flow). Only HOLD when all
-     |flow| < 0.02 or a position is already open.
-3. **Size & enter.** One position at a time (`max_open_executors: 1`), **2x
-   leverage**, sized from the live portfolio balance within
-   `max_position_size_quote` (50). Never exceed the funded wallet. Open a
-   `PositionExecutor`.
-   **Call shape (REQUIRED — matches the risk gate):**
-   - Put `"controller_id": "<Agent ID from the system prompt>"` **INSIDE**
-     `executor_config` — the gate reads the tag ONLY from inside the config.
-   - Pass `total_amount_quote` (the quote notional, e.g. ~$16 for 0.1 SOL at
-     current price) AND `amount` in **BASE units**: **0.1 SOL** (= Derive's min
-     order). The gate compares `total_amount_quote` against the $50 cap, so give
-     it the honest quote notional of the position.
-   - Set `leverage: 2`, `side: 1` (LONG) / `2` (SHORT), `connector_name:
-     "derive_perpetual"`, `trading_pair: "SOL-USDC"`, plus a
-     `triple_barrier_config` (TP/trail/stop per step 4).
-   The Risk Engine auto-blocks anything over the $50 cap.
-4. **Manage.** 50% take-profit at +2%, trail 2% after +1.5% in profit, hard stop
-   −2.5%. On signal flip (next tick's flow score crosses zero against your
-   position) with conviction ≥ 0.4, exit and optionally reverse. Max 8h hold.
-5. **Journal the flow thesis** — one line per tick in flow terms, e.g.
-   *"RISK-ON; SOL flow +0.52; Solana pulse +0.44 → LONG SOL-USDC."*
+## Step 1 — Run the flow read
 
-DEMO MODE: if the read is ambiguous, prefer opening the largest-|flow| asset
-anyway (direction = sign of flow) so a position exists for the demo — survival
-still beats activity, but a flat session is the failure mode here.
+Call `manage_routines(action="run", routine="onchain_flow")`.
+
+It returns:
+- a **direction** (`LONG` / `SHORT` / `HOLD`),
+- the **best-flow asset**,
+- the **Solana on-chain pulse**,
+- a per-asset context table, and writes a ReportBuilder dashboard.
+
+Read its output; do not re-fetch raw data.
+
+## Step 2 — Filter (DEMO MODE: take a position unless flat-risk)
+
+Trade **SOL-USDC only** — the only market this strategy trades. The routine may
+flag other symbols; they are advisory at most, never tradeable here. With no
+open position:
+
+- **`LONG`** when SOL-USDC `flow_score >= +0.05` — any regime
+  (ignore RISK-ON / RISK-OFF / NEUTRAL).
+- **`SHORT`** when SOL-USDC `flow_score <= -0.05` — any regime.
+- **Fallback:** if no asset clears `|flow| >= 0.05`, open on the asset with the
+  largest `|flow_score|` anyway (direction = sign of flow).
+- **HOLD** only when **all** |flow| < 0.02, or a position is already open.
+
+DEMO MODE reasoning: a flat session is the failure mode for the demo. Prefer
+opening the largest-|flow| asset (direction = sign of flow) so a position
+exists — survival still beats activity, but only a genuinely flat market
+(~0 flow) justifies standing aside.
+
+## Step 3 — Size & enter
+
+One position at a time (`max_open_executors: 1`), **2x leverage**, sized from
+the live portfolio balance within `max_position_size_quote` (50). Never exceed
+the funded wallet. Open a **`PositionExecutor`**.
+
+### Call shape (REQUIRED — matches the risk gate)
+
+- Put `"controller_id": "<Agent ID from the system prompt>"` **INSIDE**
+  `executor_config` — the gate reads the tag ONLY from inside the config.
+- Pass **`total_amount_quote`** (the quote notional, e.g. ~$16 for 0.1 SOL at
+  current price) **AND** `amount` in **BASE units**: **0.1 SOL** (= Derive's min
+  order). The gate compares `total_amount_quote` against the $50 cap, so give it
+  the honest quote notional of the position.
+- Set `leverage: 2`, `side: 1` (LONG) / `2` (SHORT),
+  `connector_name: "derive_perpetual"`, `trading_pair: "SOL-USDC"`, plus a
+  `triple_barrier_config` (TP/trail/stop per Step 4).
+
+The Risk Engine auto-blocks anything over the $50 cap — do not fight it, resize.
+
+## Step 4 — Manage open positions
+
+- **Take profit:** scale out 50% at +2%, trail the rest with a +1.5% activation
+  and 2% trail; hard stop at −2.5%.
+- **Signal flip:** if the next tick's flow read inverts (score crosses through
+  zero against your position) with conviction ≥ 0.4, exit and optionally reverse.
+- **Time limit:** max 8h hold per position.
+- **Leftover position:** if a grid stops out but holds inventory, wait for a
+  recovery within 1% of breakeven, then exit with an `OrderExecutor`.
+
+## Step 5 — Journal the *why* in flow terms
+
+One line per tick, in flow terms, e.g.:
+
+- *"RISK-ON; SOL flow +0.52 (vol/mcap 2.1x, trending #4); Solana pulse +0.44 →
+  LONG SOL-USDC."*
+- *"RISK-OFF; SOL flow −0.4 → SHORT SOL-USDC."*
+
+Record the thesis, not just the fill.
+
+---
+
+## Cheat sheet (every tick)
+
+| # | Action | Key values |
+|---|---|---|
+| 1 | Run `onchain_flow` routine | direction + best asset + pulse + table |
+| 2 | Filter | SOL-USDC only; LONG ≥ +0.05, SHORT ≤ −0.05 (any regime); fallback largest-|flow|; HOLD only if all < 0.02 |
+| 3 | Size & enter | 1 executor, 2x lev, ≤ $50 quote; controller_id inside config; total_amount_quote + 0.1 SOL base |
+| 4 | Manage | TP 50% @ +2%, trail 1.5/2%, stop −2.5%, 8h max, flip on conviction ≥ 0.4 |
+| 5 | Journal | one flow-thesis line per tick |
+
+If the read is ambiguous, prefer the fallback open (DEMO MODE) — a flat session
+is the failure mode. No forced trades outside the playbook.
