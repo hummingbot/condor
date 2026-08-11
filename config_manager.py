@@ -150,6 +150,7 @@ class ConfigManager:
         self._data.setdefault("server_access", {})
         self._data.setdefault("chat_defaults", {})
         self._data.setdefault("user_preferences", {})
+        self._data.setdefault("telemetry", {})
         # Migrate audit_log from config.yml to separate file (one-time)
         if "audit_log" in self._data:
             self._audit_log = self._data.pop("audit_log")
@@ -174,6 +175,7 @@ class ConfigManager:
             "server_access": {},
             "chat_defaults": {},
             "user_preferences": {},
+            "telemetry": {},
             "version": self.VERSION,
         }
 
@@ -216,6 +218,7 @@ class ConfigManager:
                 "server_access": self._data.get("server_access", {}),
                 "chat_defaults": self._data.get("chat_defaults", {}),
                 "web_jwt_secret": self._data.get("web_jwt_secret"),
+                "telemetry": self._data.get("telemetry", {}),
                 "version": self._data.get("version", self.VERSION),
             }
             # Keep a copy of the last known-good file before truncating it,
@@ -585,6 +588,27 @@ class ConfigManager:
     # =========================================================================
     # USER MANAGEMENT
     # =========================================================================
+
+    # ── Telemetry (FEAT-023) ──
+    # Consent and the install's random identity live here because this file is
+    # the one durable, process-wide store the MCP subprocess can also read.
+    # Nothing in this section is transmitted except `install_id` and `level`;
+    # `install_secret` never leaves the machine. See PRIVACY.md.
+
+    def get_telemetry(self) -> dict:
+        """The telemetry section. Empty dict on an install that never opted in."""
+        section = self._data.get("telemetry")
+        return dict(section) if isinstance(section, dict) else {}
+
+    def update_telemetry(self, **changes) -> dict:
+        """Merge keys into the telemetry section and persist."""
+        section = self._data.setdefault("telemetry", {})
+        if not isinstance(section, dict):
+            section = {}
+            self._data["telemetry"] = section
+        section.update(changes)
+        self._save_config()
+        return dict(section)
 
     def get_user(self, user_id: int) -> Optional[dict]:
         """Get user record."""
