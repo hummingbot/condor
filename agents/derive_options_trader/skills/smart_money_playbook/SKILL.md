@@ -18,7 +18,7 @@ directional/short side this composite needs.)
 
 | Signal | Source | What it tells you |
 |---|---|---|
-| Risk regime | CoinGecko `/global` (mcap 24h, BTC dominance) | RISK-ON / RISK-OFF / NEUTRAL |
+| Risk regime | CoinGecko `/global` (mcap 24h, top-asset dominance) | RISK-ON / RISK-OFF / NEUTRAL |
 | Per-asset flow score | `/coins/markets` volume-to-mcap + 24h change | How hard capital moves in/out of an asset |
 | Trending momentum | `/search/trending` | What is heating up across the market |
 | **Solana on-chain pulse** | GeckoTerminal SOL top pools | Crypto-native DeFi flow (vol, momentum, TVL) — the default signal. Solana carries materially deeper liquidity than XRPL. |

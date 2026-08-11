@@ -12,7 +12,7 @@ default_config:
   min_order_amount_quote: 10
   max_ticks: 0
   risk_limits:
-    max_total_exposure_quote: 50
+    max_position_size_quote: 50
     max_drawdown_pct: 8
     max_open_executors: 1
     max_leverage: 2
@@ -47,6 +47,10 @@ Extract:
 - `composite_score`: −1 to +1 (negative = bearish, positive = bullish)
 - `confidence`: LOW / MEDIUM / HIGH
 - SOL spot price (from the report or portfolio overview)
+
+If the routine reports "Derive API unavailable", there is no options signal this
+tick: treat as HOLD, keep any open position's barriers active, and journal the
+outage. Do not enter on stale or missing data.
 
 ### Step 2 — Check open positions
 
@@ -93,6 +97,7 @@ Convert to base units: `sol_amount = size_quote / sol_spot`, round down to neare
   "trading_pair": "SOL-USDC",
   "side": 1,
   "amount": <sol_amount>,
+  "total_amount_quote": <size_quote>,
   "leverage": 2,
   "executor_config": {
     "controller_id": "<Agent ID from system prompt>",
@@ -107,8 +112,10 @@ Convert to base units: `sol_amount = size_quote / sol_spot`, round down to neare
 ```
 
 - `side: 1` = LONG, `side: 2` = SHORT.
-- Raise leverage to 3 only if confidence=HIGH **and** |composite_score| ≥ 0.70.
-- The Risk Engine enforces `max_total_exposure_quote` (50) and `max_open_executors` (1)
+- Keep leverage at 2, **including** when confidence=HIGH and |composite_score| ≥ 0.70 —
+  the risk gate does not clamp leverage, so never request more than `max_leverage` (2).
+- Pass `total_amount_quote` with the honest quote notional — the Risk Engine compares
+  it against `max_position_size_quote` (50). It also enforces `max_open_executors` (1)
   — do not try to open a second position if one is already open.
 
 ### Step 5 — Manage open positions

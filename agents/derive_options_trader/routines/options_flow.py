@@ -52,6 +52,7 @@ async def _post(session: aiohttp.ClientSession, path: str, payload: dict) -> dic
         headers={"Content-Type": "application/json"},
         timeout=aiohttp.ClientTimeout(total=15),
     ) as resp:
+        resp.raise_for_status()
         return await resp.json()
 
 
@@ -146,11 +147,14 @@ def _gex(opts: list[dict], spot: float) -> float:
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
-    async with aiohttp.ClientSession() as session:
-        perp_data, instruments = await asyncio.gather(
-            _fetch_perp_ticker(session, config.perp_instrument),
-            _fetch_instruments(session, config.currency),
-        )
+    try:
+        async with aiohttp.ClientSession() as session:
+            perp_data, instruments = await asyncio.gather(
+                _fetch_perp_ticker(session, config.perp_instrument),
+                _fetch_instruments(session, config.currency),
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        return f"Derive API unavailable ({type(e).__name__}: {e}) — no options signal this tick"
 
     spot = float(perp_data.get("index_price") or 0)
     if spot <= 0:
@@ -179,8 +183,21 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 tickers = await _fetch_tickers(s, config.currency, exp)
         return exp, tickers
 
-    ticker_pairs = await asyncio.gather(*[fetch_guarded(e) for e in expiry_dates])
-    expiry_opts = {exp: _parse_options(tickers) for exp, tickers in ticker_pairs}
+    results = await asyncio.gather(
+        *[fetch_guarded(e) for e in expiry_dates], return_exceptions=True
+    )
+    expiry_opts, failed_expiries = {}, []
+    for exp, res in zip(expiry_dates, results):
+        if isinstance(res, BaseException):
+            logger.warning("options_flow: expiry %s fetch failed: %s", exp, res)
+            failed_expiries.append(exp)
+        else:
+            expiry_opts[exp] = _parse_options(res[1])
+    if not expiry_opts:
+        return (
+            f"Derive API unavailable (all {len(expiry_dates)} expiry fetches failed) "
+            "— no options signal this tick"
+        )
 
     # ── Per-expiry signals ──
     today = datetime.now(tz=timezone.utc)
@@ -240,7 +257,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             gex_exp = exp
             gex_val = _gex(expiry_opts[exp], spot)
             break
-    gex_amp = 0.75 if gex_val > 0 else 1.25
+    # No liquid expiry → no gamma read → neutral amplifier (never amplify on missing data)
+    gex_amp = 0.75 if gex_val > 0 else (1.25 if gex_val < 0 else 1.0)
 
     composite = max(-1.0, min(1.0,
         (rr_score * config.rr_weight + oi_score * config.oi_weight + ts_score * config.ts_weight)
@@ -285,7 +303,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.kpi("25D Risk Reversal", f"{rr_score:+.3f}  (wt {config.rr_weight:.0%})")
     builder.kpi("P/C OI Ratio", f"{oi_score:+.3f}  (wt {config.oi_weight:.0%})")
     builder.kpi("Term Structure", f"{ts_score:+.3f}  (wt {config.ts_weight:.0%})")
-    builder.kpi("GEX Amplifier", f"{gex_val:+.1f}  →  {gex_amp:.2f}×")
+    if gex_exp is not None:
+        builder.kpi("GEX Amplifier", f"{gex_val:+.1f}  →  {gex_amp:.2f}×")
+    else:
+        builder.kpi("GEX Amplifier", "n/a (no liquid expiry)  →  1.00×")
+    if failed_expiries:
+        builder.markdown(
+            f"⚠️ {len(failed_expiries)}/{len(expiry_dates)} expiry fetches failed "
+            f"({', '.join(failed_expiries)}) — composite computed from partial data."
+        )
 
     # Per-expiry table
     exp_rows = []
@@ -344,11 +370,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     await builder.save()
 
+    gex_str = f"GEX {gex_val:+.0f} ({gex_amp:.2f}×)" if gex_exp is not None else "GEX n/a (1.00×)"
     summary = (
         f"{emoji} Options Oracle: **{direction}** (score {composite:+.3f} | {confidence} confidence)\n"
         f"{config.currency} @ ${spot:.3f} | "
-        f"25D RR {rr_score:+.3f} | P/C OI {oi_score:+.3f} | TS {ts_score:+.3f} | GEX {gex_val:+.0f} ({gex_amp:.2f}×)"
+        f"25D RR {rr_score:+.3f} | P/C OI {oi_score:+.3f} | TS {ts_score:+.3f} | {gex_str}"
     )
+    if failed_expiries:
+        summary += f"\n⚠️ partial data: {len(failed_expiries)}/{len(expiry_dates)} expiry fetches failed"
 
     return RoutineResult(
         text=summary,
