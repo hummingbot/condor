@@ -103,6 +103,30 @@ async def get_connected_exchanges(name: str, user: WebUser = Depends(get_current
     return result or []
 
 
+@router.get("/servers/{name}/market/gateway-networks")
+async def get_gateway_networks(name: str, user: WebUser = Depends(get_current_user)):
+    """Gateway networks the trade panel can offer (chartable DEX venues).
+
+    Answers ``{"networks": []}`` rather than a 502 when the gateway container is
+    down: the panel then simply shows no DEX. The fetcher runs ``strict=True``, so
+    the failure is never cached as an empty list and the next request retries.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from condor.server_data_service import ServerDataType, get_server_data_service
+
+    try:
+        result = await get_server_data_service().get_or_fetch(
+            name, ServerDataType.GATEWAY_NETWORKS
+        )
+    except Exception as e:
+        logger.warning("Gateway networks unavailable for %s: %s", name, e)
+        return {"networks": []}
+    return {"networks": result or []}
+
+
 @router.get("/servers/{name}/market/prices", response_model=MarketPriceResponse)
 async def get_price(
     name: str,

@@ -41,6 +41,7 @@ from condor.fetchers.trading_rules import fetch_trading_rules
 from condor.fetchers.connectors import (
     fetch_connectors,
     fetch_available_cex_connectors,
+    fetch_gateway_networks,
     is_cex_connector,
 )
 from condor.fetchers.executors import (
@@ -74,6 +75,7 @@ __all__ = [
     "fetch_trading_rules",
     "fetch_connectors",
     "fetch_available_cex_connectors",
+    "fetch_gateway_networks",
     "is_cex_connector",
     "fetch_executors",
     "fetch_all_executors",
