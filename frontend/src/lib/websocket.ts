@@ -29,6 +29,11 @@ export class CondorWebSocket {
     this.token = token;
   }
 
+  /** Whether the underlying socket is open right now (diagnostics only). */
+  get isOpen(): boolean {
+    return this.ws?.readyState === WebSocket.OPEN;
+  }
+
   connect() {
     this.shouldConnect = true;
     this._connect();

@@ -281,6 +281,17 @@ export function acquireSocket(token: string): CondorWebSocket {
   return socket ?? openSocket(token);
 }
 
+/**
+ * State of the shared connection, for a bug report to quote.
+ *
+ * "closed" while the dashboard is open is itself the bug in most stale-data
+ * reports, and it is not something a user can see.
+ */
+export function socketStatus(): "connected" | "connecting" | "closed" {
+  if (!socket) return "closed";
+  return socket.isOpen ? "connected" : "connecting";
+}
+
 /** Drop a reference. The last one closes the socket after a short grace period. */
 export function releaseSocket(): void {
   socketRefs = Math.max(0, socketRefs - 1);

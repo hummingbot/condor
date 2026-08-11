@@ -952,6 +952,15 @@ export function parseCustomAgentKey(
 
 // ── Backtesting ──
 
+export interface AppEnvResponse {
+  version: string;
+  branch: string;
+  python: string;
+  os: string;
+  arch: string;
+  in_docker: boolean;
+}
+
 export interface BacktestTask {
   task_id: string;
   status: "pending" | "running" | "completed" | "failed";
@@ -966,6 +975,9 @@ export interface BacktestTask {
 
 export const api = {
   getServers: () => apiFetch<ServerInfo[]>("/api/v1/servers"),
+
+  /** Build identity — shown to the user when they file an issue. */
+  getEnv: () => apiFetch<AppEnvResponse>("/api/v1/meta/env"),
 
   getServerStatus: (name: string) =>
     apiFetch<{ online: boolean; error?: string }>(
