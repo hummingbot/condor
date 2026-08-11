@@ -496,7 +496,7 @@ export function TradeBottomPane({
                       const active = isExecutorActive(ex.status);
                       const stopping = stoppingIds.has(ex.id);
                       const side = ex.side?.toUpperCase();
-                      const isBuy = side === "BUY" || side === "1";
+                      const isBuy = side === "BUY";
                       const borderColor = active ? "var(--color-primary)" : ex.pnl >= 0 ? "var(--color-green)" : "var(--color-red)";
                       const isSelected = selectedExecutorId === ex.id;
                       const entry = getEntryPrice(ex);
