@@ -11,6 +11,9 @@ tools:
 - get_portfolio_overview
 - get_market_data
 - send_notification
+- manage_routines
+- manage_trading_agent
+- trading_agent_journal_read
 - manage_memory
 - manage_skill
 when_to_consult: When the user asks whether a freshly-graduated Meteora DAMM v2 pool
