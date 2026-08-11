@@ -45,7 +45,7 @@ class ServerDataType(Enum):
     CANDLE_CONNECTORS = "candle_connectors"
     SERVER_STATUS = "server_status"
     ALL_CONNECTORS = "all_connectors"
-    GATEWAY_NETWORKS = "gateway_networks"
+    VENUES = "venues"
     TICKERS = "tickers"
     TICKER_POOL = "ticker_pool"
 
@@ -84,11 +84,10 @@ _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.ALL_CONNECTORS: DataTypeDefaults(
         interval=300, ttl=600, stale_threshold=30
     ),
-    # Gateway networks change ~never (a chain is added to the gateway config by
-    # hand), so a read is served from cache for half an hour.
-    ServerDataType.GATEWAY_NETWORKS: DataTypeDefaults(
-        interval=300, ttl=1800, stale_threshold=300
-    ),
+    # Venue traits follow the CONNECTORS cadence, not the "chains change ~never"
+    # one: the credentialed connector list is one of the inputs, so the answer
+    # changes the moment a user adds API keys.
+    ServerDataType.VENUES: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
     ServerDataType.TICKERS: DataTypeDefaults(interval=60, ttl=180, stale_threshold=30),
     # Whole-server ticker pool: one poll feeds every per-connector ticker view and
     # all currency conversion, so reads never hit the network.
@@ -854,13 +853,13 @@ def register_default_fetches() -> None:
         fetch_connectors,
         fetch_current_price,
         fetch_executors,
-        fetch_gateway_networks,
         fetch_portfolio,
         fetch_positions,
         fetch_server_status,
         fetch_ticker_pool,
         fetch_tickers,
         fetch_trading_rules,
+        fetch_venues,
     )
 
     sds = get_server_data_service()
@@ -881,9 +880,7 @@ def register_default_fetches() -> None:
         ServerDataType.CONNECTORS, partial(fetch_available_cex_connectors, strict=True)
     )
     sds.register_fetch(ServerDataType.ALL_CONNECTORS, fetch_connectors)
-    sds.register_fetch(
-        ServerDataType.GATEWAY_NETWORKS, partial(fetch_gateway_networks, strict=True)
-    )
+    sds.register_fetch(ServerDataType.VENUES, partial(fetch_venues, strict=True))
     sds.register_fetch(ServerDataType.BOTS_STATUS, fetch_bots_status)
     sds.register_fetch(ServerDataType.EXECUTORS, fetch_executors)
     sds.register_fetch(ServerDataType.BOT_RUNS, fetch_bot_runs)

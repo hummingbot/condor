@@ -103,13 +103,18 @@ async def get_connected_exchanges(name: str, user: WebUser = Depends(get_current
     return result or []
 
 
-@router.get("/servers/{name}/market/gateway-networks")
-async def get_gateway_networks(name: str, user: WebUser = Depends(get_current_user)):
-    """Gateway networks the trade panel can offer (chartable DEX venues).
+@router.get("/servers/{name}/market/venues")
+async def get_venues(name: str, user: WebUser = Depends(get_current_user)):
+    """Venues the trade panel can offer, each with its independent traits.
 
-    Answers ``{"networks": []}`` rather than a 502 when the gateway container is
-    down: the panel then simply shows no DEX. The fetcher runs ``strict=True``, so
-    the failure is never cached as an empty list and the next request retries.
+    ``{"venues": [{"name", "hummingbot_market_data", "clmm_lp"}, ...]}``. The panel
+    maps traits to UI decisions itself — which tabs and strategies to render is a
+    product decision, not a server fact; only the facts they rest on come from here.
+
+    Answers ``{"venues": []}`` rather than a 502 when the server cannot be described
+    at all, so the panel renders its empty state. The fetcher runs ``strict=True``,
+    so that failure is never cached; a gateway-only failure degrades inside the
+    fetcher and still reports the credentialed venues.
     """
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
@@ -119,12 +124,12 @@ async def get_gateway_networks(name: str, user: WebUser = Depends(get_current_us
 
     try:
         result = await get_server_data_service().get_or_fetch(
-            name, ServerDataType.GATEWAY_NETWORKS
+            name, ServerDataType.VENUES
         )
     except Exception as e:
-        logger.warning("Gateway networks unavailable for %s: %s", name, e)
-        return {"networks": []}
-    return {"networks": result or []}
+        logger.warning("Venues unavailable for %s: %s", name, e)
+        return {"venues": []}
+    return {"venues": result or []}
 
 
 _NO_POOL = {

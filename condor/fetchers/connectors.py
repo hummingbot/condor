@@ -1,7 +1,7 @@
 """Fetch connector information from Hummingbot API."""
 
 import logging
-from typing import List
+from typing import Dict, List
 
 from condor.fetchers._identifiers import validate_identifier
 
@@ -35,34 +35,25 @@ def _network_id(item) -> str:
     return str(item)
 
 
-async def fetch_gateway_networks(client, strict: bool = False, **_kw) -> List[str]:
-    """Gateway networks that Condor can chart (subset of ``NETWORK_TO_GECKO``).
+async def _chartable_gateway_networks(client) -> List[str]:
+    """Gateway networks Condor can chart: ``list_networks()`` ∩ ``NETWORK_TO_GECKO``.
 
     The intersection is the point: a network is only offered to the trade panel if
     ``dex_candles.uses_gecko_candles`` will answer for it, so selecting one can
     never produce an empty chart. Do not widen this to every gateway network.
 
-    Args:
-        strict: Raise when the gateway request itself fails, instead of reporting
-            that no networks exist. Callers that cache the answer want the
-            distinction: an unreachable gateway is worth retrying, and must not be
-            cached as "this server has no DEX".
+    Raises whatever the gateway request raises — the caller decides how much of the
+    answer a gateway failure is allowed to take down.
     """
     # Lazy, like condor.dex_candles.uses_gecko_candles — condor.fetchers must not
     # import handlers at module scope.
     from handlers.dex.pool_data import NETWORK_TO_GECKO
 
-    try:
-        response = await client.gateway.list_networks()
-        networks = (response or {}).get("networks") or []
-        return sorted(
-            {n for n in (_network_id(i) for i in networks) if n in NETWORK_TO_GECKO}
-        )
-    except Exception as e:
-        if strict:
-            raise
-        logger.error("Error fetching gateway networks: %s", e, exc_info=True)
-        return []
+    response = await client.gateway.list_networks()
+    networks = (response or {}).get("networks") or []
+    return sorted(
+        {n for n in (_network_id(i) for i in networks) if n in NETWORK_TO_GECKO}
+    )
 
 
 async def fetch_available_cex_connectors(
@@ -103,3 +94,74 @@ async def fetch_available_cex_connectors(
             raise
         logger.error("Error fetching connectors: %s", e, exc_info=True)
         return []
+
+
+async def fetch_venues(
+    client, account_name: str = "master_account", strict: bool = False, **_kw
+) -> List[Dict]:
+    """Venues the trade panel can offer, each with its independent traits.
+
+    Returns ``[{"name", "hummingbot_market_data", "clmm_lp"}, ...]`` sorted by name.
+    The two traits are *independent facts about the venue*, each with exactly one
+    authority, because the panel's four decisions (which executor tabs, which
+    execution strategies, whether the order-book/rules/price endpoints are called,
+    where the current price comes from) are four different questions. Answering them
+    from a single ``cex``/``dex`` membership test is what this shape replaces.
+
+    ``hummingbot_market_data``: the venue came from the credentialed connector list.
+    Credentials are per Hummingbot connector, so ``solana-mainnet-beta`` can never
+    appear there and presence is positive evidence that ``/market/trading-rules``,
+    ``/market/order-book``, ``/market/tickers`` and ``/market/prices`` answer.
+    **A venue in both input lists is a Hummingbot connector.** That is the ``xrpl``
+    guarantee and this is the only place it is expressed: ``xrpl`` is a first-class
+    connector with a real order book whose *charts* come from GeckoTerminal, so it
+    sits in ``NETWORK_TO_GECKO`` and would appear in the gateway half the day a
+    Gateway version reports it — without this rule it would silently lose its order
+    book, its trading rules and every strategy but MARKET.
+
+    ``clmm_lp``: the venue is a gateway network *and* its gecko chain hosts a CLMM
+    venue (``pool_data.network_has_clmm``), not merely that it is a gateway network.
+    That is what keeps an order-book venue from being offered an LP tab it cannot
+    honor.
+
+    The candle source (CandlesFactory vs GeckoTerminal) is deliberately *not* a
+    field: the server already forks on it internally and no UI decision needs it.
+
+    Args:
+        strict: Raise instead of reporting a venue-less server, so a failure is
+            never cached as "there is nothing here". Credentials are load-bearing,
+            so their failure always re-raises under ``strict``. A gateway failure
+            only re-raises when it would leave the list empty: losing the DEX half
+            must not empty the whole dropdown, and a list that still carries the
+            credentialed venues is not a cached lie.
+    """
+    from handlers.dex.pool_data import network_has_clmm
+
+    # Credentials first: under strict this raises, and there is no point asking the
+    # gateway about a server we cannot describe at all.
+    connectors = await fetch_available_cex_connectors(
+        client, account_name=account_name, strict=strict
+    )
+
+    gateway_error = None
+    networks: List[str] = []
+    try:
+        networks = await _chartable_gateway_networks(client)
+    except Exception as e:
+        gateway_error = e
+        logger.error("Error fetching gateway networks: %s", e, exc_info=True)
+
+    credentialed = set(connectors)
+    gateway = set(networks)
+    venues = [
+        {
+            "name": name,
+            "hummingbot_market_data": name in credentialed,
+            "clmm_lp": name in gateway and network_has_clmm(name),
+        }
+        for name in sorted(credentialed | gateway)
+    ]
+
+    if strict and gateway_error is not None and not venues:
+        raise gateway_error
+    return venues

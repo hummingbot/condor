@@ -489,6 +489,20 @@ async def resolve_pool_info(
     return info
 
 
+def network_has_clmm(network: str) -> bool:
+    """Whether any known CLMM venue exists on this network's gecko chain.
+
+    This is the authority for "can a venue on this network take an ``lp_executor``
+    position", and it is deliberately *not* "is this a gateway network". ``xrpl`` is
+    a gateway-adjacent id that lives in ``NETWORK_TO_GECKO`` for charting only — its
+    AMM is not concentrated-liquidity, so it answers ``False`` here whether or not
+    Gateway ever reports it in ``list_networks()``. Deriving the trait from
+    ``_CLMM_VENUES`` instead of from gateway membership is what keeps that true.
+    """
+    gecko = get_gecko_network(network)
+    return any(gecko in networks for _brand, _qualifiers, networks in _CLMM_VENUES)
+
+
 def lp_provider_for_dex(dex_id: str, network: str) -> Optional[str]:
     """``"meteora/clmm"``-style LP provider for a GeckoTerminal dex id, or ``None``.
 
