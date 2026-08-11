@@ -1,8 +1,8 @@
 ---
 name: smart_money_playbook
-description: How to read the Smart-Money Flow composite and translate it into a bounded directional perp decision on any venue (Derive, Hyperliquid, Backpack, Pacifica, …). Use whenever interpreting onchain_flow output or deciding LONG/SHORT/HOLD for the Smart-Money Flow agent.
-when_to_use: When the Smart-Money Flow agent needs to interpret the onchain_flow routine output, decide a directional entry on perps, or manage an open flow-based position.
-source: agent:smart_money_flow
+description: How to read the Smart-Money Flow composite and translate it into a bounded directional perp decision on any venue (Derive, Hyperliquid, Backpack, Pacifica, …). Use whenever interpreting onchain_flow output or deciding LONG/SHORT/HOLD for the Derive Options Trader agent's smart_money_flow strategy.
+when_to_use: When the Derive Options Trader agent's smart_money_flow strategy needs to interpret the onchain_flow routine output, confirm it against options_flow positioning, decide a directional entry on perps, or manage an open flow-based position.
+source: agent:derive_options_trader
 ---
 
 # Smart-Money Playbook (Directional Perps, any venue)
@@ -23,20 +23,24 @@ directional/short side this composite needs.)
 | Trending momentum | `/search/trending` | What is heating up across the market |
 | **Solana on-chain pulse** | GeckoTerminal SOL top pools | Crypto-native DeFi flow (vol, momentum, TVL) — the default signal. Solana carries materially deeper liquidity than XRPL. |
 | XRPL pulse (optional) | XRPL JSON-RPC AMM/wallets | Legacy cross-check, off by default |
+| **Options confirmation** | `options_flow` (Derive options API) | 25D risk reversal, put/call OI, term structure, GEX — confirms or fades the flow read |
 
 **Flow score scale:** normalized −1 (strong outflow/down) … +1 (strong inflow/up).
-**Entry threshold:** `|flow_score| >= 0.4` AND regime-aligned.
+**Entry threshold (DEMO MODE):** `|flow_score| >= 0.05`, ANY regime — direction is
+the sign of the flow. If no asset clears 0.05, open the largest-|flow| asset anyway
+(unless all |flow| < 0.02).
+**Options confirmation:** always cross-check the `options_flow` composite before
+sizing — full size when options agree with the flow direction, half size when they
+strongly disagree (|composite| ≥ 0.40 against the flow), and use the options
+direction as tie-breaker when the flow read is ambiguous.
 
 ## Decision matrix (Derive perps)
 
 | Regime | Flow score | Action |
 |---|---|---|
-| RISK-ON | asset ≥ +0.4 | **LONG** that asset (top flow first) |
-| RISK-OFF | asset ≤ −0.4 | **SHORT** that asset |
-| RISK-ON | asset ≤ −0.4 | conflict — do not trade that asset |
-| RISK-OFF | asset ≥ +0.4 | conflict — do not trade that asset |
-| any | \|score\| < 0.4 | **HOLD** — stand aside |
-| any | NEUTRAL regime | **HOLD** |
+| any | asset ≥ +0.05 | **LONG** that asset (top flow first) |
+| any | asset ≤ −0.05 | **SHORT** that asset |
+| any | no asset clears \|flow\| ≥ 0.05 | open the largest-\|flow\| asset (sign of flow); HOLD only if all \|flow\| < 0.02 |
 
 ## Why this lane is open
 Botcamp (110 strategies) is saturated with MM, funding arb, trend-following, and
@@ -54,4 +58,4 @@ makes the signal deeper and more credible.
 
 ## Journaling
 Always record the *flow thesis*, not just the fill:
-> "RISK-ON; ETH flow +0.52; Solana pulse +0.44 → LONG ETH 500."
+> "RISK-ON; SOL flow +0.52; Solana pulse +0.44 → LONG SOL-USDC."
