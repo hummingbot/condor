@@ -1,4 +1,4 @@
-"""Read or add-and-verify one exact Gateway token tuple; preview by default."""
+"""Preview or unconditionally add-and-verify one exact Gateway token tuple."""
 
 import asyncio
 import json
@@ -99,26 +99,34 @@ def _normalize(row: dict[str, Any]) -> tuple[str, str, int]:
     return address, symbol, parsed_decimals
 
 
-def _classify(
-    rows: list[dict[str, Any]], config: Config
-) -> tuple[Literal["exact", "absent", "conflict", "ambiguous"], str | None]:
+def _classify(rows: list[dict[str, Any]], config: Config) -> tuple[
+    Literal["exact", "case_alias", "absent", "conflict", "ambiguous"],
+    str | None,
+    tuple[str, str, int] | None,
+]:
     normalized = [_normalize(row) for row in rows]
     by_address = [row for row in normalized if row[0] == config.mint]
-    by_symbol = [row for row in normalized if row[1] == config.symbol]
-    exact = [
-        row
-        for row in normalized
-        if row == (config.mint, config.symbol, config.decimals)
+    by_symbol = [
+        row for row in normalized if row[1].casefold() == config.symbol.casefold()
     ]
-    if len(exact) == 1 and len(by_address) == 1 and len(by_symbol) == 1:
-        return "exact", None
-    if len(exact) > 1 or len(by_address) > 1 or len(by_symbol) > 1:
-        return "ambiguous", "duplicate address or symbol entries in Gateway registry"
+    if len(by_address) > 1 or len(by_symbol) > 1:
+        return (
+            "ambiguous",
+            "duplicate address or case-insensitive symbol entries in Gateway registry",
+            None,
+        )
     if by_address:
-        return "conflict", "mint is registered with different symbol or decimals"
+        registered = by_address[0]
+        if registered[2] != config.decimals:
+            return "conflict", "mint is registered with different decimals", registered
+        if registered[1] == config.symbol:
+            return "exact", None, registered
+        if registered[1].casefold() == config.symbol.casefold():
+            return "case_alias", None, registered
+        return "conflict", "mint is registered with a different symbol", registered
     if by_symbol:
-        return "conflict", "symbol is registered to a different mint"
-    return "absent", None
+        return "conflict", "symbol is registered to a different mint", by_symbol[0]
+    return "absent", None, None
 
 
 async def _read_registry(gateway: Any, config: Config) -> list[dict[str, Any]]:
@@ -158,14 +166,8 @@ async def run(config: Config, context: Any) -> str:
         gateway = getattr(client, "gateway", None)
         if gateway is None:
             raise ValueError("Gateway registry client is unavailable")
-        before = await _read_registry(gateway, config)
-        state, reason = _classify(before, config)
     except Exception as exc:
-        trace.record(
-            "registry_read_before",
-            "error",
-            error_type=type(exc).__name__,
-        )
+        trace.record("gateway_client", "error", error_type=type(exc).__name__)
         return await finish(
             {
                 **base,
@@ -174,26 +176,57 @@ async def run(config: Config, context: Any) -> str:
                 "reason": _safe_error(exc),
             }
         )
-    trace.record("registry_read_before", state=state, row_count=len(before))
 
-    if state == "exact":
-        return await finish(
-            {**base, "status": "confirmed", "mutation": False, "present": True}
-        )
-    if state in {"conflict", "ambiguous"}:
-        trace.record("registration_decision", "rejected", state=state, reason=reason)
-        return await finish(
-            {
-                **base,
-                "status": (
-                    "rejected_before_submit" if state == "conflict" else "ambiguous"
-                ),
-                "mutation": False,
-                "present": False,
-                "reason": reason,
-            }
-        )
     if config.preview:
+        try:
+            before = await _read_registry(gateway, config)
+            state, reason, registered = _classify(before, config)
+        except Exception as exc:
+            trace.record(
+                "registry_read_before",
+                "error",
+                error_type=type(exc).__name__,
+            )
+            return await finish(
+                {
+                    **base,
+                    "status": "unavailable",
+                    "mutation": False,
+                    "reason": _safe_error(exc),
+                }
+            )
+        trace.record("registry_read_before", state=state, row_count=len(before))
+
+        if state in {"exact", "case_alias"}:
+            return await finish(
+                {
+                    **base,
+                    "status": "confirmed",
+                    "mutation": False,
+                    "present": True,
+                    "registered_token": list(registered),
+                    "canonical_symbol": registered[1],
+                    "symbol_match": "exact" if state == "exact" else "case_alias",
+                }
+            )
+        if state in {"conflict", "ambiguous"}:
+            trace.record(
+                "registration_decision", "rejected", state=state, reason=reason
+            )
+            return await finish(
+                {
+                    **base,
+                    "status": (
+                        "rejected_before_submit"
+                        if state == "conflict"
+                        else "ambiguous"
+                    ),
+                    "mutation": False,
+                    "present": False,
+                    "reason": reason,
+                    "registered_token": list(registered) if registered else None,
+                }
+            )
         trace.record("registration_decision", "preview", state=state)
         return await finish(
             {
@@ -230,7 +263,7 @@ async def run(config: Config, context: Any) -> str:
 
     try:
         after = await _read_registry(gateway, config)
-        state, reason = _classify(after, config)
+        state, reason, registered = _classify(after, config)
     except Exception as exc:
         trace.record(
             "registry_read_after",
@@ -248,8 +281,16 @@ async def run(config: Config, context: Any) -> str:
         )
     trace.record("registry_read_after", state=state, row_count=len(after))
 
-    if state == "exact":
-        result = {**base, "status": "confirmed", "mutation": True, "present": True}
+    if state in {"exact", "case_alias"}:
+        result = {
+            **base,
+            "status": "confirmed",
+            "mutation": True,
+            "present": True,
+            "registered_token": list(registered),
+            "canonical_symbol": registered[1],
+            "symbol_match": "exact" if state == "exact" else "case_alias",
+        }
         if add_error:
             result["warning"] = (
                 "add response failed but exact registry truth confirms the token"
@@ -263,6 +304,7 @@ async def run(config: Config, context: Any) -> str:
                 "mutation": True,
                 "present": False,
                 "reason": reason,
+                "registered_token": list(registered) if registered else None,
             }
         )
     return await finish(

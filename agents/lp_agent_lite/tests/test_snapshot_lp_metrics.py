@@ -248,6 +248,36 @@ def test_position_mint_is_not_a_metrics_input():
         _config(positions=[_position(position_mint="9" * 32)])
 
 
+@pytest.mark.parametrize(
+    ("native_state", "expected"),
+    [
+        ("RUNNING", "active"),
+        ("in-range", "active"),
+        ("BELOW_RANGE", "active"),
+        ("above range", "active"),
+        ("SHUTTING_DOWN", "closing"),
+        ("Terminated", "closed"),
+    ],
+)
+def test_position_state_normalizes_native_case_and_separators(native_state, expected):
+    config = _config(positions=[_position(state=native_state)])
+
+    assert config.positions[0].state == expected
+
+
+def test_unknown_position_state_and_native_last_status_remain_rejected():
+    with pytest.raises(ValidationError):
+        _config(positions=[_position(state="PAUSED")])
+    with pytest.raises(ValidationError):
+        _config(
+            last={
+                "kind": "prepare",
+                "identity": "executor-1",
+                "status": "TERMINATED",
+            }
+        )
+
+
 def test_prepared_residual_and_rejected_open_use_declared_shapes(monkeypatch, tmp_path):
     engine = _engine(tmp_path)
     _install(monkeypatch, engine)
@@ -279,6 +309,51 @@ def test_prepared_residual_and_rejected_open_use_declared_shapes(monkeypatch, tm
         "status": "rejected_before_submit",
         "transaction": None,
     }
+
+
+@pytest.mark.parametrize(
+    "kind", ["PREPARE", "preparation", "hold", "wind_down", "metrics"]
+)
+def test_last_kind_rejects_aliases_and_non_mutation_decisions(kind):
+    with pytest.raises(ValidationError):
+        _config(
+            last={
+                "kind": kind,
+                "identity": "not-a-mutation",
+                "status": "confirmed",
+            }
+        )
+
+
+def test_invalid_last_kind_writes_nothing_then_exact_correction_succeeds(
+    monkeypatch, tmp_path
+):
+    engine = _engine(tmp_path)
+    _install(monkeypatch, engine)
+
+    with pytest.raises(ValidationError):
+        _config(
+            last={
+                "kind": "preparation",
+                "identity": "preparation-executor",
+                "status": "confirmed",
+            }
+        )
+    assert not (engine.session_dir / "metrics").exists()
+
+    _, result = _run(
+        _config(
+            last={
+                "kind": "prepare",
+                "identity": "preparation-executor",
+                "status": "confirmed",
+            }
+        )
+    )
+
+    assert result["status"] == "complete"
+    assert result["artifact_write"] is True
+    assert result["last"][0] == "prepare"
 
 
 def test_metrics_reject_symbol_map_and_raw_native_mutation_status():

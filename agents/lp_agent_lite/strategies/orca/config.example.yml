@@ -19,7 +19,6 @@ max_amount_quote_per_lp_position: 5
 capital_headroom_pct: 5
 lp_open_balance_buffer_pct: 2
 target_active_lp_positions: 3
-allow_multiple_lp_positions_per_pool: true
 max_lp_deployments_per_tick: 1
 
 orca_stats_indexing_lag_seconds: 90
@@ -35,6 +34,7 @@ mcda_weights:
 minimum_range_half_width_pct: 0.5
 maximum_range_half_width_pct: 20
 
+lp_pnl_grace_period_minutes: 5
 position_take_profit_net_pnl_ratio: 0.05
 position_stop_loss_net_pnl_ratio: 0.05
 position_time_limit_minutes: 1440

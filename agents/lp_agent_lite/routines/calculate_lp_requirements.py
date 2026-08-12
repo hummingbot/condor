@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from decimal import ROUND_CEILING, ROUND_FLOOR, Decimal, localcontext
 from typing import Any
 
@@ -13,6 +14,7 @@ from pydantic import (
     Field,
     StrictBool,
     StrictInt,
+    StrictStr,
     field_validator,
     model_validator,
 )
@@ -25,6 +27,12 @@ _TRANSPORT_MAX_CHARS = 1_900
 _MIN_TICK = -443_636
 _MAX_TICK = 443_636
 _TICK_BASE = Decimal("1.0001")
+_BALANCE_DISPLAY = re.compile(r"^(?P<number>\d+\.\d{4})(?P<suffix>[KM]?)$")
+_BALANCE_MULTIPLIERS = {
+    "": Decimal(1),
+    "K": Decimal(1_000),
+    "M": Decimal(1_000_000),
+}
 _NUMERIC_FIELDS = (
     "selected_allocation_quote",
     "max_amount_quote_per_lp_position",
@@ -34,8 +42,6 @@ _NUMERIC_FIELDS = (
     "current_price",
     "lower_price",
     "upper_price",
-    "available_base",
-    "available_quote",
 )
 
 
@@ -54,8 +60,8 @@ class Config(BaseModel):
     lower_price: Decimal = Field(gt=0)
     upper_price: Decimal = Field(gt=0)
     tick_spacing: StrictInt = Field(gt=0, le=32_768)
-    available_base: Decimal = Field(ge=0)
-    available_quote: Decimal = Field(ge=0)
+    available_base_display: StrictStr
+    available_quote_display: StrictStr
     base_decimals: StrictInt = Field(ge=0, le=18)
     quote_decimals: StrictInt = Field(ge=0, le=18)
 
@@ -71,6 +77,12 @@ class Config(BaseModel):
         if not number.is_finite():
             raise ValueError("value must be finite")
         return number
+
+    @field_validator("available_base_display", "available_quote_display")
+    @classmethod
+    def wallet_display(cls, value: str) -> str:
+        _parse_balance_display(value)
+        return value
 
     @model_validator(mode="after")
     def valid_range(self) -> "Config":
@@ -90,6 +102,7 @@ Config.model_rebuild(
         "Decimal": Decimal,
         "StrictBool": StrictBool,
         "StrictInt": StrictInt,
+        "StrictStr": StrictStr,
     }
 )
 
@@ -109,6 +122,20 @@ def _text(value: Decimal) -> str:
         return "0"
     rendered = format(value, "f")
     return rendered.rstrip("0").rstrip(".") if "." in rendered else rendered
+
+
+def _parse_balance_display(display: str) -> tuple[Decimal, Decimal]:
+    """Expand one native portfolio balance and return its displayed quantum."""
+    if display == "0":
+        return Decimal(0), Decimal("0.0001")
+    match = _BALANCE_DISPLAY.fullmatch(display)
+    if match is None:
+        raise ValueError(
+            "wallet balance must be exact absent-token zero or preserve the native "
+            "four-decimal display and optional K/M suffix"
+        )
+    multiplier = _BALANCE_MULTIPLIERS[match.group("suffix")]
+    return Decimal(match.group("number")) * multiplier, Decimal("0.0001") * multiplier
 
 
 def _tick(price: Decimal, decimal_factor: Decimal, rounding: str) -> int:
@@ -215,6 +242,22 @@ async def run(config: Config, context: Any) -> str:
             open_balance_factor = Decimal(1) + (
                 config.lp_open_balance_buffer_pct / Decimal(100)
             )
+            available_base, base_observation_quantum = _parse_balance_display(
+                config.available_base_display
+            )
+            available_quote, quote_observation_quantum = _parse_balance_display(
+                config.available_quote_display
+            )
+            observed_available_base = _floor(available_base, config.base_decimals)
+            observed_available_quote = _floor(available_quote, config.quote_decimals)
+            safe_available_base = _floor(
+                max(available_base - base_observation_quantum, Decimal(0)),
+                config.base_decimals,
+            )
+            safe_available_quote = _floor(
+                max(available_quote - quote_observation_quantum, Decimal(0)),
+                config.quote_decimals,
+            )
 
             sqrt_price = config.current_price.sqrt()
             sqrt_lower = aligned_lower.sqrt()
@@ -228,25 +271,22 @@ async def run(config: Config, context: Any) -> str:
             limits = {
                 "budget": usable_budget / value_per_liquidity,
                 "inventory": (
-                    config.available_quote
-                    + config.available_base * config.current_price
+                    safe_available_quote + safe_available_base * config.current_price
                 )
                 / value_per_liquidity,
-                "quote_balance": config.available_quote
+                "quote_balance": safe_available_quote
                 / (quote_per_liquidity * open_balance_factor),
             }
             if not config.allow_base_preparation:
-                limits["base_balance"] = config.available_base / (
+                limits["base_balance"] = safe_available_base / (
                     base_per_liquidity * open_balance_factor
                 )
             limiting_side, liquidity = min(limits.items(), key=lambda item: item[1])
 
-            available_base = _floor(config.available_base, config.base_decimals)
             base_amount = _floor(liquidity * base_per_liquidity, config.base_decimals)
             quote_amount = _floor(
                 liquidity * quote_per_liquidity, config.quote_decimals
             )
-            available_quote = _floor(config.available_quote, config.quote_decimals)
             base_balance_required = _ceil(
                 base_amount * open_balance_factor, config.base_decimals
             )
@@ -254,14 +294,15 @@ async def run(config: Config, context: Any) -> str:
                 quote_amount * open_balance_factor, config.quote_decimals
             )
             base_shortfall = (
-                max(base_balance_required - available_base, Decimal(0))
+                max(base_balance_required - safe_available_base, Decimal(0))
                 if config.allow_base_preparation
                 else Decimal(0)
             )
             budget_used = base_amount * config.current_price + quote_amount
             budget_headroom = max(authorization - budget_used, Decimal(0))
-            balances_cover_open = quote_balance_required <= available_quote and (
-                config.allow_base_preparation or base_balance_required <= available_base
+            balances_cover_open = quote_balance_required <= safe_available_quote and (
+                config.allow_base_preparation
+                or base_balance_required <= safe_available_base
             )
             feasible = (
                 base_amount > 0
@@ -274,6 +315,28 @@ async def run(config: Config, context: Any) -> str:
                 if feasible and base_shortfall > 0
                 else "feasible" if feasible else "infeasible"
             )
+            reasons: list[str] = []
+            if not feasible:
+                if authorization <= 0:
+                    reasons.append("no_authorized_budget")
+                else:
+                    if safe_available_quote <= 0:
+                        reasons.append("insufficient_quote_balance")
+                    if not config.allow_base_preparation and safe_available_base <= 0:
+                        reasons.append("insufficient_base_balance")
+                    if not reasons:
+                        if base_amount <= 0:
+                            reasons.append("base_amount_below_token_precision")
+                        if quote_amount <= 0:
+                            reasons.append("quote_amount_below_token_precision")
+                        if quote_balance_required > safe_available_quote:
+                            reasons.append("insufficient_quote_balance")
+                        if (
+                            not config.allow_base_preparation
+                            and base_balance_required > safe_available_base
+                        ):
+                            reasons.append("insufficient_base_balance")
+                reasons = list(dict.fromkeys(reasons))
 
             payload = {
                 "schema": _SCHEMA,
@@ -283,6 +346,14 @@ async def run(config: Config, context: Any) -> str:
                 "usable_budget_quote": _text(usable_budget),
                 "lp_open_balance_buffer_pct": _text(config.lp_open_balance_buffer_pct),
                 "allow_base_preparation": config.allow_base_preparation,
+                "available_base_display": config.available_base_display,
+                "available_quote_display": config.available_quote_display,
+                "available_base_observed": _text(observed_available_base),
+                "available_quote_observed": _text(observed_available_quote),
+                "base_balance_observation_quantum": _text(base_observation_quantum),
+                "quote_balance_observation_quantum": _text(quote_observation_quantum),
+                "safe_available_base": _text(safe_available_base),
+                "safe_available_quote": _text(safe_available_quote),
                 "base_amount": _text(base_amount),
                 "quote_amount": _text(quote_amount),
                 "base_shortfall": _text(base_shortfall),
@@ -290,12 +361,12 @@ async def run(config: Config, context: Any) -> str:
                 "quote_balance_required": _text(quote_balance_required),
                 "budget_used_quote": _text(budget_used),
                 "budget_headroom_quote": _text(budget_headroom),
-                "limiting_side": limiting_side if feasible else "precision",
+                "limiting_side": limiting_side,
                 "lower_tick": lower_tick,
                 "upper_tick": upper_tick,
                 "aligned_lower_price": _text(aligned_lower),
                 "aligned_upper_price": _text(aligned_upper),
-                "reasons": [] if feasible else ["amount_below_token_precision"],
+                "reasons": reasons,
                 "mutation": False,
             }
             trace.record(

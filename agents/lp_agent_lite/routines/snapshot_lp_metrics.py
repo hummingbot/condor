@@ -8,7 +8,15 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from agents.lp_agent_lite.routines._reporting import DiagnosticTrace, report_result
 
@@ -16,6 +24,21 @@ CATEGORY = "Orca LP Metrics"
 _CONTROLLER = re.compile(r"^lp_agent_lite\.orca_(?P<suffix>e?[1-9]\d*)$")
 _ADDRESS = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
 _TARGET_CHARS = 1_700
+_POSITION_STATE_ALIASES = {
+    "RUNNING": "active",
+    "ACTIVE": "active",
+    "INRANGE": "active",
+    "BELOWRANGE": "active",
+    "ABOVERANGE": "active",
+    "SHUTTINGDOWN": "closing",
+    "CLOSING": "closing",
+    "TERMINATED": "closed",
+    "COMPLETED": "closed",
+    "CLOSED": "closed",
+    "UNTRACKED": "untracked",
+    "FOREIGN": "foreign",
+    "AMBIGUOUS": "ambiguous",
+}
 
 
 def _finite(value: Decimal | None) -> bool:
@@ -36,6 +59,14 @@ class PositionMetric(BaseModel):
     fees_quote: Decimal | None = None
     pnl_quote: Decimal | None = None
     pnl_ratio: Decimal | None = None
+
+    @field_validator("state", mode="before")
+    @classmethod
+    def normalize_state(cls, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        key = re.sub(r"[^A-Za-z0-9]", "", value).upper()
+        return _POSITION_STATE_ALIASES.get(key, value)
 
     @model_validator(mode="after")
     def finite_numbers(self):

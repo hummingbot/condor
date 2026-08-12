@@ -1,282 +1,344 @@
 ---
 name: orca_lp_operations
-description: Operate one exact Orca LP lifecycle through native executors, failed-close Orca Stats reconciliation, quote restoration, and progress-gated retry without a local controller.
-when_to_use: Read before preparation, LP open or close, residual cleanup, graceful wind-down, or reconciliation of a failed LP operation.
+description: Exact routine and native-executor guide for the Orca LP lifecycle.
+when_to_use: Read for a failed or uncertain close, close quarantine, or a genuinely exceptional LP recovery question. Ordinary PREPARE, OPEN, close, cleanup, and graceful wind-down use Strategy fast paths without reading this skill.
 source: agent:lp_agent_lite
 ---
 
 # Orca LP Operations
 
-This is a reactive playbook, not a state machine. Begin every use from the exact
-current controller, frozen config, and fresh executor and wallet evidence. Use
-Orca Stats only after a failed or uncertain close: compare exact `summary` with
-exact-filtered `history` for the already-known position after the configured
-indexing delay. Do not use it to discover or reconcile an LP open. An exact
-coherent current-controller executor is sufficient for normal supervision.
-Earlier intent narrows what to reconcile but never replaces current evidence.
+This is an operational reference, not a state machine. The Strategy owns phase
+order, admission, and lifecycle decisions. Begin from the exact current
+controller, frozen config, committed pool when present, and fresh affected
+executor and wallet evidence.
 
-Each Lite routine attempts a Condor diagnostic report only after its result is
-final. Read the compact JSON result itself for operational truth. Its
-`report_id`/`report_error` fields are for human review only; a missing report or
-report failure never changes an LP, swap, cleanup, registration, retry, or stop
-decision and never justifies repeating an operation.
+Routine JSON and native executor detail are operational truth. Condor diagnostic
+`report_id` and `report_error` fields are human-review metadata only; a reporting
+failure never changes or repeats an operation.
 
-## Mode And Ownership Gate
+## Routine Invocation Guides
 
-- Dry run is operationally read-only; propose the operation without
-  registration, executor, journal, metrics-file, wallet, or Agent mutation. A
-  best-effort Condor diagnostic report is allowed because it has no trading
-  authority and is not Agent state.
-- Run once never starts preparation or a new LP. It may perform one exactly
-  attributable risk-reducing close or cleanup only when same-tick reconciliation
-  is possible; unresolved restoration becomes explicit manual follow-up.
-- Loop may progress one bounded lifecycle decision per tick under the exact
-  `lp_agent_lite.orca_N` controller.
+Call every routine only through
+`manage_routines(action="run", name=<exact name>, agent="lp_agent_lite",
+config={...})`. The following tables are exact Config APIs. Never rename a key,
+change an enum's case, or substitute a synonym. Optional routine-owned controls
+are normally omitted unless current Strategy config explicitly supplies them.
+Parse the inner structured result; outer MCP completion is not the routine
+outcome. Only an outer `Invalid config:` rejection permits one corrected Config
+call because no routine instance or effect started.
 
-Mutate only an exact current-controller executor. Older, foreign, and untracked
-positions are observation-only; they do not consume the current-session target
-or executor risk count, but their inventory reduces available wallet balances.
-Shared-wallet balances are aggregate feasibility facts, never per-position
-ownership.
+### `calculate_lp_requirements`
 
-The configured deployment quota counts LP create calls only. Registration,
-preparation BUY, LP create, cleanup SELL, and Agent stop remain separate and are
-not combined in one tick. In loop mode only, one `CLOSE` decision may stop a
-bounded set of independently triggered exact current-session LPs sequentially,
-up to `risk_limits.max_open_executors`. Journal the exact target set once,
-refresh after each stop, and end the batch on uncertainty. Never run stops
-concurrently or combine that close batch with another transition category.
-`WIND_DOWN` is a posture, not a tool action.
+Use only after selecting one exact pool/range and refreshing native pool and
+wallet facts. It is pure calculation and performs no external mutation.
 
-## Token Orientation And Order Semantics
+#### Top-Level Config Parameters
 
-For every pool handled by this Strategy, bind the following from the current
-config before constructing any native request:
+<!-- routine-config:calculate_lp_requirements -->
+| Config key | Presence | Exact source and use |
+|---|---|---|
+| `selected_allocation_quote` | required | LLM-selected quote allocation within current limits. |
+| `max_amount_quote_per_lp_position` | required | Current per-position hard cap. |
+| `remaining_session_quote` | required | Current uncommitted session quote capacity. |
+| `capital_headroom_pct` | required | Current configured aggregate headroom. |
+| `lp_open_balance_buffer_pct` | required | Current configured per-leg open buffer. |
+| `allow_base_preparation` | required | Exact boolean: `true` before preparation; `false` after preparation and for corrected open retry. |
+| `current_price` | required | Fresh native QUOTE-per-BASE pool price. |
+| `lower_price` | required | Selected lower range price, below current price. |
+| `upper_price` | required | Selected upper range price, above current price. |
+| `tick_spacing` | required | Fresh native pool tick spacing. |
+| `available_base_display` | required | Exact `"0"` when BASE is absent from the native wallet response; otherwise preserve the native four-decimal string and optional uppercase `K` or `M`. |
+| `available_quote_display` | required | Exact `"0"` when QUOTE is absent from the native wallet response; otherwise preserve the native four-decimal string and optional uppercase `K` or `M`. |
+| `base_decimals` | required | Exact selected BASE mint decimals. |
+| `quote_decimals` | required | Exact configured QUOTE mint decimals. |
+<!-- /routine-config -->
 
-- `QUOTE` is the exact configured quote symbol, mint, and decimals; `BASE` is the
-  pool's other token;
-- `trading_pair` is exactly `BASE-<config.quote_token_symbol>`;
-- price is QUOTE per BASE;
-- `order_executor.amount` is always BASE-token units, for both BUY and SELL;
-- preparation is `side=1` (`BUY` BASE using configured QUOTE);
-- cleanup is `side=2` (`SELL` BASE for configured QUOTE);
-- an order executor's `connector_name` is `<config.network>`, not the provider
-  identifier; its swap provider is `<config.swap_provider>`;
-- every executor's top-level account is `<config.account_name>`.
+Require `lower_price < current_price < upper_price` and
+`lp_open_balance_buffer_pct <= capital_headroom_pct`. Consume the returned
+aligned prices/ticks, floored amounts, buffered requirements, safe wallet bounds,
+and `base_shortfall`; never reconstruct them in prose.
 
-Reject a reversed/uncertain pair or amount unit. Read the current executor
-schema before create and use only fields it accepts. Preparation BUYs and cleanup
-SELLs use a native current-controller `order_executor` exclusively. Trust the
-configured Gateway/Jupiter execution path's internal slippage protection. Do not
-invent or pass a `slippage` field, do not request a separate swap quote, and
-never call `manage_gateway_swaps` for any action.
+### `snapshot_lp_metrics`
 
-## Preparation
+Call once before the decision using only already-observed facts. It provides the
+exact current-session clock and may write only the loop tick's metrics artifact;
+experiments return a preview.
 
-1. Require one selected and natively verified Orca pool, exact token registry
-   truth, available current-session executor risk capacity, and current
-   capital/reserve evidence.
-2. Immediately refresh the exact selected Orca pool through native
-   `explore_dex_pools(action="get_pool_info")`; require its exact orientation,
-   finite positive current price, and tick spacing. Run
-   `calculate_lp_requirements` for the selected pool/range with those mechanics,
-   configured `lp_open_balance_buffer_pct`, and
-   `allow_base_preparation=true`. Use its floored amounts and buffered exact
-   base shortfall; do not reconstruct them from prose or substitute
-   scanner/GeckoTerminal prices.
-3. If a material shortfall exists, record one loop intent containing the exact
-   pool, BASE mint, pair, requested BASE shortfall, and configured receive
-   threshold, then submit one native current-controller market
-   `order_executor`. Pass exact `controller_id` and
-   `account_name=<config.account_name>` at tool top level. Its config uses
-   `type="order_executor"`, `connector_name=<config.network>`,
-   `trading_pair="BASE-<config.quote_token_symbol>"`, `side=1`,
-   `amount=<base_shortfall in BASE units>`, and
-   `execution_strategy="MARKET"`, subject to the live schema.
-4. Retain its exact executor ID and fetch that exact executor. If it is
-   nonterminal, submitted, or uncertain, end the tick and reconcile later. If
-   confirmed terminal, require positive `executed_amount_base`. For the
-   checked-out Gateway connector this is the realized received BASE derived from
-   settled token changes. Refresh the wallet for spendable LP inventory; do not
-   require the realized amount to equal the request.
-5. End the tick. On a later tick, refresh wallet balances, pool price, and range
-   composition and run the calculator again with
-   `allow_base_preparation=false`. Fit the LP to the actual balances while
-   preserving capital headroom and the configured per-token open buffer. A small
-   receive difference is normal: downsize to a meaningful feasible LP instead
-   of declaring preparation failed or submitting a dust top-up swap. Never swap
-   and open in one tick.
+#### Top-Level Config Parameters
 
-Compare the journaled preparation order's positive requested BASE amount with
-the confirmed executor's positive realized `executed_amount_base`:
+<!-- routine-config:snapshot_lp_metrics -->
+| Config key | Presence | Exact source and use |
+|---|---|---|
+| `controller_id` | required | Exact injected current Agent/controller ID. |
+| `tick` | required | Exact injected positive tick integer. |
+| `session_pnl_quote` | required | Fresh current-session net quote PnL. |
+| `quote_balance` | required | Fresh configured QUOTE wallet balance. |
+| `sol_balance` | required | Fresh SOL wallet balance used for reserve supervision. |
+| `positions` | optional | De-duplicated list using the exact nested schema below. |
+| `residuals` | optional | De-duplicated list using the exact nested schema below. |
+| `last` | optional | Latest exact current-session lifecycle mutation using the exact nested schema below. |
+<!-- /routine-config -->
+
+#### Nested `positions[]` Item Parameters
+
+<!-- routine-config:snapshot_lp_metrics.positions -->
+| Config key | Presence | Exact source and use |
+|---|---|---|
+| `executor_id` | optional | Full executor ID; required by the routine for active, closing, or closed tracked states. |
+| `position_address` | required | Exact on-chain position identity; never substitute position mint. |
+| `pool_address` | required | Exact Whirlpool address. |
+| `state` | required | Canonical output is `active`, `closing`, `closed`, `untracked`, `foreign`, or `ambiguous`; native case/separator aliases described below are accepted and normalized. |
+| `age_minutes` | optional | Fresh nonnegative age. |
+| `base_amount` | optional | Fresh nonnegative native position BASE amount. |
+| `quote_amount` | optional | Fresh nonnegative native position QUOTE amount. |
+| `fees_quote` | optional | Fresh finite fees in QUOTE. |
+| `pnl_quote` | optional | Fresh finite PnL in QUOTE. |
+| `pnl_ratio` | optional | Fresh finite PnL ratio. |
+<!-- /routine-config -->
+
+#### Nested `residuals[]` Item Parameters
+
+<!-- routine-config:snapshot_lp_metrics.residuals -->
+| Config key | Presence | Exact source and use |
+|---|---|---|
+| `mint` | required | Exact Solana mint address, never a symbol. |
+| `amount` | required | Fresh nonnegative amount. |
+| `value_quote` | optional | Fresh nonnegative estimated QUOTE value. |
+| `status` | required | Exactly `prepared`, `clean`, `cleanup`, or `unattributed`. |
+<!-- /routine-config -->
+
+#### Nested `last` Parameters
+
+<!-- routine-config:snapshot_lp_metrics.last -->
+| Config key | Presence | Exact source and use |
+|---|---|---|
+| `kind` | required | Exactly `register`, `prepare`, `open`, `close`, `cleanup`, or `stop`. |
+| `identity` | required | Full exact executor, token, or Agent identity for that mutation. |
+| `status` | required | Exactly `rejected_before_submit`, `submitted`, `confirmed`, `uncertain`, `ambiguous`, or `unavailable`. |
+| `transaction` | optional | Exact transaction identity when known. |
+<!-- /routine-config -->
+
+Position-state normalization is case-insensitive and ignores spaces, hyphens,
+and underscores: `RUNNING`, `ACTIVE`, `IN_RANGE`, `BELOW_RANGE`, and
+`ABOVE_RANGE` become `active`; `SHUTTING_DOWN` and `CLOSING` become `closing`;
+`TERMINATED`, `COMPLETED`, and `CLOSED` become `closed`. Unknown states reject.
+Use
+`position_address`, never `position_mint`. Residual `mint` is an address, not a
+symbol. Optional `last` preserves the latest lifecycle mutation; a preparation
+Order Executor is `kind="prepare"`, never `"preparation"`. `HOLD`, `WIND_DOWN`,
+reads, metrics, and journal writes are not valid `last.kind` values. Omit `last`
+when no exact mutation is known. `last.status` is a classified mutation outcome,
+not a raw executor lifecycle status: do not pass `RUNNING`, `SHUTTING_DOWN`, or
+`TERMINATED`; omit `last` until the outcome can be classified. Read compact
+tuples through their returned column arrays.
+
+Require `status="complete"` and `artifact_write=true` in loop, or
+`status="preview"` and `artifact_write=false` in experiments. Metrics failure
+blocks only its dependent clock or metric, never an independently proven native
+risk-reducing exit.
+
+### `inspect_orca_positions`
+
+Use only after a failed or uncertain close for one already-known exact position.
+It has no action selector and never discovers or reconciles an LP open.
+
+#### Top-Level Config Parameters
+
+<!-- routine-config:inspect_orca_positions -->
+| Config key | Presence | Exact source and use |
+|---|---|---|
+| `wallet_address` | required | Exact configured wallet address. |
+| `position_address` | required | Exact already-known on-chain position address. |
+| `expected_pool_address` | required | Exact expected Whirlpool address. |
+| `mutation_started_at` | required | Close mutation-start integer Unix epoch in seconds. |
+| `indexing_lag_seconds` | optional | Pass current configured Orca indexing lag. |
+| `timestamp_tolerance_seconds` | optional | Routine-owned event tolerance; normally omit. |
+| `history_limit` | optional | Routine-owned bounded history size; normally omit. |
+| `timeout_seconds` | optional | Routine-owned request timeout; normally omit. |
+<!-- /routine-config -->
+
+Consume `close_outcome` exactly: `closed` forbids another close;
+`still_active` permits one corrected close no earlier than a later tick;
+`pending_index`, `uncertain`, or `unavailable` requires HOLD. One endpoint,
+missing coverage, or disagreement never proves closure.
+
+### `register_gateway_token`
+
+Use only for a committed selected pool's non-SOL, non-quote BASE token. Normal
+live registration is an unconditional add followed by one exact registry
+read-back; it does not check presence first. Registration is a separate loop
+transition. Pass `preview=false` on that normal live call.
+
+#### Top-Level Config Parameters
+
+<!-- routine-config:register_gateway_token -->
+| Config key | Presence | Exact source and use |
+|---|---|---|
+| `network` | optional | Pass exact current `solana-mainnet-beta`; no other literal is accepted. |
+| `mint` | required | Exact selected BASE Solana mint address. |
+| `symbol` | required | Exact selected BASE symbol preserved from the scanner tuple. |
+| `decimals` | required | Exact selected BASE decimals preserved from the scanner tuple. |
+| `preview` | optional | Pass `false` for normal live add-and-verify; use `true` only to reconcile an earlier uncertain add. |
+| `timeout_seconds` | optional | Routine-owned request timeout; normally omit. |
+<!-- /routine-config -->
+
+Do not call it when the exact BASE mint is wrapped SOL or the configured quote
+mint. Do not perform a registry-presence check before a normal live call;
+re-registering an existing exact token is allowed. Continue only on inner
+`status="confirmed"` with exact mint and decimals. A case-only symbol alias may
+confirm; use returned `canonical_symbol` thereafter. The confirmed add plus
+read-back is final registration reconciliation: end the tick and go directly to
+committed sizing next tick without previewing or repeating registration. Any
+other metadata conflict is ambiguous, and an uncertain live add is never blindly
+repeated.
+
+## Shared Operation Rules
+
+- Dry run is read-only. Run once never starts preparation or a new LP. Loop uses
+  the exact `lp_agent_lite.orca_N` controller and one bounded lifecycle decision.
+- The controller is top-level mutation authority and a server-side session
+  filter. The full executor ID is lifecycle identity. On later ticks, each full
+  `id` returned by the exact current-controller filtered search is a
+  current-session executor identity; fetch exact detail and require matching
+  detail `id` before lifecycle action. Never require the earlier create response.
+- Ignore embedded raw/config `controller_id`, including `main`. It is
+  non-authoritative metadata. Eight-character prefixes are display-only.
+- Older, foreign, and untracked positions are observation-only. Shared wallet
+  balances affect feasibility but do not establish position ownership.
+- Fresh selection commits and ends without mutation. A committed continuation
+  does not rescan, compare alternatives, reread selection guidance, or fetch
+  unrelated pools. Never fold `PREPARE` into `OPEN`; reconcile a mutation and end
+  its tick.
+- Use one external mutation phase per tick. The sole exception is a bounded,
+  sequential same-phase close batch of independently triggered current-session
+  LPs; stop on uncertainty.
+
+## Native Executor Request Guide
+
+For every request, `QUOTE` is the configured quote tuple, `BASE` is the pool's
+other token, pair is `<canonical BASE symbol>-<config.quote_token_symbol>`, and
+price is QUOTE per BASE. Read the live executor schema before cleanup create.
+Ordinary committed `PREPARE` and LP `OPEN` use the Strategy's exact requests and
+let the native create action perform its own live schema validation without a
+separate schema-only call.
+
+### Preparation and cleanup Order Executor
+
+- top level: exact `controller_id`, `account_name=<config.account_name>`, and
+  `executor_type="order_executor"`;
+- config: `type="order_executor"`, `connector_name=<config.network>`, canonical
+  pair, `execution_strategy="MARKET"`, and `amount` in BASE units;
+- preparation: `side=1` to BUY BASE with QUOTE;
+- cleanup: `side=2` to SELL BASE for QUOTE.
+
+This is the exclusive swap path. Trust Gateway/Jupiter's internal slippage
+protection; do not request a quote, pass a slippage field, or call
+`manage_gateway_swaps`. On the checked-out path, `executed_amount_base` repeats
+the requested BASE amount and is not received-inventory evidence.
+
+### LP Executor
+
+- top level: exact `controller_id`, `account_name=<config.account_name>`, and
+  `executor_type="lp_executor"`;
+- config: `type="lp_executor"`, `connector_name=<config.network>`,
+  `lp_provider=<config.lp_provider>`, `swap_provider=<config.swap_provider>`,
+  canonical pair, exact pool and aligned bounds, `side=3`, calculator-returned
+  BASE/QUOTE amounts, and `keep_position=false`.
+
+Retain the full returned ID. In loop mode, a successful LP create receipt ends
+the tick; use the next tick's canonical controller search and wallet refresh,
+fetching exact detail only if its broad row is insufficient and requiring detail
+`id` equality when fetched. One create consumes the configured per-tick LP
+deployment quota even when schema or Gateway rejects it.
+
+### LP stop
+
+Call `manage_executors(action="stop", controller_id=<exact current>,
+executor_id=<one full executor ID>, keep_position=false)`. Never concatenate
+IDs. Refresh that executor and wallet after each stop.
+
+## Lifecycle Safety Notes
+
+### Preparation
+
+Use `calculate_lp_requirements` with `allow_base_preparation=true`. Journal the
+committed pool, exact pre-BASE wallet display, requested shortfall, and receive
+threshold before one preparation BUY. Do not load this skill, request a separate
+schema, repeat a pool or wallet read, or reconcile after create during an
+ordinary committed `PREPARE`. Retain the full create-returned executor ID and
+end the tick; the successful receipt is `submitted`, not received inventory or
+terminal success.
+
+On the next tick, use the canonical controller search and wallet read to
+reconcile the full-ID preparation, then size the same committed pool with
+`allow_base_preparation=false`. Small receive differences downsize the LP; they
+do not trigger failure or a dust top-up. Only a conservatively bounded wallet
+difference strictly above `preparation_receive_difference_blacklist_pct`, with
+exact exclusive attribution, blacklists the pool and BASE mint. Equality,
+ambiguity, or insufficient precision never blacklists.
+
+### Open and retry
+
+Immediately before LP create, require a fresh feasible calculation, capacity,
+and the canonical current-tick wallet baseline in the action intent. When no
+same-tick wallet mutation occurred, reuse that wallet through submit and do not
+make a second precautionary wallet call. Do not load this skill, make a separate
+schema-only call, repeat predecessor detail, or make an intermediate wallet
+refresh during an ordinary committed `OPEN`. Do not call
+`inspect_orca_positions` for an LP open.
+
+Only the Strategy's full `rejected_before_submit` proof permits one corrected
+later-tick OPEN. Any position identity, nonzero native actual amount, changed
+exact-mint balance, missing baseline, or contradictory evidence forbids retry.
+Metrics and Orca Stats never repair failed-open proof, and an unchanged request
+is never repeated.
+
+### Close quarantine
+
+Use `inspect_orca_positions` only when a close failed or remains uncertain and
+the exact position is known. `still_active` permits at most one corrected stop on
+a later tick. Another failure or `404` quarantines only that executor, position,
+pool, and attributable capital for manual recovery; healthy siblings and other
+available capacity continue.
+
+Fresh proof that the on-chain position is closed plus a wallet able to pass
+normal new-LP sizing releases close quarantine. Remaining inventory follows the
+ordinary cleanup rule and cannot keep close quarantine active.
+
+### Quote restoration
+
+After a terminal current-session LP, refresh its exact BASE-mint balance. For
+non-SOL BASE above `residual_base_dust_quote`, sell the entire refreshed balance
+to configured QUOTE through one cleanup Order Executor. This may include
+pre-existing same-mint wallet inventory but never adopts a foreign executor.
+Retain the full create-returned cleanup executor ID and end the tick without a
+post-create search or wallet refresh. The receipt is `submitted`; reconcile the
+executor and refreshed wallet through the next tick's canonical reads.
+
+For SOL BASE, normally retain SOL. Only after a terminal SOL-base LP close and
+only while QUOTE is below `total_amount_quote`, sell at most:
 
 ```text
-receive_difference_pct =
-  abs(executed_amount_base - requested_base_amount) / requested_base_amount * 100
+protected_sol = min_sol_reserve * (1 + capital_headroom_pct / 100)
+excess_sol = max(fresh_sol_balance - protected_sol, 0)
+quote_shortfall = max(total_amount_quote - fresh_quote_balance, 0)
+sol_to_sell = min(excess_sol, quote_shortfall / fresh_sol_price_quote)
 ```
 
-At or below `preparation_receive_difference_blacklist_pct`, use the realized
-amount and continue with fresh sizing. Strictly above it, require exact matching
-controller, executor, pool, pair, BASE mint, the same positive requested amount,
-and non-contradictory wallet evidence; then `HOLD`, exclude that pool and BASE
-mint immediately, and write one
-`category="execution"` learning exactly as
-`BLACKLIST_POOL=<pool> BLACKLIST_TOKEN=<base_mint> DIFF_PCT=<value>
-LIMIT_PCT=<configured_limit>`. Equality never blacklists. Missing, zero,
-nonterminal, uncertain, ambiguous, or contradictory evidence never blacklists;
-reconcile instead.
+Require a finite positive QUOTE-per-SOL price and floor to accepted precision.
+If QUOTE is at target or protected excess is zero, retain SOL and mark the chain
+clean.
 
-If preparation is confirmed but LP creation becomes authoritatively impossible,
-restore only the exact attributable prepared base amount to configured QUOTE.
-Never infer restoration amount from total wallet balance.
+### Wind-down and stop
 
-## LP Open
+During `lp_pnl_grace_period_minutes` after an LP's authoritative creation time,
+its position PnL and whole-session aggregate PnL are provisional and cannot
+trigger a PnL close or wind-down. Zero disables this grace. Non-PnL exits and
+otherwise eligible deployment continue. After grace, require fresh PnL evidence;
+never reuse a provisional breach.
 
-1. Immediately before submit, require the latest calculator result used
-   `allow_base_preparation=false` after any confirmed preparation and that its
-   `base_balance_required` and `quote_balance_required` fit the refreshed wallet.
-   Refresh native wallet and executor facts; require the current-session
-   open-executor count below `risk_limits.max_open_executors` and no unresolved
-   open.
-2. Read the live `lp_executor` schema. If schema retrieval or validation is
-   unavailable, `HOLD`; never rely on skipped validation.
-3. After validation and immediately before submit, record loop intent with the
-   exact pool/range, calculated amounts, controller, and reason. Refresh the
-   native wallet again after validation and persist that baseline in the action
-   text as exact `base_mint`, `pre_base_balance`, `quote_mint`, and
-   `pre_quote_balance` key/value fields. Use plain decimal spendable balances at
-   their current native token precision; planned LP deposit amounts are not
-   baseline substitutes.
-4. Submit at most one create with the exact current controller and
-   `account_name=<config.account_name>` at tool top level, plus
-   `executor_type="lp_executor"`. Inside `executor_config`, use
-   `type="lp_executor"`, `connector_name=<config.network>`,
-   `lp_provider=<config.lp_provider>`,
-   `swap_provider=<config.swap_provider>`,
-   `trading_pair="BASE-<config.quote_token_symbol>"`, exact pool, aligned
-   `lower_price`/`upper_price`, double-sided `side=3`, calculator
-   `base_amount`/`quote_amount`, and `keep_position=false`. Do not substitute a
-   DEX/provider name for `connector_name` or put top-level authority only inside
-   config.
-5. Record returned executor, transaction, and position identities immediately.
-   Refresh executor and wallet evidence. If the exact current-controller
-   executor coherently reports the position and lifecycle, supervise it directly.
-   Do not call `inspect_orca_positions` for an LP open.
-
-One create call consumes the per-tick deployment quota even when rejected by
-schema or Gateway simulation. Do not submit a second pool that tick.
-
-## Progress-Gated Retry
-
-Classify the result:
-
-- `rejected_before_submit`: no mutation was submitted;
-- `submitted` or `confirmed`: an external identity/effect exists;
-- `uncertain`: an effect may exist but is not exact;
-- `ambiguous`: several or contradictory matches exist;
-- `unavailable`: required truth is incomplete or unreachable.
-
-For LP open only, reconcile once on the first later tick with one exact
-executor-detail read and one fresh wallet read. A result is
-`rejected_before_submit` when the exact current-controller executor is terminal
-`FAILED`, has no position address, reports zero native actual LP base/quote
-amounts at token precision, and fresh balances for journaled `base_mint` and
-`quote_mint` equal `pre_base_balance` and `pre_quote_balance`. Normalize exact
-decimals to each mint's freshly verified native precision. Do not treat
-requested/configured amounts or initial-amount fallback fields as actual LP
-amounts.
-
-When those gates pass, continue in that same reconciliation tick: refresh all
-remaining admission facts, rerun sizing with `allow_base_preparation=false`,
-and submit one corrected OPEN after its sole action intent is written. Do not
-spend a separate `HOLD` tick merely recording the classification. That intent
-names the failed executor, states `rejected_before_submit`, records the corrected
-range/amounts, and persists a new four-field wallet baseline. At least one of
-the corrected `base_amount` or `quote_amount` must be lower than the failed
-request at token precision, both buffered requirements must fit, and no
-arbitrary percentage reduction is required.
-
-Any position address, nonzero native actual LP amount, or exact-mint balance
-change is `uncertain` and forbids retry. Missing any of the four journal fields
-or an actual-amount observation is `unavailable` and remains `HOLD`; metrics are
-never a baseline substitute. Do not call Orca Stats, require transaction
-evidence, search the same logs again, or promise exact-position recovery without
-an address. The failed create consumed its original tick's quota, so the one
-corrected create occurs only on this or another later tick and consumes that
-tick's quota. Never repeat an identical request.
-
-## Per-Position Close
-
-1. Build a bounded target set containing only exact current-controller LP
-   executors with a verified configured take-profit, stop-loss, time-limit, or
-   explicit risk-reducing reason. In run once the set may contain only one target.
-2. Record one loop intent listing every exact executor and position in the set.
-3. Submit `manage_executors(action="stop", keep_position=false)` sequentially for
-   each exact controller/executor pair. Refresh the affected exact executor and
-   wallet after each result; stop the batch immediately if any result is not a
-   proven non-ambiguous submission/confirmation. Each native stop may internally
-   perform remove-liquidity and its close-out swap.
-4. If a close is terminal `FAILED` or its effect remains uncertain, run
-   close-only `inspect_orca_positions` for that exact known position. Pass the
-   required exact wallet, position, pool, mutation-start Unix timestamp, and
-   configured lag; there is no action selector. Consume `close_outcome`
-   deterministically: `closed` forbids another stop; `still_active` permits a
-   corrected close no earlier than a later tick; and `pending_index`,
-   `uncertain`, or `unavailable` remains `HOLD`. Never repeat a possibly
-   submitted close without this classification.
-5. Indexed close consensus proves the indexed lifecycle effect but not token
-   delivery or quote restoration. Refresh wallet balances and native results.
-
-If Orca Stats shows an active position without an exact native executor that can
-own and close it, do not adopt or hide a direct Gateway mutation inside a
-routine. Count it, quarantine conflicting deployment, and request manual
-exact-position recovery through Gateway or Orca UI.
-
-## Quote Restoration
-
-Native LP close with `keep_position=false` closes the on-chain position and
-then attempts to neutralize the LP round trip's net BASE difference relative to
-the amounts deposited. It does **not** sell the original prepared BASE deposit
-and does not by itself make the session all-QUOTE. Verify executor `COMPLETE`,
-wallet balances, and attribution rather than assuming quote restoration.
-
-- While close-out is pending, reconcile read-only and do not race it with a
-  cleanup order.
-- If no exactly attributable base value exceeds
-  `residual_base_dust_quote`, mark only that action chain quote-clean.
-- If one material amount is attributed by exact executor or finalized
-  transaction evidence, record intent and submit one native current-controller
-  market `order_executor` SELL. Pass exact top-level controller and
-  `account_name=<config.account_name>`. Its config uses
-  `connector_name=<config.network>`,
-  `trading_pair="BASE-<config.quote_token_symbol>"`, `side=2`,
-  `amount=<attributable BASE units>`, and `execution_strategy="MARKET"`, subject
-  to the live schema. Reconcile its exact identity and actual wallet result.
-- If attribution or cleanup submission is uncertain, quarantine that chain.
-
-An attributable amount must come from a finalized current-session transaction's
-token changes or a native executor field whose documented meaning is actual,
-not requested. A serialized exact-mint before/after balance change is usable only
-when it is tied to that executor/transaction and the shared-wallet exclusivity
-check proves no other balance-changing controller was live. Cap any SELL by the
-fresh available BASE balance. If only an aggregate balance, requested amount, or
-unproven delta exists, classify it `unattributed` and do not sell it.
-
-Never sell the wallet's whole balance, a broad delta, pre-existing holdings,
-another executor's inventory, an old session's assets, an unattributed token, or
-the protected SOL reserve. No new preparation/open and no clean stop are allowed
-while any current-session residual chain remains material or unresolved.
-
-## Wind-Down And Stop
-
-Once a whole-session TP, SL, time limit, or graceful-end request is proven,
-disable registration, preparation, and open. Close exact current-session LPs,
-using the bounded sequential close exception where safe, reconcile each
-independently, restore every attributable base residual in later separately
-admitted cleanup work, and verify all affected facts. Only after every LP is
-terminal and every inventory chain is quote-clean may the Strategy call
-exact-current `stop_agent`.
-
-An external kill or manual hard stop bypasses this path and therefore requires
-manual inspection and cleanup. A later session may observe the remains for
-balance and attribution safety but never adopt, close, or clean them.
+Wind-down forbids new registration, preparation, and open. Close exact
+current-session LPs, reconcile each, and clean each BASE in later admitted
+cleanup work. Call exact-current `stop_agent` only after every LP is terminal,
+all mutations are reconciled, and every affected inventory chain is quote-clean.
+An external kill requires manual cleanup; a later session never adopts it.

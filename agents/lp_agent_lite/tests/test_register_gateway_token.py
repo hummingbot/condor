@@ -38,13 +38,21 @@ class Gateway:
             raise TimeoutError("response lost")
         if self.add_error:
             raise self.add_error
-        self.rows.append(
-            {
-                "address": kwargs["address"],
-                "symbol": kwargs["symbol"],
-                "decimals": kwargs["decimals"],
-            }
-        )
+        replacement = {
+            "address": kwargs["address"],
+            "symbol": kwargs["symbol"],
+            "decimals": kwargs["decimals"],
+        }
+        matching = [
+            index
+            for index, row in enumerate(self.rows)
+            if row.get("address") == kwargs["address"]
+            or str(row.get("symbol", "")).casefold() == kwargs["symbol"].casefold()
+        ]
+        if matching:
+            self.rows[matching[0]] = replacement
+        else:
+            self.rows.append(replacement)
         return {"ok": True}
 
 
@@ -74,6 +82,27 @@ def test_exact_existing_tuple_is_confirmed_without_mutation(monkeypatch):
     assert result["status"] == "confirmed"
     assert result["mutation"] is False
     assert result["present"] is True
+    assert result["canonical_symbol"] == "TOK"
+    assert result["symbol_match"] == "exact"
+    assert result["registered_token"] == [MINT, "TOK", 9]
+    assert gateway.reads == 1
+    assert gateway.adds == []
+
+
+def test_case_only_symbol_alias_uses_gateway_canonical_symbol(monkeypatch):
+    gateway = Gateway([{"address": MINT, "symbol": "CBBTC", "decimals": 8}])
+    result = _run(
+        monkeypatch,
+        gateway,
+        _config(symbol="cbBTC", decimals=8),
+    )
+
+    assert result["status"] == "confirmed"
+    assert result["mutation"] is False
+    assert result["present"] is True
+    assert result["canonical_symbol"] == "CBBTC"
+    assert result["symbol_match"] == "case_alias"
+    assert result["registered_token"] == [MINT, "CBBTC", 8]
     assert gateway.reads == 1
     assert gateway.adds == []
 
@@ -108,7 +137,9 @@ def test_live_absent_token_is_added_once_then_verified(monkeypatch):
 
     assert result["status"] == "confirmed"
     assert result["mutation"] is True
-    assert gateway.reads == 2
+    assert result["canonical_symbol"] == "TOK"
+    assert result["symbol_match"] == "exact"
+    assert gateway.reads == 1
     assert gateway.adds == [
         {
             "network_id": "solana-mainnet-beta",
@@ -128,7 +159,7 @@ def test_lost_add_response_is_reconciled_without_retry(monkeypatch):
     assert result["mutation"] is True
     assert "warning" in result
     assert len(gateway.adds) == 1
-    assert gateway.reads == 2
+    assert gateway.reads == 1
 
 
 def test_add_error_with_absent_post_truth_is_uncertain(monkeypatch):
@@ -139,27 +170,28 @@ def test_add_error_with_absent_post_truth_is_uncertain(monkeypatch):
     assert result["mutation"] is True
     assert result["present"] is False
     assert len(gateway.adds) == 1
-    assert gateway.reads == 2
+    assert gateway.reads == 1
 
 
 def test_post_add_read_failure_is_uncertain_and_never_retries(monkeypatch):
-    gateway = Gateway(read_errors=[None, TimeoutError("registry unavailable")])
+    gateway = Gateway(read_errors=[TimeoutError("registry unavailable")])
     result = _run(monkeypatch, gateway, _config(preview=False))
 
     assert result["status"] == "uncertain"
     assert result["mutation"] is True
     assert result["present"] is None
     assert len(gateway.adds) == 1
-    assert gateway.reads == 2
+    assert gateway.reads == 1
 
 
-def test_initial_registry_failure_does_not_mutate(monkeypatch):
+def test_live_registration_has_no_preflight_registry_read(monkeypatch):
     gateway = Gateway(read_errors=[TimeoutError("secret=" + "x" * 500)])
     result = _run(monkeypatch, gateway, _config(preview=False))
 
-    assert result["status"] == "unavailable"
-    assert result["mutation"] is False
-    assert gateway.adds == []
+    assert result["status"] == "uncertain"
+    assert result["mutation"] is True
+    assert len(gateway.adds) == 1
+    assert gateway.reads == 1
     assert len(result["reason"]) <= 180
 
 
@@ -169,5 +201,17 @@ def test_duplicate_registry_identity_is_ambiguous(monkeypatch):
     result = _run(monkeypatch, gateway, _config(preview=False))
 
     assert result["status"] == "ambiguous"
-    assert result["mutation"] is False
-    assert gateway.adds == []
+    assert result["mutation"] is True
+    assert len(gateway.adds) == 1
+    assert gateway.reads == 1
+
+
+def test_live_existing_tuple_is_still_added_then_verified(monkeypatch):
+    gateway = Gateway([{"address": MINT, "symbol": "TOK", "decimals": 9}])
+    result = _run(monkeypatch, gateway, _config(preview=False))
+
+    assert result["status"] == "confirmed"
+    assert result["mutation"] is True
+    assert result["registered_token"] == [MINT, "TOK", 9]
+    assert len(gateway.adds) == 1
+    assert gateway.reads == 1

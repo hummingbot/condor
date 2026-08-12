@@ -12,10 +12,60 @@ Use this playbook after `scan_orca_pools` returns current compact evidence. It
 guides judgment; it does not repair missing identity, incomplete required facts,
 a technical rejection, or a registry conflict.
 
+Use it only while no committed deployment chain exists. Once selection commits
+an exact pool, pair, BASE symbol, BASE mint, BASE decimals, allocation, range
+thesis, and next phase, later registration, preparation, and open ticks resume
+that pool without another scan, alternative comparison, or reread of this skill.
+
 Use the returned scan schema and coverage for selection. Its best-effort Condor
 report is a human diagnostic copy of sanitized input, output, and trace;
 `report_id` and `report_error` do not affect rank, coverage, candidate validity,
 or permission to deploy, and report failure never justifies another scan.
+
+## Routine Guide: `scan_orca_pools`
+
+Call it only as
+`manage_routines(action="run", name="scan_orca_pools",
+agent="lp_agent_lite", config={...})`. Treat the Config below as an exact API:
+never rename a key or paraphrase a value. Pass the current configured TVL floor,
+candidate limit, and all five configured weights. Normally omit the two
+routine-owned request controls so their validated defaults apply.
+
+### Top-Level Config Parameters
+
+<!-- routine-config:scan_orca_pools -->
+| Config key | Presence | Exact source and use |
+|---|---|---|
+| `min_pool_tvl_usd` | required | Current Strategy TVL floor; finite and positive. |
+| `candidate_scan_limit` | optional | Pass the current configured bounded candidate count. |
+| `mcda_weights` | optional | Pass the complete nested configured object below. |
+| `request_size` | optional | Routine-owned transport bound; omit unless current config explicitly supplies it. |
+| `timeout_seconds` | optional | Routine-owned request timeout; omit unless current config explicitly supplies it. |
+<!-- /routine-config -->
+
+When `mcda_weights` is supplied, it must contain exactly all five keys and their
+finite zero-to-one values must sum exactly to one.
+
+### Nested `mcda_weights` Parameters
+
+<!-- routine-config:scan_orca_pools.mcda_weights -->
+| Config key | Presence | Exact meaning |
+|---|---|---|
+| `fee_productivity` | optional | Relative fee generation weight. |
+| `recent_activity` | optional | Recent flow and acceleration weight. |
+| `price_stability` | optional | Adverse-selection and movement weight. |
+| `liquidity_depth` | optional | TVL resilience weight. |
+| `execution_simplicity` | optional | Tick, adaptive-fee, and persistence weight. |
+<!-- /routine-config -->
+
+Parse the inner JSON, not outer MCP completion. Require its exact `schema`,
+`status`, `coverage`, `windows`, `candidates`, and `mutation=false` before using
+the shortlist. `complete` means all four bounded discovery lenses returned;
+`degraded` means only two or three and requires explicit caution; `unavailable`
+provides no deployable shortlist. Read candidate arrays only in the returned
+`windows` and MCDA order. Run no second successful scan in the same tick; the
+Agent-level pre-execution `Invalid config:` correction rule is the sole allowed
+extra call.
 
 Before comparison, parse only exact injected execution-learning records with
 `BLACKLIST_POOL=<pool>` and `BLACKLIST_TOKEN=<base_mint>`. Exclude the exact
@@ -23,6 +73,15 @@ pool and every candidate with that exact BASE mint before selection. Ignore
 malformed records and all general learning prose. A blacklist is persistent
 exclusion evidence only; it supplies no price, quality, ownership, or mutation
 authority.
+
+Also exclude an exact pool while a current-session LP there is active or may
+have landed. At most one active or possibly landed LP per exact pool is
+mandatory and has no config waiver. A pool becomes eligible again after its
+terminal close and cleanup are resolved, or after its open is proven
+`rejected_before_submit` under the corrected-retry contract. A failed-close
+quarantined pool remains excluded while its exact on-chain position is active;
+after exact closure, reuse also requires fresh wallet feasibility under normal
+sizing, reserve, capital, and risk gates.
 
 ## Establish Evidence Quality
 
@@ -42,8 +101,9 @@ authority.
 
 The four discovery lenses are 24-hour fee yield/TVL, 7-day fee yield/TVL,
 24-hour volume, and 7-day volume. The normalized evidence covers
-1h/4h/24h/7d periods. An absent Gateway token is later registration work, not a
-pool-quality penalty; conflicting token metadata is a hard candidate block.
+1h/4h/24h/7d periods. Gateway registry presence is not a selection-time fact;
+non-SOL/non-quote registration is a later transition, and any exact metadata
+conflict returned there blocks that committed chain.
 
 Read the compact candidate schema exactly:
 
@@ -80,12 +140,11 @@ trade.
 For the bounded shortlist, use
 `explore_dex_pools(action="get_pool_info", connector="orca",
 network=<config.network>, pool_address=<exact pool>)` to confirm current
-price, liquidity, fee, token identity, and tick mechanics. Use bounded
-GeckoTerminal `pool_detail`, `multi_pools`, `token_info`, or `ohlcv` only when a
-close score, contradiction, token concern, or range choice needs it. Its network
-argument is the tool-specific `solana` key after `<config.network>` has been
-validated as the supported Solana mainnet network; do not pass a Gateway network
-identifier to GeckoTerminal.
+price, liquidity, fee, token identity, and tick mechanics. Never call
+GeckoTerminal or another external market-data fallback. The scan routine is the
+primary comparison surface and native Orca pool detail is the verification
+surface; if together they cannot support a required comparison or range
+judgment, reject only that candidate or `HOLD`.
 
 Compare candidates on:
 
@@ -93,7 +152,7 @@ Compare candidates on:
 - current native facts versus the official scan;
 - price direction, volatility, and whether a useful range is plausible;
 - depth and tick spacing relative to the intended small position;
-- token identity and current registry feasibility;
+- token identity and a complete supported registration tuple;
 - overlap with existing wallet-wide LP exposure;
 - source coverage and the cost of being wrong.
 
@@ -119,6 +178,14 @@ token amounts or tick arithmetic here.
 - Existing same-base or correlated LP exposure is a reason to prefer
   diversification, not permission to exceed any cap.
 
-Return one selected exact pool plus a range thesis and allocation within config,
-or `HOLD`. Registration, exact feasible-size math, preparation, execution, and
-reconciliation remain with the Strategy.
+Return one selected exact pool plus its scanner `base=[symbol,mint,decimals]`
+tuple, a range thesis, and allocation within config, or `HOLD`. Registration,
+exact feasible-size math, preparation, execution, and reconciliation remain
+with the Strategy.
+
+Fresh selection never mutates. After choosing and natively verifying one
+eligible pool, journal `HOLD` with the committed pool and exact next phase, then
+end the tick. The next tick resumes that committed pool without another scan,
+alternative comparison, or reread of this skill. Preserve the tuple as exact
+`base_symbol`, `base_mint`, and `base_decimals` commitment fields so later ticks
+never need to rediscover token metadata.
