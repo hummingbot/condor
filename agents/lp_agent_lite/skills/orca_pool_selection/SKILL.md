@@ -1,7 +1,7 @@
 ---
 name: orca_pool_selection
 description: Interpret the neutral Orca MCDA shortlist, verify live Whirlpool facts, and choose a pool and range or HOLD without turning rank into a command.
-when_to_use: Read when two or more valid Orca candidates are close, source coverage is degraded, native facts contradict the neutral rank, or a rank override or difficult range judgment needs explicit reasoning.
+when_to_use: Read only when the current selection has close candidates, degraded coverage, native contradiction, an unusual risk/range judgment, or a justified rank override. A clear eligible winner and every committed deployment chain use the Strategy without this skill.
 references_routine: scan_orca_pools
 source: agent:lp_agent_lite
 ---
@@ -12,10 +12,13 @@ Use this playbook after `scan_orca_pools` returns current compact evidence. It
 guides judgment; it does not repair missing identity, incomplete required facts,
 a technical rejection, or a registry conflict.
 
-Use it only while no committed deployment chain exists. Once selection commits
-an exact pool, pair, BASE symbol, BASE mint, BASE decimals, allocation, range
-thesis, and next phase, later registration, preparation, and open ticks resume
-that pool without another scan, alternative comparison, or reread of this skill.
+Use it only while no committed deployment chain exists. A finalized loop-mode
+non-SOL/non-quote selection registers in the same tick, including when this skill
+resolved close candidates or justified a rank override. Once that combined step
+commits an exact pool, pair, BASE symbol, BASE mint, BASE decimals, allocation,
+range thesis, canonical registered symbol, and next phase, later sizing,
+preparation, and open ticks resume it without another scan, alternative
+comparison, skill read, registry check, or registration call.
 
 Use the returned scan schema and coverage for selection. Its best-effort Condor
 report is a human diagnostic copy of sanitized input, output, and trace;
@@ -101,9 +104,10 @@ sizing, reserve, capital, and risk gates.
 
 The four discovery lenses are 24-hour fee yield/TVL, 7-day fee yield/TVL,
 24-hour volume, and 7-day volume. The normalized evidence covers
-1h/4h/24h/7d periods. Gateway registry presence is not a selection-time fact;
-non-SOL/non-quote registration is a later transition, and any exact metadata
-conflict returned there blocks that committed chain.
+1h/4h/24h/7d periods. Do not check Gateway registry presence while selecting.
+After final selection, non-SOL/non-quote registration is the same tick's sole
+external mutation. Its exact add-and-read-back result completes commitment; an
+exact metadata conflict means selection does not complete.
 
 Read the compact candidate schema exactly:
 
@@ -128,8 +132,9 @@ Read the compact candidate schema exactly:
 - Liquidity depth: use TVL as execution and resilience evidence while respecting
   the absolute configured floor.
 - Execution simplicity: the neutral component combines tick-spacing/adaptive-fee
-  mechanics with fee persistence. Wallet inventory, token registration, schema
-  support, and range feasibility are separate later admission checks.
+  mechanics with fee persistence. Wallet inventory, registration tuple support,
+  and range feasibility remain separate admission checks; registration executes
+  immediately after final non-SOL/non-quote selection.
 
 The configured weights and routine math own the neutral score. Do not rescore in
 prose, change weights from session language, or treat rank 1 as an automatic
@@ -183,9 +188,8 @@ tuple, a range thesis, and allocation within config, or `HOLD`. Registration,
 exact feasible-size math, preparation, execution, and reconciliation remain
 with the Strategy.
 
-Fresh selection never mutates. After choosing and natively verifying one
-eligible pool, journal `HOLD` with the committed pool and exact next phase, then
-end the tick. The next tick resumes that committed pool without another scan,
-alternative comparison, or reread of this skill. Preserve the tuple as exact
-`base_symbol`, `base_mint`, and `base_decimals` commitment fields so later ticks
-never need to rediscover token metadata.
+In loop mode, finalize a non-SOL/non-QUOTE selection only when its complete
+registration tuple is ready, then follow the Strategy's same-tick
+`SELECT_REGISTER` mutation. Preserve the confirmed canonical symbol, exact
+`base_mint`, and `base_decimals` so later ticks resume at `SIZE` without token
+rediscovery. SOL and QUOTE selections commit read-only and resume at `SIZE`.

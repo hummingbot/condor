@@ -1,7 +1,7 @@
 ---
 name: orca_lp_operations
 description: Exact routine and native-executor guide for the Orca LP lifecycle.
-when_to_use: Read for a failed or uncertain close, close quarantine, or a genuinely exceptional LP recovery question. Ordinary PREPARE, OPEN, close, cleanup, and graceful wind-down use Strategy fast paths without reading this skill.
+when_to_use: Read only when this tick actively inspects or resolves a failed or uncertain close, evaluates its one corrected stop, or handles a genuinely exceptional LP recovery question. Mere quarantine presence and ordinary PREPARE, OPEN, close, cleanup, or wind-down do not trigger this skill.
 source: agent:lp_agent_lite
 ---
 
@@ -11,6 +11,11 @@ This is an operational reference, not a state machine. The Strategy owns phase
 order, admission, and lifecycle decisions. Begin from the exact current
 controller, frozen config, committed pool when present, and fresh affected
 executor and wallet evidence.
+
+Load this reference because the current tick chose active failed-close recovery,
+not merely because a quarantined position exists in the portfolio. Use it once
+for that recovery work and do not carry its presence into unrelated sibling
+supervision, deployment, normal close, cleanup, or quiet `HOLD` work.
 
 Routine JSON and native executor detail are operational truth. Condor diagnostic
 `report_id` and `report_error` fields are human-review metadata only; a reporting
@@ -40,6 +45,7 @@ wallet facts. It is pure calculation and performs no external mutation.
 | `selected_allocation_quote` | required | LLM-selected quote allocation within current limits. |
 | `max_amount_quote_per_lp_position` | required | Current per-position hard cap. |
 | `remaining_session_quote` | required | Current uncommitted session quote capacity. |
+| `remaining_risk_quote` | required | Fresh nonnegative capacity remaining below core `risk_limits.max_position_size_quote`. |
 | `capital_headroom_pct` | required | Current configured aggregate headroom. |
 | `lp_open_balance_buffer_pct` | required | Current configured per-leg open buffer. |
 | `allow_base_preparation` | required | Exact boolean: `true` before preparation; `false` after preparation and for corrected open retry. |
@@ -166,8 +172,9 @@ missing coverage, or disagreement never proves closure.
 
 Use only for a committed selected pool's non-SOL, non-quote BASE token. Normal
 live registration is an unconditional add followed by one exact registry
-read-back; it does not check presence first. Registration is a separate loop
-transition. Pass `preview=false` on that normal live call.
+read-back; it does not check presence first. Normal registration is the external
+mutation completing the selection tick, not a separate tick. Pass
+`preview=false` on that live call.
 
 #### Top-Level Config Parameters
 
@@ -188,9 +195,10 @@ re-registering an existing exact token is allowed. Continue only on inner
 `status="confirmed"` with exact mint and decimals. A case-only symbol alias may
 confirm; use returned `canonical_symbol` thereafter. The confirmed add plus
 read-back is final registration reconciliation: end the tick and go directly to
-committed sizing next tick without previewing or repeating registration. Any
-other metadata conflict is ambiguous, and an uncertain live add is never blindly
-repeated.
+committed sizing next tick without previewing, checking presence, or repeating
+registration. Trust it for the unchanged chain unless a later exact Gateway
+registry/metadata error invalidates it. Any other metadata conflict is ambiguous,
+and an uncertain live add is never blindly repeated.
 
 ## Shared Operation Rules
 
@@ -205,10 +213,11 @@ repeated.
   non-authoritative metadata. Eight-character prefixes are display-only.
 - Older, foreign, and untracked positions are observation-only. Shared wallet
   balances affect feasibility but do not establish position ownership.
-- Fresh selection commits and ends without mutation. A committed continuation
-  does not rescan, compare alternatives, reread selection guidance, or fetch
-  unrelated pools. Never fold `PREPARE` into `OPEN`; reconcile a mutation and end
-  its tick.
+- A finalized loop-mode non-SOL/non-QUOTE selection completes registration in
+  the same `SELECT_REGISTER` tick. SOL and QUOTE commit read-only. A committed
+  continuation does not rescan, compare alternatives, reread selection
+  guidance, or fetch unrelated pools. Never fold `PREPARE` into `OPEN`;
+  reconcile a mutation and end its tick.
 - Use one external mutation phase per tick. The sole exception is a bounded,
   sequential same-phase close batch of independently triggered current-session
   LPs; stop on uncertainty.
@@ -217,10 +226,9 @@ repeated.
 
 For every request, `QUOTE` is the configured quote tuple, `BASE` is the pool's
 other token, pair is `<canonical BASE symbol>-<config.quote_token_symbol>`, and
-price is QUOTE per BASE. Read the live executor schema before cleanup create.
-Ordinary committed `PREPARE` and LP `OPEN` use the Strategy's exact requests and
-let the native create action perform its own live schema validation without a
-separate schema-only call.
+price is QUOTE per BASE. Ordinary `PREPARE`, `OPEN`, and cleanup use their exact
+documented requests and let native create perform live schema validation without
+a separate schema-only call.
 
 ### Preparation and cleanup Order Executor
 
@@ -307,27 +315,11 @@ ordinary cleanup rule and cannot keep close quarantine active.
 
 ### Quote restoration
 
-After a terminal current-session LP, refresh its exact BASE-mint balance. For
-non-SOL BASE above `residual_base_dust_quote`, sell the entire refreshed balance
-to configured QUOTE through one cleanup Order Executor. This may include
-pre-existing same-mint wallet inventory but never adopts a foreign executor.
-Retain the full create-returned cleanup executor ID and end the tick without a
-post-create search or wallet refresh. The receipt is `submitted`; reconcile the
-executor and refreshed wallet through the next tick's canonical reads.
-
-For SOL BASE, normally retain SOL. Only after a terminal SOL-base LP close and
-only while QUOTE is below `total_amount_quote`, sell at most:
-
-```text
-protected_sol = min_sol_reserve * (1 + capital_headroom_pct / 100)
-excess_sol = max(fresh_sol_balance - protected_sol, 0)
-quote_shortfall = max(total_amount_quote - fresh_quote_balance, 0)
-sol_to_sell = min(excess_sol, quote_shortfall / fresh_sol_price_quote)
-```
-
-Require a finite positive QUOTE-per-SOL price and floor to accepted precision.
-If QUOTE is at target or protected excess is zero, retain SOL and mark the chain
-clean.
+After terminal close, the Strategy activates ordinary cleanup and loads
+`solana_inventory_cleanup` on the cleanup tick. That skill exclusively owns the
+precision-safe amount, protected-SOL formula, retry, residual quarantine, and
+manual-recovery handoff. Never request a full rounded display balance or use
+this failed-close reference as substitute cleanup guidance.
 
 ### Wind-down and stop
 
@@ -339,6 +331,8 @@ never reuse a provisional breach.
 
 Wind-down forbids new registration, preparation, and open. Close exact
 current-session LPs, reconcile each, and clean each BASE in later admitted
-cleanup work. Call exact-current `stop_agent` only after every LP is terminal,
-all mutations are reconciled, and every affected inventory chain is quote-clean.
-An external kill requires manual cleanup; a later session never adopts it.
+cleanup work. Follow the Strategy's normal clean-stop gate or the cleanup
+skill's exact `STOP_MANUAL_RECOVERY` handoff after its corrected retry is
+exhausted; do not repeat `HOLD` solely because quarantined residual inventory is
+not quote-clean. An external kill requires manual cleanup; a later session never
+adopts it.

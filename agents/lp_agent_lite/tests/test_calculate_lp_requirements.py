@@ -19,6 +19,7 @@ def _config(**overrides):
         "selected_allocation_quote": "5",
         "max_amount_quote_per_lp_position": "5",
         "remaining_session_quote": "10",
+        "remaining_risk_quote": "10",
         "capital_headroom_pct": "5",
         "lp_open_balance_buffer_pct": "2",
         "allow_base_preparation": True,
@@ -88,6 +89,15 @@ def test_uses_tightest_cap_and_current_inventory_without_exact_plan_failure():
     assert Decimal(result["authorization_quote"]) == Decimal("3")
     assert Decimal(result["budget_used_quote"]) <= Decimal("2.85")
     assert result["limiting_side"] in {"budget", "inventory", "quote_balance"}
+
+
+def test_remaining_core_risk_capacity_is_a_hard_sizing_cap():
+    result = _run(_config(remaining_risk_quote="2"))
+
+    assert result["status"] == "preparation_required"
+    assert Decimal(result["authorization_quote"]) == Decimal("2")
+    assert result["remaining_risk_quote"] == "2"
+    assert Decimal(result["budget_used_quote"]) <= Decimal("1.9")
 
 
 def test_post_preparation_sizes_down_to_buffered_actual_balances():
@@ -238,6 +248,14 @@ def test_zero_remaining_budget_is_an_ordinary_structured_shortage():
     assert "error" not in result
 
 
+def test_zero_remaining_risk_capacity_is_an_ordinary_structured_shortage():
+    result = _run(_config(remaining_risk_quote="0"))
+
+    assert result["status"] == "infeasible"
+    assert result["authorization_quote"] == "0"
+    assert result["reasons"] == ["no_authorized_budget"]
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -248,6 +266,7 @@ def test_zero_remaining_budget_is_an_ordinary_structured_shortage():
         {"available_quote_display": 1},
         {"capital_headroom_pct": "100"},
         {"lp_open_balance_buffer_pct": "6"},
+        {"remaining_risk_quote": "-1"},
         {"allow_base_preparation": 1},
         {"lower_price": "101"},
         {"tick_spacing": True},
@@ -270,7 +289,7 @@ def test_whirlpool_tick_domain_failure_is_compact_and_non_mutating():
     )
 
     assert result == {
-        "schema": "lp_agent_lite.requirements.v1",
+        "schema": "lp_agent_lite.requirements.v2",
         "status": "error",
         "feasible": False,
         "error": "range_outside_whirlpool_ticks",

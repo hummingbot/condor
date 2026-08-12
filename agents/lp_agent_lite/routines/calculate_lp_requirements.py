@@ -22,7 +22,7 @@ from pydantic import (
 from agents.lp_agent_lite.routines._reporting import DiagnosticTrace, report_result
 
 CATEGORY = "Orca LP Arithmetic"
-_SCHEMA = "lp_agent_lite.requirements.v1"
+_SCHEMA = "lp_agent_lite.requirements.v2"
 _TRANSPORT_MAX_CHARS = 1_900
 _MIN_TICK = -443_636
 _MAX_TICK = 443_636
@@ -37,6 +37,7 @@ _NUMERIC_FIELDS = (
     "selected_allocation_quote",
     "max_amount_quote_per_lp_position",
     "remaining_session_quote",
+    "remaining_risk_quote",
     "capital_headroom_pct",
     "lp_open_balance_buffer_pct",
     "current_price",
@@ -53,6 +54,7 @@ class Config(BaseModel):
     selected_allocation_quote: Decimal = Field(gt=0)
     max_amount_quote_per_lp_position: Decimal = Field(gt=0)
     remaining_session_quote: Decimal = Field(ge=0)
+    remaining_risk_quote: Decimal = Field(ge=0)
     capital_headroom_pct: Decimal = Field(ge=0, lt=100)
     lp_open_balance_buffer_pct: Decimal = Field(ge=0, lt=100)
     allow_base_preparation: StrictBool
@@ -235,6 +237,7 @@ async def run(config: Config, context: Any) -> str:
                 config.selected_allocation_quote,
                 config.max_amount_quote_per_lp_position,
                 config.remaining_session_quote,
+                config.remaining_risk_quote,
             )
             usable_budget = authorization * (
                 Decimal(1) - config.capital_headroom_pct / Decimal(100)
@@ -343,6 +346,7 @@ async def run(config: Config, context: Any) -> str:
                 "status": status,
                 "feasible": feasible,
                 "authorization_quote": _text(authorization),
+                "remaining_risk_quote": _text(config.remaining_risk_quote),
                 "usable_budget_quote": _text(usable_budget),
                 "lp_open_balance_buffer_pct": _text(config.lp_open_balance_buffer_pct),
                 "allow_base_preparation": config.allow_base_preparation,

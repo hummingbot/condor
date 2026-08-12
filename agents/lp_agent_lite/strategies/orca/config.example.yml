@@ -37,7 +37,7 @@ maximum_range_half_width_pct: 20
 lp_pnl_grace_period_minutes: 5
 position_take_profit_net_pnl_ratio: 0.05
 position_stop_loss_net_pnl_ratio: 0.05
-position_time_limit_minutes: 1440
+position_time_limit_minutes: 720
 session_take_profit_net_pnl_ratio: 0.05
 session_stop_loss_net_pnl_ratio: 0.05
 session_time_limit_minutes: 1440
