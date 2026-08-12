@@ -17,7 +17,7 @@ when_to_consult: When the user asks about market regime, whether spreads are app
   user wants to deploy or set up a new PMM Mister bot on a token — use delegate so
   the agent runs the full deployment in the background and pings when done.
 server_required: true
-server_name: moneymaker
+server_name: ''
 created_by: 481175164
 created_at: '2026-06-24T22:39:20.729730+00:00'
 ---

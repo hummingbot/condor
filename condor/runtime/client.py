@@ -76,6 +76,32 @@ async def get_info(key: SessionKey) -> SessionInfo | None:
     return session.info() if session else None
 
 
+async def conversation_for_session(session_key: str) -> str:
+    """Resolve a session key to the conversation currently on that session.
+
+    The one place that knows how to turn a raw key into a conversation id, so
+    every producer of async work that reports back to its origin — delegations,
+    notifications, routine runs — agrees on what "the conversation behind this
+    call" means.
+
+    Answered on demand rather than cached at spawn because the conversation id
+    does not exist when the MCP subprocess starts (``get_or_create_session``
+    mints it after the client is up) — by call time it is settled.
+
+    A missing, malformed or dead key is not an error: it means "no conversation
+    behind this call", which is the truth for a consult-, tick- or
+    scheduler-started run and for anything predating this provenance.
+    """
+    if not session_key:
+        return ""
+    try:
+        info = await get_info(SessionKey.parse(session_key))
+        return info.conversation_id if info else ""
+    except Exception:
+        log.debug("Could not resolve session key %r", session_key, exc_info=True)
+        return ""
+
+
 async def list_sessions(user_id: int | None = None) -> list[SessionInfo]:
     """List sessions, optionally filtered by owning user."""
     return _local().list_sessions(user_id)
@@ -166,6 +192,10 @@ async def prompt(
         req.text,
         agent_key=session.agent_key,
         agent_slug=session.agent_slug,
+        # Empty for a turn the user typed; set when something else drove it
+        # (a background task waking the chat), so the opening line is recorded
+        # as a system note rather than as the user's words.
+        user_kind=req.user_kind,
     )
     try:
         async for event in session.prompt_stream(req.text, lock_timeout=lock_timeout):

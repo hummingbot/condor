@@ -104,6 +104,13 @@ class OwnedBot:
     origin: str  # "deployed" | "adopted" | "legacy"
     since: float  # epoch this session took ownership
     last_seen: float
+    # Epoch this session gave the bot up, or 0.0 while it still holds it. A
+    # session that stops without winding its bot down leaves it running, and
+    # without this the attribution window ran to *now* — so a finished session
+    # kept accruing PnL it had nothing to do with, and kept showing the live open
+    # book, until some later session adopted the bot. Stamped by
+    # :meth:`BotLedger.release`.
+    until: float = 0.0
 
 
 def _parse_bots(data: dict[str, Any]) -> dict[str, OwnedBot]:
@@ -116,6 +123,9 @@ def _parse_bots(data: dict[str, Any]) -> dict[str, OwnedBot]:
                 origin=raw.get("origin", "adopted"),
                 since=float(raw.get("since", 0.0)),
                 last_seen=float(raw.get("last_seen", 0.0)),
+                # Absent in ledgers written before releases were recorded: those
+                # sessions read as still-holding, exactly as they did then.
+                until=float(raw.get("until", 0.0) or 0.0),
             )
         except Exception:
             continue
@@ -144,11 +154,43 @@ def read_owned(session_dir: Path | None) -> list[OwnedBot]:
     return sorted(_parse_bots(data).values(), key=lambda b: (b.since, b.base))
 
 
+def prior_session_bases(sessions_root: Path | None) -> set[str]:
+    """Every base any session under ``sessions_root`` recorded owning.
+
+    The lineage of a strategy's bots. A crash restart mints a *new* session with a
+    fresh empty ledger, so a session that does not enforce a namespace has no
+    other way to recognise the still-running bot its predecessor deployed —
+    without this it would orphan the bot and report $0 while the bot kept trading.
+    Namespace-enforcing sessions do not need it: for them the name is the proof.
+    """
+    out: set[str] = set()
+    if sessions_root is None or not Path(sessions_root).is_dir():
+        return out
+    for session_dir in Path(sessions_root).iterdir():
+        if session_dir.is_dir():
+            out.update(b.base for b in read_owned(session_dir))
+    return out
+
+
 class BotLedger:
     """Per-session record of the bots a session owns.
 
     Persisted to ``{session_dir}/owned_bots.json``; in-memory only when there is
     no session dir (experiments — see ``TickEngine.__post_init__``).
+
+    **Recording is unconditional; enforcement is not.** Every session gets a
+    ledger, because what a session deployed is a fact about the session and not
+    about how it was configured — and every PnL surface keys attribution on that
+    fact. ``enforced`` only decides whether the namespace rule is *applied*: a
+    session that declared controller mode may touch nothing outside its namespace,
+    while one that did not is trusted with the bots it deploys but still has them
+    written down.
+
+    Skipping the ledger for executor-mode sessions is what made a real session
+    report $0.00 for twenty ticks while it operated three bots that lost $1.46: no
+    ledger meant no recorded deploy, no recorded deploy meant no base to attribute,
+    and both the tick loop and the dashboard fell back to searching executors
+    tagged with the ``agent_id`` — which a bot's controllers never carry.
     """
 
     def __init__(
@@ -156,14 +198,22 @@ class BotLedger:
         namespace: str,
         session_dir: Path | None = None,
         declared: Iterable[str] = (),
+        enforced: bool | None = None,
     ) -> None:
         self.namespace = namespace
         self.session_dir = session_dir
         self.declared: list[str] = [d for d in declared if d]
+        # ``None`` means "recover from disk, else enforce" — the same recovery the
+        # namespace gets below, for the same reason: boot reconciliation reopens a
+        # finished session's ledger with no config to restate the mode from, and
+        # must not rewrite it as enforced on save.
+        self.enforced = enforced
         self.bots: dict[str, OwnedBot] = {}
         self.violations: list[dict[str, Any]] = []
         self._pending_violations: list[dict[str, Any]] = []
         self._load()
+        if self.enforced is None:
+            self.enforced = True
 
     # ------------------------------------------------------------------
     # Queries
@@ -203,6 +253,27 @@ class BotLedger:
         """
         self._record(name, "adopted", now)
 
+    def release(self, now: float | None = None) -> None:
+        """Close the ownership window on every bot this session still holds.
+
+        Called when the session ends. Idempotent and never re-opens a window: a
+        bot already released keeps its first release instant, so a double stop
+        cannot extend attribution.
+
+        ``now`` lets a caller close the window at an instant other than the call
+        itself — boot reconciliation closes a crashed session at the last moment
+        it was recorded alive, not at the reboot. It is clamped to ``since``: a
+        window can never end before it opened, which would slice negative.
+        """
+        ts = time.time() if now is None else now
+        changed = False
+        for bot in self.bots.values():
+            if bot.until <= 0:
+                bot.until = max(ts, bot.since)
+                changed = True
+        if changed:
+            self._save()
+
     def note_violation(self, name: str, action: str, now: float | None = None) -> None:
         entry = {
             "name": name or "",
@@ -231,6 +302,9 @@ class BotLedger:
             # First claim wins: a bot this session deployed stays "deployed" even
             # if a later adoption pass sees it running.
             existing.last_seen = ts
+            # Operating it again re-opens a window closed by an earlier release,
+            # so a stop followed by another tick cannot strand the attribution.
+            existing.until = 0.0
         self._save()
 
     # ------------------------------------------------------------------
@@ -241,6 +315,7 @@ class BotLedger:
         return {
             "namespace": self.namespace,
             "declared": list(self.declared),
+            "enforced": self.enforced,
             "bots": {k: asdict(v) for k, v in self.bots.items()},
             "violations": list(self.violations),
         }
@@ -256,6 +331,16 @@ class BotLedger:
             return
         self.bots = _parse_bots(data)
         self.violations = list(data.get("violations") or [])[-_MAX_VIOLATIONS:]
+        # Recover the persisted scope when the caller did not supply one. Boot
+        # reconciliation opens a finished session's ledger only to close its
+        # window and has no strategy context to rebuild the namespace from;
+        # without this, saving would blank the very fields enforcement reads.
+        if not self.namespace:
+            self.namespace = str(data.get("namespace", "") or "")
+        if not self.declared:
+            self.declared = [d for d in (data.get("declared") or []) if d]
+        if self.enforced is None and "enforced" in data:
+            self.enforced = bool(data.get("enforced"))
 
     def _save(self) -> None:
         path = self.path

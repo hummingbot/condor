@@ -168,6 +168,7 @@ condor_bot_data.pickle.bak
 
 # Local config and data
 config.yml
+config.yml.bak
 audit_log.yml
 data/
 

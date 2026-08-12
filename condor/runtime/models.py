@@ -90,3 +90,9 @@ class PromptRequest(BaseModel):
     text: str
     image_b64: str | None = None
     image_mime: str | None = None
+    user_kind: str = Field(
+        default="",
+        description="Set when the turn was NOT typed by the user: the opening "
+        "line is recorded as a system turn of this kind instead of as the "
+        "user's words. Empty (the default) is a real user turn.",
+    )

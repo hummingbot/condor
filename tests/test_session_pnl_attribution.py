@@ -29,8 +29,14 @@ def _write_session(strategy_dir: Path, num: int, cfg: dict | None = None) -> Pat
     return sd
 
 
-def _write_ledger(session_dir: Path, bots: dict[str, float]) -> None:
-    """Ledger with ``{base: since}``, as BotLedger serializes it."""
+def _write_ledger(
+    session_dir: Path, bots: dict[str, float], until: dict[str, float] | None = None
+) -> None:
+    """Ledger with ``{base: since}``, as BotLedger serializes it.
+
+    ``until`` stamps a release instant on a base, i.e. the session stopped and
+    stopped owning the bot from that moment.
+    """
     (session_dir / "owned_bots.json").write_text(
         json.dumps(
             {
@@ -42,6 +48,7 @@ def _write_ledger(session_dir: Path, bots: dict[str, float]) -> None:
                         "origin": "deployed",
                         "since": since,
                         "last_seen": since,
+                        "until": (until or {}).get(base, 0.0),
                     }
                     for base, since in bots.items()
                 },
@@ -90,15 +97,21 @@ def _snap(bot_name: str, ts: str, realized=0.0, unrealized=0.0, positions=None):
     }
 
 
-def _hist_row(ts: str, cum_realized: float, cum_volume: float = 0.0):
-    return {
-        "timestamp": ts,
-        "performance": {
-            "realized_pnl_quote": cum_realized,
-            "volume_traded": cum_volume,
-            "close_type_counts": {},
-        },
+def _hist_row(
+    ts: str,
+    cum_realized: float,
+    cum_volume: float = 0.0,
+    cum_fees: float = 0.0,
+    closes: dict[str, int] | None = None,
+):
+    perf = {
+        "realized_pnl_quote": cum_realized,
+        "volume_traded": cum_volume,
+        "close_type_counts": closes or {},
     }
+    if cum_fees:
+        perf["cum_fees_quote"] = cum_fees
+    return {"timestamp": ts, "performance": perf}
 
 
 # Fixed clock anchors: the history rows below are ISO strings whose epochs the
@@ -315,6 +328,52 @@ def test_rollup_of_a_handover_sums_to_the_bots_cumulative(monkeypatch, tmp_path)
     assert totals["total_pnl"] == 108.0
 
 
+def test_session_detail_and_rollup_report_the_same_trade_count(monkeypatch, tmp_path):
+    """One session, one bot, two surfaces, one number (CORR-114).
+
+    The strategy rollup counted round-trip closes from the sliced history while
+    the session detail counted rows built from the open book, so the same session
+    read "50 trades" on the strategy list and "2 trades" on its own page — both
+    with 0 closed positions.
+    """
+    from types import SimpleNamespace
+
+    from condor.agents.performance import fetch_agent_performance
+
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T0)})
+
+    inst = "ns-bot-20260701-000000"
+    positions = [
+        {"trading_pair": pair, "amount": 1.0, "breakeven_price": 60.0}
+        for pair in ("BTC-USD", "ETH-USD")
+    ]
+    closes = {
+        "CloseType.TAKE_PROFIT": 40,
+        "CloseType.STOP_LOSS": 10,
+        "CloseType.EARLY_STOP": 900,  # pmm re-quoting churn, never a trade
+    }
+    client = _FakeClient(
+        snapshots=[_snap(inst, T3, realized=100.0, positions=positions)],
+        history={inst: [_hist_row(T0, 0.0), _hist_row(T3, 100.0, closes=closes)]},
+    )
+
+    # The session-detail path, before _rollup patches the executor fetch out.
+    async def _no_executors(**_kw):
+        return []
+
+    client.executors = SimpleNamespace(search_executors=_no_executors)
+    detail = asyncio.run(
+        fetch_agent_performance(client, "a_1", bot_names=["ns-bot"], since=_epoch(T0))
+    )
+
+    rollup = next(s for s in _rollup(monkeypatch, tmp_path, client)[0])
+
+    assert detail.trade_count == rollup.trade_count == 50
+    assert detail.closed_count == rollup.closed_count == 50
+    assert detail.open_count == 2  # the open book is not a trade count
+
+
 def test_rollup_of_one_session_on_two_bots_sums_both(monkeypatch, tmp_path):
     sd1 = _write_session(tmp_path, 1)
     _write_ledger(sd1, {"ns-bot-btc": _epoch(T0), "ns-bot-eth": _epoch(T0)})
@@ -391,3 +450,236 @@ def test_current_owner_bases_follows_the_ledger_not_the_session_number(tmp_path)
     nums = [1, 2]
     assert _current_owner_bases(tmp_path, None, nums, 1) == ["ns-b"]
     assert _current_owner_bases(tmp_path, None, nums, 2) == ["ns-a"]
+
+
+# ── Whole-server snapshot is fetched once per rollup, not once per strategy ──
+
+
+def test_rollup_fans_out_one_snapshot_call_for_all_strategies(tmp_path):
+    """N strategies on one server share a single whole-server snapshot fetch.
+
+    ``list_agents`` gathers every strategy's ``_apply_bot_mode_pnl`` at once, and
+    ``get_latest_controller_performance()`` returns the same whole-server payload
+    to each of them — so the fan-out must collapse to one round-trip.
+    """
+    from condor.fetchers.bot_performance import clear_snapshot_cache
+
+    class _CountingClient(_FakeClient):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.base_url = "http://rollup-server:8000"
+            self.snapshot_calls = 0
+
+        async def get_latest_controller_performance(self):
+            self.snapshot_calls += 1
+            return self._snapshots
+
+    inst = "ns-bot-20260701-000000"
+    client = _CountingClient(
+        snapshots=[_snap(inst, T3, realized=100.0)],
+        history={inst: [_hist_row(T0, 0.0), _hist_row(T3, 100.0)]},
+    )
+
+    strategies = []
+    for i in range(3):
+        sdir = tmp_path / f"strategy_{i}"
+        _write_ledger(_write_session(sdir, 1), {"ns-bot": _epoch(T0)})
+        strategies.append((sdir, [_session(1)]))
+
+    async def _go():
+        await asyncio.gather(
+            *[
+                _apply_bot_mode_pnl(sessions, sdir, None, client)
+                for sdir, sessions in strategies
+            ]
+        )
+
+    clear_snapshot_cache()
+    try:
+        asyncio.run(_go())
+    finally:
+        clear_snapshot_cache()
+
+    assert client.snapshot_calls == 1
+    # Every strategy still gets its attribution from that one snapshot.
+    assert [sessions[0].realized_pnl for _, sessions in strategies] == [100.0] * 3
+
+
+# ── Regressions: the four ways attribution used to be wrong ──
+
+
+def test_long_lived_bot_does_not_dump_old_pnl_on_one_session(tmp_path):
+    """A span past the finest interval's reach must still tile correctly.
+
+    ``5m`` × the 500-row cap covers ~41h. Sessions whose windows closed before
+    that read as $0 while the one straddling the boundary absorbed all of them —
+    the strategy total stayed right, which is why it hid. The interval now widens
+    to span the ownership timeline instead.
+    """
+    from datetime import datetime, timedelta
+
+    day0 = datetime.fromisoformat("2026-06-01T00:00:00+00:00")
+    marks = [(day0 + timedelta(days=n)).isoformat() for n in range(11)]
+
+    # Three sessions, each owning the bot for ~4 days — far past a 41h window.
+    for num, start in ((1, 0), (2, 4), (3, 8)):
+        _write_ledger(_write_session(tmp_path, num), {"ns-bot": _epoch(marks[start])})
+
+    inst = "ns-bot-20260601-000000"
+    # $10/day, cumulative: day N ⇒ $10N.
+    client = _FakeClient(
+        snapshots=[_snap(inst, marks[10], realized=100.0)],
+        history={inst: [_hist_row(m, 10.0 * n) for n, m in enumerate(marks)]},
+    )
+
+    s1, s2, s3 = _session(1), _session(2), _session(3)
+    asyncio.run(_apply_bot_mode_pnl([s1, s2, s3], tmp_path, None, client))
+
+    # Each session keeps only what it earned; none is starved and none inherits.
+    assert s1.realized_pnl == 40.0  # days 0–4
+    assert s2.realized_pnl == 40.0  # days 4–8
+    assert s3.realized_pnl == 20.0  # days 8–10 (history ends at day 10)
+    assert s1.realized_pnl + s2.realized_pnl + s3.realized_pnl == 100.0
+
+
+def test_interval_widens_to_cover_the_ownership_span(tmp_path):
+    """The resolution is chosen from the span, not hardcoded to 5m."""
+    from condor.fetchers.bot_performance import choose_interval
+
+    assert choose_interval(3600) == "5m"  # an hour fits at the finest rung
+    assert choose_interval(10 * 86400) == "1h"  # 10 days needs coarser buckets
+    assert choose_interval(400 * 86400) == "1d"  # beyond the ladder → coarsest
+
+
+def test_fees_are_sliced_per_session_not_dumped_on_the_last_owner(tmp_path):
+    """Fees follow the same windows as realized PnL."""
+    _write_ledger(_write_session(tmp_path, 1), {"ns-bot": _epoch(T0)})
+    _write_ledger(_write_session(tmp_path, 2), {"ns-bot": _epoch(T2)})
+
+    inst = "ns-bot-20260701-000000"
+    client = _FakeClient(
+        snapshots=[_snap(inst, T3, realized=100.0)],
+        history={
+            inst: [
+                _hist_row(T0, 0.0, cum_fees=0.0),
+                _hist_row(T2, 40.0, cum_fees=4.0),  # session 1 paid $4
+                _hist_row(T3, 100.0, cum_fees=9.0),  # session 2 paid $5
+            ]
+        },
+    )
+
+    s1, s2 = _session(1), _session(2)
+    asyncio.run(_apply_bot_mode_pnl([s1, s2], tmp_path, None, client))
+
+    assert s1.fees == 4.0
+    assert s2.fees == 5.0
+
+
+def test_fees_fall_back_to_live_figure_when_history_has_no_fee_column(tmp_path):
+    """A backend without a cumulative fee column must not report $0 everywhere."""
+    _write_ledger(_write_session(tmp_path, 1), {"ns-bot": _epoch(T0)})
+
+    inst = "ns-bot-20260701-000000"
+    position = {
+        "trading_pair": "BTC-USD",
+        "connector_name": "hyperliquid",
+        "side": "TradeType.BUY",
+        "amount": 1.0,
+        "breakeven_price": 100.0,
+        "unrealized_pnl_quote": 0.0,
+        "cum_fees_quote": 3.5,
+    }
+    client = _FakeClient(
+        snapshots=[_snap(inst, T3, realized=100.0, positions=[position])],
+        history={inst: [_hist_row(T0, 0.0), _hist_row(T3, 100.0)]},  # no fees
+    )
+
+    s1 = _session(1)
+    asyncio.run(_apply_bot_mode_pnl([s1], tmp_path, None, client))
+
+    assert s1.fees == 3.5
+
+
+def test_released_session_stops_accruing_a_surviving_bot(tmp_path):
+    """A stopped session keeps its slice but not what the bot earned afterwards."""
+    sd1 = _write_session(tmp_path, 1)
+    # Owned from T0, released at T2 — the bot kept running to T3 unattended.
+    _write_ledger(sd1, {"ns-bot": _epoch(T0)}, until={"ns-bot": _epoch(T2)})
+
+    inst = "ns-bot-20260701-000000"
+    position = {
+        "trading_pair": "BTC-USD",
+        "connector_name": "hyperliquid",
+        "side": "TradeType.BUY",
+        "amount": 1.0,
+        "breakeven_price": 100.0,
+        "unrealized_pnl_quote": 7.0,
+    }
+    client = _FakeClient(
+        snapshots=[
+            _snap(inst, T3, realized=100.0, unrealized=7.0, positions=[position])
+        ],
+        history={inst: [_hist_row(T0, 0.0), _hist_row(T2, 40.0), _hist_row(T3, 100.0)]},
+    )
+
+    s1 = _session(1)
+    asyncio.run(_apply_bot_mode_pnl([s1], tmp_path, None, client))
+
+    assert s1.realized_pnl == 40.0  # only up to the release
+    assert s1.unrealized_pnl == 0.0  # an ended session holds no open book
+    assert s1.open_count == 0
+
+
+def test_released_session_is_not_the_current_owner(tmp_path):
+    """_current_owner_bases and the slicing agree that a released bot is unowned."""
+    sd1 = _write_session(tmp_path, 1)
+    _write_ledger(sd1, {"ns-bot": _epoch(T0)}, until={"ns-bot": _epoch(T2)})
+
+    assert _current_owner_bases(tmp_path, None, [1], 1) == []
+
+
+def test_release_is_idempotent_and_reopens_on_further_use(tmp_path):
+    """Stopping twice cannot extend a window; operating again re-opens it."""
+    from condor.agents.ownership import BotLedger, read_owned
+
+    sd = tmp_path / "session_1"
+    sd.mkdir()
+    ledger = BotLedger("ns", sd)
+    ledger.note_deploy("ns-bot", now=100.0)
+
+    ledger.release(now=200.0)
+    ledger.release(now=300.0)  # a second stop must not move the instant
+    assert read_owned(sd)[0].until == 200.0
+
+    # A tick after the release means the session is operating it again.
+    ledger.adopt("ns-bot", now=400.0)
+    assert read_owned(sd)[0].until == 0.0
+
+
+def test_release_never_closes_a_window_before_it_opened(tmp_path):
+    """A stale instant is clamped to ``since`` — a negative slice is not a window."""
+    from condor.agents.ownership import BotLedger, read_owned
+
+    sd = tmp_path / "session_1"
+    sd.mkdir()
+    ledger = BotLedger("ns", sd)
+    ledger.note_deploy("ns-bot", now=500.0)
+
+    ledger.release(now=100.0)  # older than the deploy
+    assert read_owned(sd)[0].until == 500.0
+
+
+def test_release_preserves_namespace_for_a_ledger_opened_without_one(tmp_path):
+    """Boot reconciliation closes windows with no strategy context to hand."""
+    from condor.agents.ownership import BotLedger, read_owned
+
+    sd = tmp_path / "session_1"
+    sd.mkdir()
+    BotLedger("ns", sd, declared=["legacy-bot"]).note_deploy("ns-bot", now=100.0)
+
+    BotLedger("", sd).release(now=200.0)  # what loops._release_ownership does
+
+    reopened = BotLedger("", sd)
+    assert reopened.namespace == "ns"  # not blanked by the release write
+    assert reopened.declared == ["legacy-bot"]
+    assert read_owned(sd)[0].until == 200.0

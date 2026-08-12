@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import {
   ArrowUpRight,
   Bot,
+  ChevronDown,
   MessageSquare,
   PanelLeftClose,
   PanelLeftOpen,
@@ -12,7 +13,6 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
 import { deriveAgentStatus } from "@/components/agent/agentStatus";
-import { AgentsTabSwitch, type AgentsTab } from "@/components/chat/AgentsTabSwitch";
 import { BrainPicker, type BrainSelection } from "@/components/chat/BrainPicker";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { ChatSessionIdentity } from "@/components/chat/ChatSessionIdentity";
@@ -38,17 +38,13 @@ type TalkIntent = "focus" | "fresh";
 /**
  * The chat workspace — what `/agents` opens on.
  *
- * A rail of who you can talk to and what you already said, and a conversation
- * beside it. It renders the same `ChatThread` as the overlay panel and reads
- * the same `useChat()` state, so this is a second view of one chat rather than
- * a second chat.
+ * A rail of who you can talk to and what you already said, a conversation
+ * beside it, and a dock of the work it set in motion. Since the fleet grid was
+ * removed this is the whole of `/agents`: the rail is how you switch who you
+ * are talking to and start another conversation, which is the gesture the old
+ * header selector could not do.
  */
-export function AgentChatTab({
-  onTabChange,
-}: {
-  /** Flip `/agents` to the fleet report — the host owns the `?tab=` param. */
-  onTabChange: (tab: AgentsTab) => void;
-}) {
+export function AgentChatTab() {
   const chat = useChat();
   const { server } = useServer();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -117,7 +113,11 @@ export function AgentChatTab({
       }
     }
     const slotId = chat.startSession(
-      pendingAgentKey ?? defaultAgent,
+      // `""` asks whoever is bound for their own model; only an unbound chat
+      // needs a model named. Volunteering `defaultAgent` here is what used to
+      // claim an override the user never made, so a bound Agent ran on
+      // Condor's model instead of its own.
+      pendingAgentKey ?? (agentSlug ? "" : defaultAgent),
       server || undefined,
       agentSlug || undefined,
     );
@@ -174,27 +174,8 @@ export function AgentChatTab({
           railOpen ? "flex" : "hidden"
         } absolute inset-y-0 left-0 z-30 w-[260px] shrink-0 flex-col border-r border-[var(--color-border)] bg-[var(--color-bg)] md:relative md:flex`}
       >
-        {/* Where you are and what is running. Two doors to the fleet report —
-            fine, when one of them is a live count. */}
-        <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
-          <AgentsTabSwitch tab="chat" onChange={onTabChange} />
-          <button
-            onClick={() => onTabChange("fleet")}
-            className="flex min-w-0 flex-1 items-center gap-2 text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
-            title="Open the fleet report"
-          >
-            <Zap
-              className={`h-3 w-3 shrink-0 ${
-                liveAgents.length > 0 ? "text-emerald-400" : ""
-              }`}
-            />
-            <span className="min-w-0 flex-1 truncate">
-              {liveAgents.length} live
-              {runningTasks > 0 && ` · ${runningTasks} task${runningTasks !== 1 ? "s" : ""}`}
-            </span>
-            <ArrowUpRight className="h-3 w-3 shrink-0" />
-          </button>
-        </div>
+        {/* What is looping right now, and the way into it. */}
+        <LiveStrip agents={liveAgents} runningTasks={runningTasks} />
 
         {/* Who you can talk to */}
         <div className="border-b border-[var(--color-border)] py-1">
@@ -321,16 +302,11 @@ export function AgentChatTab({
                 agentBindings={agentBindings}
                 selectedKey={pendingAgentKey ?? defaultAgent}
                 onAsk={(text) => talkTo(heroAgent?.slug || "", { text })}
+                // The picker moves the model and nothing else; who answers is
+                // the rail's question, and it is already answered by the row
+                // the user highlighted.
                 onPickBrain={(sel) => {
-                  // The two fields are orthogonal — the picker names whichever
-                  // one the user changed — so binding an Agent leaves the model
-                  // alone, and vice versa.
                   if (sel.agentKey !== undefined) setPendingAgentKey(sel.agentKey);
-                  if (sel.agentSlug !== undefined) {
-                    setPendingAgent(
-                      agents.find((a) => a.slug === sel.agentSlug) || null,
-                    );
-                  }
                 }}
               />
             }
@@ -341,9 +317,95 @@ export function AgentChatTab({
           delegations={delegationData?.delegations ?? []}
           conversationId={activeSlot?.info.conversation_id || ""}
           agentSlug={activeSlot?.info.agent_slug || ""}
-          onOpenFleet={() => onTabChange("fleet")}
         />
       </div>
+    </div>
+  );
+}
+
+// ── Live strip ──
+
+/**
+ * What is looping, and the door into it.
+ *
+ * Strategies live on an agent's own page, so that is where this points — one
+ * live agent is a direct link, several open a short list. This replaced the
+ * fleet grid: the grid's only unique job was showing which agents are running,
+ * and a line at the top of the rail does that without a second page.
+ */
+function LiveStrip({
+  agents,
+  runningTasks,
+}: {
+  agents: AgentSummary[];
+  runningTasks: number;
+}) {
+  const [open, setOpen] = useState(false);
+  const tasks =
+    runningTasks > 0
+      ? ` · ${runningTasks} task${runningTasks !== 1 ? "s" : ""}`
+      : "";
+
+  const icon = (
+    <Zap
+      className={`h-3 w-3 shrink-0 ${agents.length > 0 ? "text-emerald-400" : ""}`}
+    />
+  );
+  const rowClass =
+    "flex min-w-0 flex-1 items-center gap-2 text-left text-[11px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]";
+
+  return (
+    <div className="relative flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
+      {agents.length === 0 ? (
+        <span className={rowClass}>
+          {icon}
+          <span className="min-w-0 flex-1 truncate">Nothing looping{tasks}</span>
+        </span>
+      ) : agents.length === 1 ? (
+        <Link
+          to={`/agents/${agents[0].slug}`}
+          className={rowClass}
+          title={`Open ${agents[0].name}'s strategies`}
+        >
+          {icon}
+          <span className="min-w-0 flex-1 truncate">
+            {agents[0].name} live{tasks}
+          </span>
+          <ArrowUpRight className="h-3 w-3 shrink-0" />
+        </Link>
+      ) : (
+        <button
+          onClick={() => setOpen((v) => !v)}
+          className={rowClass}
+          title="Open a running agent's strategies"
+        >
+          {icon}
+          <span className="min-w-0 flex-1 truncate">
+            {agents.length} live{tasks}
+          </span>
+          <ChevronDown className="h-3 w-3 shrink-0" />
+        </button>
+      )}
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
+          <div className="absolute left-2 top-full z-50 mt-1 flex w-[236px] flex-col rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 shadow-lg">
+            {agents.map((agent) => (
+              <Link
+                key={agent.slug}
+                to={`/agents/${agent.slug}`}
+                onClick={() => setOpen(false)}
+                className="flex items-center gap-2 px-2.5 py-1.5 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+              >
+                <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400" />
+                <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+                <ArrowUpRight className="h-3 w-3 shrink-0 text-[var(--color-text-muted)]" />
+              </Link>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   );
 }

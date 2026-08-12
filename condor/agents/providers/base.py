@@ -25,8 +25,13 @@ class BaseProvider:
         config: dict,
         agent_id: str = "",
         bot_names: list[str] | None = None,
+        since: float = 0.0,
     ) -> ProviderResult:
         """Gather this provider's slice of core data.
+
+        ``since`` is the instant the session took its bots over, for providers
+        that must report only what this session produced rather than a bot's
+        whole lifetime.
 
         ``bot_names`` are the bases the running session owns (from its ownership
         ledger); ``None`` means "not supplied" and providers that care fall back

@@ -286,3 +286,176 @@ def test_broken_channel_does_not_swallow_request(registry):
 
     outcome = asyncio.run(asyncio.wait_for(scenario(), timeout=2))
     assert outcome == {"outcome": {"outcome": "selected", "optionId": "allow"}}
+
+
+# ── Teardown denies whatever the session was still asking (SEC-094) ──
+
+
+class _DeadClient:
+    """Minimal stand-in for an agent client, for the teardown paths."""
+
+    def __init__(self, alive: bool = True):
+        self.alive = alive
+        self.stop_calls = 0
+
+    async def stop(self):
+        self.stop_calls += 1
+        self.alive = False
+
+
+def _install_session(monkeypatch, key, *, alive=True, user_id=1, **fields):
+    """Put one live-looking session behind ``key`` in the session registry."""
+    from condor.runtime import sessions as sessions_module
+
+    session = sessions_module.AgentSession(
+        key=key,
+        agent_key="claude-code",
+        client=_DeadClient(alive),
+        user_id=user_id,
+        **fields,
+    )
+    monkeypatch.setitem(sessions_module._sessions, str(key), session)
+    return session
+
+
+def test_destroying_a_session_denies_its_pending_confirmation(registry, monkeypatch):
+    """Teardown answers the approval nobody is left to act on."""
+    from condor.runtime import sessions as sessions_module
+    from condor.runtime.keys import SessionKey
+
+    key = SessionKey.telegram(42)
+    _install_session(monkeypatch, key)
+    pending = registry.register(str(key), 1, "sell everything", DANGEROUS, OPTIONS, 300)
+    other = registry.register("tg:99", 1, "unrelated", DANGEROUS, OPTIONS, 300)
+
+    assert asyncio.run(sessions_module._destroy_session_internal(key)) is True
+
+    assert pending.status is ConfirmationStatus.DENIED
+    assert pending._event.is_set()
+    # Scoped to the session that died — another chat's approval is untouched.
+    assert other.status is ConfirmationStatus.PENDING
+
+
+def test_respawn_strands_no_tappable_approval(registry, monkeypatch):
+    """Switching agent under the same key cancels the call and expires the tap.
+
+    The switch destroys and recreates ``tg:42``, so the old identity's request
+    must come back CANCELLED and its Approve button must no longer resolve —
+    which is what makes Telegram answer "Request expired." instead of
+    "Approved." for a call that would now run as whoever is bound.
+    """
+    from condor.runtime import sessions as sessions_module
+    from condor.runtime.keys import SessionKey
+
+    key = SessionKey.telegram(42)
+    _install_session(monkeypatch, key)
+    channel = _RecordingChannel()
+    cb = build_permission_callback(str(key), 1, [channel], timeout_seconds=300)
+
+    async def scenario():
+        task = asyncio.create_task(cb(DANGEROUS, OPTIONS))
+        for _ in range(100):
+            if channel.delivered:
+                break
+            await asyncio.sleep(0.005)
+        await sessions_module._destroy_session_internal(key)
+        outcome = await task
+        # The stale tap arrives after the switch.
+        late_tap = await registry.resolve(
+            channel.delivered[0].id, approved=True, by_user_id=1
+        )
+        return outcome, late_tap
+
+    outcome, late_tap = asyncio.run(asyncio.wait_for(scenario(), timeout=3))
+    assert outcome == CANCELLED
+    assert late_tap is False
+
+
+def test_reaping_a_dead_session_denies_its_pending_confirmation(registry, monkeypatch):
+    """Process death is a teardown too, even though it skips the destroy path."""
+    from condor.runtime import sessions as sessions_module
+    from condor.runtime.keys import SessionKey
+
+    key = SessionKey.telegram(7)
+    _install_session(monkeypatch, key, alive=False)
+    pending = registry.register(str(key), 1, "buy the top", DANGEROUS, OPTIONS, 300)
+
+    asyncio.run(sessions_module._enforce_session_budget(1))
+
+    assert pending.status is ConfirmationStatus.DENIED
+    assert str(key) not in sessions_module._sessions
+
+
+def test_denying_twice_is_a_no_op(registry, monkeypatch):
+    """The steer path and the teardown path cannot double-resolve one entry."""
+    from condor.runtime import sessions as sessions_module
+    from condor.runtime.keys import SessionKey
+
+    key = SessionKey.telegram(42)
+    _install_session(monkeypatch, key)
+    registry.register(str(key), 1, "sell everything", DANGEROUS, OPTIONS, 300)
+
+    assert registry.deny_pending_for_session(str(key)) == 1
+    assert asyncio.run(sessions_module._destroy_session_internal(key)) is True
+    assert registry.deny_pending_for_session(str(key)) == 0
+
+
+def test_confirmation_names_the_agent_and_server(registry, monkeypatch):
+    """An approval says which identity raised it, and where it would act."""
+    from condor.runtime.keys import SessionKey
+    from handlers.agents.confirmation import TelegramChannel
+
+    key = SessionKey.telegram(42)
+    _install_session(
+        monkeypatch,
+        key,
+        label="Executor Manager",
+        agent_slug="executor_manager",
+        server_name="hb-prod",
+    )
+    channel = _RecordingChannel()
+    cb = build_permission_callback(str(key), 1, [channel], timeout_seconds=300)
+
+    async def scenario():
+        task = asyncio.create_task(cb(DANGEROUS, OPTIONS))
+        for _ in range(100):
+            if channel.delivered:
+                break
+            await asyncio.sleep(0.005)
+        pending = channel.delivered[0]
+        await registry.resolve(pending.id, approved=False, by_user_id=1)
+        await task
+        return pending
+
+    pending = asyncio.run(asyncio.wait_for(scenario(), timeout=3))
+    assert pending.origin == "Executor Manager on hb-prod"
+    assert pending.to_wire()["origin"] == "Executor Manager on hb-prod"
+
+    sent = {}
+
+    class _Bot:
+        async def send_message(self, **kwargs):
+            sent.update(kwargs)
+
+    asyncio.run(TelegramChannel(_Bot(), 42).deliver(pending))
+    assert "Executor Manager on hb-prod" in sent["text"]
+
+
+def test_origin_is_empty_when_the_session_is_unknown(registry):
+    """Attribution is best-effort: no session, no claim about who is asking."""
+    channel = _RecordingChannel()
+    cb = build_permission_callback("tg:31337", 1, [channel], timeout_seconds=300)
+
+    async def scenario():
+        task = asyncio.create_task(cb(DANGEROUS, OPTIONS))
+        for _ in range(100):
+            if channel.delivered:
+                break
+            await asyncio.sleep(0.005)
+        pending = channel.delivered[0]
+        await registry.resolve(pending.id, approved=False, by_user_id=1)
+        await task
+        return pending
+
+    pending = asyncio.run(asyncio.wait_for(scenario(), timeout=3))
+    assert pending.origin == ""

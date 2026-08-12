@@ -109,6 +109,13 @@ class TickEngine:
     _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
+    _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
+    # Session canvas + live report (FEAT-036). Both None for experiments, which
+    # keep no journal and therefore no narrative to render.
+    _session_report: "SessionReport | None" = field(
+        default=None, init=False, repr=False
+    )
+    _nudge: "NudgeTracker | None" = field(default=None, init=False, repr=False)
     # The live per-tick ACP client, held so stop() can reap it if the tick's own
     # finally is skipped (e.g. cancelled mid-await). None between ticks.
     _active_client: "ACPClient | PydanticAIClient | None" = field(
@@ -167,14 +174,34 @@ class TickEngine:
                 agent_dir=strategy_dir,
             )
 
-        # The ledger only exists in controller mode: an executor-mode agent never
-        # touches a bot, so it gets no ownership enforcement and writes no file.
-        if self.config["bot_name"]:
-            namespace = bot_namespace(self.agent.slug, self.strategy.slug)
-            self.ledger = BotLedger(
-                namespace,
-                self.session_dir,
-                declared=declared_names(self.config, namespace),
+        # Every session gets a ledger. Declaring a bot_name decides whether the
+        # namespace rule is *enforced*, not whether deploys are *recorded*: an
+        # agent in executor mode can still call manage_bots (nothing stops it, and
+        # strategy playbooks routinely tell it to), and an unrecorded deploy is a
+        # bot whose PnL no surface can attribute to the session that placed it.
+        namespace = bot_namespace(self.agent.slug, self.strategy.slug)
+        self.ledger = BotLedger(
+            namespace,
+            self.session_dir,
+            declared=declared_names(self.config, namespace),
+            enforced=bool(self.config["bot_name"]),
+        )
+
+        # The canvas and its report exist only for loop sessions: an experiment
+        # has no session dir to write a canvas to and no history worth charting.
+        if not self.is_experiment and self.config.get("canvas_enabled", True):
+            from .canvas import NudgeTracker
+            from .session_report import SessionReport
+
+            self._nudge = NudgeTracker(
+                nudge_ticks=self.config.get("canvas_nudge_ticks", 12),
+                band_usd=self.config.get("canvas_band_usd", 25.0),
+            )
+            self._session_report = SessionReport(
+                self.agent.slug,
+                self.strategy.slug,
+                self.session_num,
+                frequency_sec=self.config.get("frequency_sec", 60),
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
@@ -228,6 +255,12 @@ class TickEngine:
                     "TickEngine %s: error reaping active client", self.agent_id
                 )
             self._active_client = None
+        # Close the ownership window before the journal: from here on this session
+        # operates nothing, so a bot left running must stop accruing to it. The
+        # next session adopts the bot on its first tick and picks the timeline up
+        # from there; the gap in between belongs to no session, which is the truth.
+        if self.ledger is not None:
+            self.ledger.release()
         if self.journal:
             self.journal.close()
         _supervisor().unregister(self.agent_id, LoopState.STOPPED)
@@ -287,6 +320,11 @@ class TickEngine:
                 f"verify positions manually! ({reason})"
             )
         finally:
+            # Mirrors stop(): the session operates nothing past this point, so its
+            # ownership window closes here too. run_shutdown() may have wound the
+            # bot down, but it also may have failed — either way the window ends.
+            if self.ledger is not None:
+                self.ledger.release()
             if self.journal:
                 self.journal.close()
             _supervisor().unregister(self.agent_id, LoopState.STOPPED)
@@ -406,6 +444,14 @@ class TickEngine:
             # the bots this session operates right now — including any extra one
             # it deployed beyond the configured name.
             bot_names=self.ledger.bases() if self.ledger else None,
+            # Earliest takeover across those bases. Bot PnL earned before it was
+            # inherited, not produced by this session, so it is sliced off rather
+            # than reported back to the agent as its own.
+            since=(
+                min((b.since for b in self.ledger.owned() if b.since > 0), default=0.0)
+                if self.ledger
+                else 0.0
+            ),
         )
 
         # Extract structured data from providers for tracking
@@ -485,6 +531,27 @@ class TickEngine:
             pass
 
         next_tick = self.journal.tick_count + 1 if self.journal else 1
+
+        # Session canvas (FEAT-036): the agent's own narrative, echoed back so it
+        # can revise what is now wrong. The nudge is pure bookkeeping over state
+        # we already hold, so deciding to nudge costs nothing.
+        canvas_text = ""
+        canvas_nudge = ""
+        if self._nudge is not None:
+            from . import canvas as canvas_mod
+
+            try:
+                canvas_text = canvas_mod.read_canvas(self.session_dir)
+                canvas_nudge = self._nudge.next(
+                    tick=next_tick,
+                    last_revised_tick=canvas_mod.last_revised_tick(self.session_dir),
+                    open_count=live_open_count,
+                    total_pnl=float(self._last_skill_data.get("total_pnl", 0.0) or 0.0),
+                    had_error=bool(self._last_error),
+                )
+            except Exception:
+                log.exception("TickEngine %s: canvas read failed", self.agent_id)
+
         prompt = build_tick_prompt(
             agent=self.agent,
             strategy=self.strategy,
@@ -500,6 +567,8 @@ class TickEngine:
             user_memory=user_memory,
             skills_index=skills_index,
             ledger=self.ledger,
+            canvas=canvas_text,
+            canvas_nudge=canvas_nudge,
         )
 
         # Inject pending user directives
@@ -572,6 +641,7 @@ class TickEngine:
             )
 
             self._journal_ownership_violations(tick_num)
+            self._journal_mode_mismatch(tick_num)
 
             skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
             skill_volume = self._last_skill_data.get("total_volume", 0.0)
@@ -608,6 +678,25 @@ class TickEngine:
                 last_action=action_brief,
             )
 
+            # Live session report (FEAT-036). Deterministic render over data we
+            # already hold — no tokens. The guard is load-bearing: a charting or
+            # report-index failure must never take down a trading tick.
+            if self._session_report is not None:
+                try:
+                    await self._session_report.update(
+                        info=self.get_info(),
+                        journal=self.journal,
+                        session_dir=self.session_dir,
+                        executors=self._last_skill_data.get("all_executors")
+                        or self._last_skill_data.get("executors")
+                        or [],
+                        pnl_series=await self._pnl_series(),
+                    )
+                except Exception:
+                    log.exception(
+                        "TickEngine %s: session report update failed", self.agent_id
+                    )
+
             log.info(
                 "TickEngine %s tick #%d complete (tools=%d, response=%d chars)",
                 self.agent_id,
@@ -617,11 +706,17 @@ class TickEngine:
             )
 
     async def _adopt_running_bots(self, client) -> None:
-        """Record the bots in our namespace that are already live (FEAT-017).
+        """Record the bots already live that belong to us (FEAT-017).
 
         Runs once, on the first tick — not in ``__post_init__``, which is sync and
         must not do network I/O. Reaching the API is best-effort: a failure means
         "own nothing yet" and is retried on the next tick, never fatal.
+
+        A namespace-enforcing session recognises its bots by name. One that does
+        not enforce has no such proof, so it adopts by *lineage* instead: a live
+        bot whose base an earlier session of this same strategy recorded owning is
+        this strategy's bot, and the session that just replaced that one inherits
+        it. Both rules are conservative — an unrecognised bot is left alone.
         """
         if self._adoption_done or self.ledger is None:
             return
@@ -633,9 +728,16 @@ class TickEngine:
             log.warning("TickEngine %s: bot adoption deferred (%s)", self.agent_id, e)
             return
 
+        from .ownership import prior_session_bases, strip_deploy_suffix
+
+        inherited: set[str] = set()
+        if not self.ledger.enforced and self.session_dir is not None:
+            inherited = prior_session_bases(self.session_dir.parent)
+
         now = time.time()
         for instance_name in all_perf:
-            if self.ledger.owns(instance_name):
+            base = strip_deploy_suffix(instance_name)
+            if self.ledger.owns(instance_name) or base in inherited:
                 self.ledger.adopt(instance_name, now)
         self._adoption_done = True
         if self.ledger.bases():
@@ -644,6 +746,63 @@ class TickEngine:
                 self.agent_id,
                 ", ".join(self.ledger.bases()),
             )
+
+    async def _pnl_series(self) -> list[dict]:
+        """This session's realized curve for the live report, or ``[]``.
+
+        Only meaningful once the session owns a bot: an executor-only session has
+        no bot history to derive from and the report falls back to the journal's
+        snapshots. Best-effort — a charting input must never cost a tick.
+        """
+        if not self.ledger or not self.ledger.bases():
+            return []
+        try:
+            from .performance import fetch_agent_pnl_series
+
+            client = await self._get_client()
+            since = min(
+                (b.since for b in self.ledger.owned() if b.since > 0), default=0.0
+            )
+            return await fetch_agent_pnl_series(client, self.ledger.bases(), since)
+        except Exception:
+            log.warning(
+                "TickEngine %s: pnl series failed", self.agent_id, exc_info=True
+            )
+            return []
+
+    def _journal_mode_mismatch(self, tick_num: int) -> None:
+        """Flag a session configured for executors that is actually running bots.
+
+        The config says how the session will trade; the strategy playbook says what
+        the model will do — and nothing reconciles them. A session left in executor
+        mode whose playbook says ``manage_bots(action="deploy", …)`` deploys bots
+        that no namespace protects, and before the ledger recorded them, no PnL
+        surface could attribute either. It is recorded now, so the numbers are
+        right; this says so once rather than leaving the operator to wonder why an
+        executor-mode agent reports a bot's PnL.
+        """
+        if self._mode_mismatch_noted or not self.journal or self.ledger is None:
+            return
+        if self.ledger.enforced or not self.ledger.bases():
+            return
+        self._mode_mismatch_noted = True
+        bases = ", ".join(self.ledger.bases())
+        log.warning(
+            "TickEngine %s: configured bot_mode=%s with no bot_name (executor "
+            "mode) but operates bots: %s — set bot_mode='bot' to enforce the "
+            "'%s' namespace on them",
+            self.agent_id,
+            self.config.get("bot_mode", "auto"),
+            bases,
+            self.ledger.namespace,
+        )
+        self.journal.append_error(
+            f"Config/behaviour mismatch: session runs in executor mode "
+            f"(bot_name empty) but deployed bots: {bases}. Their PnL IS "
+            f"attributed to this session, but they are outside the "
+            f"'{self.ledger.namespace}' namespace and so are not ownership-"
+            f"protected. Set bot_mode='bot' to enforce it."
+        )
 
     def _journal_ownership_violations(self, tick_num: int) -> None:
         """Surface refused bot calls in the journal.
@@ -699,7 +858,11 @@ class TickEngine:
             agent_slug=self.agent.slug,
         )
         permission_cb = auto_approve_with_risk_check(
-            self.risk, risk_state, execution_mode=mode, ledger=self.ledger
+            self.risk,
+            risk_state,
+            execution_mode=mode,
+            ledger=self.ledger,
+            agent_id=self.agent_id,
         )
 
         agent_key = self._agent_key()
@@ -824,9 +987,20 @@ class TickEngine:
             "status": self.status,
             "tick_count": summary["total_ticks"],
             "daily_pnl": sd.get("total_pnl", summary["daily_pnl"]),
+            "realized_pnl": sd.get("realized_pnl", 0.0),
+            "unrealized_pnl": sd.get("unrealized_pnl", 0.0),
             "total_volume": sd.get("total_volume", summary.get("total_volume", 0)),
             "total_exposure": sd.get("total_exposure", summary["total_exposure"]),
             "open_executors": len(sd.get("executors", [])) or summary["open_executors"],
+            # What the PnL above is made of, and what it is missing. A session
+            # operating bots earns through them, so naming them is the difference
+            # between a number and an auditable one.
+            "bot_names": sd.get("bot_names", []),
+            "bot_instances": sd.get("bot_instances", []),
+            "unresolved_bases": sd.get("unresolved_bases", []),
+            "controllers": sd.get("controllers", []),
+            "close_type_counts": sd.get("close_type_counts", {}),
+            "fees_known": sd.get("fees_known", True),
             "frequency_sec": self.config.get("frequency_sec", 60),
             "server_name": self.config.get("server_name", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),

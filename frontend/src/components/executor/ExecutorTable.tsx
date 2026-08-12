@@ -11,6 +11,7 @@ import { memo, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ExecutorChart } from "@/components/charts/ExecutorChart";
+import { PairLabel } from "@/components/executor/PairLabel";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { type ExecutorInfo } from "@/lib/api";
 import {
@@ -174,12 +175,14 @@ const ExecutorRow = memo(function ExecutorRow({
       <td className="px-4 py-2.5 text-sm text-[var(--color-text-muted)]">
         {ex.connector}
       </td>
-      <td className="px-4 py-2.5 text-sm font-medium">{ex.trading_pair}</td>
+      <td className="px-4 py-2.5 text-sm font-medium">
+        <PairLabel tradingPair={ex.trading_pair} connector={ex.connector} />
+      </td>
       <td className="px-4 py-2.5">
         <span
           className="text-xs font-semibold uppercase"
           style={{
-            color: side === "BUY" || side === "1" ? "var(--color-green)" : "var(--color-red)",
+            color: side === "BUY" ? "var(--color-green)" : "var(--color-red)",
           }}
         >
           {side}
@@ -392,8 +395,10 @@ export function DetailPanel({
   });
 
   const sideLabel = executor.side.toUpperCase();
-  const sideColor = sideLabel === "BUY" || sideLabel === "1" ? "var(--color-green)" : "var(--color-red)";
-  const sideBg = sideLabel === "BUY" || sideLabel === "1" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)";
+  // The backend normalizes every side to BUY/SELL (normalize_executor_side), so
+  // no raw "1"/"TradeType.BUY" fallback is needed here.
+  const sideColor = sideLabel === "BUY" ? "var(--color-green)" : "var(--color-red)";
+  const sideBg = sideLabel === "BUY" ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.1)";
   const configEntries = Object.entries(executor.config || {});
   const customEntries = Object.entries(executor.custom_info || {});
 
@@ -470,7 +475,7 @@ export function DetailPanel({
               {executor.type}
             </span>
             <span className="text-[var(--color-text-muted)]">{executor.connector}</span>
-            <span>{executor.trading_pair}</span>
+            <PairLabel tradingPair={executor.trading_pair} connector={executor.connector} />
             <span
               className="rounded px-1.5 py-0.5 text-xs font-semibold uppercase"
               style={{ color: sideColor, background: sideBg }}

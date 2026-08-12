@@ -3,6 +3,8 @@
 import logging
 from typing import Any, Dict, List, Optional
 
+from condor.fetchers.connectors import fetch_available_cex_connectors
+
 logger = logging.getLogger(__name__)
 
 
@@ -23,24 +25,18 @@ async def fetch_cex_balances(
 
     Returns:
         Dict of connector_name -> list of balances
+
+    Raises:
+        IdentifierError: if ``account_name`` is not a safe URL path segment.
     """
-    from condor.fetchers.connectors import is_cex_connector
+    # Outside the try: this validates ``account_name`` and the except below
+    # turns everything into {}, which would cache a bogus entry instead of
+    # surfacing the rejection.
+    cex = await fetch_available_cex_connectors(client, account_name)
+    if not cex:
+        return {}
 
     try:
-        configured = await client.accounts.list_account_credentials(account_name)
-
-        try:
-            available = set(await client.connectors.list_connectors())
-        except Exception:
-            available = None
-
-        cex = [c for c in configured if is_cex_connector(c)]
-        if available is not None:
-            cex = [c for c in cex if c in available]
-
-        if not cex:
-            return {}
-
         portfolio_state = await client.portfolio.get_state(
             account_names=[account_name],
             connector_names=cex,

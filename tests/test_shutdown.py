@@ -215,6 +215,8 @@ def _fake_engine(running_executors, positions_sequence, monkeypatch, tmp_path):
         config={},
         journal=_FakeJournal(),
         provider_registry=_Registry(),
+        # Executor-mode session: no bot, so no ownership window to release.
+        ledger=None,
         _last_skill_data={"executors": running_executors},
         _get_client=_get_client,
         _notify=_notify,
@@ -301,6 +303,7 @@ def test_run_shutdown_idempotent(monkeypatch):
         _task=None,
         _active_client=None,
         journal=None,
+        ledger=None,
         agent_id="acme.scalper_1",
         _notify=_notify,
     )

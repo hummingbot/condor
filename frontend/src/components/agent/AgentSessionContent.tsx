@@ -1,12 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
 import {
+  AlertTriangle,
+  Bot,
   ChevronDown,
   ChevronRight,
+  FileText,
   Wrench,
 } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import { ExecutorChart, type SnapshotBubble } from "@/components/charts/ExecutorChart";
+import { PairLabel } from "@/components/executor/PairLabel";
 import { AgentPnlChart, metricsToDataPoints } from "@/components/agent/AgentPnlChart";
 import { useAgentExecutors } from "@/hooks/useAgentExecutors";
 import { type AgentExecutorRow, type AgentPerformance, type ExecutorInfo, api } from "@/lib/api";
@@ -41,16 +47,332 @@ function agentRowToExecutorInfo(row: AgentExecutorRow): ExecutorInfo {
   };
 }
 
+/** "CloseType.EARLY_STOP" → "early stop" */
+function prettyCloseType(raw: string): string {
+  return raw.replace(/^CloseType\./, "").replace(/_/g, " ").toLowerCase();
+}
+
+/** Total closes and a readable breakdown from the raw close-type counts. */
+function closeSummary(perf?: AgentPerformance | null): { total: number; label: string } {
+  const counts = perf?.close_type_counts ?? {};
+  const entries = Object.entries(counts).filter(([, n]) => n > 0);
+  return {
+    total: entries.reduce((sum, [, n]) => sum + n, 0),
+    label: entries.map(([k, n]) => `${prettyCloseType(k)} ×${n}`).join(", "),
+  };
+}
+
+// ── Session KPIs ──
+//
+// Driven by `performance`, never by the executor rows. A session trading through
+// bots has no rows to derive anything from — its executors live inside the bot
+// instance's own database — so deriving the strip from rows made a session that
+// traded $1.2k and lost $1.46 render as one that did nothing at all.
+
+function Kpi({ label, value, sub, className = "" }: { label: string; value: string; sub?: string; className?: string }) {
+  return (
+    <div>
+      <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">{label}</span>
+      <span className={`font-mono text-sm font-semibold ${className || "text-[var(--color-text)]"}`}>{value}</span>
+      {sub && <span className="block text-[9px] text-[var(--color-text-muted)]/70">{sub}</span>}
+    </div>
+  );
+}
+
+export function SessionKpis({
+  perf,
+  summary,
+  hasReport,
+  onOpenReport,
+}: {
+  perf?: AgentPerformance | null;
+  summary?: { status: string; lastTick: number; lastAction: string };
+  hasReport?: boolean;
+  onOpenReport?: () => void;
+}) {
+  const total = perf?.total_pnl ?? 0;
+  const closes = closeSummary(perf);
+  const trades = perf?.trade_count ?? 0;
+  const volume = perf?.volume ?? 0;
+  const feesKnown = perf?.fees_known !== false;
+
+  // A round-trip count of zero next to real volume is the strict close-type
+  // filter refusing to read a directional controller's risk stop as a trade.
+  // Show the closes that did happen rather than a bare "0" the numbers contradict.
+  const tradeValue =
+    trades > 0 ? String(trades) : closes.total > 0 ? String(closes.total) : volume > 0 ? "—" : "0";
+  const tradeSub = trades === 0 && closes.total > 0 ? closes.label : undefined;
+
+  const status = summary?.status || "";
+  const statusClass =
+    status === "ACTIVE" || status === "running"
+      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+      : status === "paused"
+        ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
+        : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]";
+
+  return (
+    <div className="space-y-2">
+      {(perf?.unresolved_bases?.length ?? 0) > 0 && (
+        <div className="flex items-start gap-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-4 py-2.5 text-xs text-amber-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span>
+            <strong>Incomplete.</strong> No live or archived instance for{" "}
+            <span className="font-mono">{perf?.unresolved_bases?.join(", ")}</span>. The figures below are a
+            floor — whatever those bots did is not in them.
+          </span>
+        </div>
+      )}
+
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
+        {summary && (
+          <div>
+            <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Status</span>
+            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${statusClass}`}>
+              {status || "idle"}
+            </span>
+          </div>
+        )}
+        <Kpi
+          label="Total PnL"
+          value={formatCurrencyPnl(total)}
+          className={total >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}
+        />
+        <Kpi label="Realized" value={formatCurrencyPnl(perf?.realized_pnl ?? 0)} />
+        <Kpi label="Unrealized" value={formatCurrencyPnl(perf?.unrealized_pnl ?? 0)} />
+        <Kpi label="Volume" value={formatCompactUsd(volume)} />
+        <Kpi
+          label="Fees"
+          value={feesKnown ? formatCompactUsd(perf?.fees ?? 0) : "—"}
+          sub={feesKnown ? undefined : "not reported"}
+        />
+        <Kpi label="Closes" value={tradeValue} sub={tradeSub} />
+        <Kpi label="Open" value={String(perf?.open_count ?? 0)} />
+        {summary && summary.lastTick > 0 && <Kpi label="Ticks" value={`#${summary.lastTick}`} />}
+        {/* The session's own live report. It has always existed — rebuilt every
+            tick under a stable id — but was only reachable through the routines
+            report grid, where it appeared as a routine nobody had created. */}
+        {hasReport && (
+          <button
+            onClick={onOpenReport}
+            className="ml-auto flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/50 hover:text-[var(--color-primary)]"
+          >
+            <FileText className="h-3 w-3" /> Session report
+          </button>
+        )}
+      </div>
+
+      {summary?.lastAction && (
+        <p className="px-1 text-xs text-[var(--color-text-muted)]">
+          <span className="text-[10px] uppercase tracking-wider">Last action</span> — {summary.lastAction}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ── Bots & Controllers ──
+//
+// The answer to "what did this session actually run". The aggregator has always
+// known it; the HTTP model used to drop it, so the UI could not have shown it.
+
+export function SessionBots({ perf }: { perf?: AgentPerformance | null }) {
+  const instances = perf?.bot_instances ?? [];
+  const controllers = perf?.controllers ?? [];
+  const liveNames = useMemo(() => new Set(perf?.bot_names ?? []), [perf?.bot_names]);
+
+  // Group controllers under the instance they ran on, keeping deploy order.
+  const groups = useMemo(() => {
+    const byBot = new Map<string, typeof controllers>();
+    for (const c of controllers) {
+      const key = c.bot_name || "";
+      byBot.set(key, [...(byBot.get(key) ?? []), c]);
+    }
+    const names = instances.length > 0 ? instances : Array.from(byBot.keys());
+    return names.map((name) => ({ name, controllers: byBot.get(name) ?? [] }));
+  }, [controllers, instances]);
+
+  if (groups.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+      <h3 className="mb-3 flex items-center gap-2 text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+        <Bot className="h-3.5 w-3.5" /> Bots &amp; Controllers ({groups.length} deploy{groups.length !== 1 ? "s" : ""})
+      </h3>
+      <div className="space-y-3">
+        {groups.map(({ name, controllers: ctrls }) => {
+          const live = liveNames.has(name);
+          const realized = ctrls.reduce((s, c) => s + (c.realized_pnl_quote ?? 0), 0);
+          const volume = ctrls.reduce((s, c) => s + (c.volume_traded ?? 0), 0);
+          return (
+            <div key={name} className="rounded-md border border-[var(--color-border)]/60 bg-[var(--color-bg)]/40">
+              <div className="flex flex-wrap items-center gap-2 border-b border-[var(--color-border)]/40 px-3 py-2">
+                <span className="font-mono text-xs text-[var(--color-text)]">{name}</span>
+                {/* Derived from the live snapshot's membership, NOT from the
+                    controller `status` field — that reports "running" even for
+                    instances this session stopped hours ago. */}
+                <span
+                  className={`rounded-full border px-2 py-0.5 text-[9px] font-bold uppercase ${
+                    live
+                      ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                      : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
+                  }`}
+                >
+                  {live ? "running" : "stopped"}
+                </span>
+                <span className={`ml-auto font-mono text-xs ${realized >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
+                  {formatCurrencyPnl(realized)}
+                </span>
+                <span className="font-mono text-[10px] text-[var(--color-text-muted)]">{formatCompactUsd(volume)} vol</span>
+              </div>
+              {ctrls.length === 0 ? (
+                <p className="px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
+                  No performance snapshot retained for this deploy.
+                </p>
+              ) : (
+                <table className="w-full text-left text-xs">
+                  <thead>
+                    <tr className="text-[9px] uppercase tracking-widest text-[var(--color-text-muted)]">
+                      <th className="px-3 py-1.5 font-bold">Controller</th>
+                      <th className="px-3 py-1.5 text-right font-bold">Realized</th>
+                      <th className="px-3 py-1.5 text-right font-bold">Unrealized</th>
+                      <th className="px-3 py-1.5 text-right font-bold">Volume</th>
+                      <th className="px-3 py-1.5 text-right font-bold">Closes</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {ctrls.map((c, i) => {
+                      const cCloses = Object.entries(c.close_type_counts ?? {}).filter(([, n]) => n > 0);
+                      const cTotal = cCloses.reduce((s, [, n]) => s + n, 0);
+                      return (
+                        <tr key={`${c.controller_id}-${i}`} className="border-t border-[var(--color-border)]/25">
+                          <td className="px-3 py-1.5 font-mono text-[var(--color-text)]">
+                            {c.controller_id || "—"}
+                            {c.trading_pair && (
+                              <span className="ml-1.5 text-[10px] text-[var(--color-text-muted)]">{c.trading_pair}</span>
+                            )}
+                          </td>
+                          <td className={`px-3 py-1.5 text-right font-mono ${(c.realized_pnl_quote ?? 0) >= 0 ? "text-[var(--color-text-muted)]" : "text-[var(--color-red)]"}`}>
+                            {formatCurrencyPnl(c.realized_pnl_quote ?? 0)}
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono text-[var(--color-text-muted)]">
+                            {formatCurrencyPnl(c.unrealized_pnl_quote ?? 0)}
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono text-[var(--color-text-muted)]">
+                            {formatCompactUsd(c.volume_traded ?? 0)}
+                          </td>
+                          <td className="px-3 py-1.5 text-right font-mono text-[var(--color-text-muted)]">
+                            {cTotal === 0 ? "—" : cTotal}
+                            {cTotal > 0 && (
+                              <span className="ml-1 text-[9px] text-[var(--color-text-muted)]/70">
+                                {cCloses.map(([k]) => prettyCloseType(k)).join(", ")}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Session Canvas ──
+//
+// The agent's own thesis, written every tick and — until now — readable only
+// inside the live report. The numbers say what happened; this says what the
+// agent believed while it happened.
+
+export function SessionCanvasPanel({ slug, sslug, sessionNum }: { slug: string; sslug: string; sessionNum: number }) {
+  const [expanded, setExpanded] = useState(true);
+  const { data } = useQuery({
+    queryKey: ["strategy", slug, sslug, "session", sessionNum, "canvas"],
+    queryFn: () => api.getSessionCanvas(slug, sslug, sessionNum),
+    refetchInterval: 30000,
+  });
+
+  const sections = useMemo(() => {
+    if (!data) return [];
+    return data.section_order
+      .map((key) => ({ key, title: data.section_titles[key] ?? key, body: data.sections[key] ?? "" }))
+      .filter((s) => s.body.trim().length > 0);
+  }, [data]);
+
+  if (sections.length === 0) return null;
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <button
+        onClick={() => setExpanded((v) => !v)}
+        className="flex w-full items-center justify-between px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
+      >
+        <div className="flex items-center gap-2">
+          <h3 className="text-xs font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+            Narrative — the agent's own words
+          </h3>
+          {data && data.last_revised_tick > 0 && (
+            <span className="text-[10px] text-[var(--color-text-muted)]/70">
+              last revised at tick #{data.last_revised_tick} · unverified
+            </span>
+          )}
+        </div>
+        {expanded ? (
+          <ChevronDown className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+        ) : (
+          <ChevronRight className="h-3.5 w-3.5 text-[var(--color-text-muted)]" />
+        )}
+      </button>
+      {expanded && (
+        <div className="space-y-4 border-t border-[var(--color-border)] p-4">
+          {sections.map((s) => (
+            <div key={s.key}>
+              <h4 className="mb-1 text-[10px] font-bold uppercase tracking-widest text-[var(--color-text-muted)]">
+                {s.title}
+              </h4>
+              <div className="chat-markdown text-sm leading-relaxed text-[var(--color-text)]">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{s.body}</ReactMarkdown>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Session Overview ──
 
 export function SessionOverview(props: {
   journal: ParsedJournal;
   perf?: AgentPerformance | null;
+  pnlSeries?: { timestamp: string; pnl: number }[] | null;
 }) {
   const { metrics } = props.journal;
+  const { pnlSeries } = props;
 
-  // PnL chart data from metrics timeline
-  const pnlData = useMemo(() => metricsToDataPoints(metrics), [metrics]);
+  // Prefer the series derived from the bots' own history: the journal snapshots
+  // are only what the aggregator believed at each tick, so a session that ran
+  // while it could not see its bots has a permanently flat record of zeros.
+  // Fall back to the snapshots for pure executor sessions, which own no bot and
+  // so have no history to derive from.
+  const pnlData = useMemo(() => {
+    if (pnlSeries?.length) {
+      return pnlSeries
+        .filter((p) => p.timestamp)
+        .map((p) => ({
+          time: Math.floor(new Date(p.timestamp).getTime() / 1000),
+          value: p.pnl,
+        }))
+        .sort((a, b) => a.time - b.time);
+    }
+    return metricsToDataPoints(metrics);
+  }, [pnlSeries, metrics]);
 
   if (pnlData.length <= 1) {
     return null;
@@ -58,7 +380,11 @@ export function SessionOverview(props: {
 
   return (
     <div className="space-y-4">
-      <AgentPnlChart data={pnlData} height={400} title="Metrics Timeline" />
+      <AgentPnlChart
+        data={pnlData}
+        height={400}
+        title={pnlSeries?.length ? "Realized PnL" : "Metrics Timeline"}
+      />
     </div>
   );
 }
@@ -116,8 +442,8 @@ export function SessionExecutors({
   serverName,
   controllerIds,
   onSnapshotClick,
-  sessionSummary,
   isLiveSession = false,
+  botMode = false,
 }: {
   slug: string;
   sslug: string;
@@ -125,10 +451,13 @@ export function SessionExecutors({
   serverName: string;
   controllerIds?: string[];
   onSnapshotClick?: (tick: number) => void;
-  sessionSummary?: { status: string; lastTick: number; lastAction: string };
   /** True only for the session currently running: lets the WS contribute
    *  executors the session REST endpoint hasn't recorded yet. */
   isLiveSession?: boolean;
+  /** True when the session traded through bots. Its per-trade rows live inside
+   *  the bot instance's own database and never reach the agent_id-keyed executor
+   *  table, so "no rows" means "not retained here" — not "nothing happened". */
+  botMode?: boolean;
 }) {
   // REST data (fallback + historical executors)
   const { data: sessionDetail } = useQuery({
@@ -221,22 +550,6 @@ export function SessionExecutors({
     [executorInfos, serverName],
   );
 
-  // Aggregate stats
-  const stats = useMemo(() => {
-    let totalPnl = 0;
-    let totalVolume = 0;
-    let totalFees = 0;
-    let activeCount = 0;
-    for (const ex of executorInfos) {
-      totalPnl += ex.pnl ?? 0;
-      totalVolume += ex.volume ?? 0;
-      totalFees += ex.cum_fees_quote ?? 0;
-      const s = ex.status?.toLowerCase() ?? "";
-      if (s === "running" || s === "active_position" || s === "active") activeCount++;
-    }
-    return { totalPnl, totalVolume, totalFees, activeCount, total: executorInfos.length };
-  }, [executorInfos]);
-
   // Table state
   const [sortKey, setSortKey] = useState<SortKey>("timestamp");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
@@ -288,65 +601,20 @@ export function SessionExecutors({
     );
   }
 
+  // No rows is two different facts, and rendering them alike is what made a
+  // session that traded through three bot deploys read as one that never traded.
   if (executorInfos.length === 0) {
-    return <p className="py-8 text-center text-sm text-[var(--color-text-muted)]">No executors for this session.</p>;
+    return (
+      <p className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-3 text-xs leading-relaxed text-[var(--color-text-muted)]">
+        {botMode
+          ? "No open positions right now. This session trades through bots, whose per-trade rows stay inside each bot instance's own database and never reach the executor table — the realized figures above come from the controllers' performance history instead."
+          : "No executors for this session."}
+      </p>
+    );
   }
 
   return (
     <div className="space-y-3">
-      {/* Stats strip */}
-      <div className="flex flex-wrap items-center gap-4 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5">
-        {sessionSummary && (
-          <div>
-            <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Status</span>
-            <span className={`rounded-full border px-2 py-0.5 text-[10px] font-bold uppercase ${
-              sessionSummary.status === "ACTIVE" || sessionSummary.status === "running"
-                ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                : sessionSummary.status === "paused"
-                  ? "border-amber-500/30 bg-amber-500/10 text-amber-400"
-                  : "border-[var(--color-border)] bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]"
-            }`}>
-              {sessionSummary.status || "idle"}
-            </span>
-          </div>
-        )}
-        <div>
-          <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Net PnL</span>
-          <span className={`font-mono text-sm font-semibold ${stats.totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
-            {formatCurrencyPnl(stats.totalPnl)}
-          </span>
-        </div>
-        <div>
-          <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Volume</span>
-          <span className="font-mono text-sm text-[var(--color-text)]">{formatCompactUsd(stats.totalVolume)}</span>
-        </div>
-        <div>
-          <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
-          <span className="font-mono text-sm text-[var(--color-text-muted)]">{formatCompactUsd(stats.totalFees)}</span>
-        </div>
-        <div>
-          <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Executors</span>
-          <span className="text-sm text-[var(--color-text)]">
-            {stats.total}
-            {stats.activeCount > 0 && (
-              <span className="ml-1 text-emerald-400">({stats.activeCount} active)</span>
-            )}
-          </span>
-        </div>
-        {sessionSummary && sessionSummary.lastTick > 0 && (
-          <div>
-            <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Tick</span>
-            <span className="font-mono text-sm text-[var(--color-text)]">#{sessionSummary.lastTick}</span>
-          </div>
-        )}
-        {sessionSummary?.lastAction && (
-          <div>
-            <span className="block text-[9px] uppercase tracking-wider text-[var(--color-text-muted)]">Last Action</span>
-            <span className="text-sm text-[var(--color-text)]">{sessionSummary.lastAction}</span>
-          </div>
-        )}
-      </div>
-
       {/* Positions Held */}
       {positions.length > 0 && (
         <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
@@ -375,7 +643,9 @@ export function SessionExecutors({
                   const current = p.current_price ?? 0;
                   return (
                     <tr key={`${p.trading_pair}-${i}`} className="border-b border-[var(--color-border)]/30">
-                      <td className="py-2 pr-3 font-mono text-[var(--color-text)]">{p.trading_pair}</td>
+                      <td className="py-2 pr-3 font-mono text-[var(--color-text)]">
+                        <PairLabel tradingPair={p.trading_pair} connector={p.connector_name} />
+                      </td>
                       <td className="py-2 pr-3">
                         <span className={side.toLowerCase().includes("long") || side.toLowerCase() === "buy" ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}>
                           {side.toUpperCase()}
@@ -405,7 +675,11 @@ export function SessionExecutors({
             {/* Pair header (only when multiple pairs) */}
             {chartGroups.length > 1 && (
               <div className="mb-1.5 flex items-center gap-2 px-1">
-                <span className="text-xs font-medium text-[var(--color-text)]">{group[0].trading_pair}</span>
+                <PairLabel
+                  tradingPair={group[0].trading_pair}
+                  connector={group[0].connector}
+                  className="text-xs font-medium text-[var(--color-text)]"
+                />
                 <span className="text-[10px] text-[var(--color-text-muted)]">{group[0].connector}</span>
                 <span className={`ml-auto font-mono text-xs ${pairPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]"}`}>
                   {formatCurrencyPnl(pairPnl)}

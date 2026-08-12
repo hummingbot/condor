@@ -37,11 +37,17 @@ export function ToolCallStatus({
   // Computed above the empty-list early return so the hook below always runs;
   // `every` on an empty list is `true`, which reads correctly as "not running".
   const allDone = toolCalls.every((tc) => toolCallState(tc.status) !== "pending");
-  // Both inputs are required, not just `allDone`. A prompt that was abandoned
-  // mid-tool persists its non-terminal status, so a replayed transcript can
-  // contain a call that still looks pending forever; gating on the bubble
-  // actually streaming keeps history collapsed regardless.
-  const { expanded, toggle } = useLiveDisclosure(live && !allDone);
+  // Open for as long as the turn is being written, not only while a call is
+  // in flight. The calls worth watching are the ones that *return instantly*
+  // and keep working elsewhere — `delegate` hands back a task id, a routine is
+  // created and then runs — and gating on a pending status collapsed the list
+  // the moment those returned, which is the moment their name is the only
+  // thing telling the user what was set in motion.
+  //
+  // `live` alone still keeps history closed: a prompt abandoned mid-tool
+  // persists its non-terminal status, so a replayed transcript can contain a
+  // call that looks pending forever, and that bubble is not streaming.
+  const { expanded, toggle } = useLiveDisclosure(live);
 
   if (toolCalls.length === 0) return null;
 

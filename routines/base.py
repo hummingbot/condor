@@ -15,7 +15,7 @@ from typing import Any, Awaitable, Callable
 
 from pydantic import BaseModel
 
-from condor.memory.paths import CHAT_SLUG
+from condor.memory.paths import CHAT_SLUG, shared_routines_root
 
 logger = logging.getLogger(__name__)
 
@@ -23,19 +23,26 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def assistant_routines_dir(agent_slug: str | None) -> Path:
-    """Routines dir for an agent.
+    """The **writable** routines dir of an assistant — the one it owns.
 
     There is a single home for the general library — the repo-root ``routines/``,
-    owned by the chat ``condor``. Domain experts/trading agents are isolated: each
-    owns its routines and does **not** see the general library.
+    owned by the chat ``condor``. A trading agent / domain expert owns
+    ``agents/<slug>/routines``.
 
     - chat ``condor`` (``agent_slug`` None **or** ``"condor"``) → ``routines``
-    - trading agent / domain expert (slug) → ``agents/<slug>/routines`` (isolated)
+    - trading agent / domain expert (slug) → ``agents/<slug>/routines``
 
     The explicit ``"condor"`` carve-out is load-bearing (FEAT-033): Condor is now
     an ordinary entry under ``agents/``, so threading its slug through naively
     would relocate the general library to ``agents/condor/routines`` and empty
     the catalog — silently, since a missing dir simply lists nothing.
+
+    This is what an assistant may **write**, not everything it may run: since
+    FEAT-038 every assistant also *reads* the shared library
+    (:func:`condor.memory.paths.shared_routines_root`). Use
+    :func:`assistant_routines` for "what can this assistant run"; keeping this
+    function the writable dir is what makes an agent's ``create_routine``
+    physically unable to land in the shared root.
     """
     if agent_slug and agent_slug != CHAT_SLUG:
         return _PROJECT_ROOT / "agents" / agent_slug / "routines"
@@ -155,7 +162,14 @@ class RoutineInfo:
 
 def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
     """
-    Discover all routines in the routines folder.
+    Discover the general routine library: root ``routines/`` **plus** the shared
+    library ``agents/_shared/routines`` (FEAT-038), root shadowing shared.
+
+    Note this is no longer "the files in ``routines/``": a routine published for
+    every assistant lives in the shared root and is returned here too, with
+    ``source="global"`` and its bare name — because from every consumer's point
+    of view (``_store_name``, ``RoutineStore._resolve_routine``, the dock filter,
+    report attribution) it *is* part of the general library.
 
     Each routine module needs:
     - Config: Pydantic BaseModel with optional docstring description
@@ -239,6 +253,15 @@ def discover_routines(force_reload: bool = False) -> dict[str, RoutineInfo]:
 
         except Exception as e:
             logger.error(f"Failed to load routine {file_path.stem}: {e}")
+
+    shared = discover_routines_from_path(
+        shared_routines_root(), agent_slug=None, force_reload=force_reload
+    )
+    # Root ``routines/`` is the chat's OWN library and shadows the shared one,
+    # the same precedence SkillStore gives an assistant's own playbooks. The
+    # shared root keeps its own mtime cache in ``_path_caches``, so hot-reload
+    # behaves identically for both halves.
+    routines = {**shared, **routines}
 
     _routines_mtimes.clear()
     _routines_mtimes.update(scanned_mtimes)
@@ -340,6 +363,38 @@ def discover_routines_from_path(
 
     _path_caches[cache_key] = (scanned_mtimes, routines)
     return routines
+
+
+def assistant_routines(
+    agent_slug: str | None = None, force_reload: bool = False
+) -> dict[str, RoutineInfo]:
+    """Every routine an assistant can run: its OWN library over the SHARED one.
+
+    The routine mirror of ``SkillStore``'s two roots (FEAT-038), and the single
+    place that rule is spelled — the MCP tools, the agent prompt builder and the
+    skill's ``references_routine`` validation all read it here, so they cannot
+    disagree about what an assistant may call.
+
+    - the chat (falsy slug, or ``"condor"``) → :func:`discover_routines`, which
+      already merges root ``routines/`` over the shared library;
+    - an agent → ``agents/<slug>/routines`` over the shared library.
+
+    The own library **shadows** a shared routine of the same name: specialising
+    is creating a local routine, never forking the shared file. Shared entries
+    keep ``source="global"`` — they are the general library, un-prefixed.
+    """
+    if not agent_slug or agent_slug == CHAT_SLUG:
+        return discover_routines(force_reload=force_reload)
+
+    shared = discover_routines_from_path(
+        shared_routines_root(), agent_slug=None, force_reload=force_reload
+    )
+    own = discover_routines_from_path(
+        assistant_routines_dir(agent_slug),
+        agent_slug=agent_slug,
+        force_reload=force_reload,
+    )
+    return {**shared, **own}
 
 
 def get_routine(name: str) -> RoutineInfo | None:

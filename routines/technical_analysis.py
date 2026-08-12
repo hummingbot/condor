@@ -741,18 +741,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # Return rich result with chart for web dashboard
     text = format_analysis(df, supports, resistances, grid_info, config)
 
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder(f"Technical Analysis: {config.trading_pair}")
-        builder.source("routine", "technical_analysis").tags(
-            ["technical", config.trading_pair]
-        )
-        builder.markdown(text)
-        if plotly_fig is not None:
-            builder.plotly(plotly_fig)
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    builder = ReportBuilder(f"Technical Analysis: {config.trading_pair}")
+    builder.source("routine", "technical_analysis").tags(
+        ["technical", config.trading_pair]
+    )
+    builder.markdown(text)
+    if plotly_fig is not None:
+        builder.plotly(plotly_fig)
+    await builder.save()
 
     return RoutineResult(text=text, chart_image=chart_bytes)

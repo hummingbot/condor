@@ -5,6 +5,7 @@ import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor import dex_candles
 from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
@@ -43,6 +44,28 @@ from condor.web.models import (
 )
 
 router = APIRouter(tags=["market"])
+
+
+# A token or pool address: an EVM 0x-address or a base58 Solana pubkey. Guards the
+# values that reach GeckoTerminal as URL path segments, and tells a real address
+# apart from a plain ticker like "BTC".
+_ADDRESS_RE = dex_candles.ADDRESS_RE
+_POOL_ADDRESS_RE = _ADDRESS_RE
+
+
+async def _fetch_dex_candles(
+    connector: str,
+    pool_address: str | None,
+    trading_pair: str,
+    interval: str,
+    start_time: float | None,
+    end_time: float | None,
+) -> list[CandleData]:
+    """GeckoTerminal candles for a DEX/LP/XRPL pair, as the response model."""
+    rows = await dex_candles.fetch_dex_candles(
+        connector, pool_address, trading_pair, interval, start_time, end_time
+    )
+    return [CandleData(**row) for row in rows]
 
 
 @router.get("/servers/{name}/market/connectors")
@@ -156,7 +179,15 @@ async def get_trading_rules(
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
+    from condor.fetchers._identifiers import IdentifierError, validate_identifier
     from condor.server_data_service import ServerDataType, get_server_data_service
+
+    # Rejected here, not in the fetcher: SDS records a failed fetch as an
+    # error-only cache entry, so a bad connector would still mint a key.
+    try:
+        validate_identifier(connector, "connector name")
+    except IdentifierError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     try:
         result = await get_server_data_service().get_or_fetch(
@@ -283,11 +314,20 @@ async def get_candles(
     limit: int = Query(default=1000, ge=1, le=5000),
     start_time: float | None = Query(default=None, description="Unix epoch seconds"),
     end_time: float | None = Query(default=None, description="Unix epoch seconds"),
+    pool_address: str | None = Query(
+        default=None,
+        description="DEX pool address. Set by LP/DEX executor charts — their "
+        "connector (e.g. solana-mainnet-beta) has no CandlesFactory feed, so "
+        "candles come from GeckoTerminal by pool instead.",
+    ),
     user: WebUser = Depends(get_current_user),
 ):
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
+
+    if pool_address and not _POOL_ADDRESS_RE.match(pool_address):
+        raise HTTPException(status_code=400, detail="Invalid pool_address")
 
     # Bucket start_time to 60s intervals so near-identical requests share cache
     bucketed_start = int(start_time // 60) * 60 if start_time is not None else None
@@ -300,11 +340,22 @@ async def get_candles(
         limit,
         bucketed_start,
         bucketed_end,
+        pool_address,
     )
     now = time.monotonic()
     cached = _candle_cache.get(cache_key)
     if cached and (now - cached[0]) < _CANDLE_CACHE_TTL:
         return cached[1]
+
+    # Pairs with no CandlesFactory feed never reach the client below — that path
+    # 502s for them. A GeckoTerminal-backed connector (a DEX network, or an
+    # on-chain venue like xrpl) or an explicit pool_address routes there instead.
+    if pool_address or dex_candles.uses_gecko_candles(connector):
+        candles = await _fetch_dex_candles(
+            connector, pool_address, trading_pair, interval, start_time, end_time
+        )
+        _candle_cache_put(cache_key, candles, now)
+        return candles
 
     client = await cm.get_client(name)
     result = None
@@ -392,3 +443,28 @@ async def get_candles(
             )
     _candle_cache_put(cache_key, candles, now)
     return candles
+
+
+@router.get("/market/token-symbol")
+async def get_token_symbol(
+    mint: str = Query(..., description="Token mint or contract address"),
+    network: str = Query(
+        default="solana",
+        description="Network id or DEX connector (e.g. solana-mainnet-beta)",
+    ),
+    user: WebUser = Depends(get_current_user),
+):
+    """Resolve a token address to its ticker.
+
+    LP/DEX executors store ``trading_pair`` as ``<base_mint>-<quote>`` because
+    Gateway cannot resolve memecoins by symbol, so without this the dashboard shows
+    a raw mint. Not server-scoped — it is a pure GeckoTerminal lookup, so the
+    executor tables can resolve a symbol without threading a server name through
+    every row. Auth is still required.
+    """
+    from handlers.dex.pool_data import fetch_token_symbol
+
+    if not _ADDRESS_RE.match(mint):
+        raise HTTPException(status_code=400, detail="Invalid token address")
+
+    return {"mint": mint, "symbol": await fetch_token_symbol(mint, network)}

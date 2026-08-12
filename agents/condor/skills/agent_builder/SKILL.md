@@ -91,6 +91,19 @@ manage_trading_agent(
 > `active_agent_key` and their saved `custom_llm_endpoints` if you need to show or
 > confirm the choice.
 
+> **Leave `server_name` empty.** Same discipline, different field. An empty
+> `server_name` means "follow whichever server the chat is on", which is right for
+> almost every agent — and it is the only value that travels, because an agent is
+> shared, committed, and read on machines whose server list is nothing like the
+> creating operator's. Naming the server you happen to be on **pins** the agent to
+> it: its `mcp-hummingbot` subprocess and every strategy it deploys use that server
+> forever, regardless of the chat, and on anyone else's install it names a server
+> that does not exist. Pass a name **only** when the user explicitly says this agent
+> must always trade on that specific server. It is not a field to fill in helpfully
+> because `server_required: true` sits next to it. The pin can be set or cleared
+> later from the agent's page (the server chip beside its model), so leaving it
+> empty costs nothing.
+
 The **AGENT.md body (`instructions`)** is the brain — write it as the agent's own system
 prompt, kept tight: **who it is** (its domain + what it explicitly does NOT handle),
 **what it knows** (durable domain knowledge), and **how it answers** (lead with the
@@ -127,11 +140,10 @@ as the upgrade, then guide the user through it one routine at a time:
 2. **Create** — hand the writing to a background worker
    (`delegate(action="start", agent="condor", task="...")`); it follows the
    `routine_cookbook` playbook and tests the routine before reporting. Tell it the
-   target agent so it passes the right `strategy_id`. Routines live at
-   the agent level and are shared across consults and any future loop. Pass the **agent
-   slug** as `strategy_id` (it accepts a bare agent slug or `agent_slug.strategy_slug`):
+   target agent so it passes the right `agent`. Routines live at the agent level
+   and are shared across consults and any future loop — pass the **agent slug**:
    ```
-   manage_routines(action="create_routine", strategy_id="<agent_slug>",
+   manage_routines(action="create_routine", agent="<agent_slug>",
                    name="band_scanner", code="<python>")
    ```
 3. **Analyze the output** — run it and read it together; iterate until it's clean and
@@ -282,6 +294,9 @@ it into a questionnaire — it's the easiest thing to change later.
 enforced on pydantic-ai consults and loops (empty = unrestricted; not enforceable on ACP
 keys). An agent keeps its own domain memory (`manage_memory`) and reusable playbooks
 (`manage_skill`/`agents/{slug}/skills/`) — the agent OWNS skills; it is not itself a skill.
+A new agent also reads the **shared** library (`agents/_shared/skills/`) from birth, so it
+gets `routine_cookbook` and friends for free — write only what is specific to its domain,
+and target it explicitly with `manage_skill(..., agent="<slug>")`.
 
 **Editing & deleting:** read the current brain with `get_agent(agent_slug=…)`, edit with
 `update_agent(agent_slug=…, instructions=…)`. `delete_agent` refuses while the agent still
@@ -294,6 +309,10 @@ owns strategies — delete those first (`delete_strategy`).
   else.
 - Only the step label as a header. Be direct; status as key: value.
 - Every agent is consultable (always set `when_to_consult`).
+- **Never invent an `agent_key` or a `server_name`.** Both default to "follow the
+  operator" — pass either one only when the user named it. A guessed model or a
+  helpfully-filled server pin fails on someone else's install, long after creation
+  reported success.
 - Create the AGENT.md FIRST — routines and strategies require an existing agent_slug.
 - One routine per analysis task; run it and show the output before moving on.
 - A loop doesn't have to trade — it can report or watch. Always include risk limits when

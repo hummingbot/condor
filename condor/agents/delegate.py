@@ -44,6 +44,16 @@ DEFAULT_TIMEOUT_S = 900
 # where a huge output was cut. ``dt.events`` itself keeps the full output.
 MAX_TOOL_OUTPUT = 2000
 
+# What happens to the conversation that asked for the work when the task ends.
+#
+# ``notify`` -- Telegram push + transcript note, and nothing else. The outcome is
+#              for the human to read.
+# ``resume`` -- additionally wake the live session with the result so the agent
+#              continues whatever it was going to do with it (FEAT-034).
+ON_COMPLETE_NOTIFY = "notify"
+ON_COMPLETE_RESUME = "resume"
+ON_COMPLETE_CHOICES = (ON_COMPLETE_NOTIFY, ON_COMPLETE_RESUME)
+
 
 @dataclass
 class DelegateTask:
@@ -60,6 +70,11 @@ class DelegateTask:
     # delegations with no conversation behind them (a consult, a tick engine, or
     # anything started before provenance existed) -- honest rather than guessed.
     conversation_id: str = ""
+    # The session that asked, and what it wants when the task ends. The
+    # conversation id alone cannot *prompt* anything -- the runtime is addressed
+    # by key -- so a wake needs both (FEAT-034).
+    session_key: str = ""
+    on_complete: str = ON_COMPLETE_NOTIFY
     # Wall-clock start, so a watcher can show elapsed time without having been
     # there when the task began.
     started_at: float = field(default_factory=time.time)
@@ -80,6 +95,10 @@ class DelegateTask:
             "result": self.result,
             "error": self.error,
             "conversation_id": self.conversation_id,
+            # One word, and the dock can say "will continue in chat".
+            # ``session_key`` deliberately stays out: it is plumbing, and this
+            # dict is polled straight into a chat agent's context.
+            "on_complete": self.on_complete,
             "started_at": self.started_at,
             # NOTE: `events` is deliberately omitted. This dict is what the MCP
             # `delegate` tool polls, so including the session stream would dump
@@ -107,6 +126,8 @@ async def start_delegation(
     bot=None,
     timeout_s: int = DEFAULT_TIMEOUT_S,
     conversation_id: str = "",
+    session_key: str = "",
+    on_complete: str = ON_COMPLETE_NOTIFY,
 ) -> DelegateTask:
     """Create a DelegateTask, spawn the detached runner, register it, return now.
 
@@ -122,6 +143,13 @@ async def start_delegation(
         server_name=server_name,
         task=task,
         conversation_id=conversation_id,
+        session_key=session_key,
+        # Unknown values degrade to the passive behaviour rather than raising
+        # here: the caller-facing validation is at the edges (the MCP tool and
+        # the route), and a delegation must not fail to *start* over a flag.
+        on_complete=(
+            on_complete if on_complete in ON_COMPLETE_CHOICES else ON_COMPLETE_NOTIFY
+        ),
     )
     _delegations[dt.task_id] = dt
     _record_delegation_status(dt)
@@ -133,12 +161,21 @@ def _delegation_status_name(task_id: str) -> str:
     return f"{task_id}.status.json"
 
 
+TERMINAL_STATES = ("done", "error", "stopped")
+
+
 def _record_delegation_status(dt: "DelegateTask") -> None:
-    """Persist this delegation's state next to its transcript.
+    """Persist this delegation's *record* next to its transcript.
 
     Written at start (not only at the end) precisely so a task the process dies
     on leaves something to reconcile — a transcript is only written when the
     task finishes.
+
+    It carries the whole record, not just the state, because this file is what
+    :mod:`condor.agents.delegation_history` rebuilds a row from once the
+    in-memory registry is gone (FEAT-035). ``write_status`` merges, so the
+    fields the start-time write cannot know (result, tool count, end time)
+    simply arrive with the final write.
     """
     try:
         from condor.agents.agent import AgentStore
@@ -149,6 +186,7 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
             return
         delegations_dir = agent.agent_dir / "delegations"
         delegations_dir.mkdir(parents=True, exist_ok=True)
+        extra = {"ended_at": time.time()} if dt.status in TERMINAL_STATES else {}
         write_status(
             delegations_dir,
             _delegation_status_name(dt.task_id),
@@ -158,7 +196,15 @@ def _record_delegation_status(dt: "DelegateTask") -> None:
             chat_id=dt.chat_id,
             user_id=dt.user_id,
             conversation_id=dt.conversation_id,
+            session_key=dt.session_key,
+            on_complete=dt.on_complete,
             started_at=dt.started_at,
+            task=dt.task,
+            server_name=dt.server_name,
+            result=dt.result,
+            error=dt.error,
+            tool_count=sum(1 for e in dt.events if e.get("type") == "tool"),
+            **extra,
         )
     except Exception:
         log.debug(
@@ -249,6 +295,13 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
                 await _notify_done(dt, bot)
             except Exception:
                 log.exception("Failed to notify delegation %s done", dt.task_id)
+            # Last, and never before the notification: a wake that fails must
+            # not cost the user their message. Only a task that actually
+            # produced something is worth continuing from -- a failed or timed
+            # out one gives the agent nothing to work with, and the error is
+            # already in the chat and in the transcript.
+            if dt.on_complete == ON_COMPLETE_RESUME and dt.status == "done":
+                await _resume_conversation(dt)
 
 
 async def stop_delegation(task_id: str) -> bool:
@@ -342,6 +395,10 @@ def _render_session(events: list[dict]) -> str:
     return "\n\n".join(parts)
 
 
+def _events_sidecar_name(task_id: str) -> str:
+    return f"{task_id}.events.json"
+
+
 def _persist_transcript(dt: DelegateTask) -> None:
     """Write a session transcript under agents/{slug}/delegations/{task_id}.md.
 
@@ -349,7 +406,15 @@ def _persist_transcript(dt: DelegateTask) -> None:
     heavyweight ``sessions/`` tree -- a delegate has no ticks to journal. Captures
     the full session: the agent's reasoning, every tool call (with input/output),
     and the final result, so nothing about *how* the task was solved is lost.
+
+    A ``{task_id}.events.json`` sidecar goes out alongside it (FEAT-035): the
+    markdown is for a human reading the repo, the JSON is what lets the dashboard
+    render a finished delegation with the same collapsible transcript it shows
+    while the task is running. Both are projections of the same ``dt.events``
+    through the same output bound, so they cannot drift apart.
     """
+    import json
+
     from condor.agents.agent import AgentStore
 
     agent = AgentStore().get(dt.agent_slug)
@@ -374,6 +439,9 @@ def _persist_transcript(dt: DelegateTask) -> None:
         f"{body or '(none)'}\n"
     )
     (delegations_dir / f"{dt.task_id}.md").write_text(content)
+    (delegations_dir / _events_sidecar_name(dt.task_id)).write_text(
+        json.dumps({"events": events_for_wire(dt.events)}, indent=2)
+    )
 
 
 def _completion_text(dt: DelegateTask) -> str:
@@ -424,18 +492,63 @@ def _record_completion_turn(dt: DelegateTask) -> None:
         )
 
 
-async def _notify_done(dt: DelegateTask, bot) -> None:
-    """Notify the user the delegation finished.
+RESUME_INSTRUCTION = (
+    "You started this task earlier in this conversation. Continue with whatever "
+    "you were going to do with the result. If nothing remains, say so in one "
+    "line -- do not restate the result."
+)
+
+
+def _resume_text(dt: DelegateTask) -> str:
+    """The turn a woken conversation reads.
+
+    Built on :func:`_completion_text` so the wake, the chat push and the
+    transcript note cannot tell three different stories about one task. The
+    closing instruction is the cost control that matters in practice: without
+    it the overwhelmingly common wake turn is the agent paraphrasing an answer
+    the user can already read.
+    """
+    return f"[background task complete] {_completion_text(dt)}\n\n{RESUME_INSTRUCTION}"
+
+
+async def _resume_conversation(dt: DelegateTask) -> None:
+    """Hand the result back to the live session that asked for it (FEAT-034).
+
+    Never allowed to raise: by here the user has already been notified and the
+    transcript already carries the outcome, so a wake that cannot happen costs
+    nothing. Imported lazily like the rest of this module's runtime touchpoints.
+    """
+    if not dt.session_key or not dt.conversation_id:
+        return
+    try:
+        from condor.runtime import wake
+
+        woke = await wake.resume_session(
+            session_key=dt.session_key,
+            conversation_id=dt.conversation_id,
+            text=_resume_text(dt),
+            kind="resume",
+        )
+        if not woke:
+            log.debug(
+                "Delegation %s asked to resume %s but there was nothing live to wake",
+                dt.task_id,
+                dt.conversation_id,
+            )
+    except Exception:
+        log.exception("Failed to resume conversation for delegation %s", dt.task_id)
+
+
+def resolve_bot(bot=None):
+    """The best Telegram sender available in this process.
 
     Prefer the passed live ``bot``; otherwise fall back to the registered routine
     bot, and finally the ``_HttpBot`` Telegram-HTTP path (``TELEGRAM_TOKEN``) that
-    routines/notification already use, so a process with no live bot still delivers.
+    routines/notification already use, so a process with no live bot still
+    delivers. Public because a Telegram wake sink (FEAT-034) must reach the user
+    through exactly the same ladder a completion notice does -- two ladders would
+    eventually disagree about who can talk to a chat.
     """
-    if not dt.chat_id:
-        return
-
-    text = _completion_text(dt)
-
     target = bot
     if target is None:
         try:
@@ -448,5 +561,12 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
         from condor.routine_store import _HttpBot
 
         target = _HttpBot()
+    return target
 
-    await target.send_message(chat_id=dt.chat_id, text=text)
+
+async def _notify_done(dt: DelegateTask, bot) -> None:
+    """Notify the user the delegation finished."""
+    if not dt.chat_id:
+        return
+
+    await resolve_bot(bot).send_message(chat_id=dt.chat_id, text=_completion_text(dt))

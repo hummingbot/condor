@@ -17,7 +17,6 @@ import yamlLib from "js-yaml";
 
 import { CodeEditor } from "@/components/editor/CodeEditor";
 import { ControllerPnlChart } from "@/components/bots/ControllerPnlChart";
-import { AgentToggleButton } from "@/components/layout/AgentToggleButton";
 import { api, type ControllerInfo } from "@/lib/api";
 import { configToYaml, CONTROLLER_HIDDEN_KEYS } from "@/lib/configYaml";
 import { formatCurrencyVolume, formatCurrencyPnl, pnlColor } from "@/lib/formatters";
@@ -454,7 +453,6 @@ export function ControllerBrowser({
               )}
             </button>
             {/* Agent chat toggle */}
-            <AgentToggleButton />
             <button
               onClick={onClose}
               className="ml-1 rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"

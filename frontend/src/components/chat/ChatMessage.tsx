@@ -1,7 +1,7 @@
 import { memo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { ChevronDown, ChevronRight, Square, User, Bot } from "lucide-react";
+import { ChevronDown, ChevronRight, Loader2, Square, User, Bot } from "lucide-react";
 import type { ChatMessage as ChatMessageType } from "@/hooks/useChatSocket";
 import { useLiveDisclosure } from "@/hooks/useLiveDisclosure";
 import { ToolCallStatus } from "./ToolCallStatus";
@@ -16,7 +16,17 @@ function ThoughtBlock({ text, live }: { text: string; live: boolean }) {
         className="flex items-center gap-1 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)] transition-colors"
       >
         {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-        Thinking...
+        {live ? (
+          // Same treatment the tool list gets while it runs: the spinner is
+          // what says the reasoning is still arriving rather than finished and
+          // merely worded in the present tense.
+          <span className="flex items-center gap-1">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            Thinking...
+          </span>
+        ) : (
+          <span>Thought</span>
+        )}
       </button>
       {expanded && (
         <div className="mt-1 ml-4 text-xs text-[var(--color-text-muted)] italic whitespace-pre-wrap">
@@ -44,7 +54,19 @@ export const ChatMessageView = memo(function ChatMessageView({
   // is prose, not a label: the divider treatment (uppercase, nowrap, 10px)
   // would render it as one unreadable line. It stays visibly not-the-agent's
   // own words — an inset note, no avatar — while still being readable.
-  if (message.role === "system" && message.kind === "delegation") {
+  //
+  // A `resume` note is the same shape: it is what a finished background task
+  // said to the agent to make it continue. Nobody typed it, so it must not
+  // render as a user bubble. So is a `notification`: the agent announced it to
+  // the user out of band, and the transcript records that it did. And so is a
+  // `routine` outcome — a run's result, often a multi-line error, which the
+  // divider rendered as one shouting, unreadable, un-wrapped line.
+  const isNote =
+    message.kind === "delegation" ||
+    message.kind === "resume" ||
+    message.kind === "notification" ||
+    message.kind === "routine";
+  if (message.role === "system" && isNote) {
     return (
       <div className="my-3 flex justify-start">
         <div className="chat-markdown max-w-[85%] rounded-xl border border-dashed border-[var(--color-border)] px-3.5 py-2 text-sm text-[var(--color-text-muted)]">
@@ -102,8 +124,18 @@ export const ChatMessageView = memo(function ChatMessageView({
             </div>
           )}
           {!message.text && message.toolCalls.length === 0 && !message.thought && (
-            <div className="rounded-2xl rounded-tl-sm bg-[var(--color-surface-hover)] px-3.5 py-2 text-sm text-[var(--color-text-muted)]">
-              ...
+            <div className="flex items-center gap-1.5 rounded-2xl rounded-tl-sm bg-[var(--color-surface-hover)] px-3.5 py-2 text-sm text-[var(--color-text-muted)]">
+              {/* The bubble exists before anything is in it. While the turn is
+                  live that gap is the agent working, so it spins like the tool
+                  list does; a bubble that ended up empty just stays quiet. */}
+              {live ? (
+                <>
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  <span className="text-xs">Working...</span>
+                </>
+              ) : (
+                "..."
+              )}
             </div>
           )}
           {/* The user redirected the agent here. Subdued on purpose: the

@@ -48,11 +48,37 @@ def format_bot_logs_as_table(logs: list[dict[str, Any]]) -> str:
     return f"{header}\n{separator}\n" + "\n".join(rows)
 
 
+def format_controller_state(controller_data: dict[str, Any]) -> str:
+    """
+    Derive the real run state of a controller.
+
+    The `status` field the API reports per controller is NOT the run state: it is a
+    hardcoded "running" that only flips to "error" when the performance report fails
+    to parse (hummingbot-api `bots_orchestrator._clean_controller_data`). A controller
+    stopped via its kill switch keeps publishing performance and keeps reporting
+    "running". The authoritative signal is `manual_kill_switch` in the bot's controller
+    config, attached here as `kill_switch` by `get_active_bots_status`.
+
+    Returns one of: "stopped", "error", "running", "unknown".
+    """
+    if not isinstance(controller_data, dict):
+        return "unknown"
+
+    kill_switch = controller_data.get("kill_switch")
+    if kill_switch is True:
+        return "stopped"
+    if get_field(controller_data, "status", default="") == "error":
+        return "error"
+    if kill_switch is False:
+        return "running"
+    return "unknown"
+
+
 def format_active_bots_as_table(bots_data: dict[str, Any]) -> str:
     """
     Format active bots data as a table string for better LLM processing.
 
-    Columns: bot_name | controller | status | realized_pnl | unrealized_pnl | global_pnl | volume | errors
+    Columns: bot_name | controller | state | realized_pnl | unrealized_pnl | global_pnl | volume | errors
 
     Args:
         bots_data: Dictionary containing bot data
@@ -64,7 +90,7 @@ def format_active_bots_as_table(bots_data: dict[str, Any]) -> str:
         return "No active bots found."
 
     # Header
-    header = "bot_name | controller | status | realized_pnl | unrealized_pnl | global_pnl | volume | errors | recent_logs"
+    header = "bot_name | controller | state | realized_pnl | unrealized_pnl | global_pnl | volume | errors | recent_logs"
     separator = format_table_separator()
 
     # Format each bot as rows
@@ -94,8 +120,8 @@ def format_active_bots_as_table(bots_data: dict[str, Any]) -> str:
         else:
             # Bot with controllers
             for controller_name, controller_data in performance.items():
-                ctrl_status = get_field(controller_data, "status", default="unknown")
-                ctrl_perf = controller_data.get("performance", {})
+                ctrl_state = format_controller_state(controller_data)
+                ctrl_perf = controller_data.get("performance", {}) if isinstance(controller_data, dict) else {}
 
                 realized_pnl = format_number(get_field(ctrl_perf, "realized_pnl_quote", default=None), compact=False)
                 unrealized_pnl = format_number(get_field(ctrl_perf, "unrealized_pnl_quote", default=None), compact=False)
@@ -106,7 +132,7 @@ def format_active_bots_as_table(bots_data: dict[str, Any]) -> str:
                 row = (
                     f"{bot_name} | "
                     f"{controller_name} | "
-                    f"{ctrl_status} | "
+                    f"{ctrl_state} | "
                     f"{realized_pnl} | "
                     f"{unrealized_pnl} | "
                     f"{global_pnl} ({global_pnl_pct}) | "

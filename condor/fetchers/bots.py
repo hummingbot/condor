@@ -37,6 +37,25 @@ def extract_bots_list(result: Any) -> list[dict]:
     return []
 
 
+def _pick_value(live: dict, db: dict, key: str, default: Any = None) -> Any:
+    """Merge a field preferring live, by key presence — not truthiness.
+
+    An empty live reading (``0``, ``{}``, ``[]``) is legitimate — a freshly
+    redeployed controller has closed nothing and holds no positions — so it must
+    win over the DB snapshot instead of falling through to a stale value from a
+    previous deploy. Only an absent key falls back to the DB.
+    """
+    if key in live:
+        return live[key]
+    return db.get(key, default)
+
+
+def _pick(live: dict, db: dict, key: str, default: float = 0.0) -> float:
+    """Presence-based merge of a numeric field, coerced to float."""
+    val = _pick_value(live, db, key, default)
+    return float(val if val is not None else default)
+
+
 def build_bots_page(
     raw_status: Any,
     *,
@@ -109,35 +128,15 @@ def build_bots_page(
                     live_perf = {}
 
                 # Merge: prefer live data for real-time fields, DB for historical consistency
-                realized = float(
-                    live_perf.get("realized_pnl_quote", 0)
-                    or db_perf.get("realized_pnl_quote", 0)
-                    or 0
-                )
-                unrealized = float(
-                    live_perf.get("unrealized_pnl_quote", 0)
-                    or db_perf.get("unrealized_pnl_quote", 0)
-                    or 0
-                )
+                realized = _pick(live_perf, db_perf, "realized_pnl_quote")
+                unrealized = _pick(live_perf, db_perf, "unrealized_pnl_quote")
                 global_pnl = realized + unrealized
-                global_pnl_pct = float(
-                    live_perf.get("global_pnl_pct", 0)
-                    or db_perf.get("global_pnl_pct", 0)
-                    or 0
-                )
-                volume = float(
-                    live_perf.get("volume_traded", 0)
-                    or db_perf.get("volume_traded", 0)
-                    or 0
-                )
-                close_types = live_perf.get("close_type_counts") or db_perf.get(
-                    "close_type_counts", {}
-                )
+                global_pnl_pct = _pick(live_perf, db_perf, "global_pnl_pct")
+                volume = _pick(live_perf, db_perf, "volume_traded")
+                close_types = _pick_value(live_perf, db_perf, "close_type_counts", {})
                 if not isinstance(close_types, dict):
                     close_types = {}
-                positions = live_perf.get("positions_summary") or db_perf.get(
-                    "positions_summary", []
-                )
+                positions = _pick_value(live_perf, db_perf, "positions_summary", [])
                 if not isinstance(positions, list):
                     positions = []
 

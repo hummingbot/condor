@@ -10,7 +10,11 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
+from functools import partial
 from typing import Any
+
+from condor.fetchers._pagination import walk_pages
 
 log = logging.getLogger(__name__)
 
@@ -24,7 +28,11 @@ class AgentPerformance:
     volume: float = 0.0
     fees: float = 0.0
     trade_count: int = 0
-    win_rate: float = 0.0
+    # Executor-derived, and ``None`` when there is nothing to derive it from —
+    # which is not the same as 0%. Only closed executor rows carry a per-trade
+    # outcome; a bot-mode agent's trades come from the controller snapshot, which
+    # says how many positions closed but not how any of them ended.
+    win_rate: float | None = None
     open_count: int = 0
     closed_count: int = 0
     executors: list[dict[str, Any]] = field(default_factory=list)
@@ -34,7 +42,29 @@ class AgentPerformance:
     # is a list; the merge is plain addition over disjoint sets and needs no
     # de-duplication as long as the bases are disjoint (see ``resolve_bots``).
     bot_names: list[str] = field(default_factory=list)
+    # Every instance that ever ran under an owned base, oldest deploy first —
+    # including the ones this session already stopped. ``bot_names`` names only the
+    # instances alive now, so a session that redeployed three times reported the
+    # last one and hid the two it had operated and wound down. Both are needed:
+    # the live names say what is running, this says what the session ran.
+    bot_instances: list[str] = field(default_factory=list)
     controllers: list[dict[str, Any]] = field(default_factory=list)
+    # Raw ``CloseType.X -> n`` breakdown across every operated controller.
+    # ``trade_count`` counts only round-trip closes, which reads a directional
+    # controller's risk stop (EARLY_STOP) as churn and reports 0 trades on a
+    # session that closed three positions. Nothing in the payload tells a market
+    # maker's re-quote from a directional stop, so the breakdown ships alongside
+    # the count instead of a heuristic guessing between them.
+    close_type_counts: dict[str, int] = field(default_factory=dict)
+    # False when ``fees`` is a floor rather than a figure: a backend that reports
+    # no cumulative fee column leaves bot-mode fees derivable only from open
+    # positions, so a flat bot sums to 0.0 — which is "unknown", not "free".
+    fees_known: bool = True
+    # Owned bases that resolved to no instance at all — neither running nor
+    # archived. Their contribution is unknown, not zero, and the two must not
+    # render alike: a session whose bot has vanished reporting "$0.00" reads as
+    # "traded flat" when it means "cannot see the bot".
+    unresolved_bases: list[str] = field(default_factory=list)
 
     @property
     def bot_name(self) -> str:
@@ -56,95 +86,65 @@ def _extract_executors_list(result: Any) -> list[dict]:
 
 
 def _executor_row(ex: dict) -> dict[str, Any]:
-    from condor.fetchers.executors import (
-        get_executor_fees,
-        get_executor_pnl,
-        get_executor_volume,
-    )
+    """The agents-side display row for one raw executor.
 
-    cfg = ex.get("config", ex) if isinstance(ex.get("config"), dict) else ex
-    custom_info = ex.get("custom_info") or {}
-    if not isinstance(custom_info, dict):
-        custom_info = {}
+    The transform itself is shared — :func:`condor.fetchers.executors.build_executor_row`
+    — so an executor cannot mean two things depending on whether the executors
+    tab or the agent session view built its row. Only the agents-side reading of
+    it stays here: ``status`` is uppercased for this wire, and a position
+    executor that resolved no entry price is worth a log line.
+    """
+    from condor.fetchers.executors import build_executor_row
 
-    # entry_price is a display-only field; PnL comes straight from the executor's
-    # reported fields via get_executor_pnl() and never depends on it.
-    # Only position executors carry a real entry_price (config > top-level > custom_info).
-    # Grid/DCA executors expose break_even_price instead; use it as the display "entry".
-    _cfg_entry = float(cfg.get("entry_price") or 0)
-    _top_entry = float(ex.get("entry_price") or 0)
-    _ci_entry = float(custom_info.get("current_position_average_price") or 0)
-    _be_price = float(custom_info.get("break_even_price") or 0)
-    entry_price = _cfg_entry or _top_entry or _ci_entry or _be_price or 0.0
+    row = build_executor_row(ex)
+    row["status"] = row["status"].upper()
+
     # A position executor with no entry_price is genuinely suspicious; everything
     # else legitimately lacks one, so don't warn for them.
-    _ex_type = str(cfg.get("type") or ex.get("type") or "").lower()
-    if entry_price == 0.0 and "position" in _ex_type:
+    if row["entry_price"] == 0.0 and "position" in str(row["type"]).lower():
         log.warning(
             "entry_price fell back to 0.0 for position executor %s — PnL may be wrong",
-            ex.get("id") or ex.get("executor_id") or "?",
+            row["id"] or "?",
         )
-
-    # current_price / close_price: top-level > custom_info
-    _top_cur = float(ex.get("current_price") or 0)
-    _ci_cur = float(custom_info.get("current_price") or 0)
-    _ci_close = float(custom_info.get("close_price") or 0)
-    current_price = (
-        _top_cur
-        if _top_cur > 0
-        else (_ci_cur if _ci_cur > 0 else (_ci_close if _ci_close > 0 else 0.0))
-    )
-
-    amount = float(cfg.get("total_amount_quote") or cfg.get("amount") or 0)
-    if amount <= 0:
-        amount = float(custom_info.get("total_value_quote") or 0)
-
-    return {
-        "id": str(ex.get("id") or ex.get("executor_id") or ""),
-        "type": cfg.get("type") or ex.get("type") or "",
-        "connector": cfg.get("connector_name")
-        or ex.get("connector_name")
-        or cfg.get("connector")
-        or ex.get("connector")
-        or "",
-        "pair": cfg.get("trading_pair") or ex.get("trading_pair") or "",
-        "side": str(cfg.get("side") or ex.get("side") or ""),
-        "status": str(ex.get("status") or "").upper(),
-        "close_type": str(ex.get("close_type") or ""),
-        "pnl": get_executor_pnl(ex),
-        "volume": get_executor_volume(ex),
-        "fees": get_executor_fees(ex),
-        "entry_price": entry_price,
-        "current_price": current_price,
-        "amount": amount,
-        "timestamp": float(cfg.get("timestamp") or ex.get("timestamp") or 0),
-        "close_timestamp": float(ex.get("close_timestamp") or 0),
-        "controller_id": str(cfg.get("controller_id") or ex.get("controller_id") or ""),
-        "custom_info": custom_info,
-        "config": ex.get("config") if isinstance(ex.get("config"), dict) else {},
-    }
+    return row
 
 
 async def fetch_agent_performance(
-    client: Any, agent_id: str, bot_names: list[str] | None = None
+    client: Any,
+    agent_id: str,
+    bot_names: list[str] | None = None,
+    since: float = 0.0,
 ) -> AgentPerformance:
     """Fetch authoritative performance for a single ``agent_id``.
 
     When ``bot_names`` is given, the agent is in controller mode: each named bot's
-    aggregate PnL is merged into the returned totals (see
+    PnL is merged into the returned totals (see
     :func:`fetch_agent_performance_batch`).
+
+    ``since`` is the instant this session took the bots over. With it, the bot's
+    realized/volume/trades/fees are sliced to ``[since, now)`` exactly as the web
+    rollup slices them, so a session that adopted a long-running bot is not
+    credited with the PnL it inherited. Without it the whole lifetime aggregate is
+    merged, which is only right for a session that deployed the bot itself.
     """
     names = [b for b in (bot_names or []) if b]
     batch = await fetch_agent_performance_batch(
-        client, [agent_id], {agent_id: names} if names else None
+        client,
+        [agent_id],
+        {agent_id: names} if names else None,
+        since={agent_id: since} if names and since > 0 else None,
     )
     return batch.get(
         agent_id, AgentPerformance(agent_id=agent_id, bot_names=list(names))
     )
 
 
-def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
-    """Fold a bot's aggregate into an executor-derived ``AgentPerformance`` in place.
+def _merge_bot_perf(
+    perf: AgentPerformance,
+    bot: dict[str, Any],
+    window: tuple[float, float, float, float] | None = None,
+) -> None:
+    """Fold a bot's contribution into an executor-derived ``AgentPerformance``.
 
     The two sources are disjoint (bot controllers tag executors with their own
     config ids, never the ``agent_id``), so the merge is plain addition — no
@@ -155,21 +155,155 @@ def _merge_bot_perf(perf: AgentPerformance, bot: dict[str, Any]) -> None:
     Additive in the bot dimension too: folding several owned bots in turn
     accumulates rather than overwrites, so a session operating two bots reports
     their sum and both controller breakdowns.
+
+    ``window`` is this session's sliced ``(realized, volume, trades, fees)`` from
+    the controller history. When given it replaces the lifetime aggregate for
+    those four; unrealized PnL and the open rows always come from the live
+    snapshot, since the open book belongs to whoever operates the bot now.
+
+    Trades come from the bot's real round-trip closes (``closed_trades``, or the
+    sliced ``trades`` when a window is given) — never from ``rows``, which only
+    describe the positions open at this instant. ``win_rate`` is left untouched:
+    the bot snapshot reports how many positions closed but not how each one ended,
+    so a bot-mode agent has no per-trade outcome to derive one from.
     """
     from condor.fetchers.bot_performance import bot_executor_rows
 
-    perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
+    rows = bot_executor_rows(bot)
+    open_rows = [r for r in rows if r["status"] == "RUNNING"]
+
+    if window is None:
+        closes = int(bot.get("closed_trades", 0) or 0)
+        volume_added = float(bot.get("volume_traded", 0) or 0)
+        fees_added = float(bot.get("cum_fees_quote", 0) or 0)
+        perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
+        perf.volume += volume_added
+        perf.fees += fees_added
+    else:
+        realized, volume, trades, fees = window
+        closes = int(round(trades))
+        perf.realized_pnl += realized
+        perf.volume += volume
+        # A backend that reports no cumulative fee column slices to zero; the
+        # live open-position figure is then the only one there is.
+        fees_added = fees if fees else float(bot.get("cum_fees_quote", 0) or 0)
+        volume_added = volume
+        perf.fees += fees_added
+
+    # Traded but charged nothing: the fee column is missing, not the fees.
+    if volume_added > 0 and fees_added == 0.0:
+        perf.fees_known = False
+
+    for ct, n in (bot.get("close_type_counts") or {}).items():
+        perf.close_type_counts[str(ct)] = perf.close_type_counts.get(str(ct), 0) + int(
+            n or 0
+        )
+
+    perf.trade_count += closes
+    perf.closed_count += closes
     perf.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
     perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
-    perf.volume += float(bot.get("volume_traded", 0) or 0)
-    perf.fees += float(bot.get("cum_fees_quote", 0) or 0)
     perf.controllers = perf.controllers + list(bot.get("controllers", []))
-
-    rows = bot_executor_rows(bot)
     perf.executors = perf.executors + rows
-    open_rows = [r for r in rows if r["status"] == "RUNNING"]
     perf.open_count += len(open_rows)
-    perf.trade_count += len(rows)
+
+
+async def fetch_agent_pnl_series(
+    client: Any,
+    bot_names: list[str],
+    since: float,
+    until: float = 0.0,
+) -> list[dict[str, Any]]:
+    """This session's realized-PnL curve over its ownership window.
+
+    Reconstructed from the bots' own controller-performance history rather than
+    replayed from the per-tick journal snapshots. The snapshots are a *cache* of
+    whatever the aggregator believed at each tick, so a session that ticked while
+    the aggregator was blind to its bots holds a permanent record of flat zeros —
+    the KPI can be corrected, a written-down snapshot cannot. Deriving the curve
+    from the same history the KPI is sliced from means the two cannot disagree,
+    and a fix reaches every past session without rewriting any journal.
+
+    Realized only: the history carries no unrealized column, and a mark-to-market
+    line would in any case be a point-in-time value rather than something that
+    accrues. The final point therefore matches the KPI's *Realized*, not its
+    *Total*, whenever a position is still open.
+
+    Returns ``[{"timestamp": iso, "pnl": realized, "volume": volume}, …]``, empty
+    when the session owns no bot or the history is unavailable.
+    """
+    import time as _time
+
+    from condor.fetchers.bot_performance import (
+        fetch_all_bot_performance,
+        fetch_archived_instances,
+        fetch_base_histories,
+        slice_history,
+    )
+
+    bases = [b for b in (bot_names or []) if b]
+    if not client or not bases or since <= 0:
+        return []
+
+    end = until if until > 0 else _time.time()
+    try:
+        all_bot_perf = await fetch_all_bot_performance(client)
+    except Exception as e:
+        log.warning("pnl series: bot snapshot failed: %s", e)
+        all_bot_perf = {}
+    archived = await fetch_archived_instances(client)
+    try:
+        histories = await fetch_base_histories(
+            client, all_bot_perf, bases, since, end, extra_names=archived
+        )
+    except Exception as e:
+        log.warning("pnl series: history fetch failed: %s", e)
+        return []
+
+    instances = [h for hs in histories.values() for h in hs if h]
+    if not instances:
+        return []
+
+    # One point per instant any instance was sampled. Each is the whole session's
+    # cumulative at that moment, so the curve is continuous across a redeploy
+    # rather than restarting at zero with each new bot.
+    stamps = sorted({t for h in instances for t, *_ in h if since <= t <= end})
+    series: list[dict[str, Any]] = []
+    for t in stamps:
+        realized, volume, _trades, _fees = slice_history(instances, since, t)
+        series.append(
+            {
+                "timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),
+                "pnl": realized,
+                "volume": volume,
+            }
+        )
+    return series
+
+
+def _merge_stopped_bot_perf(
+    perf: AgentPerformance,
+    window: tuple[float, float, float, float],
+) -> None:
+    """Fold a stopped bot's sliced window into ``perf``.
+
+    The live-snapshot counterpart of :func:`_merge_bot_perf` has nothing to work
+    with once a bot is archived — there is no aggregate, no open book and no
+    controller breakdown, only the history it left behind. That history is the
+    whole point: a session is judged on what it realized, and stopping the bot is
+    the normal way a session ends. Everything an open position would contribute
+    (unrealized PnL, executor rows) is correctly absent.
+    """
+    realized, volume, trades, fees = window
+    closes = int(round(trades))
+    perf.realized_pnl += realized
+    perf.volume += volume
+    perf.fees += fees
+    if volume > 0 and fees == 0.0:
+        perf.fees_known = False
+    perf.trade_count += closes
+    perf.closed_count += closes
+    perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
 
 
 def _build_perf_from_rows(
@@ -189,7 +323,7 @@ def _build_perf_from_rows(
     volume = sum(r["volume"] for r in rows)
     fees = sum(r["fees"] for r in rows)
 
-    win_rate = 0.0
+    win_rate: float | None = None
     if closed:
         wins = sum(1 for r in closed if r["pnl"] > 0)
         win_rate = wins / len(closed)
@@ -214,12 +348,19 @@ async def fetch_agent_performance_batch(
     agent_ids: list[str],
     bot_names: dict[str, list[str]] | None = None,
     failed_ids: set[str] | None = None,
+    since: dict[str, float] | None = None,
 ) -> dict[str, AgentPerformance]:
     """Batched multi-agent fetch via a single cursor-paginated executor search.
 
     ``bot_names`` maps ``agent_id -> the bases it owns`` for agents running in
-    controller mode; each such agent's bot aggregates (one shared snapshot fetch
-    for the whole batch) are merged into its executor-derived totals.
+    controller mode; each such agent's bot figures (one shared snapshot fetch for
+    the whole batch) are merged into its executor-derived totals.
+
+    ``since`` maps ``agent_id -> the instant it took its bots over``. Where it is
+    known, that agent's bot realized/volume/trades/fees are sliced from the
+    controller history to ``[since, now)`` instead of taking the bot's whole
+    lifetime, so the figure matches what the web rollup attributes to the same
+    session.
 
     ``failed_ids``, when provided, is populated with the agent_ids whose executor
     search raised — their entries may be partial/empty. This lets callers avoid
@@ -236,36 +377,22 @@ async def fetch_agent_performance_batch(
     # causing sessions with many executors to appear as zero in the rollup
     # while the per-session endpoint showed the correct numbers.
     PAGE_SIZE = 50
-    MAX_PAGES = 200  # safety cap → 10,000 executors per agent
+    # Safety cap, expressed in rows: the walker counts what it accumulated, not
+    # how many times it looped, and its own terminal guards end a stalled walk.
+    MAX_PAGES = 200  # → 10,000 executors per agent
 
     async def _fetch_rows(aid: str) -> list[dict]:
         rows: list[dict] = []
-        cursor: str | None = None
         try:
-            for _ in range(MAX_PAGES):
-                kwargs: dict[str, Any] = {
-                    "controller_ids": [aid],
-                    "limit": PAGE_SIZE,
-                }
-                if cursor:
-                    kwargs["cursor"] = cursor
-                result = await client.executors.search_executors(**kwargs)
-                page = _extract_executors_list(result)
+            async for page in walk_pages(
+                partial(client.executors.search_executors, controller_ids=[aid]),
+                _extract_executors_list,
+                page_size=PAGE_SIZE,
+                max_items=MAX_PAGES * PAGE_SIZE,
+            ):
                 for ex in page:
                     if isinstance(ex, dict):
                         rows.append(_executor_row(ex))
-
-                next_cursor = None
-                if isinstance(result, dict):
-                    next_cursor = result.get("next_cursor") or result.get("cursor")
-                    pagination = result.get("pagination")
-                    if not next_cursor and isinstance(pagination, dict):
-                        next_cursor = pagination.get("next_cursor") or pagination.get(
-                            "cursor"
-                        )
-                if not next_cursor or len(page) < PAGE_SIZE:
-                    break
-                cursor = next_cursor
         except Exception as e:
             log.warning("search_executors(%s) failed: %s", aid, e)
             if failed_ids is not None:
@@ -284,9 +411,15 @@ async def fetch_agent_performance_batch(
         if aid in out and any(bases)
     }
     if wanted:
+        import time
+
         from condor.fetchers.bot_performance import (
             fetch_all_bot_performance,
+            fetch_archived_instances,
+            fetch_base_histories,
+            partition_instances,
             resolve_bots,
+            slice_history,
         )
 
         try:
@@ -294,16 +427,54 @@ async def fetch_agent_performance_batch(
         except Exception as e:
             log.warning("fetch_all_bot_performance failed: %s", e)
             all_bot_perf = {}
+        # Stopped instances still hold the realized PnL they earned, and a session
+        # that stopped its bot before the rollup ran would otherwise report $0.
+        archived = await fetch_archived_instances(client)
+        now = time.time()
         for aid, bases in wanted.items():
             # Resolved per agent over ALL its bases at once, so an owned parent
             # never resolves to a tagged sibling's instance and no bot is merged
             # into the same agent twice.
             live = resolve_bots(all_bot_perf, bases)
+            instances = partition_instances(all_bot_perf, bases, archived)
+            start = float((since or {}).get(aid, 0.0) or 0.0)
+            windows: dict[str, tuple[float, float, float, float]] = {}
+            if start > 0 and (all_bot_perf or archived):
+                try:
+                    histories = await fetch_base_histories(
+                        client, all_bot_perf, bases, start, now, extra_names=archived
+                    )
+                    windows = {
+                        base: slice_history(hs, start, now)
+                        for base, hs in histories.items()
+                    }
+                except Exception as e:
+                    # Falling back to the lifetime aggregate over-credits an
+                    # adopted bot, but reporting zero would be worse: the agent
+                    # would read a live position as costless.
+                    log.warning("history slice for %s failed: %s", aid, e)
             for base in bases:
                 bot = live.get(base)
                 # An unresolved base (never deployed, or no snapshot yet) still
                 # names the bot the agent operates, as the single-bot path did.
                 out[aid].bot_names.append(bot.get("bot_name", base) if bot else base)
+                # Everything ever deployed under the base, stopped instances
+                # included — the session operated them all, and the two this one
+                # wound down are exactly where its realized PnL came from.
+                out[aid].bot_instances.extend(instances.get(base) or [])
                 if bot:
-                    _merge_bot_perf(out[aid], bot)
+                    _merge_bot_perf(out[aid], bot, windows.get(base))
+                elif base in windows:
+                    # Stopped: no live snapshot to merge, but the window over its
+                    # archived history is exactly what this session realized on it.
+                    _merge_stopped_bot_perf(out[aid], windows[base])
+                if not instances.get(base):
+                    out[aid].unresolved_bases.append(base)
+            if out[aid].unresolved_bases:
+                log.warning(
+                    "agent %s owns bases with no live or archived instance: %s — "
+                    "their PnL is unknown, not zero",
+                    aid,
+                    ", ".join(out[aid].unresolved_bases),
+                )
     return out

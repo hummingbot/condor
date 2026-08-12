@@ -186,6 +186,17 @@ export interface ExecutorInfo {
   config: Record<string, unknown>;
 }
 
+/** Executor totals for a period, aggregated server-side over the full history.
+ *  `pnl` and `volume` are USD-denominated; `converted` is false when some quote
+ *  asset had no path to USD and its rows were counted in their own quote. */
+export interface ExecutorPeriodSummary {
+  period: string;
+  pnl: number;
+  volume: number;
+  count: number;
+  converted: boolean;
+}
+
 export interface PositionHeld {
   connector_name: string;
   trading_pair: string;
@@ -340,7 +351,8 @@ export interface RunningInstance {
   fees: number;
   open_count: number;
   closed_count: number;
-  win_rate: number;
+  /** null = no closed executors to derive it from (bot-mode sessions), not 0%. */
+  win_rate: number | null;
   server_name: string;
   total_amount_quote: number;
   trading_context: string;
@@ -429,10 +441,60 @@ export interface AgentPerformance {
   volume: number;
   fees: number;
   trade_count: number;
-  win_rate: number;
+  /** null = no closed executors to derive it from (bot-mode sessions), not 0%. */
+  win_rate: number | null;
   open_count: number;
   closed_count: number;
   executors: AgentExecutorRow[];
+  // ── Bot-mode attribution ──
+  // A session trading through bots has no rows in the agent_id-keyed executor
+  // table: its executors live inside the bot instance's own database, and the
+  // only ones Condor can reconstruct are the positions open right now. These say
+  // what the session actually operated when `executors` is empty.
+  /** Instance names alive now, one per owned base. */
+  bot_names?: string[];
+  /** Every instance ever deployed under an owned base, oldest first — a name in
+   *  here but not in `bot_names` is one this session already stopped. */
+  bot_instances?: string[];
+  /** Owned bases with no live and no archived instance: their PnL is unknown,
+   *  not zero, so the totals are a floor. */
+  unresolved_bases?: string[];
+  controllers?: AgentControllerRow[];
+  /** Raw `CloseType.X -> n` across the operated bots. `trade_count` counts only
+   *  round-trip closes and reads a directional controller's risk stop as churn,
+   *  so this is what explains "0 trades" on non-zero volume. */
+  close_type_counts?: Record<string, number>;
+  /** False when `fees` is a floor: the backend reports no cumulative fee column,
+   *  so 0 means unknown rather than free. */
+  fees_known?: boolean;
+}
+
+/** One controller of one bot instance a session operated. */
+export interface AgentControllerRow {
+  /** The deploy this controller ran under. */
+  bot_name: string;
+  controller_id: string;
+  controller_name: string;
+  connector: string;
+  trading_pair: string;
+  /** From the performance snapshot, which reports "running" even for archived
+   *  instances — never render this as live truth. Derive liveness from whether
+   *  `bot_name` appears in `AgentPerformance.bot_names`. */
+  status: string;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  volume_traded: number;
+  cum_fees_quote: number;
+  closed_trades: number;
+  close_type_counts: Record<string, number>;
+}
+
+export interface SessionCanvas {
+  sections: Record<string, string>;
+  section_titles: Record<string, string>;
+  section_order: string[];
+  last_revised_tick: number;
+  revisions: { tick: number; section: string; text: string }[];
 }
 
 export interface AgentPerformanceResponse {
@@ -470,8 +532,21 @@ export interface AgentDetail {
   strategies: StrategySummary[];
 }
 
+// How a delegation ended. `running`…`stopped` come from the live registry;
+// `interrupted` is a task whose process died mid-flight, and `unknown` a
+// transcript too old to say — both only ever arrive from history.
+export type DelegationStatus =
+  | "running"
+  | "done"
+  | "error"
+  | "stopped"
+  | "interrupted"
+  | "unknown";
+
 // Delegation = a fire-and-forget background task handed to a detached Agent
-// instance (DELEGATE mode). Ephemeral + in-process; status drives the UI.
+// instance (DELEGATE mode). The registry is in-process, but the record outlives
+// it on disk — so this shape also comes back from history (FEAT-035), where
+// `ended_at`/`tool_count` are known and the live registry has nothing to say.
 export interface Delegation {
   task_id: string;
   agent: string;
@@ -479,14 +554,19 @@ export interface Delegation {
   chat_id: number;
   server_name: string | null;
   task: string;
-  status: "running" | "done" | "error" | "stopped";
+  status: DelegationStatus;
   result: string;
   error: string;
   /** The conversation that started this task; "" when there was none. */
   conversation_id: string;
   /** Wall-clock start (epoch seconds) — drives the elapsed time. */
   started_at: number;
+  ended_at?: number;
+  tool_count?: number;
 }
+
+/** A history row: the record minus the bodies, which the sheet fetches on open. */
+export type DelegationSummary = Omit<Delegation, "result" | "error">;
 
 // One entry of a delegation's session transcript. Mirrors the three shapes the
 // runner's event sink folds into `DelegateTask.events`; tool entries are patched
@@ -557,6 +637,13 @@ export interface RoutineInstance {
   config: Record<string, unknown>;
   status: string;
   source: string;
+  /**
+   * The conversation that asked for this run, "" for the scheduler, the
+   * dashboard and Telegram. Set since ARCH-089, and what scopes a run to a
+   * chat — the routine's own name cannot, since an agent runs shared-library
+   * routines under their bare name.
+   */
+  conversation_id?: string;
   schedule?: Record<string, unknown>;
   created_at: number;
   last_run_at: number | null;
@@ -731,6 +818,8 @@ export interface AgentBindingOption {
   name: string;
   description: string;
   when_to_consult: string;
+  /** The model it answers on unless the user overrides one — its own default. */
+  agent_key: string;
 }
 
 export interface SessionOptionsResponse extends ChatOptionsResponse {
@@ -1027,6 +1116,11 @@ export const api = {
     );
   },
 
+  getExecutorsSummary: (server: string, period: string) =>
+    apiFetch<ExecutorPeriodSummary>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/summary?period=${encodeURIComponent(period)}`,
+    ),
+
   getExecutorsPage: (
     server: string,
     params: {
@@ -1127,12 +1221,23 @@ export const api = {
     limit = 1000,
     startTime?: number,
     endTime?: number,
+    poolAddress?: string,
   ) => {
     let url = `/api/v1/servers/${encodeURIComponent(server)}/market/candles?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
     if (startTime) url += `&start_time=${startTime}`;
     if (endTime) url += `&end_time=${endTime}`;
+    // DEX/LP executors: the pool address routes the backend to GeckoTerminal,
+    // since these connectors have no CEX candle feed.
+    if (poolAddress) url += `&pool_address=${encodeURIComponent(poolAddress)}`;
     return apiFetch<CandleData[]>(url);
   },
+
+  // Resolve a token address → ticker (GeckoTerminal). Not server-scoped; used to
+  // render LP/DEX pairs, which are stored as `<address>-<quote>`.
+  getTokenSymbol: (mint: string, network?: string) =>
+    apiFetch<{ mint: string; symbol: string }>(
+      `/api/v1/market/token-symbol?mint=${encodeURIComponent(mint)}${network ? `&network=${encodeURIComponent(network)}` : ""}`,
+    ),
 
   // ── Agents (identity + brain) ──
 
@@ -1162,16 +1267,22 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
-  /** Set or clear the Agent's server pin. An empty `server_name` clears it,
-   *  so the Agent follows whatever server the chat is pointed at. */
+  /** Set or clear the Agent's server pin and model. An empty `server_name`
+   *  clears the pin, so the Agent follows whatever server the chat is pointed
+   *  at; an empty `agent_key` clears the model, falling back to the chat's. */
   updateAgentConfig: (
     slug: string,
-    data: { server_name?: string; server_required?: boolean },
+    data: { server_name?: string; server_required?: boolean; agent_key?: string },
   ) =>
-    apiFetch<{ updated: boolean; server_name: string; server_required: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/config`,
-      { method: "PATCH", body: JSON.stringify(data) },
-    ),
+    apiFetch<{
+      updated: boolean;
+      server_name: string;
+      server_required: boolean;
+      agent_key: string;
+    }>(`/api/v1/agents/${encodeURIComponent(slug)}/config`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
 
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
@@ -1183,13 +1294,30 @@ export const api = {
   getDelegations: () =>
     apiFetch<{ delegations: Delegation[] }>("/api/v1/agents/delegations"),
 
+  /** Every delegation ever recorded, newest first — live ones included, and the
+   *  ones whose process is long gone. Optionally scoped to one agent. */
+  getDelegationHistory: (agent?: string, limit = 100) =>
+    apiFetch<{ delegations: DelegationSummary[] }>(
+      `/api/v1/agents/delegations/history?limit=${limit}` +
+        (agent ? `&agent=${encodeURIComponent(agent)}` : ""),
+    ),
+
+  /** One delegation's full record, from the registry or from disk. */
+  getDelegation: (taskId: string) =>
+    apiFetch<Delegation>(
+      `/api/v1/agents/delegations/${encodeURIComponent(taskId)}`,
+    ),
+
   /** The human-facing transcript. Separate from the (agent-facing) status route
-   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py. */
+   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py.
+   *  `markdown` is the fallback for records written before the events sidecar:
+   *  no structured events, just the transcript as it was rendered to disk. */
   getDelegationEvents: (taskId: string) =>
     apiFetch<{
       task_id: string;
-      status: Delegation["status"];
+      status: DelegationStatus;
       events: DelegationEvent[];
+      markdown: string;
     }>(`/api/v1/agents/delegations/${encodeURIComponent(taskId)}/events`),
 
   stopDelegation: (taskId: string) =>
@@ -1255,7 +1383,14 @@ export const api = {
     ),
 
   getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
-    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
+    apiFetch<{
+      executors: AgentExecutorRow[];
+      performance: AgentPerformance;
+      // Realized-PnL curve sliced from the session's bot-ownership window. Derived
+      // from the bots' own history, not from the journal's per-tick snapshots,
+      // which only record what the aggregator believed at the time.
+      pnl_series?: { timestamp: string; pnl: number; volume: number }[];
+    }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
     ),
 
@@ -1312,6 +1447,17 @@ export const api = {
   getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
+    ),
+
+  getSessionCanvas: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<SessionCanvas>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/canvas`,
+    ),
+
+  // The live report this session keeps — `{report: null}` when it has none.
+  getSessionReport: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<{ report: ReportSummary | null }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/report`,
     ),
 
   getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>

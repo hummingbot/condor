@@ -30,8 +30,16 @@ __all__ = [
 
 def format_tool_summary(tool_call: dict[str, Any]) -> str:
     """Format a tool call into a human-readable summary for the confirmation message."""
-    tool_name = tool_call.get("tool", "") or tool_call.get("title", "Unknown")
-    input_data = tool_call.get("input", {})
+    from handlers.agents._shared import tool_call_input, tool_call_name
+
+    # The bare name, or an ACP call (``mcp__mcp-hummingbot__manage_bots``) would
+    # match none of the branches below and be approved as an opaque string.
+    tool_name = tool_call_name(tool_call) or "Unknown"
+    input_data = tool_call_input(tool_call)
+    if input_data is None:
+        # The gate sends unreadable calls here on purpose (SEC-093). Say so,
+        # rather than rendering a row of "?" that looks like a parsed call.
+        return f"{tool_name} (arguments could not be read)"
 
     if tool_name == "place_order":
         side = input_data.get("trade_type", "?")
@@ -112,9 +120,16 @@ class TelegramChannel:
                 ]
             ]
         )
+        # Naming the asker is not decoration: one chat can talk to several
+        # agents on several servers, and "Approve this action?" on its own does
+        # not say whose action, or where it lands.
+        asked_by = f"\nRequested by {pending.origin}\n" if pending.origin else ""
         await self._bot.send_message(
             chat_id=self._chat_id,
-            text=f"Trade Confirmation\n\n{pending.summary}\n\nApprove this action?",
+            text=(
+                f"Trade Confirmation\n{asked_by}\n"
+                f"{pending.summary}\n\nApprove this action?"
+            ),
             reply_markup=keyboard,
         )
 

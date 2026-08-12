@@ -26,12 +26,23 @@ from ._shared import (
     COMPACT_PROMPT_AUTO,
     COMPACT_PROMPT_CUSTOM_TEMPLATE,
     DEFAULT_AGENT,
+    bind_chat_to_agent,
+    find_conversation,
+    forget_chat_conversation,
     get_project_dir,
+    remember_chat_conversation,
+    resolve_chat_binding,
     selectable_agent_options,
+    stale_binding_notice,
+    stored_chat_conversation,
 )
 from .confirmation import resolve_confirmation
 from .menu import show_agent_menu
 from .stream import TelegramStreamer
+
+# Imported for its import-time registration: it is what lets a finished
+# background task render its continuation in the chat that asked (FEAT-034).
+from . import wake as _wake  # noqa: F401  isort:skip
 
 log = logging.getLogger(__name__)
 
@@ -91,13 +102,17 @@ async def _create_tg_session(
     An empty ``agent_key`` with ``agent_slug`` set lets the bound Agent's own
     configured model win; pass both to override it deliberately.
 
-    An empty ``conversation_id`` starts a fresh conversation — which is what
-    every call site here wants, since ``/agent → New session`` means a new
-    chat. Passing one resumes that transcript; the key ``tg:{chat_id}`` is
-    unchanged either way, so Telegram carries the conversation on the session
-    record rather than in the key.
+    An empty ``conversation_id`` starts a fresh conversation, which only the
+    deliberate new-chat verbs want; the respawn paths pass the one the chat was
+    already in. The key ``tg:{chat_id}`` is unchanged either way, so Telegram
+    carries the conversation on the session record rather than in the key.
+
+    Whichever conversation the session ends up on is recorded on the chat before
+    returning. That single write is what makes every respawn path resumable
+    without each of them having to remember to stash anything — including the
+    ones that just minted a fresh conversation, which the chat is now in.
     """
-    return await runtime.create_session(
+    info = await runtime.create_session(
         SessionSpec(
             key=str(_tg_key(chat_id)),
             agent_key=agent_key,
@@ -111,6 +126,20 @@ async def _create_tg_session(
         permission_callback=permission_callback,
         user_data=user_data,
     )
+    remember_chat_conversation(user_data, info.conversation_id)
+    return info
+
+
+async def _chat_conversation_id(chat_id: int, user_data: dict | None) -> str:
+    """The conversation a respawn of this chat should continue.
+
+    The live session is the authority while it exists — another surface can move
+    the key onto a different conversation, and ARCH-089's resolver is the one
+    place that knows how to ask. The recorded id is the answer once the
+    subprocess is gone, which is precisely when a respawn needs it.
+    """
+    live = await runtime.conversation_for_session(str(_tg_key(chat_id)))
+    return live or stored_chat_conversation(user_data)
 
 
 # Cache CLI availability checks so we only hit the filesystem once per key
@@ -245,6 +274,41 @@ async def agent_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 
 
 @restricted
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /stop — interrupt the answer in flight, keep the session.
+
+    This is the dashboard's Stop button, as a command: it aborts the running
+    turn at the agent (ACP ``session/cancel``) and leaves the session and its
+    context intact. Deliberately *not* what the menu's "End session" button
+    does, which kills the subprocess and the conversation with it.
+
+    A message queued behind the aborted turn still runs — stopping the answer
+    you are watching is not the same as discarding what you asked next.
+    """
+    chat_type = update.effective_chat.type
+    if chat_type in ("group", "supergroup"):
+        await update.message.reply_text("The agent is only available in private chats.")
+        return
+
+    chat_id = update.effective_chat.id
+    session = await get_session(chat_id)
+
+    if not session or not session.alive:
+        await update.message.reply_text("No active session.")
+        return
+
+    if not session.is_busy:
+        await update.message.reply_text("Nothing to stop — the agent is idle.")
+        return
+
+    # Awaits the agent's own cancel (bounded by TIMEOUTS.prompt_cancel), so by
+    # the time this replies the generation has actually stopped. The streamed
+    # message finalizes itself on the DONE/cancelled event.
+    await runtime.abort(_tg_key(chat_id))
+    await update.message.reply_text("⏹ Stopped. The session and its context are kept.")
+
+
+@restricted
 async def agent_callback_handler(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
@@ -315,25 +379,25 @@ async def agent_callback_handler(
     elif action == "cu_clear":
         await _handle_custom_clear_filter(update, context)
     elif action.startswith("cu_use:"):
-        await _handle_custom_use(update, context, int(action.split(":", 1)[1]))
+        await _handle_custom_use(update, context, action.split(":", 1)[1])
     elif action.startswith("cu_page:"):
         await _handle_custom_page(update, context, int(action.split(":", 1)[1]))
     elif action.startswith("cu_pick:"):
         await _handle_custom_pick(update, context, action.split(":", 1)[1])
     elif action.startswith("cu_key:"):
-        await _handle_custom_rekey(update, context, int(action.split(":", 1)[1]))
+        await _handle_custom_rekey(update, context, action.split(":", 1)[1])
     elif action.startswith("cu_delok:"):
-        await _handle_custom_delete(update, context, int(action.split(":", 1)[1]))
+        await _handle_custom_delete(update, context, action.split(":", 1)[1])
     elif action.startswith("cu_del:"):
-        await _handle_custom_delete_confirm(
-            update, context, int(action.split(":", 1)[1])
-        )
+        await _handle_custom_delete_confirm(update, context, action.split(":", 1)[1])
     elif action == "cu_noop":
         pass  # page indicator / section header — do nothing
 
     # Session management
     elif action == "stop":
         await _handle_stop(update, context)
+    elif action == "cancel":
+        await _handle_cancel(update, context)
     elif action == "close":
         await _handle_close(update, context)
     elif action == "menu":
@@ -355,6 +419,24 @@ async def agent_callback_handler(
     elif action.startswith("talk_pick:"):
         await _handle_talk_pick(update, context, int(action.split(":", 1)[1]))
     elif action == "talk_noop":
+        pass  # page indicator — do nothing
+
+    # Conversations — which transcript this chat is in
+    elif action == "conv_list":
+        await _handle_conversations(update, context, page=0)
+    elif action.startswith("conv_page:"):
+        await _handle_conversations(update, context, page=int(action.split(":", 1)[1]))
+    elif action.startswith("conv_pick:"):
+        await _handle_conversation_pick(update, context, action.split(":", 1)[1])
+    # Before "conv_del:", which is a prefix of it — the confirmed delete must
+    # never be read as a request to confirm again.
+    elif action.startswith("conv_delok:"):
+        await _handle_conversation_delete(update, context, action.split(":", 1)[1])
+    elif action.startswith("conv_del:"):
+        await _handle_conversation_delete_confirm(
+            update, context, action.split(":", 1)[1]
+        )
+    elif action == "conv_noop":
         pass  # page indicator — do nothing
 
     # Trade confirmations. "Request expired" also covers "already answered
@@ -380,7 +462,12 @@ async def _handle_start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ) -> None:
-    """Start a fresh Condor session for this chat."""
+    """Start a fresh session for this chat, under whoever it is bound to.
+
+    "New session" means a new conversation, not a new interlocutor: a chat bound
+    to a specialist restarts as that specialist, but with an empty transcript.
+    Use "Talk to → Condor" to go back to the coordinator.
+    """
     query = update.callback_query
     message = query.message if query else update.message
     chat_id = update.effective_chat.id
@@ -389,7 +476,16 @@ async def _handle_start(
     agent_key = context.user_data.get("agent_llm", DEFAULT_AGENT)
     llm_label = AGENT_OPTIONS.get(agent_key, {}).get("label", agent_key)
 
-    status_text = f"Starting Condor session ({llm_label})..."
+    agent, stale_slug = resolve_chat_binding(context.user_data)
+    label = (agent.name or agent.slug) if agent else "Condor"
+
+    status_text = (
+        f"Starting {label} session..."
+        if agent
+        else f"Starting Condor session ({llm_label})..."
+    )
+    if stale_slug:
+        status_text = f"{stale_binding_notice(stale_slug)}\n\n{status_text}"
     if query:
         await message.edit_text(status_text)
     else:
@@ -397,6 +493,10 @@ async def _handle_start(
 
     # Destroy existing session
     await destroy_session(chat_id)
+    # Dropped before the spawn, not after: if the spawn fails there is no
+    # session and the next message auto-creates one, which must still honour
+    # the "new session" the user asked for rather than resuming the old chat.
+    forget_chat_conversation(context.user_data)
 
     try:
         bot = context.bot
@@ -405,14 +505,17 @@ async def _handle_start(
 
         await _create_tg_session(
             chat_id=chat_id,
-            agent_key=agent_key,
+            # A bound Agent's own configured model wins, exactly as it does when
+            # the binding is first made in the "Talk to" picker.
+            agent_key="" if agent else agent_key,
             user_id=user_id,
             permission_callback=_perm_cb,
             user_data=context.user_data,
+            agent_slug=agent.slug if agent else "",
         )
 
         await message.edit_text(
-            "Condor is ready. Send a message to start chatting.\n\n"
+            f"{label} is ready. Send a message to start chatting.\n\n"
             "Use /agent to see options or any other command to exit."
         )
     except Exception as e:
@@ -738,13 +841,17 @@ async def _handle_custom_list(
     )
 
 
-def _provider_at(context: ContextTypes.DEFAULT_TYPE, idx: int) -> dict | None:
-    from condor.preferences import get_custom_providers
+def _provider_named(context: ContextTypes.DEFAULT_TYPE, name: str) -> dict | None:
+    """Resolve the endpoint a `cu_*` button was rendered for.
 
-    providers = get_custom_providers(context.user_data)
-    if 0 <= idx < len(providers):
-        return providers[idx]
-    return None
+    Buttons carry the sanitized nickname rather than a list position: the saved
+    list is shared state (the web dashboard writes it too), so an index taken at
+    render time can point at a different endpoint by the time it's tapped —
+    which for delete and re-key means destroying the wrong credential.
+    """
+    from condor.preferences import find_custom_provider
+
+    return find_custom_provider(context.user_data, name)
 
 
 # -- Adding an endpoint --
@@ -930,18 +1037,21 @@ def _cached_models(
 
 
 async def _handle_custom_use(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, provider_name: str
 ) -> None:
     """Open the model picker for a saved endpoint, refetching if stale."""
+    from condor.preferences import sanitize_provider_name
+
     from .custom_models import CustomProviderError, fetch_models
     from .menu import _custom_error_keyboard, _custom_picker_keyboard
 
-    provider = _provider_at(context, idx)
+    provider = _provider_named(context, provider_name)
     if provider is None:
         await _handle_custom_list(update, context, notice="That endpoint is gone.")
         return
 
     name = provider["name"]
+    key = sanitize_provider_name(name)
     models = _cached_models(context, name)
 
     if models is None:
@@ -954,8 +1064,8 @@ async def _handle_custom_use(
             await placeholder.edit_text(
                 f"'{name}' isn't responding: {e}",
                 reply_markup=_custom_error_keyboard(
-                    f"agent:cu_use:{idx}",
-                    secondary=("Change API key", f"agent:cu_key:{idx}"),
+                    f"agent:cu_use:{key}",
+                    secondary=("Change API key", f"agent:cu_key:{key}"),
                 ),
             )
             return
@@ -1107,12 +1217,12 @@ async def _handle_custom_manage(
 
 
 async def _handle_custom_rekey(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, provider_name: str
 ) -> None:
     """Replace the API key on a saved endpoint without re-entering its URL."""
     from .menu import _custom_key_prompt_keyboard
 
-    provider = _provider_at(context, idx)
+    provider = _provider_named(context, provider_name)
     if provider is None:
         await _handle_custom_list(update, context, notice="That endpoint is gone.")
         return
@@ -1133,11 +1243,11 @@ async def _handle_custom_rekey(
 
 
 async def _handle_custom_delete_confirm(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, provider_name: str
 ) -> None:
     from .menu import _custom_delete_keyboard
 
-    provider = _provider_at(context, idx)
+    provider = _provider_named(context, provider_name)
     if provider is None:
         await _handle_custom_list(update, context, notice="That endpoint is gone.")
         return
@@ -1146,17 +1256,17 @@ async def _handle_custom_delete_confirm(
         update,
         f"Forget '{provider['name']}' ({provider['base_url']})?\n\n"
         "The saved URL and API key are deleted from this bot.",
-        _custom_delete_keyboard(idx, provider["name"]),
+        _custom_delete_keyboard(provider["name"]),
     )
 
 
 async def _handle_custom_delete(
-    update: Update, context: ContextTypes.DEFAULT_TYPE, idx: int
+    update: Update, context: ContextTypes.DEFAULT_TYPE, provider_name: str
 ) -> None:
     """Forget an endpoint, clearing agent_llm if it pointed at that endpoint."""
     from condor.preferences import parse_custom_agent_key, remove_custom_provider
 
-    provider = _provider_at(context, idx)
+    provider = _provider_named(context, provider_name)
     if provider is None:
         await _handle_custom_list(update, context, notice="That endpoint is gone.")
         return
@@ -1185,23 +1295,36 @@ async def _handle_custom_cancel(
 
 
 async def _handle_stop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Stop the active agent session."""
+    """End the active session — subprocess and conversation both go.
+
+    Not to be confused with /stop, which only interrupts the turn in flight.
+    """
     query = update.callback_query
     chat_id = update.effective_chat.id
 
     destroyed = await destroy_session(chat_id)
 
     if destroyed:
-        await query.message.edit_text("Agent session stopped.")
+        await query.message.edit_text("Agent session ended.")
     else:
         await query.message.edit_text("No active session.")
+
+
+async def _handle_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stop generating — the /stop command as a button on the answer itself.
+
+    Aborts the turn in flight (ACP ``session/cancel``) and leaves the session
+    standing, unlike "End session" above. Nothing is written back here: the
+    button lives on the message the streamer is still editing, so the reply
+    belongs to `TelegramStreamer.finalize()`, which marks the partial answer
+    stopped and drops the button with it.
+    """
+    await runtime.abort(_tg_key(update.effective_chat.id))
 
 
 async def _handle_close(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Close the agent menu (keep session alive if running)."""
     query = update.callback_query
-    chat_id = update.effective_chat.id
-    session = await get_session(chat_id)
 
     await query.message.delete()
 
@@ -1228,28 +1351,63 @@ async def _handle_compact_menu(
     )
 
 
-async def _handle_compact(
+def _edit_render(message):
+    """Render every step by editing one message in place (callback surface)."""
+
+    async def render(text: str) -> None:
+        await message.edit_text(text)
+
+    return render
+
+
+def _reply_render(message):
+    """Reply once, then edit that reply in place (typed-message surface)."""
+    placeholder = None
+
+    async def render(text: str) -> None:
+        nonlocal placeholder
+        if placeholder is None:
+            placeholder = await message.reply_text(text)
+        else:
+            await placeholder.edit_text(text)
+
+    return render
+
+
+async def _compact(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
-    custom_instructions: str | None = None,
+    *,
+    instructions: str | None,
+    render,
+    keep_custom_flag_on_busy: bool = False,
 ) -> None:
-    """Compact: summarize context → destroy session → recreate with summary."""
-    query = update.callback_query
+    """Summarize context → destroy session → recreate with the summary reinjected.
+
+    The single implementation behind both compact surfaces: the menu button
+    (which edits its own callback message) and the typed custom instructions
+    (which replies, then edits that reply). ``render`` is what abstracts the
+    two apart — everything else about the sequence is identical, and keeping it
+    identical is the point: a fix here can no longer land in only one copy.
+    """
     chat_id = update.effective_chat.id
     session = await get_session(chat_id)
 
     if not session or not session.alive:
-        await query.message.edit_text("No active session to compact.")
+        await render("No active session to compact.")
         return
 
     if session.is_busy:
-        await query.message.edit_text("Agent is busy. Wait for it to finish first.")
+        await render("Agent is busy. Wait for it to finish first.")
+        if keep_custom_flag_on_busy:
+            # Stay armed so the user can resend the same instructions.
+            context.user_data["agent_compact_custom"] = True
         return
 
-    await query.message.edit_text("Compacting context...")
+    await render("Compacting context...")
 
-    if custom_instructions:
-        prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=custom_instructions)
+    if instructions:
+        prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=instructions)
     else:
         prompt = COMPACT_PROMPT_AUTO
 
@@ -1257,14 +1415,18 @@ async def _handle_compact(
         summary = await runtime.prompt_once(_tg_key(chat_id), prompt)
     except Exception as e:
         log.exception("Failed to get compact summary")
-        await query.message.edit_text(f"Compact failed: {e}")
+        await render(f"Compact failed: {e}")
         return
 
     if not summary or not summary.strip():
-        await query.message.edit_text("Agent returned empty summary. Compact aborted.")
+        await render("Agent returned empty summary. Compact aborted.")
         return
 
     agent_key = session.agent_key
+    # Compact is a respawn like any other, so it has to carry the identity over:
+    # keeping only the model would summarize the specialist's context and then
+    # hand it to the coordinator.
+    agent_slug = session.agent_slug
     await destroy_session(chat_id)
 
     try:
@@ -1273,12 +1435,17 @@ async def _handle_compact(
 
         _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
-        new_session = await _create_tg_session(
+        await _create_tg_session(
             chat_id=chat_id,
             agent_key=agent_key,
             user_id=user_id,
             permission_callback=_perm_cb,
             user_data=context.user_data,
+            agent_slug=agent_slug,
+            # No conversation_id on purpose: compact is the one respawn that
+            # must NOT resume, or the replay would re-inject the very transcript
+            # the summary just replaced. The fresh conversation minted here is
+            # recorded as the chat's, so later respawns resume the compacted one.
         )
 
         compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
@@ -1286,13 +1453,27 @@ async def _handle_compact(
 
     except Exception as e:
         log.exception("Failed to recreate session after compact")
-        await query.message.edit_text(f"Compact failed during session reset: {e}")
+        await render(f"Compact failed during session reset: {e}")
         return
 
     word_count = len(summary.split())
-    await query.message.edit_text(
+    await render(
         f"Context compacted ({word_count} words carried over).\n\n"
         "Send a message to continue chatting."
+    )
+
+
+async def _handle_compact(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    custom_instructions: str | None = None,
+) -> None:
+    """Compact: summarize context → destroy session → recreate with summary."""
+    await _compact(
+        update,
+        context,
+        instructions=custom_instructions,
+        render=_edit_render(update.callback_query.message),
     )
 
 
@@ -1340,6 +1521,10 @@ async def _handle_talk_to(
 
     query = update.callback_query
     session = await get_session(update.effective_chat.id)
+    # Between respawns there is no session, but the chat is still bound -- tick
+    # what it will come back as, not what happens to be running.
+    bound, _ = resolve_chat_binding(context.user_data, drop_stale=False)
+    current_slug = session.agent_slug if session else (bound.slug if bound else "")
     # The coordinator is the keyboard's own first row, so listing it here too
     # would offer Condor twice (FEAT-033 put it in the registry).
     agents = AgentStore().list_specialists()
@@ -1348,7 +1533,7 @@ async def _handle_talk_to(
         await query.message.edit_text(
             "No agents defined yet. Create one with /agent → Condor, or from the "
             "dashboard's Agents page.",
-            reply_markup=_talk_to_keyboard([], 0, ""),
+            reply_markup=_talk_to_keyboard([], 0, current_slug),
         )
         return
 
@@ -1358,9 +1543,7 @@ async def _handle_talk_to(
         "Who do you want to talk to?\n\n"
         "A domain Agent answers with its own identity, tools and memory. "
         "Condor is the general coordinator.",
-        reply_markup=_talk_to_keyboard(
-            agents, page, session.agent_slug if session else ""
-        ),
+        reply_markup=_talk_to_keyboard(agents, page, current_slug),
     )
 
 
@@ -1370,10 +1553,12 @@ async def _handle_talk_pick(
     """Bind (or unbind) the chat's session to a domain Agent.
 
     ACP cannot hot-swap an identity, so this reaps the subprocess and spawns a
-    new one under the same key. The conversation does not survive; the user is
-    told so rather than silently losing it.
+    new one under the same key. The conversation is carried across that reap and
+    the handover is marked in the transcript, so switching happens *inside* one
+    chat — the same semantics the dashboard's ``switch`` action already has.
     """
     from condor.agents.agent import AgentStore
+    from condor.runtime import conversations
 
     query = update.callback_query
     chat_id = update.effective_chat.id
@@ -1396,86 +1581,246 @@ async def _handle_talk_pick(
 
     _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
 
+    # Read before the teardown — afterwards there is no session left to ask.
+    conversation_id = await _chat_conversation_id(chat_id, context.user_data)
+
     await query.message.edit_text(f"Switching to {label}...")
     await destroy_session(chat_id)
 
     try:
-        await _create_tg_session(
+        info = await _create_tg_session(
             chat_id=chat_id,
             agent_key="" if agent_slug else agent_key,
             user_id=user_id,
             permission_callback=_perm_cb,
             user_data=context.user_data,
             agent_slug=agent_slug,
+            conversation_id=conversation_id,
         )
     except Exception as e:
         log.exception("Failed to bind session to agent %r", agent_slug)
         await query.message.edit_text(f"Could not switch to {label}: {e}")
         return
 
+    # Only once the session actually stands up: a chat must never be left
+    # pointing at an agent it could not spawn.
+    bind_chat_to_agent(context.user_data, agent_slug)
+
+    # The handover, marked in the transcript rather than only in the header, so
+    # the resumed agent reads a divider between the two identities' turns.
+    # Recorded after the respawn: a switch that failed to spawn leaves no
+    # divider claiming it happened.
+    carried = bool(conversation_id) and info.conversation_id == conversation_id
+    if carried:
+        conversations.record_system(
+            user_id, conversation_id, f"Switched to {label}", kind="switch"
+        )
+
     await query.message.edit_text(
-        f"Now talking to {label}. Previous conversation was not carried over.\n\n"
-        "Send a message to start."
+        f"Now talking to {label}."
+        + (" The conversation so far is carried over." if carried else "")
+        + "\n\nSend a message to continue."
     )
+
+
+async def _handle_conversations(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, page: int = 0, notice: str = ""
+) -> None:
+    """Show the picker of conversations this chat can come back to.
+
+    The store is one keyspace across surfaces, so this lists chats held on the
+    dashboard exactly like chats held here (ARCH-102). Read fresh on every
+    render and never cached in ``user_data``: the same list is being written by
+    the other surface, and a stale snapshot is what would make a tap land on the
+    wrong conversation.
+    """
+    from condor.runtime import conversations
+
+    from .menu import _conversations_keyboard
+
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    metas = conversations.list_conversations(user_id)
+    if not metas:
+        await query.message.edit_text(
+            f"{notice}No conversations yet. Send a message and this chat becomes one.",
+            reply_markup=_conversations_keyboard([], 0, ""),
+        )
+        return
+
+    # Marks the row this chat is in right now, which is the one question the
+    # list cannot answer on its own — every other surface's session is in here.
+    current = await _chat_conversation_id(chat_id, context.user_data)
+    await query.message.edit_text(
+        f"{notice}Your conversations, newest first — including the ones you held "
+        "on the dashboard.\n\nPick one to continue it here, or 🗑 to forget it.",
+        reply_markup=_conversations_keyboard(metas, page, current),
+    )
+
+
+async def _handle_conversation_pick(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, token: str
+) -> None:
+    """Continue an existing conversation in this chat.
+
+    The whole resume is one argument: ``conversation_id`` on the spawn, and the
+    runtime replays the transcript into the new session's opening context
+    (ARCH-101). What is left to decide here is *who* picks it up — the agent the
+    conversation was held with, so that resuming reads as returning to that
+    chat rather than as handing its history to whoever answered last. The chat's
+    binding follows, or the next respawn would silently swap the identity back.
+    """
+    from condor.agents.agent import AgentStore
+    from condor.runtime import conversations
+
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    meta = find_conversation(conversations.list_conversations(user_id), token)
+    if meta is None:
+        await _handle_conversations(
+            update, context, notice="That conversation is no longer there.\n\n"
+        )
+        return
+
+    session = await get_session(chat_id)
+    if session and session.alive and session.conversation_id == meta.id:
+        await query.message.edit_text(
+            "This chat is already in that conversation.\n\nSend a message to continue."
+        )
+        return
+
+    agent = AgentStore().get(meta.agent_slug) if meta.agent_slug else None
+    notice = ""
+    if meta.agent_slug and agent is None:
+        # The transcript outlived the agent that wrote half of it. Condor can
+        # still read it, but saying so beats resuming under a silent stand-in.
+        notice = f"{stale_binding_notice(meta.agent_slug)}\n\n"
+    agent_slug = agent.slug if agent else ""
+    label = (agent.name or agent.slug) if agent else "Condor"
+
+    agent_key = _reclaim_default_agent(context)
+    _perm_cb = _tg_permission_callback(context.bot, chat_id, user_id)
+
+    await query.message.edit_text(f"{notice}Resuming with {label}...")
+    await destroy_session(chat_id)
+
+    try:
+        info = await _create_tg_session(
+            chat_id=chat_id,
+            # A bound Agent brings its own configured model, exactly as it does
+            # when the binding is made in the "Talk to" picker.
+            agent_key="" if agent_slug else agent_key,
+            user_id=user_id,
+            permission_callback=_perm_cb,
+            user_data=context.user_data,
+            agent_slug=agent_slug,
+            conversation_id=meta.id,
+        )
+    except Exception as e:
+        log.exception("Failed to resume conversation %r", meta.id)
+        await query.message.edit_text(f"Could not resume that conversation: {e}")
+        return
+
+    # Only once the session stands up — a chat must never be left pointing at an
+    # agent it could not spawn.
+    bind_chat_to_agent(context.user_data, agent_slug)
+
+    if info.conversation_id == meta.id:
+        headline = f"Resumed with {label}: {meta.title or 'untitled'}"
+        body = f"{label} has read the conversation so far."
+    else:
+        # Deleted between the listing and the spawn: the runtime falls through
+        # to a new conversation rather than stranding the chat, so say which one
+        # the user actually got.
+        headline = f"That conversation is gone. Started a fresh one with {label}."
+        body = "Nothing was carried over."
+
+    await query.message.edit_text(
+        f"{headline}\n\n{body}\n\nSend a message to continue."
+    )
+
+
+async def _handle_conversation_delete_confirm(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, token: str
+) -> None:
+    """Ask before forgetting a transcript — it goes for every surface at once."""
+    from condor.runtime import conversations
+
+    from .menu import _ago, _conversation_delete_keyboard
+
+    query = update.callback_query
+    user_id = update.effective_user.id
+
+    meta = find_conversation(conversations.list_conversations(user_id), token)
+    if meta is None:
+        await _handle_conversations(
+            update, context, notice="That conversation is no longer there.\n\n"
+        )
+        return
+
+    await query.message.edit_text(
+        f"Delete this conversation?\n\n" f"{meta.title or 'Untitled'}\n"
+        # Same three facts in the same order as the row that was tapped, so the
+        # confirmation is recognisably about *that* one.
+        f"{_ago(meta.updated_at)} · {meta.agent_slug or 'Condor'} · "
+        f"{meta.turn_count} turns\n\n"
+        "The transcript goes for the dashboard too, and cannot be recovered.",
+        reply_markup=_conversation_delete_keyboard(meta),
+    )
+
+
+async def _handle_conversation_delete(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, token: str
+) -> None:
+    """Forget a conversation, and let go of it if this chat was in it.
+
+    Mirrors the dashboard's DELETE, which also reaps whatever session is still
+    answering the conversation: leaving the chat pointing at a deleted id would
+    make its next message spawn onto a transcript that no longer exists.
+    """
+    from condor.runtime import conversations
+
+    query = update.callback_query
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    meta = find_conversation(conversations.list_conversations(user_id), token)
+    if meta is None:
+        await _handle_conversations(
+            update, context, notice="That conversation was already gone.\n\n"
+        )
+        return
+
+    was_current = await _chat_conversation_id(chat_id, context.user_data) == meta.id
+    deleted = conversations.delete_conversation(user_id, meta.id)
+    if not deleted:
+        await query.message.edit_text("Could not delete that conversation.")
+        return
+
+    if was_current:
+        await destroy_session(chat_id)
+        forget_chat_conversation(context.user_data)
+
+    notice = f"Deleted: {meta.title or 'untitled'}"
+    if was_current:
+        notice += ". This chat starts fresh on your next message"
+    await _handle_conversations(update, context, notice=f"{notice}.\n\n")
 
 
 async def _do_compact_from_message(
     update: Update, context: ContextTypes.DEFAULT_TYPE, instructions: str
 ) -> None:
     """Execute custom compact from user's text input."""
-    chat_id = update.effective_chat.id
-    session = await get_session(chat_id)
-
-    if not session or not session.alive:
-        await update.message.reply_text("No active session to compact.")
-        return
-
-    if session.is_busy:
-        await update.message.reply_text("Agent is busy. Wait for it to finish first.")
-        context.user_data["agent_compact_custom"] = True
-        return
-
-    placeholder = await update.message.reply_text("Compacting context...")
-
-    prompt = COMPACT_PROMPT_CUSTOM_TEMPLATE.format(instructions=instructions)
-    try:
-        summary = await runtime.prompt_once(_tg_key(chat_id), prompt)
-    except Exception as e:
-        log.exception("Failed to get compact summary")
-        await placeholder.edit_text(f"Compact failed: {e}")
-        return
-
-    if not summary or not summary.strip():
-        await placeholder.edit_text("Agent returned empty summary. Compact aborted.")
-        return
-
-    agent_key = session.agent_key
-    await destroy_session(chat_id)
-
-    try:
-        user_id = update.effective_user.id
-        bot = context.bot
-
-        _perm_cb = _tg_permission_callback(bot, chat_id, user_id)
-
-        new_session = await _create_tg_session(
-            chat_id=chat_id,
-            agent_key=agent_key,
-            user_id=user_id,
-            permission_callback=_perm_cb,
-            user_data=context.user_data,
-        )
-        compact_context = COMPACT_CONTEXT_TEMPLATE.format(summary=summary)
-        await runtime.prompt_once(_tg_key(chat_id), compact_context)
-    except Exception as e:
-        log.exception("Failed to recreate session after compact")
-        await placeholder.edit_text(f"Compact failed during session reset: {e}")
-        return
-
-    word_count = len(summary.split())
-    await placeholder.edit_text(
-        f"Context compacted ({word_count} words carried over).\n\n"
-        "Send a message to continue chatting."
+    await _compact(
+        update,
+        context,
+        instructions=instructions,
+        render=_reply_render(update.message),
+        keep_custom_flag_on_busy=True,
     )
 
 
@@ -1575,7 +1920,13 @@ async def agent_message_handler(
         return
 
     chat_id = update.effective_chat.id
-    text = context.chat_data.pop("_voice_transcription", None) or update.message.text
+
+    # Consume the voice hand-off exactly once, before any early return below, so
+    # the transcript survives to build the streamer prefix and neither key leaks
+    # into the next message's turn.
+    voice_transcription = context.chat_data.pop("_voice_transcription", None)
+    voice_placeholder = context.chat_data.pop("_voice_placeholder", None)
+    text = voice_transcription or update.message.text
 
     if not text:
         return
@@ -1585,6 +1936,9 @@ async def agent_message_handler(
         session = await get_session(chat_id)
         if session:
             await destroy_session(chat_id)
+        # "Fresh" is the whole point of the verb: without this the auto-create
+        # below would replay the transcript the user just asked to leave.
+        forget_chat_conversation(context.user_data)
         await update.message.reply_text("Session reset. Send a message to start fresh.")
         return
 
@@ -1617,9 +1971,19 @@ async def agent_message_handler(
         # /agent command does, so users who only ever type messages benefit too.
         agent_key = _reclaim_default_agent(context)
 
-        # Check if the CLI binary is installed before attempting to spawn
-        if not _is_agent_available(agent_key):
-            log.debug("Agent CLI for %s not found, skipping auto-create", agent_key)
+        # The subprocess is gone but the chat's choice is not: respawn under the
+        # Agent it was bound to, or this silently answers as the coordinator --
+        # other identity, other tools, other server, other memory (CORR-090).
+        agent, stale_slug = resolve_chat_binding(context.user_data)
+        if stale_slug:
+            await update.message.reply_text(stale_binding_notice(stale_slug))
+
+        # Check if the CLI binary is installed before attempting to spawn. A
+        # bound Agent runs on its own configured model, so that is the one whose
+        # CLI has to be there.
+        probe_key = (agent.agent_key or agent_key) if agent else agent_key
+        if not _is_agent_available(probe_key):
+            log.debug("Agent CLI for %s not found, skipping auto-create", probe_key)
             return
 
         try:
@@ -1629,10 +1993,16 @@ async def agent_message_handler(
 
             session = await _create_tg_session(
                 chat_id=chat_id,
-                agent_key=agent_key,
+                agent_key="" if agent else agent_key,
                 user_id=user_id,
                 permission_callback=_perm_cb,
                 user_data=context.user_data,
+                agent_slug=agent.slug if agent else "",
+                # The subprocess died, the chat did not: resume the transcript
+                # it was in. Without this every restart, health-monitor reap or
+                # LRU detach silently hands the user an agent with no memory of
+                # the conversation they are in the middle of (ARCH-101).
+                conversation_id=stored_chat_conversation(context.user_data),
             )
 
         except Exception as e:
@@ -1640,27 +2010,22 @@ async def agent_message_handler(
             await update.message.reply_text(f"Failed to start agent: {e}")
             return
 
-    # Busy is an acknowledgement, not a refusal. The message really is queued
-    # now: `on_busy="queue"` below lets it block on the session lock, which is
-    # FIFO, so several messages sent mid-answer are answered in the order they
-    # were sent. Telegram has no Stop button and no live composer, so silently
-    # killing a running answer because someone sent a second thought would be
-    # hostile — the dashboard steers, this waits.
-    if session.is_busy:
-        await update.message.reply_text(
-            r"⏳ Queued\. It will run when the current answer finishes\.",
-            parse_mode="MarkdownV2",
-        )
+    # Busy is an acknowledgement, not a refusal. The message really is queued:
+    # `on_busy="queue"` below lets it block on the session lock, which is FIFO,
+    # so several messages sent mid-answer are answered in the order they were
+    # sent. Telegram has no live composer, so silently killing a running answer
+    # because someone sent a second thought would be hostile — the dashboard
+    # steers, this waits, and /stop is how you interrupt on purpose.
+    #
+    # The acknowledgement is not sent from here any more: the QUEUED event the
+    # runtime emits renders inside this turn's own placeholder, which costs one
+    # message instead of two and cannot miss the race where `is_busy` was read
+    # from a snapshot taken just before the turn ahead finished.
 
-    prefix = ""
-
-    # Fetch voice data if this was a transcription
-    voice_placeholder = context.chat_data.pop("_voice_placeholder", None)
-    voice_transcription = context.chat_data.pop("_voice_transcription", None)
-
-    if voice_transcription:
-        voice_prefix = f"🎙 {voice_transcription}"
-        prefix = f"{prefix}{voice_prefix}" if prefix else voice_prefix
+    # Keep the spoken question at the head of the streamed answer: the streamer
+    # edits the very placeholder that was showing the transcript, so without the
+    # prefix the user's words would be overwritten by the reply.
+    prefix = f"🎙 {voice_transcription}" if voice_transcription else ""
 
     # Send or reuse placeholder message
     if voice_placeholder:

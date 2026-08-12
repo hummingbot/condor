@@ -10,6 +10,25 @@ from typing import Any, Literal
 from mcp_servers.hummingbot_api.formatters import format_active_bots_as_table, format_bot_logs_as_table
 
 
+async def _get_controller_configs_map(client: Any, bot_name: str) -> dict[str, dict[str, Any]]:
+    """
+    Fetch a bot's controller configs keyed by both config id and config file name.
+
+    The status payload keys controllers by their config `id`, while the update endpoint
+    addresses them by file name (`_config_name`); they usually match but not always, so
+    both are indexed here.
+    """
+    configs = await client.controllers.get_bot_controller_configs(bot_name)
+    by_key: dict[str, dict[str, Any]] = {}
+    for config in configs or []:
+        if not isinstance(config, dict):
+            continue
+        for key in (config.get("id"), config.get("_config_name")):
+            if key:
+                by_key[str(key)] = config
+    return by_key
+
+
 async def get_active_bots_status(client: Any) -> dict[str, Any]:
     """
     Get the status of all active bots.
@@ -33,6 +52,8 @@ async def get_active_bots_status(client: Any) -> dict[str, Any]:
                 if "general_logs" in bot_data:
                     bot_data["general_logs"] = bot_data["general_logs"][-5:]
 
+        await _attach_kill_switches(client, active_bots["data"])
+
     # Format as table for better readability
     bots_table = format_active_bots_as_table(active_bots)
 
@@ -44,6 +65,39 @@ async def get_active_bots_status(client: Any) -> dict[str, Any]:
         "bots_table": bots_table,
         "total_bots": total_bots,
     }
+
+
+async def _attach_kill_switches(client: Any, bots: dict[str, Any]) -> None:
+    """
+    Attach each controller's `manual_kill_switch` to its entry in the status payload.
+
+    The per-controller `status` the API reports is a hardcoded "running" that never
+    reflects a stopped controller, so the kill switch from the bot's controller config
+    is the only way to tell a running controller from a stopped one. Bots whose configs
+    cannot be read keep `kill_switch=None`, which surfaces as state "unknown" rather
+    than a wrong "running".
+    """
+    bot_names = [name for name, data in bots.items() if isinstance(data, dict)]
+    if not bot_names:
+        return
+
+    configs_per_bot = await asyncio.gather(
+        *(_get_controller_configs_map(client, name) for name in bot_names),
+        return_exceptions=True,
+    )
+
+    for bot_name, configs in zip(bot_names, configs_per_bot):
+        if isinstance(configs, BaseException):
+            continue
+        performance = bots[bot_name].get("performance")
+        if not isinstance(performance, dict):
+            continue
+        for controller_id, controller_data in performance.items():
+            if not isinstance(controller_data, dict):
+                continue
+            config = configs.get(str(controller_id))
+            if config is not None:
+                controller_data["kill_switch"] = bool(config.get("manual_kill_switch", False))
 
 
 async def get_bot_logs(
@@ -155,44 +209,103 @@ async def manage_bot_execution(
             "message": f"Bot execution stopped and archived: {result}",
         }
 
-    elif action == "stop_controllers":
+    elif action in ("stop_controllers", "start_controllers"):
         if controller_names is None or len(controller_names) == 0:
-            raise ValueError("controller_names is required for stop_controllers action")
+            raise ValueError(f"controller_names is required for {action} action")
 
-        tasks = [
-            client.controllers.update_bot_controller_config(bot_name, controller, {"manual_kill_switch": True})
-            for controller in controller_names
-        ]
-        result = await asyncio.gather(*tasks)
-
-        return {
-            "action": "stop_controllers",
-            "bot_name": bot_name,
-            "controller_names": controller_names,
-            "result": result,
-            "message": f"Controllers stopped: {result}",
-        }
-
-    elif action == "start_controllers":
-        if controller_names is None or len(controller_names) == 0:
-            raise ValueError("controller_names is required for start_controllers action")
-
-        tasks = [
-            client.controllers.update_bot_controller_config(bot_name, controller, {"manual_kill_switch": False})
-            for controller in controller_names
-        ]
-        result = await asyncio.gather(*tasks)
-
-        return {
-            "action": "start_controllers",
-            "bot_name": bot_name,
-            "controller_names": controller_names,
-            "result": result,
-            "message": f"Controllers started: {result}",
-        }
+        return await _set_kill_switches(
+            client=client,
+            bot_name=bot_name,
+            controller_names=controller_names,
+            kill_switch=action == "stop_controllers",
+        )
 
     else:
         raise ValueError(f"Invalid action: {action}")
+
+
+async def _set_kill_switches(
+    client: Any,
+    bot_name: str,
+    controller_names: list[str],
+    kill_switch: bool,
+) -> dict[str, Any]:
+    """
+    Flip `manual_kill_switch` on the given controllers and verify it was written.
+
+    The write goes to the controller config file the bot re-reads on a timer
+    (`config_update_interval`, 10s by default), so the bot acts on it shortly after
+    this returns — it is not applied synchronously. The config is read back here to
+    confirm the flag landed on the right file, since a name that resolves to no config
+    would otherwise look like a silent success.
+    """
+    action = "stop_controllers" if kill_switch else "start_controllers"
+    verb = "stopped" if kill_switch else "started"
+
+    # Resolve each name to the config file name the update endpoint addresses
+    try:
+        configs = await _get_controller_configs_map(client, bot_name)
+    except Exception:
+        configs = {}
+    targets = {
+        name: str((configs.get(name) or {}).get("_config_name") or name)
+        for name in controller_names
+    }
+
+    results = await asyncio.gather(
+        *(
+            client.controllers.update_bot_controller_config(
+                bot_name, target, {"manual_kill_switch": kill_switch}
+            )
+            for target in targets.values()
+        ),
+        return_exceptions=True,
+    )
+
+    succeeded: list[str] = []
+    failed: dict[str, str] = {}
+    for name, result in zip(targets, results):
+        if isinstance(result, BaseException):
+            failed[name] = str(result)
+        else:
+            succeeded.append(name)
+
+    if not succeeded:
+        raise ValueError(f"No controller could be {verb} on bot '{bot_name}': {failed}")
+
+    # Read the configs back so the reported state is the persisted one, not the request
+    confirmed: dict[str, bool | None] = {}
+    try:
+        updated_configs = await _get_controller_configs_map(client, bot_name)
+    except Exception:
+        updated_configs = {}
+    for name in succeeded:
+        config = updated_configs.get(name) or updated_configs.get(targets[name])
+        confirmed[name] = bool(config.get("manual_kill_switch", False)) if config else None
+
+    unconfirmed = [name for name, value in confirmed.items() if value is not kill_switch]
+
+    verified = [name for name in succeeded if name not in unconfirmed]
+    message = (
+        f"Controllers {verb} on bot '{bot_name}': {verified or succeeded}. "
+        f"manual_kill_switch={kill_switch} written to the controller configs; "
+        f"the bot applies it on its next config reload (~10s), then closes that "
+        f"controller's executors. The controller stays listed in status with state '{verb}'."
+    )
+    if unconfirmed:
+        message += f" Write NOT confirmed by read-back for: {unconfirmed}."
+    if failed:
+        message += f" Failed: {failed}."
+
+    return {
+        "action": action,
+        "bot_name": bot_name,
+        "controller_names": controller_names,
+        "succeeded": succeeded,
+        "failed": failed,
+        "confirmed_kill_switch": confirmed,
+        "message": message,
+    }
 
 
 async def get_bot_controller_configs(client: Any, bot_name: str) -> dict[str, Any]:

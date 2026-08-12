@@ -382,45 +382,42 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             logger.warning(f"Failed to send chart to Telegram: {e}")
 
     # Report: chart FIRST, then table
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder("Solana Pool Scanner")
-        builder.source("routine", "solana_pool_scanner").tags(
-            ["solana", "dex", "pools", "yield"]
-        )
+    builder = ReportBuilder("Solana Pool Scanner")
+    builder.source("routine", "solana_pool_scanner").tags(
+        ["solana", "dex", "pools", "yield"]
+    )
 
-        builder.markdown(
-            f"Scanned {len(all_pools)} pools across Orca, Raydium, Meteora. "
-            f"{len(filtered)} passed filters (vol >= {_fmt_usd(config.min_volume_24h)}, "
-            f"tvl >= {_fmt_usd(config.min_tvl)}). Distribution: {dist_str}"
-        )
+    builder.markdown(
+        f"Scanned {len(all_pools)} pools across Orca, Raydium, Meteora. "
+        f"{len(filtered)} passed filters (vol >= {_fmt_usd(config.min_volume_24h)}, "
+        f"tvl >= {_fmt_usd(config.min_tvl)}). Distribution: {dist_str}"
+    )
 
-        if plotly_fig is not None:
-            builder.plotly(plotly_fig)
+    if plotly_fig is not None:
+        builder.plotly(plotly_fig)
 
-        builder.table(
-            [
-                {
-                    "#": i,
-                    "Pool": p["name"],
-                    "DEX": p["dex"],
-                    "Vol 24h": _fmt_usd(p["volume_24h"]),
-                    "TVL": _fmt_usd(p["tvl"]),
-                    "V/T": f"{p['vol_tvl_ratio']:.1f}x",
-                    "Fee": f"{p['fee_pct'] * 100:.2f}".rstrip("0").rstrip(".") + "%",
-                    "Fee APR": _fmt_pct(p["fee_tvl_ratio"]),
-                    "Price": f"${_fmt_price(p['base_price'])}",
-                    "24h": f"{p['pct_24h']:+.1f}%",
-                    "Link": f'<a href="{_pool_url(p["dex_id"], p["address"])}" target="_blank" title="Open on {p["dex_family"].capitalize()}">&#x1F517;</a>',
-                }
-                for i, p in enumerate(top, 1)
-            ]
-        )
+    builder.table(
+        [
+            {
+                "#": i,
+                "Pool": p["name"],
+                "DEX": p["dex"],
+                "Vol 24h": _fmt_usd(p["volume_24h"]),
+                "TVL": _fmt_usd(p["tvl"]),
+                "V/T": f"{p['vol_tvl_ratio']:.1f}x",
+                "Fee": f"{p['fee_pct'] * 100:.2f}".rstrip("0").rstrip(".") + "%",
+                "Fee APR": _fmt_pct(p["fee_tvl_ratio"]),
+                "Price": f"${_fmt_price(p['base_price'])}",
+                "24h": f"{p['pct_24h']:+.1f}%",
+                "Link": f'<a href="{_pool_url(p["dex_id"], p["address"])}" target="_blank" title="Open on {p["dex_family"].capitalize()}">&#x1F517;</a>',
+            }
+            for i, p in enumerate(top, 1)
+        ]
+    )
 
-        builder.manual_order()
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    builder.manual_order()
+    await builder.save()
 
     return RoutineResult(text=report_text, chart_image=chart_bytes)

@@ -18,7 +18,7 @@ export interface ChatMessage {
   text: string;
   toolCalls: ToolCall[];
   thought?: string;
-  /** System messages only: "switch" | "error" | "delegation". */
+  /** System: "switch" | "error" | "delegation" | "resume" | "notification" | "routine". */
   kind?: string;
   /**
    * The user redirected the agent while this answer was being written. The
@@ -70,6 +70,8 @@ export interface SlotInfo {
 export interface PermissionRequest {
   request_id: string;
   summary: string;
+  /** Which agent, on which server, raised it. Empty when unattributable. */
+  origin?: string;
 }
 
 /**
@@ -140,17 +142,20 @@ function foldIntoStream(
 /**
  * End the turn: whatever is on screen is what was said.
  *
- * Only the last message can be open — a bubble stops being foldable the moment
- * anything is appended after it — so closing it is enough, and returning the
- * same array when there is nothing to close keeps a `prompt_done` for an idle
- * slot from re-rendering the transcript.
+ * Every open bubble is closed, not just the last one. A bubble stops being
+ * *foldable* the moment anything is appended after it, but it does not stop
+ * being open: an out-of-band note (a routine outcome pushed mid-answer) lands
+ * after a bubble the turn was still writing into, and that bubble is what
+ * `open` has to keep describing until the turn actually ends. Closing only the
+ * tail left it flagged open forever, and the next turn in the same slot lit it
+ * up as live again.
+ *
+ * Returning the same array when there is nothing to close keeps a
+ * `prompt_done` for an idle slot from re-rendering the transcript.
  */
 function closeStream(msgs: ChatMessage[]): ChatMessage[] {
-  const last = msgs.length - 1;
-  if (last < 0 || !msgs[last].open) return msgs;
-  const out = [...msgs];
-  out[last] = { ...out[last], open: false };
-  return out;
+  if (!msgs.some((m) => m.open)) return msgs;
+  return msgs.map((m) => (m.open ? { ...m, open: false } : m));
 }
 
 /** Stop every tool call that is still spinning. A prompt that ended, ended. */
@@ -573,7 +578,11 @@ export function useChatSocket() {
           info: {
             slot_id: conversationId,
             conversation_id: conversationId,
-            agent_key: meta?.agent_key || "",
+            // The record's key is a log of what answered last, so for a bound
+            // conversation it is not what is about to: the server resolves the
+            // Agent's *current* model. `""` lets the picker fall back to that
+            // rather than flashing a model the resume will not use.
+            agent_key: meta?.agent_slug ? "" : meta?.agent_key || "",
             server_name: meta?.server_name,
             agent_slug: meta?.agent_slug,
             label: meta?.label,
@@ -823,6 +832,7 @@ export function useChatSocket() {
             [askingSlot]: {
               request_id: data.request_id as string,
               summary: data.summary as string,
+              origin: (data.origin as string) || "",
             },
           }));
           break;
@@ -858,6 +868,38 @@ export function useChatSocket() {
           // dashboard ate my message" and "it is next in line".
           if (!slotId) break;
           setQueuedSlots((prev) => (prev[slotId] ? prev : { ...prev, [slotId]: true }));
+          break;
+        }
+
+        case "system_note": {
+          // Something finished in the background and wrote a note into the
+          // transcript — a routine's outcome, most often. The note is already
+          // recorded server-side; this only puts it on screen without a reload.
+          // Appended after the buffered text so it cannot cut an answer in half.
+          if (!slotId) break;
+          flushChunks(slotId);
+          const noteText = (data.text as string) || "";
+          const noteKind = (data.kind as string) || undefined;
+          if (!noteText) break;
+          setSlots((prev) =>
+            prev.map((s) =>
+              s.info.slot_id === slotId
+                ? {
+                    ...s,
+                    messages: [
+                      ...s.messages,
+                      {
+                        id: nextMsgId(),
+                        role: "system" as const,
+                        text: noteText,
+                        kind: noteKind,
+                        toolCalls: [],
+                      },
+                    ],
+                  }
+                : s,
+            ),
+          );
           break;
         }
 

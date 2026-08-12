@@ -15,7 +15,15 @@ class JSONRPCError(Exception):
         self.code = code
         self.message = message
         self.data = data
-        super().__init__(f"[{code}] {message}")
+        # The `data` payload is where an ACP bridge puts the actual cause — a
+        # bare "[-32603] Internal error" reaches the user with no way to tell a
+        # bad handshake from a refused subprocess. Keep it in the string.
+        detail = ""
+        if isinstance(data, dict):
+            detail = str(data.get("details") or data.get("message") or "") or str(data)
+        elif data:
+            detail = str(data)
+        super().__init__(f"[{code}] {message}" + (f": {detail[:300]}" if detail else ""))
 
 
 # Standard JSON-RPC 2.0 error codes

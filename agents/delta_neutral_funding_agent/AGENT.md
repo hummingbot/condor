@@ -20,7 +20,7 @@ when_to_consult: When the user asks about delta-neutral funding strategies on HI
   funding MM on a configured pair — use delegate so the agent runs the full
   deployment in the background and pings when done.
 server_required: true
-server_name: moneymaker
+server_name: ''
 created_by: 456181693
 created_at: '2026-07-30T00:00:00+00:00'
 ---

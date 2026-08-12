@@ -44,6 +44,7 @@ export function candlesQuery(
   interval: string,
   start?: number,
   end?: number,
+  poolAddress?: string,
 ) {
   const startTime =
     start === undefined ? undefined : Math.floor(start / CANDLE_WINDOW_BUCKET) * CANDLE_WINDOW_BUCKET;
@@ -52,6 +53,16 @@ export function candlesQuery(
   return {
     startTime,
     endTime,
-    queryKey: ["candles", server, connector, pair, interval, startTime ?? null, endTime ?? null],
+    queryKey: [
+      "candles",
+      server,
+      connector,
+      pair,
+      interval,
+      startTime ?? null,
+      endTime ?? null,
+      // Same market, different pool → different candles.
+      poolAddress ?? null,
+    ],
   };
 }

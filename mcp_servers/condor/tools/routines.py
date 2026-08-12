@@ -6,6 +6,12 @@ process does. Execution is not: a routine *run* is a live object (an instance in
 subprocess to show up in the dashboard and be stoppable from it. So run/start/
 stop/list_instances delegate to the main process over ``call_main_api``, the
 same crossing ``consult`` and ``delegate`` already make.
+
+That crossing is also what makes a run survive the caller: the instance belongs
+to the main process, not to the turn that asked for it. ``run`` waits on it for
+convenience; ``run_async`` + ``get_instance`` hand the same run back as a token
+to redeem later, which is the only workable shape for a routine that takes
+longer than a conversation turn.
 """
 
 import asyncio
@@ -28,80 +34,100 @@ _NO_SERVER = (
 )
 
 
-def _get_agent_routines_dir(strategy_id: str | None) -> Path | None:
+def _shared_root() -> Path:
+    """``agents/_shared/routines`` — the library every assistant reads."""
+    from condor.memory.paths import shared_routines_root
+
+    return shared_routines_root()
+
+
+def _get_agent_routines_dir(target: str | None, shared: bool = False) -> Path | None:
     """Resolve the routines directory to write to.
 
-    Routines live at the **Agent** level (``agents/<slug>/routines``),
-    shared across all of that agent's strategies. A strategy_id (composite key
-    "agent_slug.strategy_slug") resolves to its owning agent's routines dir; a
-    bare agent slug ("agent_slug", no dot) resolves to that agent directly —
-    used in the expert-first flow where routines are created before any strategy
-    exists. Otherwise the current assistant's own dir — the general library
-    (root ``routines/``) for the chat, or the launched Agent's
-    (``agents/<slug>/routines``, ``settings.agent_slug``).
+    Routines live at the **Agent** level (``agents/<slug>/routines``), shared
+    across all of that agent's strategies — so ``target`` is an *agent* selector:
+    a bare agent slug ("agent_slug") is the canonical form. A composite strategy
+    key ("agent_slug.strategy_slug") is still accepted and resolves to its
+    *owning agent's* dir (the strategy half is discarded — there is no
+    per-strategy routines dir). Without a ``target``, the current assistant's own
+    dir — the general library (root ``routines/``) for the chat, or the launched
+    Agent's (``agents/<slug>/routines``, ``settings.agent_slug``).
+
+    ``shared=True`` targets the published library every assistant reads
+    (:func:`condor.memory.paths.shared_routines_root`), and is honored **only**
+    for the chat authoring its own library — same rule and same one-line guard
+    as ``manage_skill``'s ``shared``. For an agent it is ignored, so an agent's
+    ``create_routine``/``edit_routine`` physically cannot reach the shared root.
     """
     from routines.base import assistant_routines_dir
 
-    if strategy_id:
-        from condor.agents.strategy import StrategyStore
+    if shared and not settings.specialist_slug and not target:
+        return _shared_root()
 
-        s = StrategyStore().get_by_key(strategy_id)
-        if s:
-            return assistant_routines_dir(s.agent_slug)
-        # Fall back: treat strategy_id as a bare agent slug so routines can be
-        # created/run for a consult-only expert that owns no strategy yet.
+    if target:
         from condor.agents.agent import AgentStore
 
-        if AgentStore().get(strategy_id):
-            return assistant_routines_dir(strategy_id)
+        if AgentStore().get(target):
+            return assistant_routines_dir(target)
+
+        # Legacy/convenience form: a composite strategy key. Routines live one
+        # level up, so this only serves to name the owning agent.
+        from condor.agents.strategy import StrategyStore
+
+        s = StrategyStore().get_by_key(target)
+        if s:
+            return assistant_routines_dir(s.agent_slug)
         return None
 
     return assistant_routines_dir(settings.specialist_slug or None)
 
 
+def _own_plus_shared(slug: str | None) -> dict:
+    """An assistant's runnable routines: own library over the shared one.
+
+    One call for both seats (FEAT-038): a domain expert/trading agent gets
+    ``agents/<slug>/routines`` over ``agents/_shared/routines``, the chat gets
+    the general library — which ``discover_routines`` already merges the shared
+    root into. The chat re-scans on every call because it is the library's
+    author and its edits must be visible immediately; an agent rides the mtime
+    cache.
+    """
+    from routines.base import assistant_routines
+
+    return assistant_routines(slug, force_reload=not slug)
+
+
 def _resolve_routine(name: str):
     """Look up a routine in the current assistant's scope.
 
-    A domain expert/trading agent (``settings.agent_slug`` set) resolves ONLY its
-    own routines — it never sees the chat's general library. The chat ``condor``
-    resolves the general library (root ``routines/``).
+    A domain expert/trading agent (``settings.agent_slug`` set) resolves its own
+    routines plus the shared library, its own shadowing a shared name. The chat
+    ``condor`` resolves the general library (root ``routines/`` + shared).
     """
-    from routines.base import (
-        assistant_routines_dir,
-        discover_routines,
-        discover_routines_from_path,
-    )
-
-    slug = settings.specialist_slug
-    if slug:
-        own_dir = assistant_routines_dir(slug)
-        if own_dir.exists():
-            own = discover_routines_from_path(own_dir, agent_slug=slug)
-            return own.get(name)
-        return None
-
-    return discover_routines(force_reload=True).get(name)
+    return _own_plus_shared(settings.specialist_slug).get(name)
 
 
-def list_routines(strategy_id: str | None = None) -> dict:
+def list_routines(target: str | None = None) -> dict:
     from routines.base import discover_routines, discover_routines_from_path
 
     result = []
 
-    # Agent/expert MCP: ONLY its own routines, isolated from the general library.
+    # Agent/expert MCP: its own routines plus the shared library. Shared entries
+    # are flagged so the agent knows which ones it may not edit — a local
+    # routine of the same name shadows one instead.
     if settings.specialist_slug:
-        own_dir = _get_agent_routines_dir(None)
-        if own_dir and own_dir.exists():
-            for name, routine in sorted(discover_routines_from_path(own_dir).items()):
-                result.append(
-                    {
-                        "name": name,
-                        "description": routine.description,
-                        "type": "continuous" if routine.is_continuous else "one-shot",
-                        "scope": "agent",
-                        "agent": settings.specialist_slug,
-                    }
-                )
+        for name, routine in sorted(_own_plus_shared(settings.specialist_slug).items()):
+            entry = {
+                "name": name,
+                "description": routine.description,
+                "type": "continuous" if routine.is_continuous else "one-shot",
+            }
+            if (routine.source or "").startswith("agent:"):
+                entry["scope"] = "agent"
+                entry["agent"] = settings.specialist_slug
+            else:
+                entry["scope"] = "shared"
+            result.append(entry)
         return {"routines": result}
 
     # Chat condor: the general library (root routines/).
@@ -115,9 +141,12 @@ def list_routines(strategy_id: str | None = None) -> dict:
             }
         )
 
-    if strategy_id:
-        agent_routines_dir = _get_agent_routines_dir(strategy_id)
+    if target:
+        agent_routines_dir = _get_agent_routines_dir(target)
         if agent_routines_dir and agent_routines_dir.exists():
+            # Report the owning agent, not the caller's spelling: `target` may be
+            # a composite strategy key, and the routines are the agent's.
+            owner = _owner_of(target) or target
             for name, routine in sorted(
                 discover_routines_from_path(agent_routines_dir).items()
             ):
@@ -127,7 +156,7 @@ def list_routines(strategy_id: str | None = None) -> dict:
                         "description": routine.description,
                         "type": "continuous" if routine.is_continuous else "one-shot",
                         "scope": "agent",
-                        "agent": strategy_id,
+                        "agent": owner,
                     }
                 )
     else:
@@ -166,31 +195,31 @@ def describe_routine(name: str) -> dict:
     }
 
 
-def _owner_of(strategy_id: str) -> str | None:
-    """The agent slug that owns a strategy key, or a bare agent slug as given."""
+def _owner_of(target: str) -> str | None:
+    """The agent slug ``target`` names — itself, or the owner of a strategy key."""
     from condor.agents.agent import AgentStore
     from condor.agents.strategy import StrategyStore
 
-    s = StrategyStore().get_by_key(strategy_id)
+    if AgentStore().get(target):
+        return target
+    # Legacy/convenience form: a composite strategy key names its owning agent.
+    s = StrategyStore().get_by_key(target)
     if s:
         return s.agent_slug
-    # Expert-first flow: the id is already a bare agent slug, no strategy yet.
-    if AgentStore().get(strategy_id):
-        return strategy_id
     return None
 
 
-def _resolve_with_owner(name: str, strategy_id: str | None):
+def _resolve_with_owner(name: str, target: str | None):
     """Resolve a routine plus the assistant its reports belong to.
 
     Attribution follows the run context, not the routine file: an explicit
-    strategy resolves to its owning agent (the bare slug, the canonical unit
+    target resolves to its owning agent (the bare slug, the canonical unit
     shared with the web/Telegram runner's ``_agent_of``), else the running
     assistant, else the chat ``condor``. It therefore differs from
     ``_agent_of`` exactly when an agent runs a routine from the general
     library — which is why it is sent to the store rather than re-derived there.
     """
-    owner = _owner_of(strategy_id) if strategy_id else None
+    owner = _owner_of(target) if target else None
     if owner:
         from routines.base import assistant_routines_dir, discover_routines_from_path
 
@@ -219,6 +248,21 @@ def _store_name(routine, fallback: str) -> str:
     return rname
 
 
+def _with_provenance(payload: dict) -> dict:
+    """Stamp a run payload with the session that asked for it.
+
+    The main process turns the key into the conversation the finished run reports
+    back to (ARCH-089) — the same provenance ``delegate`` and ``send_notification``
+    carry, so all three announce their outcome where the user asked for it. A
+    runner with no session behind it (a tick loop, a delegate worker) sends
+    nothing: there is no conversation to report to, and the route already reads a
+    missing key as exactly that.
+    """
+    if settings.session_key:
+        payload["session_key"] = settings.session_key
+    return payload
+
+
 async def _poll_until_done(instance_id: str) -> dict | None:
     """Follow a delegated run until it leaves ``running``. None on timeout."""
     deadline = time.monotonic() + _RUN_BUDGET
@@ -230,23 +274,26 @@ async def _poll_until_done(instance_id: str) -> dict | None:
     return None
 
 
-async def run_routine(
-    name: str, config: dict | None, strategy_id: str | None = None
-) -> dict:
-    """Run a one-shot routine in the main process and return its result.
+async def _submit_oneshot(
+    name: str, config: dict | None, target: str | None
+) -> tuple[str | None, dict | None]:
+    """Resolve, validate and start a one-shot run. Returns (instance_id, error).
 
     Resolution and config validation stay here — this is the code that knows
-    about ``strategy_id`` and agent-local dirs, and a bad config field must fail
+    about the agent ``target`` and agent-local dirs, and a bad config field must fail
     fast with a useful message instead of arriving as a 404 from the API. The
     execution itself is delegated so the run is a real instance: it shows up in
     the dock while it runs, fires its post-run hooks, and keeps its result.
+
+    Shared by the blocking ``run`` and the fire-and-forget ``run_async`` — the
+    two differ only in whether they then wait for the instance to finish.
     """
-    routine, agent = _resolve_with_owner(name, strategy_id)
+    routine, agent = _resolve_with_owner(name, target)
     if not routine:
-        return {"error": f"Routine '{name}' not found"}
+        return None, {"error": f"Routine '{name}' not found"}
 
     if routine.is_continuous:
-        return {
+        return None, {
             "error": f"Routine '{name}' is continuous — use action='start' to run "
             "it in the background, and action='stop' with its instance_id to end it."
         }
@@ -254,45 +301,40 @@ async def run_routine(
     try:
         routine.config_class(**(config or {}))
     except Exception as e:
-        return {"error": f"Invalid config: {e}"}
+        return None, {"error": f"Invalid config: {e}"}
 
     if not settings.active_server:
-        return {"error": _NO_SERVER}
+        return None, {"error": _NO_SERVER}
 
     try:
         started = await call_main_api(
             "POST",
             "/routines/run",
-            {
-                "routine_name": _store_name(routine, name),
-                "server_name": settings.active_server,
-                "config": config or {},
-                "attribute_to": agent,
-            },
+            _with_provenance(
+                {
+                    "routine_name": _store_name(routine, name),
+                    "server_name": settings.active_server,
+                    "config": config or {},
+                    "attribute_to": agent,
+                }
+            ),
         )
-        instance_id = started.get("instance_id") if isinstance(started, dict) else None
-        if not instance_id:
-            return {"error": f"Routine '{name}' did not start: {started}"}
-
-        inst = await _poll_until_done(instance_id)
     except APIError as e:
-        return {"error": f"Routine '{name}' could not be run: {e}"}
+        return None, {"error": f"Routine '{name}' could not be run: {e}"}
 
-    if inst is None:
-        return {
-            "error": f"Routine '{name}' timed out after {int(_RUN_BUDGET)}s "
-            "(it may still be running — check the dashboard)",
-            "instance_id": instance_id,
-        }
-    if inst.get("error"):
-        return {
-            "error": f"Routine '{name}' failed: {inst['error']}",
-            "instance_id": instance_id,
-        }
+    instance_id = started.get("instance_id") if isinstance(started, dict) else None
+    if not instance_id:
+        return None, {"error": f"Routine '{name}' did not start: {started}"}
+    return instance_id, None
 
+
+def _result_payload(name: str, instance_id: str, inst: dict) -> dict:
+    """Shape a finished instance record into the tool's result dict."""
     return {
         "name": name,
         "instance_id": instance_id,
+        "status": inst.get("status"),
+        "report_id": inst.get("report_id"),
         "result": {
             "text": inst.get("result_text") or inst.get("last_result") or "",
             "table_data": inst.get("table_data"),
@@ -303,6 +345,94 @@ async def run_routine(
             "sections": inst.get("sections"),
         },
     }
+
+
+async def run_routine(
+    name: str, config: dict | None, target: str | None = None
+) -> dict:
+    """Run a one-shot routine in the main process and wait for its result."""
+    instance_id, error = await _submit_oneshot(name, config, target)
+    if error:
+        return error
+
+    try:
+        inst = await _poll_until_done(instance_id)
+    except APIError as e:
+        return {"error": f"Routine '{name}' could not be run: {e}"}
+
+    if inst is None:
+        return {
+            "error": f"Routine '{name}' timed out after {int(_RUN_BUDGET)}s. It is "
+            "still running — read its result later with "
+            f"action='get_instance', name='{instance_id}'. For a routine you "
+            "know is slow, submit it with action='run_async' instead of waiting.",
+            "instance_id": instance_id,
+        }
+    if inst.get("error"):
+        return {
+            "error": f"Routine '{name}' failed: {inst['error']}",
+            "instance_id": instance_id,
+        }
+
+    return _result_payload(name, instance_id, inst)
+
+
+async def run_async_routine(
+    name: str, config: dict | None, target: str | None = None
+) -> dict:
+    """Submit a one-shot routine and return immediately — fire and forget.
+
+    The counterpart of ``run`` for work that outlives a turn (a backtest, a long
+    scan): the run is a normal instance in the main process, so it keeps going,
+    fires its post-run hooks and stores its result whether or not anyone is
+    waiting. Read it back later with ``get_instance``.
+    """
+    instance_id, error = await _submit_oneshot(name, config, target)
+    if error:
+        return error
+
+    return {
+        "started": True,
+        "instance_id": instance_id,
+        "routine": name,
+        "note": (
+            "Running in the background — do NOT wait for it. Read the result "
+            f"later with action='get_instance', name='{instance_id}'."
+        ),
+    }
+
+
+async def get_instance(instance_id: str) -> dict:
+    """Read a run back: its status, and its result once it has finished."""
+    try:
+        inst = await call_main_api("GET", f"/routines/instances/{instance_id}")
+    except APIError as e:
+        return {
+            "error": f"Could not read instance '{instance_id}': {e}. Instances live "
+            "in the running process, so a bot restart drops them — the run's "
+            "report survives in the dashboard. Use action='list_instances' to "
+            "see what is still known."
+        }
+
+    if not isinstance(inst, dict):
+        return {"error": f"Instance '{instance_id}' returned no record: {inst}"}
+
+    name = inst.get("routine_name") or instance_id
+    if inst.get("status") == "running":
+        return {
+            "name": name,
+            "instance_id": instance_id,
+            "status": "running",
+            "note": "Still running — check again later.",
+        }
+    if inst.get("error"):
+        return {
+            "error": f"Routine '{name}' failed: {inst['error']}",
+            "instance_id": instance_id,
+            "status": inst.get("status"),
+        }
+
+    return _result_payload(name, instance_id, inst)
 
 
 async def start_routine(name: str, config: dict | None) -> dict:
@@ -327,12 +457,14 @@ async def start_routine(name: str, config: dict | None) -> dict:
         data = await call_main_api(
             "POST",
             "/routines/start",
-            {
-                "routine_name": _store_name(routine, name),
-                "server_name": settings.active_server,
-                "config": config or {},
-                "attribute_to": settings.specialist_slug or "condor",
-            },
+            _with_provenance(
+                {
+                    "routine_name": _store_name(routine, name),
+                    "server_name": settings.active_server,
+                    "config": config or {},
+                    "attribute_to": settings.specialist_slug or "condor",
+                }
+            ),
         )
     except APIError as e:
         return {"error": f"Failed to start '{name}': {e}"}
@@ -359,8 +491,14 @@ async def list_instances() -> dict:
     return {"instances": instances}
 
 
-def create_routine(name: str, code: str, strategy_id: str | None) -> dict:
-    """Create a new agent-local routine file."""
+def create_routine(
+    name: str, code: str, target: str | None, shared: bool = False
+) -> dict:
+    """Create a new routine file in the caller's writable library.
+
+    ``shared=True`` publishes it to every assistant — chat only, see
+    :func:`_get_agent_routines_dir`.
+    """
     import re
 
     if not name or not re.match(r"^[a-z][a-z0-9_]*$", name):
@@ -370,12 +508,12 @@ def create_routine(name: str, code: str, strategy_id: str | None) -> dict:
     if not code:
         return {"error": "code is required"}
 
-    routines_dir = _get_agent_routines_dir(strategy_id)
+    routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
-            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
-            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
-            "resolve to an existing agent."
+            "error": "Pass agent — the slug of an existing agent (a legacy strategy "
+            "key 'agent_slug.strategy_slug' is also accepted) — or CONDOR_AGENT_SLUG "
+            "must be set."
         }
 
     file_path = routines_dir / f"{name}.py"
@@ -402,21 +540,31 @@ def create_routine(name: str, code: str, strategy_id: str | None) -> dict:
         }
 
     routine = loaded[name]
-    return {
+    result = {
         "created": True,
         "name": name,
         "description": routine.description,
         "path": str(file_path),
     }
+    if routines_dir == _shared_root():
+        result["shared"] = True
+    return result
 
 
-def read_routine(name: str, strategy_id: str | None) -> dict:
+def read_routine(name: str, target: str | None, shared: bool = False) -> dict:
     """Read the source code of a routine."""
-    routines_dir = _get_agent_routines_dir(strategy_id)
+    routines_dir = _get_agent_routines_dir(target, shared)
     if routines_dir:
         file_path = routines_dir / f"{name}.py"
         if file_path.exists():
             return {"name": name, "code": file_path.read_text(), "scope": "agent"}
+
+    # An assistant can read the source of anything it can run, so the shared
+    # library is on the fallback path too — read-only for an agent, which the
+    # `scope` says (writes go through _get_agent_routines_dir and never land here).
+    shared_path = _shared_root() / f"{name}.py"
+    if shared_path.exists():
+        return {"name": name, "code": shared_path.read_text(), "scope": "shared"}
 
     global_path = Path("routines") / f"{name}.py"
     if global_path.exists():
@@ -425,14 +573,16 @@ def read_routine(name: str, strategy_id: str | None) -> dict:
     return {"error": f"Routine '{name}' not found"}
 
 
-def edit_routine(name: str, code: str, strategy_id: str | None) -> dict:
-    """Update the source code of an agent-local routine."""
-    routines_dir = _get_agent_routines_dir(strategy_id)
+def edit_routine(
+    name: str, code: str, target: str | None, shared: bool = False
+) -> dict:
+    """Update the source code of a routine in the caller's writable library."""
+    routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
-            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
-            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
-            "resolve to an existing agent."
+            "error": "Pass agent — the slug of an existing agent (a legacy strategy "
+            "key 'agent_slug.strategy_slug' is also accepted) — or CONDOR_AGENT_SLUG "
+            "must be set."
         }
 
     file_path = routines_dir / f"{name}.py"
@@ -464,14 +614,14 @@ def edit_routine(name: str, code: str, strategy_id: str | None) -> dict:
     }
 
 
-def delete_routine(name: str, strategy_id: str | None) -> dict:
-    """Delete an agent-local routine."""
-    routines_dir = _get_agent_routines_dir(strategy_id)
+def delete_routine(name: str, target: str | None, shared: bool = False) -> dict:
+    """Delete a routine from the caller's writable library."""
+    routines_dir = _get_agent_routines_dir(target, shared)
     if not routines_dir:
         return {
-            "error": "Pass strategy_id — a strategy key 'agent_slug.strategy_slug' "
-            "or a bare agent slug — (or CONDOR_AGENT_SLUG must be set), and it must "
-            "resolve to an existing agent."
+            "error": "Pass agent — the slug of an existing agent (a legacy strategy "
+            "key 'agent_slug.strategy_slug' is also accepted) — or CONDOR_AGENT_SLUG "
+            "must be set."
         }
 
     file_path = routines_dir / f"{name}.py"
@@ -486,11 +636,21 @@ async def manage_routines(
     action: str,
     name: str | None = None,
     config: dict | None = None,
-    strategy_id: str | None = None,
+    agent: str | None = None,
     code: str | None = None,
+    strategy_id: str | None = None,
+    shared: bool | None = None,
 ) -> dict:
+    # ``strategy_id`` is the deprecated spelling of ``agent`` — routines live at
+    # the agent level, never per strategy. Kept so existing MCP hosts and the
+    # playbooks that name it keep working.
+    target = agent or strategy_id
+    # Publish/target the shared library. Chat-only; ignored for an agent, whose
+    # writes therefore stay in its own dir (see _get_agent_routines_dir).
+    publish = bool(shared)
+
     if action == "list":
-        return list_routines(strategy_id)
+        return list_routines(target)
     if action == "describe":
         if not name:
             return {"error": "name is required"}
@@ -498,23 +658,31 @@ async def manage_routines(
     if action == "run":
         if not name:
             return {"error": "name is required"}
-        return await run_routine(name, config, strategy_id)
+        return await run_routine(name, config, target)
+    if action == "run_async":
+        if not name:
+            return {"error": "name is required"}
+        return await run_async_routine(name, config, target)
+    if action == "get_instance":
+        if not name:
+            return {"error": "instance_id is required (pass as name)"}
+        return await get_instance(name)
     if action == "create_routine":
         if not name:
             return {"error": "name is required"}
-        return create_routine(name, code or "", strategy_id)
+        return create_routine(name, code or "", target, publish)
     if action == "read_routine":
         if not name:
             return {"error": "name is required"}
-        return read_routine(name, strategy_id)
+        return read_routine(name, target, publish)
     if action == "edit_routine":
         if not name:
             return {"error": "name is required"}
-        return edit_routine(name, code or "", strategy_id)
+        return edit_routine(name, code or "", target, publish)
     if action == "delete_routine":
         if not name:
             return {"error": "name is required"}
-        return delete_routine(name, strategy_id)
+        return delete_routine(name, target, publish)
     if action == "start":
         if not name:
             return {"error": "name is required"}

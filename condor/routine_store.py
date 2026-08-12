@@ -108,14 +108,36 @@ def _agent_of(routine) -> str:
     return src.split(":", 1)[1] if src.startswith("agent:") else "condor"
 
 
+def _run_outcome_text(routine_name: str, summary: str, error: str | None) -> str:
+    """The one-line outcome of a finished run, for the conversation transcript.
+
+    Built from the same two values the instance record keeps — its ``error`` and
+    its already-clipped ``last_result`` — so the note a conversation reads and
+    the record the dashboard shows can never disagree about the same run.
+    """
+    if error:
+        return f"❌ Routine {routine_name} failed: {error}"
+    return f"✅ Routine {routine_name} done\n\n{(summary or '').strip()}".rstrip()
+
+
 class WebRoutineContext:
     """Lightweight context so routines can run without Telegram."""
 
     def __init__(self, server_name: str, bot=None, chat_id: int = 0):
+        from condor.preferences import USER_PREFERENCES_KEY
+
         self._chat_id = chat_id
+        # The server this run was launched against, readable by name — for a routine
+        # that must *record* it (backtest_chart files its results under it).
+        self.server_name = server_name
         self.bot = bot if bot is not None else _http_bot
+        # And the same server as an active-server preference, which is how
+        # get_client(chat_id, context=...) resolves it. This dict was keyed
+        # "preferences" while the preference API reads USER_PREFERENCES_KEY
+        # ("user_preferences"), so the server a web or agent run was launched with
+        # never reached its client — every such run silently picked the chat default.
         self._user_data: dict[str, Any] = {
-            "preferences": {"general": {"active_server": server_name}},
+            USER_PREFERENCES_KEY: {"general": {"active_server": server_name}},
         }
 
     @property
@@ -158,6 +180,11 @@ class RoutineStore:
         agents_dir = Path(__file__).resolve().parent.parent / "agents"
         if agents_dir.exists():
             for agent_dir in sorted(agents_dir.iterdir()):
+                # `_`-prefixed dirs are not agents (`_shared`, `_defaults`) —
+                # same rule as AgentStore._iter_agent_dirs, so a library dir can
+                # never surface here as a routine owner named `_shared/...`.
+                if agent_dir.name.startswith("_"):
+                    continue
                 routines_path = agent_dir / "routines"
                 if not routines_path.is_dir():
                     continue
@@ -278,6 +305,64 @@ class RoutineStore:
                 f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
             )
 
+    async def _report_run(
+        self, instance_id: str, summary: str, error: str | None
+    ) -> None:
+        """Report a finished run to the conversation that asked for it.
+
+        One note, delivered twice. The ``system`` turn is the *record*: the
+        routine sibling of ``delegate._record_completion_turn``, without which
+        the conversation ended on "I started it" and ``replay_context`` told the
+        next session the same incomplete story (ARCH-089). Recorded as a
+        ``system`` turn so the replay reads it as a parenthetical note rather
+        than as the agent's own words.
+
+        The push is what the user *sees*. A recorded turn reaches an already-open
+        dashboard only when the page is reloaded, so a run that failed thirty
+        seconds in stayed invisible until someone refreshed. ``deliver_note``
+        shows the same line immediately and costs nothing: a finished routine is
+        worth showing, not worth a model turn to announce it.
+
+        A run with no conversation behind it — the scheduler, the dashboard, the
+        Telegram menu, an instance restored on boot — is a no-op: ``record_system``
+        ignores an empty id and a run with no session key reaches no surface.
+        Neither delivery is allowed to raise: a missing note must not cost the
+        user the run's own result or its hooks.
+        """
+        meta = self._instances.get(instance_id) or {}
+        conversation_id = meta.get("conversation_id") or ""
+        if not conversation_id:
+            return
+
+        text = _run_outcome_text(meta.get("routine_name") or "", summary, error)
+        try:
+            from condor.runtime.conversations import record_system
+
+            record_system(meta.get("user_id"), conversation_id, text, kind="routine")
+        except Exception:
+            logger.debug(
+                f"Could not record run {instance_id} in conversation {conversation_id}",
+                exc_info=True,
+            )
+
+        session_key = meta.get("session_key") or ""
+        if not session_key:
+            return
+        try:
+            from condor.runtime import wake
+
+            await wake.deliver_note(
+                session_key=session_key,
+                conversation_id=conversation_id,
+                text=text,
+                kind="routine",
+            )
+        except Exception:
+            logger.debug(
+                f"Could not show run {instance_id} in conversation {conversation_id}",
+                exc_info=True,
+            )
+
     def _new_instance_meta(
         self,
         routine_name: str,
@@ -285,9 +370,18 @@ class RoutineStore:
         server_name: str,
         user_id: int,
         source: str,
+        conversation_id: str = "",
+        session_key: str = "",
         **extra,
     ) -> dict:
-        """Fresh instance-metadata dict shared by execute/start_continuous/schedule."""
+        """Fresh instance-metadata dict shared by execute/start_continuous/schedule.
+
+        ``conversation_id`` is the run's provenance: the conversation that asked
+        for it, which its outcome is reported back to. ``session_key`` is the
+        live session behind that conversation, which the outcome is *shown* in
+        while it is still open. Both empty for everything with no conversation
+        behind it (dashboard, Telegram, restored schedules).
+        """
         return {
             "routine_name": routine_name,
             "config": config,
@@ -295,6 +389,8 @@ class RoutineStore:
             "source": source,
             "server_name": server_name,
             "user_id": user_id,
+            "conversation_id": conversation_id,
+            "session_key": session_key,
             "created_at": time.time(),
             "last_run_at": None,
             "last_result": None,
@@ -339,8 +435,12 @@ class RoutineStore:
         failed = False
         try:
             cfg = routine.config_class(**config)
+            # The bare name (not "agent_slug/name") is what both report lookups
+            # match on, and what routines that do call .source() already use.
+            base_name = (routine.name or "").split("/")[-1]
             with reports.attribute_to(agent or _agent_of(routine)):
-                raw = await routine.run_fn(cfg, ctx)
+                with reports.default_source("routine", base_name):
+                    raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
             result = RoutineResult(text="Stopped by user")
@@ -356,6 +456,9 @@ class RoutineStore:
         duration = time.time() - start
         report_id = reports.get_last_report_id()
         self._results[instance_id] = result
+        # Clipped once: the instance record and the conversation note are the
+        # same summary, so they cannot tell the user different stories.
+        summary = result.text[:500]
 
         if instance_id in self._instances:
             self._instances[instance_id].update(
@@ -364,7 +467,7 @@ class RoutineStore:
                         (failed_status or status_after) if failed else status_after
                     ),
                     "last_run_at": time.time(),
-                    "last_result": result.text[:500],
+                    "last_result": summary,
                     "last_duration": duration,
                     # The run's report is what a reader wants to open; the text
                     # is only what the caller (or the LLM) was handed back. A
@@ -375,6 +478,8 @@ class RoutineStore:
                     "error": error_msg,
                 }
             )
+
+        await self._report_run(instance_id, summary, error_msg)
 
         if fire_hooks:
             await self._fire_hooks(instance_id, result, report_id, failed)
@@ -402,10 +507,14 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
         agent: str = "",
+        conversation_id: str = "",
+        session_key: str = "",
     ) -> str:
         """Run a one-shot routine from the web. Returns instance_id.
 
-        ``agent`` overrides report attribution (see ``_execute_and_record``).
+        ``agent`` overrides report attribution (see ``_execute_and_record``);
+        ``conversation_id`` and ``session_key`` are where the finished run
+        reports back to and shows itself (see ``_report_run``).
         """
         routine = self._resolve_routine(routine_name)
         if not routine:
@@ -413,7 +522,13 @@ class RoutineStore:
 
         instance_id = self._gen_id()
         self._instances[instance_id] = self._new_instance_meta(
-            routine_name, config, server_name, user_id, source="web"
+            routine_name,
+            config,
+            server_name,
+            user_id,
+            source="web",
+            conversation_id=conversation_id,
+            session_key=session_key,
         )
 
         task = asyncio.create_task(
@@ -451,6 +566,8 @@ class RoutineStore:
         server_name: str,
         user_id: int = 0,
         agent: str = "",
+        conversation_id: str = "",
+        session_key: str = "",
     ) -> str:
         """Start a continuous routine as a background task. Returns instance_id."""
         routine = self._resolve_routine(routine_name)
@@ -463,7 +580,13 @@ class RoutineStore:
 
         instance_id = self._gen_id()
         self._instances[instance_id] = self._new_instance_meta(
-            routine_name, config, server_name, user_id, source="mcp"
+            routine_name,
+            config,
+            server_name,
+            user_id,
+            source="mcp",
+            conversation_id=conversation_id,
+            session_key=session_key,
         )
 
         task = asyncio.create_task(

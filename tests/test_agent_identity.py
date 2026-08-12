@@ -70,6 +70,27 @@ def test_list_index_unknown_exclude_is_a_no_op(three_agents):
     assert AgentStore().list_index(exclude="nope") == AgentStore().list_index()
 
 
+# ── identity_header rules out CONSULT on yourself, not DELEGATE (FEAT-041) ──
+
+
+@pytest.mark.parametrize(
+    "slug,name",
+    [("backpack_mm", "Backpack MM"), ("condor", "Condor")],
+)
+def test_identity_header_does_not_forbid_delegating_to_yourself(slug, name):
+    """Both seats read this line verbatim, so it must not contradict the routing.
+
+    It used to say "never consult or delegate to `<slug>`" — which contradicted
+    the chat's own routine-authoring rule and made an agent refuse to spawn a
+    background copy of itself. Whether delegating to yourself is right is a
+    per-seat question, answered by `_agent_base`/`_chat_base`/`_worker_base`.
+    """
+    header = identity_header(slug, name)
+    assert f"never consult `{slug}`" in header.lower()
+    assert "never consult or delegate" not in header.lower()
+    assert "background session of you" in header
+
+
 # ── the shared identity line ──
 
 

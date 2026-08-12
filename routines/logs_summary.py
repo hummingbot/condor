@@ -351,27 +351,22 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     summary = "\n".join(lines)
 
     # --- persistent report ----------------------------------------------------
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder("Bot Logs Summary")
-        builder.source("routine", "logs_summary").tags(["logs", "diagnostics", "bots"])
-        builder.kpi("Total Errors", total_errors)
-        builder.kpi("Total Warnings", total_warns)
-        builder.kpi("Bots w/ Errors", f"{bots_with_errors}/{len(bot_rows)}")
-        builder.kpi("Servers", f"{len(server_data)}/{len(server_names)}")
-        builder.kpi("Active Incidents", len(incidents))
-        builder.markdown(summary)
-        if bot_rows:
-            builder.table(bot_rows, bot_cols)
-        if pattern_rows:
-            builder.table(pattern_rows, pattern_cols)
-        builder.manual_order()
-        await builder.save()
-    except Exception as e:  # noqa: BLE001
-        import logging
-
-        logging.getLogger(__name__).warning(f"Report generation failed: {e}")
+    builder = ReportBuilder("Bot Logs Summary")
+    builder.source("routine", "logs_summary").tags(["logs", "diagnostics", "bots"])
+    builder.kpi("Total Errors", total_errors)
+    builder.kpi("Total Warnings", total_warns)
+    builder.kpi("Bots w/ Errors", f"{bots_with_errors}/{len(bot_rows)}")
+    builder.kpi("Servers", f"{len(server_data)}/{len(server_names)}")
+    builder.kpi("Active Incidents", len(incidents))
+    builder.markdown(summary)
+    if bot_rows:
+        builder.table(bot_rows, bot_cols)
+    if pattern_rows:
+        builder.table(pattern_rows, pattern_cols)
+    builder.manual_order()
+    await builder.save()
 
     # --- rich inline result ---------------------------------------------------
     try:

@@ -11,119 +11,18 @@ OpenRouter catalog, cheapest first.
 Read-only and side-effect-free. NEVER returns a key value — only whether each
 key's env var is set. An unreachable local server is a normal state (the user
 simply isn't running it), reported as ``reachable: false``, never raised.
+
+The detection itself lives in :mod:`handlers.agents.readiness`, shared with the
+setup wizard (``condor/setup_llm.py``) so the two can never disagree about what
+this machine can run.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
-import subprocess
-from pathlib import Path
 
-import httpx
-
-from condor.acp import ACP_COMMANDS
-from condor.acp.pydantic_ai_client import DEFAULT_BASE_URLS
 from handlers.agents.openrouter_models import fetch_models
-
-# Cloud providers Condor can address as "<prefix>:<model>", mapped to the env
-# var holding each key. Presence of the key = the provider is usable. Sourced
-# here (not hardcoded elsewhere) so the set stays in one place.
-_CLOUD_KEY_ENVS = {
-    "openrouter": "OPENROUTER_API_KEY",
-    "openai": "OPENAI_API_KEY",
-    "anthropic": "ANTHROPIC_API_KEY",
-    "groq": "GROQ_API_KEY",
-    "google": "GOOGLE_API_KEY",
-}
-
-# Local, keyless OpenAI-compatible servers. Base URLs come from the resolver's
-# own defaults (DEFAULT_BASE_URLS) so they can never drift from what actually
-# runs the model at request time.
-_LOCAL_PREFIXES = ("ollama", "lmstudio")
-
-
-def _npx_packages_installed() -> set[str]:
-    """npm packages resolvable WITHOUT a network install: local, global, npx cache.
-
-    Mirrors how npx resolves a package before falling back to downloading it.
-    ``shutil.which("npx")`` says nothing about the package — npx exists whenever
-    Node does — so probing the launcher would mark every ``npx``-run bridge
-    available on any machine with Node.
-    """
-    roots = [Path.cwd() / "node_modules"]
-    npm = shutil.which("npm")
-    if npm:
-        try:
-            proc = subprocess.run(
-                [npm, "root", "-g"], capture_output=True, text=True, timeout=10
-            )
-            if proc.returncode == 0 and proc.stdout.strip():
-                roots.append(Path(proc.stdout.strip()))
-        except (OSError, subprocess.SubprocessError):
-            pass  # npm unusable = nothing installed via it; local + cache still count
-    roots.extend((Path.home() / ".npm" / "_npx").glob("*/node_modules"))
-
-    installed: set[str] = set()
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for entry in root.iterdir():
-            if entry.name.startswith("@"):
-                installed.update(f"{entry.name}/{sub.name}" for sub in entry.iterdir())
-            else:
-                installed.add(entry.name)
-    return installed
-
-
-def _acp_clis() -> list[dict]:
-    """ACP CLI bridges and whether each one is actually installed.
-
-    A bridge launched as ``npx <package> …`` is available only if the PACKAGE is
-    already installed; a bare command is available if it is on PATH. Note that
-    ``available`` means "launchable" — every ACP bridge additionally needs its
-    own interactive login (Claude/Google/GitHub/OpenAI), which cannot be probed
-    from here, so an available bridge is not necessarily a working one.
-    """
-    npx_packages = _npx_packages_installed()
-    out: list[dict] = []
-    for base, cmd in ACP_COMMANDS.items():
-        parts = cmd.split()
-        if not parts:
-            available = False
-        elif parts[0] == "npx":
-            available = parts[1] in npx_packages if len(parts) > 1 else False
-        else:
-            available = shutil.which(parts[0]) is not None
-        out.append({"agent_key": base, "command": cmd, "available": available})
-    return out
-
-
-async def _local_servers() -> dict:
-    """Probe local OpenAI-compatible servers and list their loaded models.
-
-    Unreachable servers are reported (``reachable: false``), not raised — the
-    user just isn't running that server.
-    """
-    result: dict = {}
-    timeout = httpx.Timeout(connect=1.5, read=3.0, write=1.5, pool=1.5)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for prefix in _LOCAL_PREFIXES:
-            base = DEFAULT_BASE_URLS.get(prefix)
-            entry = {"base_url": base, "reachable": False, "models": []}
-            if base:
-                try:
-                    resp = await client.get(f"{base.rstrip('/')}/models")
-                    if resp.status_code == 200:
-                        data = resp.json().get("data", [])
-                        entry["reachable"] = True
-                        entry["models"] = sorted(
-                            m["id"] for m in data if isinstance(m, dict) and m.get("id")
-                        )
-                except Exception:
-                    pass  # not running = normal, leave reachable=False
-            result[prefix] = entry
-    return result
+from handlers.agents.readiness import CLOUD_KEY_ENVS, acp_bridges, local_servers
 
 
 async def _openrouter(query: str, limit: int) -> dict:
@@ -201,12 +100,12 @@ async def get_available_models(
 ) -> dict:
     """Report every model/provider currently usable for an agent's ``agent_key``."""
     cloud_keys = {
-        prefix: bool(os.environ.get(env)) for prefix, env in _CLOUD_KEY_ENVS.items()
+        prefix: bool(os.environ.get(env)) for prefix, env in CLOUD_KEY_ENVS.items()
     }
     return {
-        "acp_clis": _acp_clis(),
+        "acp_clis": acp_bridges(),
         "cloud_keys": cloud_keys,
         "custom_endpoints": await _custom_endpoints(),
-        "local": await _local_servers(),
+        "local": await local_servers(),
         "openrouter": await _openrouter(openrouter_query, openrouter_limit),
     }
