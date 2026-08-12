@@ -11,7 +11,7 @@ import { useAuth } from "@/lib/auth";
 const TABS = [
   { key: "servers", label: "Servers" },
   { key: "gateway", label: "Gateway" },
-  { key: "keys", label: "API Keys" },
+  { key: "keys", label: "Keys and Wallets" },
   { key: "llm", label: "LLM Endpoints" },
   { key: "voice", label: "Voice & AI" },
 ] as const;

@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  Globe,
   Loader2,
   Play,
   RefreshCw,
@@ -38,6 +39,221 @@ function formatRelativeTime(dateStr: string): string {
 function formatDuration(sec: number): string {
   if (sec < 60) return `${Math.floor(sec)}s`;
   return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
+}
+
+// Config keys that describe the network itself and must not be edited from the UI.
+const READONLY_NETWORK_KEYS = new Set([
+  "chain_id",
+  "native_currency_symbol",
+  "gecko_id",
+  "default_network",
+  "default_networks",
+  "default_wallet",
+]);
+
+function NetworkConfigEditor({ server, networkId }: { server: string; networkId: string }) {
+  const qc = useQueryClient();
+  const [draft, setDraft] = useState<Record<string, string>>({});
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["gateway-network-config", server, networkId],
+    queryFn: () => api.getGatewayNetworkConfig(server, networkId),
+  });
+
+  const saveMut = useMutation({
+    mutationFn: (config: Record<string, unknown>) =>
+      api.updateGatewayNetworkConfig(server, networkId, config),
+    onSuccess: () => {
+      setDraft({});
+      qc.invalidateQueries({ queryKey: ["gateway-network-config", server, networkId] });
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 p-3 text-xs text-[var(--color-text-muted)]">
+        <Loader2 className="h-3 w-3 animate-spin" /> Loading config...
+      </div>
+    );
+  }
+  if (error || !data) {
+    return (
+      <p className="p-3 text-xs text-[var(--color-red)]">
+        Failed to load config{error ? `: ${(error as Error).message}` : ""}
+      </p>
+    );
+  }
+
+  const config = data.config ?? {};
+  const editableEntries = Object.entries(config).filter(
+    ([key, value]) =>
+      !READONLY_NETWORK_KEYS.has(key) &&
+      (typeof value === "string" || typeof value === "number" || typeof value === "boolean"),
+  );
+
+  const changed = Object.entries(draft).filter(
+    ([key, value]) => value !== String(config[key] ?? ""),
+  );
+
+  const save = () => {
+    const updates: Record<string, unknown> = {};
+    for (const [key, value] of changed) {
+      const original = config[key];
+      if (typeof original === "number") {
+        const num = Number(value);
+        if (isNaN(num)) continue;
+        updates[key] = num;
+      } else if (typeof original === "boolean") {
+        updates[key] = value === "true";
+      } else {
+        updates[key] = value;
+      }
+    }
+    if (Object.keys(updates).length > 0) saveMut.mutate(updates);
+  };
+
+  return (
+    <div className="space-y-2 p-3">
+      {editableEntries.map(([key, value]) => {
+        const current = draft[key] ?? String(value ?? "");
+        const isDirty = draft[key] !== undefined && draft[key] !== String(value ?? "");
+        return (
+          <div key={key} className="flex items-center gap-2">
+            <label
+              className="w-44 shrink-0 truncate font-mono text-xs text-[var(--color-text-muted)]"
+              title={key}
+            >
+              {key}
+            </label>
+            {typeof value === "boolean" ? (
+              <input
+                type="checkbox"
+                checked={current === "true"}
+                onChange={(e) => setDraft((d) => ({ ...d, [key]: String(e.target.checked) }))}
+                className="h-3.5 w-3.5"
+              />
+            ) : (
+              <input
+                value={current}
+                onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
+                className={`flex-1 rounded-md border bg-[var(--color-bg)] px-2 py-1 font-mono text-xs text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none ${
+                  isDirty ? "border-[var(--color-primary)]/60" : "border-[var(--color-border)]"
+                }`}
+              />
+            )}
+          </div>
+        );
+      })}
+
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          onClick={save}
+          disabled={changed.length === 0 || saveMut.isPending}
+          className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+        >
+          {saveMut.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+          Save {changed.length > 0 ? `(${changed.length})` : ""}
+        </button>
+        {changed.length > 0 && (
+          <button
+            onClick={() => setDraft({})}
+            className="rounded-md px-2 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+          >
+            Discard
+          </button>
+        )}
+        {saveMut.isSuccess && changed.length === 0 && (
+          <span className="flex items-center gap-1 text-xs text-emerald-400">
+            <Check className="h-3 w-3" /> Saved
+          </span>
+        )}
+        {saveMut.error && (
+          <span className="text-xs text-[var(--color-red)]">{saveMut.error.message}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GatewayNetworks({ server, running }: { server: string; running: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["gateway-networks", server],
+    queryFn: () => api.getGatewayNetworks(server),
+    enabled: open && running,
+  });
+
+  const networks = data?.networks ?? [];
+  const chains = [...new Set(networks.map((n) => n.chain))].sort();
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between p-3 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+      >
+        <div className="flex items-center gap-2">
+          <Globe className="h-4 w-4" />
+          <span className="font-medium">Networks & RPC</span>
+        </div>
+        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+      </button>
+      {open && (
+        <div className="border-t border-[var(--color-border)] p-3 space-y-3">
+          {!running ? (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Start the Gateway to view and edit network configuration.
+            </p>
+          ) : isLoading ? (
+            <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+              <Loader2 className="h-3 w-3 animate-spin" /> Loading networks...
+            </div>
+          ) : error ? (
+            <p className="text-xs text-[var(--color-red)]">{(error as Error).message}</p>
+          ) : (
+            chains.map((chain) => (
+              <div key={chain}>
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
+                  {chain}
+                </p>
+                <div className="space-y-1">
+                  {networks
+                    .filter((n) => n.chain === chain)
+                    .map((n) => (
+                      <div
+                        key={n.network_id}
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]"
+                      >
+                        <button
+                          onClick={() =>
+                            setExpanded(expanded === n.network_id ? null : n.network_id)
+                          }
+                          className="flex w-full items-center justify-between px-3 py-2 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+                        >
+                          <span className="font-mono">{n.network}</span>
+                          {expanded === n.network_id ? (
+                            <ChevronDown className="h-3 w-3" />
+                          ) : (
+                            <ChevronRight className="h-3 w-3" />
+                          )}
+                        </button>
+                        {expanded === n.network_id && (
+                          <div className="border-t border-[var(--color-border)]">
+                            <NetworkConfigEditor server={server} networkId={n.network_id} />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function GatewaySettings() {
@@ -414,6 +630,9 @@ export function GatewaySettings() {
           </div>
         </div>
       )}
+
+      {/* Networks & RPC */}
+      <GatewayNetworks server={server} running={running} />
 
       {/* Logs */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">

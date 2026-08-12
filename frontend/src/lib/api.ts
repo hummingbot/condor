@@ -383,6 +383,8 @@ export interface RunningInstance {
   total_amount_quote: number;
   trading_context: string;
   frequency_sec: number;
+  /** Wall-clock budget for one tick's agent session, in seconds. */
+  tick_timeout_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
 }
@@ -771,6 +773,23 @@ export interface GatewayStatus {
   image?: string;
   created_at?: string;
   container_status?: string;
+}
+
+export interface GatewayNetworkInfo {
+  network_id: string;
+  chain: string;
+  network: string;
+}
+
+export interface GatewayNetworkConfig {
+  network_id: string;
+  config: Record<string, unknown>;
+}
+
+export interface GatewayWalletGroup {
+  chain: string;
+  walletAddresses: string[];
+  default_address?: string;
 }
 
 export interface CredentialInfo {
@@ -1744,6 +1763,52 @@ export const api = {
 
   getGatewayLogs: (server: string) =>
     apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
+
+  getGatewayNetworks: (server: string) =>
+    apiFetch<{ networks: GatewayNetworkInfo[] }>(
+      `/api/v1/settings/gateway/networks?server=${encodeURIComponent(server)}`,
+    ),
+
+  getGatewayNetworkConfig: (server: string, networkId: string) =>
+    apiFetch<GatewayNetworkConfig>(
+      `/api/v1/settings/gateway/networks/${encodeURIComponent(networkId)}?server=${encodeURIComponent(server)}`,
+    ),
+
+  updateGatewayNetworkConfig: (
+    server: string,
+    networkId: string,
+    config: Record<string, unknown>,
+  ) =>
+    apiFetch<{ updated: boolean; network_id: string }>(
+      `/api/v1/settings/gateway/networks/${encodeURIComponent(networkId)}?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify({ config }) },
+    ),
+
+  getGatewayWallets: (server: string) =>
+    apiFetch<{ wallets: GatewayWalletGroup[] }>(
+      `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
+    ),
+
+  addGatewayWallet: (
+    server: string,
+    data: { chain: string; private_key: string; set_default?: boolean },
+  ) =>
+    apiFetch<{ added: boolean; chain: string; address: string | null }>(
+      `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  setDefaultGatewayWallet: (server: string, data: { chain: string; address: string }) =>
+    apiFetch<{ default: boolean }>(
+      `/api/v1/settings/gateway/wallets/default?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  removeGatewayWallet: (server: string, chain: string, address: string) =>
+    apiFetch<{ removed: boolean }>(
+      `/api/v1/settings/gateway/wallets/${encodeURIComponent(chain)}/${encodeURIComponent(address)}?server=${encodeURIComponent(server)}`,
+      { method: "DELETE" },
+    ),
 
   getCredentials: (server: string) =>
     apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),

@@ -128,6 +128,10 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
           <span className="text-[var(--color-text-muted)]">frequency</span>
           <span className="text-[var(--color-text)]">{instance.frequency_sec}s</span>
         </div>
+        <div className="flex justify-between">
+          <span className="text-[var(--color-text-muted)]">tick timeout</span>
+          <span className="text-[var(--color-text)]">{instance.tick_timeout_sec}s</span>
+        </div>
         {Object.entries(riskLimits).map(([k, v]) => {
           // These are risk LIMITS (max_*), not current values — keep the "max"
           // so e.g. "open executors: 10" isn't misread as 10 executors open now.

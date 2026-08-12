@@ -6,16 +6,25 @@ import {
   Key,
   Loader2,
   Plus,
+  Star,
   Trash2,
+  Wallet,
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
-import { type ConnectorInfo, type CredentialInfo, api } from "@/lib/api";
+import { type ConnectorInfo, type CredentialInfo, type GatewayWalletGroup, api } from "@/lib/api";
 import { ConnectHyperliquid } from "./ConnectHyperliquid";
+import { ImportGatewayWallet, type WalletChain } from "./ImportGatewayWallet";
 
-type Step = "list" | "select-type" | "select-exchange" | "fill-fields" | "connect-hyperliquid";
+type Step =
+  | "list"
+  | "select-type"
+  | "select-exchange"
+  | "fill-fields"
+  | "connect-hyperliquid"
+  | "import-wallet";
 
 const isHyperliquid = (name: string) => name.startsWith("hyperliquid");
 
@@ -23,6 +32,7 @@ interface AddFlowState {
   step: Step;
   connectorType: string;
   connectorName: string;
+  walletChain: WalletChain | "";
   fields: Record<string, unknown>;
   values: Record<string, string>;
 }
@@ -31,9 +41,15 @@ const INITIAL_FLOW: AddFlowState = {
   step: "list",
   connectorType: "",
   connectorName: "",
+  walletChain: "",
   fields: {},
   values: {},
 };
+
+const WALLET_CHAINS: { chain: WalletChain; label: string }[] = [
+  { chain: "solana", label: "Solana" },
+  { chain: "ethereum", label: "Ethereum/EVM" },
+];
 
 // Substrings that mark a connector config field as a sensitive credential.
 // Connector keys vary (api_key, secret_key, passphrase, private_key, api_token,
@@ -60,12 +76,30 @@ export function ApiKeysSettings() {
   const qc = useQueryClient();
   const [flow, setFlow] = useState<AddFlowState>(INITIAL_FLOW);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [confirmDeleteWallet, setConfirmDeleteWallet] = useState<string | null>(null);
 
   const { data: credsData, isLoading: loadingCreds } = useQuery({
     queryKey: ["settings-credentials", server],
     queryFn: () => api.getCredentials(server!),
     enabled: !!server,
   });
+
+  // Gateway wallets — an error (e.g. Gateway not running) renders as a muted note, not a failure.
+  const { data: walletsData, error: walletsError } = useQuery({
+    queryKey: ["gateway-wallets", server],
+    queryFn: () => api.getGatewayWallets(server!),
+    enabled: !!server,
+    retry: false,
+  });
+
+  // Same query key as GatewaySettings so the status is shared across the two tabs.
+  const { data: gatewayStatus } = useQuery({
+    queryKey: ["gateway-status", server],
+    queryFn: () => api.getGatewayStatus(server!),
+    enabled: !!server,
+    retry: false,
+  });
+  const gatewayRunning = gatewayStatus?.running === true;
 
   const { data: connectorsData, isLoading: loadingConnectors } = useQuery({
     queryKey: ["settings-connectors", server, flow.connectorType],
@@ -109,6 +143,31 @@ export function ApiKeysSettings() {
     mutationFn: (connector: string) => api.deleteCredential(server!, connector),
     onSuccess: () => { invalidate(); setConfirmDelete(null); },
   });
+
+  const invalidateWallets = () => qc.invalidateQueries({ queryKey: ["gateway-wallets", server] });
+
+  const defaultWalletMut = useMutation({
+    mutationFn: (w: { chain: string; address: string }) => api.setDefaultGatewayWallet(server!, w),
+    onSuccess: invalidateWallets,
+  });
+
+  const deleteWalletMut = useMutation({
+    mutationFn: ({ chain, address }: { chain: string; address: string }) =>
+      api.removeGatewayWallet(server!, chain, address),
+    onSuccess: () => { invalidateWallets(); setConfirmDeleteWallet(null); },
+  });
+
+  const wallets = useMemo(
+    () =>
+      (walletsData?.wallets ?? []).flatMap((group: GatewayWalletGroup) =>
+        (group.walletAddresses ?? []).map((address) => ({
+          chain: group.chain,
+          address,
+          isDefault: address === group.default_address,
+        })),
+      ),
+    [walletsData],
+  );
 
   // Normalize credentials — API may return strings or objects
   const credentials: CredentialInfo[] = useMemo(() => {
@@ -229,6 +288,57 @@ export function ApiKeysSettings() {
           setFlow(INITIAL_FLOW);
         }}
       />
+    );
+  }
+
+  // ── Add wallet flow ──
+
+  if (flow.step === "import-wallet" && flow.walletChain) {
+    return (
+      <div className="space-y-4">
+        <button
+          onClick={() => setFlow(INITIAL_FLOW)}
+          className="flex items-center gap-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+        >
+          <ArrowLeft className="h-3.5 w-3.5" /> Back
+        </button>
+        <div>
+          <h2 className="text-lg font-semibold text-[var(--color-text)]">Add Wallet to Gateway</h2>
+          <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+            Gateway signs DEX transactions on your server, so it needs the wallet's private key.
+            Browser wallets never share private keys with apps — export the key manually and paste
+            it below.
+          </p>
+        </div>
+
+        {/* Chain tabs */}
+        <div className="flex gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-1">
+          {WALLET_CHAINS.map(({ chain, label }) => (
+            <button
+              key={chain}
+              onClick={() => setFlow({ ...flow, walletChain: chain })}
+              className={`flex-1 rounded-md px-3 py-1.5 text-sm font-medium transition-colors ${
+                flow.walletChain === chain
+                  ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                  : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <ImportGatewayWallet
+          key={flow.walletChain}
+          server={server}
+          chain={flow.walletChain}
+          onBack={() => setFlow(INITIAL_FLOW)}
+          onDone={() => {
+            invalidateWallets();
+            setFlow(INITIAL_FLOW);
+          }}
+        />
+      </div>
     );
   }
 
@@ -378,14 +488,30 @@ export function ApiKeysSettings() {
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <p className="text-sm text-[var(--color-text-muted)]">
-          {credentials.length} credential{credentials.length !== 1 ? "s" : ""} configured
+          {credentials.length} credential{credentials.length !== 1 ? "s" : ""}
+          {wallets.length > 0 && `, ${wallets.length} wallet${wallets.length !== 1 ? "s" : ""}`}{" "}
+          configured
         </p>
-        <button
-          onClick={() => setFlow({ ...INITIAL_FLOW, step: "select-type" })}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80"
-        >
-          <Plus className="h-3.5 w-3.5" /> Add API Key
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() =>
+              setFlow({ ...INITIAL_FLOW, step: "import-wallet", walletChain: "solana" })
+            }
+            disabled={!gatewayRunning}
+            title={
+              gatewayRunning ? undefined : "Gateway is not running — start it from the Gateway tab."
+            }
+            className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-border-hover)] hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
+          >
+            <Wallet className="h-3.5 w-3.5" /> Add Wallet
+          </button>
+          <button
+            onClick={() => setFlow({ ...INITIAL_FLOW, step: "select-type" })}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80"
+          >
+            <Plus className="h-3.5 w-3.5" /> Add API Key
+          </button>
+        </div>
       </div>
 
       {loadingCreds ? (
@@ -455,6 +581,103 @@ export function ApiKeysSettings() {
           ))}
         </div>
       )}
+
+      {/* ── Gateway wallets ── */}
+      <div>
+        <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+          Wallets
+        </h3>
+        {walletsError ? (
+          <p className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs text-[var(--color-text-muted)]">
+            Gateway is not reachable — start it from the Gateway tab to manage wallets.
+          </p>
+        ) : wallets.length === 0 ? (
+          <p className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-xs text-[var(--color-text-muted)]">
+            No wallets in Gateway. Add one to trade on DEXs.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {wallets.map((w) => {
+              const walletKey = `${w.chain}:${w.address}`;
+              return (
+                <div
+                  key={walletKey}
+                  className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 transition-colors hover:border-[var(--color-border-hover)]"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-[var(--color-surface-hover)] text-[var(--color-text-muted)]">
+                      <Wallet className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-medium capitalize text-[var(--color-text)]">
+                          {w.chain}
+                        </span>
+                        {w.isDefault && (
+                          <span
+                            className="flex items-center gap-0.5 rounded bg-[var(--color-primary)]/10 px-1.5 py-0.5 text-[10px] font-medium text-[var(--color-primary)]"
+                            title="Default wallet for this chain"
+                          >
+                            <Star className="h-2.5 w-2.5" /> default
+                          </span>
+                        )}
+                      </div>
+                      <p className="truncate font-mono text-xs text-[var(--color-text-muted)]">
+                        {w.address}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex shrink-0 items-center gap-1">
+                    {!w.isDefault && confirmDeleteWallet !== walletKey && (
+                      <button
+                        onClick={() =>
+                          defaultWalletMut.mutate({ chain: w.chain, address: w.address })
+                        }
+                        disabled={defaultWalletMut.isPending}
+                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)] disabled:opacity-50"
+                        title="Set as default wallet for this chain"
+                      >
+                        <Star className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                    {confirmDeleteWallet === walletKey ? (
+                      <>
+                        <button
+                          onClick={() =>
+                            deleteWalletMut.mutate({ chain: w.chain, address: w.address })
+                          }
+                          disabled={deleteWalletMut.isPending}
+                          className="rounded p-1.5 text-[var(--color-red)] hover:bg-red-500/10"
+                          title="Confirm remove"
+                        >
+                          <Check className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          onClick={() => setConfirmDeleteWallet(null)}
+                          className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+                          title="Cancel remove"
+                          aria-label="Cancel remove"
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        onClick={() => setConfirmDeleteWallet(walletKey)}
+                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"
+                        title="Remove wallet from Gateway"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
