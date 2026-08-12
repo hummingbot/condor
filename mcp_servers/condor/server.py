@@ -637,7 +637,9 @@ async def manage_trading_agent(
         skills: List of optional skill names to enable (for create/update_strategy).
         config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
             For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
-            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
+            execution_mode, frequency_sec, tick_timeout_sec (wall-clock budget for one tick's
+            agent session; 0 = runtime default of 600s), total_amount_quote, trading_context,
+            risk_limits, server_name, max_ticks.
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
         when_to_consult: One-line hint describing when to route work to this agent (create/update_agent). Purely for routing — every agent is consultable with or without it; it falls back to the description.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
