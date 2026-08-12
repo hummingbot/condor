@@ -28,6 +28,7 @@ from condor.acp.client import (
 )
 from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
 from condor.runtime.registry_file import LoopState
+from condor.runtime.timeouts import resolve_tick_timeout
 from condor.telemetry import taps as telemetry_taps
 
 from .agent import Agent
@@ -600,8 +601,15 @@ class TickEngine:
         tool_call_map: dict[str, dict[str, Any]] = {}
 
         await acp_client.start()
+        # Wall-clock budget for this tick's agent session. Comes from the shared
+        # policy (10 min default, CONDOR_TIMEOUT_TICK_DEFAULT) unless the run
+        # config sets ``tick_timeout_sec`` -- a slower model or a tick that does
+        # real research needs more room than a quoting loop does.
+        tick_timeout = resolve_tick_timeout(
+            execution_mode=mode, strategy=self.config.get("tick_timeout_sec")
+        )
         try:
-            async with asyncio.timeout(300):
+            async with asyncio.timeout(tick_timeout):
                 async for event in self._collect_stream(acp_client, prompt):
                     if isinstance(event, TextChunk):
                         response_chunks.append(event.text)
@@ -610,7 +618,11 @@ class TickEngine:
                         if new_tc is not None:
                             tool_calls.append(new_tc)
         except asyncio.TimeoutError:
-            log.warning("TickEngine %s: ACP prompt timed out", self.agent_id)
+            log.warning(
+                "TickEngine %s: ACP prompt timed out after %ds",
+                self.agent_id,
+                tick_timeout,
+            )
             response_chunks.append("(timed out)")
         finally:
             await acp_client.stop()
@@ -1016,6 +1028,10 @@ class TickEngine:
             "close_type_counts": sd.get("close_type_counts", {}),
             "fees_known": sd.get("fees_known", True),
             "frequency_sec": self.config.get("frequency_sec", 60),
+            "tick_timeout_sec": resolve_tick_timeout(
+                execution_mode=self.config.get("execution_mode", "loop"),
+                strategy=self.config.get("tick_timeout_sec"),
+            ),
             "server_name": self.config.get("server_name", ""),
             "total_amount_quote": self.config.get("total_amount_quote", 100),
             "trading_context": self.config.get("trading_context", ""),

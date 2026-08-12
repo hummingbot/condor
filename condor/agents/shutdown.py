@@ -20,6 +20,8 @@ import asyncio
 import logging
 from typing import Any
 
+from condor.runtime.timeouts import resolve_tick_timeout
+
 from .strategy import Strategy, _parse_frontmatter
 
 log = logging.getLogger(__name__)
@@ -298,10 +300,11 @@ async def _run_llm_cleanup(
 ) -> None:
     """Best-effort LLM nuance pass on top of the guaranteed deterministic floor.
 
-    Bounded by a hard 300s timeout (the same ceiling the tick ACP session runs
-    under) and fully fail-open: the safety-critical winddown already happened, so
-    any hang or error here is logged and swallowed — it can never strand a position
-    the way an LLM-only shutdown could.
+    Bounded by the same budget the tick agent session runs under (the shared
+    timeout policy, overridable per run with ``tick_timeout_sec``) and fully
+    fail-open: the safety-critical winddown already happened, so any hang or
+    error here is logged and swallowed — it can never strand a position the way
+    an LLM-only shutdown could.
     """
     agent = getattr(engine, "agent", None)
     if not body or agent is None:
@@ -312,7 +315,10 @@ async def _run_llm_cleanup(
         running = await _get_running_executors(engine, client)
         positions = await _fetch_positions(client, engine.agent_id)
         context = _build_llm_context(policy, running, positions, failures)
-        async with asyncio.timeout(300):
+        cleanup_timeout = resolve_tick_timeout(
+            strategy=engine.config.get("tick_timeout_sec")
+        )
+        async with asyncio.timeout(cleanup_timeout):
             await _run_agent_to_completion(
                 slug=agent.slug,
                 user_id=engine.user_id,

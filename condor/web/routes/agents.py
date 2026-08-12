@@ -101,6 +101,7 @@ class RunningInstance(BaseModel):
     total_amount_quote: float = 100.0
     trading_context: str = ""
     frequency_sec: int = 60
+    tick_timeout_sec: int = 600
     execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
 
@@ -777,6 +778,7 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         total_amount_quote=info.get("total_amount_quote", 100),
         trading_context=info.get("trading_context", ""),
         frequency_sec=info.get("frequency_sec", 60),
+        tick_timeout_sec=info.get("tick_timeout_sec", 600),
         agent_key=info.get("agent_key", ""),
         execution_mode=info.get("execution_mode", "loop"),
         risk_limits=info.get("risk_limits", {}),

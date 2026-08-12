@@ -44,6 +44,11 @@ class AgentConfig(BaseModel):
         description="Total capital budget for this session in quote currency",
     )
     frequency_sec: int = Field(default=60, description="Tick frequency in seconds")
+    tick_timeout_sec: int = Field(
+        default=0,
+        description="Wall-clock budget for one tick's agent session, in seconds; "
+        "0 = use the runtime default (10 min, or CONDOR_TIMEOUT_TICK_DEFAULT)",
+    )
     trading_context: str = Field(
         default="",
         description="Natural language session context that guides the agent's trading decisions",

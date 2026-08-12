@@ -509,6 +509,23 @@ class GatewayPullRequest(BaseModel):
     image: str = "hummingbot/gateway:latest"
 
 
+class GatewayNetworkUpdateRequest(BaseModel):
+    # Partial network config (snake_case keys, e.g. {"node_url": "https://..."}).
+    # The Gateway validates values against its own JSON schema.
+    config: dict[str, Any]
+
+
+class GatewayWalletAddRequest(BaseModel):
+    chain: str
+    private_key: str
+    set_default: bool = False
+
+
+class GatewayWalletDefaultRequest(BaseModel):
+    chain: str
+    address: str
+
+
 class AddCredentialRequest(BaseModel):
     connector_name: str
     credentials: dict[str, Any]

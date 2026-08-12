@@ -10,8 +10,11 @@ from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
     CredentialInfo,
+    GatewayNetworkUpdateRequest,
     GatewayPullRequest,
     GatewayStartRequest,
+    GatewayWalletAddRequest,
+    GatewayWalletDefaultRequest,
     ServerInfo,
     UpdateServerRequest,
     WebUser,
@@ -280,6 +283,159 @@ async def gateway_logs(
     except Exception as e:
         logger.exception("Failed to fetch gateway logs from '%s'", server)
         raise upstream_error("Failed to fetch gateway logs", e)
+
+
+# ── Gateway Networks (RPC) ──
+
+
+@router.get("/gateway/networks")
+async def gateway_networks(
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        result = await client.gateway.list_networks()
+        networks = result.get("networks", result) if isinstance(result, dict) else result
+        return {"networks": networks}
+    except Exception as e:
+        logger.exception("Failed to list gateway networks from '%s'", server)
+        raise upstream_error("Failed to list gateway networks", e)
+
+
+@router.get("/gateway/networks/{network_id}")
+async def gateway_network_config(
+    network_id: str,
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        config = await client.gateway.get_network_config(network_id)
+        return {"network_id": network_id, "config": config}
+    except Exception as e:
+        logger.exception(
+            "Failed to fetch gateway network config '%s' from '%s'", network_id, server
+        )
+        raise upstream_error("Failed to fetch network config", e)
+
+
+@router.post("/gateway/networks/{network_id}")
+async def gateway_network_update(
+    network_id: str,
+    req: GatewayNetworkUpdateRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        result = await client.gateway.update_network_config(network_id, req.config)
+        return {"updated": True, "network_id": network_id, "result": result}
+    except Exception as e:
+        logger.exception(
+            "Failed to update gateway network config '%s' on '%s'", network_id, server
+        )
+        raise upstream_error("Failed to update network config", e)
+
+
+# ── Gateway Wallets ──
+
+
+@router.get("/gateway/wallets")
+async def gateway_wallets(
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        wallets = await client.accounts.list_gateway_wallets()
+        return {"wallets": wallets}
+    except Exception as e:
+        logger.exception("Failed to list gateway wallets from '%s'", server)
+        raise upstream_error("Failed to list gateway wallets", e)
+
+
+@router.post("/gateway/wallets")
+async def gateway_wallet_add(
+    req: GatewayWalletAddRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        result = await client.accounts.add_gateway_wallet(
+            chain=req.chain, private_key=req.private_key
+        )
+        address = result.get("address") if isinstance(result, dict) else None
+        if req.set_default and address:
+            await client.accounts.set_default_gateway_wallet(
+                chain=req.chain, address=address
+            )
+        return {"added": True, "chain": req.chain, "address": address}
+    except Exception as e:
+        # Never include the request payload here — it carries the private key.
+        logger.exception(
+            "Failed to add gateway wallet on chain '%s' via '%s'", req.chain, server
+        )
+        raise upstream_error("Failed to add wallet", e)
+
+
+@router.post("/gateway/wallets/default")
+async def gateway_wallet_set_default(
+    req: GatewayWalletDefaultRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        result = await client.accounts.set_default_gateway_wallet(
+            chain=req.chain, address=req.address
+        )
+        return {"default": True, "chain": req.chain, "address": req.address, "result": result}
+    except Exception as e:
+        logger.exception(
+            "Failed to set default gateway wallet on '%s' via '%s'", req.chain, server
+        )
+        raise upstream_error("Failed to set default wallet", e)
+
+
+@router.delete("/gateway/wallets/{chain}/{address}")
+async def gateway_wallet_remove(
+    chain: str,
+    address: str,
+    server: str = Query(...),
+    user: WebUser = Depends(get_current_user),
+):
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, server):
+        raise HTTPException(status_code=403, detail="No access")
+    client = await _get_client(cm, server)
+    try:
+        result = await client.accounts.remove_gateway_wallet(chain=chain, address=address)
+        return {"removed": True, "chain": chain, "address": address, "result": result}
+    except Exception as e:
+        logger.exception(
+            "Failed to remove gateway wallet %s on '%s' via '%s'", address, chain, server
+        )
+        raise upstream_error("Failed to remove wallet", e)
 
 
 # ── Voice Preferences ──
