@@ -194,7 +194,7 @@ class ManageExecutorsRequest(BaseModel):
             return "performance_report"
         elif self.action == "orphaned":
             return "orphaned"
-        elif self.action == "resolve_orphan" and self.executor_id:
+        elif self.action == "resolve_orphan":
             return "resolve_orphan"
         elif self.executor_type is not None:
             return "show_schema"

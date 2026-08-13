@@ -390,6 +390,15 @@ async def manage_executors(
 
     elif flow_stage == "resolve_orphan":
         # Mark an orphaned position as recovered (after closing it externally)
+        if not request.executor_id:
+            return {
+                "action": "resolve_orphan",
+                "error": "executor_id is required",
+                "formatted_output": (
+                    "resolve_orphan requires executor_id. "
+                    'Run manage_executors(action="orphaned") to list candidates.'
+                ),
+            }
         try:
             resp = await client.executors.session.post(
                 f"{client.executors.base_url}/executors/{request.executor_id}/resolve-orphan",
