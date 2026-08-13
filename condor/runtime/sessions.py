@@ -28,7 +28,11 @@ from condor.runtime.confirmations import get_registry as get_confirmation_regist
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
-from handlers.agents._shared import build_initial_context, get_project_dir
+from handlers.agents._shared import (
+    build_initial_context,
+    get_project_dir,
+    platform_formatting,
+)
 
 log = logging.getLogger(__name__)
 
@@ -246,6 +250,29 @@ async def _enforce_session_budget(user_id: int) -> None:
         await _destroy_session_internal(victim.key)
 
 
+def bound_agent_context(
+    bound: binding.SessionBinding, user_id: int, platform: str
+) -> str:
+    """The opening context of a chat bound to a specialist Agent.
+
+    A specialist opens with its own identity and domain memory rather than the
+    chat's context, which is what makes it a different brain instead of a skin
+    — but it meant it was also the one brain that never passed through
+    :func:`build_initial_context`, and so never heard how the surface it is
+    speaking into renders a reply: no tables and no charts on the dashboard, no
+    length rules on Telegram. The formatting section is appended here, at the
+    branch that skips the other path, so both teach it exactly once.
+    """
+    return "\n\n".join(
+        (
+            binding.agent_identity_context(
+                bound.agent_slug, user_id, bound.instructions, bound.label
+            ),
+            platform_formatting(platform),
+        )
+    )
+
+
 def _resolve_conversation(
     spec: SessionSpec,
     key: SessionKey,
@@ -458,9 +485,7 @@ async def get_or_create_session(
         # the chat's — that is what makes it a different brain, not a skin.
         initial_context = ""
         if bound.is_agent and spec.user_id:
-            initial_context = binding.agent_identity_context(
-                bound.agent_slug, spec.user_id, bound.instructions, bound.label
-            )
+            initial_context = bound_agent_context(bound, spec.user_id, spec.platform)
         elif spec.user_id:
             initial_context = build_initial_context(
                 spec.user_id,

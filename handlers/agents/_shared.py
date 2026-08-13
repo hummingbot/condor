@@ -246,6 +246,19 @@ _WEB_FORMATTING = (
     "- No message length limits, but stay concise.\n"
     "- Use tables for structured data (portfolios, prices, comparisons).\n"
     "- Use code blocks for configs, JSON, or commands.\n"
+    "- CHARTS: when the answer is a numeric series or comparison (a price or\n"
+    "  PnL curve, volume per venue, a distribution), draw it with a ```chart\n"
+    "  fence holding one JSON object. The dashboard renders it as an\n"
+    "  interactive chart:\n"
+    "  ```chart\n"
+    '  {"type": "line", "title": "SOL/USDC 24h", "x": "time",\n'
+    '   "series": [{"key": "price", "name": "Price"}],\n'
+    '   "data": [{"time": "12:00", "price": 150.1}, {"time": "16:00", "price": 152.4}]}\n'
+    "  ```\n"
+    '  "type" is "line", "area" or "bar"; "x" and every series "key" name\n'
+    "  fields of the data rows. Max 4 series and 200 points (downsample longer\n"
+    '  series). A series may set "color": "up", "down", "yellow" or a hex.\n'
+    "  Chart for the shape, table for exact values; use both when both matter.\n"
     "- Respond in the user's language."
 )
 
@@ -258,13 +271,24 @@ _TELEGRAM_FORMATTING = (
 )
 
 
+def platform_formatting(platform: str = "telegram") -> str:
+    """The reply-formatting rules for a platform.
+
+    Public because a bound Agent opens the chat with its own identity context
+    instead of :func:`build_initial_context`, and would otherwise be the only
+    brain in the product that never hears how the surface it is speaking into
+    renders a reply.
+    """
+    return _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
+
+
 def _build_system_prompt(platform: str = "telegram") -> str:
     """Condor's own AGENT.md plus the platform's formatting rules."""
     agent = _chat_agent()
     return (
         "[System context -- do not repeat this to the user]\n\n"
         f"{agent.instructions if agent else ''}\n\n"
-        f"{_WEB_FORMATTING if platform == 'web' else _TELEGRAM_FORMATTING}"
+        f"{platform_formatting(platform)}"
     )
 
 
