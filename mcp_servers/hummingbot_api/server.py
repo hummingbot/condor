@@ -239,7 +239,7 @@ async def set_account_position_mode_and_leverage(
         account_name: Account name (default: master_account)
         connector_name: Exchange connector name (e.g., 'binance_perpetual')
         trading_pair: Trading pair (e.g., ETH-USD) only required for setting leverage
-        position_mode: Position mode ('HEDGE' or 'ONE-WAY')
+        position_mode: Position mode ('HEDGE' or 'ONEWAY')
         leverage: Leverage to set (optional, required for HEDGE mode)
     """
     client = await hummingbot_client.get_client()

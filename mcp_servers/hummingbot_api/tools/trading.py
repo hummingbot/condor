@@ -7,6 +7,7 @@ managing positions and setting account configurations.
 For order placement and cancellation, use `manage_executors` with `order_executor` type.
 """
 
+import re
 from typing import Any, Literal
 
 from mcp_servers.hummingbot_api.formatters import (
@@ -31,7 +32,7 @@ async def set_position_mode_and_leverage(
         account_name: Account name
         connector_name: Exchange connector name
         trading_pair: Trading pair (required for leverage)
-        position_mode: Position mode ('HEDGE' or 'ONE-WAY')
+        position_mode: Position mode ('HEDGE' or 'ONEWAY')
         leverage: Leverage to set
 
     Returns:
@@ -47,9 +48,11 @@ async def set_position_mode_and_leverage(
 
     # Set position mode
     if position_mode:
-        position_mode = position_mode.upper()
-        if position_mode not in ["HEDGE", "ONE-WAY"]:
-            raise ValueError("Invalid position mode. Must be 'HEDGE' or 'ONE-WAY'")
+        # The API expects the plain enum member name ("ONEWAY"/"HEDGE"). Accept the
+        # hyphen/underscore/space spellings callers often use and normalize them.
+        position_mode = re.sub(r"[-_\s]", "", position_mode.upper())
+        if position_mode not in ["HEDGE", "ONEWAY"]:
+            raise ValueError("Invalid position mode. Must be 'HEDGE' or 'ONEWAY'")
 
         position_mode_result = await client.trading.set_position_mode(
             account_name=account_name,
