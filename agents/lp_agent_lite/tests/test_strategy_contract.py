@@ -300,7 +300,10 @@ def test_runtime_stores_build_live_prompt_with_close_authority_before_current_co
     skill_index = prompt.rindex("[AVAILABLE SKILLS & ROUTINES]")
     current_config = prompt.rindex("[CURRENT CONFIG]")
     assert authority < skill_index < current_config
-    assert "position_time_limit_minutes: 30" in prompt[current_config:]
+    assert (
+        f"position_time_limit_minutes: {config['position_time_limit_minutes']}"
+        in prompt[current_config:]
+    )
     assert "Mere quarantine presence" in prompt
 
 
@@ -412,9 +415,60 @@ def test_confirmed_registration_is_trusted_until_an_exact_gateway_error():
         "only normal standalone `REGISTER` ticks",
     ):
         assert text in strategy
-    assert "Finalized loop-mode non-SOL/non-QUOTE selection always folds" in agent
+    assert "Allowed folds are `SELECT -> REGISTER`" in agent
     assert "Trust it for the unchanged chain" in operations
     assert "Registration is a separate loop transition" not in operations
+
+
+def test_session_27_preparation_switch_is_lifecycle_control_not_config():
+    defaults = _strategy_frontmatter()["default_config"]
+    strategy = _prose(STRATEGY_PATH)
+    assert "allow_base_preparation" not in defaults
+    for text in (
+        "routine lifecycle switch, not a `[CURRENT CONFIG]` field",
+        "its absence there never blocks sizing",
+        "`true` on pre-preparation `SIZE` and `PREPARE`",
+        "`false` after confirmed preparation and for corrected `OPEN` sizing",
+        "`preparation_required` at `SIZE` journals `next_phase=PREPARE` and ends",
+    ):
+        assert text in strategy
+
+
+def test_select_register_persists_the_complete_deployment_tuple():
+    agent = _prose(AGENT_PATH)
+    strategy = _prose(STRATEGY_PATH)
+    for field in (
+        "controller=<id>",
+        "pool=<address>",
+        "pair=<BASE-QUOTE>",
+        "base_symbol=<symbol>",
+        "base_mint=<mint>",
+        "base_decimals=<integer>",
+        "quote_mint=<mint>",
+        "allocation_quote=<amount>",
+        "range_thesis=<range>",
+        "next_phase=SIZE",
+    ):
+        assert field in strategy
+    assert "A missing field blocks journaling, commitment, and registration" in strategy
+    assert "Its `SELECT_REGISTER` journal must contain every field" in agent
+
+
+def test_incomplete_committed_tuple_has_exact_metadata_recovery_only():
+    prose = _prose(AGENT_PATH) + " " + _prose(STRATEGY_PATH)
+    for text in (
+        "omitted `base_symbol` or `base_decimals`",
+        "run `scan_orca_pools` once with current config",
+        "full `pool` and `base[1]` equal the commitment",
+        "Copy only missing `base[0]` and `base[2]`",
+        "ignore rank, score, and every other candidate",
+        "Never change pool, mint, allocation, range, or registration state",
+        "`METADATA_RECOVERY`",
+        "Native Orca `get_pool_info` does not supply token decimals",
+        "sole committed-chain rescan exception",
+        "cannot select an alternative",
+    ):
+        assert text in prose
 
 
 def test_phase_budget_and_committed_chain_remain_complete():
@@ -432,14 +486,50 @@ def test_phase_budget_and_committed_chain_remain_complete():
         assert text in prose
 
 
-def test_late_deployment_requires_a_full_position_lifetime_remaining():
+def test_reconcile_open_cannot_fold_into_new_deployment():
+    agent = _prose(AGENT_PATH)
+    strategy = _prose(STRATEGY_PATH)
+    assert "next tick is `RECONCILE_OPEN`-only for deployment" in agent
+    assert (
+        "never start `SELECT`, `SELECT_REGISTER`, `SIZE`, `PREPARE`, or `OPEN`" in agent
+    )
+    assert "next loop tick is `RECONCILE_OPEN`-only" in strategy
+    assert "never start `SELECT`, `REGISTER`, `SIZE`, `PREPARE`, or `OPEN`" in strategy
+    assert "Mandatory risk-reducing exits remain eligible" in strategy
+
+
+def test_reconcile_cleanup_ends_before_other_lifecycle_work():
+    agent = _prose(AGENT_PATH)
+    strategy = _prose(STRATEGY_PATH)
+    assert "Loop `RECONCILE_CLEANUP` is reconciliation-only" in agent
+    assert "next loop tick is `RECONCILE_CLEANUP`-only" in strategy
+    for text in (
+        "journal the next phase",
+        "end before another lifecycle phase",
+        "Do no other lifecycle work",
+        "Stay cleanup-related unless confirmed with none remaining",
+        "`HOLD` with `next_phase=SUPERVISE`",
+        "next tick",
+    ):
+        assert text in agent + " " + strategy
+
+
+def test_late_deployment_reserves_phase_aware_runway():
     strategy = _prose(STRATEGY_PATH)
     for text in (
-        "Before `SELECT`, `REGISTER`, `PREPARE`, or `OPEN`",
-        "remaining_session_minutes = session_time_limit_minutes - session.age_min",
-        "strictly greater than `position_time_limit_minutes`",
-        "equality, a shorter remainder, or an unavailable clock prohibits new risk",
-        "clean any confirmed prepared inventory",
+        "Before deployment compute from current metrics",
+        "latest_start_age = session_time_limit_minutes - position_time_limit_minutes - remaining_tick_boundaries * frequency_sec / 60",
+        "session.age_min < latest_start_age",
+        "equality blocks",
+        "no discretionary safety margin",
+        "Count boundaries until `OPEN`",
+        "direct `SIZE` or `RECONCILE_PREPARE=1`",
+        "`SIZE` requiring preparation `=3`",
+        "non-SOL BASE absent/unproven `=4`",
+        "recheck after sizing",
+        "before more pool/sizing/mutation calls",
+        "Insufficient runway or unavailable clock releases an unmutated chain",
+        "cleans prepared inventory",
     ):
         assert text in strategy
 
@@ -459,6 +549,79 @@ def test_exact_identity_pool_and_risk_contracts_survive_compaction():
         assert text in prose
 
 
+def test_opaque_target_and_journal_ids_are_verbatim_and_bad_reads_are_local():
+    strategy = _prose(STRATEGY_PATH)
+    for text in (
+        "Pool, executor, position, and mint IDs are opaque",
+        "Targeted calls and journal identity fields copy the full value verbatim",
+        "same-tick structured evidence or its exact committed field",
+        "never prose, canvas, or display prefix",
+        "compare character-for-character immediately before call/write",
+        "A mismatched read may be corrected once that tick",
+        "not mutation/backend evidence",
+        "never learn from its 404/500",
+        "later-discovered corrupt journal ID is no authority",
+        "reestablish it from current structured evidence",
+        "Never apply this correction to a mutation",
+    ):
+        assert text in strategy
+
+    learnings = LEARNINGS_PATH.read_text()
+    for false_record in (
+        "Tick #2 native Orca get_pool_info for the committed PUMP-USDC pool returned a Gateway 500",
+        "Tick 7: current-controller LP search showed RUNNING while exact executor detail returned 404",
+        "Tick #8: an exact LP executor detail that returned 404 on the prior tick recovered",
+    ):
+        assert false_record not in learnings
+
+
+def test_session_29_sized_chain_is_preserved_or_cleaned_before_reselection():
+    agent = _prose(AGENT_PATH)
+    strategy = _prose(STRATEGY_PATH)
+    for text in (
+        "committed deployment chain",
+        "exact sized bounds",
+        "Every `SIZE` journal carries exact pool/pair",
+        "`lower_price`, `upper_price`",
+        "`PREPARE` and `RECONCILE_PREPARE` carry the full `SIZE` tuple unchanged",
+        "Never overwrite a committed chain",
+        "`ABANDON -> CLEANUP`",
+        "clean its confirmed prepared non-SOL BASE before any new `SELECT`",
+    ):
+        assert text in agent + " " + strategy
+
+
+def test_session_29_guardian_close_rejection_has_one_bounded_recovery():
+    agent = _prose(AGENT_PATH)
+    strategy = _prose(STRATEGY_PATH)
+    for text in (
+        "Guardian rejection before `manage_executors` runs is `rejected_before_submit`",
+        "never uncertain/backend failure or a learning",
+        "End that tick",
+        "Next tick load `orca_lp_operations`",
+        "after the indexing lag run close-only `inspect_orca_positions`",
+        "`still_active` permits at most one corrected later stop",
+        "A second failure or `404`",
+        "quarantines only the exact executor, position, pool, and attributable capital",
+        "Continue independently proven siblings and free capacity",
+        "Never learn from close errors",
+    ):
+        assert text in agent + " " + strategy
+
+
+def test_session_29_healthy_sibling_read_does_not_consume_a_lifecycle_phase():
+    agent = _prose(AGENT_PATH)
+    assert "healthy-sibling read is evidence, not a `SUPERVISE` phase" in agent
+    assert "free capacity may still run `SELECT -> REGISTER`" in agent
+
+
+def test_only_receive_difference_blacklist_may_write_a_learning():
+    prose = _prose(AGENT_PATH) + " " + _prose(STRATEGY_PATH)
+    assert "Generic injected error-learning guidance does not apply" in prose
+    assert 'blacklist may use `entry_type="learning"`' in prose
+    assert "Never learn from close errors" in prose
+
+
 def test_native_evidence_and_executor_paths_remain_bounded():
     agent = AGENT_PATH.read_text()
     prose = _prose(AGENT_PATH) + " " + _prose(STRATEGY_PATH)
@@ -472,12 +635,68 @@ def test_native_evidence_and_executor_paths_remain_bounded():
     assert "- manage_gateway_swaps" not in agent
 
 
+def test_session_26_wallet_query_uses_hapi_gateway_network_scope():
+    agent = _prose(AGENT_PATH)
+    strategy = _prose(STRATEGY_PATH)
+    for text in (
+        "`account_names=[<config.account_name>]`",
+        "`connector_names=[<config.network>]`",
+        "HAPI Gateway portfolio expects the chain-network key here",
+        "never `orca`, `lp_provider`, or `swap_provider`",
+        'pool tools separately use `connector="orca"`',
+        "correct that read once in the same tick",
+        "it was not canonical",
+        "Exact-scope empty is `unavailable`, never zero",
+        "do not snapshot fabricated balances",
+        "metrics snapshot only from available observed wallet facts",
+    ):
+        assert text in agent + " " + strategy
+
+
+def test_lp_lifecycle_is_separate_from_hapi_position_hold_inventory():
+    agent = _prose(AGENT_PATH)
+    strategy = _prose(STRATEGY_PATH)
+    cleanup = _prose(CLEANUP_SKILL_PATH)
+    for text in (
+        "Count LP occupancy only from exact current-controller `lp_executor` lifecycle",
+        "unresolved submitted open",
+        "quarantined exact on-chain position not proven closed",
+        "`performance_report.active_positions`",
+        "`[CORE DATA - positions]`",
+        "never LP identity, occupancy, reuse, close state, or `STOP` authority",
+        "An exact terminal LP row with no unresolved close is closed",
+        '`close_outcome="closed"` is final',
+        "no inventory signal may reopen it",
+    ):
+        assert text in agent + " " + strategy
+    assert "persistent PositionHold inventory summaries, never LP evidence" in cleanup
+    assert (
+        "at or below dust is complete even when a PositionHold count persists"
+        in cleanup
+    )
+
+
+def test_session_25_terminal_wind_down_ignores_stale_position_hold():
+    strategy = _prose(STRATEGY_PATH)
+    for gate in (
+        "all exact current-session LP lifecycles terminal",
+        "no submitted/uncertain LP transition",
+        "cleanups reconciled",
+        "touched non-SOL BASE at/below dust",
+        "protected SOL intact",
+        "no unresolved capital",
+    ):
+        assert gate in strategy
+    assert "HAPI PositionHold/`active_positions` cannot veto" in strategy
+    assert "journal `STOP` and stop that tick rather than `HOLD`" in strategy
+
+
 def test_prepare_open_and_cleanup_receipts_defer_reconciliation():
     strategy = _prose(STRATEGY_PATH)
     cleanup = _prose(CLEANUP_SKILL_PATH)
     assert "The create receipt is `submitted`" in strategy
-    assert "end" in strategy and "Reconcile next tick" in strategy
-    assert "successful receipt is `submitted` and ends the tick" in strategy
+    assert "ends the tick" in strategy and "`RECONCILE_OPEN`-only" in strategy
+    assert "its receipt is `submitted` and ends the tick" in strategy
     assert "A create receipt is `submitted`" in cleanup
     assert "end without post-create reads" in cleanup
     assert "PREPARE -> OPEN" in _prose(AGENT_PATH)

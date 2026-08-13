@@ -12,6 +12,11 @@ venue that produced it. The Strategy owns phase order and admission. Use this
 skill only after a terminal close or abandoned confirmed preparation has made
 cleanup active; never use it to inspect or repair an on-chain LP position.
 
+HAPI `performance_report.active_positions` and `[CORE DATA - positions]` are
+persistent PositionHold inventory summaries, never LP evidence. Cleanup comes
+from the fresh exact-mint wallet amount/value: at or below dust is complete even
+when a PositionHold count persists.
+
 Load it once for the active cleanup work and keep the tick narrow: reuse the
 canonical wallet, executor, metrics, pair, mint, decimals, and prior cleanup
 evidence. Do not select a pool, register a token, rescan markets, load another
