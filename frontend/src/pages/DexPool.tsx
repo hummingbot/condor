@@ -43,7 +43,11 @@ export function DexPool() {
   const { network = "", address = "" } = useParams();
 
   const [wantedTab, setTab] = useState<Tab>("order");
-  const [interval, setIntervalValue] = useState("1m");
+  // 5m over 3 days, matching the executor pages. Not 1m: GeckoTerminal caps a
+  // response at 1000 candles, so 1m can only ever fill ~16h of this window (the
+  // buffer then sits permanently short and re-backfills), while 5m covers the
+  // full 3 days in one request and halves the poll rate on a shared budget.
+  const [interval, setIntervalValue] = useState("5m");
   const [lookbackSeconds, setLookbackSeconds] = useState(3 * 86400);
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
