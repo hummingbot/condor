@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle, Copy, X } from "lucide-react";
+import { ArrowLeft, CheckCircle, ChevronLeft, ChevronRight, Copy, X } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
+import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { PoolStats } from "@/components/dex/PoolStats";
 import {
   LPConfigPanel,
@@ -14,7 +15,7 @@ import {
   useOrderConfig,
 } from "@/components/executor/OrderConfigPanel";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
-import { TradeChart } from "@/components/trade/TradeChart";
+import { TradeChart, type ChartPriceAxis } from "@/components/trade/TradeChart";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
@@ -23,6 +24,8 @@ import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { INTERVALS, LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
 
 type Tab = "order" | "lp";
+
+const DEPTH_KEY = "condor.dex.depth-collapsed";
 
 /**
  * One pool, and everything you can do in it.
@@ -46,6 +49,23 @@ export function DexPool() {
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
   const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
   const [successId, setSuccessId] = useState<string | null>(null);
+  // The chart lends out its price mapping; the depth column draws on it.
+  const [priceAxis, setPriceAxis] = useState<ChartPriceAxis | null>(null);
+  const [depthCollapsed, setDepthCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(DEPTH_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(DEPTH_KEY, depthCollapsed ? "1" : "0");
+    } catch {
+      /* private mode; the column just forgets */
+    }
+  }, [depthCollapsed]);
 
   const { onMouseDown: startHDrag } = useResizeDrag({
     axis: "x",
@@ -82,6 +102,18 @@ export function DexPool() {
     queryFn: () => api.getVenues(server!),
     enabled: !!server,
     staleTime: 5 * 60 * 1000,
+  });
+
+  // Bins move with every swap through the active bin, so the server caches them
+  // for a minute and this polls at the same cadence — every viewer of the pool
+  // shares that one Gateway call. Asked only when the pool says it has bins:
+  // `has_bins` is decided by the same predicate the route gates on.
+  const { data: depth } = useQuery({
+    queryKey: ["dex-pool-bins", server, network, address, pool?.dex_id],
+    queryFn: () => api.getPoolBins(server!, address, network, pool?.dex_id ?? ""),
+    enabled: !!server && !!address && !!pool?.has_bins,
+    staleTime: 60 * 1000,
+    refetchInterval: 60 * 1000,
   });
 
   // The same function Trade feeds; it is handed a gateway network here instead
@@ -232,7 +264,8 @@ export function DexPool() {
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1 overflow-hidden">
+          <div className="flex min-h-0 flex-1">
+            <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
             <TradeChart
               key={`${network}:${pool.address}:${interval}`}
               server={server}
@@ -254,7 +287,43 @@ export function DexPool() {
               positions={positions}
               selectedExecutorId={selectedExecutorId}
               onExecutorDeselect={() => setSelectedExecutorId(null)}
+              onChartReady={setPriceAxis}
             />
+            </div>
+
+            {/* Liquidity depth, on the chart's own price axis. Only where there
+                are bins to read: a plain AMM pool has none to draw. */}
+            {pool.has_bins &&
+              (depthCollapsed ? (
+                <button
+                  onClick={() => setDepthCollapsed(false)}
+                  title="Show liquidity depth"
+                  className="flex w-5 shrink-0 items-center justify-center border-l border-[var(--color-border)] text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+                >
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                </button>
+              ) : (
+                <div className="relative flex shrink-0">
+                  {depth && !depth.available ? (
+                    <p className="w-[120px] shrink-0 border-l border-[var(--color-border)] px-2 py-2 text-[10px] leading-relaxed text-[var(--color-text-muted)]">
+                      {depth.reason ?? "No liquidity bins for this pool."}
+                    </p>
+                  ) : (
+                    <LiquidityDepthColumn
+                      bins={depth?.bins ?? []}
+                      activePrice={depth?.active_price ?? pool.current_price ?? null}
+                      axis={priceAxis}
+                    />
+                  )}
+                  <button
+                    onClick={() => setDepthCollapsed(true)}
+                    title="Hide liquidity depth"
+                    className="absolute right-0 top-0 z-10 rounded-bl bg-[var(--color-bg)]/80 p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+                  >
+                    <ChevronRight className="h-3 w-3" />
+                  </button>
+                </div>
+              ))}
           </div>
 
           <div

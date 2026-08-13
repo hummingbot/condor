@@ -316,6 +316,24 @@ export interface PoolSummary {
   pool_created_at?: string | null;
 }
 
+/** One CLMM bin: the liquidity sitting at one price step of a pool. */
+export interface LiquidityBin {
+  price: number;
+  base_amount: number;
+  quote_amount: number;
+  /** Null when the pool's token prices are unknown; size bars by amount then. */
+  liquidity_usd: number | null;
+}
+
+export interface PoolBins {
+  bins: LiquidityBin[];
+  active_price: number | null;
+  bin_step: number | null;
+  /** False is a state to render (with `reason`), never an error to surface. */
+  available: boolean;
+  reason: string | null;
+}
+
 export interface PoolQuery {
   source: "gecko" | "gateway";
   /** source=gecko: the chain, as a Gateway network id or a gecko chain id. */
@@ -1325,6 +1343,16 @@ export const api = {
   getDexPoolByAddress: (server: string, address: string, network: string) =>
     apiFetch<PoolSummary>(
       `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}?network=${encodeURIComponent(network)}`,
+    ),
+
+  /**
+   * A pool's liquidity bins, for the depth column beside its chart. Answers
+   * `available: false` with a reason rather than failing: a venue Condor cannot
+   * read bins from is something to say, not an error to raise.
+   */
+  getPoolBins: (server: string, address: string, network: string, connector: string) =>
+    apiFetch<PoolBins>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}/bins?network=${encodeURIComponent(network)}&connector=${encodeURIComponent(connector)}`,
     ),
 
   getPrice: (server: string, connector: string, pair: string) =>
