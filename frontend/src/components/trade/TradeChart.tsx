@@ -11,6 +11,24 @@ import { escapeHtml, formatCompactUsd } from "@/lib/formatters";
 
 type PickField = "start" | "end" | "limit" | null;
 
+/**
+ * The chart's price mapping, and nothing else.
+ *
+ * A sibling drawn beside the chart — the DEX liquidity-depth column — has to put
+ * a bin at the same vertical position the candles put its price, at every zoom
+ * level. Inventing a second scale is the one failure such a column exists to
+ * prevent, so the chart lends out its own mapping instead. Three methods, no
+ * chart instance: nothing outside can mutate the chart through this.
+ */
+export interface ChartPriceAxis {
+  /** Pixel row for a price, from the pane's top. `null` when it is off-scale. */
+  priceToCoordinate(price: number): number | null;
+  /** Pane height in CSS pixels, so a sibling canvas can match it. */
+  height(): number;
+  /** Subscribe to scale changes; returns its own unsubscribe. */
+  onScaleChange(cb: () => void): () => void;
+}
+
 interface TradeChartProps {
   server: string;
   connector: string;
@@ -43,6 +61,8 @@ interface TradeChartProps {
   onRequestCandleRange?: (startTime: number) => void;
   /** Callback when user clicks chart background to deselect executor */
   onExecutorDeselect?: () => void;
+  /** Called once the series exists, with the chart's price mapping. */
+  onChartReady?: (axis: ChartPriceAxis) => void;
 }
 
 export function TradeChart({
@@ -69,6 +89,7 @@ export function TradeChart({
   convertValue,
   convertPnl,
   onExecutorDeselect,
+  onChartReady,
 }: TradeChartProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
@@ -452,6 +473,33 @@ export function TradeChart({
       }
     };
   }, []);
+
+  // ── Lend the price mapping out, once the series exists ──
+  // Read before the series is created, priceToCoordinate answers for an empty
+  // scale — plausible pixels for the wrong prices — so this waits on chartReady
+  // rather than firing from the init effect. The callback is held in a ref so a
+  // parent that passes an inline arrow does not re-hand the axis every render.
+  const onChartReadyRef = useRef(onChartReady);
+  onChartReadyRef.current = onChartReady;
+  useEffect(() => {
+    if (!chartReady) return;
+    const notify = onChartReadyRef.current;
+    if (!notify) return;
+    notify({
+      priceToCoordinate: (price) => {
+        const coord = seriesRef.current?.priceToCoordinate(price);
+        return coord == null ? null : (coord as number);
+      },
+      height: () => containerRef.current?.clientHeight ?? 0,
+      onScaleChange: (cb) => {
+        const chart = chartRef.current;
+        if (!chart) return () => {};
+        const timeScale = chart.timeScale();
+        timeScale.subscribeVisibleLogicalRangeChange(cb);
+        return () => timeScale.unsubscribeVisibleLogicalRangeChange(cb);
+      },
+    });
+  }, [chartReady]);
 
   // ── Re-apply chart colors on theme change ──
   useEffect(() => {
