@@ -30,6 +30,8 @@ class ManageExecutorsRequest(BaseModel):
     9. action="reset_preferences" -> Reset preferences to defaults
     10. action="positions_summary" -> Get positions (or specific if connector_name+trading_pair given)
     11. action="clear_position" + connector_name + trading_pair -> Clear position
+    12. action="orphaned" -> List terminated executors that may still own an on-chain position
+    13. action="resolve_orphan" + executor_id -> Mark an orphaned position as recovered
     """
 
     action: (
@@ -44,6 +46,8 @@ class ManageExecutorsRequest(BaseModel):
             "positions_summary",
             "clear_position",
             "performance_report",
+            "orphaned",
+            "resolve_orphan",
         ]
         | None
     ) = Field(
@@ -188,6 +192,10 @@ class ManageExecutorsRequest(BaseModel):
             return "clear_position"
         elif self.action == "performance_report":
             return "performance_report"
+        elif self.action == "orphaned":
+            return "orphaned"
+        elif self.action == "resolve_orphan" and self.executor_id:
+            return "resolve_orphan"
         elif self.executor_type is not None:
             return "show_schema"
         else:

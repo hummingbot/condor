@@ -51,7 +51,7 @@ NOT_ACTIVE → OPENING → IN_RANGE ↔ OUT_OF_RANGE → CLOSING → COMPLETE
                                                        ↘ SWAPPING → COMPLETE
 ```
 
-Any state may transition to `FAILED` if max retries are exhausted (open / close / swap) or if `early_stop` is called while still `OPENING`.
+Any state may transition to `FAILED` if max retries are exhausted with nothing left on-chain (open / swap) or if `early_stop` is called while still `OPENING`. An exhausted **close** instead terminates as an involuntary `POSITION_HOLD` (`hold_reason: "close_retries_exhausted"`) because the position is still live on-chain.
 
 - **NOT_ACTIVE**: Initial state, no position yet
 - **OPENING**: `add_liquidity` submitted, waiting for confirmation
@@ -60,7 +60,7 @@ Any state may transition to `FAILED` if max retries are exhausted (open / close 
 - **CLOSING**: `remove_liquidity` submitted, waiting for confirmation
 - **SWAPPING**: Close-out swap in progress (only when `keep_position=False`, to return to the original quote asset)
 - **COMPLETE**: Position closed permanently
-- **FAILED**: Max retries reached or invalid config; manual intervention required
+- **FAILED**: Max retries reached with nothing left on-chain, or invalid config. A failed close retries in `CLOSING` with fresh on-chain state (bounded by `max_retries`); if the retries run out with the position still live, the executor terminates as an involuntary `POSITION_HOLD` with `hold_reason: "close_retries_exhausted"` and the record is flagged `orphaned_position` in `custom_info` — recover it (see below) before opening new positions
 
 #### Key Parameters
 
@@ -177,7 +177,12 @@ manage_executors(
 - If position is closed on-chain but executor still shows `RUNNING`, manually update executor status in database to `TERMINATED`
 - If position is open on-chain but executor still shows `OPENING`, the executor should eventually sync — if stuck, check API logs for errors
 
-**Exception: Executor not found in API (404 error):**
-- If API was restarted, executors may no longer exist in memory but positions remain on-chain
-- In this case, close the on-chain position directly via the DEX UI or gateway API
-- Then manually update the executor status in the database to `TERMINATED`
+**Orphaned positions (executor terminated with a live on-chain position):**
+- `manage_executors(action="orphaned")` lists terminated executors that may still own an on-chain position: involuntary holds (`POSITION_HOLD` with `hold_reason` set — a close that exhausted its retries), legacy `FAILED` executors whose final state carries a `position_address`, and `SYSTEM_CLEANUP` LP executors from an API restart (position address unknown — reconcile against `get_portfolio_overview(include_lp_positions=True)` or the gateway positions-owned endpoints)
+- Recover by closing the position via the gateway tools (remove liquidity by position address). A fresh `lp_executor` CANNOT adopt an existing position — it always mints a new one, which would stack a second funded position on top of the orphan
+- After the position is closed on-chain, mark it recovered with `manage_executors(action="resolve_orphan", executor_id="...")` so it stops appearing in orphan listings and warnings
+- Do NOT open new positions on the same funds until the orphan is recovered
+
+**Stopping an already-terminated executor is a no-op, not an error:**
+- `manage_executors(action="stop")` on a terminated executor returns `status="already_terminated"` with its final `close_type`, `position_address`, and `orphaned_position` flag instead of a 404
+- A 404 means the executor ID is unknown to the API's database (never existed, or the database was unavailable at that moment)

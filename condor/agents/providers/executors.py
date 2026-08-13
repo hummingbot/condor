@@ -53,6 +53,28 @@ class ExecutorsProvider(BaseProvider):
             )
 
         running = [e for e in perf.executors if e["status"] == "RUNNING"]
+        # A terminal executor that still reports an on-chain position address has
+        # stranded live exposure with no automated owner: an involuntary hold
+        # (POSITION_HOLD with hold_reason set — an LP close that exhausted its
+        # retries) or a legacy FAILED-with-position. It would otherwise vanish
+        # from this RUNNING-only summary — surface it until it is recovered.
+        orphaned = [
+            e
+            for e in perf.executors
+            if e["status"] != "RUNNING"
+            and not (e.get("custom_info") or {}).get("orphan_resolved")
+            and (
+                (e.get("custom_info") or {}).get("orphaned_position")
+                or (
+                    (e.get("custom_info") or {}).get("hold_reason")
+                    and (e.get("custom_info") or {}).get("position_address")
+                )
+                or (
+                    str(e.get("close_type") or "").upper() == "FAILED"
+                    and (e.get("custom_info") or {}).get("position_address")
+                )
+            )
+        ]
         lines = [
             (
                 f"Active Executors ({len(running)}) [agent: {agent_id}]:"
@@ -64,6 +86,17 @@ class ExecutorsProvider(BaseProvider):
             side = r.get("side") or ""
             lines.append(
                 f"  {r['pair']} {side} ${r['pnl']:+.2f} (V:${r['volume']:,.0f})"
+            )
+        for o in orphaned:
+            pos = (o.get("custom_info") or {}).get("position_address")
+            reason = (o.get("custom_info") or {}).get("hold_reason") or "close failed"
+            lines.append(
+                f"  🚨 ORPHANED POSITION: executor {o['id']} ({o['pair']}) terminated "
+                f"({reason}) with position {pos} still open on-chain. Close it via the "
+                "gateway tools (remove liquidity by position address — a new "
+                "lp_executor CANNOT adopt it and would mint a second position), then "
+                f"mark it recovered with manage_executors(action=\"resolve_orphan\", "
+                f"executor_id=\"{o['id']}\"). Do not open new positions on these funds first."
             )
         if perf.bot_names:
             lines.append(f"  Bots operated: {', '.join(perf.bot_names)}")
@@ -90,6 +123,7 @@ class ExecutorsProvider(BaseProvider):
             name=self.name,
             data={
                 "executors": running,
+                "orphaned_executors": orphaned,
                 "all_executors": perf.executors,
                 "total_pnl": perf.total_pnl,
                 "realized_pnl": perf.realized_pnl,
