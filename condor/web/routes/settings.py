@@ -299,7 +299,9 @@ async def gateway_networks(
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.list_networks()
-        networks = result.get("networks", result) if isinstance(result, dict) else result
+        networks = (
+            result.get("networks", result) if isinstance(result, dict) else result
+        )
         return {"networks": networks}
     except Exception as e:
         logger.exception("Failed to list gateway networks from '%s'", server)
@@ -367,6 +369,21 @@ async def gateway_wallets(
         raise upstream_error("Failed to list gateway wallets", e)
 
 
+async def _gateway_default_address(client, chain: str) -> str | None:
+    """Current default wallet address for a chain, or None if there is none."""
+    try:
+        groups = await client.accounts.list_gateway_wallets()
+    except Exception:
+        logger.warning(
+            "Could not read gateway wallets to preserve default for '%s'", chain
+        )
+        return None
+    for group in groups or []:
+        if isinstance(group, dict) and group.get("chain") == chain:
+            return group.get("default_address") or None
+    return None
+
+
 @router.post("/gateway/wallets")
 async def gateway_wallet_add(
     req: GatewayWalletAddRequest,
@@ -377,16 +394,39 @@ async def gateway_wallet_add(
     if not cm.has_server_access(user.id, server):
         raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
+    # Gateway's add-wallet always promotes the new key to the chain default, so when the user
+    # opted out we capture the existing default first and restore it after the import.
+    previous_default = (
+        None if req.set_default else await _gateway_default_address(client, req.chain)
+    )
     try:
         result = await client.accounts.add_gateway_wallet(
             chain=req.chain, private_key=req.private_key
         )
         address = result.get("address") if isinstance(result, dict) else None
+        is_default = True
         if req.set_default and address:
             await client.accounts.set_default_gateway_wallet(
                 chain=req.chain, address=address
             )
-        return {"added": True, "chain": req.chain, "address": address}
+        elif previous_default and previous_default != address:
+            try:
+                await client.accounts.set_default_gateway_wallet(
+                    chain=req.chain, address=previous_default
+                )
+                is_default = False
+            except Exception:
+                logger.exception(
+                    "Imported wallet on '%s' but failed to restore previous default on chain '%s'",
+                    server,
+                    req.chain,
+                )
+        return {
+            "added": True,
+            "chain": req.chain,
+            "address": address,
+            "is_default": is_default,
+        }
     except Exception as e:
         # Never include the request payload here — it carries the private key.
         logger.exception(
@@ -409,7 +449,12 @@ async def gateway_wallet_set_default(
         result = await client.accounts.set_default_gateway_wallet(
             chain=req.chain, address=req.address
         )
-        return {"default": True, "chain": req.chain, "address": req.address, "result": result}
+        return {
+            "default": True,
+            "chain": req.chain,
+            "address": req.address,
+            "result": result,
+        }
     except Exception as e:
         logger.exception(
             "Failed to set default gateway wallet on '%s' via '%s'", req.chain, server
@@ -429,11 +474,16 @@ async def gateway_wallet_remove(
         raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
-        result = await client.accounts.remove_gateway_wallet(chain=chain, address=address)
+        result = await client.accounts.remove_gateway_wallet(
+            chain=chain, address=address
+        )
         return {"removed": True, "chain": chain, "address": address, "result": result}
     except Exception as e:
         logger.exception(
-            "Failed to remove gateway wallet %s on '%s' via '%s'", address, chain, server
+            "Failed to remove gateway wallet %s on '%s' via '%s'",
+            address,
+            chain,
+            server,
         )
         raise upstream_error("Failed to remove wallet", e)
 

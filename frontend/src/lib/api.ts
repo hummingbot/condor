@@ -1930,7 +1930,7 @@ export const api = {
     server: string,
     data: { chain: string; private_key: string; set_default?: boolean },
   ) =>
-    apiFetch<{ added: boolean; chain: string; address: string | null }>(
+    apiFetch<{ added: boolean; chain: string; address: string | null; is_default: boolean }>(
       `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
       { method: "POST", body: JSON.stringify(data) },
     ),
