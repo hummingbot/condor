@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -104,9 +104,15 @@ export function CreateExecutor() {
   const pair = gridState.pair;
   const isSpot = isSpotConnector(connector);
 
+  // The venue the URL asked for, kept after the param is stripped below: the
+  // redirect guard cannot read it from the URL any more, and it must not fire
+  // for a *persisted* gateway network (that one just resets to a CLOB venue).
+  const urlConnectorRef = useRef<string | null>(null);
+
   // Apply connector/pair from URL params (e.g. from Executors detail panel)
   useEffect(() => {
     const urlConnector = searchParams.get("connector");
+    urlConnectorRef.current = urlConnector;
     const urlPair = searchParams.get("pair");
     if (urlConnector) {
       gridDispatch({ type: "SET_CONNECTOR", value: urlConnector });
@@ -165,18 +171,15 @@ export function CreateExecutor() {
   // Order-book venues first, then swap-only ones — the grouping ExchangeSelector
   // renders, and it keeps allConnectors[0] (the reset fallback) a tradable venue
   // rather than whichever chain sorts first alphabetically.
+  // Trade is for venues with an order book — whether or not the venue is
+  // decentralized: hyperliquid and xrpl belong here, solana-mainnet-beta does
+  // not. Everything Condor trades through Gateway lives on /dex instead, where
+  // the pool rather than the pair is the unit of navigation.
   const allConnectors = useMemo(
-    () => [
-      ...venues.filter((v) => v.hummingbotMarketData).map((v) => v.name),
-      ...venues.filter((v) => !v.hummingbotMarketData).map((v) => v.name),
-    ],
+    () => venues.filter((v) => v.hummingbotMarketData).map((v) => v.name),
     [venues],
   );
 
-  const dexConnectors = useMemo(
-    () => venues.filter((v) => !v.hummingbotMarketData).map((v) => v.name),
-    [venues],
-  );
 
   const caps = useMemo(
     () => connectorCapabilities(connector, venues),
@@ -222,8 +225,22 @@ export function CreateExecutor() {
     setSelectedExecutorId(null);
   }, [connector, pair]);
 
+  // A /trade URL naming a gateway network is a link to the wrong page now: its
+  // pools, not its pairs, are the thing to pick. Send it to /dex rather than
+  // silently swapping in a CEX. Only a *known* non-CLOB venue redirects, so a
+  // typo still falls through to the reset below.
+  useEffect(() => {
+    if (!listsReady) return;
+    const wanted = urlConnectorRef.current;
+    if (wanted && venues.some((v) => v.name === wanted && !v.hummingbotMarketData)) {
+      urlConnectorRef.current = null;
+      navigate("/dex", { replace: true });
+    }
+  }, [listsReady, venues, navigate]);
+
   // Sync connector to the offered venues. A venue the server no longer reports
   // cannot stay selected, or the panel queries endpoints for a venue that is gone.
+  // A persisted solana-mainnet-beta retires itself here — no migration code.
   useEffect(() => {
     if (listsReady && allConnectors.length && !allConnectors.includes(connector)) {
       gridDispatch({ type: "SET_CONNECTOR", value: allConnectors[0] });
@@ -458,7 +475,6 @@ export function CreateExecutor() {
               connectors={allConnectors}
               value={connector}
               onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
-              dexConnectors={dexConnectors}
             />
           </div>
         </div>
