@@ -16,8 +16,8 @@ import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 
 const IMAGE_OPTIONS = [
-  { label: "Latest", value: "hummingbot/gateway:latest" },
   { label: "Development", value: "hummingbot/gateway:development" },
+  { label: "Latest", value: "hummingbot/gateway:latest" },
 ];
 
 function formatRelativeTime(dateStr: string): string {
