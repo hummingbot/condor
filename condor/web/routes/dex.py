@@ -124,3 +124,149 @@ async def get_pool(
     if not pool:
         raise HTTPException(status_code=404, detail="Pool not found")
     return pool
+
+
+def _no_bins(reason: str) -> dict:
+    """The unavailable state, with a 200.
+
+    A pool Condor cannot draw bins for is something to render — a one-line
+    reason where the depth column would be — not a failure the user can act on.
+    Upstream failures degrade the same way, for the same reason.
+    """
+    return {
+        "bins": [],
+        "active_price": None,
+        "bin_step": None,
+        "available": False,
+        "reason": reason,
+    }
+
+
+def _as_float(value) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number else None  # NaN is not a price
+
+
+@router.get("/servers/{name}/dex/pools/{pool_address}/bins")
+async def get_pool_bins(
+    name: str,
+    pool_address: str,
+    network: str = Query(default="solana-mainnet-beta"),
+    connector: str = Query(
+        default="meteora",
+        description="The pool's Gateway CLMM connector, or the GeckoTerminal "
+        "dex_id it is derived from (meteora-dlmm → meteora).",
+    ),
+    user: WebUser = Depends(get_current_user),
+):
+    """The pool's liquidity bins, for the depth column beside its chart.
+
+    ``can_fetch_liquidity`` is the gate and is asked first — it is the same
+    predicate that decorates every pool row with ``has_bins``, so the workspace
+    already knows whether to call. It answers a *different* question from
+    ``lp_provider_for_dex``: a pool can be LP-able without Condor being able to
+    draw its bins, and the two must not be read as proxies for each other.
+
+    The ``get_pool_info`` → ``get_pools`` fallback for pools outside Gateway's
+    DLMM list stays where it already is, in ``fetch_liquidity_bins``; this
+    handler injects a client and shapes the answer.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    if not _POOL_ADDRESS_RE.match(pool_address):
+        raise HTTPException(status_code=400, detail="Invalid pool_address")
+
+    from handlers.dex.pool_data import (
+        can_fetch_liquidity,
+        fetch_liquidity_bins,
+        get_connector_for_dex,
+    )
+
+    # Gated on the *dex id* as given, which is exactly what decorates each pool
+    # row with ``has_bins`` — so the route and the browser never disagree about
+    # which pools have a depth column. A Raydium AMM v4 pool is refused here for
+    # the same reason it is refused there: only ``raydium`` (CLMM) is in the set.
+    named = (connector or "").strip().lower()
+    if not named or not can_fetch_liquidity(named, network):
+        return _no_bins(
+            f"Condor reads liquidity bins from Gateway CLMM, which does not cover "
+            f"{named or 'this venue'} on {network}."
+        )
+    # The Gateway connector the gated dex id names (``meteora`` → ``meteora``).
+    resolved = get_connector_for_dex(named) or named
+
+    try:
+        client = await cm.get_client(name)
+    except Exception as e:
+        logger.warning("Gateway client unavailable for %s: %s", name, e)
+        client = None
+    if client is None:
+        return _no_bins("The API server is not reachable, so bins cannot be read.")
+
+    try:
+        bins, pool_info, error = await fetch_liquidity_bins(
+            pool_address=pool_address,
+            connector=resolved,
+            network=network,
+            client=client,
+        )
+    except Exception as e:  # fetch_liquidity_bins already swallows its own
+        logger.warning("Liquidity bins failed for %s: %s", pool_address[:12], e)
+        return _no_bins("Liquidity bins could not be read from Gateway.")
+
+    if error or not bins:
+        return _no_bins(error or "Gateway reports no liquidity bins for this pool.")
+
+    pool_info = pool_info or {}
+    base_usd = _as_float(pool_info.get("base_token_price_usd"))
+    quote_usd = _as_float(pool_info.get("quote_token_price_usd"))
+
+    rows = []
+    for raw in bins:
+        if not isinstance(raw, dict):
+            continue
+        price = _as_float(raw.get("price"))
+        if price is None:
+            continue
+        base_amount = _as_float(raw.get("base_token_amount")) or 0.0
+        quote_amount = _as_float(raw.get("quote_token_amount")) or 0.0
+        # Only when both sides can be priced: a half-priced bin would size its
+        # bar against a different unit than its neighbours.
+        liquidity_usd = (
+            base_amount * base_usd + quote_amount * quote_usd
+            if base_usd is not None and quote_usd is not None
+            else None
+        )
+        rows.append(
+            {
+                "price": price,
+                "base_amount": base_amount,
+                "quote_amount": quote_amount,
+                "liquidity_usd": liquidity_usd,
+            }
+        )
+
+    if not rows:
+        return _no_bins("Gateway reports no liquidity bins for this pool.")
+
+    active_price = _as_float(pool_info.get("price"))
+    if active_price is None:
+        active_price = _as_float(pool_info.get("current_price"))
+    bin_step = pool_info.get("bin_step")
+    try:
+        bin_step = int(bin_step) if bin_step is not None else None
+    except (TypeError, ValueError):
+        bin_step = None
+
+    return {
+        "bins": rows,
+        "active_price": active_price,
+        "bin_step": bin_step,
+        "available": True,
+        "reason": None,
+    }

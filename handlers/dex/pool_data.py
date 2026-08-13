@@ -722,6 +722,14 @@ async def fetch_ohlcv(
         return None, f"Failed to fetch OHLCV: {str(e)}"
 
 
+# Bins for one pool, keyed ``(connector, pool_address)``. Used when no caller
+# supplies a ``user_data`` to cache in — i.e. by the web dashboard, where every
+# viewer of a pool would otherwise open its own Gateway call at the same cadence.
+# Same one-minute TTL as the per-chat cache: bins move with every swap through
+# the active bin, so a longer one would draw liquidity that has already left.
+_pool_bins_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+
+
 async def fetch_liquidity_bins(
     pool_address: str,
     connector: str = "meteora",
@@ -729,6 +737,7 @@ async def fetch_liquidity_bins(
     user_data: dict = None,
     chat_id: int = None,
     context=None,
+    client=None,
 ) -> Tuple[Optional[List], Optional[Dict], Optional[str]]:
     """Fetch liquidity bin data for CLMM pools via gateway
 
@@ -736,8 +745,13 @@ async def fetch_liquidity_bins(
         pool_address: Pool contract address
         connector: DEX connector (meteora, raydium, orca)
         network: Network identifier
-        user_data: Optional user_data dict for caching
+        user_data: Optional user_data dict for caching. When omitted the result
+            is cached process-wide instead, so callers with no conversation of
+            their own (the web dashboard) still share one Gateway call per pool.
         chat_id: Chat ID for per-chat server selection
+        client: An already-resolved API client. The web side holds a server
+            *name* and resolves its client through the config manager, which the
+            ``get_client(chat_id)`` path below cannot express.
 
     Returns:
         Tuple of (bins_list, pool_info, error_message)
@@ -753,10 +767,15 @@ async def fetch_liquidity_bins(
         cache_key = f"pool_bins_{connector}_{pool_address}"
         if user_data is not None:
             cached = get_cached(user_data, cache_key, ttl=BINS_CACHE_TTL)
-            if cached is not None:
-                return cached.get("bins"), cached, None
+        else:
+            cached = _ttl_get(
+                _pool_bins_cache, (connector, pool_address), BINS_CACHE_TTL
+            )
+        if cached is not None:
+            return cached.get("bins"), cached, None
 
-        client = await get_client(chat_id, context=context)
+        if client is None:
+            client = await get_client(chat_id, context=context)
         if not client:
             return None, None, "Gateway client not available"
 
@@ -819,6 +838,10 @@ async def fetch_liquidity_bins(
         # Cache result
         if user_data is not None:
             set_cached(user_data, cache_key, pool_info)
+        else:
+            _ttl_put(
+                _pool_bins_cache, (connector, pool_address), pool_info, BINS_CACHE_TTL
+            )
 
         return bins, pool_info, None
 
