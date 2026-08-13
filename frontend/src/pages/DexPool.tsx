@@ -313,6 +313,8 @@ export function DexPool() {
                       bins={depth?.bins ?? []}
                       activePrice={depth?.active_price ?? pool.current_price ?? null}
                       axis={priceAxis}
+                      rangeStart={active.chartProps.startPrice}
+                      rangeEnd={active.chartProps.endPrice}
                     />
                   )}
                   <button

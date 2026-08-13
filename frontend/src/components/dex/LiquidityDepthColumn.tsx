@@ -16,6 +16,9 @@ interface Props {
   activePrice: number | null;
   /** The candle chart's own price mapping. Null until the chart is ready. */
   axis: ChartPriceAxis | null;
+  /** The range being configured in the panel, drawn across the bars. */
+  rangeStart?: number | null;
+  rangeEnd?: number | null;
   width?: number;
   /** Ignore the loudest bins when scaling bars. 90 keeps the shape readable. */
   percentile?: number;
@@ -45,6 +48,8 @@ export function LiquidityDepthColumn({
   bins,
   activePrice,
   axis,
+  rangeStart,
+  rangeEnd,
   width = 72,
   percentile = 90,
 }: Props) {
@@ -129,6 +134,29 @@ export function LiquidityDepthColumn({
       }
       ctx.globalAlpha = 1;
 
+      // The range being configured, so "am I inside the liquidity" is answered
+      // by looking. It shares the bars' axis, so it cannot drift from them.
+      if (rangeStart != null && rangeEnd != null && rangeStart > 0 && rangeEnd > 0) {
+        const y1 = axis.priceToCoordinate(Math.min(rangeStart, rangeEnd));
+        const y2 = axis.priceToCoordinate(Math.max(rangeStart, rangeEnd));
+        if (y1 != null && y2 != null) {
+          const top = Math.min(y1, y2);
+          const box = Math.abs(y1 - y2);
+          ctx.fillStyle = colors.yellow;
+          ctx.globalAlpha = 0.12;
+          ctx.fillRect(0, top, w, box);
+          ctx.strokeStyle = colors.yellow;
+          ctx.globalAlpha = 0.7;
+          ctx.beginPath();
+          ctx.moveTo(0, Math.round(top) + 0.5);
+          ctx.lineTo(w, Math.round(top) + 0.5);
+          ctx.moveTo(0, Math.round(top + box) + 0.5);
+          ctx.lineTo(w, Math.round(top + box) + 0.5);
+          ctx.stroke();
+          ctx.globalAlpha = 1;
+        }
+      }
+
       // The active price, so the two sides are readable as sides.
       if (active != null) {
         const y = axis.priceToCoordinate(active);
@@ -173,7 +201,7 @@ export function LiquidityDepthColumn({
       observer.disconnect();
       cancelAnimationFrame(frame);
     };
-  }, [axis, bins, activePrice, percentile]);
+  }, [axis, bins, activePrice, rangeStart, rangeEnd, percentile]);
 
   return (
     <div
