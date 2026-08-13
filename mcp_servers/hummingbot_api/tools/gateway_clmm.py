@@ -178,25 +178,12 @@ async def explore_gateway_clmm_pools(
         if not request.pool_address:
             raise ToolError("pool_address is required for get_pool_info action")
 
-        # The client library's get_pool_info has no bin_count parameter, so ask the
-        # endpoint directly when bins are wanted (same passthrough the executors
-        # tools use for newer routes).
-        if request.bin_count:
-            result = await client.gateway_clmm._get(
-                "/gateway/clmm/pool-info",
-                params={
-                    "connector": request.connector,
-                    "network": request.network,
-                    "pool_address": request.pool_address,
-                    "bin_count": request.bin_count,
-                },
-            )
-        else:
-            result = await client.gateway_clmm.get_pool_info(
-                connector=request.connector,
-                network=request.network,
-                pool_address=request.pool_address,
-            )
+        result = await client.gateway_clmm.get_pool_info(
+            connector=request.connector,
+            network=request.network,
+            pool_address=request.pool_address,
+            bin_count=request.bin_count,
+        )
 
         return {
             "action": "get_pool_info",
