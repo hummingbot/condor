@@ -196,7 +196,9 @@ def test_a_failed_pool_lookup_is_not_cached(monkeypatch):
     class _Failing:
         async def get_top_pools_by_network_token(self, *_a):
             calls.append(1)
-            raise RuntimeError("429 Too Many Requests")
+            # Not a 429: that trips the shared breaker, which deliberately skips
+            # the second call. What is under test here is the cache rule.
+            raise RuntimeError("upstream exploded")
 
     monkeypatch.setattr(pool_data, "_gecko_client", lambda: _Failing())
     assert run(pool_data.fetch_token_top_pool("mint", "solana", "SOL")) == ""
@@ -484,7 +486,7 @@ def test_a_failed_pair_search_is_not_cached(monkeypatch):
     class _Failing:
         async def api_request(self, *_a, **_k):
             calls.append(1)
-            raise RuntimeError("429 Too Many Requests")
+            raise RuntimeError("upstream exploded")
 
     monkeypatch.setattr(pool_data, "_gecko_client", lambda: _Failing())
     assert run(pool_data.fetch_pair_top_pool("SOLO", "XRP", "xrpl")) == ("", False)

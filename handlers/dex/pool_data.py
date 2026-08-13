@@ -17,6 +17,7 @@ import logging
 import math
 import re
 import time
+from collections import deque
 from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
@@ -265,13 +266,58 @@ def _gecko_client() -> GeckoTerminalAsyncClient:
 
 # GeckoTerminal's free tier is ~30 requests/minute *per IP*, and that budget is
 # shared by every dashboard viewer, the candle poll loop and the pool browser at
-# once. Left unbounded, a single page load with a dex filter fans out to eight
-# concurrent requests and throttles the whole process; the semaphore turns that
-# burst into a queue.
+# once. Three separate guards defend it, because they fail differently:
+#
+# * ``_gecko_gate`` (concurrency) turns a burst into a queue, so one page load
+#   with a dex filter cannot open eight sockets at once.
+# * ``_acquire_rate_slot`` (rate) is the one that actually keeps us under the
+#   limit. A concurrency cap alone does not: four *fast* concurrent requests
+#   sustain well over 100/min, which is how the budget was being spent before
+#   anything looked like a burst.
+# * ``_trip_breaker`` (circuit) stops calling at all for a moment once gecko has
+#   said 429. Every request sent during a throttled window is spent for nothing
+#   and keeps the window rolling, so the cheapest response is silence.
 _GECKO_MAX_CONCURRENCY = 4
 _GECKO_TIMEOUT = 15.0
 _GECKO_RETRIES = 2
 _gecko_semaphore: Optional[asyncio.Semaphore] = None
+
+# Held under gecko's ~30 so a burst that straddles the window boundary still
+# lands inside it, and so a Telegram handler racing the dashboard has headroom.
+_GECKO_RATE_LIMIT = 25
+_GECKO_RATE_WINDOW = 60.0
+
+# How long a caller will queue for a slot before giving up. A web request is
+# waiting on the other end, and this module's standing answer to "no budget" is
+# the stale cache the callers already fall back to — which beats a request that
+# hangs for most of a minute and then succeeds into a closed browser tab.
+_GECKO_MAX_WAIT = 5.0
+
+# Silence after a 429. Long enough for a rolling per-minute window to drain most
+# of the way, short enough that a chart recovers on its next poll rather than
+# staying blank until someone reloads.
+_GECKO_COOLDOWN = 20.0
+
+
+class GeckoRateLimited(RuntimeError):
+    """Raised *instead of* calling gecko when the shared budget is spent.
+
+    Carries "rate limit" in its message so ``_is_rate_limited`` recognizes it and
+    callers that already branch on a throttled upstream need no change.
+    """
+
+
+# Timestamps of the requests inside the current rolling window.
+_gecko_call_times: deque = deque()
+_gecko_rate_lock: Optional[asyncio.Lock] = None
+
+# Circuit-breaker + health state. Process-wide, because the budget is per-IP:
+# one viewer's 429 is every viewer's 429, and there is no point rediscovering it
+# once per chart.
+_gecko_cooldown_until: float = 0.0
+_gecko_last_429: float = 0.0
+_gecko_429_count: int = 0
+_gecko_throttled_calls: int = 0
 
 
 def _gecko_gate() -> asyncio.Semaphore:
@@ -282,41 +328,194 @@ def _gecko_gate() -> asyncio.Semaphore:
     return _gecko_semaphore
 
 
+def _gecko_rate_gate() -> asyncio.Lock:
+    """The rate gate, built lazily for the same reason as the semaphore."""
+    global _gecko_rate_lock
+    if _gecko_rate_lock is None:
+        _gecko_rate_lock = asyncio.Lock()
+    return _gecko_rate_lock
+
+
 def _is_rate_limited(exc: BaseException) -> bool:
+    if isinstance(exc, GeckoRateLimited):
+        return True
     resp = getattr(exc, "response", None)
     if resp is not None and getattr(resp, "status_code", None) == 429:
         return True
     return "429" in str(exc) or "rate limit" in str(exc).lower()
 
 
-async def gecko_request(method: str, path: str, **kwargs) -> Any:
-    """One GeckoTerminal call, gated and retried where retrying can help.
+def _trip_breaker() -> None:
+    """Record a 429 and stop outbound calls for ``_GECKO_COOLDOWN`` seconds."""
+    global _gecko_cooldown_until, _gecko_last_429, _gecko_429_count
+    now = time.time()
+    _gecko_last_429 = now
+    _gecko_429_count += 1
+    _gecko_cooldown_until = now + _GECKO_COOLDOWN
+    logger.warning(
+        "GeckoTerminal rate-limited (429 #%d) — pausing all requests for %.0fs",
+        _gecko_429_count,
+        _GECKO_COOLDOWN,
+    )
+
+
+async def _acquire_rate_slot() -> None:
+    """Claim one request from the shared per-minute budget.
+
+    Waits for a slot up to ``_GECKO_MAX_WAIT``; raises ``GeckoRateLimited`` when
+    the budget is spent for longer than that, or while the breaker is open. The
+    wait happens under the lock so callers queue in arrival order instead of
+    stampeding the instant a slot frees.
+    """
+    global _gecko_throttled_calls
+    deadline = time.time() + _GECKO_MAX_WAIT
+    async with _gecko_rate_gate():
+        while True:
+            now = time.time()
+
+            if now < _gecko_cooldown_until:
+                _gecko_throttled_calls += 1
+                raise GeckoRateLimited(
+                    f"GeckoTerminal rate limit: cooling down for another "
+                    f"{_gecko_cooldown_until - now:.1f}s"
+                )
+
+            while (
+                _gecko_call_times and now - _gecko_call_times[0] >= _GECKO_RATE_WINDOW
+            ):
+                _gecko_call_times.popleft()
+
+            if len(_gecko_call_times) < _GECKO_RATE_LIMIT:
+                _gecko_call_times.append(now)
+                return
+
+            # Budget full: wait exactly until the oldest request ages out.
+            wait = _GECKO_RATE_WINDOW - (now - _gecko_call_times[0])
+            if now + wait > deadline:
+                _gecko_throttled_calls += 1
+                raise GeckoRateLimited(
+                    f"GeckoTerminal rate limit: {_GECKO_RATE_LIMIT} requests "
+                    f"already sent this minute, next slot in {wait:.1f}s"
+                )
+            await asyncio.sleep(min(wait, 0.25))
+
+
+def gecko_health() -> Dict[str, Any]:
+    """Current state of the shared GeckoTerminal budget.
+
+    Exists so "are we rate limited?" has an answer that is not "read the logs" —
+    every failure downstream of here degrades to an empty list, which cannot tell
+    a throttled upstream apart from a pool that simply has no trades.
+    """
+    now = time.time()
+    recent = sum(1 for t in _gecko_call_times if now - t < _GECKO_RATE_WINDOW)
+    return {
+        "rate_limited": now < _gecko_cooldown_until,
+        "cooldown_remaining": max(0.0, _gecko_cooldown_until - now),
+        "requests_last_minute": recent,
+        "budget": _GECKO_RATE_LIMIT,
+        "count_429": _gecko_429_count,
+        "last_429_age": (now - _gecko_last_429) if _gecko_last_429 else None,
+        "throttled_calls": _gecko_throttled_calls,
+    }
+
+
+def reset_gecko_throttle() -> None:
+    """Forget the spent budget and any open breaker.
+
+    For tests, which drive hundreds of calls through this module inside one real
+    wall-clock minute and would otherwise throttle themselves.
+    """
+    global _gecko_cooldown_until, _gecko_last_429, _gecko_429_count
+    global _gecko_throttled_calls
+    _gecko_call_times.clear()
+    _gecko_inflight.clear()
+    _gecko_cooldown_until = 0.0
+    _gecko_last_429 = 0.0
+    _gecko_429_count = 0
+    _gecko_throttled_calls = 0
+    for cache in (
+        _gecko_page_cache,
+        _pool_by_address_cache,
+        _multi_pool_cache,
+        _gecko_dexes_cache,
+        _gateway_pool_list_cache,
+        _token_symbol_cache,
+        _token_pool_cache,
+        _pair_pool_cache,
+    ):
+        cache.clear()
+
+
+async def gecko_call(method: str, *args: Any, **kwargs: Any) -> Any:
+    """One GeckoTerminal client call, rate-gated and retried where that helps.
+
+    ``method`` names a method on the shared client. Every outbound GeckoTerminal
+    request in this module goes through here — calling the client directly skips
+    the budget, which is exactly how the candle poll loop (the highest-frequency
+    caller in the process) used to exhaust it while the guards sat idle in front
+    of two pool-list walks.
 
     Only timeouts and transport errors are retried. A 429 is deliberately *not*:
     gecko's limit is a per-minute window, so no backoff short enough to sit inside
     a web request will clear it, and a retry only spends more of the very budget
-    that is exhausted — while making every other caller wait behind it. The answer
-    to a 429 is the stale cache the callers fall back to, and the semaphore above,
-    which stops the burst that causes it. A 404, or the 401 gecko answers past page
-    10, is a final answer and is raised on the first attempt.
+    that is exhausted. It trips the breaker instead. A 404, or the 401 gecko
+    answers past page 10, is a final answer and is raised on the first attempt.
     """
     for attempt in range(_GECKO_RETRIES + 1):
+        await _acquire_rate_slot()
         try:
             async with _gecko_gate():
-                return await _gecko_client().api_request(method, path, **kwargs)
+                return await getattr(_gecko_client(), method)(*args, **kwargs)
         except Exception as e:  # noqa: BLE001 - re-raised below when not retryable
-            retryable = not _is_rate_limited(e) and isinstance(
-                e, (httpx.TimeoutException, httpx.TransportError)
-            )
+            if _is_rate_limited(e):
+                if not isinstance(e, GeckoRateLimited):
+                    _trip_breaker()
+                raise
+            retryable = isinstance(e, (httpx.TimeoutException, httpx.TransportError))
             if not retryable or attempt == _GECKO_RETRIES:
                 raise
             await asyncio.sleep(_GECKO_BACKOFF[attempt])
     raise RuntimeError("unreachable")
 
 
+async def gecko_request(method: str, path: str, **kwargs) -> Any:
+    """A raw REST call for paths the typed client does not expose."""
+    return await gecko_call("api_request", method, path, **kwargs)
+
+
 # Backoff between retries of a *timeout*, which is a slow chain listing rather than
 # a throttled one — short, because a web request is waiting on it.
 _GECKO_BACKOFF = (0.4, 1.0)
+
+
+# ── Single-flight ──
+# A TTL cache only helps once an answer has *arrived*. Flicking between explorer
+# tabs asks for the same listings again while the first requests are still in the
+# air, so every one of them misses the cache and opens its own gecko request — the
+# fastest way there is to spend the minute's budget. This collapses concurrent
+# callers of the same key onto one upstream request.
+_gecko_inflight: Dict[Tuple, "asyncio.Task"] = {}
+
+
+async def _single_flight(key: Tuple, factory) -> Any:
+    """Run ``factory()`` once per key, sharing its result with every concurrent caller.
+
+    The work runs as a detached task and awaiters ``shield`` it, so the very thing
+    that causes the stampede — a viewer navigating away and cancelling their
+    request — cannot also cancel the fetch the remaining viewers are waiting on.
+    """
+    task = _gecko_inflight.get(key)
+    if task is None or task.done():
+        task = asyncio.ensure_future(factory())
+        _gecko_inflight[key] = task
+
+        def _clear(finished: "asyncio.Task", _key: Tuple = key) -> None:
+            if _gecko_inflight.get(_key) is finished:
+                _gecko_inflight.pop(_key, None)
+
+        task.add_done_callback(_clear)
+    return await asyncio.shield(task)
 
 
 # ── Small TTL caches for token lookups ──
@@ -396,7 +595,7 @@ async def fetch_token_symbol(mint: str, network: str) -> str:
         return cached
 
     try:
-        data = await _gecko_client().get_specific_token_on_network(gnet, mint)
+        data = await gecko_call("get_specific_token_on_network", gnet, mint)
     except Exception as e:
         logger.info("token symbol lookup failed mint=%s net=%s: %s", mint, gnet, e)
         return ""
@@ -436,7 +635,7 @@ async def fetch_token_top_pool_info(
         return cached or None
 
     try:
-        pools = await _gecko_client().get_top_pools_by_network_token(gnet, mint)
+        pools = await gecko_call("get_top_pools_by_network_token", gnet, mint)
     except Exception as e:
         # Includes the KeyError geckoterminal_py raises post-processing an empty
         # result set. Not cached — a transient failure must not pin "" for an hour.
@@ -507,7 +706,7 @@ async def fetch_pair_top_pool_info(
     try:
         # Both symbols in the query: GeckoTerminal matches them against the pool
         # name ("SOLO / XRP"), so this narrows the answer set before we filter.
-        data = await _gecko_client().api_request(
+        data = await gecko_request(
             "GET", "search/pools", params={"query": f"{b} {q}", "network": gnet}
         )
     except Exception as e:
@@ -789,7 +988,8 @@ async def fetch_ohlcv(
         # Pass all parameters explicitly:
         # - currency="token" means price in quote token (not USD)
         # - token="base" means OHLCV for the base token
-        result = await _gecko_client().get_ohlcv(
+        result = await gecko_call(
+            "get_ohlcv",
             gecko_network,
             pool_address,
             timeframe,
@@ -1360,6 +1560,23 @@ async def _gecko_page_rows(
     if cached is not None:
         return [dict(row) for row in cached]
 
+    # Concurrent askers for this exact page share one request. Rows are copied per
+    # caller below, since the shared answer is one list object.
+    rows = await _single_flight(
+        ("page",) + key, lambda: _gecko_page_fetch(gnet, view, token, page, dex, key)
+    )
+    return None if rows is None else [dict(row) for row in rows]
+
+
+async def _gecko_page_fetch(
+    gnet: str,
+    view: str,
+    token: str,
+    page: int,
+    dex: Optional[str],
+    key: Tuple,
+) -> Optional[List[Dict[str, Any]]]:
+    """The uncached fetch behind ``_gecko_page_rows``. One upstream request."""
     if dex:
         path = GECKO_CONSTANTS.GET_TOP_POOLS_BY_NETWORK_DEX_PATH.format(gnet, dex)
     elif view == "token":
@@ -1392,11 +1609,11 @@ async def _gecko_page_rows(
             f" (serving {age:.0f}s-old cache)" if stale is not None else "",
         )
         if stale is not None:
-            return [dict(row) for row in stale]
+            return stale
         return None
 
     _stale_put(_gecko_page_cache, key, rows)
-    return [dict(row) for row in rows]
+    return rows
 
 
 def _normalized_gecko_rows(
@@ -1641,7 +1858,7 @@ async def fetch_pools_by_addresses(
             pools.extend(dict(row) for row in cached)
             continue
         try:
-            result = await _gecko_client().get_multiple_pools_by_network(gnet, batch)
+            result = await gecko_call("get_multiple_pools_by_network", gnet, batch)
         except Exception as e:
             stale, age = _stale_get(_multi_pool_cache, batch_key)
             logger.warning(
@@ -1761,7 +1978,12 @@ async def fetch_pool_by_address(
         return dict(cached) if cached else None
 
     try:
-        result = await _gecko_client().get_pool_by_network_address(gnet, pool_address)
+        # Shared with any concurrent viewer of the same pool — opening pools in
+        # quick succession otherwise opens one request each.
+        result = await _single_flight(
+            ("pool", gnet, pool_address),
+            lambda: gecko_call("get_pool_by_network_address", gnet, pool_address),
+        )
     except Exception as e:
         logger.info("pool lookup failed net=%s pool=%s: %s", gnet, pool_address, e)
         return None

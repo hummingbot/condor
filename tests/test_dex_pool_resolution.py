@@ -127,7 +127,7 @@ def test_a_failed_lookup_is_still_not_cached_in_the_info_form(monkeypatch):
     class _Failing:
         async def get_top_pools_by_network_token(self, *_a):
             calls.append(1)
-            raise RuntimeError("429 Too Many Requests")
+            raise RuntimeError("upstream exploded")
 
     monkeypatch.setattr(pool_data, "_gecko_client", lambda: _Failing())
     assert run(pool_data.fetch_token_top_pool_info("mint", "solana", "SOL")) is None
