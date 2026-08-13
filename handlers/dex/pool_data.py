@@ -90,6 +90,22 @@ NETWORK_TO_GECKO = {
     "xrpl": "xrpl",
 }
 
+# The inverse of NETWORK_TO_GECKO, one entry per gecko chain: the Gateway network
+# id a pool discovered on that chain belongs to. Lives here rather than in the
+# Telegram handler that used to own it because the pool browser's rows are routed
+# by it (``/dex/{gateway_network}/{address}``), and a gecko chain with no entry is
+# one Gateway cannot reach — a state to render, not an error.
+GECKO_TO_GATEWAY_NETWORK = {
+    "solana": "solana-mainnet-beta",
+    "eth": "ethereum-mainnet",
+    "base": "base-mainnet",
+    "arbitrum": "arbitrum-one",
+    "bsc": "bsc-mainnet",
+    "polygon_pos": "polygon-mainnet",
+    "avalanche": "avalanche-mainnet",
+    "optimism": "optimism-mainnet",
+}
+
 # Networks whose venues quote *tickers* rather than token addresses. An XRPL token
 # is a (currency, issuer) pair that the connector hides behind a symbol like
 # ``SOLO-XRP``, so its pool can only be found by searching for that symbol —
@@ -113,6 +129,12 @@ OHLCV_CACHE_TTL = 300  # 5 minutes
 BINS_CACHE_TTL = 60  # 1 minute
 TOKEN_SYMBOL_TTL = 24 * 3600  # a mint's ticker does not change
 TOKEN_POOL_TTL = 3600  # a token's main pool is stable over an hour
+# Pool *lists* are the pool browser's hot path and GeckoTerminal rate-limits per
+# IP across every dashboard viewer and every polling chart, so these are not an
+# optimization: an un-cached browser refetching per keystroke would starve the
+# candle poll loop of the same budget.
+POOL_LIST_TTL = 60  # gecko trending/top/new/token lists
+GATEWAY_POOL_LIST_TTL = 30  # gateway CLMM lists, per (connector, search)
 
 # GeckoTerminal's OHLCV endpoint only accepts these aggregates, and its client
 # raises ValueError on anything else. Charts pick their own interval, so map an
@@ -805,6 +827,45 @@ async def fetch_liquidity_bins(
         return None, None, f"Failed to fetch liquidity: {str(e)}"
 
 
+def _token_address_from_id(token_id: Any) -> str:
+    """``solana_<mint>`` → ``<mint>``. Anything without the prefix passes through.
+
+    GeckoTerminal ids are ``{network}_{address}`` in the relationships block, but
+    ``process_pools_list`` already strips them on its list endpoints and the
+    by-address endpoint does not. Neither a base58 pubkey nor an EVM 0x-address
+    contains an underscore, so stripping is idempotent and safe for both shapes.
+    """
+    text = str(token_id or "").strip()
+    if not text or text.lower() == "nan":
+        return ""
+    _head, sep, tail = text.partition("_")
+    return tail if sep and tail else text
+
+
+def _gecko_token_address(pool: dict, attrs: dict, side: str) -> str:
+    """The ``base``/``quote`` token address on a GeckoTerminal pool row.
+
+    Reads the nested ``relationships.{side}_token.data.id`` the raw API returns,
+    then the flat ``{side}_token_id`` / ``{side}_token_address`` columns a
+    DataFrame row carries instead. Columns have moved between library versions,
+    so every known shape is tried before giving up.
+    """
+    rel = ((pool.get("relationships") or {}).get(f"{side}_token") or {}).get("data")
+    nested = (rel or {}).get("id") if isinstance(rel, dict) else None
+    token_obj = attrs.get(f"{side}_token")
+    candidates = (
+        nested,
+        attrs.get(f"{side}_token_id"),
+        attrs.get(f"{side}_token_address"),
+        token_obj.get("address") if isinstance(token_obj, dict) else None,
+    )
+    for candidate in candidates:
+        address = _token_address_from_id(candidate)
+        if address:
+            return address
+    return ""
+
+
 def normalize_pool_data(pool: dict, source: str = "gecko") -> Dict[str, Any]:
     """Normalize pool data from different sources to a common format
 
@@ -824,6 +885,11 @@ def normalize_pool_data(pool: dict, source: str = "gecko") -> Dict[str, Any]:
             "name": attrs.get("name", "Unknown"),
             "base_token_symbol": attrs.get("base_token_symbol", "???"),
             "quote_token_symbol": attrs.get("quote_token_symbol", "???"),
+            # A pool-first UI cannot do without the mints: an LP or DEX order
+            # executor's trading_pair is ``<base_mint>-<quote_symbol>``, so a pool
+            # with no base address is a pool nothing can be opened in.
+            "base_token_address": _gecko_token_address(pool, attrs, "base"),
+            "quote_token_address": _gecko_token_address(pool, attrs, "quote"),
             "base_token_price_usd": attrs.get("base_token_price_usd"),
             "quote_token_price_usd": attrs.get("quote_token_price_usd"),
             "network": pool.get("network") or attrs.get("network", "solana"),
@@ -868,6 +934,8 @@ def normalize_pool_data(pool: dict, source: str = "gecko") -> Dict[str, Any]:
             "base_fee_percentage": pool.get("base_fee_percentage"),
             "mint_x": pool.get("mint_x"),
             "mint_y": pool.get("mint_y"),
+            "base_token_address": str(pool.get("mint_x") or ""),
+            "quote_token_address": str(pool.get("mint_y") or ""),
             "source": "gateway",
         }
 
@@ -932,3 +1000,285 @@ def extract_pair_from_name(name: str) -> Tuple[str, str]:
                 return parts[0].strip(), parts[1].strip()
 
     return name, "???"
+
+
+# ── Pool discovery ──
+# The pool browser's three sources, behind one module. Telegram's /lp flow reaches
+# GeckoTerminal and Gateway CLMM through its own inline fetching, each wrapped in
+# MarkdownV2 table building and per-user caching, so none of it is callable from a
+# web route. These are: the same upstreams, normalized, decorated and TTL-cached
+# process-wide, with no presentation attached.
+
+GECKO_POOL_VIEWS = ("trending", "top", "new", "token")
+
+_gecko_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
+_gateway_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
+_pool_by_address_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
+
+# A pool list is a browser page, not a report: cap what an upstream can be asked
+# for so one query cannot drag a thousand rows through normalization.
+_POOL_LIST_MAX = 100
+
+
+def _coerce_pool_rows(result: Any, limit: int = 20) -> List[Dict[str, Any]]:
+    """``DataFrame | {"data": [...]} | [...]`` → a list of raw pool dicts.
+
+    ``geckoterminal_py`` answers the pool-list endpoints with a pandas DataFrame,
+    but the raw JSON shapes turn up too (a hand-rolled ``api_request``, a recorded
+    fixture), and which one arrives has changed across library versions. Anything
+    that is not a mapping is dropped rather than crashing the whole listing.
+    """
+    if result is None:
+        return []
+
+    try:
+        import pandas as pd
+
+        if isinstance(result, pd.DataFrame):
+            rows = result.to_dict("records")
+            return [r for r in rows if isinstance(r, dict)][:limit]
+    except ImportError:  # pragma: no cover - pandas ships with geckoterminal_py
+        pass
+
+    if isinstance(result, dict):
+        rows = result.get("data") or []
+    elif isinstance(result, list):
+        rows = result
+    else:
+        rows = getattr(result, "data", None) or []
+
+    if isinstance(rows, dict):  # a by-address response: one pool, not a list
+        rows = [rows]
+    return [r for r in rows if isinstance(r, dict)][:limit]
+
+
+def decorate_pool(info: Dict[str, Any], network: str) -> Dict[str, Any]:
+    """Add the venue facts a pool-first UI cannot derive on its own, in place.
+
+    A browser row has to answer three questions before the user clicks it — can I
+    chart this pool, can I trade in it, can I LP in it — and every one of them is
+    a fact about *our* connectors, not about the pool. Deciding them here keeps
+    the frontend from re-deriving venue rules it cannot know, and keeps "chart yes,
+    LP no" a renderable state rather than an executor that fails on create.
+    """
+    dex_id = str(info.get("dex_id") or "")
+    gecko_network = get_gecko_network(network)
+    gateway_network = GECKO_TO_GATEWAY_NETWORK.get(gecko_network) or (
+        network if network in NETWORK_TO_GECKO else ""
+    )
+
+    # normalize_pool_data reports "???" for a symbol GeckoTerminal only publishes
+    # inside the pool's display name; _fill_pool_pair_fields has parsed it by now.
+    def _symbol(side: str) -> str:
+        for key in (f"{side}_symbol", f"{side}_token_symbol"):
+            value = str(info.get(key) or "").strip()
+            if value and value != "???":
+                return value.upper()
+        return ""
+
+    base_symbol, quote_symbol = _symbol("base"), _symbol("quote")
+    info["base_symbol"] = base_symbol or "???"
+    info["quote_symbol"] = quote_symbol or "???"
+    info["base_token_symbol"] = base_symbol or "???"
+    info["quote_token_symbol"] = quote_symbol or "???"
+
+    provider = lp_provider_for_dex(dex_id, network)
+    info["lp_provider"] = provider
+    info["lp_supported"] = provider is not None
+    info["gateway_network"] = gateway_network
+    info["network"] = network
+    info["gecko_network"] = gecko_network
+    # A chain GeckoTerminal indexes is not necessarily one Gateway reaches.
+    info["tradable"] = bool(gateway_network) and gateway_network in NETWORK_TO_GECKO
+    # Consumed by the liquidity-bin depth chart (FEAT-045); decided here because
+    # it is the same kind of venue fact as lp_supported.
+    info["has_bins"] = can_fetch_liquidity(dex_id, network)
+
+    # The <base_mint>-<quote_symbol> form LP and DEX order executors already carry,
+    # except on a network whose venues quote tickers rather than addresses (xrpl),
+    # where the base *is* a symbol.
+    base = base_symbol if uses_symbol_pairs(network) else info.get("base_token_address")
+    base = str(base or "")
+    info["trading_pair"] = f"{base}-{quote_symbol}" if base and quote_symbol else ""
+    return info
+
+
+def _normalize_gecko_pool(row: Dict[str, Any], network: str) -> Dict[str, Any]:
+    """One raw GeckoTerminal pool row → a decorated, normalized pool."""
+    info = normalize_pool_data(row, source="gecko")
+    _fill_pool_pair_fields(info, network, row)
+    return decorate_pool(info, network)
+
+
+def _clamp_pool_limit(limit: Any) -> int:
+    try:
+        value = int(limit)
+    except (TypeError, ValueError):
+        return 20
+    return max(1, min(value, _POOL_LIST_MAX))
+
+
+async def list_gecko_pools(
+    network: str,
+    view: str = "trending",
+    token: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """GeckoTerminal pools for a chain: ``trending``, ``top``, ``new`` or by token.
+
+    ``network`` may be a Gateway network id or a gecko chain id — ``get_gecko_network``
+    normalizes either. ``view="token"`` needs ``token`` to be a real address; a
+    ticker would be pasted straight into a URL path segment, so it is refused here.
+
+    An upstream failure answers ``[]`` (and is not cached), because the caller's
+    honest rendering of "no pools" is more useful than an error the user cannot act
+    on. A successful empty answer *is* cached — that chain really has no such list.
+    """
+    from condor.dex_candles import ADDRESS_RE
+
+    gnet = get_gecko_network(network)
+    view = (view or "trending").strip().lower()
+    if view not in GECKO_POOL_VIEWS:
+        view = "trending"
+    token = (token or "").strip()
+    if view == "token" and not ADDRESS_RE.match(token):
+        return []
+    limit = _clamp_pool_limit(limit)
+
+    key = (gnet, view, token, limit)
+    cached = _ttl_get(_gecko_pool_list_cache, key, POOL_LIST_TTL)
+    if cached is not None:
+        return [dict(row) for row in cached]
+
+    client = _gecko_client()
+    try:
+        if view == "trending":
+            result = await client.get_trending_pools_by_network(gnet)
+        elif view == "top":
+            result = await client.get_top_pools_by_network(gnet)
+        elif view == "new":
+            result = await client.get_new_pools_by_network(gnet)
+        else:
+            result = await client.get_top_pools_by_network_token(gnet, token)
+    except Exception as e:
+        # Includes the KeyError geckoterminal_py raises post-processing an empty
+        # result set, and every rate-limit response.
+        logger.warning("gecko pool list failed net=%s view=%s: %s", gnet, view, e)
+        return []
+
+    pools: List[Dict[str, Any]] = []
+    for row in _coerce_pool_rows(result, limit):
+        try:
+            pool = _normalize_gecko_pool(row, network)
+        except Exception as e:
+            logger.info("gecko pool row skipped net=%s: %s", gnet, e)
+            continue
+        if pool.get("address"):
+            pools.append(pool)
+
+    _ttl_put(_gecko_pool_list_cache, key, pools, POOL_LIST_TTL)
+    return [dict(row) for row in pools]
+
+
+def gateway_connector_network(connector: str) -> str:
+    """The network a Gateway CLMM connector's pools live on."""
+    return LIQUIDITY_SUPPORTED_DEXES.get((connector or "").strip().lower(), "solana")
+
+
+async def list_gateway_pools(
+    client: Any,
+    connector: str,
+    search: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Gateway CLMM pools for a connector, optionally filtered by free text.
+
+    Unlike the gecko sources this one is server-scoped (it needs a Hummingbot API
+    client) and searches *within* a connector by name rather than by token address
+    — which is why the route keeps the two behind a ``source`` discriminator
+    instead of one parameter set with meaningless combinations.
+    """
+    connector = (connector or "").strip().lower()
+    if not connector:
+        return []
+    search = (search or "").strip() or None
+    limit = _clamp_pool_limit(limit)
+
+    key = (connector, search or "", limit)
+    cached = _ttl_get(_gateway_pool_list_cache, key, GATEWAY_POOL_LIST_TTL)
+    if cached is not None:
+        return [dict(row) for row in cached]
+
+    if client is None or not hasattr(client, "gateway_clmm"):
+        logger.warning("Gateway CLMM unavailable for connector=%s", connector)
+        return []
+
+    try:
+        result = await client.gateway_clmm.get_pools(
+            connector=connector, page=0, limit=limit, search_term=search
+        )
+    except Exception as e:
+        logger.warning("gateway pool list failed connector=%s: %s", connector, e)
+        return []
+
+    raw = result.get("pools") if isinstance(result, dict) else result
+    network = gateway_connector_network(connector)
+    pools: List[Dict[str, Any]] = []
+    for row in _coerce_pool_rows(raw, limit):
+        row = dict(row)
+        row.setdefault("connector", connector)
+        try:
+            pool = decorate_pool(normalize_pool_data(row, source="gateway"), network)
+        except Exception as e:
+            logger.info("gateway pool row skipped connector=%s: %s", connector, e)
+            continue
+        if pool.get("address"):
+            pools.append(pool)
+
+    _ttl_put(_gateway_pool_list_cache, key, pools, GATEWAY_POOL_LIST_TTL)
+    return [dict(row) for row in pools]
+
+
+async def fetch_pool_by_address(
+    network: str, pool_address: str
+) -> Optional[Dict[str, Any]]:
+    """One normalized pool, for a deep link or a reload of the pool workspace.
+
+    The workspace has to render from a URL alone, with no state carried over from
+    the browser that linked to it, so the pool is fetched by address rather than
+    looked up in a list. A pool that genuinely does not exist is cached as such;
+    a failed lookup is not.
+    """
+    from condor.dex_candles import ADDRESS_RE
+
+    pool_address = (pool_address or "").strip()
+    if not ADDRESS_RE.match(pool_address):
+        return None
+
+    gnet = get_gecko_network(network)
+    key = (gnet, pool_address)
+    cached = _ttl_get(_pool_by_address_cache, key, POOL_LIST_TTL)
+    if cached is not None:
+        return dict(cached) if cached else None
+
+    try:
+        result = await _gecko_client().get_pool_by_network_address(gnet, pool_address)
+    except Exception as e:
+        logger.info("pool lookup failed net=%s pool=%s: %s", gnet, pool_address, e)
+        return None
+
+    rows = _coerce_pool_rows(result, 1)
+    if not rows:
+        _ttl_put(_pool_by_address_cache, key, {}, POOL_LIST_TTL)
+        return None
+
+    try:
+        pool = _normalize_gecko_pool(rows[0], network)
+    except Exception as e:
+        logger.info("pool parse failed net=%s pool=%s: %s", gnet, pool_address, e)
+        return None
+
+    if not pool.get("address"):
+        pool["address"] = pool_address
+    _ttl_put(_pool_by_address_cache, key, pool, POOL_LIST_TTL)
+    return dict(pool)

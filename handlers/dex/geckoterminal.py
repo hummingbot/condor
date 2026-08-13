@@ -21,6 +21,7 @@ from telegram.ext import ContextTypes
 from utils.telegram_formatters import escape_markdown_v2
 
 from ._shared import cached_call
+from .pool_data import GECKO_TO_GATEWAY_NETWORK as _GECKO_TO_GATEWAY_NETWORK
 from .pool_data import can_fetch_liquidity, fetch_liquidity_bins, get_connector_for_dex
 from .visualizations import (
     generate_combined_chart,
@@ -1492,17 +1493,9 @@ async def process_gecko_search(
         )
 
 
-# GeckoTerminal to Gateway network mapping
-GECKO_TO_GATEWAY_NETWORK = {
-    "solana": "solana-mainnet-beta",
-    "eth": "ethereum-mainnet",
-    "base": "base-mainnet",
-    "arbitrum": "arbitrum-one",
-    "bsc": "bsc-mainnet",
-    "polygon_pos": "polygon-mainnet",
-    "avalanche": "avalanche-mainnet",
-    "optimism": "optimism-mainnet",
-}
+# GeckoTerminal to Gateway network mapping. Defined in pool_data, next to its
+# inverse (NETWORK_TO_GECKO), because the web pool browser routes its rows by it.
+GECKO_TO_GATEWAY_NETWORK = _GECKO_TO_GATEWAY_NETWORK
 
 # Default connectors by network chain
 NETWORK_DEFAULT_CONNECTOR = {
