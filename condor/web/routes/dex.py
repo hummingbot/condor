@@ -55,7 +55,13 @@ async def list_pools(
         description="source=gecko+view=token: the token address. "
         "source=gateway: free text matched against pool names.",
     ),
+    dexes: str | None = Query(
+        default=None,
+        description="source=gecko: comma-separated GeckoTerminal dex ids to keep "
+        "(meteora,orca,raydium-clmm). Empty means every venue.",
+    ),
     limit: int = Query(default=20, ge=1, le=100),
+    page: int = Query(default=1, ge=1, description="1-based page of `limit` rows"),
     user: WebUser = Depends(get_current_user),
 ):
     """Pools to browse, from one of the two upstreams.
@@ -68,12 +74,15 @@ async def list_pools(
     An upstream failure answers ``{"pools": []}`` with a warning, like
     ``/market/venues``: the browser's empty state is something the user can act on,
     a 502 is not.
+
+    ``has_more`` — not a total — is what the browser's Next needs, and a total is
+    something neither upstream reports.
     """
     cm = get_config_manager()
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access")
 
-    from handlers.dex.pool_data import list_gateway_pools, list_gecko_pools
+    from handlers.dex.pool_data import list_gateway_pools, list_gecko_pools_page
 
     source = (source or "gecko").strip().lower()
 
@@ -82,9 +91,17 @@ async def list_pools(
             client = await cm.get_client(name)
         except Exception as e:
             logger.warning("Gateway pools unavailable for %s: %s", name, e)
-            return {"pools": [], "source": source}
-        pools = await list_gateway_pools(client, connector, search=query, limit=limit)
-        return {"pools": pools, "source": source}
+            return {"pools": [], "source": source, "page": page, "has_more": False}
+        pools = await list_gateway_pools(
+            client, connector, search=query, limit=limit, page=page
+        )
+        # Gateway reports no total, so a full page is the only evidence of another.
+        return {
+            "pools": pools,
+            "source": source,
+            "page": page,
+            "has_more": len(pools) >= limit,
+        }
 
     if source != "gecko":
         raise HTTPException(status_code=400, detail="Unknown source")
@@ -95,8 +112,70 @@ async def list_pools(
     if view == "token" and not _ADDRESS_RE.match(token):
         raise HTTPException(status_code=400, detail="Invalid token address")
 
-    pools = await list_gecko_pools(network, view=view, token=token, limit=limit)
-    return {"pools": pools, "source": source}
+    result = await list_gecko_pools_page(
+        network,
+        view=view,
+        token=token,
+        limit=limit,
+        page=page,
+        dexes=[d for d in (dexes or "").split(",") if d.strip()],
+    )
+    return {
+        "pools": result["pools"],
+        "source": source,
+        "page": page,
+        "has_more": result["has_more"],
+    }
+
+
+@router.get("/servers/{name}/dex/dexes")
+async def list_dexes(
+    name: str,
+    network: str = Query(default="solana-mainnet-beta"),
+    user: WebUser = Depends(get_current_user),
+):
+    """The venues on a chain, for the pool browser's dex filter.
+
+    Offered by the chain rather than hardcoded, so a venue GeckoTerminal starts
+    indexing is filterable without a deploy. Empty when the lookup fails — a filter
+    with no options is one the browser simply does not show.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from handlers.dex.pool_data import list_gecko_dexes
+
+    return {"dexes": await list_gecko_dexes(network)}
+
+
+@router.get("/servers/{name}/dex/pools-by-address")
+async def list_pools_by_address(
+    name: str,
+    addresses: str = Query(description="Comma-separated pool addresses (max 30)"),
+    network: str = Query(default="solana-mainnet-beta"),
+    user: WebUser = Depends(get_current_user),
+):
+    """Several pools by address at once, for the favourites view.
+
+    A favourite is stored as an address, not as a copy of the row, so its TVL and
+    volume have to be re-read like any other row rather than replayed from
+    whenever it was starred. An address that no longer resolves is absent from the
+    answer instead of failing the whole view — a de-indexed pool is not an error.
+
+    Declared above ``/dex/pools/{pool_address}`` deliberately: a path segment would
+    otherwise be read as an address.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from handlers.dex.pool_data import fetch_pools_by_addresses
+
+    wanted = [a.strip() for a in (addresses or "").split(",") if a.strip()][:30]
+    if not wanted:
+        return {"pools": []}
+    return {"pools": await fetch_pools_by_addresses(network, wanted)}
 
 
 @router.get("/servers/{name}/dex/pools/{pool_address}")

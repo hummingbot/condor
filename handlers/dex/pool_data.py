@@ -19,6 +19,8 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from geckoterminal_py import GeckoTerminalAsyncClient
+from geckoterminal_py import constants as GECKO_CONSTANTS
+from glom import glom
 
 from config_manager import get_client
 
@@ -1034,7 +1036,32 @@ def extract_pair_from_name(name: str) -> Tuple[str, str]:
 
 GECKO_POOL_VIEWS = ("trending", "top", "new", "token")
 
-_gecko_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
+# GeckoTerminal serves every pool list in fixed pages of 20 and answers 401 past
+# page 10, so those two numbers — not a preference of ours — bound what the pool
+# browser can page through.
+GECKO_PAGE_SIZE = 20
+GECKO_MAX_PAGE = 10
+# With a dex filter on, matching rows are scattered across upstream pages and have
+# to be walked for. Capped because the walk costs one rate-limited request per
+# page and the browser is asking for a screenful, not a census.
+_GECKO_FILTER_WALK_PAGES = 3
+# Merging several venues' own listings costs one request per venue per page, so
+# the fan-out is bounded: past this, the chain-wide walk is used instead.
+_GECKO_SCOPED_MAX_REQUESTS = 8
+
+# The list endpoint behind each view. The library exposes one method per view but
+# none of them take ``page``, so the paths are used directly.
+_GECKO_VIEW_PATHS = {
+    "trending": GECKO_CONSTANTS.GET_TRENDING_POOLS_BY_NETWORK_PATH,
+    "top": GECKO_CONSTANTS.GET_TOP_POOLS_BY_NETWORK_PATH,
+    "new": GECKO_CONSTANTS.GET_NEW_POOLS_BY_NETWORK_PATH,
+}
+
+# A chain's venues change on the order of weeks; the filter dropdown reads this.
+GECKO_DEXES_TTL = 6 * 3600
+
+_gecko_page_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
+_gecko_dexes_cache: Dict[Tuple, Tuple[float, List[Dict[str, str]]]] = {}
 _gateway_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
 _pool_by_address_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 
@@ -1073,6 +1100,53 @@ def _coerce_pool_rows(result: Any, limit: int = 20) -> List[Dict[str, Any]]:
     if isinstance(rows, dict):  # a by-address response: one pool, not a list
         rows = [rows]
     return [r for r in rows if isinstance(r, dict)][:limit]
+
+
+# Every numeric a pool row carries, and the two upstreams disagree on the type of
+# nearly all of them: GeckoTerminal answers strings (``"12500000.0"``) *and*
+# pandas ``NaN`` for a missing figure, Gateway answers strings for APR and TVL.
+# A NaN is not JSON (FastAPI refuses to encode one, and the whole listing 500s),
+# and a string has no ``.toFixed``, so the browser crashes formatting it. Both are
+# settled here, once, rather than in every consumer.
+_POOL_NUMERIC_FIELDS = (
+    "reserve_usd",
+    "volume_24h",
+    "volume_6h",
+    "volume_1h",
+    "price_change_24h",
+    "price_change_6h",
+    "price_change_1h",
+    "fdv_usd",
+    "market_cap_usd",
+    "current_price",
+    "base_token_price_usd",
+    "quote_token_price_usd",
+    "apr",
+    "apy",
+    "base_fee_percentage",
+)
+
+
+def _finite(value: Any) -> Optional[float]:
+    """``value`` as a float, or None when it is missing, unparseable or NaN."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def coerce_pool_numbers(info: Dict[str, Any]) -> Dict[str, Any]:
+    """Make every numeric on a pool row a finite float (or None), in place."""
+    for field in _POOL_NUMERIC_FIELDS:
+        if field in info:
+            info[field] = _finite(info[field])
+    if "bin_step" in info:
+        step = _finite(info.get("bin_step"))
+        info["bin_step"] = int(step) if step is not None else None
+    return info
 
 
 def decorate_pool(info: Dict[str, Any], network: str) -> Dict[str, Any]:
@@ -1123,7 +1197,7 @@ def decorate_pool(info: Dict[str, Any], network: str) -> Dict[str, Any]:
     base = base_symbol if uses_symbol_pairs(network) else info.get("base_token_address")
     base = str(base or "")
     info["trading_pair"] = f"{base}-{quote_symbol}" if base and quote_symbol else ""
-    return info
+    return coerce_pool_numbers(info)
 
 
 def _normalize_gecko_pool(row: Dict[str, Any], network: str) -> Dict[str, Any]:
@@ -1141,21 +1215,131 @@ def _clamp_pool_limit(limit: Any) -> int:
     return max(1, min(value, _POOL_LIST_MAX))
 
 
-async def list_gecko_pools(
+async def _gecko_page_rows(
+    gnet: str, view: str, token: str, page: int, dex: Optional[str] = None
+) -> Optional[List[Dict[str, Any]]]:
+    """One raw upstream page of pool rows, or None when the fetch failed.
+
+    Raw rather than normalized, because normalization depends on the *caller's*
+    network id (``solana-mainnet-beta`` and ``solana`` are one gecko chain but two
+    Gateway networks) while this cache is keyed by the gecko chain alone.
+
+    None and ``[]`` mean different things and are cached differently: an empty page
+    really is the end of the list, a failure is not, and caching a rate-limit reply
+    for a minute would turn one throttled request into a minute of empty browsers.
+    """
+    key = (gnet, view, token, page, dex or "")
+    cached = _ttl_get(_gecko_page_cache, key, POOL_LIST_TTL)
+    if cached is not None:
+        return [dict(row) for row in cached]
+
+    if dex:
+        path = GECKO_CONSTANTS.GET_TOP_POOLS_BY_NETWORK_DEX_PATH.format(gnet, dex)
+    elif view == "token":
+        path = GECKO_CONSTANTS.GET_TOP_POOLS_BY_NETWORK_TOKEN_PATH.format(gnet, token)
+    else:
+        path = _GECKO_VIEW_PATHS[view].format(gnet)
+
+    try:
+        payload = await _gecko_client().api_request("GET", path, params={"page": page})
+        rows = [
+            row
+            for row in glom(payload, GECKO_CONSTANTS.POOL_SPEC)
+            if isinstance(row, dict)
+        ]
+    except Exception as e:
+        # Every rate-limit reply, and the 401 gecko answers past page 10.
+        logger.warning(
+            "gecko pool page failed net=%s view=%s dex=%s page=%s: %s",
+            gnet,
+            view,
+            dex or "-",
+            page,
+            e,
+        )
+        return None
+
+    _ttl_put(_gecko_page_cache, key, rows, POOL_LIST_TTL)
+    return [dict(row) for row in rows]
+
+
+def _normalized_gecko_rows(
+    rows: List[Dict[str, Any]], network: str, dexes: set
+) -> List[Dict[str, Any]]:
+    """Raw upstream rows → decorated pools, keeping only the venues asked for."""
+    pools: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            pool = _normalize_gecko_pool(row, network)
+        except Exception as e:
+            logger.info("gecko pool row skipped net=%s: %s", network, e)
+            continue
+        if not pool.get("address"):
+            continue
+        if dexes and str(pool.get("dex_id") or "").strip().lower() not in dexes:
+            continue
+        pools.append(pool)
+    return pools
+
+
+async def _scoped_top_page(
+    gnet: str, network: str, venues: List[str], limit: int, page: int
+) -> Dict[str, Any]:
+    """Top pools across several venues, from each venue's own listing.
+
+    Filtering the chain-wide list instead would answer almost nothing: Solana's
+    top hundred pools are overwhelmingly one venue's, so "Top, on Meteora and
+    Orca" scanned that way finds a handful of rows and calls it the answer. Each
+    venue's own listing is already the top *of that venue*, so they are merged
+    and re-ranked by volume — which is what the chain-wide list ranks by too.
+
+    Bounded by ``_GECKO_SCOPED_MAX_REQUESTS`` because the fan-out is one request
+    per venue per page, and every one of them shares the chart loop's budget.
+    """
+    skip = (page - 1) * limit
+    pages_each = min(-(-(skip + limit) // GECKO_PAGE_SIZE), GECKO_MAX_PAGE)
+    budget = _GECKO_SCOPED_MAX_REQUESTS
+
+    rows: List[Dict[str, Any]] = []
+    for venue in venues:
+        for upstream in range(1, pages_each + 1):
+            if budget <= 0:
+                break
+            budget -= 1
+            got = await _gecko_page_rows(gnet, "top", "", upstream, dex=venue)
+            if got is None:
+                break  # this venue is as far as it goes; the others still count
+            rows.extend(got)
+            if len(got) < GECKO_PAGE_SIZE:
+                break
+
+    pools = _normalized_gecko_rows(rows, network, set())
+    pools.sort(key=lambda p: p.get("volume_24h") or 0.0, reverse=True)
+    return {
+        "pools": pools[skip : skip + limit],
+        "has_more": len(pools) > skip + limit,
+    }
+
+
+async def list_gecko_pools_page(
     network: str,
     view: str = "trending",
     token: Optional[str] = None,
     limit: int = 20,
-) -> List[Dict[str, Any]]:
-    """GeckoTerminal pools for a chain: ``trending``, ``top``, ``new`` or by token.
+    page: int = 1,
+    dexes: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    """One page of GeckoTerminal pools, optionally narrowed to given venues.
 
-    ``network`` may be a Gateway network id or a gecko chain id — ``get_gecko_network``
-    normalizes either. ``view="token"`` needs ``token`` to be a real address; a
-    ticker would be pasted straight into a URL path segment, so it is refused here.
+    ``page`` is the browser's page, which is not the upstream's: gecko pages are a
+    fixed 20 rows, the browser picks its own size, and with a dex filter on the
+    matching rows are scattered across upstream pages. So the window
+    ``[(page-1)*limit, page*limit)`` is cut out of a walk over upstream pages —
+    started at the page that can hold it when unfiltered, and at the first page
+    when filtering, since only then do we know how many rows matched before it.
 
-    An upstream failure answers ``[]`` (and is not cached), because the caller's
-    honest rendering of "no pools" is more useful than an error the user cannot act
-    on. A successful empty answer *is* cached — that chain really has no such list.
+    ``has_more`` is answered from what the walk saw, not guessed from a full page:
+    a Next that lands on nothing is worse than no Next at all.
     """
     from condor.dex_candles import ADDRESS_RE
 
@@ -1165,42 +1349,151 @@ async def list_gecko_pools(
         view = "trending"
     token = (token or "").strip()
     if view == "token" and not ADDRESS_RE.match(token):
-        return []
+        return {"pools": [], "has_more": False}
     limit = _clamp_pool_limit(limit)
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+    wanted = {d.strip().lower() for d in (dexes or []) if str(d).strip()}
 
-    key = (gnet, view, token, limit)
-    cached = _ttl_get(_gecko_pool_list_cache, key, POOL_LIST_TTL)
+    # One venue's *top* pools is a listing GeckoTerminal serves directly, already
+    # scoped and already paged — so that case costs one request instead of a walk,
+    # and pages as deep as the venue goes rather than as deep as we cared to scan.
+    # Trending and New have no venue-scoped form, so those still walk.
+    if view == "top" and len(wanted) > 1:
+        return await _scoped_top_page(gnet, network, sorted(wanted), limit, page)
+    scope = next(iter(wanted)) if view == "top" and len(wanted) == 1 else None
+    if scope:
+        wanted = set()
+
+    skip = (page - 1) * limit
+    # With nothing to filter out, row N is on a known upstream page, so the walk
+    # starts there rather than re-fetching everything before it.
+    upstream = 1 if wanted else skip // GECKO_PAGE_SIZE + 1
+    local_skip = skip if wanted else skip % GECKO_PAGE_SIZE
+    last_page = (
+        min(GECKO_MAX_PAGE, upstream + _GECKO_FILTER_WALK_PAGES - 1)
+        if wanted
+        else GECKO_MAX_PAGE
+    )
+
+    collected: List[Dict[str, Any]] = []
+    has_more = False
+    while upstream <= last_page:
+        rows = await _gecko_page_rows(gnet, view, token, upstream, dex=scope)
+        if rows is None:
+            # An upstream failure is not an empty chain: say nothing rather than
+            # claiming this view has no pools, and never cache the claim. Mid-walk
+            # though, the rows already in hand are a screenful the user can use —
+            # a rate limit hit on page 3 must not blank pages 1 and 2.
+            if not collected:
+                return {"pools": [], "has_more": False}
+            break
+        collected.extend(_normalized_gecko_rows(rows, network, wanted))
+        if len(collected) > local_skip + limit:
+            has_more = True
+            break
+        if len(rows) < GECKO_PAGE_SIZE:
+            break  # upstream has no more rows behind this page
+        upstream += 1
+        if len(collected) >= local_skip + limit:
+            has_more = upstream <= last_page
+            break
+
+    pools = collected[local_skip : local_skip + limit]
+    return {"pools": pools, "has_more": has_more and len(pools) == limit}
+
+
+async def list_gecko_pools(
+    network: str,
+    view: str = "trending",
+    token: Optional[str] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """The first page of :func:`list_gecko_pools_page`, for callers with no paging."""
+    result = await list_gecko_pools_page(
+        network, view=view, token=token, limit=limit, page=1
+    )
+    return result["pools"]
+
+
+async def list_gecko_dexes(network: str) -> List[Dict[str, str]]:
+    """The venues GeckoTerminal indexes on a chain, for the browser's dex filter.
+
+    The filter offers what the chain actually has rather than a hardcoded list, so
+    a new venue shows up without a deploy. An upstream failure answers ``[]``: a
+    filter that cannot be populated is a filter the user simply does not see.
+    """
+    gnet = get_gecko_network(network)
+    cached = _ttl_get(_gecko_dexes_cache, (gnet,), GECKO_DEXES_TTL)
     if cached is not None:
         return [dict(row) for row in cached]
 
-    client = _gecko_client()
     try:
-        if view == "trending":
-            result = await client.get_trending_pools_by_network(gnet)
-        elif view == "top":
-            result = await client.get_top_pools_by_network(gnet)
-        elif view == "new":
-            result = await client.get_new_pools_by_network(gnet)
-        else:
-            result = await client.get_top_pools_by_network_token(gnet, token)
+        payload = await _gecko_client().api_request(
+            "GET", GECKO_CONSTANTS.GET_DEXES_BY_NETWORK_PATH.format(gnet)
+        )
+        rows = glom(payload, GECKO_CONSTANTS.DEXES_BY_NETWORK_SPEC)
     except Exception as e:
-        # Includes the KeyError geckoterminal_py raises post-processing an empty
-        # result set, and every rate-limit response.
-        logger.warning("gecko pool list failed net=%s view=%s: %s", gnet, view, e)
+        logger.warning("gecko dex list failed net=%s: %s", gnet, e)
+        return []
+
+    dexes = [
+        {"id": str(row["id"]), "name": str(row.get("name") or row["id"])}
+        for row in rows
+        if isinstance(row, dict) and row.get("id")
+    ]
+    _ttl_put(_gecko_dexes_cache, (gnet,), dexes, GECKO_DEXES_TTL)
+    return [dict(row) for row in dexes]
+
+
+# GeckoTerminal's multi-pool endpoint takes at most 30 addresses in one path.
+_GECKO_MULTI_MAX = 30
+
+
+async def fetch_pools_by_addresses(
+    network: str, addresses: List[str]
+) -> List[Dict[str, Any]]:
+    """Several pools by address in one request, for the favourites view.
+
+    Favourites are stored as addresses, not as copies of the rows: a saved pool is
+    a pointer, and its TVL, volume and price have to be as live as any other row in
+    the table. Addresses that resolve to nothing are simply absent from the answer
+    — a pool that has since been dropped from the index is not an error.
+    """
+    from condor.dex_candles import ADDRESS_RE
+
+    gnet = get_gecko_network(network)
+    seen: List[str] = []
+    for address in addresses:
+        address = str(address or "").strip()
+        if address and ADDRESS_RE.match(address) and address not in seen:
+            seen.append(address)
+    if not seen:
         return []
 
     pools: List[Dict[str, Any]] = []
-    for row in _coerce_pool_rows(result, limit):
+    for start in range(0, len(seen), _GECKO_MULTI_MAX):
+        batch = seen[start : start + _GECKO_MULTI_MAX]
         try:
-            pool = _normalize_gecko_pool(row, network)
+            result = await _gecko_client().get_multiple_pools_by_network(gnet, batch)
         except Exception as e:
-            logger.info("gecko pool row skipped net=%s: %s", gnet, e)
+            logger.warning("gecko multi-pool failed net=%s: %s", gnet, e)
             continue
-        if pool.get("address"):
-            pools.append(pool)
+        for row in _coerce_pool_rows(result, len(batch)):
+            try:
+                pool = _normalize_gecko_pool(row, network)
+            except Exception as e:
+                logger.info("gecko pool row skipped net=%s: %s", gnet, e)
+                continue
+            if pool.get("address"):
+                pools.append(pool)
 
-    _ttl_put(_gecko_pool_list_cache, key, pools, POOL_LIST_TTL)
-    return [dict(row) for row in pools]
+    # In the order the caller saved them, not the order gecko answers in.
+    rank = {address: i for i, address in enumerate(seen)}
+    pools.sort(key=lambda p: rank.get(str(p.get("address")), len(rank)))
+    return pools
 
 
 def gateway_connector_network(connector: str) -> str:
@@ -1213,6 +1506,7 @@ async def list_gateway_pools(
     connector: str,
     search: Optional[str] = None,
     limit: int = 20,
+    page: int = 1,
 ) -> List[Dict[str, Any]]:
     """Gateway CLMM pools for a connector, optionally filtered by free text.
 
@@ -1220,14 +1514,21 @@ async def list_gateway_pools(
     client) and searches *within* a connector by name rather than by token address
     — which is why the route keeps the two behind a ``source`` discriminator
     instead of one parameter set with meaningless combinations.
+
+    ``page`` is 1-based like every other page in the browser; Gateway counts from
+    zero, and that translation stays here rather than in the route.
     """
     connector = (connector or "").strip().lower()
     if not connector:
         return []
     search = (search or "").strip() or None
     limit = _clamp_pool_limit(limit)
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
 
-    key = (connector, search or "", limit)
+    key = (connector, search or "", limit, page)
     cached = _ttl_get(_gateway_pool_list_cache, key, GATEWAY_POOL_LIST_TTL)
     if cached is not None:
         return [dict(row) for row in cached]
@@ -1238,7 +1539,7 @@ async def list_gateway_pools(
 
     try:
         result = await client.gateway_clmm.get_pools(
-            connector=connector, page=0, limit=limit, search_term=search
+            connector=connector, page=page - 1, limit=limit, search_term=search
         )
     except Exception as e:
         logger.warning("gateway pool list failed connector=%s: %s", connector, e)

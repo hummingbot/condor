@@ -31,7 +31,8 @@ def run(coro):
 @pytest.fixture(autouse=True)
 def _clear_caches():
     for cache in (
-        pool_data._gecko_pool_list_cache,
+        pool_data._gecko_page_cache,
+        pool_data._gecko_dexes_cache,
         pool_data._gateway_pool_list_cache,
         pool_data._pool_by_address_cache,
     ):
@@ -81,34 +82,106 @@ def gateway_row(**over):
     return row
 
 
+def api_row(row=None, **over):
+    """One row in the shape the *API* returns, which ``glom`` reads.
+
+    ``gecko_row`` is the flat DataFrame shape the library hands back; the paged
+    listing talks to the endpoint directly, so the fake has to answer the nested
+    JSON the flat shape is derived from.
+    """
+    flat = dict(row or gecko_row())
+    flat.update(over)
+    return {
+        "id": flat.get("id", ""),
+        "type": "pool",
+        "attributes": {
+            "address": flat.get("address", ""),
+            "name": flat.get("name", ""),
+            "base_token_price_usd": flat.get("base_token_price_usd"),
+            "base_token_price_native_currency": None,
+            "quote_token_price_usd": flat.get("quote_token_price_usd"),
+            "quote_token_price_native_currency": None,
+            "reserve_in_usd": flat.get("reserve_in_usd"),
+            "pool_created_at": flat.get("pool_created_at"),
+            "fdv_usd": flat.get("fdv_usd"),
+            "market_cap_usd": flat.get("market_cap_usd"),
+            "price_change_percentage": {
+                "h1": flat.get("price_change_percentage_h1"),
+                "h24": flat.get("price_change_percentage_h24"),
+            },
+            "transactions": {
+                "h1": {"buys": 0, "sells": 0},
+                "h24": {"buys": 0, "sells": 0},
+            },
+            "volume_usd": {"h24": flat.get("volume_usd_h24")},
+        },
+        "relationships": {
+            "dex": {"data": {"id": flat.get("dex_id", "meteora")}},
+            "base_token": {"data": {"id": flat.get("base_token_id", "")}},
+            "quote_token": {"data": {"id": flat.get("quote_token_id", "")}},
+        },
+    }
+
+
+_VIEW_BY_SUFFIX = {"trending_pools": "trending", "new_pools": "new", "pools": "top"}
+
+
 class FakeGecko:
-    """Stands in for the shared GeckoTerminalAsyncClient."""
+    """Stands in for the shared GeckoTerminalAsyncClient.
+
+    The pool listings go through ``api_request`` (the library exposes no ``page``),
+    so that is the surface faked; ``frame`` is served as upstream page 1 and every
+    page behind it is empty, which is how a real list ends.
+    """
 
     def __init__(self, frame=None, error=None):
         self.frame = frame
         self.error = error
         self.calls: list[tuple] = []
+        self.pages: list[int] = []
 
-    async def _answer(self, *args):
-        self.calls.append(args)
+    def _rows(self):
+        if self.frame is None:
+            return []
+        rows = (
+            self.frame.to_dict("records")
+            if hasattr(self.frame, "to_dict")
+            else list(self.frame)
+        )
+        return [api_row(r) for r in rows]
+
+    async def api_request(self, method, path, params=None):
+        parts = path.split("/")
+        network = parts[1]
+        if parts[-1] == "dexes":
+            self.calls.append(("dexes", network))
+        elif parts[-2] == "tokens" or (len(parts) > 3 and parts[2] == "tokens"):
+            self.calls.append(("token", network, parts[3]))
+        else:
+            self.calls.append((_VIEW_BY_SUFFIX.get(parts[-1], parts[-1]), network))
+        page = int((params or {}).get("page", 1))
+        self.pages.append(page)
+        if self.error:
+            raise self.error
+        if parts[-1] == "dexes":
+            return {
+                "data": [
+                    {"id": "meteora", "type": "dex", "attributes": {"name": "Meteora"}}
+                ]
+            }
+        return {"data": self._rows() if page == 1 else []}
+
+    async def get_multiple_pools_by_network(self, n, addresses):
+        self.calls.append(("multi", n, tuple(addresses)))
         if self.error:
             raise self.error
         return self.frame
 
-    async def get_trending_pools_by_network(self, n):
-        return await self._answer("trending", n)
-
-    async def get_top_pools_by_network(self, n):
-        return await self._answer("top", n)
-
-    async def get_new_pools_by_network(self, n):
-        return await self._answer("new", n)
-
-    async def get_top_pools_by_network_token(self, n, t):
-        return await self._answer("token", n, t)
-
     async def get_pool_by_network_address(self, n, a):
-        return await self._answer("address", n, a)
+        self.calls.append(("address", n, a))
+        if self.error:
+            raise self.error
+        return self.frame
 
 
 @pytest.fixture
@@ -326,6 +399,7 @@ def test_rows_with_no_address_are_dropped(fake_gecko):
 def test_limit_is_clamped(fake_gecko):
     fake_gecko(pd.DataFrame([gecko_row(address=POOL)] * 60))
     assert len(run(pool_data.list_gecko_pools("solana", limit=5))) == 5
+    # Clamped to _POOL_LIST_MAX, so the whole 60 rows the upstream has come back.
     assert len(run(pool_data.list_gecko_pools("solana", limit=10_000))) == 60
 
 
@@ -541,3 +615,278 @@ def test_pool_by_address_rejects_a_non_address(route_client, fake_gecko):
 def test_unknown_pool_is_a_404(route_client, fake_gecko):
     fake_gecko(pd.DataFrame())
     assert route_client().get(f"/servers/srv/dex/pools/{POOL}").status_code == 404
+
+
+# ── paging, dex filter and favourites ──
+
+
+@pytest.fixture
+def paged_gecko(monkeypatch):
+    """Install a fake whose upstream pages differ, and take it away again."""
+
+    def install(pages):
+        client = PagedGecko(pages)
+        monkeypatch.setattr(pool_data, "_gecko_client", lambda: client)
+        return client
+
+    return install
+
+
+class PagedGecko(FakeGecko):
+    """A fake whose upstream pages differ, so a window can be told from a repeat."""
+
+    def __init__(self, pages):
+        super().__init__()
+        self.by_page = pages
+        self.scopes: list = []
+        # From this upstream page on, the fake answers like a rate limit.
+        self.fail_from = None
+
+    def _rows(self):
+        return []
+
+    async def api_request(self, method, path, params=None):
+        page = int((params or {}).get("page", 1))
+        parts = path.split("/")
+        self.scopes.append(parts[3] if len(parts) > 3 and parts[2] == "dexes" else None)
+        self.pages.append(page)
+        self.calls.append(("page", page))
+        if self.fail_from is not None and page >= self.fail_from:
+            raise RuntimeError("429 rate limited")
+        rows = self.by_page.get(page, [])
+        return {"data": [api_row(r) for r in rows]}
+
+
+# Base58 has no 0, O, I or l, and the address guard knows it — so a synthetic
+# address has to be built out of the real alphabet, not zero-padded.
+_B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
+def addr(i):
+    """A distinct, valid pool address, so a page's identity is checkable."""
+    return POOL[:-2] + _B58[i // 58] + _B58[i % 58]
+
+
+def _rows(count, dex_id="meteora", start=0):
+    return [gecko_row(dex_id=dex_id, address=addr(i + start)) for i in range(count)]
+
+
+def test_a_page_of_20_maps_onto_the_upstream_page_that_holds_it(paged_gecko):
+    """Gecko pages are a fixed 20, so page 3 must not re-walk pages 1 and 2."""
+    client = paged_gecko({3: _rows(20, start=40)})
+    result = run(pool_data.list_gecko_pools_page("solana", limit=20, page=3))
+    assert client.pages == [3], "an unfiltered page is one upstream request"
+    assert len(result["pools"]) == 20
+
+
+def test_paging_cuts_the_window_out_of_the_upstream_pages(paged_gecko):
+    client = paged_gecko({1: _rows(20, start=0), 2: _rows(20, start=20)})
+    # 10 rows a page: the second half of upstream page 1.
+    second = run(pool_data.list_gecko_pools_page("solana", limit=10, page=2))
+    assert [p["address"] for p in second["pools"]] == [addr(i) for i in range(10, 20)]
+    assert second["has_more"] is True
+
+
+def test_has_more_is_false_at_the_end_of_the_list(paged_gecko):
+    client = paged_gecko({1: _rows(5)})
+    result = run(pool_data.list_gecko_pools_page("solana", limit=20, page=1))
+    assert len(result["pools"]) == 5 and result["has_more"] is False
+
+
+def test_the_dex_filter_keeps_only_the_venues_asked_for(paged_gecko):
+    client = paged_gecko(
+        {1: _rows(10, dex_id="meteora") + _rows(10, dex_id="pumpswap", start=50)}
+    )
+    result = run(
+        pool_data.list_gecko_pools_page("solana", limit=20, page=1, dexes=["meteora"])
+    )
+    assert {p["dex_id"] for p in result["pools"]} == {"meteora"}
+    assert len(result["pools"]) == 10
+
+
+def test_the_dex_filter_walks_pages_to_fill_one_screen(paged_gecko):
+    """Matching rows are scattered upstream, so a filtered page is a walk."""
+    client = paged_gecko(
+        {
+            1: _rows(19, dex_id="pumpswap") + _rows(1, dex_id="meteora", start=90),
+            2: _rows(19, dex_id="pumpswap", start=20) + _rows(1, "meteora", start=91),
+        }
+    )
+    result = run(
+        pool_data.list_gecko_pools_page("solana", limit=2, page=1, dexes=["meteora"])
+    )
+    assert len(result["pools"]) == 2
+    assert client.pages == [1, 2]
+
+
+def test_an_empty_dex_filter_is_no_filter(fake_gecko):
+    client = fake_gecko(pd.DataFrame([gecko_row(dex_id="pumpswap")]))
+    result = run(pool_data.list_gecko_pools_page("solana", dexes=["", "  "]))
+    assert len(result["pools"]) == 1
+
+
+def test_a_nan_never_reaches_the_wire(route_client, fake_gecko):
+    """pandas answers NaN for a missing figure, and NaN is not JSON.
+
+    FastAPI refuses to encode one and the whole listing 500s, which is exactly how
+    the trending view broke — so it is settled in decoration, not left to the route.
+    """
+    row = gecko_row()
+    row["market_cap_usd"] = float("nan")
+    row["reserve_in_usd"] = float("nan")
+    fake_gecko(pd.DataFrame([row]))
+    r = route_client().get("/servers/srv/dex/pools")
+    assert r.status_code == 200
+    pool = r.json()["pools"][0]
+    assert pool["market_cap_usd"] is None and pool["reserve_usd"] is None
+
+
+def test_gateway_numbers_arrive_as_numbers_not_strings():
+    """Gateway answers APR and TVL as strings; a string has no ``.toFixed``."""
+    clmm = FakeClmm(
+        {"pools": [gateway_row(apr="0.2724", liquidity="861007.27", bin_step="4")]}
+    )
+    pool = run(pool_data.list_gateway_pools(FakeClient(clmm), "meteora"))[0]
+    assert pool["apr"] == pytest.approx(0.2724)
+    assert pool["reserve_usd"] == pytest.approx(861007.27)
+    assert pool["bin_step"] == 4
+
+
+def test_gateway_paging_is_zero_based_upstream():
+    clmm = FakeClmm({"pools": []})
+    run(pool_data.list_gateway_pools(FakeClient(clmm), "meteora", page=3))
+    assert clmm.calls[0]["page"] == 2
+
+
+def test_gateway_pages_are_cached_separately():
+    clmm = FakeClmm({"pools": [gateway_row()]})
+    client = FakeClient(clmm)
+    run(pool_data.list_gateway_pools(client, "meteora", page=1))
+    run(pool_data.list_gateway_pools(client, "meteora", page=1))
+    assert len(clmm.calls) == 1
+    run(pool_data.list_gateway_pools(client, "meteora", page=2))
+    assert len(clmm.calls) == 2
+
+
+def test_favourites_are_fetched_by_address_in_the_saved_order(fake_gecko):
+    a, b = addr(1), addr(2)
+    client = fake_gecko(pd.DataFrame([gecko_row(address=b), gecko_row(address=a)]))
+    pools = run(pool_data.fetch_pools_by_addresses("solana-mainnet-beta", [a, b]))
+    assert [p["address"] for p in pools] == [a, b]
+    assert client.calls[0][0] == "multi"
+
+
+def test_favourites_ignore_junk_addresses(fake_gecko):
+    client = fake_gecko(pd.DataFrame([gecko_row()]))
+    assert run(pool_data.fetch_pools_by_addresses("solana", ["", "nope!"])) == []
+    assert client.calls == []
+
+
+def test_the_dex_filter_options_come_from_the_chain(route_client, fake_gecko):
+    fake_gecko(pd.DataFrame([gecko_row()]))
+    r = route_client().get("/servers/srv/dex/dexes?network=solana-mainnet-beta")
+    assert r.status_code == 200
+    assert r.json()["dexes"] == [{"id": "meteora", "name": "Meteora"}]
+
+
+def test_favourites_route_answers_the_saved_pools(route_client, fake_gecko):
+    fake_gecko(pd.DataFrame([gecko_row()]))
+    r = route_client().get(f"/servers/srv/dex/pools-by-address?addresses={POOL}")
+    assert r.status_code == 200
+    assert r.json()["pools"][0]["address"] == POOL
+
+
+def test_favourites_route_is_not_read_as_a_pool_address(route_client, fake_gecko):
+    """It is declared above ``/dex/pools/{pool_address}`` for exactly this reason."""
+    fake_gecko(pd.DataFrame())
+    r = route_client().get("/servers/srv/dex/pools-by-address?addresses=")
+    assert r.status_code == 200 and r.json()["pools"] == []
+
+
+def test_one_venues_top_pools_use_the_venue_endpoint(paged_gecko):
+    """A scoped listing is one request, not a walk over the whole chain."""
+    client = paged_gecko({1: _rows(20, dex_id="meteora")})
+    result = run(
+        pool_data.list_gecko_pools_page("solana", view="top", dexes=["meteora"])
+    )
+    assert len(result["pools"]) == 20
+    assert client.pages == [1], "the venue's own listing is already scoped"
+    assert client.scopes == ["meteora"]
+
+
+def test_several_venues_top_pools_are_merged_from_each_venues_listing(paged_gecko):
+    """Filtering the chain-wide list would answer almost nothing — one venue
+    dominates it — so each venue's own top listing is read and merged."""
+    client = paged_gecko({1: _rows(5, dex_id="meteora")})
+    result = run(
+        pool_data.list_gecko_pools_page("solana", view="top", dexes=["meteora", "orca"])
+    )
+    assert client.scopes == ["meteora", "orca"]
+    assert len(result["pools"]) == 10  # both venues' rows, not an intersection
+
+
+def test_a_merged_venue_listing_is_ranked_by_volume(paged_gecko):
+    quiet = gecko_row(dex_id="meteora", address=addr(1))
+    quiet["volume_usd_h24"] = "1000.0"
+    busy = gecko_row(dex_id="orca", address=addr(2))
+    busy["volume_usd_h24"] = "9000000.0"
+    client = paged_gecko({})
+    client.by_page = {1: [quiet]}
+
+    async def scoped(method, path, params=None):
+        parts = path.split("/")
+        venue = parts[3]
+        client.scopes.append(venue)
+        return {"data": [api_row(busy if venue == "orca" else quiet)]}
+
+    client.api_request = scoped
+    result = run(
+        pool_data.list_gecko_pools_page("solana", view="top", dexes=["meteora", "orca"])
+    )
+    assert [p["dex_id"] for p in result["pools"]] == ["orca", "meteora"]
+
+
+def test_a_venue_whose_listing_fails_does_not_take_the_others_with_it(paged_gecko):
+    client = paged_gecko({})
+
+    async def half_broken(method, path, params=None):
+        venue = path.split("/")[3]
+        client.scopes.append(venue)
+        if venue == "orca":
+            raise RuntimeError("429 rate limited")
+        return {"data": [api_row(gecko_row(dex_id="meteora"))]}
+
+    client.api_request = half_broken
+    result = run(
+        pool_data.list_gecko_pools_page("solana", view="top", dexes=["meteora", "orca"])
+    )
+    assert [p["dex_id"] for p in result["pools"]] == ["meteora"]
+
+
+def test_trending_never_uses_the_venue_endpoint(paged_gecko):
+    """There is no venue-scoped *trending*, and silently serving Top instead lies."""
+    client = paged_gecko({1: _rows(20, dex_id="meteora")})
+    run(pool_data.list_gecko_pools_page("solana", view="trending", dexes=["meteora"]))
+    assert client.scopes[0] is None
+
+
+def test_a_mid_walk_failure_keeps_what_was_already_found(paged_gecko):
+    """A rate limit on page 3 must not blank the rows pages 1 and 2 produced."""
+    client = paged_gecko({1: _rows(20, dex_id="meteora")})
+    client.fail_from = 2
+    # 30 a page, so one upstream page is not enough and the walk goes on to fail.
+    result = run(
+        pool_data.list_gecko_pools_page(
+            "solana", view="trending", limit=30, dexes=["meteora"]
+        )
+    )
+    assert client.pages == [1, 2]
+    assert len(result["pools"]) == 20
+    assert result["has_more"] is False
+
+
+def test_a_first_page_failure_is_still_empty(paged_gecko):
+    client = paged_gecko({})
+    client.fail_from = 1
+    result = run(pool_data.list_gecko_pools_page("solana", dexes=["meteora"]))
+    assert result == {"pools": [], "has_more": False}

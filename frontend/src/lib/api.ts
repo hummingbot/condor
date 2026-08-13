@@ -303,14 +303,15 @@ export interface PoolSummary {
   /** False when GeckoTerminal indexes this chain but Gateway does not reach it. */
   tradable: boolean;
   has_bins: boolean;
-  reserve_usd: string | number | null;
+  reserve_usd: number | null;
   volume_24h: number | null;
   price_change_24h: number | null;
   current_price?: number | null;
-  base_token_price_usd?: string | number | null;
-  quote_token_price_usd?: string | number | null;
-  /** Gateway CLMM only. */
+  base_token_price_usd?: number | null;
+  quote_token_price_usd?: number | null;
+  /** Gateway CLMM only: Meteora reports `apr` as 24h fee/TVL, `apy` annualized. */
   apr?: number | null;
+  apy?: number | null;
   bin_step?: number | null;
   base_fee_percentage?: number | null;
   pool_created_at?: string | null;
@@ -344,7 +345,23 @@ export interface PoolQuery {
   connector?: string;
   /** source=gecko+view=token: a token address. source=gateway: free text. */
   query?: string;
+  /** source=gecko: GeckoTerminal dex ids to keep. Empty means every venue. */
+  dexes?: string[];
   limit?: number;
+  /** 1-based. Both upstreams page; neither reports a total. */
+  page?: number;
+}
+
+/** A page of pools. `has_more`, not a count — no upstream reports a total. */
+export interface PoolPage {
+  pools: PoolSummary[];
+  has_more: boolean;
+}
+
+/** One venue GeckoTerminal indexes on a chain, for the browser's dex filter. */
+export interface DexVenue {
+  id: string;
+  name: string;
 }
 
 export interface DexPoolInfo {
@@ -1327,17 +1344,35 @@ export const api = {
     ),
 
   /** Pools to browse, from GeckoTerminal (by chain) or Gateway CLMM (by connector). */
-  getDexPools: (server: string, q: PoolQuery) => {
+  getDexPools: (server: string, q: PoolQuery): Promise<PoolPage> => {
     const params = new URLSearchParams({ source: q.source });
     if (q.network) params.set("network", q.network);
     if (q.view) params.set("view", q.view);
     if (q.connector) params.set("connector", q.connector);
     if (q.query) params.set("query", q.query);
+    if (q.dexes?.length) params.set("dexes", q.dexes.join(","));
     params.set("limit", String(q.limit ?? 20));
-    return apiFetch<{ pools: PoolSummary[]; source: string }>(
+    params.set("page", String(q.page ?? 1));
+    return apiFetch<{ pools: PoolSummary[]; has_more?: boolean }>(
       `/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`,
-    ).then((r) => r.pools ?? []);
+    ).then((r) => ({ pools: r.pools ?? [], has_more: !!r.has_more }));
   },
+
+  /** The venues a chain has, so the dex filter offers what exists, not a guess. */
+  getDexVenues: (server: string, network: string) =>
+    apiFetch<{ dexes: DexVenue[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/dexes?network=${encodeURIComponent(network)}`,
+    ).then((r) => r.dexes ?? []),
+
+  /**
+   * Several pools by address, for the favourites view. A favourite is a saved
+   * address, so its TVL and volume are re-read rather than replayed from
+   * whenever it was starred.
+   */
+  getDexPoolsByAddress: (server: string, network: string, addresses: string[]) =>
+    apiFetch<{ pools: PoolSummary[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools-by-address?network=${encodeURIComponent(network)}&addresses=${encodeURIComponent(addresses.join(","))}`,
+    ).then((r) => r.pools ?? []),
 
   /** One pool by address, so /dex/{network}/{address} renders from the URL alone. */
   getDexPoolByAddress: (server: string, address: string, network: string) =>
