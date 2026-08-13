@@ -11,6 +11,8 @@ import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
+import { Dex } from "@/pages/Dex";
+import { DexPool } from "@/pages/DexPool";
 import { Executors } from "@/pages/Executors";
 import { Login } from "@/pages/Login";
 import { Portfolio } from "@/pages/Portfolio";
@@ -71,6 +73,8 @@ export default function App() {
                 <Route path="/bots" element={<Bots />} />
                 <Route path="/bots/:id" element={<BotDetail />} />
                 <Route path="/trade" element={<CreateExecutor />} />
+            <Route path="/dex" element={<Dex />} />
+            <Route path="/dex/:network/:address" element={<DexPool />} />
                 <Route path="/executors" element={<Executors />} />
                 <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
                 <Route path="/executors/new-grid" element={<Navigate to="/trade?type=grid" replace />} />

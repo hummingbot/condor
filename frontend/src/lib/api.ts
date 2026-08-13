@@ -274,6 +274,61 @@ interface WireVenue {
   clmm_lp: boolean;
 }
 
+/**
+ * One pool as the DEX browser and workspace see it: the market numbers from the
+ * upstream, plus the venue facts the server decides (`lp_supported`, `tradable`,
+ * `trading_pair`) because they depend on which connectors Condor drives, not on
+ * anything the browser can know.
+ */
+export interface PoolSummary {
+  address: string;
+  name: string;
+  source: "gecko" | "gateway";
+  dex_id: string;
+  /** Chain as the caller named it, and the Gateway network its rows link to. */
+  network: string;
+  gecko_network: string;
+  gateway_network: string;
+  base_symbol: string;
+  quote_symbol: string;
+  base_token_symbol: string;
+  quote_token_symbol: string;
+  base_token_address: string;
+  quote_token_address: string;
+  /** `<base_mint>-<quote_symbol>`, the form LP and DEX order executors carry. */
+  trading_pair: string;
+  /** An `lp_executor` provider (`meteora/clmm`), or null when the pool is not CLMM. */
+  lp_provider: string | null;
+  lp_supported: boolean;
+  /** False when GeckoTerminal indexes this chain but Gateway does not reach it. */
+  tradable: boolean;
+  has_bins: boolean;
+  reserve_usd: string | number | null;
+  volume_24h: number | null;
+  price_change_24h: number | null;
+  current_price?: number | null;
+  base_token_price_usd?: string | number | null;
+  quote_token_price_usd?: string | number | null;
+  /** Gateway CLMM only. */
+  apr?: number | null;
+  bin_step?: number | null;
+  base_fee_percentage?: number | null;
+  pool_created_at?: string | null;
+}
+
+export interface PoolQuery {
+  source: "gecko" | "gateway";
+  /** source=gecko: the chain, as a Gateway network id or a gecko chain id. */
+  network?: string;
+  /** source=gecko: trending | top | new | token. */
+  view?: string;
+  /** source=gateway: the CLMM connector. */
+  connector?: string;
+  /** source=gecko+view=token: a token address. source=gateway: free text. */
+  query?: string;
+  limit?: number;
+}
+
 export interface DexPoolInfo {
   pool_address: string | null;
   dex_id: string | null;
@@ -1251,6 +1306,25 @@ export const api = {
   getDexPool: (server: string, connector: string, pair: string) =>
     apiFetch<DexPoolInfo>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/dex-pool?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
+    ),
+
+  /** Pools to browse, from GeckoTerminal (by chain) or Gateway CLMM (by connector). */
+  getDexPools: (server: string, q: PoolQuery) => {
+    const params = new URLSearchParams({ source: q.source });
+    if (q.network) params.set("network", q.network);
+    if (q.view) params.set("view", q.view);
+    if (q.connector) params.set("connector", q.connector);
+    if (q.query) params.set("query", q.query);
+    params.set("limit", String(q.limit ?? 20));
+    return apiFetch<{ pools: PoolSummary[]; source: string }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`,
+    ).then((r) => r.pools ?? []);
+  },
+
+  /** One pool by address, so /dex/{network}/{address} renders from the URL alone. */
+  getDexPoolByAddress: (server: string, address: string, network: string) =>
+    apiFetch<PoolSummary>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}?network=${encodeURIComponent(network)}`,
     ),
 
   getPrice: (server: string, connector: string, pair: string) =>
