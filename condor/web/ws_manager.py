@@ -68,6 +68,29 @@ def _coerce_duration(value: object) -> int | None:
     return duration if duration > 0 else None
 
 
+def parse_candle_channel(channel: str) -> tuple[str, str, str, str, str | None] | None:
+    """Split a candle channel into its parts, or ``None`` if it is malformed.
+
+    The channel is ``candles:{server}:{connector}:{pair}:{interval}[:{pool_address}]``.
+    The pool address is an **optional sixth segment**, set by the DEX page so a
+    chart is pinned to the exact pool the user opened instead of whichever pool
+    ``dex_candles._resolve_pool`` judges deepest for the pair. A five-part channel
+    (every CLOB chart) parses to ``pool_address=None`` and is byte-identical to
+    what it was before the segment existed.
+
+    Every consumer must go through here: unpacking five names off ``split(":")``
+    raises ``ValueError`` on a six-part channel, and each of the three call sites
+    fails silently in a different way (a stream that never backfills, a backfill
+    that never ticks).
+    """
+    parts = channel.split(":")
+    if len(parts) < 5:
+        return None
+    server_name, connector, pair, interval = parts[1:5]
+    pool_address = parts[5] if len(parts) > 5 else None
+    return server_name, connector, pair, interval, pool_address or None
+
+
 class _CandleBuffer:
     """Per-channel candle buffer with dynamic sizing based on interval + duration."""
 
@@ -498,10 +521,10 @@ class WebSocketManager:
 
     async def _backfill_candles(self, channel: str) -> None:
         """Fetch historical candles to fill the buffer gap."""
-        parts = channel.split(":")
-        if len(parts) < 5:
+        parsed = parse_candle_channel(channel)
+        if parsed is None:
             return
-        _, server_name, connector, pair, interval = parts
+        server_name, connector, pair, interval, pool_address = parsed
         buf = self._candle_buffers.get(channel)
         if buf is None:
             return
@@ -525,7 +548,7 @@ class WebSocketManager:
 
             if dex_candles.uses_gecko_candles(connector):
                 candles = await dex_candles.fetch_dex_candles(
-                    connector, None, pair, interval, start_time, end_time
+                    connector, pool_address, pair, interval, start_time, end_time
                 )
                 if candles:
                     buf.upsert_many(candles)
@@ -1006,10 +1029,10 @@ class WebSocketManager:
                 backoff = min(backoff * 2, 60)
 
     async def _candle_stream(self, channel: str) -> None:
-        parts = channel.split(":")
-        if len(parts) < 5:
+        parsed = parse_candle_channel(channel)
+        if parsed is None:
             return
-        _, server_name, connector, pair, interval = parts
+        server_name, connector, pair, interval, pool_address = parsed
 
         from config_manager import get_config_manager
 
@@ -1179,10 +1202,10 @@ class WebSocketManager:
         from — this loop *is* the feed, so it polls from the first tick and never
         waits for staleness.
         """
-        parts = channel.split(":")
-        if len(parts) < 5:
+        parsed = parse_candle_channel(channel)
+        if parsed is None:
             return
-        _, server_name, connector, pair, interval = parts
+        server_name, connector, pair, interval, pool_address = parsed
         interval_sec = _INTERVAL_SECONDS.get(interval, 60)
         gecko = dex_candles.uses_gecko_candles(connector)
         # How long without a WS update before we consider it stale
@@ -1228,7 +1251,7 @@ class WebSocketManager:
                     if gecko:
                         candles = await dex_candles.fetch_dex_candles(
                             connector,
-                            None,
+                            pool_address,
                             pair,
                             interval,
                             now - interval_sec * 5,

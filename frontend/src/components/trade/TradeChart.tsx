@@ -16,6 +16,11 @@ interface TradeChartProps {
   connector: string;
   pair: string;
   interval: string;
+  /**
+   * Chart this exact DEX pool instead of letting the backend resolve one from
+   * the pair. Set by the DEX pool workspace; every CLOB chart omits it.
+   */
+  poolAddress?: string;
   lookbackSeconds: number;
   startPrice: number;
   endPrice: number;
@@ -45,6 +50,7 @@ export function TradeChart({
   connector,
   pair,
   interval,
+  poolAddress,
   lookbackSeconds,
   startPrice,
   endPrice,
@@ -98,7 +104,13 @@ export function TradeChart({
   const positionLinesRef = useRef<import("lightweight-charts").IPriceLine[]>([]);
 
   // ── Candle data from the singleton store (WS live + cached) ──
-  const { candles, mergeCandles, setDuration } = useCandleStore(server, connector, pair, interval);
+  const { candles, mergeCandles, setDuration } = useCandleStore(
+    server,
+    connector,
+    pair,
+    interval,
+    poolAddress,
+  );
 
   // ── Filter executor overlays to those within candle time range ──
   const filteredOverlays = useMemo(() => {
@@ -117,7 +129,7 @@ export function TradeChart({
   // ── REST backfill on pair/interval/lookback change ──
   const backfillKeyRef = useRef("");
   useEffect(() => {
-    const backfillKey = `${server}:${connector}:${pair}:${interval}:${lookbackSeconds}`;
+    const backfillKey = `${server}:${connector}:${pair}:${interval}:${lookbackSeconds}:${poolAddress ?? ""}`;
     if (backfillKey === backfillKeyRef.current) return;
     backfillKeyRef.current = backfillKey;
 
@@ -129,7 +141,7 @@ export function TradeChart({
     const fetchWithRetry = (attempt: number) => {
       if (cancelled) return;
       api
-        .getCandles(server, connector, pair, interval, 5000, startTime)
+        .getCandles(server, connector, pair, interval, 5000, startTime, undefined, poolAddress)
         .then((fetched) => {
           if (!cancelled && fetched?.length) mergeCandles(fetched);
         })
@@ -142,7 +154,7 @@ export function TradeChart({
     fetchWithRetry(0);
 
     return () => { cancelled = true; };
-  }, [server, connector, pair, interval, lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [server, connector, pair, interval, poolAddress, lookbackSeconds]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Initialize chart ONCE ──
   useEffect(() => {
