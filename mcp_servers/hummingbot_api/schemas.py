@@ -539,6 +539,18 @@ class GatewayCLMMRequest(BaseModel):
         default=None, description="Pool contract address (required for get_pool_info)"
     )
 
+    bin_count: int = Field(
+        default=0,
+        ge=0,
+        le=401,
+        description=(
+            "For get_pool_info: if > 0, include the per-tick liquidity distribution "
+            "(`bins`) around the active price. Meteora always returns its bins; "
+            "orca, raydium, uniswap and pancakeswap compute them on request. "
+            "Default 0 skips the extra on-chain reads."
+        ),
+    )
+
     # Pool listing parameters
     page: int = Field(
         default=0, ge=0, description="Page number for list_pools (default: 0)"
