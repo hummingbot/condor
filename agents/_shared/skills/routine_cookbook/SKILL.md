@@ -29,6 +29,24 @@ Most routines need `report_builder.md` plus one or two others. A continuous
 price monitor with a live dashboard, for example, reads `hummingbot_client.md`
 + `continuous.md`.
 
+## First: is this a routine at all?
+
+A routine is a **durable artifact** — it has a name, a config schema, a place in
+the library, and it can be scheduled, shared and re-run by anyone. That is worth
+a file when the work repeats.
+
+A **one-off computation** is not. "What were SOL's hourly returns yesterday",
+"what is the spread between these two venues right now", "aggregate these
+executors by controller" — write the Python and call
+`run_code(code="...")`. It runs in the bot with exactly the primitives below
+(`context`, `client`, pandas, `ReportBuilder`, every `condor.*` module), returns
+its `print` output and its `result`, and hands you the traceback to fix when it
+fails. No file, no `Config` class, no library entry.
+
+Promote a snippet to a routine when you have run essentially the same thing a
+third time, or the moment it needs to be scheduled, shared, or visible to the
+user.
+
 ## Where the routine lives
 
 **Agent-local** — `agents/{slug}/routines/` — visible only to that agent, and

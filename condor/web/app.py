@@ -17,6 +17,7 @@ from condor.web.routes import (
     backtesting,
     bots,
     chat_ws,
+    code,
     confirmations,
     controller_performance,
     conversations,
@@ -87,6 +88,7 @@ def create_app() -> FastAPI:
     app.include_router(ws.router, prefix="/api/v1")
     app.include_router(agents.router, prefix="/api/v1")
     app.include_router(routines.router, prefix="/api/v1")
+    app.include_router(code.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     app.include_router(settings.router, prefix="/api/v1")
     app.include_router(sessions.router, prefix="/api/v1")
