@@ -156,6 +156,25 @@ export function DexPool() {
   const active = tab === "lp" ? lpConfig : orderConfig;
   const currentPrice = pool?.current_price ?? null;
 
+  /**
+   * How many decimals the price axis shows.
+   *
+   * A CEX pair gets this from its trading rules, but a DEX pool has none — so it
+   * comes from the price itself. Without it lightweight-charts falls back to 2
+   * decimals, which renders a memecoin at 0.000312032 as a flat "0.00" axis with
+   * every candle stacked on one line.
+   *
+   * Held to ~5 significant digits: enough to separate ticks at any magnitude,
+   * short enough that a $150 pair does not get an axis of trailing zeros.
+   */
+  const pricePrecision = useMemo(() => {
+    if (!currentPrice || !Number.isFinite(currentPrice) || currentPrice <= 0) {
+      return undefined;
+    }
+    const leadingZeros = Math.ceil(-Math.log10(currentPrice));
+    return Math.min(12, Math.max(2, leadingZeros + 4));
+  }, [currentPrice]);
+
   const createMutation = useMutation({
     mutationFn: () => {
       if (!server) throw new Error("No server");
@@ -275,6 +294,7 @@ export function DexPool() {
               poolAddress={pool.address}
               interval={interval}
               lookbackSeconds={lookbackSeconds}
+              pricePrecision={pricePrecision}
               startPrice={active.chartProps.startPrice}
               endPrice={active.chartProps.endPrice}
               limitPrice={active.chartProps.limitPrice}

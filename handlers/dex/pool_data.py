@@ -12,12 +12,14 @@ data. Consumers (Telegram handlers, the web dashboard's market routes) call thes
 functions rather than building GeckoTerminal URLs themselves.
 """
 
+import asyncio
 import logging
 import math
 import re
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import httpx
 from geckoterminal_py import GeckoTerminalAsyncClient
 from geckoterminal_py import constants as GECKO_CONSTANTS
 from glom import glom
@@ -70,12 +72,31 @@ LIQUIDITY_SUPPORTED_DEXES = {
     "pancakeswap": "bsc",
 }
 
-# GeckoTerminal network mapping
+# GeckoTerminal network mapping.
+#
+# The keys are the network ids Gateway actually reports from ``/gateway/networks``
+# — ``chain-network``, so every EVM chain is ``ethereum-<network>``. That is not
+# cosmetic: the ids this table used to carry (``base-mainnet``, ``arbitrum-one``,
+# ``polygon-mainnet``) are ones Gateway never emits, so every EVM pool fell through
+# to "no gecko chain" and rendered as untradable. The older spellings are kept as
+# aliases because persisted preferences and Telegram flows still hold them.
 NETWORK_TO_GECKO = {
+    # Solana
     "solana": "solana",
     "solana-mainnet-beta": "solana",
+    # EVM, as Gateway names them
     "ethereum": "eth",
     "ethereum-mainnet": "eth",
+    "ethereum-arbitrum": "arbitrum",
+    "ethereum-avalanche": "avax",
+    "ethereum-base": "base",
+    "ethereum-bsc": "bsc",
+    "ethereum-celo": "celo",
+    "ethereum-optimism": "optimism",
+    "ethereum-polygon": "polygon_pos",
+    "ethereum-robinhoodchain": "robinhood",
+    "ethereum-unichain": "unichain",
+    # Legacy spellings still held by persisted preferences and Telegram flows.
     "arbitrum": "arbitrum",
     "arbitrum-one": "arbitrum",
     "base": "base",
@@ -84,7 +105,10 @@ NETWORK_TO_GECKO = {
     "binance-smart-chain": "bsc",
     "polygon": "polygon_pos",
     "polygon-mainnet": "polygon_pos",
-    "avalanche": "avalanche",
+    # Gecko's id for Avalanche is `avax`, not `avalanche` — the old value here
+    # matched no chain at all.
+    "avalanche": "avax",
+    "avalanche-mainnet": "avax",
     "optimism": "optimism",
     # Not a Gateway network: `xrpl` is a first-class Hummingbot connector (orders,
     # balances, order book) that CandlesFactory simply has no feed for. Its AMM
@@ -97,15 +121,22 @@ NETWORK_TO_GECKO = {
 # Telegram handler that used to own it because the pool browser's rows are routed
 # by it (``/dex/{gateway_network}/{address}``), and a gecko chain with no entry is
 # one Gateway cannot reach — a state to render, not an error.
+#
+# Every value must be a key of NETWORK_TO_GECKO, because `decorate_pool` decides
+# `tradable` by looking the result up there; a value that round-trips to nothing
+# marks a perfectly reachable chain untradable.
 GECKO_TO_GATEWAY_NETWORK = {
     "solana": "solana-mainnet-beta",
     "eth": "ethereum-mainnet",
-    "base": "base-mainnet",
-    "arbitrum": "arbitrum-one",
-    "bsc": "bsc-mainnet",
-    "polygon_pos": "polygon-mainnet",
-    "avalanche": "avalanche-mainnet",
-    "optimism": "optimism-mainnet",
+    "arbitrum": "ethereum-arbitrum",
+    "avax": "ethereum-avalanche",
+    "base": "ethereum-base",
+    "bsc": "ethereum-bsc",
+    "celo": "ethereum-celo",
+    "optimism": "ethereum-optimism",
+    "polygon_pos": "ethereum-polygon",
+    "robinhood": "ethereum-robinhoodchain",
+    "unichain": "ethereum-unichain",
 }
 
 # Networks whose venues quote *tickers* rather than token addresses. An XRPL token
@@ -220,7 +251,72 @@ def _gecko_client() -> GeckoTerminalAsyncClient:
     global _gecko_client_instance
     if _gecko_client_instance is None:
         _gecko_client_instance = GeckoTerminalAsyncClient()
+        # geckoterminal_py builds its httpx client with no timeout override, so a
+        # slow chain listing blocks for httpx's 5s default and then fails outright.
+        # A read timeout well above that is worth more than a fast empty table.
+        try:
+            _gecko_client_instance._client.timeout = httpx.Timeout(
+                _GECKO_TIMEOUT, connect=5.0
+            )
+        except Exception:  # pragma: no cover - a library layout change, not an error
+            logger.debug("could not set gecko client timeout", exc_info=True)
     return _gecko_client_instance
+
+
+# GeckoTerminal's free tier is ~30 requests/minute *per IP*, and that budget is
+# shared by every dashboard viewer, the candle poll loop and the pool browser at
+# once. Left unbounded, a single page load with a dex filter fans out to eight
+# concurrent requests and throttles the whole process; the semaphore turns that
+# burst into a queue.
+_GECKO_MAX_CONCURRENCY = 4
+_GECKO_TIMEOUT = 15.0
+_GECKO_RETRIES = 2
+_gecko_semaphore: Optional[asyncio.Semaphore] = None
+
+
+def _gecko_gate() -> asyncio.Semaphore:
+    """The concurrency gate, built lazily so it binds to the running loop."""
+    global _gecko_semaphore
+    if _gecko_semaphore is None:
+        _gecko_semaphore = asyncio.Semaphore(_GECKO_MAX_CONCURRENCY)
+    return _gecko_semaphore
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 429:
+        return True
+    return "429" in str(exc) or "rate limit" in str(exc).lower()
+
+
+async def gecko_request(method: str, path: str, **kwargs) -> Any:
+    """One GeckoTerminal call, gated and retried where retrying can help.
+
+    Only timeouts and transport errors are retried. A 429 is deliberately *not*:
+    gecko's limit is a per-minute window, so no backoff short enough to sit inside
+    a web request will clear it, and a retry only spends more of the very budget
+    that is exhausted — while making every other caller wait behind it. The answer
+    to a 429 is the stale cache the callers fall back to, and the semaphore above,
+    which stops the burst that causes it. A 404, or the 401 gecko answers past page
+    10, is a final answer and is raised on the first attempt.
+    """
+    for attempt in range(_GECKO_RETRIES + 1):
+        try:
+            async with _gecko_gate():
+                return await _gecko_client().api_request(method, path, **kwargs)
+        except Exception as e:  # noqa: BLE001 - re-raised below when not retryable
+            retryable = not _is_rate_limited(e) and isinstance(
+                e, (httpx.TimeoutException, httpx.TransportError)
+            )
+            if not retryable or attempt == _GECKO_RETRIES:
+                raise
+            await asyncio.sleep(_GECKO_BACKOFF[attempt])
+    raise RuntimeError("unreachable")
+
+
+# Backoff between retries of a *timeout*, which is a slow chain listing rather than
+# a throttled one — short, because a web request is waiting on it.
+_GECKO_BACKOFF = (0.4, 1.0)
 
 
 # ── Small TTL caches for token lookups ──
@@ -253,6 +349,36 @@ def _ttl_put(cache: dict, key: tuple, value: Any, ttl: float) -> None:
     cache[key] = (now, value)
     while len(cache) > _TOKEN_CACHE_MAX:
         cache.pop(next(iter(cache)))
+
+
+# ── Stale-tolerant cache, for upstreams that fail more often than they change ──
+# The rule everywhere else — never cache a failure — is right, but on its own it
+# turns every rate-limited request into an empty table: the browser asks, gecko
+# says 429, and the user sees "No pools found" for a chain with thousands. Pool
+# listings are ranked-by-volume snapshots, so a two-minute-old copy is a far better
+# answer than no answer, and these two helpers exist so a failed refresh can fall
+# back to one.
+#
+# Separate from _ttl_put because that one *sweeps* expired entries on every write,
+# which would throw away the very copies this fallback depends on.
+_STALE_MAX_AGE = 15 * 60
+
+
+def _stale_put(cache: dict, key: tuple, value: Any) -> None:
+    cache[key] = (time.time(), value)
+    now = time.time()
+    for k in [k for k, (ts, _) in cache.items() if now - ts >= _STALE_MAX_AGE]:
+        cache.pop(k, None)
+    while len(cache) > _TOKEN_CACHE_MAX:
+        cache.pop(next(iter(cache)))
+
+
+def _stale_get(cache: dict, key: tuple) -> Tuple[Optional[Any], float]:
+    """The cached value regardless of freshness, with its age in seconds."""
+    entry = cache.get(key)
+    if not entry:
+        return None, 0.0
+    return entry[1], time.time() - entry[0]
 
 
 async def fetch_token_symbol(mint: str, network: str) -> str:
@@ -1063,6 +1189,7 @@ GECKO_DEXES_TTL = 6 * 3600
 _gecko_page_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
 _gecko_dexes_cache: Dict[Tuple, Tuple[float, List[Dict[str, str]]]] = {}
 _gateway_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
+_multi_pool_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
 _pool_by_address_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 
 # A pool list is a browser page, not a report: cap what an upstream can be asked
@@ -1241,7 +1368,7 @@ async def _gecko_page_rows(
         path = _GECKO_VIEW_PATHS[view].format(gnet)
 
     try:
-        payload = await _gecko_client().api_request("GET", path, params={"page": page})
+        payload = await gecko_request("GET", path, params={"page": page})
         rows = [
             row
             for row in glom(payload, GECKO_CONSTANTS.POOL_SPEC)
@@ -1249,17 +1376,26 @@ async def _gecko_page_rows(
         ]
     except Exception as e:
         # Every rate-limit reply, and the 401 gecko answers past page 10.
+        # A stale copy beats an empty table: this listing is a ranked snapshot, so
+        # rows from a few minutes ago are still the answer to "what should I look
+        # at", while "No pools found" reads as a fact about the chain. The stale
+        # entry is returned but *not* refreshed, so the next request past the TTL
+        # tries upstream again rather than settling into serving old rows forever.
+        stale, age = _stale_get(_gecko_page_cache, key)
         logger.warning(
-            "gecko pool page failed net=%s view=%s dex=%s page=%s: %s",
+            "gecko pool page failed net=%s view=%s dex=%s page=%s: %s%s",
             gnet,
             view,
             dex or "-",
             page,
             e,
+            f" (serving {age:.0f}s-old cache)" if stale is not None else "",
         )
+        if stale is not None:
+            return [dict(row) for row in stale]
         return None
 
-    _ttl_put(_gecko_page_cache, key, rows, POOL_LIST_TTL)
+    _stale_put(_gecko_page_cache, key, rows)
     return [dict(row) for row in rows]
 
 
@@ -1402,6 +1538,17 @@ async def list_gecko_pools_page(
             break
 
     pools = collected[local_skip : local_skip + limit]
+
+    # Trending and New have no venue-scoped form upstream, so a dex filter on them
+    # is a scan of the chain-wide list — and a venue that simply has nothing
+    # trending right now then reads as a venue with no pools at all. It has pools;
+    # they are just not in *this* ranking. So ask the venue's own top listing
+    # instead of answering "none", which is the query the user meant by picking it.
+    if not pools and wanted:
+        scoped = await _scoped_top_page(gnet, network, sorted(wanted), limit, page)
+        if scoped["pools"]:
+            return scoped
+
     return {"pools": pools, "has_more": has_more and len(pools) == limit}
 
 
@@ -1431,13 +1578,21 @@ async def list_gecko_dexes(network: str) -> List[Dict[str, str]]:
         return [dict(row) for row in cached]
 
     try:
-        payload = await _gecko_client().api_request(
+        payload = await gecko_request(
             "GET", GECKO_CONSTANTS.GET_DEXES_BY_NETWORK_PATH.format(gnet)
         )
         rows = glom(payload, GECKO_CONSTANTS.DEXES_BY_NETWORK_SPEC)
     except Exception as e:
-        logger.warning("gecko dex list failed net=%s: %s", gnet, e)
-        return []
+        # A chain's venue list changes about never, so a stale copy is as good as a
+        # fresh one — and losing it makes the filter vanish from the browser.
+        stale, age = _stale_get(_gecko_dexes_cache, (gnet,))
+        logger.warning(
+            "gecko dex list failed net=%s: %s%s",
+            gnet,
+            e,
+            f" (serving {age:.0f}s-old cache)" if stale is not None else "",
+        )
+        return [dict(row) for row in stale] if stale is not None else []
 
     dexes = [
         {"id": str(row["id"]), "name": str(row.get("name") or row["id"])}
@@ -1473,14 +1628,32 @@ async def fetch_pools_by_addresses(
     if not seen:
         return []
 
+    # The favourites view re-reads every starred pool on every visit, and this was
+    # the one listing with no cache at all — a tab switch back and forth spent the
+    # chain listing's rate-limit budget. Keyed by the batch, so it collides with
+    # itself the way the other pool caches do.
     pools: List[Dict[str, Any]] = []
     for start in range(0, len(seen), _GECKO_MULTI_MAX):
         batch = seen[start : start + _GECKO_MULTI_MAX]
+        batch_key = (gnet, ",".join(batch))
+        cached = _ttl_get(_multi_pool_cache, batch_key, POOL_LIST_TTL)
+        if cached is not None:
+            pools.extend(dict(row) for row in cached)
+            continue
         try:
             result = await _gecko_client().get_multiple_pools_by_network(gnet, batch)
         except Exception as e:
-            logger.warning("gecko multi-pool failed net=%s: %s", gnet, e)
+            stale, age = _stale_get(_multi_pool_cache, batch_key)
+            logger.warning(
+                "gecko multi-pool failed net=%s: %s%s",
+                gnet,
+                e,
+                f" (serving {age:.0f}s-old cache)" if stale is not None else "",
+            )
+            if stale is not None:
+                pools.extend(dict(row) for row in stale)
             continue
+        batch_pools: List[Dict[str, Any]] = []
         for row in _coerce_pool_rows(result, len(batch)):
             try:
                 pool = _normalize_gecko_pool(row, network)
@@ -1488,7 +1661,9 @@ async def fetch_pools_by_addresses(
                 logger.info("gecko pool row skipped net=%s: %s", gnet, e)
                 continue
             if pool.get("address"):
-                pools.append(pool)
+                batch_pools.append(pool)
+        _stale_put(_multi_pool_cache, batch_key, batch_pools)
+        pools.extend(dict(row) for row in batch_pools)
 
     # In the order the caller saved them, not the order gecko answers in.
     rank = {address: i for i, address in enumerate(seen)}

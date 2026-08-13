@@ -1,7 +1,7 @@
 import { Check, ChevronDown, Search, Star, X } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import type { DexVenue } from "@/lib/api";
+import type { DexChain, DexVenue } from "@/lib/api";
 
 /**
  * Which pool listing to browse. The upstreams take genuinely different arguments
@@ -21,11 +21,19 @@ export const GECKO_TABS = [
   { view: "token", label: "Search" },
 ] as const;
 
-/** The CLMM connectors Gateway can list pools for (and open positions in). */
+/**
+ * The CLMM connectors Gateway can list pools for (and open positions in).
+ *
+ * Both are Solana venues, so these tabs are hidden on any other chain: a Meteora
+ * tab on Base lists nothing and offers no position to open, which is worse than
+ * not offering it. GeckoTerminal browsing works on every chain either way.
+ */
 export const GATEWAY_TABS = [
   { connector: "meteora", label: "Meteora" },
   { connector: "orca", label: "Orca" },
 ] as const;
+
+export const GATEWAY_TAB_CHAIN = "solana";
 
 export function sameSource(a: PoolSource, b: PoolSource): boolean {
   if (a.kind === "gecko" && b.kind === "gecko") return a.view === b.view;
@@ -34,15 +42,100 @@ export function sameSource(a: PoolSource, b: PoolSource): boolean {
   return a.kind === "favorites" && b.kind === "favorites";
 }
 
+/**
+ * Pills rather than underlined tabs, because there are seven of them and they no
+ * longer sit on one baseline: a wrapped underline reads as two broken rules across
+ * the header, while a pill is legible on whatever row it lands on.
+ */
 const TAB_BASE =
-  "px-3 py-1.5 text-xs font-medium transition-colors border-b-2 -mb-px whitespace-nowrap";
+  "rounded-md px-2.5 py-1 text-xs font-medium transition-colors whitespace-nowrap";
 
 function tabClass(active: boolean) {
   return `${TAB_BASE} ${
     active
-      ? "border-[var(--color-primary)] text-[var(--color-text)]"
-      : "border-transparent text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+      ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+      : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
   }`;
+}
+
+/**
+ * The chain the browser is pointed at.
+ *
+ * Single-select, unlike the venue filter: a pool lives on exactly one chain, and
+ * every row's address, chart and executor is scoped to it, so "Solana and Base at
+ * once" is not a view the workspace behind a row could honour.
+ */
+function ChainSelect({
+  chains,
+  network,
+  onChange,
+}: {
+  chains: DexChain[];
+  network: string;
+  onChange: (next: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handler = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const keyHandler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", handler);
+    document.addEventListener("keydown", keyHandler);
+    return () => {
+      document.removeEventListener("mousedown", handler);
+      document.removeEventListener("keydown", keyHandler);
+    };
+  }, []);
+
+  // One chain is not a choice — render it as a label rather than a dead dropdown.
+  if (chains.length <= 1) return null;
+
+  const current = chains.find((c) => c.network_id === network);
+
+  return (
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        title="Chain to browse pools on"
+        className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2 py-1 text-xs text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)]"
+      >
+        {current?.label ?? network}
+        <ChevronDown
+          className={`h-3 w-3 transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1.5 w-44 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl">
+          {chains.map((c) => (
+            <button
+              key={c.network_id}
+              onClick={() => {
+                onChange(c.network_id);
+                setOpen(false);
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
+            >
+              <span
+                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                  c.network_id === network
+                    ? "bg-[var(--color-primary)]"
+                    : "bg-transparent"
+                }`}
+              />
+              <span className="truncate">{c.label}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
 }
 
 /**
@@ -189,6 +282,10 @@ function DexFilter({
 interface Props {
   source: PoolSource;
   onSourceChange: (s: PoolSource) => void;
+  /** The chains this Gateway can browse. One or none hides the selector. */
+  chains: DexChain[];
+  network: string;
+  onNetworkChange: (next: string) => void;
   /** The venues on this chain, for the filter. Empty hides it. */
   venues: DexVenue[];
   selectedDexes: string[];
@@ -201,6 +298,9 @@ interface Props {
 export function PoolSourceTabs({
   source,
   onSourceChange,
+  chains,
+  network,
+  onNetworkChange,
   venues,
   selectedDexes,
   onDexesChange,
@@ -214,10 +314,20 @@ export function PoolSourceTabs({
       ? "Filter pools by name…"
       : "Paste a pool or token address…";
   const searchShown = source.kind === "gateway" || isSearch;
+  const showGatewayTabs = network.startsWith(GATEWAY_TAB_CHAIN);
 
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--color-border)] px-4">
-      <div className="flex items-center overflow-x-auto">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--color-border)] px-4 py-2">
+      {/* Wraps rather than scrolls. Seven short labels fit one row on any desktop
+          width, and on a phone a second row is reachable where a horizontal
+          scroller inside a vertically-scrolling page is largely not. */}
+      <ChainSelect
+        chains={chains}
+        network={network}
+        onChange={onNetworkChange}
+      />
+
+      <div className="flex flex-wrap items-center gap-0.5">
         {GECKO_TABS.map((t) => (
           <button
             key={t.view}
@@ -229,21 +339,25 @@ export function PoolSourceTabs({
             {t.label}
           </button>
         ))}
-        <span className="mx-2 h-4 w-px bg-[var(--color-border)]" />
-        {GATEWAY_TABS.map((t) => (
-          <button
-            key={t.connector}
-            onClick={() =>
-              onSourceChange({ kind: "gateway", connector: t.connector })
-            }
-            className={tabClass(
-              sameSource(source, { kind: "gateway", connector: t.connector }),
-            )}
-          >
-            {t.label}
-          </button>
-        ))}
-        <span className="mx-2 h-4 w-px bg-[var(--color-border)]" />
+        {showGatewayTabs && (
+          <>
+            <span className="mx-1.5 h-4 w-px bg-[var(--color-border)]" />
+            {GATEWAY_TABS.map((t) => (
+              <button
+                key={t.connector}
+                onClick={() =>
+                  onSourceChange({ kind: "gateway", connector: t.connector })
+                }
+                className={tabClass(
+                  sameSource(source, { kind: "gateway", connector: t.connector }),
+                )}
+              >
+                {t.label}
+              </button>
+            ))}
+          </>
+        )}
+        <span className="mx-1.5 h-4 w-px bg-[var(--color-border)]" />
         <button
           onClick={() => onSourceChange({ kind: "favorites" })}
           className={`${tabClass(source.kind === "favorites")} flex items-center gap-1`}
@@ -261,7 +375,7 @@ export function PoolSourceTabs({
         </button>
       </div>
 
-      <div className="ml-auto flex items-center gap-2 py-1.5">
+      <div className="ml-auto flex items-center gap-2">
         {source.kind === "gecko" && (
           <DexFilter
             venues={venues}

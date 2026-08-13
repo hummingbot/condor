@@ -19,15 +19,18 @@ const SEARCH_DEBOUNCE_MS = 400;
 const PAGE_SIZE = 20;
 
 /**
- * The one chain the browser offers, deliberately.
+ * The chain the browser opens on.
  *
- * Every other Gateway network is reachable by URL (`/dex/{network}/{address}`
- * still renders), but the venues Condor can actually LP in — Meteora, Orca —
- * are Solana's, so a chain picker offering chains with no CLMM connector behind
- * them sells a workspace that cannot open a position. One constant, so widening
- * this later is a list, not a rewrite.
+ * Solana rather than "whatever Gateway lists first", because it is the only chain
+ * with CLMM connectors (Meteora, Orca) behind it — so it is the one chain where a
+ * row leads all the way to an open position. The rest of the list comes from
+ * `/dex/chains`: Gateway's own networks, intersected with what GeckoTerminal
+ * indexes, since a chain missing from either has no pools to browse.
  */
-const NETWORK = "solana-mainnet-beta";
+const DEFAULT_NETWORK = "solana-mainnet-beta";
+
+/** Survives a reload, so the chain you browse is not re-picked on every visit. */
+const NETWORK_KEY = "condor.dex.network";
 
 /** An EVM address or a Solana pubkey — the same guard the backend applies. */
 const ADDRESS_RE = /^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/;
@@ -48,6 +51,9 @@ export function Dex() {
     kind: "gecko",
     view: "trending",
   });
+  const [network, setNetwork] = useState<string>(
+    () => localStorage.getItem(NETWORK_KEY) || DEFAULT_NETWORK,
+  );
   const [dexes, setDexes] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -64,14 +70,51 @@ export function Dex() {
   }, [query]);
 
   // Page 4 of Trending is not page 4 of anything else, and a stale page number
-  // would land the user on an empty table.
+  // would land the user on an empty table. Chain belongs here too: page 4 of
+  // Solana's trending is not page 4 of Base's.
   useEffect(() => {
     setPage(1);
-  }, [source, debouncedQuery, dexes]);
+  }, [source, debouncedQuery, dexes, network]);
+
+  useEffect(() => {
+    localStorage.setItem(NETWORK_KEY, network);
+  }, [network]);
+
+  const { data: chains = [] } = useQuery({
+    queryKey: ["dex-chains", server],
+    queryFn: () => api.getDexChains(server!),
+    enabled: !!server,
+    staleTime: 6 * 60 * 60 * 1000,
+  });
+
+  // A venue filter is a set of dex ids from the chain that was showing when it was
+  // picked, and those ids do not exist on the next one — carried over, it filters
+  // every row away and the chain looks empty.
+  const onNetworkChange = (next: string) => {
+    if (next === network) return;
+    setNetwork(next);
+    setDexes([]);
+    // Meteora and Orca are Solana connectors; their tabs disappear off Solana, and
+    // a selection left pointing at a hidden tab shows a table with no active tab.
+    if (!next.startsWith("solana")) {
+      setSource((s) => (s.kind === "gateway" ? { kind: "gecko", view: "trending" } : s));
+    }
+  };
+
+  // A chain that vanished from Gateway (or was never there — a stale localStorage
+  // value from another server) must not strand the browser on a chain the backend
+  // will not serve.
+  useEffect(() => {
+    if (!chains.length) return;
+    if (!chains.some((c) => c.network_id === network)) {
+      onNetworkChange(chains[0]?.network_id ?? DEFAULT_NETWORK);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [chains, network]);
 
   const { data: venues = [] } = useQuery({
-    queryKey: ["dex-venues", server, NETWORK],
-    queryFn: () => api.getDexVenues(server!, NETWORK),
+    queryKey: ["dex-venues", server, network],
+    queryFn: () => api.getDexVenues(server!, network),
     enabled: !!server,
     staleTime: 6 * 60 * 60 * 1000,
   });
@@ -93,6 +136,7 @@ export function Dex() {
         : source.kind === "gateway"
           ? source.connector
           : "favorites",
+      network,
       debouncedQuery,
       dexes.join(","),
       page,
@@ -110,7 +154,7 @@ export function Dex() {
             }
           : {
               source: "gecko",
-              network: NETWORK,
+              network,
               view: source.kind === "gecko" ? source.view : "trending",
               query: isSearch ? debouncedQuery : undefined,
               dexes,
@@ -127,24 +171,24 @@ export function Dex() {
   // characters and nothing distinguishes them by shape, so the pool lookup runs
   // alongside the token search and whichever resolves is what the user meant.
   const { data: pastedPool } = useQuery({
-    queryKey: ["dex-pool-by-address", server, NETWORK, debouncedQuery],
+    queryKey: ["dex-pool-by-address", server, network, debouncedQuery],
     queryFn: () =>
       api
-        .getDexPoolByAddress(server!, debouncedQuery, NETWORK)
+        .getDexPoolByAddress(server!, debouncedQuery, network)
         .catch(() => null as PoolSummary | null),
     enabled: !!server && isSearch && isAddress,
     staleTime: POOL_STALE_MS,
   });
 
   const favoriteAddresses = useMemo(
-    () => favorites.filter((f) => f.network === NETWORK).map((f) => f.address),
-    [favorites],
+    () => favorites.filter((f) => f.network === network).map((f) => f.address),
+    [favorites, network],
   );
 
   const { data: favoritePools = [], isFetching: favoritesFetching } = useQuery({
-    queryKey: ["dex-favorites", server, NETWORK, favoriteAddresses.join(",")],
+    queryKey: ["dex-favorites", server, network, favoriteAddresses.join(",")],
     queryFn: () =>
-      api.getDexPoolsByAddress(server!, NETWORK, favoriteAddresses),
+      api.getDexPoolsByAddress(server!, network, favoriteAddresses),
     enabled:
       !!server && source.kind === "favorites" && !!favoriteAddresses.length,
     staleTime: POOL_STALE_MS,
@@ -175,8 +219,8 @@ export function Dex() {
       <div>
         <h1 className="text-lg font-semibold">DEX</h1>
         <p className="text-sm text-[var(--color-text-muted)]">
-          Solana pools Condor trades through Gateway. Open one to chart it, swap
-          in it and provide liquidity to it.
+          Pools Condor trades through Gateway. Open one to chart it, swap in it
+          and provide liquidity to it.
         </p>
       </div>
 
@@ -184,6 +228,9 @@ export function Dex() {
         <PoolSourceTabs
           source={source}
           onSourceChange={setSource}
+          chains={chains}
+          network={network}
+          onNetworkChange={onNetworkChange}
           venues={venues}
           selectedDexes={dexes}
           onDexesChange={setDexes}
@@ -198,7 +245,7 @@ export function Dex() {
           <button
             onClick={() =>
               navigate(
-                `/dex/${pastedPool.gateway_network || NETWORK}/${pastedPool.address}`,
+                `/dex/${pastedPool.gateway_network || network}/${pastedPool.address}`,
               )
             }
             className="flex w-full items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-surface)] px-4 py-2.5 text-left transition-colors hover:bg-[var(--color-surface-hover)]"
@@ -225,7 +272,7 @@ export function Dex() {
           isLoading={loading}
           emptyMessage={emptyMessage}
           showGatewayColumns={source.kind === "gateway"}
-          network={NETWORK}
+          network={network}
           page={isFavorites ? 1 : page}
           hasMore={isFavorites ? false : !!pagedPools?.has_more}
           onPageChange={setPage}

@@ -364,6 +364,13 @@ export interface DexVenue {
   name: string;
 }
 
+/** A chain the pool browser can browse, as Gateway names it. */
+export interface DexChain {
+  network_id: string;
+  chain: string;
+  label: string;
+}
+
 export interface DexPoolInfo {
   pool_address: string | null;
   dex_id: string | null;
@@ -1357,6 +1364,16 @@ export const api = {
       `/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`,
     ).then((r) => ({ pools: r.pools ?? [], has_more: !!r.has_more }));
   },
+
+  /**
+   * The chains the pool browser can offer: the intersection of what this Gateway
+   * is configured for and what GeckoTerminal indexes. Asked of the server rather
+   * than hardcoded, so a chain the operator adds to Gateway shows up on its own.
+   */
+  getDexChains: (server: string) =>
+    apiFetch<{ chains: DexChain[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/chains`,
+    ).then((r) => r.chains ?? []),
 
   /** The venues a chain has, so the dex filter offers what exists, not a guess. */
   getDexVenues: (server: string, network: string) =>

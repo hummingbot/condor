@@ -35,6 +35,7 @@ def _clear_caches():
         pool_data._gecko_dexes_cache,
         pool_data._gateway_pool_list_cache,
         pool_data._pool_by_address_cache,
+        pool_data._multi_pool_cache,
     ):
         cache.clear()
     yield
@@ -890,3 +891,188 @@ def test_a_first_page_failure_is_still_empty(paged_gecko):
     client.fail_from = 1
     result = run(pool_data.list_gecko_pools_page("solana", dexes=["meteora"]))
     assert result == {"pools": [], "has_more": False}
+
+
+# ── surviving a throttled upstream ──
+#
+# GeckoTerminal's free tier is ~30 requests a minute per IP, shared by every viewer,
+# the candle poll loop and this browser at once — so a 429 is a routine event, not
+# an exceptional one. What it must never produce is "No pools found", which reads as
+# a fact about the chain rather than about the request.
+
+
+def test_a_throttled_refresh_serves_the_last_good_rows(paged_gecko):
+    """A 429 falls back to the cached copy instead of emptying the table."""
+    client = paged_gecko({1: _rows(20)})
+    first = run(pool_data.list_gecko_pools_page("solana", limit=20, page=1))
+    assert len(first["pools"]) == 20
+
+    # Past the TTL, so the next call really does go upstream — and is throttled.
+    for key in list(pool_data._gecko_page_cache):
+        rows = pool_data._gecko_page_cache[key][1]
+        pool_data._gecko_page_cache[key] = (0.0, rows)
+    client.fail_from = 1
+
+    again = run(pool_data.list_gecko_pools_page("solana", limit=20, page=1))
+    assert [p["address"] for p in again["pools"]] == [
+        p["address"] for p in first["pools"]
+    ], "a throttled refresh must answer with the stale rows, not an empty table"
+
+
+def test_a_throttled_first_request_is_still_empty(paged_gecko):
+    """With nothing cached there is nothing to fall back to — and no invention."""
+    client = paged_gecko({1: _rows(20)})
+    client.fail_from = 1
+    result = run(pool_data.list_gecko_pools_page("solana", limit=20, page=1))
+    assert result == {"pools": [], "has_more": False}
+
+
+def test_a_rate_limit_is_not_retried(paged_gecko):
+    """Backoff cannot clear a per-minute window; retrying only spends more of it."""
+    client = paged_gecko({1: _rows(20)})
+    client.fail_from = 1
+    run(pool_data.list_gecko_pools_page("solana", limit=20, page=1))
+    assert client.pages == [1], "a 429 is a final answer, not something to retry"
+
+
+def test_a_venue_with_nothing_trending_falls_back_to_its_own_listing(paged_gecko):
+    """Filtering Trending by a venue that is not in it must not answer 'no pools'.
+
+    The venue has pools; they are simply not in *this* ranking. The scoped listing
+    is the query the user meant by picking it.
+    """
+    client = paged_gecko({1: _rows(20, dex_id="pumpswap")})
+    result = run(
+        pool_data.list_gecko_pools_page(
+            "solana", view="trending", limit=20, dexes=["orca"]
+        )
+    )
+    assert result["pools"], "a venue-scoped retry should have found rows"
+    assert "orca" in client.scopes, "the fallback must ask for the venue's own listing"
+
+
+# ── the network ids Gateway actually reports ──
+
+
+@pytest.mark.parametrize(
+    "gateway_network, gecko_chain",
+    [
+        ("solana-mainnet-beta", "solana"),
+        ("ethereum-mainnet", "eth"),
+        ("ethereum-base", "base"),
+        ("ethereum-robinhoodchain", "robinhood"),
+        ("ethereum-unichain", "unichain"),
+        ("ethereum-avalanche", "avax"),
+        ("ethereum-polygon", "polygon_pos"),
+    ],
+)
+def test_gateway_network_ids_map_to_a_gecko_chain(gateway_network, gecko_chain):
+    """Gateway names networks `chain-network`; this table has to speak that.
+
+    It previously held ids Gateway never emits (``base-mainnet``, ``arbitrum-one``),
+    so every EVM pool fell through to "no gecko chain" and rendered untradable.
+    """
+    assert pool_data.get_gecko_network(gateway_network) == gecko_chain
+
+
+def test_every_discovered_chain_round_trips_back_to_a_known_network():
+    """`decorate_pool` marks a pool tradable by looking its network up again.
+
+    A value that does not round-trip marks a perfectly reachable chain untradable —
+    which is what used to happen to BSC, Avalanche and Optimism.
+    """
+    for chain, network in pool_data.GECKO_TO_GATEWAY_NETWORK.items():
+        assert (
+            network in pool_data.NETWORK_TO_GECKO
+        ), f"{chain} -> {network} is a dead end"
+        assert pool_data.NETWORK_TO_GECKO[network] == chain
+
+
+# ── the chains the browser may offer ──
+
+
+class FakeGatewayNetworks:
+    """Gateway's `/gateway/networks`, which names networks `chain-network`."""
+
+    def __init__(self, networks=None, error=None):
+        self._networks = networks
+        self._error = error
+
+    async def list_networks(self):
+        if self._error:
+            raise self._error
+        return {"networks": self._networks}
+
+
+class FakeNetworkClient:
+    def __init__(self, gateway):
+        self.gateway = gateway
+
+
+def _net(network_id, chain, network):
+    return {"network_id": network_id, "chain": chain, "network": network}
+
+
+def _chains_client(route_client, networks=None, error=None):
+    gateway = FakeGatewayNetworks(networks, error)
+    return route_client(client=FakeNetworkClient(gateway))
+
+
+def test_chains_offers_what_gateway_has_and_gecko_indexes(route_client):
+    client = _chains_client(
+        route_client,
+        [
+            _net("solana-mainnet-beta", "solana", "mainnet-beta"),
+            _net("ethereum-base", "ethereum", "base"),
+            _net("ethereum-robinhoodchain", "ethereum", "robinhoodchain"),
+        ],
+    )
+    chains = client.get("/servers/srv/dex/chains").json()["chains"]
+    assert [c["network_id"] for c in chains] == [
+        "solana-mainnet-beta",
+        "ethereum-base",
+        "ethereum-robinhoodchain",
+    ], "Solana leads because it is the default; the rest sort by label"
+    assert [c["label"] for c in chains] == ["Solana", "Base", "Robinhood"]
+
+
+def test_chains_drops_testnets(route_client):
+    """There is nothing to discover on a testnet — Gecko does not index one."""
+    client = _chains_client(
+        route_client,
+        [
+            _net("solana-mainnet-beta", "solana", "mainnet-beta"),
+            _net("solana-devnet", "solana", "devnet"),
+            _net("ethereum-sepolia", "ethereum", "sepolia"),
+            _net(
+                "ethereum-robinhoodchain-testnet", "ethereum", "robinhoodchain-testnet"
+            ),
+        ],
+    )
+    chains = client.get("/servers/srv/dex/chains").json()["chains"]
+    assert [c["network_id"] for c in chains] == ["solana-mainnet-beta"]
+
+
+def test_chains_drops_networks_gecko_cannot_index(route_client):
+    client = _chains_client(
+        route_client,
+        [
+            _net("solana-mainnet-beta", "solana", "mainnet-beta"),
+            _net("ethereum-madeupchain", "ethereum", "madeupchain"),
+        ],
+    )
+    chains = client.get("/servers/srv/dex/chains").json()["chains"]
+    assert [c["network_id"] for c in chains] == ["solana-mainnet-beta"]
+
+
+def test_chains_falls_back_to_solana_when_gateway_is_down(route_client):
+    """The browser must always have at least the chain it defaults to."""
+    client = _chains_client(route_client, error=RuntimeError("gateway is down"))
+    r = client.get("/servers/srv/dex/chains")
+    assert r.status_code == 200
+    assert [c["network_id"] for c in r.json()["chains"]] == ["solana-mainnet-beta"]
+
+
+def test_chains_needs_server_access(route_client):
+    client = route_client(allowed=False)
+    assert client.get("/servers/srv/dex/chains").status_code == 403

@@ -13,6 +13,7 @@ fetching or normalization of their own.
 from __future__ import annotations
 
 import logging
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -30,6 +31,36 @@ router = APIRouter(tags=["dex"])
 # — the same guard ``/market/candles`` and ``/market/token-symbol`` already apply.
 _ADDRESS_RE = dex_candles.ADDRESS_RE
 _POOL_ADDRESS_RE = _ADDRESS_RE
+
+# The chain the browser opens on, and the one it falls back to when Gateway cannot
+# be reached: Solana is where Condor's CLMM connectors (Meteora, Orca) live.
+DEFAULT_NETWORK = "solana-mainnet-beta"
+
+_TESTNET_RE = re.compile(r"(testnet|devnet|sepolia|goerli)", re.IGNORECASE)
+
+# Gateway names a network `chain-network`; the browser wants the part that varies.
+_CHAIN_LABELS = {
+    "solana-mainnet-beta": "Solana",
+    "ethereum-mainnet": "Ethereum",
+    "ethereum-base": "Base",
+    "ethereum-robinhoodchain": "Robinhood",
+    "ethereum-unichain": "Unichain",
+    "ethereum-arbitrum": "Arbitrum",
+    "ethereum-avalanche": "Avalanche",
+    "ethereum-bsc": "BNB Chain",
+    "ethereum-celo": "Celo",
+    "ethereum-optimism": "Optimism",
+    "ethereum-polygon": "Polygon",
+}
+
+
+def _chain_label(network_id: str, item: dict) -> str:
+    if network_id in _CHAIN_LABELS:
+        return _CHAIN_LABELS[network_id]
+    # An unmapped network is still perfectly browsable; title-case its own name
+    # rather than showing a raw id or dropping it.
+    name = str(item.get("network") or network_id).replace("-", " ").strip()
+    return name.title() or network_id
 
 
 @router.get("/servers/{name}/dex/pools")
@@ -147,6 +178,62 @@ async def list_dexes(
     from handlers.dex.pool_data import list_gecko_dexes
 
     return {"dexes": await list_gecko_dexes(network)}
+
+
+@router.get("/servers/{name}/dex/chains")
+async def list_chains(
+    name: str,
+    user: WebUser = Depends(get_current_user),
+):
+    """The chains the pool browser can offer, from Gateway rather than a constant.
+
+    A chain qualifies only if it is both something *this* Gateway is configured for
+    and something GeckoTerminal indexes — a network Gateway reaches but Gecko does
+    not has no pools to browse, and one Gecko indexes but Gateway cannot reach
+    routes to a workspace that cannot trade. Testnets are dropped for the same
+    reason: there is nothing to discover on them.
+
+    Falls back to Solana alone when Gateway is unreachable, so the browser always
+    has at least the chain it defaults to.
+    """
+    cm = get_config_manager()
+    if not cm.has_server_access(user.id, name):
+        raise HTTPException(status_code=403, detail="No access")
+
+    from handlers.dex.pool_data import NETWORK_TO_GECKO
+
+    fallback = [{"network_id": DEFAULT_NETWORK, "chain": "solana", "label": "Solana"}]
+    try:
+        client = await cm.get_client(name)
+        result = await client.gateway.list_networks()
+    except Exception as e:
+        logger.warning("Gateway networks unavailable for %s: %s", name, e)
+        return {"chains": fallback}
+
+    raw = result.get("networks", result) if isinstance(result, dict) else result
+    chains = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, dict):
+            continue
+        network_id = str(item.get("network_id") or "").strip()
+        if not network_id or network_id not in NETWORK_TO_GECKO:
+            continue
+        if _TESTNET_RE.search(network_id):
+            continue
+        chains.append(
+            {
+                "network_id": network_id,
+                "chain": str(item.get("chain") or ""),
+                "label": _chain_label(network_id, item),
+            }
+        )
+
+    if not chains:
+        return {"chains": fallback}
+    # Solana first — it is the default and the only chain with CLMM connectors
+    # behind it — then alphabetically, so the order does not shift with Gateway's.
+    chains.sort(key=lambda c: (c["network_id"] != DEFAULT_NETWORK, c["label"].lower()))
+    return {"chains": chains}
 
 
 @router.get("/servers/{name}/dex/pools-by-address")
