@@ -83,6 +83,7 @@ BODY_SITES = [
     ("condor.web.routes.routines", "schedule_routine_v2"),
     ("condor.web.routes.code", "run_code"),
     ("condor.web.routes.sessions", "_respawn"),
+    ("condor.web.routes.sessions", "create_session"),
     ("condor.web.routes.agents", "update_agent_config"),
     ("condor.web.routes.agents", "consult_agent"),
     ("condor.web.routes.agents", "delegate_agent"),

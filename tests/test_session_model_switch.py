@@ -83,6 +83,11 @@ class FakeConfigManager:
     def has_server_access(self, user_id, server_name, *a, **k):
         return server_name in {"local", "prod"}
 
+    # Resolution holds every candidate to existence *and* reach (SEC-178), so
+    # the stub has to answer both halves of the predicate.
+    def get_server(self, name):
+        return {"host": "h", "port": 8000} if name in {"local", "prod"} else None
+
 
 @pytest.fixture
 def env(tmp_path, monkeypatch):

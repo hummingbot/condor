@@ -535,7 +535,9 @@ def build_mcp_servers_for_session(
 
     ``server_name`` pins the run to that Condor server (an Agent with
     ``server_required``); when omitted, the chat's ambient server is resolved
-    from the user's preferences, then from the first accessible server.
+    from the user's preferences, then from the first accessible server. Each
+    candidate must exist *and* be reachable by ``user_id`` — a name this user
+    has no grant on resolves to the next candidate, never to its credentials.
 
     ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
     own stores (``agents/{slug}/``). Without it the tools target the chat
@@ -551,12 +553,28 @@ def build_mcp_servers_for_session(
 
     cm = get_config_manager()
 
-    # Resolve which hummingbot server to use (explicit override > user preferences)
-    if not server_name:
-        server_name = get_effective_server(chat_id, user_data)
-    if not server_name:
+    # Resolve which hummingbot server to use (explicit override > user
+    # preferences). Every candidate is held to existence *and* reach, because
+    # the name that comes out of here decides whose API credentials go into the
+    # subprocess env below. ``chat_id`` is not a principal — ``chat_defaults``
+    # is a global map keyed by chat, so a caller who can name someone else's
+    # chat could name their server too (SEC-178, the SEC-164 shape). The subject
+    # is always ``user_id``, the authenticated owner of the run; the same
+    # predicate guards TickEngine._resolve_server.
+    def usable(name: str | None) -> bool:
+        return bool(name and cm.get_server(name)) and cm.has_server_access(
+            user_id, name
+        )
+
+    def candidates():
+        # Lazy on purpose: resolving the chat default writes back into
+        # ``user_data``, so it must not run when a pin already answered.
+        yield server_name
+        yield get_effective_server(chat_id, user_data)
         accessible = cm.get_accessible_servers(user_id)
-        server_name = accessible[0] if accessible else None
+        yield accessible[0] if accessible else None
+
+    server_name = next((name for name in candidates() if usable(name)), None)
 
     # Condor MCP -- runs as stdio subprocess, tools work locally without TCP bridge
     # Pass resolved server_name so start_agent uses the correct server

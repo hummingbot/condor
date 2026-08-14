@@ -146,6 +146,15 @@ async def create_session(
     elif spec.user_id != user.id and not cm.is_admin(user.id):
         raise HTTPException(status_code=403, detail="Cannot create for another user")
 
+    # The session's toolset is built with this server's API credentials, so gate
+    # the pinned name exactly like ``_respawn`` does. The subject is the
+    # *caller*, never ``spec.user_id`` (SEC-167): an admin creating a session
+    # for someone else is held to their own reach, not licensed by the owner's.
+    # The rest of the spec is not a licence either — ``spec.chat_id`` reaches
+    # server resolution too, and is checked where it lands (SEC-178).
+    if spec.server_name:
+        check_server_access(user.id, spec.server_name)
+
     from condor.preferences import load_user_data_for
 
     try:

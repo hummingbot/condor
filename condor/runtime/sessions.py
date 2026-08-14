@@ -510,16 +510,30 @@ async def get_or_create_session(
                 platform=spec.platform,
                 server_name=spec.server_name,
             )
-        # Resolve the server name that was actually used for this session
-        resolved_server = spec.server_name
-        if not resolved_server and spec.user_id:
-            from config_manager import get_config_manager, get_effective_server
+        # Resolve the server name that was actually used for this session. The
+        # chat default is the ambient answer, but ``chat_defaults`` is a global
+        # map keyed by chat id and ``spec`` is an unvalidated request body on
+        # the web, so naming someone else's chat would otherwise resolve their
+        # server here (SEC-178). Every candidate is therefore held to existence
+        # *and* reach, subjected on the run's own principal — the same id the
+        # MCP toolset is built for, so the label and the credentials downstream
+        # can never disagree about who this session belongs to.
+        from config_manager import get_config_manager, get_effective_server
 
+        cm = get_config_manager()
+        subject_id, _ = spec.effective_ids()
+
+        def usable(name: str | None) -> bool:
+            return bool(name and cm.get_server(name)) and cm.has_server_access(
+                subject_id, name
+            )
+
+        resolved_server = spec.server_name
+        if not usable(resolved_server):
             resolved_server = get_effective_server(spec.chat_id, user_data)
-            if not resolved_server:
-                cm = get_config_manager()
-                accessible = cm.get_accessible_servers(spec.user_id)
-                resolved_server = accessible[0] if accessible else None
+        if not usable(resolved_server):
+            accessible = cm.get_accessible_servers(subject_id)
+            resolved_server = accessible[0] if accessible else None
 
         # The durable conversation behind this session. An empty id mints a new
         # one; a supplied id replays that transcript's tail into the opening
