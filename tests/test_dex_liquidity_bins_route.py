@@ -104,6 +104,7 @@ def route_client(monkeypatch):
     def build(allowed=True, client=None, client_error=None):
         cm = FakeConfigManager(allowed, client, client_error)
         monkeypatch.setattr(dex_routes, "get_config_manager", lambda: cm)
+        monkeypatch.setattr("condor.web.auth.get_config_manager", lambda: cm)
         app = FastAPI()
         app.include_router(dex_routes.router)
         app.dependency_overrides[get_current_user] = lambda: USER

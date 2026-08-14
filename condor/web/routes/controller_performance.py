@@ -3,11 +3,11 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Query
 
 from condor.fetchers.bot_performance import extract_snapshots as _extract_snapshots
 from condor.fetchers.bot_performance import fetch_all_bot_performance
-from condor.web.auth import get_current_user
+from condor.web.auth import require_server_access
 from condor.web.models import (
     BotRunInfo,
     BotRunsResponse,
@@ -101,14 +101,12 @@ async def get_bot_runs(
     deployment_status: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=500),
     offset: int = Query(0, ge=0),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Get bot runs with optional filtering."""
     import asyncio
 
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -154,12 +152,10 @@ async def get_bot_runs(
 async def delete_bot_run(
     name: str,
     bot_run_id: int,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Delete an archived bot run by its numeric ID."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -198,12 +194,10 @@ def _extract_runs_list(result) -> list[dict]:
 async def get_latest_controller_performance(
     name: str,
     bot_name: Optional[str] = Query(None),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Get the most recent performance snapshot for each bot/controller."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -243,12 +237,10 @@ async def get_controller_performance_history(
     interval: str = Query("5m"),
     limit: Optional[int] = Query(None, ge=1, le=5000),
     cursor: Optional[str] = Query(None),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Get historical controller performance with pagination and interval sampling."""
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 

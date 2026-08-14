@@ -185,6 +185,9 @@ def _client(monkeypatch) -> TestClient:
     monkeypatch.setattr(
         market_routes, "get_config_manager", lambda: FakeConfigManager()
     )
+    monkeypatch.setattr(
+        "condor.web.auth.get_config_manager", lambda: FakeConfigManager()
+    )
     app = FastAPI()
     app.include_router(market_routes.router)
     app.dependency_overrides[get_current_user] = lambda: USER

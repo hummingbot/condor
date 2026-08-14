@@ -227,11 +227,20 @@ def test_an_unknown_period_is_a_bad_request(summary_env):
     assert exc.value.status_code == 400
 
 
-def test_access_is_checked_before_any_work(summary_env, monkeypatch):
-    """No server access, no walk."""
-    client = summary_env([_executor(0)], {})
+def test_access_is_checked_before_any_work(monkeypatch):
+    """No server access, no walk.
+
+    Since SEC-147 the guard is the ``require_server_access`` dependency, which
+    FastAPI resolves before the endpoint coroutine is ever awaited — so "before
+    any work" is structural, not a matter of statement order in the body. That
+    the route carries the dependency is pinned by
+    ``tests/test_web_server_access_dependency.py``.
+    """
+    from condor.web.auth import require_server_access
+    from condor.web.models import WebUser
+
     monkeypatch.setattr(
-        "condor.web.routes.executors.get_config_manager",
+        "condor.web.auth.get_config_manager",
         lambda: type(
             "_Denied",
             (),
@@ -240,10 +249,9 @@ def test_access_is_checked_before_any_work(summary_env, monkeypatch):
     )
 
     with pytest.raises(HTTPException) as exc:
-        _summary()
+        asyncio.run(require_server_access("srv", user=WebUser(id=1, role="user")))
 
     assert exc.value.status_code == 403
-    assert client.calls == []
 
 
 # ── the pure aggregation ──

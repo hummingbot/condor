@@ -8,7 +8,7 @@ import secrets
 import time
 from typing import Optional
 
-from fastapi import Depends, HTTPException, WebSocket, status
+from fastapi import Depends, HTTPException, Query, WebSocket, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError, jwt
 
@@ -152,6 +152,59 @@ async def get_current_user(
         first_name=payload.get("first_name", ""),
         role=role.value,
     )
+
+
+# ── Server-scoped access (SEC-147) ──
+
+
+def check_server_access(user_id: int, server_name: str) -> None:
+    """Raise ``403 No access`` unless ``user_id`` may use ``server_name``.
+
+    Single implementation of the guard that used to be hand-copied into every
+    server-scoped web endpoint. ``has_server_access`` defaults to
+    :attr:`ServerPermission.TRADER`, which is the level every web call already
+    required. Endpoints that need a *stronger* level (owner-only credential and
+    server mutations in ``routes/settings.py``) still layer their own check on
+    top of this one — this is the floor, never the ceiling.
+
+    Endpoints whose server name arrives in the request **body** call this
+    directly (a path/query dependency cannot see the body); endpoints that take
+    it as a path or query parameter use the ``require_server_access*``
+    dependencies below, which are thin wrappers over this function.
+    """
+    if not get_config_manager().has_server_access(user_id, server_name):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access")
+
+
+async def require_server_access(
+    name: str, user: WebUser = Depends(get_current_user)
+) -> WebUser:
+    """Auth dependency for endpoints routed under ``/servers/{name}/...``.
+
+    Drop-in replacement for ``Depends(get_current_user)``: it returns the same
+    :class:`WebUser`, having first enforced access to the ``{name}`` path
+    parameter. If the route has no ``{name}`` path parameter FastAPI treats it
+    as a required *query* parameter and the request fails with 422 — the guard
+    fails closed, never open.
+    """
+    check_server_access(user.id, name)
+    return user
+
+
+async def require_server_access_by_server_name(
+    server_name: str, user: WebUser = Depends(get_current_user)
+) -> WebUser:
+    """Same as :func:`require_server_access` for a ``{server_name}`` path param."""
+    check_server_access(user.id, server_name)
+    return user
+
+
+async def require_server_access_query(
+    server: str = Query(...), user: WebUser = Depends(get_current_user)
+) -> WebUser:
+    """Same as :func:`require_server_access` for a ``?server=`` query param."""
+    check_server_access(user.id, server)
+    return user
 
 
 # ── One-time login tokens (generated from Telegram /web command) ──

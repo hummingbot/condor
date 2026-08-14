@@ -106,6 +106,7 @@ def env(tmp_path, monkeypatch):
         "config_manager.get_config_manager", lambda: FakeConfigManager()
     )
     monkeypatch.setattr(session_routes, "get_config_manager", FakeConfigManager)
+    monkeypatch.setattr("condor.web.auth.get_config_manager", FakeConfigManager)
     monkeypatch.setattr("handlers.agents._shared.DEFAULT_AGENT", FALLBACK)
     monkeypatch.setattr("condor.web.routes.chat_ws.DEFAULT_AGENT", FALLBACK)
 

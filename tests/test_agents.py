@@ -649,8 +649,7 @@ def test_consult_denies_server_without_access(monkeypatch):
 
     monkeypatch.setattr(consult_module, "run_consult", _fail_run_consult)
     monkeypatch.setattr(
-        config_manager,
-        "get_config_manager",
+        "condor.web.auth.get_config_manager",
         lambda: SimpleNamespace(has_server_access=lambda uid, name: False),
     )
 
@@ -679,8 +678,7 @@ def test_consult_forces_caller_user_id(monkeypatch):
 
     monkeypatch.setattr(consult_module, "run_consult", _capture_run_consult)
     monkeypatch.setattr(
-        config_manager,
-        "get_config_manager",
+        "condor.web.auth.get_config_manager",
         lambda: SimpleNamespace(has_server_access=lambda uid, name: True),
     )
 

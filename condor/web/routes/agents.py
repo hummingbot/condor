@@ -39,7 +39,7 @@ from condor.agents.sessions_index import (
     list_session_snapshots,
     list_sessions,
 )
-from condor.web.auth import get_current_user
+from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import ReportSummary, WebUser
 
 # ── Simple in-memory TTL cache for performance data ──
@@ -1168,10 +1168,8 @@ async def update_agent_config(
     # A pin decides which account the Agent's tools trade on, so it is gated
     # like every other server-scoped write. An empty string clears the pin and
     # needs no access at all.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
 
     # Picker sentinels ("openrouter:", "custom:") are drill-downs that open a
     # model list, not startable models: stored here they would fail at every
@@ -1228,10 +1226,8 @@ async def consult_agent(
     # routes do — otherwise any session could consult against a server it was
     # never granted (IDOR). Only enforce when a server is actually requested;
     # serverless consults need no server scope.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
 
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
@@ -1288,10 +1284,8 @@ async def delegate_agent(
 
     # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
     # to ``server_name``'s live credentials, so refuse a server the caller can't access.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
 
     conversation_id = await _conversation_for_session(req.session_key)
 
@@ -1757,8 +1751,7 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     server_name = config_dict.get("server_name")
     asked_for_it = bool(req.config and req.config.get("server_name"))
     if server_name and (asked_for_it or cm.get_server(server_name)):
-        if not cm.has_server_access(user_id, server_name):
-            raise HTTPException(status_code=403, detail="No access")
+        check_server_access(user_id, server_name)
 
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context

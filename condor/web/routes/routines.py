@@ -14,7 +14,11 @@ from condor import routine_hooks
 from condor.reports import list_reports
 from condor.routine_store import get_routine_store
 from condor.runtime import client
-from condor.web.auth import get_current_user
+from condor.web.auth import (
+    check_server_access,
+    get_current_user,
+    require_server_access_by_server_name,
+)
 from condor.web.models import WebUser
 from config_manager import get_config_manager
 
@@ -141,12 +145,9 @@ async def run_routine(
     server_name: str,
     routine_name: str,
     body: RunRequest,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_by_server_name),
 ):
     """Execute a one-shot routine. Returns instance_id for polling."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, server_name):
-        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.execute(
@@ -165,12 +166,9 @@ async def schedule_routine(
     server_name: str,
     routine_name: str,
     body: ScheduleRequest,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_by_server_name),
 ):
     """Schedule a routine at an interval. Returns instance_id."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, server_name):
-        raise HTTPException(status_code=403, detail="No access")
     store = get_routine_store()
     try:
         instance_id = await store.schedule(
@@ -191,9 +189,7 @@ async def run_routine_v2(
     user: WebUser = Depends(get_current_user),
 ):
     """Execute a routine (supports names with slashes like agent/routine)."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, body.server_name):
-        raise HTTPException(status_code=403, detail="No access")
+    check_server_access(user.id, body.server_name)
     store = get_routine_store()
     try:
         instance_id = await store.execute(
@@ -221,9 +217,7 @@ async def start_continuous_v2(
     an agent starts from chat lives in the main process's store — visible in the
     dashboard and stoppable from it — instead of dying with the MCP subprocess.
     """
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, body.server_name):
-        raise HTTPException(status_code=403, detail="No access")
+    check_server_access(user.id, body.server_name)
     store = get_routine_store()
     try:
         instance_id = await store.start_continuous(
@@ -246,9 +240,7 @@ async def schedule_routine_v2(
     user: WebUser = Depends(get_current_user),
 ):
     """Schedule a routine (supports names with slashes like agent/routine)."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, body.server_name):
-        raise HTTPException(status_code=403, detail="No access")
+    check_server_access(user.id, body.server_name)
     store = get_routine_store()
     try:
         instance_id = await store.schedule(

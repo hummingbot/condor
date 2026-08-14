@@ -258,6 +258,10 @@ def _config(monkeypatch, **kw):
     monkeypatch.setattr(
         code_routes, "get_config_manager", lambda: _FakeConfigManager(**kw)
     )
+    # The server-access guard moved to condor.web.auth (SEC-147).
+    monkeypatch.setattr(
+        "condor.web.auth.get_config_manager", lambda: _FakeConfigManager(**kw)
+    )
 
 
 def test_the_route_runs_the_snippet_as_the_authenticated_caller(monkeypatch):
@@ -418,8 +422,13 @@ def test_the_mcp_run_code_path_still_works_end_to_end(monkeypatch, seat):
         def get_user_role(self, user_id):
             return UserRole.ADMIN if user_id == seat_user_id else UserRole.PENDING
 
-    monkeypatch.setattr(web_auth, "get_config_manager", lambda: _AuthConfigManager())
+        def has_server_access(self, user_id, server_name, *a, **kw):
+            return True
+
+    # _config also stubs condor.web.auth, so install the auth-side manager last:
+    # in production both answers come from the one real ConfigManager.
     _config(monkeypatch, allowed=True, admins={seat_user_id})
+    monkeypatch.setattr(web_auth, "get_config_manager", lambda: _AuthConfigManager())
 
     async def _execute(code, **kw):
         return {

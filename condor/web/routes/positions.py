@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends
 
-from condor.web.auth import get_current_user
+from condor.web.auth import require_server_access
 from condor.web.models import WebUser
 from config_manager import get_config_manager
 
@@ -46,11 +46,9 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
 @router.get("/servers/{name}/positions")
 async def get_consolidated_positions(
     name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 

@@ -5,7 +5,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from condor.web.auth import get_current_user
+from condor.web.auth import get_current_user, require_server_access_query
 from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
@@ -151,11 +151,9 @@ async def set_default_server(name: str, user: WebUser = Depends(get_current_user
 @router.get("/gateway/status")
 async def gateway_status(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         info = await client.gateway.get_status()
@@ -176,11 +174,9 @@ async def gateway_status(
 async def gateway_pull(
     req: GatewayPullRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         # Parse "image:tag" format (e.g. "hummingbot/gateway:latest")
@@ -197,11 +193,9 @@ async def gateway_pull(
 @router.get("/gateway/pull-status")
 async def gateway_pull_status(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.docker.get_pull_status()
@@ -215,11 +209,9 @@ async def gateway_pull_status(
 async def gateway_start(
     req: GatewayStartRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.start(
@@ -237,11 +229,9 @@ async def gateway_start(
 @router.post("/gateway/stop")
 async def gateway_stop(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.stop()
@@ -254,11 +244,9 @@ async def gateway_stop(
 @router.post("/gateway/restart")
 async def gateway_restart(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.restart()
@@ -271,11 +259,9 @@ async def gateway_restart(
 @router.get("/gateway/logs")
 async def gateway_logs(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         logs = await client.gateway.get_logs()
@@ -291,11 +277,9 @@ async def gateway_logs(
 @router.get("/gateway/networks")
 async def gateway_networks(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.list_networks()
@@ -312,11 +296,9 @@ async def gateway_networks(
 async def gateway_network_config(
     network_id: str,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         config = await client.gateway.get_network_config(network_id)
@@ -333,11 +315,9 @@ async def gateway_network_update(
     network_id: str,
     req: GatewayNetworkUpdateRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.update_network_config(network_id, req.config)
@@ -355,11 +335,9 @@ async def gateway_network_update(
 @router.get("/gateway/wallets")
 async def gateway_wallets(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         wallets = await client.accounts.list_gateway_wallets()
@@ -388,11 +366,9 @@ async def _gateway_default_address(client, chain: str) -> str | None:
 async def gateway_wallet_add(
     req: GatewayWalletAddRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     # Gateway's add-wallet always promotes the new key to the chain default, so when the user
     # opted out we capture the existing default first and restore it after the import.
@@ -439,11 +415,9 @@ async def gateway_wallet_add(
 async def gateway_wallet_set_default(
     req: GatewayWalletDefaultRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.accounts.set_default_gateway_wallet(
@@ -467,11 +441,9 @@ async def gateway_wallet_remove(
     chain: str,
     address: str,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.accounts.remove_gateway_wallet(
@@ -554,11 +526,9 @@ async def update_voice_settings(
 @router.get("/credentials")
 async def list_credentials(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         creds_raw = await client.accounts.list_account_credentials("master_account")
@@ -589,11 +559,8 @@ async def list_credentials(
 async def list_connectors(
     server: str = Query(...),
     type: str = Query(None),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -629,11 +596,9 @@ async def list_connectors(
 async def connector_config_map(
     name: str,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         config_map = await client.connectors.get_config_map(name)
@@ -649,11 +614,9 @@ async def connector_config_map(
 async def add_credential(
     req: AddCredentialRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     # Credentials are server configuration, not trading: a shared trader must not
     # overwrite the owner's exchange keys. Same line update_server/delete_server draw.
     _require_owner(cm, user.id, server)
@@ -680,11 +643,9 @@ async def add_credential(
 async def delete_credential(
     connector: str,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     # Deleting a key kills the owner's running bots' connectivity — owner only.
     _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)

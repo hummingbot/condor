@@ -42,7 +42,7 @@ _candle_inflight: dict[tuple, tuple[asyncio.AbstractEventLoop, asyncio.Task]] = 
 
 
 from condor.fetchers.market_data import fetch_historical_candles
-from condor.web.auth import get_current_user
+from condor.web.auth import get_current_user, require_server_access
 from condor.web.models import (
     CandleData,
     MarketPriceResponse,
@@ -83,10 +83,7 @@ async def _fetch_dex_candles(
 
 
 @router.get("/servers/{name}/market/connectors")
-async def get_connectors(name: str, user: WebUser = Depends(get_current_user)):
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
+async def get_connectors(name: str, user: WebUser = Depends(require_server_access)):
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -101,11 +98,10 @@ async def get_connectors(name: str, user: WebUser = Depends(get_current_user)):
 
 
 @router.get("/servers/{name}/market/connected-exchanges")
-async def get_connected_exchanges(name: str, user: WebUser = Depends(get_current_user)):
+async def get_connected_exchanges(
+    name: str, user: WebUser = Depends(require_server_access)
+):
     """Get connectors that have credentials configured (accounts connected)."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -120,7 +116,7 @@ async def get_connected_exchanges(name: str, user: WebUser = Depends(get_current
 
 
 @router.get("/servers/{name}/market/venues")
-async def get_venues(name: str, user: WebUser = Depends(get_current_user)):
+async def get_venues(name: str, user: WebUser = Depends(require_server_access)):
     """Venues the trade panel can offer, each with its independent traits.
 
     ``{"venues": [{"name", "hummingbot_market_data", "clmm_lp"}, ...]}``. The panel
@@ -132,9 +128,6 @@ async def get_venues(name: str, user: WebUser = Depends(get_current_user)):
     so that failure is never cached; a gateway-only failure degrades inside the
     fetcher and still reports the credentialed venues.
     """
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -166,7 +159,7 @@ async def get_dex_pool(
         ..., description="Gateway network, e.g. solana-mainnet-beta"
     ),
     trading_pair: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """The pool a DEX pair trades in, and whether an LP position can be opened in it.
 
@@ -179,9 +172,6 @@ async def get_dex_pool(
     ask for a pool address by hand, which is a state to render rather than a failure
     to handle.
     """
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from handlers.dex.pool_data import lp_provider_for_dex, resolve_pool_info
 
@@ -220,11 +210,8 @@ async def get_price(
     name: str,
     connector: str = Query(...),
     trading_pair: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -263,12 +250,9 @@ async def get_price(
 async def get_rates(
     name: str,
     body: dict,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Cross-rates resolved from Condor's cached ticker pool (replaces the rate oracle)."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     trading_pairs = body.get("trading_pairs") or []
     if not trading_pairs:
@@ -289,11 +273,8 @@ async def get_rates(
 async def get_trading_rules(
     name: str,
     connector: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.fetchers._identifiers import IdentifierError, validate_identifier
     from condor.server_data_service import ServerDataType, get_server_data_service
@@ -339,12 +320,9 @@ async def get_trading_rules(
 async def get_tickers(
     name: str,
     connector: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """24h tickers for a connector, sorted by USD volume (highest first)."""
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.market_rates import get_connector_tickers
 
@@ -378,11 +356,9 @@ async def get_order_book(
     connector: str = Query(...),
     trading_pair: str = Query(...),
     depth: int = Query(default=20, ge=1, le=100),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
@@ -503,11 +479,9 @@ async def get_candles(
         "connector (e.g. solana-mainnet-beta) has no CandlesFactory feed, so "
         "candles come from GeckoTerminal by pool instead.",
     ),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     if pool_address and not _POOL_ADDRESS_RE.match(pool_address):
         raise HTTPException(status_code=400, detail="Invalid pool_address")

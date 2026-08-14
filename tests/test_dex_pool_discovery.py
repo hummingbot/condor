@@ -29,7 +29,7 @@ def run(coro):
 
 
 @pytest.fixture(autouse=True)
-def _clear_caches():
+def _clear_caches(monkeypatch):
     for cache in (
         pool_data._gecko_page_cache,
         pool_data._gecko_dexes_cache,
@@ -38,6 +38,11 @@ def _clear_caches():
         pool_data._multi_pool_cache,
     ):
         cache.clear()
+    # No test in this module may reach the real GeckoTerminal — and a Gateway
+    # listing now looks pools up there too, to fill the figures Orca's connector
+    # leaves null. The empty stand-in is overridden by the ``fake_gecko`` fixture
+    # wherever a test actually wants rows back.
+    monkeypatch.setattr(pool_data, "_gecko_client", lambda: FakeGecko())
     yield
 
 
@@ -468,6 +473,72 @@ def test_gateway_lists_are_cached_per_connector_and_search():
     assert len(clmm.calls) == 2
 
 
+# ── gateway rows filled from GeckoTerminal ──
+
+
+def test_gateway_gaps_are_filled_from_gecko(fake_gecko):
+    """Orca reports TVL and nothing else; the browser's other columns come from gecko."""
+    client = fake_gecko(pd.DataFrame([gecko_row(dex_id="orca")]))
+    clmm = FakeClmm(
+        {"pools": [gateway_row(connector="orca", volume_24h=None, apr=None)]}
+    )
+    pool = run(pool_data.list_gateway_pools(FakeClient(clmm), "orca"))[0]
+    assert pool["volume_24h"] == 4_200_000.0
+    assert pool["price_change_24h"] == -3.5
+    # The connector's own TVL stands; gecko's only fills a gap.
+    assert pool["reserve_usd"] == 4_500_000.0
+    assert ("multi", "solana", (POOL,)) in client.calls
+
+
+def test_missing_gateway_yield_is_estimated_from_volume_and_fee_tier(fake_gecko):
+    fake_gecko(pd.DataFrame([gecko_row(dex_id="orca")]))
+    clmm = FakeClmm(
+        {"pools": [gateway_row(connector="orca", volume_24h=None, apr=None)]}
+    )
+    pool = run(pool_data.list_gateway_pools(FakeClient(clmm), "orca"))[0]
+    # 4.2M of volume at 0.2% over 4.5M of TVL.
+    fees = 4_200_000.0 * 0.2 / 100
+    assert pool["fees_24h"] == pytest.approx(fees)
+    assert pool["apr"] == pytest.approx(fees / 4_500_000.0 * 100)
+    assert pool["apy"] > pool["apr"]
+    assert pool["apr_estimated"] is True
+
+
+def test_a_reported_yield_is_never_overwritten(fake_gecko):
+    fake_gecko(pd.DataFrame([gecko_row()]))
+    clmm = FakeClmm({"pools": [gateway_row(volume_24h=None)]})
+    pool = run(pool_data.list_gateway_pools(FakeClient(clmm), "meteora"))[0]
+    assert pool["apr"] == 42.5
+    assert "apr_estimated" not in pool
+
+
+def test_a_reported_volume_is_never_overwritten(fake_gecko):
+    fake_gecko(pd.DataFrame([gecko_row()]))
+    clmm = FakeClmm({"pools": [gateway_row()]})
+    pool = run(pool_data.list_gateway_pools(FakeClient(clmm), "meteora"))[0]
+    assert pool["volume_24h"] == 1_200_000.0
+
+
+def test_a_failed_lookup_leaves_the_rows_alone(fake_gecko):
+    fake_gecko(error=RuntimeError("gecko down"))
+    clmm = FakeClmm({"pools": [gateway_row(volume_24h=None, apr=None)]})
+    pool = run(pool_data.list_gateway_pools(FakeClient(clmm), "orca"))[0]
+    assert pool["volume_24h"] is None
+    assert pool["reserve_usd"] == 4_500_000.0
+
+
+def test_the_filled_page_is_what_gets_cached(fake_gecko):
+    """The extra request is spent once per page, not once per viewer of it."""
+    client = fake_gecko(pd.DataFrame([gecko_row(dex_id="orca")]))
+    clmm = FakeClmm({"pools": [gateway_row(connector="orca", volume_24h=None)]})
+    gateway_client = FakeClient(clmm)
+    run(pool_data.list_gateway_pools(gateway_client, "orca"))
+    second = run(pool_data.list_gateway_pools(gateway_client, "orca"))
+    assert len(clmm.calls) == 1
+    assert len([c for c in client.calls if c[0] == "multi"]) == 1
+    assert second[0]["volume_24h"] == 4_200_000.0
+
+
 # ── fetch_pool_by_address ──
 
 
@@ -525,6 +596,7 @@ def route_client(monkeypatch):
     def build(allowed=True, client=None, client_error=None):
         cm = FakeConfigManager(allowed, client, client_error)
         monkeypatch.setattr(dex_routes, "get_config_manager", lambda: cm)
+        monkeypatch.setattr("condor.web.auth.get_config_manager", lambda: cm)
         app = FastAPI()
         app.include_router(dex_routes.router)
         app.dependency_overrides[get_current_user] = lambda: USER

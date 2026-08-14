@@ -378,18 +378,24 @@ def test_route_normalizes_a_none_answer(monkeypatch):
 
 
 def test_route_rejects_a_caller_without_access(monkeypatch):
+    """The guard is the ``require_server_access`` dependency (SEC-147).
+
+    It runs before the endpoint body, so the refusal is asserted on the
+    dependency itself; that the route actually carries it is pinned
+    structurally by ``tests/test_web_server_access_dependency.py``.
+    """
     from fastapi import HTTPException
 
+    from condor.web.auth import require_server_access
     from condor.web.models import WebUser
-    from condor.web.routes.market import get_venues
 
     class _Cm:
         def has_server_access(self, user_id, name):
             return False
 
     monkeypatch.setattr(
-        "condor.web.routes.market.get_config_manager", lambda: _Cm(), raising=True
+        "condor.web.auth.get_config_manager", lambda: _Cm(), raising=True
     )
     with pytest.raises(HTTPException) as e:
-        asyncio.run(get_venues("srv", user=WebUser(id=1, role="user")))
+        asyncio.run(require_server_access("srv", user=WebUser(id=1, role="user")))
     assert e.value.status_code == 403

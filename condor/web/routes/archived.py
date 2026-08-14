@@ -8,7 +8,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from condor.fetchers.executors import normalize_executor_side
-from condor.web.auth import get_current_user
+from condor.web.auth import require_server_access
 from condor.web.models import (
     ArchivedBotPerformance,
     ArchivedBotSummary,
@@ -309,10 +309,8 @@ async def _fetch_and_cache_performance(
 
 
 @router.get("/servers/{name}/archived")
-async def list_archived_bots(name: str, user: WebUser = Depends(get_current_user)):
+async def list_archived_bots(name: str, user: WebUser = Depends(require_server_access)):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -357,11 +355,9 @@ async def get_archived_performance(
     include_executors: bool = Query(
         False, description="Include full executor list in response"
     ),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -380,11 +376,9 @@ async def get_archived_executors(
     db_path: str = Query(..., description="Database path"),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     cache_key = (name, db_path)
 

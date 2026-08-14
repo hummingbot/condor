@@ -18,7 +18,7 @@ import re
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from condor import dex_candles
-from condor.web.auth import get_current_user
+from condor.web.auth import require_server_access
 from condor.web.models import WebUser
 from config_manager import get_config_manager
 
@@ -93,7 +93,7 @@ async def list_pools(
     ),
     limit: int = Query(default=20, ge=1, le=100),
     page: int = Query(default=1, ge=1, description="1-based page of `limit` rows"),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Pools to browse, from one of the two upstreams.
 
@@ -110,8 +110,6 @@ async def list_pools(
     something neither upstream reports.
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from handlers.dex.pool_data import list_gateway_pools, list_gecko_pools_page
 
@@ -163,7 +161,7 @@ async def list_pools(
 async def list_dexes(
     name: str,
     network: str = Query(default="solana-mainnet-beta"),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """The venues on a chain, for the pool browser's dex filter.
 
@@ -171,9 +169,6 @@ async def list_dexes(
     indexing is filterable without a deploy. Empty when the lookup fails — a filter
     with no options is one the browser simply does not show.
     """
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from handlers.dex.pool_data import list_gecko_dexes
 
@@ -183,7 +178,7 @@ async def list_dexes(
 @router.get("/servers/{name}/dex/chains")
 async def list_chains(
     name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """The chains the pool browser can offer, from Gateway rather than a constant.
 
@@ -197,8 +192,6 @@ async def list_chains(
     has at least the chain it defaults to.
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from handlers.dex.pool_data import NETWORK_TO_GECKO
 
@@ -241,7 +234,7 @@ async def list_pools_by_address(
     name: str,
     addresses: str = Query(description="Comma-separated pool addresses (max 30)"),
     network: str = Query(default="solana-mainnet-beta"),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Several pools by address at once, for the favourites view.
 
@@ -253,9 +246,6 @@ async def list_pools_by_address(
     Declared above ``/dex/pools/{pool_address}`` deliberately: a path segment would
     otherwise be read as an address.
     """
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from handlers.dex.pool_data import fetch_pools_by_addresses
 
@@ -270,16 +260,13 @@ async def get_pool(
     name: str,
     pool_address: str,
     network: str = Query(default="solana-mainnet-beta"),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """One pool by address, so ``/dex/{network}/{address}`` renders from a URL alone.
 
     404 when the pool is genuinely unknown *or* the lookup failed: either way the
     workspace has nothing to draw, and the two are indistinguishable to the user.
     """
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     if not _POOL_ADDRESS_RE.match(pool_address):
         raise HTTPException(status_code=400, detail="Invalid pool_address")
@@ -326,7 +313,7 @@ async def get_pool_bins(
         description="The pool's Gateway CLMM connector, or the GeckoTerminal "
         "dex_id it is derived from (meteora-dlmm → meteora).",
     ),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """The pool's liquidity bins, for the depth column beside its chart.
 
@@ -341,8 +328,6 @@ async def get_pool_bins(
     handler injects a client and shapes the answer.
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     if not _POOL_ADDRESS_RE.match(pool_address):
         raise HTTPException(status_code=400, detail="Invalid pool_address")

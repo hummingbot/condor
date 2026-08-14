@@ -61,6 +61,11 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "config_manager.get_config_manager", lambda: FakeConfigManager()
     )
+    # The server-access guard lives in condor.web.auth (SEC-147), which binds
+    # get_config_manager at import time — patch it there too.
+    monkeypatch.setattr(
+        "condor.web.auth.get_config_manager", lambda: FakeConfigManager()
+    )
     monkeypatch.setattr(engine_module, "TickEngine", FakeEngine)
     FakeEngine.spawned = []
     AgentStore().create(name="Brigado", description="BRL market making")

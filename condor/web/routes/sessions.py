@@ -22,7 +22,7 @@ from condor.runtime import client as runtime
 from condor.runtime import conversations
 from condor.runtime.binding import UnknownAgent, remember_model_choice
 from condor.runtime.sse import SSE_HEADERS, event_stream
-from condor.web.auth import get_current_user
+from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import WebUser
 from config_manager import get_config_manager
 
@@ -253,10 +253,8 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
     # gate it exactly like consult/delegate do — otherwise a switch would be a
     # way to reach a server the caller was never granted (IDOR). Checked before
     # the teardown, so a refused switch leaves the session running as it was.
-    if body.server_name and not get_config_manager().has_server_access(
-        info.user_id or 0, body.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if body.server_name:
+        check_server_access(info.user_id or 0, body.server_name)
 
     # Unspecified fields keep their current value, so "new" is just a switch
     # to the same identity.

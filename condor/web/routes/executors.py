@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 from condor.fetchers.executors import EXECUTORS_POLL_MAX, MAX_EXECUTORS_FETCH
 from condor.fetchers.executors import extract_executors_list as _extract_executors_list
 from condor.fetchers.executors import fetch_all_executors, summarize_executors_by_quote
-from condor.web.auth import get_current_user
+from condor.web.auth import require_server_access
 from condor.web.models import (
     CreateExecutorRequest,
     ExecutorInfo,
@@ -55,11 +55,9 @@ async def list_executors(
         le=MAX_EXECUTORS_FETCH,
         description="Max executors to return (0 = default SDS cache)",
     ),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -130,7 +128,7 @@ async def list_executors_page(
     trading_pair: str = Query(default=""),
     status: str = Query(default=""),
     controller_id: str = Query(default=""),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Fetch a single page of executors with a next_cursor for progressive loading.
 
@@ -142,8 +140,6 @@ async def list_executors_page(
     from the API instead, so the stream continues past the poll's page budget.
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     has_filters = bool(executor_type or trading_pair or status or controller_id)
 
@@ -263,7 +259,7 @@ async def _usd_summary(
 async def executors_summary(
     name: str,
     period: str = Query(default="1D", description="Window: 1D, 1W or 1M"),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """PnL, volume and executor count over a period, across the whole history.
 
@@ -278,8 +274,6 @@ async def executors_summary(
     at its one request per tick.
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     period = period.upper()
     window = _PERIOD_SECONDS.get(period)
@@ -313,11 +307,9 @@ async def executors_summary(
 async def create_executor_endpoint(
     name: str,
     body: CreateExecutorRequest,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -341,11 +333,9 @@ async def stop_executor_endpoint(
     name: str,
     executor_id: str,
     keep_position: bool = Query(default=False),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -361,11 +351,9 @@ async def stop_executor_endpoint(
 @router.get("/servers/{name}/executors/positions")
 async def get_positions_held(
     name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
@@ -396,11 +384,9 @@ async def clear_position_held(
     connector: str,
     pair: str,
     controller_id: str = Query(default=""),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:

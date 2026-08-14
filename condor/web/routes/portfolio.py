@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
-from condor.web.auth import get_current_user
+from condor.web.auth import require_server_access
 from condor.web.models import (
     BalanceItem,
     ConnectorBalance,
@@ -27,11 +27,9 @@ router = APIRouter(tags=["portfolio"])
 async def get_portfolio(
     name: str,
     refresh: bool = Query(False),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access to this server")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -174,11 +172,8 @@ async def get_portfolio_history(
     name: str,
     range: str = Query("1D", pattern="^(1D|1W|1M|3M)$"),
     breakdown: bool = Query(False),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access to this server")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 

@@ -7,7 +7,7 @@ from pydantic import BaseModel
 
 from condor.backtest_store import get_backtest_store
 from condor.backtesting import coerce_controller_config, normalize_backtest_task
-from condor.web.auth import get_current_user
+from condor.web.auth import require_server_access
 from condor.web.models import WebUser
 from config_manager import get_config_manager
 
@@ -28,11 +28,9 @@ class SubmitBacktestRequest(BaseModel):
 async def submit_backtest_task(
     name: str,
     body: SubmitBacktestRequest,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -56,11 +54,9 @@ async def submit_backtest_task(
 @router.get("/servers/{name}/backtesting/tasks")
 async def list_backtest_tasks(
     name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     store = get_backtest_store()
 
@@ -105,11 +101,9 @@ async def list_backtest_tasks(
 async def get_backtest_task(
     name: str,
     task_id: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     store = get_backtest_store()
 
@@ -139,11 +133,9 @@ async def get_backtest_task(
 async def delete_backtest_task(
     name: str,
     task_id: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     store = get_backtest_store()
     store.delete_result(task_id)
@@ -162,11 +154,8 @@ async def delete_backtest_task(
 @router.get("/servers/{name}/backtesting/saved")
 async def list_saved_results(
     name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     store = get_backtest_store()
     return [normalize_backtest_task(entry) for entry in store.list_results(name)]
@@ -176,11 +165,8 @@ async def list_saved_results(
 async def delete_saved_result(
     name: str,
     task_id: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     store = get_backtest_store()
     deleted = store.delete_result(task_id)

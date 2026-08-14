@@ -84,6 +84,7 @@ def client_and_store(monkeypatch):
     cm = FakeConfigManager(allowed={(USER.id, OWNED_SERVER)})
     monkeypatch.setattr(routines_module, "get_routine_store", lambda: store)
     monkeypatch.setattr(routines_module, "get_config_manager", lambda: cm)
+    monkeypatch.setattr("condor.web.auth.get_config_manager", lambda: cm)
 
     app = FastAPI()
     app.include_router(routines_module.router)

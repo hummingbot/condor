@@ -465,11 +465,21 @@ def test_route_refuses_an_address_that_is_not_one(monkeypatch):
 
 
 def test_route_rejects_a_caller_without_access(monkeypatch):
+    """Refused by the ``require_server_access`` dependency (SEC-147), which
+    runs before the endpoint body — so nothing is resolved. That the route
+    carries it is pinned by ``tests/test_web_server_access_dependency.py``."""
     from fastapi import HTTPException
 
-    async def _resolve(_net, _pair):
-        raise AssertionError("access is checked before anything is resolved")
+    from condor.web.auth import require_server_access
+    from condor.web.models import WebUser
 
+    class _Cm:
+        def has_server_access(self, user_id, name):
+            return False
+
+    monkeypatch.setattr(
+        "condor.web.auth.get_config_manager", lambda: _Cm(), raising=True
+    )
     with pytest.raises(HTTPException) as e:
-        _call_route(monkeypatch, _resolve, access=False)
+        asyncio.run(require_server_access("srv", user=WebUser(id=1, role="user")))
     assert e.value.status_code == 403

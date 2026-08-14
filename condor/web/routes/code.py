@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from condor.code_runner import DEFAULT_TIMEOUT, MAX_TIMEOUT, execute_code
-from condor.web.auth import get_current_user
+from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import WebUser
 from config_manager import get_config_manager
 
@@ -81,9 +81,7 @@ async def run_code(
     if not body.code.strip():
         raise HTTPException(400, "code is required")
     if body.server_name:
-        cm = get_config_manager()
-        if not cm.has_server_access(user.id, body.server_name):
-            raise HTTPException(status_code=403, detail="No access")
+        check_server_access(user.id, body.server_name)
 
     return await execute_code(
         body.code,
