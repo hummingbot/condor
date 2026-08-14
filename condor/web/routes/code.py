@@ -8,6 +8,11 @@ for the next reader of ``tools/code.py`` beside ``tools/routines.py``.
 
 There are no GET endpoints on purpose: history is read straight off disk by the
 subprocess, which shares the filesystem, just as routine CRUD is.
+
+A snippet runs unsandboxed in this process, so reaching this route *is* reaching
+everything the bot can reach — config.yml, the web JWT secret, os.environ. The
+server ACL below only picks which client is pre-resolved; it cannot constrain a
+body. The real gate is therefore ``_may_run_code`` (SEC-151).
 """
 
 from __future__ import annotations
@@ -24,6 +29,29 @@ from config_manager import get_config_manager
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/code", tags=["code"])
+
+# The preference an admin sets on a user record to hand them the code runner.
+RUN_CODE_PREFERENCE = "code_run"
+
+
+def _may_run_code(user_id: int) -> bool:
+    """Who is allowed to execute a snippet in the bot's own process.
+
+    Being approved is not enough. ``execute_code`` compiles with full builtins
+    and no sandbox, so any snippet can read every server's credentials, the web
+    JWT secret and ``os.environ`` no matter which servers its caller was granted
+    — running code here is admin-equivalent by construction, and gating it on
+    ``UserRole.USER`` silently voided the whole role model (SEC-151).
+
+    Admins therefore pass, and anyone else only with the explicit
+    ``code_run`` preference an admin sets on their record. That opt-in is what
+    keeps the door open for a non-admin seat whose MCP ``run_code`` tool is a
+    legitimate part of their workflow: it is a grant, not a default.
+    """
+    cm = get_config_manager()
+    return cm.is_admin(user_id) or bool(
+        cm.get_user_preference(user_id, RUN_CODE_PREFERENCE, False)
+    )
 
 
 class RunCodeRequest(BaseModel):
@@ -45,6 +73,11 @@ async def run_code(
     user: WebUser = Depends(get_current_user),
 ):
     """Execute a Python snippet in this process and return its recorded run."""
+    if not _may_run_code(user.id):
+        # Before the 400 and before any store write: a refused caller must not
+        # learn anything, and must leave no CodeRun behind.
+        log.warning("Denied /code/run to user %s (not admin, no grant)", user.id)
+        raise HTTPException(status_code=403, detail="Not allowed to run code")
     if not body.code.strip():
         raise HTTPException(400, "code is required")
     if body.server_name:

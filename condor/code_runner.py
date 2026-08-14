@@ -12,6 +12,12 @@ top-level ``await`` is allowed, ``print()`` is the output and an optional
 that without wrapping the source in a function, which is what keeps traceback
 line numbers pointing at the line the caller actually wrote — the single most
 useful property when the caller is a model about to fix its own snippet.
+
+There is no sandbox and that is deliberate — a snippet is meant to reach exactly
+what a routine reaches. It follows that calling ``execute_code`` is handing over
+the whole process, so every caller must gate it at least as tightly as
+``condor/web/routes/code.py`` does (SEC-151); "the caller is authenticated" is
+not a gate.
 """
 
 from __future__ import annotations

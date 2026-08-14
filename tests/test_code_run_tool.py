@@ -234,6 +234,32 @@ def test_history_rereads_the_index_the_main_process_writes(tmp_path, seat, monke
 # ── the route ──
 
 
+class _FakeConfigManager:
+    """Server ACL + the SEC-151 code-run gate, both answered from the test."""
+
+    def __init__(self, allowed: bool = True, admins=(), granted=()):
+        self.allowed = allowed
+        self.admins = set(admins)
+        self.granted = set(granted)
+
+    def has_server_access(self, user_id, server_name, *a, **kw):
+        return self.allowed
+
+    def is_admin(self, user_id):
+        return user_id in self.admins
+
+    def get_user_preference(self, user_id, key, default=None):
+        if key == code_routes.RUN_CODE_PREFERENCE:
+            return user_id in self.granted
+        return default
+
+
+def _config(monkeypatch, **kw):
+    monkeypatch.setattr(
+        code_routes, "get_config_manager", lambda: _FakeConfigManager(**kw)
+    )
+
+
 def test_the_route_runs_the_snippet_as_the_authenticated_caller(monkeypatch):
     seen: dict = {}
 
@@ -242,9 +268,7 @@ def test_the_route_runs_the_snippet_as_the_authenticated_caller(monkeypatch):
         return {"id": "code_1_aaaa", "status": "ok"}
 
     monkeypatch.setattr(code_routes, "execute_code", _execute)
-    monkeypatch.setattr(
-        code_routes, "get_config_manager", lambda: _FakeConfigManager(True)
-    )
+    _config(monkeypatch, allowed=True, admins={CALLER.id})
 
     body = RunCodeRequest(
         code="result = 1",
@@ -265,18 +289,8 @@ def test_the_route_runs_the_snippet_as_the_authenticated_caller(monkeypatch):
     assert seen["session_key"] == "web:7:slot-1"
 
 
-class _FakeConfigManager:
-    def __init__(self, allowed: bool):
-        self.allowed = allowed
-
-    def has_server_access(self, user_id, server_name, *a, **kw):
-        return self.allowed
-
-
 def test_the_route_refuses_a_server_the_caller_cannot_reach(monkeypatch):
-    monkeypatch.setattr(
-        code_routes, "get_config_manager", lambda: _FakeConfigManager(False)
-    )
+    _config(monkeypatch, allowed=False, admins={CALLER.id})
 
     body = RunCodeRequest(code="result = 1", server_name="someone-elses")
     with pytest.raises(HTTPException) as excinfo:
@@ -286,6 +300,7 @@ def test_the_route_refuses_a_server_the_caller_cannot_reach(monkeypatch):
 
 
 def test_the_route_rejects_an_empty_snippet(monkeypatch):
+    _config(monkeypatch, admins={CALLER.id})
     with pytest.raises(HTTPException) as excinfo:
         asyncio.run(run_code_route(RunCodeRequest(code="  \n "), user=CALLER))
 
@@ -300,6 +315,7 @@ def test_the_route_clamps_the_timeout_to_the_hard_cap(monkeypatch):
         return {}
 
     monkeypatch.setattr(code_routes, "execute_code", _execute)
+    _config(monkeypatch, admins={CALLER.id})
     asyncio.run(run_code_route(RunCodeRequest(code="pass", timeout=9999), user=CALLER))
 
     assert seen["timeout"] == code_routes.MAX_TIMEOUT
@@ -312,6 +328,127 @@ def test_the_route_is_authenticated_like_every_other_router():
     assert any(
         d.call is get_current_user for d in route.dependant.dependencies
     ), "an endpoint that executes arbitrary Python must never be anonymous"
+
+
+# ── SEC-151: the gate in front of an unsandboxed interpreter ──
+
+
+def _never_executes(monkeypatch):
+    """An ``execute_code`` that fails the test if the gate ever lets it run."""
+
+    async def _execute(code, **kw):  # pragma: no cover - must not be reached
+        raise AssertionError("execute_code ran for a caller that must be refused")
+
+    monkeypatch.setattr(code_routes, "execute_code", _execute)
+
+
+def test_an_approved_non_admin_is_refused_before_anything_executes(monkeypatch):
+    """Approved is not enough: the snippet outranks every ACL, so USER cannot."""
+    _never_executes(monkeypatch)
+    _config(monkeypatch, admins={999}, granted=set())
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(run_code_route(RunCodeRequest(code="result = 1"), user=CALLER))
+
+    assert excinfo.value.status_code == 403
+
+
+def test_the_refusal_lands_before_the_empty_snippet_check(monkeypatch):
+    """A refused caller learns nothing about the body it sent."""
+    _never_executes(monkeypatch)
+    _config(monkeypatch, admins={999})
+
+    with pytest.raises(HTTPException) as excinfo:
+        asyncio.run(run_code_route(RunCodeRequest(code="   "), user=CALLER))
+
+    assert excinfo.value.status_code == 403, "403 must win over the 400"
+
+
+def test_an_admin_still_runs_code(monkeypatch):
+    ran: dict = {}
+
+    async def _execute(code, **kw):
+        ran["code"] = code
+        return {"id": "code_1_aaaa", "status": "ok"}
+
+    monkeypatch.setattr(code_routes, "execute_code", _execute)
+    _config(monkeypatch, admins={CALLER.id})
+
+    out = asyncio.run(run_code_route(RunCodeRequest(code="result = 1"), user=CALLER))
+
+    assert out["status"] == "ok"
+    assert ran["code"] == "result = 1"
+
+
+def test_a_non_admin_the_admin_granted_still_runs_code(monkeypatch):
+    """The escape hatch: a seat that legitimately needs run_code is not locked out."""
+    ran: dict = {}
+
+    async def _execute(code, **kw):
+        ran["code"] = code
+        return {"id": "code_1_aaaa", "status": "ok"}
+
+    monkeypatch.setattr(code_routes, "execute_code", _execute)
+    _config(monkeypatch, admins={999}, granted={CALLER.id})
+
+    out = asyncio.run(run_code_route(RunCodeRequest(code="result = 1"), user=CALLER))
+
+    assert out["status"] == "ok"
+    assert ran["code"] == "result = 1"
+
+
+def test_the_mcp_run_code_path_still_works_end_to_end(monkeypatch, seat):
+    """The MCP tool → its JWT → get_current_user → the gated route, for real.
+
+    Only the HTTP hop is elided: the token is minted by the same
+    ``create_jwt(settings.user_id, ...)`` call ``condor_client.call_main_api``
+    makes, and it is resolved by the real ``get_current_user`` dependency, so a
+    gate that rejected the MCP principal would fail here.
+    """
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    from condor.web import auth as web_auth
+    from config_manager import UserRole
+
+    seat_user_id = 4242
+    monkeypatch.setattr(settings, "user_id", seat_user_id)
+    monkeypatch.setattr(web_auth, "_jwt_secret", lambda: "test-secret")
+
+    class _AuthConfigManager:
+        def get_user_role(self, user_id):
+            return UserRole.ADMIN if user_id == seat_user_id else UserRole.PENDING
+
+    monkeypatch.setattr(web_auth, "get_config_manager", lambda: _AuthConfigManager())
+    _config(monkeypatch, allowed=True, admins={seat_user_id})
+
+    async def _execute(code, **kw):
+        return {
+            "id": "code_1_aaaa",
+            "status": "ok",
+            "stdout": "",
+            "result": str(kw["chat_id"]),
+            "error": "",
+            "traceback": "",
+            "report_id": "",
+            "duration_ms": 1,
+        }
+
+    monkeypatch.setattr(code_routes, "execute_code", _execute)
+
+    async def _transport(method, path, body=None, timeout=None):
+        assert (method, path) == ("POST", "/code/run")
+        token = web_auth.create_jwt(settings.user_id, role="user")
+        user = await web_auth.get_current_user(
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+        )
+        return await run_code_route(RunCodeRequest(**body), user=user)
+
+    monkeypatch.setattr(code_tool, "call_main_api", _transport)
+
+    out = asyncio.run(code_tool.run_code(code="result = 1", label="probe"))
+
+    assert out["status"] == "ok", out
+    assert out["result"] == str(seat_user_id), "the run belongs to the MCP seat"
 
 
 # ── guidance: the assistant has to be told this exists ──
