@@ -108,7 +108,6 @@ class TickEngine:
     _last_tick_at: float = field(default=0.0, init=False)
     _last_error: str = field(default="", init=False)
     _last_skill_data: dict[str, Any] = field(default_factory=dict, init=False)
-    _pending_directives: list[str] = field(default_factory=list, init=False)
     _cached_routines_section: str | None = field(default=None, init=False, repr=False)
     _adoption_done: bool = field(default=False, init=False, repr=False)
     _mode_mismatch_noted: bool = field(default=False, init=False, repr=False)
@@ -351,18 +350,9 @@ class TickEngine:
         self._paused = False
         _supervisor().record(self, LoopState.RUNNING)
 
-    def inject_directive(self, text: str) -> None:
-        """Queue a user directive to be included in the next tick's prompt."""
-        self._pending_directives.append(text)
-        log.info("TickEngine %s: directive queued: %s", self.agent_id, text[:80])
-
     @property
     def is_running(self) -> bool:
         return self._running and self._task is not None and not self._task.done()
-
-    @property
-    def is_paused(self) -> bool:
-        return self._paused
 
     @property
     def status(self) -> str:
@@ -585,12 +575,6 @@ class TickEngine:
             canvas=canvas_text,
             canvas_nudge=canvas_nudge,
         )
-
-        # Inject pending user directives
-        if self._pending_directives:
-            directives = "\n".join(f"- {d}" for d in self._pending_directives)
-            prompt += f"\n\nUSER DIRECTIVES (apply these on this tick):\n{directives}"
-            self._pending_directives.clear()
 
         # 6. Create a fresh agent client per tick (clean context window)
         acp_client = await self._create_client(risk_state)
