@@ -503,12 +503,13 @@ class TickEngine:
             return
 
         if risk_state.is_blocked and not self.is_experiment:
-            self.journal.append_action(
-                self.journal.tick_count + 1,
-                "tick_blocked",
-                risk_state.block_reason,
-            )
-            self.journal.record_tick("blocked: " + risk_state.block_reason)
+            with self.journal.batch():
+                self.journal.append_action(
+                    self.journal.tick_count + 1,
+                    "tick_blocked",
+                    risk_state.block_reason,
+                )
+                self.journal.record_tick("blocked: " + risk_state.block_reason)
             await self._notify(
                 f"Agent {self.agent_id} blocked: {risk_state.block_reason}"
             )
@@ -653,24 +654,40 @@ class TickEngine:
                 len(response_text),
             )
         else:
-            # Sessions: full journal tracking
-            tick_num = self.journal.record_tick(
-                response_summary=response_text[:500],
-            )
+            # Sessions: full journal tracking. Every journal.md update of this
+            # tick goes into one batch, so the file is rewritten once instead of
+            # three-to-five times (PERF-136).
+            with self.journal.batch():
+                tick_num = self.journal.record_tick(
+                    response_summary=response_text[:500],
+                )
 
-            self._journal_ownership_violations(tick_num)
-            self._journal_mode_mismatch(tick_num)
+                self._journal_ownership_violations(tick_num)
+                self._journal_mode_mismatch(tick_num)
 
-            skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
-            skill_volume = self._last_skill_data.get("total_volume", 0.0)
-            skill_executors = len(self._last_skill_data.get("executors", []))
-            skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
-            self.journal.record_snapshot(
-                total_pnl=skill_pnl,
-                total_volume=skill_volume,
-                open_count=skill_executors,
-                position_size=skill_exposure,
-            )
+                skill_pnl = self._last_skill_data.get("total_pnl", 0.0)
+                skill_volume = self._last_skill_data.get("total_volume", 0.0)
+                skill_executors = len(self._last_skill_data.get("executors", []))
+                skill_exposure = self._last_skill_data.get("total_exposure", 0.0)
+                self.journal.record_snapshot(
+                    total_pnl=skill_pnl,
+                    total_volume=skill_volume,
+                    open_count=skill_executors,
+                    position_size=skill_exposure,
+                )
+
+                action_brief = (
+                    response_text[:100].replace("\n", " ")
+                    if response_text
+                    else "No response"
+                )
+                self.journal.write_summary(
+                    tick=tick_num,
+                    status="Running",
+                    pnl=skill_pnl,
+                    open_count=skill_executors,
+                    last_action=action_brief,
+                )
 
             self.journal.save_full_snapshot(
                 tick=tick_num,
@@ -681,19 +698,6 @@ class TickEngine:
                 executors_data=executors_summary,
                 risk_state=risk_state.to_dict(),
                 duration=tick_duration,
-            )
-
-            action_brief = (
-                response_text[:100].replace("\n", " ")
-                if response_text
-                else "No response"
-            )
-            self.journal.write_summary(
-                tick=tick_num,
-                status="Running",
-                pnl=skill_pnl,
-                open_count=skill_executors,
-                last_action=action_brief,
             )
 
             # Live session report (FEAT-036). Deterministic render over data we
