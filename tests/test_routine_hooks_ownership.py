@@ -43,6 +43,8 @@ def hooks_file(tmp_path, monkeypatch):
     path = tmp_path / "routine_hooks.json"
     monkeypatch.setattr(hooks, "_HOOKS_FILE", path)
     monkeypatch.setattr(config_manager, "get_config_manager", FakeConfigManager)
+    # The "dropped a dead field" log fires once per routine per process.
+    monkeypatch.setattr(hooks, "_dead_field_warned", set())
     return path
 
 
@@ -262,3 +264,68 @@ def test_fire_hooks_passes_the_instance_owner(monkeypatch):
     asyncio.run(store._fire_hooks("i1", FakeResult(), None, False))
 
     assert seen == {"name": ROUTINE, "owner_id": OWNER.id}
+
+
+# ── READ-172: the dead `email` block on old on-disk configs ──
+
+
+def legacy_email_body(chat_ids, recipients=("someone@example.com",)):
+    """A hook config as written before the email destination was deleted."""
+    body = hook_body(chat_ids)
+    body["email"] = {"enabled": True, "recipients": list(recipients)}
+    return body
+
+
+def test_owned_config_with_a_legacy_email_block_still_loads(hooks_file):
+    """A config a user already has on disk must survive the field's removal."""
+    write_raw(
+        hooks_file, {ROUTINE: {str(OWNER.id): legacy_email_body([str(OWNER.id)])}}
+    )
+
+    cfg = hooks.load_hooks(ROUTINE, OWNER.id)
+
+    assert cfg is not None, "an old config must not fail to load"
+    assert "email" not in cfg
+    assert cfg["telegram"]["chat_ids"] == [str(OWNER.id)]
+    assert cfg["trigger"] == "success"
+
+
+def test_unowned_legacy_entry_with_an_email_block_still_loads(hooks_file):
+    write_raw(hooks_file, {ROUTINE: legacy_email_body([GROUP_CHAT])})
+
+    cfg = hooks.load_hooks(ROUTINE, ADMIN.id)
+
+    assert cfg is not None
+    assert "email" not in cfg
+    assert cfg["telegram"]["chat_ids"] == [GROUP_CHAT]
+
+
+def test_a_legacy_email_block_does_not_stop_telegram_delivery(hooks_file):
+    write_raw(
+        hooks_file, {ROUTINE: {str(OWNER.id): legacy_email_body([str(OWNER.id)])}}
+    )
+    bot = FakeBot()
+
+    fire(ROUTINE, OWNER.id, bot)
+
+    assert bot.sent == [OWNER.id]
+
+
+def test_the_dashboard_is_never_shown_the_dead_email_block(make_client, hooks_file):
+    write_raw(
+        hooks_file, {ROUTINE: {str(OWNER.id): legacy_email_body([str(OWNER.id)])}}
+    )
+
+    assert "email" not in make_client(OWNER).get(f"/routines/{ROUTINE}/hooks").json()
+
+
+def test_the_email_block_is_dropped_on_load_not_silently_on_save(hooks_file):
+    """The next write cleans the file because the *loader* already dropped it."""
+    write_raw(hooks_file, {ROUTINE: legacy_email_body([GROUP_CHAT])})
+
+    # Saving an unrelated routine rewrites the whole file.
+    hooks.save_hooks("other_routine", hook_body([str(OWNER.id)]), OWNER.id)
+
+    stored = read_raw(hooks_file)
+    assert "email" not in stored[ROUTINE][""]
+    assert stored[ROUTINE][""]["telegram"]["chat_ids"] == [GROUP_CHAT]

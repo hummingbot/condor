@@ -33,6 +33,13 @@ Legacy entries written before ownership existed are kept verbatim under the
 ``_UNOWNED`` key: they are nobody's, so they no longer fire for everyone —
 only an admin's runs trigger them, and an admin saving that routine's hooks
 adopts them under their own id.
+
+Dead ``email`` block (READ-172). Hooks once had an email destination; the
+sender was deleted long ago, so configs written back then carry an ``email``
+block nothing reads and every save quietly dropped. It is now dropped on
+*load* instead — see :data:`_DEAD_FIELDS` — so the config the dashboard shows,
+the config dispatch acts on, and the config a save writes are the same thing,
+and an old file on disk still loads without a fuss.
 """
 
 from __future__ import annotations
@@ -55,6 +62,14 @@ _TRIGGERS = ("success", "always", "failure")
 # Owner key for hooks saved before ownership existed. They are nobody's: kept
 # on disk, readable and adoptable by an admin, fired only for an admin's runs.
 _UNOWNED = ""
+
+# Config keys written by older builds that no code reads anymore (READ-172).
+# Dropped when a stored entry is loaded, not when it is saved.
+_DEAD_FIELDS = ("email",)
+
+# Routines already logged about, so a stale file does not repeat itself on
+# every read.
+_dead_field_warned: set[str] = set()
 
 
 class ForbiddenRecipient(Exception):
@@ -97,19 +112,53 @@ def _allowed_recipient(chat_id: str, user_id: int | None) -> bool:
 # ── Persistence ──
 
 
-def _normalize(entry: Any) -> dict[str, dict]:
+def _strip_dead_fields(cfg: Any, routine_name: str) -> Any:
+    """Drop config keys no code reads anymore, so a stale file still loads.
+
+    A user's ``routine_hooks.json`` is live state we do not get to rewrite out
+    from under them, so removing a destination from the code has to leave the
+    old shape loadable. Dropping it here — rather than letting the next
+    ``save_hooks`` silently discard it — keeps what is read, shown and written
+    identical, and the discard shows up in the log instead of nowhere.
+    """
+    if not isinstance(cfg, dict):
+        return cfg
+    dead = [k for k in _DEAD_FIELDS if k in cfg]
+    if not dead:
+        return cfg
+    if routine_name not in _dead_field_warned:
+        _dead_field_warned.add(routine_name)
+        logger.info(
+            "Dropping unused hook field(s) %s from %s; nothing has sent to them "
+            "since the email destination was removed",
+            ", ".join(dead),
+            routine_name,
+        )
+    return {k: v for k, v in cfg.items() if k not in _DEAD_FIELDS}
+
+
+def _normalize(entry: Any, routine_name: str) -> dict[str, dict]:
     """Coerce one stored routine entry into ``{owner_key: config}``.
 
     Pre-SEC-152 files hold a bare config per routine name. Those entries are
-    preserved as-is under :data:`_UNOWNED` rather than dropped or reassigned to
-    a made-up owner — losing an admin's delivery config silently would be as
-    bad a surprise as leaving it firing for everyone.
+    preserved under :data:`_UNOWNED` rather than dropped or reassigned to a
+    made-up owner — losing an admin's delivery config silently would be as bad
+    a surprise as leaving it firing for everyone.
+
+    A bare config is told apart from an owner map by its known keys. ``email``
+    is deliberately not one of them: those files always carried ``telegram``
+    and ``trigger`` alongside it, so it never discriminated anything, and it is
+    stripped before the check anyway.
     """
     if not isinstance(entry, dict):
         return {}
-    if "telegram" in entry or "trigger" in entry or "email" in entry:
-        return {_UNOWNED: entry}
-    return {str(k): v for k, v in entry.items() if isinstance(v, dict)}
+    if "telegram" in entry or "trigger" in entry:
+        return {_UNOWNED: _strip_dead_fields(entry, routine_name)}
+    return {
+        str(k): _strip_dead_fields(v, routine_name)
+        for k, v in entry.items()
+        if isinstance(v, dict)
+    }
 
 
 def _read_all() -> dict[str, dict[str, dict]]:
@@ -119,7 +168,7 @@ def _read_all() -> dict[str, dict[str, dict]]:
         data = json.loads(_HOOKS_FILE.read_text())
         if not isinstance(data, dict):
             return {}
-        return {name: _normalize(entry) for name, entry in data.items()}
+        return {name: _normalize(entry, name) for name, entry in data.items()}
     except Exception:  # noqa: BLE001
         logger.warning("Failed to read %s; treating as empty", _HOOKS_FILE)
         return {}
