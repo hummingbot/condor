@@ -60,6 +60,11 @@ def _local():
     return sessions
 
 
+def bound_agent_context(bound, user_id: int, platform: str) -> str:
+    """Opening context for a chat bound to a specialist Agent."""
+    return _local().bound_agent_context(bound, user_id, platform)
+
+
 async def create_session(
     spec: SessionSpec,
     *,

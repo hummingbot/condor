@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from condor.runtime import binding
-from condor.runtime.sessions import bound_agent_context
+from condor.runtime.client import bound_agent_context
 from handlers.agents._shared import (
     _TELEGRAM_FORMATTING,
     _WEB_FORMATTING,
