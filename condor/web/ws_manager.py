@@ -1469,6 +1469,15 @@ class WebSocketManager:
                 sds = get_server_data_service()
                 client = await cm.get_client(server_name)
                 all_raw: list[dict] = []
+                # Rows already through ExecutorInfo, accumulated page by page.
+                # Transforming the *whole* accumulated list on every page made
+                # this quadratic: with FIRST_PAGE/NEXT_PAGE/MAX_PREFETCH below,
+                # a 5k history cost ~27k pydantic validations instead of 5k, all
+                # on the event loop the candle and bots broadcasts share.
+                # ``_transform_executors`` is a pure per-item map over a list
+                # (``extract_executors_list`` passes a list through untouched),
+                # so transforming each page once yields the identical snapshot.
+                transformed: list[dict] = []
                 page_num = 0
                 FIRST_PAGE = 50
                 NEXT_PAGE = 500
@@ -1483,16 +1492,19 @@ class WebSocketManager:
                     max_items=MAX_PREFETCH,
                 ):
                     all_raw.extend(page)
+                    transformed.extend(self._transform_executors(page))
 
-                    # Transform and broadcast accumulated results after each page
-                    executors = self._transform_executors(all_raw)
-                    if executors:
-                        await self.broadcast(channel, executors)
+                    # Broadcast the accumulated snapshot after each page. It is
+                    # copied because ``broadcast`` retains what it is handed as
+                    # the channel's last-known payload, which the next page
+                    # would otherwise keep mutating underneath it.
+                    if transformed:
+                        await self.broadcast(channel, list(transformed))
                         logger.info(
                             "Executor pre-fetch page %d: %d executors (total %d) for %s",
                             page_num,
                             len(page),
-                            len(executors),
+                            len(transformed),
                             channel,
                         )
                     page_num += 1
