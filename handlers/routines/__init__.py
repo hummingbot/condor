@@ -72,6 +72,22 @@ def _get_instances(context: ContextTypes.DEFAULT_TYPE) -> dict:
     return context.user_data["routine_instances"]
 
 
+def _owner_data(application, owner_id: int | None, chat_id: int) -> dict:
+    """The starter's ``user_data`` bucket, as seen from a job or a task.
+
+    PTB keys ``user_data`` by ``update.effective_user.id``, which is what
+    ``_get_instances`` writes through — so a job must look itself up by the
+    owner stamped at creation, never by ``chat_id``. In a private chat the two
+    ids coincide; in a group the chat id is negative and its bucket does not
+    exist at all.
+
+    ``owner_id`` falls back to ``chat_id`` so private chats and jobs persisted
+    before the owner was carried in ``job_data`` resolve exactly as before —
+    the same graceful degradation ``_sync_instance_to_store`` applies.
+    """
+    return application.user_data.get(owner_id if owner_id is not None else chat_id, {})
+
+
 def _get_draft(context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> dict:
     """Get draft config for a routine, initializing from defaults if needed."""
     drafts = _get_drafts(context)
@@ -272,8 +288,13 @@ async def _execute_routine(
     config_dict: dict,
     chat_id: int,
     active_server: str | None = None,
+    owner_id: int | None = None,
 ) -> tuple[str, float, str | None]:
-    """Execute a routine and return (result, duration, report_id)."""
+    """Execute a routine and return (result, duration, report_id).
+
+    ``chat_id`` is where the result is delivered; ``owner_id`` is whose
+    ``user_data`` (and therefore whose preferences) the routine runs against.
+    """
     routine = get_routine(routine_name)
     if not routine:
         return "Routine not found", 0, None
@@ -283,7 +304,7 @@ async def _execute_routine(
     # Prepare context for routine
     context._chat_id = chat_id
     context._instance_id = instance_id
-    user_data = context.application.user_data.get(chat_id, {})
+    user_data = _owner_data(context.application, owner_id, chat_id)
     # Inject the active server captured at creation time so routines
     # in group chats connect to the correct server.
     if active_server and not user_data.get("preferences", {}).get("general", {}).get(
@@ -354,22 +375,31 @@ async def _run_continuous_routine(
     config_dict: dict,
     chat_id: int,
     active_server: str | None = None,
+    owner_id: int | None = None,
 ) -> None:
-    """Run a continuous routine as an asyncio task."""
+    """Run a continuous routine as an asyncio task.
+
+    ``chat_id`` addresses the messages; ``owner_id`` keys the ``user_data`` the
+    routine reads and the instance bucket cleaned up when the task ends.
+    """
     routine = get_routine(routine_name)
     if not routine:
         logger.error(f"Routine {routine_name} not found")
         return
+
+    owner_key = owner_id if owner_id is not None else chat_id
 
     # Create a mock context for the routine
     class MockContext:
         def __init__(self):
             self._chat_id = chat_id
             self._instance_id = instance_id
-            # Ensure user_data dict exists in application
-            if chat_id not in application.user_data:
-                application.user_data[chat_id] = {}
-            self._user_data = application.user_data[chat_id]
+            # Ensure user_data dict exists in application. Keyed by the owner:
+            # fabricating one for a (negative) group chat id would both persist
+            # junk and hand the routine an empty bucket.
+            if owner_key not in application.user_data:
+                application.user_data[owner_key] = {}
+            self._user_data = application.user_data[owner_key]
             # Inject active server so group chats connect to the correct server
             if active_server and not self._user_data.get("preferences", {}).get(
                 "general", {}
@@ -398,7 +428,7 @@ async def _run_continuous_routine(
         logger.error(f"Continuous routine {routine_name}[{instance_id}] error: {e}")
 
     # Clean up instance when task ends
-    instances = application.user_data.get(chat_id, {}).get("routine_instances", {})
+    instances = _owner_data(application, owner_id, chat_id).get("routine_instances", {})
     if instance_id in instances:
         del instances[instance_id]
     try:
@@ -414,9 +444,10 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     routine_name = data["routine_name"]
     config_dict = data["config_dict"]
     chat_id = data["chat_id"]
+    owner_id = data.get("user_id")
 
     # Check if instance still exists (may have been stopped)
-    instances = context.application.user_data.get(chat_id, {}).get(
+    instances = _owner_data(context.application, owner_id, chat_id).get(
         "routine_instances", {}
     )
     if instance_id not in instances:
@@ -430,10 +461,11 @@ async def _interval_job_callback(context: CallbackContext) -> None:
         config_dict,
         chat_id,
         active_server=data.get("active_server"),
+        owner_id=owner_id,
     )
 
     # Re-check instance exists after execution (may have been stopped during run)
-    instances = context.application.user_data.get(chat_id, {}).get(
+    instances = _owner_data(context.application, owner_id, chat_id).get(
         "routine_instances", {}
     )
     if instance_id not in instances:
@@ -494,6 +526,7 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     chat_id = data["chat_id"]
     msg_id = data.get("msg_id")
     background = data.get("background", False)
+    owner_id = data.get("user_id")
 
     result, duration, report_id = await _execute_routine(
         context,
@@ -502,10 +535,11 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
         config_dict,
         chat_id,
         active_server=data.get("active_server"),
+        owner_id=owner_id,
     )
 
     # Remove one-shot instance after completion
-    instances = context.application.user_data.get(chat_id, {}).get(
+    instances = _owner_data(context.application, owner_id, chat_id).get(
         "routine_instances", {}
     )
     if instance_id in instances:
@@ -547,7 +581,14 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     elif msg_id:
         # Update the detail view
         await _refresh_detail_msg(
-            context, chat_id, msg_id, routine_name, result, duration, report_id
+            context,
+            chat_id,
+            msg_id,
+            routine_name,
+            result,
+            duration,
+            report_id,
+            owner_id=owner_id,
         )
 
 
@@ -558,6 +599,7 @@ async def _daily_job_callback(context: CallbackContext) -> None:
     routine_name = data["routine_name"]
     config_dict = data["config_dict"]
     chat_id = data["chat_id"]
+    owner_id = data.get("user_id")
 
     result, duration, report_id = await _execute_routine(
         context,
@@ -566,10 +608,11 @@ async def _daily_job_callback(context: CallbackContext) -> None:
         config_dict,
         chat_id,
         active_server=data.get("active_server"),
+        owner_id=owner_id,
     )
 
     # Update instance state
-    instances = context.application.user_data.get(chat_id, {}).get(
+    instances = _owner_data(context.application, owner_id, chat_id).get(
         "routine_instances", {}
     )
     if instance_id in instances:
@@ -669,6 +712,9 @@ def _create_scheduled_instance(
         "routine_name": routine_name,
         "config_dict": config_dict.copy(),  # Copy to isolate from draft changes
         "chat_id": chat_id,
+        # Carried for the same reason as active_server: the tick has no update
+        # to derive it from, and user_data is keyed by user_id, not chat_id.
+        "user_id": user_id,
         "msg_id": msg_id,
         "background": background,
         "active_server": active_server,
@@ -764,6 +810,7 @@ def _create_continuous_instance(
             frozen_config,
             chat_id,
             active_server=active_server,
+            owner_id=user_id,
         )
     )
     _continuous_tasks[instance_id] = task
@@ -1195,13 +1242,18 @@ async def _refresh_detail_msg(
     result: str | None = None,
     duration: float | None = None,
     report_id: str | None = None,
+    owner_id: int | None = None,
 ) -> None:
-    """Refresh the routine detail message after execution."""
+    """Refresh the routine detail message after execution.
+
+    Drafts and instances belong to ``owner_id``; ``chat_id`` only says where the
+    message lives.
+    """
     routine = get_routine(routine_name)
     if not routine:
         return
 
-    user_data = context.application.user_data.get(chat_id, {})
+    user_data = _owner_data(context.application, owner_id, chat_id)
     drafts = user_data.get("routine_drafts", {})
     draft = drafts.get(routine_name, {})
 
@@ -1561,7 +1613,9 @@ async def _process_config(
     msg_id = context.user_data.get("routines_msg_id")
     chat_id = context.user_data.get("routines_chat_id")
     if msg_id and chat_id:
-        await _refresh_detail_msg(context, chat_id, msg_id, routine_name)
+        await _refresh_detail_msg(
+            context, chat_id, msg_id, routine_name, owner_id=_starter_id(update)
+        )
 
 
 async def _process_daily_time(
@@ -1622,7 +1676,9 @@ async def _process_daily_time(
     # Refresh detail
     msg_id = context.user_data.get("routines_msg_id")
     if msg_id:
-        await _refresh_detail_msg(context, chat_id, msg_id, routine_name)
+        await _refresh_detail_msg(
+            context, chat_id, msg_id, routine_name, owner_id=_starter_id(update)
+        )
 
 
 # =============================================================================
@@ -1809,6 +1865,10 @@ async def restore_scheduled_jobs(application) -> int:
             if not inst.get("user_id"):
                 inst["user_id"] = chat_id
 
+            # The bucket this instance was found in is its owner, so this is
+            # the key every restored job must read itself back through.
+            owner_id = inst.get("user_id") or chat_id
+
             routine_name = inst.get("routine_name")
             config_dict = inst.get("config", {})
             schedule = inst.get("schedule", {})
@@ -1848,6 +1908,7 @@ async def restore_scheduled_jobs(application) -> int:
                             config_dict,
                             chat_id,
                             active_server=_active_server,
+                            owner_id=owner_id,
                         )
                     )
                     _continuous_tasks[instance_id] = task
@@ -1870,6 +1931,7 @@ async def restore_scheduled_jobs(application) -> int:
                 "routine_name": routine_name,
                 "config_dict": config_dict,
                 "chat_id": chat_id,
+                "user_id": owner_id,
                 "active_server": _active_server,
             }
 
