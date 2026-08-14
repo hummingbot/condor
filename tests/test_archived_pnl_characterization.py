@@ -19,6 +19,7 @@ import pytest
 from condor.archived_pnl import (
     _calculate_pnl_average_cost,
     _calculate_pnl_open_close,
+    _timestamp_sort_key,
     calculate_pnl_from_trades,
     parse_timestamp,
 )
@@ -95,6 +96,22 @@ SCENARIOS: dict[str, list[dict]] = {
         _trade(1735689600, "SOL-USDC", "BUY", "NIL", 100.0, 1.0, 0.1),
         _trade(1735689660000, "SOL-USDC", "SELL", "NIL", 130.0, 1.0, 0.1),
     ],
+    # CORR-171: an explicit null next to a number used to raise TypeError and
+    # take the whole report down. Null and missing both sort as 0, ahead of
+    # any real epoch, so the deliberately shuffled input reorders to BUY,
+    # BUY, SELL.
+    "nil_null_missing_and_epoch": [
+        _trade(1735689660, "SOL-USDC", "SELL", "NIL", 130.0, 4.0, 0.2),
+        _trade(None, "SOL-USDC", "BUY", "NIL", 100.0, 2.0, 0.1),
+        {
+            "trading_pair": "SOL-USDC",
+            "trade_type": "BUY",
+            "position": "NIL",
+            "price": 110.0,
+            "amount": 2.0,
+            "trade_fee_in_quote": 0.1,
+        },
+    ],
     # ---- OPEN/CLOSE mode ---------------------------------------------
     "oc_long_full": [
         _trade("2026-01-01T00:00:00", "SOL-USDT", "BUY", "OPEN", 100.0, 10.0, 0.5),
@@ -168,6 +185,7 @@ MODES: dict[str, str] = {
     "nil_unparseable_timestamps": "avg",
     "nil_unknown_trade_type": "avg",
     "nil_epoch_timestamps": "avg",
+    "nil_null_missing_and_epoch": "avg",
     "oc_long_full": "oc",
     "oc_short_full": "oc",
     "oc_partial_then_over_close": "oc",
@@ -304,6 +322,20 @@ GOLDEN: dict[str, dict] = {
             (29.9, "SOL-USDC"),
         ],
     },
+    "nil_null_missing_and_epoch": {
+        "total_pnl": 99.8,
+        "total_fees": 0.4,
+        "total_volume": 940.0,
+        "pnl_by_pair": {
+            "SOL-USDC": 99.8,
+        },
+        # the null-timestamp BUY charts no point (same as nil_none_timestamp);
+        # the missing-timestamp one still charts at epoch 0
+        "cumulative": [
+            (0.0, "SOL-USDC"),
+            (99.8, "SOL-USDC"),
+        ],
+    },
     "oc_long_full": {
         "total_pnl": 99.45,
         "total_fees": 1.05,
@@ -421,7 +453,7 @@ def _expected_timestamps(trades):
     """Timestamps the cumulative series must carry, derived independently."""
     stamps = [
         parse_timestamp(t.get("timestamp", 0))
-        for t in sorted(trades, key=lambda t: t.get("timestamp", 0))
+        for t in sorted(trades, key=_timestamp_sort_key)
     ]
     return [ts for ts in stamps if ts]
 
@@ -520,3 +552,51 @@ def test_empty_trades_short_circuits_with_integer_zeros():
         "cumulative_pnl": [],
         "total_volume": 0,
     }
+
+
+def test_null_timestamp_next_to_a_number_does_not_raise():
+    """CORR-171: one ``timestamp: None`` row must not kill the whole report."""
+    trades = SCENARIOS["nil_null_missing_and_epoch"]
+    result = calculate_pnl_from_trades(trades)  # used to raise TypeError
+    assert result["total_pnl"] == 99.8
+
+    # null and missing sort as 0, ahead of the epoch row, input order kept
+    assert [t.get("price") for t in sorted(trades, key=_timestamp_sort_key)] == [
+        100.0,
+        110.0,
+        130.0,
+    ]
+
+
+def test_sort_key_orders_each_shape_without_mixing_comparisons():
+    """Homogeneous lists keep the ordering the naive sort gave them."""
+    numeric = [{"timestamp": 3}, {"timestamp": 1}, {"timestamp": 2.5}]
+    assert [t["timestamp"] for t in sorted(numeric, key=_timestamp_sort_key)] == [
+        1,
+        2.5,
+        3,
+    ]
+
+    strings = [{"timestamp": "garbage"}, {"timestamp": ""}, {"timestamp": "2026-01-01"}]
+    assert [t["timestamp"] for t in sorted(strings, key=_timestamp_sort_key)] == [
+        "",
+        "2026-01-01",
+        "garbage",
+    ]
+
+    # every shape at once: numbers, then strings, then anything unorderable
+    mixed = [
+        {"timestamp": object()},
+        {"timestamp": "2026-01-01"},
+        {"timestamp": None},
+        {"timestamp": 5},
+        {},
+    ]
+    ordered = sorted(mixed, key=_timestamp_sort_key)
+    assert [type(t.get("timestamp")).__name__ for t in ordered] == [
+        "NoneType",  # explicit null -> 0
+        "NoneType",  # missing -> 0
+        "int",
+        "str",
+        "object",
+    ]

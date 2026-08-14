@@ -273,6 +273,32 @@ class _OpenClosePositionAccounting:
         )
 
 
+def _timestamp_sort_key(trade: dict[str, Any]) -> tuple[int, float, str]:
+    """Total order over every timestamp shape the archive can hand us.
+
+    Sorting on the raw field blew up with ``TypeError: '<' not supported
+    between instances of 'NoneType' and 'int'`` as soon as one row carried an
+    explicit ``timestamp: None`` next to a numeric one - a single malformed
+    archive row killed the whole PnL report instead of degrading.
+
+    Grouping by shape first (numbers, then strings, then anything else) keeps
+    the ordering of a homogeneous list byte-identical to the naive sort, while
+    a mixed list becomes merely ordered rather than fatal. A null timestamp
+    sorts as ``0``, exactly like a missing one already did.
+    """
+    ts = trade.get("timestamp")
+    if ts is None:
+        return (0, 0.0, "")
+    if isinstance(ts, (int, float)):  # bool included, as before
+        return (0, float(ts), "")
+    if isinstance(ts, str):
+        return (1, 0.0, ts)
+    parsed = parse_timestamp(ts)  # datetime / pandas Timestamp
+    if parsed is not None:
+        return (0, parsed.timestamp(), "")
+    return (2, 0.0, "")  # unknown shape: stable, keeps input order
+
+
 def _walk_trades(trades: list[dict[str, Any]], accounting) -> dict[str, Any]:
     """Run the per-trade frame both PnL modes share.
 
@@ -288,7 +314,7 @@ def _walk_trades(trades: list[dict[str, Any]], accounting) -> dict[str, Any]:
     total_volume = 0.0
 
     # Sort trades by timestamp
-    sorted_trades = sorted(trades, key=lambda t: t.get("timestamp", 0))
+    sorted_trades = sorted(trades, key=_timestamp_sort_key)
 
     for trade in sorted_trades:
         parsed = _ParsedTrade(
