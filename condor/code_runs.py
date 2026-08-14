@@ -65,8 +65,13 @@ class CodeRun:
 
 
 def new_run_id() -> str:
-    """``code_<epoch_ms>_<4 hex>`` — sortable by time, unique under concurrency."""
-    return f"code_{int(time.time() * 1000)}_{secrets.token_hex(2)}"
+    """``code_<epoch_ms>_<16 hex>`` — sortable by time, unique under concurrency.
+
+    The suffix carries 64 bits: runs starting in the same millisecond are common
+    (a loop, a burst of tool calls) and the store is keyed by this id, so a
+    collision silently overwrites the earlier run instead of raising.
+    """
+    return f"code_{int(time.time() * 1000)}_{secrets.token_hex(8)}"
 
 
 class CodeRunStore:

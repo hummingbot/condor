@@ -116,3 +116,11 @@ def test_new_run_id_is_unique_and_well_formed():
     ids = {new_run_id() for _ in range(50)}
     assert len(ids) == 50
     assert all(i.startswith("code_") and i.count("_") == 2 for i in ids)
+
+
+def test_new_run_id_suffix_carries_at_least_64_bits():
+    """The store is keyed by the id, so a same-millisecond collision overwrites."""
+    for run_id in (new_run_id() for _ in range(10)):
+        suffix = run_id.rsplit("_", 1)[1]
+        assert len(suffix) >= 16, run_id
+        assert int(suffix, 16) >= 0
