@@ -7,7 +7,10 @@ skill library, and the pydantic-ai tool allowlist.
 """
 
 import asyncio
+import json
 from types import SimpleNamespace
+
+import pytest
 
 from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.agents import agent as agent_module
@@ -721,6 +724,75 @@ def test_session_mcp_servers_carry_agent_slug(monkeypatch):
     servers = build_mcp_servers_for_session(42, 42)
     condor = next(s for s in servers if s["name"] == "condor")
     assert "--agent-slug" not in condor["args"]
+
+
+def test_session_mcp_servers_include_registered_addons(monkeypatch, tmp_path):
+    import config_manager
+    import handlers.agents._shared as shared
+
+    class _NoServers:
+        def get_accessible_servers(self, user_id):
+            return []
+
+        def get_server(self, name):
+            return None
+
+    addon_dir = tmp_path / "mcp_addons"
+    addon_dir.mkdir()
+    (addon_dir / "research-os.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "research-os": {
+                        "command": "/opt/research-os/python",
+                        "args": ["-m", "research_os.condor_addon.server"],
+                        "env": {"RESEARCH_OS_API_URL": "http://127.0.0.1:8100"},
+                    }
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _NoServers())
+    monkeypatch.setattr(config_manager, "get_effective_server", lambda *a, **k: None)
+    monkeypatch.setattr(shared, "get_project_dir", lambda: str(tmp_path))
+
+    servers = shared.build_mcp_servers_for_session(42, 42)
+
+    research = next(server for server in servers if server["name"] == "research-os")
+    assert research["command"] == "/opt/research-os/python"
+    assert research["env"] == [
+        {"name": "RESEARCH_OS_API_URL", "value": "http://127.0.0.1:8100"}
+    ]
+
+
+def test_addon_registry_rejects_core_name_collision(monkeypatch, tmp_path):
+    import config_manager
+    import handlers.agents._shared as shared
+
+    class _NoServers:
+        def get_accessible_servers(self, user_id):
+            return []
+
+        def get_server(self, name):
+            return None
+
+    addon_dir = tmp_path / "mcp_addons"
+    addon_dir.mkdir()
+    (addon_dir / "collision.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "condor": {"command": "false", "args": []},
+                }
+            }
+        )
+    )
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _NoServers())
+    monkeypatch.setattr(config_manager, "get_effective_server", lambda *a, **k: None)
+    monkeypatch.setattr(shared, "get_project_dir", lambda: str(tmp_path))
+
+    with pytest.raises(ValueError, match="duplicates MCP server name 'condor'"):
+        shared.build_mcp_servers_for_session(42, 42)
 
 
 def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
