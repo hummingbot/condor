@@ -34,6 +34,7 @@ class ServerDataType(Enum):
     """All data types fetchable from a Hummingbot server."""
 
     PORTFOLIO = "portfolio"
+    PORTFOLIO_HISTORY = "portfolio_history"
     PRICES = "prices"
     POSITIONS = "positions"
     ACTIVE_ORDERS = "active_orders"
@@ -56,10 +57,33 @@ class DataTypeDefaults:
 
     interval: float  # Default polling interval (seconds)
     ttl: float  # How long cached data is considered valid
+    # Optional per-param TTL override: (param_name, {param_value: ttl}). Some
+    # data types cache variants that go stale at very different rates — a 1D
+    # portfolio-history window is worthless after minutes while a 3M one holds
+    # for hours — and the key params say which variant this is.
+    ttl_by_param: Optional[Tuple[str, Dict[str, float]]] = None
+
+    def ttl_for(self, params: Dict[str, str]) -> float:
+        """TTL for a specific cache key's params."""
+        if not self.ttl_by_param:
+            return self.ttl
+        param_name, table = self.ttl_by_param
+        return table.get(params.get(param_name, ""), self.ttl)
 
 
 _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.PORTFOLIO: DataTypeDefaults(interval=10, ttl=60),
+    # History is polled at one cadence for every range (what the dashboard's
+    # hand-rolled refresh loop did), but each range stays valid for as long as
+    # its own resolution warrants once nobody is subscribed.
+    ServerDataType.PORTFOLIO_HISTORY: DataTypeDefaults(
+        interval=120,
+        ttl=120,
+        ttl_by_param=(
+            "range_key",
+            {"1D": 120, "1W": 600, "1M": 3600, "3M": 7200},
+        ),
+    ),
     ServerDataType.PRICES: DataTypeDefaults(interval=3, ttl=30),
     ServerDataType.POSITIONS: DataTypeDefaults(interval=10, ttl=60),
     ServerDataType.ACTIVE_ORDERS: DataTypeDefaults(interval=10, ttl=60),
@@ -368,7 +392,7 @@ class ServerDataService:
         age = time.time() - entry.fetched_at
 
         # Cached data is usable until the TTL expires
-        return entry.value if age <= defaults.ttl else None
+        return entry.value if age <= defaults.ttl_for(key.params_dict) else None
 
     async def get_or_fetch(
         self, server: str, data_type: ServerDataType, **params
@@ -813,7 +837,10 @@ class ServerDataService:
             if key in self._subscriptions and self._subscriptions[key]:
                 continue  # Active subscribers, keep
             defaults = _DEFAULTS.get(key.data_type)
-            if defaults and now - entry.fetched_at > defaults.ttl * 2:
+            if (
+                defaults
+                and now - entry.fetched_at > defaults.ttl_for(key.params_dict) * 2
+            ):
                 stale.append(key)
         for key in stale:
             del self._cache[key]
@@ -875,6 +902,7 @@ def register_default_fetches() -> None:
         fetch_current_price,
         fetch_executors,
         fetch_portfolio,
+        fetch_portfolio_history,
         fetch_positions,
         fetch_server_status,
         fetch_ticker_pool,
@@ -886,6 +914,7 @@ def register_default_fetches() -> None:
     sds = get_server_data_service()
 
     sds.register_fetch(ServerDataType.PORTFOLIO, fetch_portfolio)
+    sds.register_fetch(ServerDataType.PORTFOLIO_HISTORY, fetch_portfolio_history)
     sds.register_fetch(ServerDataType.PRICES, fetch_current_price)
     # strict=True on the cached reads: a failed call must reach
     # _do_fetch_and_cache's except branch (record_error, keep the last good

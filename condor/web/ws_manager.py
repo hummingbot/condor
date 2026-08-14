@@ -363,13 +363,12 @@ class WebSocketManager:
             sds.unsubscribe(cache_key, "ws_manager")
             logger.debug("WS unsubscribed SDS for channel %s", channel)
 
-            # Stop portfolio history refresh when no subscribers remain
+            # The history ranges ride on this subscription — drop them too, or
+            # their polls would outlive the last dashboard client watching.
             if channel.startswith("portfolio:"):
-                from condor.web.routes.portfolio import stop_history_refresh
-
                 server_name = channel.split(":")[1] if ":" in channel else ""
                 if server_name:
-                    stop_history_refresh(server_name)
+                    self._unsubscribe_portfolio_history(server_name)
 
     # -- Message handling --
 
@@ -604,18 +603,83 @@ class WebSocketManager:
                 if result != prev:
                     await self.broadcast(channel, result)
 
-            # Pre-warm portfolio history cache on subscription
+            # Portfolio history rides on the portfolio subscription: one SDS
+            # key per range, primed now and polled until the last client leaves.
             if prefix == "portfolio":
-                from condor.web.routes.portfolio import warm_portfolio_history
-
                 self._track_oneshot(
                     asyncio.create_task(
-                        warm_portfolio_history(server_name),
-                        name=f"warm_portfolio_history:{server_name}",
+                        self._subscribe_portfolio_history(channel, server_name),
+                        name=f"portfolio_history:{server_name}",
                     )
                 )
         except Exception as e:
             logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
+
+    async def _subscribe_portfolio_history(
+        self, channel: str, server_name: str
+    ) -> None:
+        """Subscribe one SDS key per history range behind a portfolio channel.
+
+        Runs off the subscribe path as a one-shot task: SDS primes each key with
+        a real backend fetch and the WS client must not wait for four of them.
+        Subscribing is idempotent per (key, subscriber), so a second client on
+        the same channel never starts a second poll. If the channel is torn down
+        while the priming is in flight, unsubscribe again — otherwise the poll
+        would outlive its last subscriber.
+        """
+        from condor.fetchers.portfolio import (
+            PORTFOLIO_HISTORY_INTERVAL,
+            PORTFOLIO_HISTORY_RANGES,
+        )
+        from condor.server_data_service import ServerDataType, get_server_data_service
+
+        sds = get_server_data_service()
+
+        async def _sub(range_key: str) -> None:
+            try:
+                await sds.subscribe(
+                    server=server_name,
+                    data_type=ServerDataType.PORTFOLIO_HISTORY,
+                    subscriber_id="ws_manager",
+                    interval=PORTFOLIO_HISTORY_INTERVAL,
+                    range_key=range_key,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Failed to subscribe portfolio history %s/%s: %s",
+                    server_name,
+                    range_key,
+                    e,
+                )
+
+        await asyncio.gather(*[_sub(rk) for rk in PORTFOLIO_HISTORY_RANGES])
+
+        if channel not in self._sds_subscriptions:
+            self._unsubscribe_portfolio_history(server_name)
+
+    def _unsubscribe_portfolio_history(self, server_name: str) -> None:
+        """Drop this manager's history subscriptions for a server.
+
+        SDS stops polling a key once it has no subscribers left, so this is what
+        ends the history refresh.
+        """
+        from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
+        from condor.server_data_service import (
+            CacheKey,
+            ServerDataType,
+            get_server_data_service,
+        )
+
+        sds = get_server_data_service()
+        for range_key in PORTFOLIO_HISTORY_RANGES:
+            sds.unsubscribe(
+                CacheKey.make(
+                    server_name,
+                    ServerDataType.PORTFOLIO_HISTORY,
+                    range_key=range_key,
+                ),
+                "ws_manager",
+            )
 
     # -- SDS listener (legacy-compatible signature) --
 

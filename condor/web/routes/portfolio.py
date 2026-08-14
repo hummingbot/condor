@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-import asyncio
 import logging
-import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
+from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
 from condor.web.auth import get_current_user
 from condor.web.models import (
     BalanceItem,
@@ -23,33 +21,6 @@ from config_manager import get_config_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["portfolio"])
-
-# ---------------------------------------------------------------------------
-# Portfolio history cache
-# ---------------------------------------------------------------------------
-
-_RANGE_TTLS: dict[str, int] = {
-    "1D": 120,
-    "1W": 600,
-    "1M": 3600,
-    "3M": 7200,
-}
-
-_WARM_INTERVAL = 120  # Re-warm every 2 min (matches shortest TTL)
-_IDLE_TIMEOUT = 600  # Stop refresh loop after 10 min with no requests
-
-
-@dataclass
-class _CacheEntry:
-    data: Any = None
-    fetched_at: float = 0.0
-    ttl: int = 120
-
-
-# (server, range, False) -> CacheEntry  (breakdown doesn't affect fetched data)
-_history_cache: dict[tuple[str, str, bool], _CacheEntry] = {}
-_refresh_tasks: dict[str, asyncio.Task] = {}
-_last_request_time: dict[str, float] = {}  # server -> last request ts
 
 
 @router.get("/servers/{name}/portfolio", response_model=PortfolioResponse)
@@ -196,106 +167,6 @@ def _dedupe_hyperliquid_unified(connectors: list[ConnectorBalance]) -> None:
     )
 
 
-RANGE_CONFIG = {
-    "1D": (86400, "5m"),
-    "1W": (604800, "1h"),
-    "1M": (2592000, "4h"),
-    "3M": (7776000, "1d"),
-}
-
-
-async def _fetch_history(server: str, range_key: str) -> Any:
-    """Fetch portfolio history from the Hummingbot API (no caching)."""
-    cm = get_config_manager()
-    client = await cm.get_client(server)
-    range_seconds, interval = RANGE_CONFIG[range_key]
-    start_time = int(time.time()) - range_seconds
-    return await client.portfolio.get_history(
-        start_time=start_time, interval=interval, limit=500
-    )
-
-
-async def _get_cached_history(
-    server: str, range_key: str, breakdown: bool = False
-) -> Any:
-    """Return cached history if fresh, otherwise fetch, cache, and return.
-
-    The raw data is the same regardless of *breakdown* (parsing happens in the
-    endpoint), so we cache without the breakdown flag to avoid duplicate fetches.
-    """
-    key = (server, range_key, False)
-    entry = _history_cache.get(key)
-    now = time.time()
-
-    if entry and entry.data is not None and (now - entry.fetched_at) < entry.ttl:
-        return entry.data
-
-    # Fetch fresh data
-    data = await _fetch_history(server, range_key)
-    _history_cache[key] = _CacheEntry(
-        data=data, fetched_at=time.time(), ttl=_RANGE_TTLS[range_key]
-    )
-    return data
-
-
-async def warm_portfolio_history(server: str) -> None:
-    """Pre-fetch all 4 history ranges into cache, then start a refresh loop."""
-    logger.info("Warming portfolio history cache for %s", server)
-    _last_request_time[server] = time.time()
-
-    # Initial warm: fetch all ranges concurrently (no breakdown)
-    tasks = []
-    for range_key in RANGE_CONFIG:
-        tasks.append(_get_cached_history(server, range_key, False))
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for range_key, result in zip(RANGE_CONFIG, results):
-        if isinstance(result, Exception):
-            logger.warning("Warm cache failed for %s/%s: %s", server, range_key, result)
-
-    # Start background refresh loop if not already running
-    if server not in _refresh_tasks or _refresh_tasks[server].done():
-        _refresh_tasks[server] = asyncio.create_task(_refresh_loop(server))
-
-
-async def _refresh_loop(server: str) -> None:
-    """Periodically re-warm cache; exits after idle timeout."""
-    logger.info("Portfolio history refresh loop started for %s", server)
-    try:
-        while True:
-            await asyncio.sleep(_WARM_INTERVAL)
-            last = _last_request_time.get(server, 0)
-            if time.time() - last > _IDLE_TIMEOUT:
-                logger.info(
-                    "Portfolio history refresh loop idle for %s, stopping", server
-                )
-                return
-
-            tasks = []
-            for range_key in RANGE_CONFIG:
-                tasks.append(_fetch_history(server, range_key))
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for range_key, result in zip(RANGE_CONFIG, results):
-                if isinstance(result, Exception):
-                    logger.debug(
-                        "Refresh failed for %s/%s: %s", server, range_key, result
-                    )
-                    continue
-                key = (server, range_key, False)
-                _history_cache[key] = _CacheEntry(
-                    data=result, fetched_at=time.time(), ttl=_RANGE_TTLS[range_key]
-                )
-    except asyncio.CancelledError:
-        logger.info("Portfolio history refresh loop cancelled for %s", server)
-
-
-def stop_history_refresh(server: str) -> None:
-    """Cancel the background refresh loop for a server."""
-    task = _refresh_tasks.pop(server, None)
-    if task and not task.done():
-        task.cancel()
-        logger.info("Stopped portfolio history refresh for %s", server)
-
-
 @router.get(
     "/servers/{name}/portfolio/history", response_model=PortfolioHistoryResponse
 )
@@ -309,16 +180,20 @@ async def get_portfolio_history(
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=403, detail="No access to this server")
 
-    _last_request_time[name] = time.time()
+    from condor.server_data_service import ServerDataType, get_server_data_service
 
+    # The raw snapshots are the same regardless of *breakdown* (parsing happens
+    # below), so the cache key is the range alone. SDS coalesces concurrent
+    # reads of the same expired key into one backend fetch.
     try:
-        history = await _get_cached_history(name, range, breakdown)
+        history = await get_server_data_service().get_or_fetch(
+            name, ServerDataType.PORTFOLIO_HISTORY, range_key=range
+        )
     except Exception as e:
         logger.warning("Failed to get portfolio history: %s", e)
-        _, interval = RANGE_CONFIG[range]
-        return PortfolioHistoryResponse(server=name, points=[], interval=interval)
+        history = None
 
-    _, interval = RANGE_CONFIG[range]
+    _, interval = PORTFOLIO_HISTORY_RANGES[range]
 
     logger.debug("Portfolio history response shape: %s", type(history))
     if isinstance(history, dict):
