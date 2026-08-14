@@ -104,18 +104,36 @@ def _get_routine_instances(
     ]
 
 
+def _starter_id(update: Update) -> int | None:
+    """The user who pressed the button — the owner of whatever they start.
+
+    ``chat_id`` only coincides with it in private chats; in a group the routine
+    belongs to the member who launched it, not to the group.
+    """
+    return update.effective_user.id if update.effective_user else None
+
+
 def _generate_instance_id() -> str:
     """Generate a short unique instance ID."""
     return hashlib.md5(f"{time.time()}{id(object())}".encode()).hexdigest()[:6]
 
 
 def _sync_instance_to_store(instance_id: str, inst_meta: dict) -> None:
-    """Sync a Telegram instance's state to the shared RoutineStore."""
+    """Sync a Telegram instance's state to the shared RoutineStore.
+
+    The owner (``user_id``, stamped at creation) is never downgraded: a later
+    tick whose meta lost it must not turn an owned instance into an unowned
+    one, which the dashboard's ownership gate (SEC-150) would hide from its
+    own starter.
+    """
     try:
         store = get_routine_store()
         existing = store._instances.get(instance_id)
         if existing:
-            existing.update(inst_meta)
+            update = dict(inst_meta)
+            if not update.get("user_id") and existing.get("user_id"):
+                update.pop("user_id", None)
+            existing.update(update)
         else:
             store.add_instance(instance_id, inst_meta.copy())
     except Exception:
@@ -601,8 +619,14 @@ def _create_scheduled_instance(
     schedule: dict,
     msg_id: int | None = None,
     background: bool = False,
+    user_id: int | None = None,
 ) -> str:
-    """Create a scheduled one-shot instance. Returns instance_id."""
+    """Create a scheduled one-shot instance. Returns instance_id.
+
+    ``user_id`` is the Telegram user who started it — the owner the dashboard
+    checks (SEC-150). It is not ``chat_id``: in a group those differ, and the
+    run belongs to the person, not to the room.
+    """
     instance_id = _generate_instance_id()
     job_name_str = _job_name(chat_id, instance_id)
 
@@ -614,6 +638,7 @@ def _create_scheduled_instance(
         "schedule": schedule.copy(),
         "status": "running",
         "source": "telegram",
+        "user_id": user_id,
         "created_at": time.time(),
         "last_run_at": None,
         "last_result": None,
@@ -688,8 +713,13 @@ def _create_continuous_instance(
     chat_id: int,
     routine_name: str,
     config_dict: dict,
+    user_id: int | None = None,
 ) -> str:
-    """Create a continuous routine instance. Returns instance_id."""
+    """Create a continuous routine instance. Returns instance_id.
+
+    ``user_id`` is the starting Telegram user (the dashboard owner), which in a
+    group chat is not ``chat_id``.
+    """
     instance_id = _generate_instance_id()
 
     # Capture active server at creation time (same fix as scheduled instances)
@@ -709,6 +739,7 @@ def _create_continuous_instance(
         "schedule": {"type": "continuous"},
         "status": "running",
         "source": "telegram",
+        "user_id": user_id,
         "created_at": time.time(),
         "last_run_at": None,
         "last_result": None,
@@ -1316,7 +1347,14 @@ async def _run_once(
     schedule = {"type": "once"}
 
     _create_scheduled_instance(
-        context, chat_id, routine_name, draft, schedule, msg_id, background
+        context,
+        chat_id,
+        routine_name,
+        draft,
+        schedule,
+        msg_id,
+        background,
+        user_id=_starter_id(update),
     )
 
     if background:
@@ -1352,7 +1390,9 @@ async def _start_continuous(
         await update.callback_query.answer(f"Config error: {e}")
         return
 
-    instance_id = _create_continuous_instance(context, chat_id, routine_name, draft)
+    instance_id = _create_continuous_instance(
+        context, chat_id, routine_name, draft, user_id=_starter_id(update)
+    )
     logger.info(f"Started continuous routine {instance_id}: {routine_name}")
 
     await update.callback_query.answer("▶️ Started")
@@ -1383,7 +1423,7 @@ async def _start_interval(
 
     schedule = {"type": "interval", "interval_sec": interval_sec}
     instance_id = _create_scheduled_instance(
-        context, chat_id, routine_name, draft, schedule
+        context, chat_id, routine_name, draft, schedule, user_id=_starter_id(update)
     )
     logger.info(
         f"Created interval schedule {instance_id} for {routine_name}: every {interval_sec}s"
@@ -1428,7 +1468,7 @@ async def _start_daily(
 
     schedule = {"type": "daily", "daily_time": time_str}
     instance_id = _create_scheduled_instance(
-        context, chat_id, routine_name, draft, schedule
+        context, chat_id, routine_name, draft, schedule, user_id=_starter_id(update)
     )
     logger.info(
         f"Created daily schedule {instance_id} for {routine_name}: at {time_str}"
@@ -1570,7 +1610,9 @@ async def _process_daily_time(
         return
 
     schedule = {"type": "daily", "daily_time": time_str}
-    _create_scheduled_instance(context, chat_id, routine_name, draft, schedule)
+    _create_scheduled_instance(
+        context, chat_id, routine_name, draft, schedule, user_id=_starter_id(update)
+    )
 
     msg = await update.message.reply_text(f"📅 Scheduled daily at {time_str}")
     asyncio.create_task(_delete_after(msg, 2))
@@ -1759,6 +1801,13 @@ async def restore_scheduled_jobs(application) -> int:
         for instance_id, inst in instances.items():
             if inst.get("status") != "running":
                 continue
+
+            # Adopt instances persisted before owners were stamped: PTB keys
+            # ``user_data`` by user id, so the bucket holding the instance is
+            # its starter — a fact, not a guess. Anything still ownerless after
+            # this stays admin-only in the dashboard (SEC-150 fails closed).
+            if not inst.get("user_id"):
+                inst["user_id"] = chat_id
 
             routine_name = inst.get("routine_name")
             config_dict = inst.get("config", {})

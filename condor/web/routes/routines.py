@@ -77,10 +77,11 @@ def _owns(inst: dict, user: WebUser) -> bool:
     """Whether ``user`` started this instance.
 
     The owner is the ``user_id`` RoutineStore records in the instance meta.
-    An instance without one is nobody's: MCP runs that carried no user and
-    Telegram instances synced into the store both land here, and treating them
-    as unowned keeps them out of every non-admin's reach instead of handing
-    them to whoever asks first.
+    Telegram-started instances now carry it too (CORR-165: the starting user,
+    not the chat). An instance without one is nobody's — MCP runs that carried
+    no user, or meta written by an older build — and treating them as unowned
+    keeps them out of every non-admin's reach instead of handing them to
+    whoever asks first.
     """
     owner = inst.get("user_id")
     return bool(owner) and owner == user.id
