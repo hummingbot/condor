@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import secrets
-import tempfile
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
+
+from condor.fsutil import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -145,29 +145,10 @@ class CodeRunStore:
         self._write_json(self._index_path, self._index)
 
     def _write_json(self, path: Path | None, data) -> None:
-        """Atomic create-or-replace, same tempfile + os.replace as the report store."""
+        """Atomic create-or-replace, via the shared :mod:`condor.fsutil` helper."""
         if path is None:
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=str(path.parent),
-            prefix=f".{path.name}.",
-            suffix=".tmp",
-            delete=False,
-        )
-        try:
-            json.dump(data, tmp, ensure_ascii=False)
-            tmp.close()
-            os.replace(tmp.name, path)
-        except Exception:
-            tmp.close()
-            try:
-                os.unlink(tmp.name)
-            except OSError:
-                pass
-            raise
+        atomic_write_json(path, data, ensure_ascii=False)
 
 
 _store: CodeRunStore | None = None

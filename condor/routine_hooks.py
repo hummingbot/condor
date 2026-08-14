@@ -16,11 +16,11 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import tempfile
 from pathlib import Path
 from typing import Any
+
+from condor.fsutil import atomic_write_json
 
 logger = logging.getLogger(__name__)
 
@@ -45,21 +45,7 @@ def _read_all() -> dict[str, dict]:
 
 
 def _write_all(data: dict[str, dict]) -> None:
-    _HOOKS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", dir=str(_HOOKS_FILE.parent), suffix=".tmp", delete=False
-    )
-    try:
-        json.dump(data, tmp, indent=2)
-        tmp.close()
-        os.replace(tmp.name, str(_HOOKS_FILE))
-    except Exception:
-        tmp.close()
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
+    atomic_write_json(_HOOKS_FILE, data, indent=2)
 
 
 def _default_config() -> dict:

@@ -20,6 +20,8 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from condor.fsutil import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 STATUS_FILENAME = "status.json"
@@ -71,17 +73,13 @@ def write_status(
     current["pid"] = os.getpid()
     current["updated_at"] = time.time()
 
-    tmp = path.with_suffix(".json.tmp")
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(current, indent=2), encoding="utf-8")
-        os.replace(tmp, path)  # atomic within a filesystem
+        # Unique temp file per writer, inside the target's directory: several
+        # processes update the same status/meta file (loops, state, delegate),
+        # and a shared temp name would let them tear each other's write.
+        atomic_write_json(path, current, indent=2)
     except Exception:
         log.warning("Could not write status for %s", session_dir, exc_info=True)
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 def read_status(

@@ -22,13 +22,13 @@ Each store lives under its assistant's home, keyed by ``user_id`` (FEAT-003);
 from __future__ import annotations
 
 import json
-import os
 import re
-import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
+
+from condor.fsutil import atomic_write_text
 
 from .paths import store_root
 
@@ -109,22 +109,15 @@ def _atomic_write(path: Path, text: str) -> None:
 
     Free function (not a method) so every per-assistant store — memories and
     skills alike — shares one implementation instead of a verbatim copy. The
-    temp file is named uniquely per writer (pid + uuid) so two processes
-    writing the same slug concurrently never share — and thus never tear — the
-    temp file; ``os.replace`` then publishes each writer's complete file
-    atomically (FEAT-003 runs the same store from the main process and the MCP
-    subprocess).
+    temp file is unique per writer, so two processes writing the same slug
+    concurrently never share — and thus never tear — it; ``os.replace`` then
+    publishes each writer's complete file atomically (FEAT-003 runs the same
+    store from the main process and the MCP subprocess).
+
+    Thin alias over :func:`condor.fsutil.atomic_write_text`, which is the one
+    implementation of this dance in the codebase (ARCH-148).
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp.write_text(text)
-        os.replace(tmp, path)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+    atomic_write_text(path, text)
 
 
 def _trim_audit(audit_file: Path, cap: int | None = None) -> None:
@@ -146,17 +139,7 @@ def _trim_audit(audit_file: Path, cap: int | None = None) -> None:
     if len(lines) <= cap * 2:
         return
     tail = lines[-cap:]
-    tmp = audit_file.with_name(
-        f".{audit_file.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
-    )
-    try:
-        tmp.write_text("".join(tail))
-        os.replace(tmp, audit_file)
-    finally:
-        try:
-            tmp.unlink()
-        except FileNotFoundError:
-            pass
+    _atomic_write(audit_file, "".join(tail))
 
 
 class MemoryStore:

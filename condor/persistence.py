@@ -10,16 +10,18 @@ Subclasses PTB's PicklePersistence to:
    to prevent pickle bloat.
 """
 
+import io
 import logging
 import os
 import pickle
-import tempfile
 from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from telegram.ext import PicklePersistence
 from telegram.ext._picklepersistence import _BotPickler, _BotUnpickler
+
+from condor.fsutil import atomic_write_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -60,20 +62,12 @@ class SafePicklePersistence(PicklePersistence):
         }
 
         target = self.filepath
-        tmp_fd = None
-        tmp_path = None
 
         try:
-            # 1. Write to a temp file in the same directory
-            tmp_fd, tmp_path = tempfile.mkstemp(
-                suffix=".tmp",
-                dir=str(target.parent),
-            )
-            with os.fdopen(tmp_fd, "wb") as f:
-                tmp_fd = None  # os.fdopen takes ownership
-                _BotPickler(self.bot, f, protocol=pickle.HIGHEST_PROTOCOL).dump(data)
-                f.flush()
-                os.fsync(f.fileno())
+            # 1. Serialize first: a pickling failure must not cost us the
+            #    backup rotation below, let alone the current file.
+            buf = io.BytesIO()
+            _BotPickler(self.bot, buf, protocol=pickle.HIGHEST_PROTOCOL).dump(data)
 
             # 2. Rotate current file to .bak (best-effort)
             bak_path = target.with_suffix(target.suffix + ".bak")
@@ -83,22 +77,12 @@ class SafePicklePersistence(PicklePersistence):
                 except OSError:
                     logger.warning("Failed to create backup of pickle file")
 
-            # 3. Atomic rename of temp → target
-            os.replace(tmp_path, str(target))
-            tmp_path = None  # success – nothing to clean up
+            # 3. Atomic temp-file → fsync → rename (shared helper, ARCH-148)
+            atomic_write_bytes(target, buf.getvalue())
 
         except Exception:
             logger.exception("Failed to write persistence file")
             raise
-        finally:
-            # Clean up temp file on failure
-            if tmp_fd is not None:
-                os.close(tmp_fd)
-            if tmp_path is not None:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
 
     # ------------------------------------------------------------------
     # Load: fall back to .bak on corruption

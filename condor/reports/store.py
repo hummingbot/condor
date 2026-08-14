@@ -6,9 +6,10 @@ import asyncio
 import contextvars
 import json
 import os
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+
+from condor.fsutil import atomic_write_json, atomic_write_text
 
 # reports/ is a repository-root output directory, not this source package.
 CHARTS_DIR = Path(__file__).resolve().parents[2] / "reports"
@@ -112,45 +113,12 @@ def _read_index() -> list[dict]:
 
 
 def _write_index(entries: list[dict]) -> None:
-    charts_dir = _charts_dir()
-    charts_dir.mkdir(exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=str(charts_dir), suffix=".tmp", delete=False
-    )
-    try:
-        json.dump(entries, tmp, indent=2, ensure_ascii=False)
-        tmp.close()
-        os.replace(tmp.name, str(_index_file()))
-    except Exception:
-        tmp.close()
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
+    atomic_write_json(_index_file(), entries, indent=2, ensure_ascii=False)
 
 
 def _write_report_html(path: Path, content: str) -> None:
     """Atomically create or replace a report HTML file."""
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    try:
-        tmp.write(content)
-        tmp.close()
-        os.replace(tmp.name, path)
-    except Exception:
-        tmp.close()
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, content)
 
 
 def list_reports(

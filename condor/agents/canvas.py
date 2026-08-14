@@ -18,11 +18,11 @@ past tick stays reconstructable even though ``canvas.md`` is overwritten.
 
 from __future__ import annotations
 
-import os
 import re
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+
+from condor.fsutil import atomic_write_text
 
 CANVAS_FILE = "canvas.md"
 REVISIONS_FILE = "canvas_revisions.md"
@@ -211,31 +211,12 @@ def _append_revision(
 
 
 def _atomic_write(path: Path, content: str) -> None:
-    """tmpfile + ``os.replace``, matching ``condor/reports/store.py``.
+    """tmpfile + ``os.replace``, via the shared :mod:`condor.fsutil` helper.
 
     A tick can be cancelled mid-write; a half-written canvas would then be
     inlined into the next prompt.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    try:
-        tmp.write(content)
-        tmp.close()
-        os.replace(tmp.name, path)
-    except Exception:
-        tmp.close()
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, content)
 
 
 # ---------------------------------------------------------------------------
