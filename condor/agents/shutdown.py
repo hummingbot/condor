@@ -380,10 +380,11 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         log.error(msg)
         await engine._notify(msg)
         if engine.journal:
-            engine.journal.append_action(
-                engine.journal.tick_count + 1, "shutdown_failed", "no API client"
-            )
-            engine.journal.record_tick("shutdown failed (no client): " + reason)
+            with engine.journal.batch():
+                engine.journal.append_action(
+                    engine.journal.tick_count + 1, "shutdown_failed", "no API client"
+                )
+                engine.journal.record_tick("shutdown failed (no client): " + reason)
         return
 
     stopped, failures = await _deterministic_baseline(engine, client, policy)
@@ -412,9 +413,12 @@ async def run_shutdown(engine: Any, reason: str) -> None:
 
     if engine.journal:
         verified = "flat" if not stranded else f"{len(stranded)} stranded"
-        engine.journal.append_action(
-            engine.journal.tick_count + 1,
-            "shutdown_done",
-            f"stopped={stopped}, failures={len(failures)}, verify={verified}",
-        )
-        engine.journal.record_tick("shutdown: " + reason)
+        # Both journal.md updates of this winddown go into one batch, so the file
+        # is rewritten once instead of twice (PERF-136 idiom, PERF-173).
+        with engine.journal.batch():
+            engine.journal.append_action(
+                engine.journal.tick_count + 1,
+                "shutdown_done",
+                f"stopped={stopped}, failures={len(failures)}, verify={verified}",
+            )
+            engine.journal.record_tick("shutdown: " + reason)

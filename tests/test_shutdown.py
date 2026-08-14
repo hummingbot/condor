@@ -6,11 +6,16 @@ verify/alert on residual), and the engine wrapper's idempotency guard.
 """
 
 import asyncio
+from contextlib import contextmanager
 from types import SimpleNamespace
 
+import pytest
+
+import condor.agents.journal as journal_mod
 from condor.agents import shutdown as shutdown_module
 from condor.agents import strategy as strategy_module
 from condor.agents.engine import TickEngine
+from condor.agents.journal import JournalManager
 from condor.agents.shutdown import (
     DEFAULT_POLICY,
     POLICY_FLATTEN_ALL,
@@ -181,6 +186,10 @@ class _FakeJournal:
         self.actions = []
         self.ticks = []
 
+    @contextmanager
+    def batch(self):
+        yield self
+
     def append_action(self, tick, action, reasoning, risk_note=""):
         self.actions.append((action, reasoning))
 
@@ -278,6 +287,82 @@ def test_winddown_no_client_alerts_loudly(tmp_path, monkeypatch):
     engine._get_client = _no_client
     asyncio.run(run_shutdown(engine, "breach"))
     assert any("🚨" in n and "could NOT reach the API" in n for n in notes)
+
+
+# ── journal write amplification (PERF-173) ──
+
+
+@pytest.fixture
+def journal_writes(monkeypatch) -> list[str]:
+    """Record every full rewrite of a journal.md, in order."""
+    recorded: list[str] = []
+    original = journal_mod.atomic_write_text
+
+    def spy(path, text, **kwargs):
+        if str(path).endswith("journal.md"):
+            recorded.append(text)
+        return original(path, text, **kwargs)
+
+    monkeypatch.setattr(journal_mod, "atomic_write_text", spy)
+    return recorded
+
+
+def _with_real_journal(engine, tmp_path) -> JournalManager:
+    engine.journal = JournalManager(engine.agent_id, session_dir=tmp_path)
+    return engine.journal
+
+
+def test_winddown_rewrites_the_journal_once_at_the_end(
+    tmp_path, monkeypatch, journal_writes
+):
+    """The terminal pair (append_action + record_tick) wrote the file twice."""
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    engine, _client, _notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    _with_real_journal(engine, tmp_path)
+
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    # shutdown_start (its own write, so it lands before the API-bound winddown)
+    # plus ONE write for the shutdown_done pair -- three writes before.
+    assert len(journal_writes) == 2
+    last = journal_writes[-1]
+    assert "shutdown_done" in last and "- tick#1 " in last
+
+
+def test_winddown_without_client_rewrites_the_journal_once(
+    tmp_path, monkeypatch, journal_writes
+):
+    engine, _client, _notes = _fake_engine([], [[]], monkeypatch, tmp_path)
+    _with_real_journal(engine, tmp_path)
+
+    async def _no_client():
+        return None
+
+    engine._get_client = _no_client
+    asyncio.run(run_shutdown(engine, "breach"))
+
+    assert len(journal_writes) == 2
+    last = journal_writes[-1]
+    assert "shutdown_failed" in last and "- tick#1 " in last
+
+
+def test_a_winddown_that_raises_still_journals_what_it_recorded(
+    tmp_path, monkeypatch, journal_writes
+):
+    """The batch flushes in a finally, so the recorded action is not lost."""
+    running = [{"id": "e_perp", "connector": "binance_perpetual"}]
+    engine, _client, _notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
+    journal = _with_real_journal(engine, tmp_path)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("disk on fire")
+
+    monkeypatch.setattr(journal, "record_tick", boom)
+
+    with pytest.raises(RuntimeError):
+        asyncio.run(run_shutdown(engine, "breach"))
+
+    assert "shutdown_done" in journal._path.read_text()
 
 
 # ── engine wrapper idempotency ──
