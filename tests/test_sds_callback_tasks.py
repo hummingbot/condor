@@ -57,7 +57,7 @@ def test_fired_callback_survives_gc_and_task_set_drains():
     sds = asyncio.run(_drive())
 
     assert ran["done"] is True, "callback was lost mid-flight"
-    assert sds._callback_tasks == set(), "done-callback must discard the task"
+    assert len(sds._callback_tasks) == 0, "done-callback must discard the task"
 
 
 def test_callback_exception_is_logged_and_isolated(caplog):
@@ -95,7 +95,7 @@ def test_callback_exception_is_logged_and_isolated(caplog):
     ), f"callback failure was not logged: {messages}"
 
     assert good_ran["count"] == 1, "a failing subscriber must not block the others"
-    assert sds._callback_tasks == set(), "failed task must still be discarded"
+    assert len(sds._callback_tasks) == 0, "failed task must still be discarded"
 
 
 def test_publisher_survives_failing_callback():
@@ -149,4 +149,4 @@ def test_stop_cancels_pending_callback_tasks():
 
     assert pending[0].cancelled(), "pending callback task must be cancelled by stop()"
     assert finished["done"] is False
-    assert sds._callback_tasks == set()
+    assert len(sds._callback_tasks) == 0

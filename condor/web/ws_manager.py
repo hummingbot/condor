@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 from fastapi import WebSocket
 
 from condor import dex_candles
+from condor.asyncutil import TaskSet
 from condor.fetchers.market_data import fetch_historical_candles, normalize_candle
 from condor.web.auth import decode_jwt
 
@@ -248,32 +249,11 @@ class WebSocketManager:
         # Strong refs to fire-and-forget one-shot tasks (backfill, warm cache)
         # so the GC can't cancel them mid-flight (the event loop only keeps a
         # weak reference). Entries auto-remove on completion.
-        self._oneshot_tasks: set[asyncio.Task] = set()
+        self._oneshot_tasks = TaskSet(logger, "One-shot task %s failed: %s")
         # Lazily-built registry of per-type stream lifecycles (see _stream_registry)
         self._stream_registry_cache: dict | None = None
 
     # -- Helpers --
-
-    def _track_oneshot(self, task: asyncio.Task) -> None:
-        """Keep a strong reference to a fire-and-forget task until it finishes,
-        so the GC can't silently cancel it (the event loop only holds a weak
-        reference). The reference is dropped automatically on completion."""
-        self._oneshot_tasks.add(task)
-        task.add_done_callback(self._on_oneshot_done)
-
-    def _on_oneshot_done(self, task: asyncio.Task) -> None:
-        """Release the strong reference and surface failures on this module's
-        logger. Nobody awaits a one-shot task, so without this a crash would
-        only show up as asyncio's "Task exception was never retrieved" at GC
-        time, leaving a channel silently stalled."""
-        self._oneshot_tasks.discard(task)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.error(
-                "One-shot task %s failed: %s", task.get_name(), exc, exc_info=exc
-            )
 
     @staticmethod
     def _server_from_channel(channel: str) -> str | None:
@@ -331,12 +311,8 @@ class WebSocketManager:
         self._last_candle_ws_update.clear()
         self._candle_first_msg_logged.clear()
 
-        # Cancel any still-pending one-shot tasks (snapshot: cancel() fires the
-        # done-callback that mutates the set).
-        for task in list(self._oneshot_tasks):
-            if not task.done():
-                task.cancel()
-        self._oneshot_tasks.clear()
+        # Cancel any still-pending one-shot tasks.
+        self._oneshot_tasks.cancel_all()
 
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
@@ -500,7 +476,7 @@ class WebSocketManager:
                 old_max = buf.max_size
                 buf.set_duration(dur)
                 if buf.max_size > old_max and buf.needs_backfill:
-                    self._track_oneshot(
+                    self._oneshot_tasks.track(
                         asyncio.create_task(
                             self._backfill_candles(channel),
                             name=f"backfill:{channel}",
@@ -650,7 +626,7 @@ class WebSocketManager:
             # Portfolio history rides on the portfolio subscription: one SDS
             # key per range, primed now and polled until the last client leaves.
             if prefix == "portfolio":
-                self._track_oneshot(
+                self._oneshot_tasks.track(
                     asyncio.create_task(
                         self._subscribe_portfolio_history(channel, server_name),
                         name=f"portfolio_history:{server_name}",
@@ -788,7 +764,7 @@ class WebSocketManager:
                 logger.debug("Failed to transform bots data for WS: %s", e)
                 return
 
-        self._track_oneshot(
+        self._oneshot_tasks.track(
             asyncio.create_task(
                 self._broadcast_update(channel, value),
                 name=f"broadcast:{channel}",

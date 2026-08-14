@@ -74,7 +74,7 @@ def test_reference_is_released_across_repeated_polls():
 
     asyncio.run(scenario())
 
-    assert manager._oneshot_tasks == set()
+    assert len(manager._oneshot_tasks) == 0
 
 
 def test_failing_broadcast_is_logged_on_this_modules_logger(caplog):
@@ -125,7 +125,7 @@ def test_cancelled_oneshot_is_not_logged_as_an_error(caplog):
         asyncio.run(scenario())
 
     assert [r for r in caplog.records if r.name == WS_LOGGER] == []
-    assert manager._oneshot_tasks == set()
+    assert len(manager._oneshot_tasks) == 0
 
 
 def test_no_untracked_fire_and_forget_dispatch_remains():

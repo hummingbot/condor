@@ -114,7 +114,7 @@ def test_history_write_is_not_broadcast_onto_the_portfolio_channel():
     asyncio.run(scenario())
 
     assert ws.sent == [], "portfolio history leaked onto the portfolio channel"
-    assert manager._oneshot_tasks == set()
+    assert len(manager._oneshot_tasks) == 0
 
 
 def test_account_scoped_portfolio_is_not_broadcast_to_the_server_channel():

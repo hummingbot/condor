@@ -22,6 +22,8 @@ from enum import Enum
 from functools import partial
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
+from condor.asyncutil import TaskSet
+
 logger = logging.getLogger(__name__)
 
 
@@ -282,7 +284,7 @@ class ServerDataService:
         # Strong refs to fire-and-forget subscriber-callback tasks so the GC
         # can't cancel them mid-flight (the event loop only keeps a weak
         # reference). Entries auto-remove on completion.
-        self._callback_tasks: set[asyncio.Task] = set()
+        self._callback_tasks = TaskSet(logger, "SDS callback error for %s: %s")
 
     # ------ Fetch registry ------
 
@@ -636,10 +638,7 @@ class ServerDataService:
         if self._poll_task and not self._poll_task.done():
             self._poll_task.cancel()
             logger.info("ServerDataService stopped")
-        for task in list(self._callback_tasks):
-            if not task.done():
-                task.cancel()
-        self._callback_tasks.clear()
+        self._callback_tasks.cancel_all()
 
     # ------ Poll loop ------
 
@@ -774,30 +773,6 @@ class ServerDataService:
 
         return result
 
-    def _track_callback_task(self, task: asyncio.Task, subscriber_id: str) -> None:
-        """Keep a strong reference to a fire-and-forget subscriber callback
-        until it finishes, so the GC can't silently cancel it mid-await (the
-        event loop only holds a weak reference). The reference is dropped
-        automatically on completion."""
-        self._callback_tasks.add(task)
-        task.add_done_callback(
-            lambda t, sid=subscriber_id: self._on_callback_done(t, sid)
-        )
-
-    def _on_callback_done(self, task: asyncio.Task, subscriber_id: str) -> None:
-        """Release the strong reference and surface failures on this module's
-        logger. Nobody awaits a subscriber callback, so without this a crash
-        would only show up as asyncio's "Task exception was never retrieved"
-        at GC time, leaving the subscriber silently broken."""
-        self._callback_tasks.discard(task)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.error(
-                "SDS callback error for %s: %s", subscriber_id, exc, exc_info=exc
-            )
-
     def _fire_callbacks(self, key: CacheKey, old_value: Any, new_value: Any) -> None:
         """Fire subscriber callbacks asynchronously.
 
@@ -816,7 +791,7 @@ class ServerDataService:
                 except Exception as e:
                     logger.debug("SDS callback error for %s: %s", sub.subscriber_id, e)
                 else:
-                    self._track_callback_task(task, sub.subscriber_id)
+                    self._callback_tasks.track(task, sub.subscriber_id)
 
     def _cleanup_stale(self) -> None:
         """Remove cache entries with no subscribers and expired TTL."""
