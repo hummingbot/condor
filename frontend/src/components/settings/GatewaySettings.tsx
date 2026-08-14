@@ -13,6 +13,7 @@ import {
 import { useEffect, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
+import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { api } from "@/lib/api";
 
 const IMAGE_OPTIONS = [
@@ -53,6 +54,9 @@ const READONLY_NETWORK_KEYS = new Set([
 
 function NetworkConfigEditor({ server, networkId }: { server: string; networkId: string }) {
   const qc = useQueryClient();
+  // Updating a network config is owner-only on the backend (SEC-166); ask about
+  // *this* server rather than the selected one, since it arrives as a prop.
+  const { isOwner } = useServerPermission(server);
   const [draft, setDraft] = useState<Record<string, string>>({});
 
   const { data, isLoading, error } = useQuery({
@@ -148,8 +152,9 @@ function NetworkConfigEditor({ server, networkId }: { server: string; networkId:
       <div className="flex items-center gap-2 pt-1">
         <button
           onClick={save}
-          disabled={changed.length === 0 || saveMut.isPending}
-          className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+          disabled={changed.length === 0 || saveMut.isPending || !isOwner}
+          title={isOwner ? undefined : OWNER_ONLY_HINT}
+          className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {saveMut.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
           Save {changed.length > 0 ? `(${changed.length})` : ""}
@@ -258,6 +263,9 @@ function GatewayNetworks({ server, running }: { server: string; running: boolean
 
 export function GatewaySettings() {
   const { server } = useServer();
+  // Container pull/start/stop/restart are owner-only on the backend (SEC-166).
+  // This only predicts the refusal — `_require_owner` is what enforces it.
+  const { isOwner } = useServerPermission();
   const qc = useQueryClient();
   const [showLogs, setShowLogs] = useState(false);
   const [showDeploy, setShowDeploy] = useState(false);
@@ -380,8 +388,9 @@ export function GatewaySettings() {
               <>
                 <button
                   onClick={() => restartMut.mutate()}
-                  disabled={restartMut.isPending}
-                  className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+                  disabled={restartMut.isPending || !isOwner}
+                  title={isOwner ? undefined : OWNER_ONLY_HINT}
+                  className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {restartMut.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                   Restart
@@ -390,8 +399,9 @@ export function GatewaySettings() {
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => stopMut.mutate()}
-                      disabled={stopMut.isPending}
-                      className="rounded-md bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--color-red)]/80"
+                      disabled={stopMut.isPending || !isOwner}
+                      title={isOwner ? undefined : OWNER_ONLY_HINT}
+                      className="rounded-md bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--color-red)]/80 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {stopMut.isPending ? "Stopping..." : "Confirm Stop"}
                     </button>
@@ -405,7 +415,9 @@ export function GatewaySettings() {
                 ) : (
                   <button
                     onClick={() => setConfirmStop(true)}
-                    className="flex items-center gap-1.5 rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-[var(--color-red)] transition-colors hover:bg-red-500/10"
+                    disabled={!isOwner}
+                    title={isOwner ? undefined : OWNER_ONLY_HINT}
+                    className="flex items-center gap-1.5 rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-[var(--color-red)] transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Square className="h-3 w-3" /> Stop
                   </button>
@@ -440,6 +452,16 @@ export function GatewaySettings() {
               </div>
             )}
           </div>
+        )}
+
+        {/* A refusal that outruns the disabled state (stale permission, a share just
+            revoked) still has to say something: show the API's own detail rather than
+            leaving the container apparently untouched and the click unexplained. */}
+        {stopMut.error && (
+          <p className="mt-3 text-xs text-[var(--color-red)]">{stopMut.error.message}</p>
+        )}
+        {restartMut.error && (
+          <p className="mt-3 text-xs text-[var(--color-red)]">{restartMut.error.message}</p>
         )}
       </div>
 
@@ -491,8 +513,9 @@ export function GatewaySettings() {
               {pullImage !== "custom" && (
                 <button
                   onClick={() => pullMut.mutate()}
-                  disabled={pulling}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                  disabled={pulling || !isOwner}
+                  title={isOwner ? undefined : OWNER_ONLY_HINT}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {pulling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                   Pull
@@ -510,8 +533,9 @@ export function GatewaySettings() {
                 />
                 <button
                   onClick={() => pullMut.mutate()}
-                  disabled={pulling || !pullCustomImage}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                  disabled={pulling || !pullCustomImage || !isOwner}
+                  title={isOwner ? undefined : OWNER_ONLY_HINT}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {pulling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                   Pull
@@ -617,8 +641,9 @@ export function GatewaySettings() {
 
             <button
               onClick={() => startMut.mutate()}
-              disabled={startMut.isPending || (image === "custom" && !customImage)}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+              disabled={startMut.isPending || (image === "custom" && !customImage) || !isOwner}
+              title={isOwner ? undefined : OWNER_ONLY_HINT}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {startMut.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
               Start Gateway

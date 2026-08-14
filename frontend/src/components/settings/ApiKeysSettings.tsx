@@ -74,10 +74,11 @@ function isCredentialField(key: string, type?: string): boolean {
 
 export function ApiKeysSettings() {
   const { server } = useServer();
-  // Credential add/delete is owner-only on the backend (SEC-153). Reading the
-  // level here does not enforce anything — the API still answers 403 — it just
-  // stops the UI from offering a trader an action that is going to be refused.
-  // Gateway wallet controls stay open: those routes are not owner-gated.
+  // Credential add/delete is owner-only on the backend (SEC-153), and so are the
+  // Gateway wallet mutations — add, set-default and remove all call `_require_owner`
+  // since SEC-166. Reading the level here does not enforce anything — the API still
+  // answers 403 — it just stops the UI from offering a trader an action that is
+  // going to be refused.
   const { isOwner } = useServerPermission();
   const qc = useQueryClient();
   const [flow, setFlow] = useState<AddFlowState>(INITIAL_FLOW);
@@ -503,9 +504,13 @@ export function ApiKeysSettings() {
             onClick={() =>
               setFlow({ ...INITIAL_FLOW, step: "import-wallet", walletChain: "solana" })
             }
-            disabled={!gatewayRunning}
+            disabled={!gatewayRunning || !isOwner}
             title={
-              gatewayRunning ? undefined : "Gateway is not running — start it from the Gateway tab."
+              !isOwner
+                ? OWNER_ONLY_HINT
+                : gatewayRunning
+                  ? undefined
+                  : "Gateway is not running — start it from the Gateway tab."
             }
             className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:border-[var(--color-border-hover)] hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-[var(--color-border)] disabled:hover:bg-[var(--color-surface)]"
           >
@@ -650,9 +655,9 @@ export function ApiKeysSettings() {
                         onClick={() =>
                           defaultWalletMut.mutate({ chain: w.chain, address: w.address })
                         }
-                        disabled={defaultWalletMut.isPending}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)] disabled:opacity-50"
-                        title="Set as default wallet for this chain"
+                        disabled={defaultWalletMut.isPending || !isOwner}
+                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                        title={isOwner ? "Set as default wallet for this chain" : OWNER_ONLY_HINT}
                       >
                         <Star className="h-3.5 w-3.5" />
                       </button>
@@ -681,8 +686,9 @@ export function ApiKeysSettings() {
                     ) : (
                       <button
                         onClick={() => setConfirmDeleteWallet(walletKey)}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"
-                        title="Remove wallet from Gateway"
+                        disabled={!isOwner}
+                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
+                        title={isOwner ? "Remove wallet from Gateway" : OWNER_ONLY_HINT}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -692,6 +698,15 @@ export function ApiKeysSettings() {
               );
             })}
           </div>
+        )}
+        {/* Same reasoning as the credential error above: a wallet mutation the API
+            refuses (owner-only since SEC-166) must say so instead of leaving the row
+            untouched and the click unexplained. */}
+        {defaultWalletMut.error && (
+          <p className="mt-2 text-xs text-[var(--color-red)]">{defaultWalletMut.error.message}</p>
+        )}
+        {deleteWalletMut.error && (
+          <p className="mt-2 text-xs text-[var(--color-red)]">{deleteWalletMut.error.message}</p>
         )}
       </div>
     </div>
