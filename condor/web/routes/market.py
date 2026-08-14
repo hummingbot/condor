@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 
@@ -27,6 +28,17 @@ def _candle_cache_put(key: tuple, value: list, now: float) -> None:
     while len(_candle_cache) > _CANDLE_CACHE_MAX:
         # dicts preserve insertion order: drop the oldest entry first
         _candle_cache.pop(next(iter(_candle_cache)))
+
+
+# In-flight coalescing, keyed exactly like _candle_cache. The TTL cache only
+# helps requests that arrive *after* one has finished; a dashboard rendering a
+# grid of executor panels for the same pair and window misses a cold cache in
+# all of them at once, and each miss used to fire its own upstream call — N
+# duplicate GeckoTerminal requests against the process-wide rate budget, or N
+# duplicate historical-candle calls to the API server. Same idiom as
+# `_snapshot_inflight` in condor/fetchers/bot_performance.py: one task per key,
+# popped by a done-callback so a failure is retried rather than remembered.
+_candle_inflight: dict[tuple, tuple[asyncio.AbstractEventLoop, asyncio.Task]] = {}
 
 
 from condor.fetchers.market_data import fetch_historical_candles
@@ -419,6 +431,63 @@ async def get_order_book(
     )
 
 
+async def _fetch_candles_upstream(
+    cm,
+    name: str,
+    connector: str,
+    trading_pair: str,
+    interval: str,
+    limit: int,
+    start_time: float | None,
+    end_time: float | None,
+    pool_address: str | None,
+) -> list[CandleData]:
+    """Fetch one window of candles upstream, with no caching of its own.
+
+    Split out of the route so concurrent requests on the same cache key can
+    share a single execution of it (see `_candle_inflight`). Raises exactly what
+    the route used to raise inline, so every waiter on a failing fetch sees the
+    same error and nothing is cached.
+    """
+    # Pairs with no CandlesFactory feed never reach the client below — that path
+    # 502s for them. A GeckoTerminal-backed connector (a DEX network, or an
+    # on-chain venue like xrpl) or an explicit pool_address routes there instead.
+    if pool_address or dex_candles.uses_gecko_candles(connector):
+        return await _fetch_dex_candles(
+            connector, pool_address, trading_pair, interval, start_time, end_time
+        )
+
+    client = await cm.get_client(name)
+    try:
+        rows = await fetch_historical_candles(
+            client,
+            connector,
+            trading_pair,
+            interval,
+            # No start_time means no time range to ask for: go straight to the
+            # plain `limit`-sized window.
+            start_time=int(start_time) if start_time is not None else None,
+            end_time=int(end_time) if end_time else int(time.time()),
+            limit=limit,
+            fallback_on_error=True,
+            strict=True,
+        )
+    except (TypeError, ValueError):
+        # A malformed row (strict=True) is a bug in the payload, not an upstream
+        # outage — surface it as-is, as this route always has.
+        raise
+    except Exception as e:
+        logger.exception(
+            "Failed to fetch candles for %s on %s of '%s'",
+            trading_pair,
+            connector,
+            name,
+        )
+        raise upstream_error("Failed to fetch candles", e)
+
+    return [CandleData(**row) for row in rows]
+
+
 @router.get("/servers/{name}/market/candles", response_model=list[CandleData])
 async def get_candles(
     name: str,
@@ -461,45 +530,39 @@ async def get_candles(
     if cached and (now - cached[0]) < _CANDLE_CACHE_TTL:
         return cached[1]
 
-    # Pairs with no CandlesFactory feed never reach the client below — that path
-    # 502s for them. A GeckoTerminal-backed connector (a DEX network, or an
-    # on-chain venue like xrpl) or an explicit pool_address routes there instead.
-    if pool_address or dex_candles.uses_gecko_candles(connector):
-        candles = await _fetch_dex_candles(
-            connector, pool_address, trading_pair, interval, start_time, end_time
+    # Cache miss: share one upstream fetch with every concurrent request on this
+    # key. Reuse an in-flight task only from the loop that created it — a task is
+    # bound to its loop and awaiting it from another one raises.
+    loop = asyncio.get_running_loop()
+    inflight = _candle_inflight.get(cache_key)
+    task = (
+        inflight[1]
+        if inflight is not None and inflight[0] is loop and not inflight[1].done()
+        # A finished task lingers until its done-callback runs; joining it would
+        # hand a fresh request the previous fetch's outcome (a failure included).
+        else None
+    )
+    if task is None:
+        task = asyncio.ensure_future(
+            _fetch_candles_upstream(
+                cm,
+                name,
+                connector,
+                trading_pair,
+                interval,
+                limit,
+                start_time,
+                end_time,
+                pool_address,
+            )
         )
-        _candle_cache_put(cache_key, candles, now)
-        return candles
+        _candle_inflight[cache_key] = (loop, task)
+        task.add_done_callback(lambda _t, k=cache_key: _candle_inflight.pop(k, None))
 
-    client = await cm.get_client(name)
-    try:
-        rows = await fetch_historical_candles(
-            client,
-            connector,
-            trading_pair,
-            interval,
-            # No start_time means no time range to ask for: go straight to the
-            # plain `limit`-sized window.
-            start_time=int(start_time) if start_time is not None else None,
-            end_time=int(end_time) if end_time else int(time.time()),
-            limit=limit,
-            fallback_on_error=True,
-            strict=True,
-        )
-    except (TypeError, ValueError):
-        # A malformed row (strict=True) is a bug in the payload, not an upstream
-        # outage — surface it as-is, as this route always has.
-        raise
-    except Exception as e:
-        logger.exception(
-            "Failed to fetch candles for %s on %s of '%s'",
-            trading_pair,
-            connector,
-            name,
-        )
-        raise upstream_error("Failed to fetch candles", e)
-
-    candles = [CandleData(**row) for row in rows]
+    # Shielded: a browser that disconnects mid-request cancels this handler, and
+    # an unshielded `await task` would cancel the shared fetch out from under
+    # every other waiter on the same key.
+    candles = await asyncio.shield(task)
     _candle_cache_put(cache_key, candles, now)
     return candles
 
