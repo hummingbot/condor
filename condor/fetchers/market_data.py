@@ -40,8 +40,7 @@ async def fetch_candles(
         )
         if not candles:
             return None
-        data = candles if isinstance(candles, list) else candles.get("data", [])
-        if not data:
+        if not _unwrap_candles(candles):
             return None
         return candles
     except Exception as e:
@@ -49,6 +48,129 @@ async def fetch_candles(
             "Error fetching candles for %s: %s", trading_pair, e, exc_info=True
         )
         return None
+
+
+def normalize_candle(c: Any, *, strict: bool = False) -> Optional[Dict[str, float]]:
+    """Normalize one candle row to a dict of floats, or None when unusable.
+
+    The API returns candles in two shapes depending on endpoint and version: a
+    dict keyed by OHLCV names, or a positional row ``[ts, o, h, l, c, v]``
+    (extra trailing fields are ignored). Rows in neither shape yield None.
+
+    Args:
+        strict: Re-raise ``TypeError``/``ValueError`` from a malformed value
+            (e.g. ``open="n/a"``) instead of dropping the row. The REST candles
+            route has always surfaced those; the WS paths have always swallowed
+            them, so the behaviour stays per-caller.
+    """
+    try:
+        if isinstance(c, dict):
+            return {
+                "timestamp": float(c.get("timestamp", 0)),
+                "open": float(c.get("open", 0)),
+                "high": float(c.get("high", 0)),
+                "low": float(c.get("low", 0)),
+                "close": float(c.get("close", 0)),
+                "volume": float(c.get("volume", 0)),
+            }
+        if isinstance(c, (list, tuple)) and len(c) >= 6:
+            return {
+                "timestamp": float(c[0]),
+                "open": float(c[1]),
+                "high": float(c[2]),
+                "low": float(c[3]),
+                "close": float(c[4]),
+                "volume": float(c[5]),
+            }
+    except (TypeError, ValueError):
+        if strict:
+            raise
+    return None
+
+
+def _unwrap_candles(result: Any) -> List[Any]:
+    """Candle rows out of either payload shape: a bare list or ``{"data": [...]}``."""
+    return (
+        result
+        if isinstance(result, list)
+        else result.get("data", []) if isinstance(result, dict) else []
+    )
+
+
+async def fetch_historical_candles(
+    client,
+    connector_name: str,
+    trading_pair: str,
+    interval: str = "1m",
+    *,
+    start_time: Optional[int] = None,
+    end_time: Optional[int] = None,
+    limit: Optional[int] = None,
+    fallback_on_error: bool = False,
+    strict: bool = False,
+) -> List[Dict[str, float]]:
+    """Time-ranged candles, normalized, with the ``get_candles`` fallback ladder.
+
+    Owns the sequence every candle consumer used to inline: ask for the historical
+    range, unwrap whichever payload shape came back, fall back to the plain
+    ``get_candles`` window when the range yields nothing, and normalize the rows.
+
+    Args:
+        start_time / end_time: Unix epoch seconds. With ``start_time`` None the
+            historical call is skipped entirely and the fallback (if any) answers.
+        limit: Row count for the ``get_candles`` fallback. None disables the
+            fallback — for pollers that only want the fresh tail of a live range
+            and would rather return nothing than a full unrelated window.
+        fallback_on_error: Treat a failing historical call as an empty result and
+            continue to the fallback, instead of propagating. Callers that abort
+            on failure (WS backfill, REST poll) leave it off.
+        strict: Passed through to `normalize_candle`.
+
+    Returns:
+        Normalized candles in upstream order; empty when nothing was usable.
+    """
+    result = None
+    if start_time is not None:
+        try:
+            logger.info(
+                "Fetching historical candles: connector=%s pair=%s interval=%s "
+                "start=%s end=%s",
+                connector_name,
+                trading_pair,
+                interval,
+                start_time,
+                end_time,
+            )
+            result = await client.market_data.get_historical_candles(
+                connector_name,
+                trading_pair,
+                interval,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        except Exception as e:
+            if not fallback_on_error:
+                raise
+            logger.warning(
+                "get_historical_candles failed: %s — falling back to get_candles", e
+            )
+            result = None
+
+    rows = _unwrap_candles(result)
+    if not rows and limit is not None:
+        logger.info(
+            "Falling back to get_candles: connector=%s pair=%s interval=%s limit=%s",
+            connector_name,
+            trading_pair,
+            interval,
+            limit,
+        )
+        result = await client.market_data.get_candles(
+            connector_name, trading_pair, interval, limit
+        )
+        rows = _unwrap_candles(result)
+
+    return [c for r in rows if (c := normalize_candle(r, strict=strict)) is not None]
 
 
 async def fetch_candle_connectors(client, **_kw) -> List[str]:

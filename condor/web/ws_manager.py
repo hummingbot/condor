@@ -10,6 +10,7 @@ from typing import Any, Awaitable, Callable, Optional
 from fastapi import WebSocket
 
 from condor import dex_candles
+from condor.fetchers.market_data import fetch_historical_candles, normalize_candle
 from condor.web.auth import decode_jwt
 
 logger = logging.getLogger(__name__)
@@ -244,28 +245,7 @@ class WebSocketManager:
     @staticmethod
     def _normalize_candle(c: Any) -> dict | None:
         """Normalize a candle from any format to a uniform dict with float values."""
-        try:
-            if isinstance(c, dict):
-                return {
-                    "timestamp": float(c.get("timestamp", 0)),
-                    "open": float(c.get("open", 0)),
-                    "high": float(c.get("high", 0)),
-                    "low": float(c.get("low", 0)),
-                    "close": float(c.get("close", 0)),
-                    "volume": float(c.get("volume", 0)),
-                }
-            elif isinstance(c, (list, tuple)) and len(c) >= 6:
-                return {
-                    "timestamp": float(c[0]),
-                    "open": float(c[1]),
-                    "high": float(c[2]),
-                    "low": float(c[3]),
-                    "close": float(c[4]),
-                    "volume": float(c[5]),
-                }
-        except (TypeError, ValueError):
-            pass
-        return None
+        return normalize_candle(c)
 
     # -- Lifecycle --
 
@@ -562,33 +542,15 @@ class WebSocketManager:
                 return
 
             client = await cm.get_client(server_name)
-            result = await client.market_data.get_historical_candles(
+            candles = await fetch_historical_candles(
+                client,
                 connector,
                 pair,
                 interval,
                 start_time=start_time,
                 end_time=end_time,
+                limit=min(buf.max_size, 5000),
             )
-
-            candles_raw = (
-                result
-                if isinstance(result, list)
-                else result.get("data", []) if isinstance(result, dict) else []
-            )
-            # Fallback to regular candles if historical returned nothing
-            if not candles_raw:
-                result = await client.market_data.get_candles(
-                    connector, pair, interval, min(buf.max_size, 5000)
-                )
-                candles_raw = (
-                    result
-                    if isinstance(result, list)
-                    else result.get("data", []) if isinstance(result, dict) else []
-                )
-
-            candles = [
-                c for r in candles_raw if (c := self._normalize_candle(r)) is not None
-            ]
             if candles:
                 buf.upsert_many(candles)
                 logger.info(
@@ -1263,27 +1225,17 @@ class WebSocketManager:
                     else:
                         cm = get_config_manager()
                         client = await cm.get_client(server_name)
-                        result = await client.market_data.get_historical_candles(
+                        # No `limit`: this poll only wants the fresh tail of the
+                        # live range, so an empty historical answer stays empty
+                        # rather than pulling a full unrelated window.
+                        candles = await fetch_historical_candles(
+                            client,
                             connector,
                             pair,
                             interval,
                             start_time=now - interval_sec * 5,
                             end_time=now,
                         )
-                        candles_raw = (
-                            result
-                            if isinstance(result, list)
-                            else (
-                                result.get("data", [])
-                                if isinstance(result, dict)
-                                else []
-                            )
-                        )
-                        candles = [
-                            c
-                            for r in candles_raw
-                            if (c := self._normalize_candle(r)) is not None
-                        ]
                     if candles:
                         buf = self._candle_buffers.get(channel)
                         # Broadcast if we have newer candles OR if the latest

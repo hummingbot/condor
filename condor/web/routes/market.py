@@ -29,6 +29,7 @@ def _candle_cache_put(key: tuple, value: list, now: float) -> None:
         _candle_cache.pop(next(iter(_candle_cache)))
 
 
+from condor.fetchers.market_data import fetch_historical_candles
 from condor.web.auth import get_current_user
 from condor.web.models import (
     CandleData,
@@ -471,95 +472,34 @@ async def get_candles(
         return candles
 
     client = await cm.get_client(name)
-    result = None
     try:
-        # Prefer historical candles with time range when start_time is given
-        if start_time is not None:
-            st = int(start_time)
-            et = int(end_time) if end_time else int(time.time())
-            logger.info(
-                "Fetching historical candles: connector=%s pair=%s interval=%s start=%s end=%s",
-                connector,
-                trading_pair,
-                interval,
-                st,
-                et,
-            )
-            result = await client.market_data.get_historical_candles(
-                connector,
-                trading_pair,
-                interval,
-                start_time=st,
-                end_time=et,
-            )
-            logger.info(
-                "Historical candles result: type=%s len=%s",
-                type(result).__name__,
-                len(result) if isinstance(result, (list, dict)) else "?",
-            )
-    except Exception as e:
-        logger.warning(
-            "get_historical_candles failed: %s — falling back to get_candles", e
+        rows = await fetch_historical_candles(
+            client,
+            connector,
+            trading_pair,
+            interval,
+            # No start_time means no time range to ask for: go straight to the
+            # plain `limit`-sized window.
+            start_time=int(start_time) if start_time is not None else None,
+            end_time=int(end_time) if end_time else int(time.time()),
+            limit=limit,
+            fallback_on_error=True,
+            strict=True,
         )
-        result = None
+    except (TypeError, ValueError):
+        # A malformed row (strict=True) is a bug in the payload, not an upstream
+        # outage — surface it as-is, as this route always has.
+        raise
+    except Exception as e:
+        logger.exception(
+            "Failed to fetch candles for %s on %s of '%s'",
+            trading_pair,
+            connector,
+            name,
+        )
+        raise upstream_error("Failed to fetch candles", e)
 
-    # Fallback: if historical returned nothing usable, use regular candles
-    candles_raw = (
-        result
-        if isinstance(result, list)
-        else result.get("data", []) if isinstance(result, dict) else []
-    )
-    if not candles_raw:
-        try:
-            logger.info(
-                "Falling back to get_candles: connector=%s pair=%s interval=%s limit=%s",
-                connector,
-                trading_pair,
-                interval,
-                limit,
-            )
-            result = await client.market_data.get_candles(
-                connector, trading_pair, interval, limit
-            )
-        except Exception as e:
-            logger.exception(
-                "Failed to fetch candles for %s on %s of '%s'",
-                trading_pair,
-                connector,
-                name,
-            )
-            raise upstream_error("Failed to fetch candles", e)
-
-    candles_raw = (
-        result
-        if isinstance(result, list)
-        else result.get("data", []) if isinstance(result, dict) else []
-    )
-
-    candles = []
-    for c in candles_raw:
-        if isinstance(c, dict):
-            candles.append(
-                CandleData(
-                    timestamp=float(c.get("timestamp", 0)),
-                    open=float(c.get("open", 0)),
-                    high=float(c.get("high", 0)),
-                    low=float(c.get("low", 0)),
-                    close=float(c.get("close", 0)),
-                    volume=float(c.get("volume", 0)),
-                )
-            )
-        elif isinstance(c, (list, tuple)) and len(c) >= 6:
-            candles.append(
-                CandleData(
-                    timestamp=float(c[0]),
-                    open=float(c[1]),
-                    high=float(c[2]),
-                    low=float(c[3]),
-                    close=float(c[4]),
-                    volume=float(c[5]),
-                )
-            )
+    candles = [CandleData(**row) for row in rows]
     _candle_cache_put(cache_key, candles, now)
     return candles
 
