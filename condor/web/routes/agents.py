@@ -1739,10 +1739,26 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     """Spawn a TickEngine session for ``strategy`` under ``agent``."""
     from condor.agents.config import load_full_config
     from condor.agents.engine import TickEngine
+    from config_manager import get_config_manager
 
     config_dict = load_full_config(strategy.dir, strategy.default_config)
     if req.config:
         config_dict.update(req.config)
+
+    # ``TickEngine._resolve_server`` trades on ``config["server_name"]`` and the
+    # request body is a free-form dict, so without this gate any authenticated
+    # user could start a live loop on another user's stored credentials — the
+    # same check the config pin and consult/delegate already apply. A name the
+    # body asked for is held to it strictly; an inherited one (strategy default,
+    # or the "local" that AgentConfig fills in) only matters when it resolves to
+    # a real server, since otherwise the engine falls through to the caller's
+    # own accessible servers, which is scoped already.
+    cm = get_config_manager()
+    server_name = config_dict.get("server_name")
+    asked_for_it = bool(req.config and req.config.get("server_name"))
+    if server_name and (asked_for_it or cm.get_server(server_name)):
+        if not cm.has_server_access(user_id, server_name):
+            raise HTTPException(status_code=403, detail="No access")
 
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context
