@@ -157,6 +157,30 @@ class WebRoutineContext:
 # in a process designed to run for weeks.
 _MAX_RESULTS = 200
 
+# CORR-163: the same bound, applied to the instance records themselves.
+# `_results` was the expensive half of the leak (a RoutineResult can pin a raw
+# PNG) but the `_instances` entry that owns it leaked in exactly the same shape:
+# every `execute()` mints a fresh id, and only the explicit `remove_instance`
+# and `stop` paths ever dropped one, so a completed one-shot was never reaped.
+#
+# Retention, not deletion-on-completion: a finished one-shot is precisely what
+# the dashboard's detail panel renders after the run ends and what an MCP agent
+# reads back through `get_instance` after a `run_async`, so the record has to
+# outlive its own run. Only *terminal* instances count against the cap —
+# anything in flight, continuous or scheduled is exempt from the count and from
+# eviction, so a scheduled routine can never be reaped out from under its own
+# task no matter how many one-shots run alongside it.
+#
+# Deliberately the same number as `_MAX_RESULTS`: an instance older than the
+# result cap has already lost its result and is a hollow record, and sharing the
+# bound is what keeps the two dicts from drifting apart.
+_MAX_TERMINAL_INSTANCES = _MAX_RESULTS
+
+# Statuses a run cannot come back from. `running` (one-shot in flight, or a
+# Telegram-owned instance, which keeps that status for its whole life) and
+# `scheduled` (between ticks of an interval schedule) are the live ones.
+_TERMINAL_STATUSES = frozenset({"completed", "failed", "stopped"})
+
 
 class RoutineStore:
     """Singleton store for routine instances and results."""
@@ -279,6 +303,7 @@ class RoutineStore:
 
     def add_instance(self, instance_id: str, metadata: dict) -> None:
         self._instances[instance_id] = metadata
+        self._prune_instances()
 
     def remove_instance(self, instance_id: str) -> None:
         self._instances.pop(instance_id, None)
@@ -288,6 +313,43 @@ class RoutineStore:
         # _authorized_instance, the MCP tool via get_instance), so a result left
         # behind here is unreachable memory rather than a cache.
         self._results.pop(instance_id, None)
+
+    def _has_live_task(self, instance_id: str) -> bool:
+        """True while the instance's own task is still on the loop."""
+        task = self._tasks.get(instance_id)
+        return task is not None and not task.done()
+
+    def _prune_instances(self) -> None:
+        """Evict the oldest terminal instances past ``_MAX_TERMINAL_INSTANCES``.
+
+        The backstop for the unbounded case: every ``execute()`` mints a fresh
+        instance id and a one-shot that completes normally is removed by nobody,
+        so without this the dict is monotonic for the life of the process.
+
+        Only instances in a terminal status are candidates, and only once their
+        task is off the loop — a run still in flight, a continuous routine and a
+        scheduled one between ticks are all exempt from eviction *and* from the
+        count, so no amount of one-shot churn can reap a live instance or push a
+        live one over the edge. The just-finished run is excluded on its own
+        prune for the same reason (its task is still executing this call); it is
+        the youngest candidate anyway, so it is never the one to go.
+
+        Oldest-first by last run, falling back to creation for an instance that
+        never ran. Eviction goes through ``remove_instance`` so a dropped
+        instance takes its result and its task entry with it, preserving
+        CORR-142's ``set(_results) <= set(_instances)``.
+        """
+        terminal = [
+            (meta.get("last_run_at") or meta.get("created_at") or 0.0, iid)
+            for iid, meta in self._instances.items()
+            if meta.get("status") in _TERMINAL_STATUSES and not self._has_live_task(iid)
+        ]
+        excess = len(terminal) - _MAX_TERMINAL_INSTANCES
+        if excess <= 0:
+            return
+        terminal.sort()
+        for _, iid in terminal[:excess]:
+            self.remove_instance(iid)
 
     # ── Results ──
 
@@ -525,6 +587,9 @@ class RoutineStore:
                     "error": error_msg,
                 }
             )
+            # The run just reached its final status: this is the moment a new
+            # terminal instance appears, so it is the moment to enforce the cap.
+            self._prune_instances()
 
         # Usage telemetry (FEAT-023): whether it ran, how it was triggered and
         # how long it took. The routine's own name only when the file ships in
