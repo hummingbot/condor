@@ -324,7 +324,7 @@ def _walk_trades(trades: list[dict[str, Any]], accounting) -> dict[str, Any]:
             trade_type=trade.get("trade_type", "").upper(),  # BUY or SELL
             position=trade.get("position", "").upper(),  # OPEN, CLOSE or NIL
             fee=float(trade.get("trade_fee_in_quote", 0)),
-            timestamp=trade.get("timestamp", 0),
+            timestamp=trade.get("timestamp"),
         )
 
         total_fees += parsed.fee

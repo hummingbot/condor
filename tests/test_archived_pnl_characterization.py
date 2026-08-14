@@ -272,11 +272,9 @@ GOLDEN: dict[str, dict] = {
         "total_fees": 0.0,
         "total_volume": 0.0,
         "pnl_by_pair": {},
-        "cumulative": [
-            (0.0, "Unknown"),
-            (0.0, "Unknown"),
-            (0.0, "Unknown"),
-        ],
+        # CORR-181: a missing timestamp is an absent one, like an explicit
+        # null - it charts nothing instead of a point at the Unix epoch
+        "cumulative": [],
     },
     "nil_none_timestamp": {
         "total_pnl": 0.0,
@@ -329,10 +327,9 @@ GOLDEN: dict[str, dict] = {
         "pnl_by_pair": {
             "SOL-USDC": 99.8,
         },
-        # the null-timestamp BUY charts no point (same as nil_none_timestamp);
-        # the missing-timestamp one still charts at epoch 0
+        # CORR-181: neither the null-timestamp BUY nor the missing-timestamp
+        # one charts a point; their PnL is carried by the next dated trade
         "cumulative": [
-            (0.0, "SOL-USDC"),
             (99.8, "SOL-USDC"),
         ],
     },
@@ -452,7 +449,7 @@ GOLDEN: dict[str, dict] = {
 def _expected_timestamps(trades):
     """Timestamps the cumulative series must carry, derived independently."""
     stamps = [
-        parse_timestamp(t.get("timestamp", 0))
+        parse_timestamp(t.get("timestamp"))
         for t in sorted(trades, key=_timestamp_sort_key)
     ]
     return [ts for ts in stamps if ts]
