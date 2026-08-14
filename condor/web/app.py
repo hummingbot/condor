@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from condor.telemetry.taps import web_tap
 from condor.web.routes import (
+    admin,
     agents,
     archived,
     auth,
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
 
     # ── API routes ──
     app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(admin.router, prefix="/api/v1")
     app.include_router(servers.router, prefix="/api/v1")
     app.include_router(portfolio.router, prefix="/api/v1")
     app.include_router(bots.router, prefix="/api/v1")

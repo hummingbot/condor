@@ -25,13 +25,15 @@ from pydantic import BaseModel
 from condor.code_runner import DEFAULT_TIMEOUT, MAX_TIMEOUT, execute_code
 from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import WebUser
-from config_manager import get_config_manager
+from config_manager import CODE_RUN_PREFERENCE, get_config_manager
 
 log = logging.getLogger(__name__)
 router = APIRouter(prefix="/code", tags=["code"])
 
 # The preference an admin sets on a user record to hand them the code runner.
-RUN_CODE_PREFERENCE = "code_run"
+# The spelling lives in config_manager beside the setter an admin drives it
+# from (ARCH-177); re-exported here because this is where it is enforced.
+RUN_CODE_PREFERENCE = CODE_RUN_PREFERENCE
 
 
 def _may_run_code(user_id: int) -> bool:
