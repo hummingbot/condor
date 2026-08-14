@@ -159,6 +159,21 @@ class AgentSession:
                         PROMPT_OVERALL_TIMEOUT,
                         self.key,
                     )
+                    # Cancel at the agent before walking away, exactly as
+                    # abort() does. Breaking out only stops us *relaying*: the
+                    # turn would keep generating and keep running tools against
+                    # a permission callback nobody is watching, and the next
+                    # prompt would overlap it at the subprocess. Bounded by
+                    # TIMEOUTS.prompt_cancel with a local fallback, so this
+                    # cannot hang the caller.
+                    try:
+                        await self.client.abort_prompt()
+                    except Exception:  # noqa: BLE001 - never mask the timeout
+                        log.warning(
+                            "Could not cancel timed-out prompt for session %s",
+                            self.key,
+                            exc_info=True,
+                        )
                     yield PromptDone(stop_reason="timeout")
                     break
         finally:
