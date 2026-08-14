@@ -70,11 +70,9 @@ ALLOWLIST: dict[tuple[str, str], str] = {
 # Routes that read a server but have never had an access check. NOT a licence:
 # each is a live gap, listed so the sweep above stays green while they are
 # fixed under their own item rather than silently smuggled into SEC-147.
-KNOWN_GAPS: dict[tuple[str, str], str] = {
-    ("GET", "/api/v1/routines/options/{source}"): (
-        "reads controller configs off any ?server= with no access check"
-    ),
-}
+# Empty since SEC-159 closed the last one (GET /routines/options/{source}) —
+# keep it that way: a new entry here is a hole shipped on purpose.
+KNOWN_GAPS: dict[tuple[str, str], str] = {}
 
 # The body-param sites: "<module>.<function>" → the attribute holding the name.
 # A path/query dependency cannot see a request body, so these call the shared
@@ -273,6 +271,7 @@ def client(app, deny):
         # aliased ?server= query param (settings.py)
         ("GET", f"/api/v1/settings/gateway/status?server={FOREIGN}"),
         ("GET", f"/api/v1/settings/credentials?server={FOREIGN}"),
+        ("GET", f"/api/v1/routines/options/controller_configs?server={FOREIGN}"),
         # {server_name} path param
         ("POST", f"/api/v1/routines/servers/{FOREIGN}/some_routine/run"),
     ],

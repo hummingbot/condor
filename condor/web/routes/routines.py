@@ -18,6 +18,7 @@ from condor.web.auth import (
     check_server_access,
     get_current_user,
     require_server_access_by_server_name,
+    require_server_access_query,
 )
 from condor.web.models import WebUser
 from config_manager import get_config_manager
@@ -291,10 +292,16 @@ async def put_hooks(
 @router.get("/options/{source}")
 async def get_field_options(
     source: str,
-    server: str = Query("local", alias="server"),
-    user: WebUser = Depends(get_current_user),
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
 ):
-    """Return dynamic options for routine config fields (e.g. controller_configs)."""
+    """Return dynamic options for routine config fields (e.g. controller_configs).
+
+    Server-scoped: ``controller_configs`` reads the named server's controller
+    configs, so the caller must have access to it (SEC-159). ``server`` used to
+    default to ``"local"``; the guard makes it required, which is what the
+    dashboard has always sent anyway.
+    """
     if source == "controller_configs":
         try:
             cm = get_config_manager()

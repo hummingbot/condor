@@ -70,12 +70,28 @@ class FakeRoutineStore:
         return "inst-cont"
 
 
+class FakeControllers:
+    async def list_controller_configs(self):
+        return [{"id": "pmm_b"}, {"id": "pmm_a"}]
+
+
+class FakeClient:
+    controllers = FakeControllers()
+
+
 class FakeConfigManager:
     def __init__(self, allowed):
         self._allowed = allowed  # set of (user_id, server_name)
+        self.clients_built = []
 
     def has_server_access(self, user_id, server_name, *args, **kwargs):
         return (user_id, server_name) in self._allowed
+
+    async def get_client(self, server_name):
+        # A denied request must never reach this: building the client is what
+        # reads the other user's server (SEC-159).
+        self.clients_built.append(server_name)
+        return FakeClient()
 
 
 @pytest.fixture
@@ -90,6 +106,19 @@ def client_and_store(monkeypatch):
     app.include_router(routines_module.router)
     app.dependency_overrides[get_current_user] = lambda: USER
     return TestClient(app), store
+
+
+@pytest.fixture
+def client_and_cm(monkeypatch):
+    """Same wiring, exposing the config manager for the field-options route."""
+    cm = FakeConfigManager(allowed={(USER.id, OWNED_SERVER)})
+    monkeypatch.setattr(routines_module, "get_config_manager", lambda: cm)
+    monkeypatch.setattr("condor.web.auth.get_config_manager", lambda: cm)
+
+    app = FastAPI()
+    app.include_router(routines_module.router)
+    app.dependency_overrides[get_current_user] = lambda: USER
+    return TestClient(app), cm
 
 
 # ── Denied: no access to the target server ──
@@ -293,3 +322,31 @@ def test_a_dashboard_run_has_no_conversation_behind_it(client_and_store, monkeyp
         json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
     )
     assert store.conversations == [""]
+
+
+# ── SEC-159: the field-options route is server-scoped too ──
+
+
+def test_field_options_denied_on_foreign_server(client_and_cm):
+    """``?server=`` on /options/{source} used to enumerate any server's configs."""
+    client, cm = client_and_cm
+    resp = client.get(f"/routines/options/controller_configs?server={FOREIGN_SERVER}")
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "No access"
+    assert cm.clients_built == []
+
+
+def test_field_options_allowed_on_owned_server(client_and_cm):
+    client, cm = client_and_cm
+    resp = client.get(f"/routines/options/controller_configs?server={OWNED_SERVER}")
+    assert resp.status_code == 200
+    assert resp.json() == {"options": ["pmm_a", "pmm_b"]}
+    assert cm.clients_built == [OWNED_SERVER]
+
+
+def test_field_options_requires_an_explicit_server(client_and_cm):
+    """The guard makes ``server`` required; it no longer falls back to "local"."""
+    client, cm = client_and_cm
+    resp = client.get("/routines/options/controller_configs")
+    assert resp.status_code == 422
+    assert cm.clients_built == []
