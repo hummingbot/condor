@@ -14,6 +14,7 @@ import {
 import { useEffect, useMemo, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
+import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { type ConnectorInfo, type CredentialInfo, type GatewayWalletGroup, api } from "@/lib/api";
 import { ConnectHyperliquid } from "./ConnectHyperliquid";
 import { ImportGatewayWallet, type WalletChain } from "./ImportGatewayWallet";
@@ -73,6 +74,11 @@ function isCredentialField(key: string, type?: string): boolean {
 
 export function ApiKeysSettings() {
   const { server } = useServer();
+  // Credential add/delete is owner-only on the backend (SEC-153). Reading the
+  // level here does not enforce anything — the API still answers 403 — it just
+  // stops the UI from offering a trader an action that is going to be refused.
+  // Gateway wallet controls stay open: those routes are not owner-gated.
+  const { isOwner } = useServerPermission();
   const qc = useQueryClient();
   const [flow, setFlow] = useState<AddFlowState>(INITIAL_FLOW);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
@@ -507,7 +513,9 @@ export function ApiKeysSettings() {
           </button>
           <button
             onClick={() => setFlow({ ...INITIAL_FLOW, step: "select-type" })}
-            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80"
+            disabled={!isOwner}
+            title={isOwner ? undefined : OWNER_ONLY_HINT}
+            className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-[var(--color-primary)]"
           >
             <Plus className="h-3.5 w-3.5" /> Add API Key
           </button>
@@ -568,8 +576,9 @@ export function ApiKeysSettings() {
                     ) : (
                       <button
                         onClick={() => setConfirmDelete(c.connector_name)}
-                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)]"
-                        title="Delete credential"
+                        disabled={!isOwner}
+                        className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-red)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[var(--color-text-muted)]"
+                        title={isOwner ? "Delete credential" : OWNER_ONLY_HINT}
                       >
                         <Trash2 className="h-3.5 w-3.5" />
                       </button>
@@ -580,6 +589,13 @@ export function ApiKeysSettings() {
             </div>
           ))}
         </div>
+      )}
+
+      {/* A refusal that slips past the disabled state (stale permission, a race with
+          a revoked share) still has to say something the user can act on — the API's
+          own detail, e.g. "Owner access required", rather than a silent no-op. */}
+      {deleteMut.error && (
+        <p className="text-xs text-[var(--color-red)]">{deleteMut.error.message}</p>
       )}
 
       {/* ── Gateway wallets ── */}
