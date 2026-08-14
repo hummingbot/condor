@@ -647,10 +647,7 @@ class WebSocketManager:
         while the priming is in flight, unsubscribe again — otherwise the poll
         would outlive its last subscriber.
         """
-        from condor.fetchers.portfolio import (
-            PORTFOLIO_HISTORY_INTERVAL,
-            PORTFOLIO_HISTORY_RANGES,
-        )
+        from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
         from condor.server_data_service import ServerDataType, get_server_data_service
 
         sds = get_server_data_service()
@@ -661,7 +658,6 @@ class WebSocketManager:
                     server=server_name,
                     data_type=ServerDataType.PORTFOLIO_HISTORY,
                     subscriber_id="ws_manager",
-                    interval=PORTFOLIO_HISTORY_INTERVAL,
                     range_key=range_key,
                 )
             except Exception as e:

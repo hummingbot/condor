@@ -18,11 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from condor.fetchers.portfolio import (
-    PORTFOLIO_HISTORY_INTERVAL,
-    PORTFOLIO_HISTORY_RANGES,
-    fetch_portfolio_history,
-)
+from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES, fetch_portfolio_history
 from condor.server_data_service import (
     _DEFAULTS,
     CacheKey,
@@ -211,7 +207,6 @@ def test_per_range_ttls_survived_the_move():
     """The old _RANGE_TTLS table now lives on the data type's defaults."""
     defaults = _DEFAULTS[ServerDataType.PORTFOLIO_HISTORY]
 
-    assert defaults.interval == PORTFOLIO_HISTORY_INTERVAL
     assert {
         rk: defaults.ttl_for({"range_key": rk}) for rk in PORTFOLIO_HISTORY_RANGES
     } == {"1D": 120, "1W": 600, "1M": 3600, "3M": 7200}
@@ -237,6 +232,12 @@ def _expire(sds: ServerDataService) -> None:
     """Age every cache entry past its interval so the next tick is due."""
     for entry in sds._cache.values():
         entry.fetched_at = 0.0
+
+
+def _age(sds: ServerDataService, seconds: float) -> None:
+    """Backdate every cache entry by ``seconds`` (per-range cadences differ)."""
+    for entry in sds._cache.values():
+        entry.fetched_at -= seconds
 
 
 def test_poll_starts_with_the_portfolio_subscriber_and_stops_with_it(env):
@@ -279,24 +280,93 @@ def test_poll_starts_with_the_portfolio_subscriber_and_stops_with_it(env):
     assert not any(k in sds._subscriptions for k in _history_keys("srv"))
 
 
-def test_history_subscriptions_use_the_previous_refresh_cadence(env):
-    """The loop re-warmed every range every 120s; the subscriptions must too."""
+def test_history_subscriptions_poll_each_range_at_its_own_ttl(env):
+    """PERF-174: one shared 120s cadence refetched the 3M window ~60x per TTL.
+
+    The cadence must come from the range's own TTL — the table that already
+    exists — not from a second table of intervals that has to agree with it.
+    """
     sds, _client = env()
+    defaults = _DEFAULTS[ServerDataType.PORTFOLIO_HISTORY]
 
     async def _drive():
         manager = WebSocketManager()
         await manager._subscribe_sds("portfolio:srv")
         await _drain(manager)
         return {
-            key: [s.interval for s in subs.values()]
+            key.params_dict["range_key"]: [s.interval for s in subs.values()]
             for key, subs in sds._subscriptions.items()
             if key.data_type is ServerDataType.PORTFOLIO_HISTORY
         }
 
     intervals = asyncio.run(_drive())
 
-    assert len(intervals) == len(PORTFOLIO_HISTORY_RANGES)
-    assert all(iv == [PORTFOLIO_HISTORY_INTERVAL] for iv in intervals.values())
+    assert intervals == {
+        rk: [defaults.ttl_for({"range_key": rk})] for rk in PORTFOLIO_HISTORY_RANGES
+    }
+    # And that is the concrete cadence: 1D unchanged, the rest much rarer.
+    assert {rk: iv[0] for rk, iv in intervals.items()} == {
+        "1D": 120,
+        "1W": 600,
+        "1M": 3600,
+        "3M": 7200,
+    }
+
+
+def _ranges_fetched(client: FakeClient, since: int) -> set[str]:
+    """Which range windows the client was asked for after call ``since``."""
+    by_candle = {candle: rk for rk, (_, candle) in PORTFOLIO_HISTORY_RANGES.items()}
+    return {by_candle[c["interval"]] for c in client.history_calls[since:]}
+
+
+def test_a_slow_range_is_not_refetched_on_the_fast_range_cadence(env):
+    """The saving itself: 120s of subscription must cost one fetch, not four."""
+    sds, client = env()
+
+    async def _drive():
+        manager = WebSocketManager()
+        await manager._subscribe_sds("portfolio:srv")
+        await _drain(manager)
+        primed = len(client.history_calls)
+
+        # 121s later: only the 1D window has outlived its TTL.
+        _age(sds, 121)
+        await sds._poll_tick()
+        after_2min = _ranges_fetched(client, primed)
+
+        # 2h later: every window is due.
+        mark = len(client.history_calls)
+        _age(sds, 7201)
+        await sds._poll_tick()
+        return after_2min, _ranges_fetched(client, mark)
+
+    after_2min, after_2h = asyncio.run(_drive())
+
+    assert after_2min == {"1D"}, "only the 1D window is stale after two minutes"
+    assert after_2h == set(PORTFOLIO_HISTORY_RANGES), "every window is due after 2h"
+
+
+def test_expired_slow_range_refreshes_on_an_explicit_request(env):
+    """Switching to 3M must not serve a two-hour-old chart while waiting for
+    the next (now much rarer) poll: the request itself refetches."""
+    sds, client = env()
+
+    async def _drive():
+        manager = WebSocketManager()
+        await manager._subscribe_sds("portfolio:srv")
+        await _drain(manager)
+        primed = len(client.history_calls)
+
+        # Past the 3M TTL, but with no poll tick in between.
+        _age(sds, 7201)
+        resp = await get_portfolio_history(name="srv", range="3M", user=_USER)
+        return primed, _ranges_fetched(client, primed), resp
+
+    primed, fetched, resp = asyncio.run(_drive())
+
+    assert primed == len(PORTFOLIO_HISTORY_RANGES)
+    assert fetched == {"3M"}, "the explicit read refetches its own range on the spot"
+    assert [p.total_usd for p in resp.points] == [150.0, 160.0]
 
 
 def test_second_subscriber_does_not_spawn_a_duplicate_poll(env):

@@ -72,12 +72,27 @@ class DataTypeDefaults:
         param_name, table = self.ttl_by_param
         return table.get(params.get(param_name, ""), self.ttl)
 
+    def interval_for(self, params: Dict[str, str]) -> float:
+        """Default poll cadence for a specific cache key's params.
+
+        Derived from that key's own TTL rather than a second per-param table:
+        polling a variant far more often than its data goes stale is pure
+        waste, and two tables that must agree eventually stop agreeing. The
+        declared ``interval:ttl`` ratio is what carries over, so a variant that
+        stays valid 60x longer is polled 60x less often.
+        """
+        if not self.ttl_by_param or not self.ttl:
+            return self.interval
+        return self.interval * (self.ttl_for(params) / self.ttl)
+
 
 _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
     ServerDataType.PORTFOLIO: DataTypeDefaults(interval=10, ttl=60),
-    # History is polled at one cadence for every range (what the dashboard's
-    # hand-rolled refresh loop did), but each range stays valid for as long as
-    # its own resolution warrants once nobody is subscribed.
+    # One entry per range window, each with its own freshness horizon: a 1D
+    # window at 5m candles is stale within minutes, a 3M window at 1d candles
+    # holds for hours. ``interval == ttl`` here, so ``interval_for`` polls each
+    # range exactly at its own TTL instead of refetching the 3M series 60x per
+    # window like the dashboard's old shared 120s loop did.
     ServerDataType.PORTFOLIO_HISTORY: DataTypeDefaults(
         interval=120,
         ttl=120,
@@ -326,13 +341,15 @@ class ServerDataService:
     ) -> CacheKey:
         """Subscribe to data updates. Returns the CacheKey.
 
-        If interval is 0 or not provided, the default for the data type is used.
+        If interval is 0 or not provided, the data type's default cadence is
+        used — derived per key from its own TTL, so a long-lived variant is
+        polled as rarely as its freshness contract allows.
         Callback signature: async callback(key: CacheKey, old_value, new_value)
         """
-        if interval <= 0:
-            interval = _DEFAULTS[data_type].interval
-
         key = CacheKey.make(server, data_type, **params)
+        if interval <= 0:
+            interval = _DEFAULTS[data_type].interval_for(key.params_dict)
+
         sub = Subscription(
             subscriber_id=subscriber_id,
             key=key,

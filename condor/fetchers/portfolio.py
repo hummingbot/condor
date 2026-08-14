@@ -19,8 +19,10 @@ PORTFOLIO_HISTORY_RANGES: Dict[str, Tuple[int, str]] = {
     "3M": (7776000, "1d"),
 }
 
-# Poll cadence for a subscribed history range (seconds).
-PORTFOLIO_HISTORY_INTERVAL = 120
+# The poll cadence is not declared here: each range is polled at its own TTL,
+# which ``ServerDataType.PORTFOLIO_HISTORY``'s defaults already state (see
+# ``DataTypeDefaults.interval_for``). A second table here would only be one
+# more thing that has to agree with that one.
 
 
 async def fetch_portfolio(client, **_kw) -> Any:
