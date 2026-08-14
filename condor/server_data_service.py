@@ -52,48 +52,33 @@ class ServerDataType(Enum):
 
 @dataclass(frozen=True)
 class DataTypeDefaults:
-    """Default interval, TTL, and stale threshold for a data type."""
+    """Default polling interval and cache TTL for a data type."""
 
     interval: float  # Default polling interval (seconds)
-    ttl: float  # How long cached data is considered valid without subscribers
-    stale_threshold: float  # Data younger than this is always returned
+    ttl: float  # How long cached data is considered valid
 
 
 _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
-    ServerDataType.PORTFOLIO: DataTypeDefaults(interval=10, ttl=60, stale_threshold=5),
-    ServerDataType.PRICES: DataTypeDefaults(interval=3, ttl=30, stale_threshold=2),
-    ServerDataType.POSITIONS: DataTypeDefaults(interval=10, ttl=60, stale_threshold=5),
-    ServerDataType.ACTIVE_ORDERS: DataTypeDefaults(
-        interval=10, ttl=60, stale_threshold=5
-    ),
-    ServerDataType.TRADING_RULES: DataTypeDefaults(
-        interval=300, ttl=600, stale_threshold=30
-    ),
-    ServerDataType.CONNECTORS: DataTypeDefaults(
-        interval=300, ttl=600, stale_threshold=30
-    ),
-    ServerDataType.BOTS_STATUS: DataTypeDefaults(interval=5, ttl=30, stale_threshold=3),
-    ServerDataType.EXECUTORS: DataTypeDefaults(interval=2, ttl=30, stale_threshold=1),
-    ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120, stale_threshold=10),
-    ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(
-        interval=300, ttl=600, stale_threshold=30
-    ),
-    ServerDataType.SERVER_STATUS: DataTypeDefaults(
-        interval=60, ttl=120, stale_threshold=15
-    ),
-    ServerDataType.ALL_CONNECTORS: DataTypeDefaults(
-        interval=300, ttl=600, stale_threshold=30
-    ),
+    ServerDataType.PORTFOLIO: DataTypeDefaults(interval=10, ttl=60),
+    ServerDataType.PRICES: DataTypeDefaults(interval=3, ttl=30),
+    ServerDataType.POSITIONS: DataTypeDefaults(interval=10, ttl=60),
+    ServerDataType.ACTIVE_ORDERS: DataTypeDefaults(interval=10, ttl=60),
+    ServerDataType.TRADING_RULES: DataTypeDefaults(interval=300, ttl=600),
+    ServerDataType.CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
+    ServerDataType.BOTS_STATUS: DataTypeDefaults(interval=5, ttl=30),
+    ServerDataType.EXECUTORS: DataTypeDefaults(interval=2, ttl=30),
+    ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120),
+    ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
+    ServerDataType.SERVER_STATUS: DataTypeDefaults(interval=60, ttl=120),
+    ServerDataType.ALL_CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
     # Venue traits follow the CONNECTORS cadence, not the "chains change ~never"
     # one: the credentialed connector list is one of the inputs, so the answer
     # changes the moment a user adds API keys.
-    ServerDataType.VENUES: DataTypeDefaults(interval=300, ttl=600, stale_threshold=30),
-    ServerDataType.TICKERS: DataTypeDefaults(interval=60, ttl=180, stale_threshold=30),
+    ServerDataType.VENUES: DataTypeDefaults(interval=300, ttl=600),
+    ServerDataType.TICKERS: DataTypeDefaults(interval=60, ttl=180),
     # Whole-server ticker pool: one poll feeds every per-connector ticker view and
     # all currency conversion, so reads never hit the network.
-    ServerDataType.TICKER_POOL: DataTypeDefaults(
-        interval=60, ttl=300, stale_threshold=60
-    ),
+    ServerDataType.TICKER_POOL: DataTypeDefaults(interval=60, ttl=300),
 }
 
 
@@ -378,11 +363,7 @@ class ServerDataService:
         defaults = _DEFAULTS[data_type]
         age = time.time() - entry.fetched_at
 
-        # Always return if within stale threshold
-        if age <= defaults.stale_threshold:
-            return entry.value
-
-        # Past the stale threshold: still usable until the TTL expires
+        # Cached data is usable until the TTL expires
         return entry.value if age <= defaults.ttl else None
 
     async def get_or_fetch(
