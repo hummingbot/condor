@@ -654,6 +654,9 @@ async def add_credential(
     cm = get_config_manager()
     if not cm.has_server_access(user.id, server):
         raise HTTPException(status_code=403, detail="No access")
+    # Credentials are server configuration, not trading: a shared trader must not
+    # overwrite the owner's exchange keys. Same line update_server/delete_server draw.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.accounts.add_credential(
@@ -682,6 +685,8 @@ async def delete_credential(
     cm = get_config_manager()
     if not cm.has_server_access(user.id, server):
         raise HTTPException(status_code=403, detail="No access")
+    # Deleting a key kills the owner's running bots' connectivity — owner only.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.accounts.delete_credential(
