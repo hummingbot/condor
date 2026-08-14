@@ -314,6 +314,9 @@ async def _execute_routine(
             report_id,
             failed=failed,
             bot=context.bot,
+            # The chat that started the run owns its hooks — the same identity
+            # user_data is keyed by, and the one the store records (SEC-152).
+            owner_id=chat_id,
         )
     except Exception as e:
         logger.error(

@@ -331,6 +331,8 @@ class RoutineStore:
                 report_id,
                 failed=failed,
                 bot=(self._bot or _http_bot),
+                # Only the hooks of whoever started this run fire (SEC-152).
+                owner_id=meta.get("user_id"),
             )
         except Exception as e:
             logger.error(

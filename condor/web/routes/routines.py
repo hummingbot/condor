@@ -266,8 +266,12 @@ async def stop_instance(instance_id: str, user: WebUser = Depends(get_current_us
 
 @router.get("/{routine_name:path}/hooks")
 async def get_hooks(routine_name: str, user: WebUser = Depends(get_current_user)):
-    """Get the post-execution hook config for a routine."""
-    cfg = routine_hooks.load_hooks(routine_name)
+    """Get the caller's post-execution hook config for a routine.
+
+    Hooks are per-owner (SEC-152), so this never exposes another user's
+    delivery destinations: a caller who configured none gets the empty default.
+    """
+    cfg = routine_hooks.load_hooks(routine_name, user.id)
     return cfg if cfg is not None else routine_hooks._default_config()
 
 
@@ -277,8 +281,11 @@ async def put_hooks(
     body: HooksRequest,
     user: WebUser = Depends(get_current_user),
 ):
-    """Save the post-execution hook config for a routine."""
-    return routine_hooks.save_hooks(routine_name, body.model_dump())
+    """Save the caller's post-execution hook config for a routine."""
+    try:
+        return routine_hooks.save_hooks(routine_name, body.model_dump(), user.id)
+    except routine_hooks.ForbiddenRecipient as e:
+        raise HTTPException(status_code=403, detail=str(e))
 
 
 @router.get("/options/{source}")
