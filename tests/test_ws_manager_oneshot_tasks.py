@@ -12,6 +12,7 @@ import asyncio
 import inspect
 import logging
 
+from condor.server_data_service import CacheKey, ServerDataType
 from condor.web.ws_manager import WebSocketManager, _Connection
 
 WS_LOGGER = "condor.web.ws_manager"
@@ -25,11 +26,9 @@ class _FakeWS:
         self.sent.append(payload)
 
 
-class _FakeDataType:
-    """Stands in for the SDS ServerDataType enum member."""
-
-    def __init__(self, name: str):
-        self.name = name
+def _key(data_type: str, server: str = "srv", **params) -> CacheKey:
+    """The typed key SDS hands its listeners on every cache write."""
+    return CacheKey.make(server, ServerDataType[data_type], **params)
 
 
 def _manager_with_subscriber(channel: str) -> tuple[WebSocketManager, _FakeWS]:
@@ -54,9 +53,7 @@ def test_sds_update_holds_a_strong_reference_until_the_broadcast_finishes():
     manager, ws = _manager_with_subscriber("portfolio:srv")
 
     async def scenario():
-        manager._on_data_update(
-            "srv", "portfolio", _FakeDataType("PORTFOLIO"), {"total": 1}
-        )
+        manager._on_data_update(_key("PORTFOLIO"), {"total": 1})
         assert len(manager._oneshot_tasks) == 1, "broadcast task was not tracked"
         name = next(iter(manager._oneshot_tasks)).get_name()
         await _drain(manager)
@@ -72,9 +69,7 @@ def test_reference_is_released_across_repeated_polls():
 
     async def scenario():
         for i in range(5):
-            manager._on_data_update(
-                "srv", "portfolio", _FakeDataType("PORTFOLIO"), {"total": i}
-            )
+            manager._on_data_update(_key("PORTFOLIO"), {"total": i})
             await _drain(manager)
 
     asyncio.run(scenario())
@@ -93,7 +88,7 @@ def test_failing_broadcast_is_logged_on_this_modules_logger(caplog):
     manager._broadcast_update = boom
 
     async def scenario():
-        manager._on_data_update("srv", "bots", _FakeDataType("BOTS_STATUS"), {})
+        manager._on_data_update(_key("BOTS_STATUS"), {})
         await _drain(manager)
 
     with caplog.at_level(logging.ERROR, logger=WS_LOGGER):
@@ -119,7 +114,7 @@ def test_cancelled_oneshot_is_not_logged_as_an_error(caplog):
     manager._broadcast_update = never_finishes
 
     async def scenario():
-        manager._on_data_update("srv", "portfolio", _FakeDataType("PORTFOLIO"), {})
+        manager._on_data_update(_key("PORTFOLIO"), {})
         await started.wait()
         task = next(iter(manager._oneshot_tasks))
         task.cancel()

@@ -5,13 +5,16 @@ import json
 import logging
 import math
 import time
-from typing import Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 
 from condor import dex_candles
 from condor.fetchers.market_data import fetch_historical_candles, normalize_candle
 from condor.web.auth import decode_jwt
+
+if TYPE_CHECKING:
+    from condor.server_data_service import CacheKey
 
 logger = logging.getLogger(__name__)
 
@@ -23,12 +26,51 @@ _CHANNEL_TO_SDT = {
     "prices": "PRICES",
 }
 
-# Reverse mapping for listener compatibility
+# Reverse mapping, for naming the channel a cache write belongs to
 _SDT_TO_CHANNEL_PREFIX = {
     "PORTFOLIO": "portfolio",
     "BOTS_STATUS": "bots",
     "PRICES": "prices",
 }
+
+# CacheKey params a data type's channel is scoped by, in channel-segment order.
+# A data type absent from this table has a server-wide channel (`{prefix}:{server}`)
+# and its key must carry no params at all — an account-scoped portfolio or any
+# other parameterized variant is a *different* dataset and must not be broadcast
+# to the server-wide channel. This is the single source of truth for both
+# directions: channel -> key params when subscribing, key -> channel when
+# broadcasting.
+_CHANNEL_KEY_PARAMS: dict[str, tuple[str, ...]] = {
+    "PRICES": ("connector_name", "trading_pair"),
+}
+
+
+def channel_for_key(key: CacheKey) -> str | None:
+    """WS channel a written SDS ``CacheKey`` belongs to, or ``None`` if none does.
+
+    ``None`` means "no channel carries this data" (a data type the dashboard does
+    not stream, e.g. portfolio history, or a parameterized variant of a
+    server-wide type) — never a silent drop of data a channel was waiting for:
+    a key that names a channel but is missing the params to address it is logged.
+    """
+    prefix = _SDT_TO_CHANNEL_PREFIX.get(key.data_type.name)
+    if not prefix:
+        return None
+
+    params = key.params_dict
+    param_names = _CHANNEL_KEY_PARAMS.get(key.data_type.name, ())
+    if set(params) != set(param_names):
+        logger.debug(
+            "No %s channel for key with params %s (expected %s)",
+            prefix,
+            sorted(params),
+            list(param_names),
+        )
+        return None
+
+    segments = [params[name] for name in param_names]
+    return ":".join([prefix, key.server, *segments])
+
 
 # Interval string -> seconds for buffer sizing
 _INTERVAL_SECONDS: dict[str, int] = {
@@ -582,10 +624,12 @@ class WebSocketManager:
         sds = get_server_data_service()
         data_type = ServerDataType[sdt_name]
 
-        # Build params for price channels
-        params = {}
-        if sdt_name == "PRICES" and len(parts) >= 4:
-            params = {"connector_name": parts[2], "trading_pair": parts[3]}
+        # Params the channel scopes its key by, read off the channel segments
+        # that follow the server (same table the broadcast direction uses).
+        param_names = _CHANNEL_KEY_PARAMS.get(sdt_name, ())
+        if len(parts) < 2 + len(param_names):
+            return
+        params = dict(zip(param_names, parts[2:]))
 
         try:
             cache_key = await sds.subscribe(
@@ -681,7 +725,7 @@ class WebSocketManager:
                 "ws_manager",
             )
 
-    # -- SDS listener (legacy-compatible signature) --
+    # -- SDS listener --
 
     @staticmethod
     def _transform_executors(raw_data: Any) -> list[dict]:
@@ -713,24 +757,15 @@ class WebSocketManager:
             server_name, data.get("controllers", []), data.get("bots", [])
         )
 
-    def _on_data_update(
-        self, server_name: str, cache_key: str, data_type: Any, value: Any
-    ) -> None:
-        """Called by SDS when cache is updated. Maps to WS channels and broadcasts."""
-        dt_name = data_type.name if hasattr(data_type, "name") else str(data_type)
-        prefix = _SDT_TO_CHANNEL_PREFIX.get(dt_name)
-        if not prefix:
+    def _on_data_update(self, key: CacheKey, value: Any) -> None:
+        """Called by SDS on every cache write. Maps the key to a WS channel and
+        broadcasts. ``key`` is an SDS ``CacheKey``: server, data type and params."""
+        channel = channel_for_key(key)
+        if channel is None:
             return
 
-        # Build channel name
-        if dt_name == "PRICES":
-            parts = cache_key.split(":")
-            if len(parts) >= 3:
-                channel = f"prices:{server_name}:{parts[1]}:{parts[2]}"
-            else:
-                return
-        else:
-            channel = f"{prefix}:{server_name}"
+        dt_name = key.data_type.name
+        server_name = key.server
 
         has_subscribers = any(channel in conn.channels for conn in self._connections)
         if not has_subscribers:

@@ -462,40 +462,29 @@ class ServerDataService:
             len(keys_to_remove),
         )
 
-    # ------ Listener compatibility (for WebSocketManager) ------
+    # ------ Cache-write listeners (for WebSocketManager) ------
 
     def add_listener(self, callback: Callable) -> None:
-        """Add a sync listener: callback(server_name, cache_key_str, data_type_name, value)"""
+        """Add a sync listener: ``callback(key: CacheKey, value: Any)``.
+
+        Fired on every cache write. The listener gets the typed key — server,
+        data type and params — so it never has to parse anything back out of a
+        formatted string.
+        """
         self._listeners.append(callback)
 
     def remove_listener(self, callback: Callable) -> None:
-        self._listeners = [cb for cb in self._listeners if cb is not callback]
+        # Compared by equality, not identity: the only listener is a bound
+        # method (``ws_manager._on_data_update``), and attribute access builds a
+        # fresh method object every time, so ``is`` never matched the one that
+        # was registered and stop() left a dead manager wired to the singleton.
+        self._listeners = [cb for cb in self._listeners if cb != callback]
 
     def _notify_listeners(self, key: CacheKey, value: Any) -> None:
-        """Notify listeners with server/channel/data_type/value arguments.
-
-        The WS manager uses the data_type name string to map to channels.
-        """
-        if not self._listeners:
-            return
-
-        # Build a channel-compatible cache_key string
-        params = key.params_dict
-        if key.data_type == ServerDataType.PRICES:
-            cache_key_str = f"cex_prices:{params.get('connector_name', '')}:{params.get('trading_pair', '')}"
-        elif key.data_type == ServerDataType.PORTFOLIO:
-            account = params.get("account_name", "")
-            cache_key_str = f"cex_balances:{account}" if account else "portfolio"
-        elif key.data_type == ServerDataType.BOTS_STATUS:
-            cache_key_str = "bots_status"
-        elif key.data_type == ServerDataType.EXECUTORS:
-            cache_key_str = "executors"
-        else:
-            cache_key_str = key.data_type.value
-
+        """Hand the written key and its value to every listener, unchanged."""
         for cb in self._listeners:
             try:
-                cb(key.server, cache_key_str, key.data_type, value)
+                cb(key, value)
             except Exception as e:
                 logger.debug("SDS listener error: %s", e)
 
