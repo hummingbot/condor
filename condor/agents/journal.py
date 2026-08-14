@@ -309,8 +309,6 @@ class JournalManager:
     def __init__(
         self,
         agent_id: str,
-        strategy_name: str = "",
-        strategy_description: str = "",
         session_dir: Path | None = None,
         agent_dir: Path | None = None,
     ):
@@ -890,32 +888,6 @@ class JournalManager:
         self._parsed_cache["executors"] = results
         return results
 
-    def _parse_ticks(self) -> list[dict]:
-        self.read_full()  # refresh parsed cache if the file changed
-        cached = self._parsed_cache.get("ticks")
-        if cached is not None:
-            return cached
-        section = self._get_section("Ticks")
-        results = []
-        for line in section.splitlines():
-            if not line.startswith(TICK_LINE_PREFIX):
-                continue
-            entry: dict[str, Any] = {}
-            parts = line[2:].split(" | ")
-            for part in parts:
-                if part.startswith("tick#"):
-                    entry["tick"] = int(part.replace("tick#", ""))
-                elif part.startswith("actions="):
-                    entry["actions"] = int(part.replace("actions=", ""))
-                else:
-                    if re.match(r"\d{4}-\d{2}-\d{2}", part.strip()):
-                        entry["timestamp"] = part.strip()
-                    else:
-                        entry["summary"] = part.strip()
-            results.append(entry)
-        self._parsed_cache["ticks"] = results
-        return results
-
     def _parse_snapshots(self) -> list[dict]:
         self.read_full()  # refresh parsed cache if the file changed
         cached = self._parsed_cache.get("snapshots")
@@ -986,7 +958,7 @@ class JournalManager:
             return 0.0
         return drawdown / exposure * 100
 
-    def get_pnl_series(self, hours: int = 24) -> list[dict]:
+    def get_pnl_series(self) -> list[dict]:
         return [
             {"timestamp": s.get("timestamp", ""), "pnl": s.get("pnl", 0)}
             for s in self._parse_snapshots()
@@ -1063,14 +1035,6 @@ class JournalManager:
             return len(snaps)
         section = self._get_section("Recent Actions")
         return len([l for l in section.splitlines() if l.startswith("- ")])
-
-    def get_data_dir(self) -> Path:
-        """Return the session data directory."""
-        return self._session_dir
-
-    def size_bytes(self) -> int:
-        """Current file size."""
-        return self._path.stat().st_size if self._path.exists() else 0
 
 
 def _normalize(text: str) -> str:

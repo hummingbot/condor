@@ -172,8 +172,6 @@ class TickEngine:
 
             self.journal = JournalManager(
                 self.agent_id,
-                strategy_name=self.strategy.name,
-                strategy_description=self.strategy.description,
                 session_dir=self.session_dir,
                 agent_dir=strategy_dir,
             )
