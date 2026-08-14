@@ -1752,6 +1752,16 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     asked_for_it = bool(req.config and req.config.get("server_name"))
     if server_name and (asked_for_it or cm.get_server(server_name)):
         check_server_access(user_id, server_name)
+        # A name the body asked for must also name something. An unknown one
+        # used to be waved through on the reasoning that it borrows no
+        # credentials, but ``has_server_access`` answers True for an admin on
+        # any string, and the loop it starts outlives the check: the engine
+        # would bind to whatever gets created under that name later (SEC-164).
+        # Refused only *after* the access check, so a caller with no access
+        # still gets the same "No access" a real server gives them and this
+        # route never reveals which names exist.
+        if not cm.get_server(server_name):
+            raise HTTPException(status_code=404, detail="Server not found")
 
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context

@@ -942,15 +942,42 @@ class TickEngine:
         )
 
     def _resolve_server(self) -> tuple[str | None, dict | None]:
-        """Resolve the server for this agent."""
+        """Resolve the server for this run, keyed on ``user_id`` (SEC-164).
+
+        Every candidate — the configured name, the subject's own default, the
+        accessible list — is held to the same bar here: the server must exist
+        *and* ``user_id`` must be able to reach it. Two properties fall out of
+        checking it at resolution rather than only at start:
+
+        * the run never inherits identity it was handed. ``chat_id`` arrives
+          from the request body, so resolving through ``get_effective_server``
+          on *it* let a caller name a chat they do not own and pick up that
+          chat's default server, with no server name for the start gate
+          (SEC-149) to check. The subject's own default is keyed by user id
+          anyway, both on the web (``set_chat_default_server(user.id, ...)``)
+          and in a private Telegram chat, where chat id == user id.
+        * a name that matched nothing at start stays unusable. The loop is
+          long-running, so a configured ``server_name`` that resolved to
+          nothing — the ``"local"`` ``AgentConfig`` fills in, typically — must
+          not silently bind to whatever another user creates under that name
+          later.
+
+        Falls back to the subject's accessible servers, as before, so a run
+        with no server configured still works.
+        """
         from config_manager import get_config_manager, get_effective_server
 
         cm = get_config_manager()
-        server_name = self.config.get("server_name")
 
-        if not server_name:
-            server_name = get_effective_server(self.chat_id)
-        if not server_name:
+        def usable(name: str | None) -> bool:
+            return bool(name and cm.get_server(name)) and cm.has_server_access(
+                self.user_id, name
+            )
+
+        server_name = self.config.get("server_name")
+        if not usable(server_name):
+            server_name = get_effective_server(self.user_id)
+        if not usable(server_name):
             accessible = cm.get_accessible_servers(self.user_id)
             server_name = accessible[0] if accessible else None
         if not server_name:
@@ -964,10 +991,18 @@ class TickEngine:
         try:
             server_name, server = self._resolve_server()
             if not server:
-                from handlers.bots._shared import get_bots_client
-
-                client, _ = await get_bots_client(self.chat_id)
-                return client
+                # Nothing to fall back to: ``_resolve_server`` already tried
+                # every server this run's subject may use, so the only servers
+                # left are other people's. ``get_bots_client(self.chat_id)``
+                # used to stand here — it ignores the chat id for server
+                # selection and, with no ``user_data`` to scope it, picks the
+                # first *globally* enabled server instead (SEC-164).
+                log.warning(
+                    "Agent %s: no accessible server for user %s, no API client",
+                    self.agent_id,
+                    self.user_id,
+                )
+                return None
 
             from config_manager import get_config_manager
 
