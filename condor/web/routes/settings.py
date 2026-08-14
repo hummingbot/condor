@@ -31,6 +31,22 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 def _require_owner(cm, user_id: int, server_name: str):
+    """Enforce the OWNER line on top of the TRADER floor every route already has.
+
+    The rule this file draws (SEC-153, extended to the gateway by SEC-166):
+
+    * **Reading** a server's state — status, logs, wallet and network listings,
+      configured connectors — needs TRADER. A shared trader has to be able to
+      see what they are trading against, and to tell the owner when it is down.
+    * **Trading** on a server needs TRADER. That is what the share is for.
+    * **Mutating a server's configuration or its infrastructure** needs OWNER.
+      Exchange credentials, the gateway container lifecycle, the private keys
+      in its keystore and the RPC endpoints it dials are all the owner's
+      machine, not a trading action — and each of them can break the owner's
+      running bots for everyone else on the server.
+
+    Admins keep the bypass they hold everywhere else in this module.
+    """
     perm = cm.get_server_permission(user_id, server_name)
     if perm != ServerPermission.OWNER and not cm.is_admin(user_id):
         raise HTTPException(status_code=403, detail="Owner access required")
@@ -177,6 +193,9 @@ async def gateway_pull(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # Pulling an image rewrites what code will run on the owner's host next
+    # restart — infrastructure, not trading.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         # Parse "image:tag" format (e.g. "hummingbot/gateway:latest")
@@ -212,6 +231,9 @@ async def gateway_start(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # The caller picks the image and port of a container started on the owner's
+    # host. That is the owner's decision, not a shared trader's.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.start(
@@ -232,6 +254,9 @@ async def gateway_stop(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # Stopping the gateway cuts DEX connectivity for every bot on the server,
+    # including the owner's. Same line delete_credential draws.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.stop()
@@ -247,6 +272,8 @@ async def gateway_restart(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # A restart drops in-flight DEX orders for everyone on the server.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.restart()
@@ -318,6 +345,9 @@ async def gateway_network_update(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # Network config carries the RPC endpoint every transaction from this server
+    # is signed and broadcast through — repointing it is a server-wide change.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.update_network_config(network_id, req.config)
@@ -369,6 +399,9 @@ async def gateway_wallet_add(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # Importing a private key into the owner's gateway makes that key usable by
+    # everyone on the server. Whose keys live on the host is the owner's call.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     # Gateway's add-wallet always promotes the new key to the chain default, so when the user
     # opted out we capture the existing default first and restore it after the import.
@@ -418,6 +451,9 @@ async def gateway_wallet_set_default(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # The default wallet is the one every subsequent DEX trade signs with, so
+    # switching it silently redirects the owner's flow to another address.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.accounts.set_default_gateway_wallet(
@@ -444,6 +480,8 @@ async def gateway_wallet_remove(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # Removing a key strands any bot trading from that address — owner only.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.accounts.remove_gateway_wallet(
