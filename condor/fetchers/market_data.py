@@ -59,9 +59,10 @@ def normalize_candle(c: Any, *, strict: bool = False) -> Optional[Dict[str, floa
 
     Args:
         strict: Re-raise ``TypeError``/``ValueError`` from a malformed value
-            (e.g. ``open="n/a"``) instead of dropping the row. The REST candles
-            route has always surfaced those; the WS paths have always swallowed
-            them, so the behaviour stays per-caller.
+            (e.g. ``open="n/a"``) instead of dropping the row. No candle caller
+            asks for this today — every one of them would rather lose a candle
+            than a whole series (see CORR-168) — but the raise stays available
+            for a consumer that cannot tolerate a hole.
     """
     try:
         if isinstance(c, dict):
@@ -124,7 +125,9 @@ async def fetch_historical_candles(
         fallback_on_error: Treat a failing historical call as an empty result and
             continue to the fallback, instead of propagating. Callers that abort
             on failure (WS backfill, REST poll) leave it off.
-        strict: Passed through to `normalize_candle`.
+        strict: Passed through to `normalize_candle`. Rows dropped instead of
+            raised are logged once per call at warning, so a payload bug is
+            still discoverable rather than silently thinning the series.
 
     Returns:
         Normalized candles in upstream order; empty when nothing was usable.
@@ -170,7 +173,31 @@ async def fetch_historical_candles(
         )
         rows = _unwrap_candles(result)
 
-    return [c for r in rows if (c := normalize_candle(r, strict=strict)) is not None]
+    normalized: List[Dict[str, float]] = []
+    dropped: List[Any] = []
+    for r in rows:
+        c = normalize_candle(r, strict=strict)
+        if c is None:
+            dropped.append(r)
+        else:
+            normalized.append(c)
+
+    if dropped:
+        # A dropped row leaves a hole in the series that consumers cannot tell
+        # apart from a genuine gap in upstream data, so keep it discoverable.
+        # One line per fetch, not per bad row: a systematically broken payload
+        # would otherwise flood the log from the WS pollers.
+        logger.warning(
+            "Dropped %d of %d unusable candle rows for %s %s %s; first: %r",
+            len(dropped),
+            len(rows),
+            connector_name,
+            trading_pair,
+            interval,
+            dropped[0],
+        )
+
+    return normalized
 
 
 async def fetch_candle_connectors(client, **_kw) -> List[str]:

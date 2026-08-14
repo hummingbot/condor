@@ -446,12 +446,13 @@ async def _fetch_candles_upstream(
             end_time=int(end_time) if end_time else int(time.time()),
             limit=limit,
             fallback_on_error=True,
-            strict=True,
+            # CORR-168: one malformed row costs one candle, not the whole
+            # chart. The fetcher logs what it dropped at warning, so a payload
+            # bug is still diagnosable without 500ing every request for the
+            # pair. A real upstream failure still raises below and is wrapped
+            # as `upstream_error` — the two stay distinguishable.
+            strict=False,
         )
-    except (TypeError, ValueError):
-        # A malformed row (strict=True) is a bug in the payload, not an upstream
-        # outage — surface it as-is, as this route always has.
-        raise
     except Exception as e:
         logger.exception(
             "Failed to fetch candles for %s on %s of '%s'",
