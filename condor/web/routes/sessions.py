@@ -227,12 +227,14 @@ async def session_action(
         return {"ok": await runtime.abort(parsed)}
 
     if body.action in ("new", "switch"):
-        return await _respawn(parsed, info, body)
+        return await _respawn(parsed, info, body, user)
 
     raise HTTPException(status_code=400, detail=f"Unknown action: {body.action}")
 
 
-async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> dict:
+async def _respawn(
+    key: SessionKey, info: SessionInfo, body: SessionAction, user: WebUser
+) -> dict:
     """Tear the session down and bring it back under the same key.
 
     ACP has no identity hot-swap, so switching who is answering means reaping
@@ -249,12 +251,25 @@ async def _respawn(key: SessionKey, info: SessionInfo, body: SessionAction) -> d
 
     switching = body.action == "switch"
 
+    # A respawn *creates* a session, so it needs a real owner to create it for:
+    # the new spec's ``user_id``, the user_data loaded for it, the remembered
+    # model choice and the conversation it writes into are all keyed by that id.
+    # A record carrying none has no such subject, so refuse rather than stand a
+    # placeholder id in for it — the same fail-closed treatment SEC-150 gave
+    # ownerless routine instances. Only an admin can get here with one anyway:
+    # ``_require_ownership`` already refuses everyone else.
+    if info.user_id is None:
+        raise HTTPException(status_code=403, detail="Session has no owner")
+
     # The new session's tools are built against this server's credentials, so
     # gate it exactly like consult/delegate do — otherwise a switch would be a
-    # way to reach a server the caller was never granted (IDOR). Checked before
-    # the teardown, so a refused switch leaves the session running as it was.
+    # way to reach a server the caller was never granted (IDOR). The subject is
+    # the *caller*, never the session's owner (SEC-167): an admin acting on
+    # someone else's session must be held to their own reach, not licensed by
+    # the owner's. Checked before the teardown, so a refused switch leaves the
+    # session running as it was.
     if body.server_name:
-        check_server_access(info.user_id or 0, body.server_name)
+        check_server_access(user.id, body.server_name)
 
     # Unspecified fields keep their current value, so "new" is just a switch
     # to the same identity.
