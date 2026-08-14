@@ -52,6 +52,23 @@ class SessionSpec(BaseModel):
         "a new one; a supplied id resumes that transcript.",
     )
 
+    def effective_ids(self) -> tuple[int, int]:
+        """``(user_id, chat_id)`` as the MCP subprocess must see them.
+
+        Both ids reach the subprocess twice — in its environment
+        (``CONDOR_USER_ID``/``CONDOR_CHAT_ID``) and on its argv
+        (``--user-id``/``--chat-id``, via ``binding.resolve``) — and argv wins
+        (mcp_servers/condor/settings.py). So the fallback for an ownerless or
+        chatless spec is derived here, once, and both channels read it: two
+        hand-copied ``or 0`` expressions used to disagree, and the subprocess
+        ran as the phantom user 0 that argv carried (SEC-180).
+
+        A spec with neither id is legitimately ownerless — sessions.py supports
+        that shape deliberately — and lands on 0, which fails closed everywhere.
+        """
+        chat_id = self.chat_id if self.chat_id is not None else (self.user_id or 0)
+        return self.user_id or chat_id, chat_id
+
 
 class SessionInfo(BaseModel):
     """Serializable view of a live session."""

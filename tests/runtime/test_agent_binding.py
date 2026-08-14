@@ -118,6 +118,46 @@ def test_resolve_unbound_session_is_the_default_agent(monkeypatch):
     assert captured["args"][0] == 42
 
 
+def test_ownerless_session_argv_matches_the_env_fallback(monkeypatch):
+    """An ownerless spec reaches the subprocess as the chat id, never as 0.
+
+    The id travels on two channels — ``CONDOR_USER_ID`` in the env (sessions.py)
+    and ``--user-id`` on argv (here) — and argv is resolved first
+    (mcp_servers/condor/settings.py), so an ``or 0`` fallback of our own would
+    override the chat-id fallback the env channel computes and pinned by
+    ``tests/test_agents.py::test_extra_env_falls_back_to_chat_id``. Down there
+    the value is a principal: it mints the web JWT, subjects the server-access
+    and admin checks, and roots the memory store — user 0 would be a phantom
+    store shared by every ownerless session (SEC-180).
+    """
+    import config_manager
+
+    class _NoServers:
+        def get_accessible_servers(self, user_id):
+            return []
+
+        def get_server(self, name):
+            return None
+
+    monkeypatch.setattr(config_manager, "get_config_manager", lambda: _NoServers())
+    monkeypatch.setattr(config_manager, "get_effective_server", lambda *a, **k: None)
+
+    def argv_of(spec):
+        bound = binding.resolve(spec)
+        condor = next(s for s in bound.mcp_servers if s["name"] == "condor")
+        return condor["args"]
+
+    args = argv_of(_spec(agent_key="claude-code", user_id=None, chat_id=777))
+    assert args[args.index("--user-id") + 1] == "777"
+    assert args[args.index("--chat-id") + 1] == "777"
+    assert args[args.index("--user-id") + 1] != "0"
+
+    # And the owned case is untouched: the explicit ids pass straight through.
+    args = argv_of(_spec(agent_key="claude-code", user_id=42, chat_id=555))
+    assert args[args.index("--user-id") + 1] == "42"
+    assert args[args.index("--chat-id") + 1] == "555"
+
+
 def test_a_missing_default_record_still_starts_the_chat(monkeypatch, tmp_path):
     """An unreadable agents/condor/AGENT.md degrades; it does not fail closed."""
     monkeypatch.setattr(agent_module, "_DATA_ROOT", tmp_path)

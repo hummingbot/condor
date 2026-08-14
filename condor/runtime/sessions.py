@@ -390,13 +390,13 @@ async def get_or_create_session(
         await _enforce_session_budget(spec.user_id)
 
     # MCP subprocess env expects a numeric chat id; surfaces without a chat
-    # (web, mcp) fall back to the user id.
-    effective_chat_id = (
-        spec.chat_id if spec.chat_id is not None else (spec.user_id or 0)
-    )
+    # (web, mcp) fall back to the user id. The same pair goes down on argv via
+    # binding.resolve, which is what the subprocess actually reads first — so
+    # both channels take it from one derivation (SEC-180).
+    effective_user_id, effective_chat_id = spec.effective_ids()
     extra_env = {
         "CONDOR_CHAT_ID": str(effective_chat_id),
-        "CONDOR_USER_ID": str(spec.user_id or effective_chat_id),
+        "CONDOR_USER_ID": str(effective_user_id),
         # Which session the MCP subprocess belongs to. The *conversation* id does
         # not exist yet here (it is minted below, after the client is up), but the
         # key does and is stable for the subprocess's whole life — so tools that

@@ -112,9 +112,13 @@ def resolve(
     # and a specialist launched without it would read and write the CHAT's store.
     # What the slug must NOT decide down there is identity or routine scope —
     # see ``Settings.specialist_slug``.
+    # One derivation for both channels: these are the very ids sessions.py puts
+    # in CONDOR_USER_ID/CONDOR_CHAT_ID, and argv beats env in the subprocess, so
+    # a local fallback here would silently override the env one (SEC-180).
+    effective_user_id, effective_chat_id = spec.effective_ids()
     mcp_servers = build_mcp_servers_for_session(
-        spec.user_id or 0,
-        spec.chat_id or spec.user_id or 0,
+        effective_user_id,
+        effective_chat_id,
         user_data,
         server_name=effective_server if agent.server_required else None,
         agent_slug=agent.slug,
