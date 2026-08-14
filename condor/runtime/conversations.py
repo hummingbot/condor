@@ -32,7 +32,9 @@ import re
 import shutil
 import time
 import uuid
+from collections.abc import Iterator
 from datetime import datetime, timezone
+from itertools import chain, islice
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -58,6 +60,11 @@ REPLAY_MAX_CHARS = int(os.environ.get("CONDOR_REPLAY_MAX_CHARS", "6000") or 6000
 
 REPLAY_HEADER = "Previously in this chat:"
 REPLAY_OMITTED = "(older turns omitted)"
+
+# Bytes pulled per backwards read of a transcript. One block already covers a
+# replay's whole char budget many times over; it only ever grows when a single
+# turn is bigger than this.
+_TAIL_BLOCK_BYTES = 64 * 1024
 
 TITLE_MAX_CHARS = 80
 SNIPPET_MAX_CHARS = 160
@@ -343,13 +350,71 @@ def list_conversations(user_id: int, *, limit: int = 100) -> list[ConversationMe
     return metas[:limit] if limit else metas
 
 
+def _iter_lines_reverse(path: Path, *, block: int | None = None) -> Iterator[bytes]:
+    """The file's non-blank lines, newest first, reading only what is consumed.
+
+    Opened in binary and split on ``b"\\n"``: no UTF-8 continuation byte is
+    ``0x0A``, so a block boundary can cut a character in half but never a line.
+    A record is always one line — ``append_turn`` writes ``json.dumps`` output,
+    which escapes newlines — so a line is a whole turn, and the last one is
+    yielded whether or not it ends in a newline (a torn append reads as a
+    malformed line, exactly as it does on the forward path).
+    """
+    size = block or _TAIL_BLOCK_BYTES
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        pos = fh.tell()
+        carry = b""
+        while pos > 0:
+            step = min(size, pos)
+            pos -= step
+            fh.seek(pos)
+            lines = (fh.read(step) + carry).split(b"\n")
+            # The first piece may continue into the block before this one.
+            carry = lines.pop(0)
+            for line in reversed(lines):
+                line = line.strip()
+                if line:
+                    yield line
+        carry = carry.strip()
+        if carry:
+            yield carry
+
+
+def _iter_turns_reverse(path: Path) -> Iterator[TurnEntry]:
+    """Parsed turns, newest first, parsing only the lines the caller pulls.
+
+    Same tolerance as the forward read: a line that will not parse is skipped,
+    an unreadable file is empty rather than fatal.
+    """
+    try:
+        if not path.is_file():
+            return
+        for line in _iter_lines_reverse(path):
+            try:
+                yield TurnEntry(**json.loads(line.decode("utf-8")))
+            except Exception:  # noqa: BLE001 - one bad line is not the file
+                continue
+    except OSError:
+        log.debug("Unreadable transcript at %s", path, exc_info=True)
+
+
 def read_transcript(user_id: int, conv_id: str, *, limit: int = 200) -> list[TurnEntry]:
     """The tail of a transcript. ``limit=0`` means all of it.
 
     A line that fails to parse is skipped, never fatal — the same tolerance
     ``read_status()`` shows for a truncated status file.
+
+    A bounded tail is read backwards from the end, so a conversation with
+    thousands of turns costs its tail rather than its whole history; only
+    ``limit=0`` still walks the file.
     """
     path = _conv_dir(user_id, conv_id) / TRANSCRIPT_FILENAME
+    if limit:
+        tail = list(islice(_iter_turns_reverse(path), limit))
+        tail.reverse()
+        return tail
+
     entries: list[TurnEntry] = []
     try:
         if not path.is_file():
@@ -366,7 +431,7 @@ def read_transcript(user_id: int, conv_id: str, *, limit: int = 200) -> list[Tur
     except OSError:
         log.debug("Unreadable transcript at %s", path, exc_info=True)
         return []
-    return entries[-limit:] if limit else entries
+    return entries
 
 
 def append_turn(user_id: int, conv_id: str, entry: TurnEntry) -> None:
@@ -462,9 +527,14 @@ def replay_context(
 
     Walks backwards from the newest turn so the most recent ones always survive
     the bound, then reverses. The returned string never exceeds ``max_chars``.
+
+    The walk reads the transcript backwards and parses lazily, so it stops at
+    the turn that overruns the budget instead of parsing the whole file first:
+    this runs on the session-spawn path, and the transcript is append-only.
     """
-    turns = read_transcript(user_id, conv_id, limit=0)
-    if not turns:
+    turns = _iter_turns_reverse(_conv_dir(user_id, conv_id) / TRANSCRIPT_FILENAME)
+    newest_turn = next(turns, None)
+    if newest_turn is None:
         return ""
 
     # Budget the body so header and footer fit inside the caller's bound.
@@ -476,10 +546,13 @@ def replay_context(
     lines: list[str] = []
     used = 0
     omitted = False
-    for turn in reversed(turns):
+    newest = ""
+    for turn in chain([newest_turn], turns):
         rendered = _render_turn(turn)
         if not rendered:
             continue
+        if not newest:
+            newest = rendered
         if used + len(rendered) + 1 > budget:
             omitted = True
             break
@@ -489,7 +562,6 @@ def replay_context(
     if not lines:
         # Even the newest turn alone overruns the budget. Keeping a truncated
         # head of it beats returning nothing at all.
-        newest = next((r for r in (_render_turn(t) for t in reversed(turns)) if r), "")
         if not newest:
             return ""
         lines = [newest[:budget]]
