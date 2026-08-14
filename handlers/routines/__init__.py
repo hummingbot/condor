@@ -307,17 +307,20 @@ async def _execute_routine(
     hook_result = (
         rich_result if rich_result is not None else normalize_result(result_text)
     )
+    # Built outside the try so a signature mismatch surfaces instead of being
+    # logged as a delivered hook — see RoutineStore._fire_hooks (CORR-175).
+    hook_coro = routine_hooks.dispatch(
+        routine_name,
+        hook_result,
+        report_id,
+        failed=failed,
+        bot=context.bot,
+        # The chat that started the run owns its hooks — the same identity
+        # user_data is keyed by, and the one the store records (SEC-152).
+        owner_id=chat_id,
+    )
     try:
-        await routine_hooks.dispatch(
-            routine_name,
-            hook_result,
-            report_id,
-            failed=failed,
-            bot=context.bot,
-            # The chat that started the run owns its hooks — the same identity
-            # user_data is keyed by, and the one the store records (SEC-152).
-            owner_id=chat_id,
-        )
+        await hook_coro
     except Exception as e:
         logger.error(
             f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"

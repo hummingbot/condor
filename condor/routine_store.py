@@ -324,16 +324,24 @@ class RoutineStore:
         routine_name = meta.get("routine_name") if meta else None
         if not routine_name:
             return
+        # Built outside the try on purpose (CORR-175). Binding the arguments
+        # happens here, at coroutine creation; nothing inside ``dispatch`` runs
+        # until it is awaited. So a call that no longer matches the signature
+        # raises TypeError *here* and surfaces, while every failure the dispatch
+        # itself hits stays swallowed below. The boundary is when the error
+        # happens, not its type: a TypeError raised while delivering is a
+        # runtime failure and must not break the run either.
+        coro = routine_hooks.dispatch(
+            routine_name,
+            result,
+            report_id,
+            failed=failed,
+            bot=(self._bot or _http_bot),
+            # Only the hooks of whoever started this run fire (SEC-152).
+            owner_id=meta.get("user_id"),
+        )
         try:
-            await routine_hooks.dispatch(
-                routine_name,
-                result,
-                report_id,
-                failed=failed,
-                bot=(self._bot or _http_bot),
-                # Only the hooks of whoever started this run fire (SEC-152).
-                owner_id=meta.get("user_id"),
-            )
+            await coro
         except Exception as e:
             logger.error(
                 f"Post-execution hooks failed for {routine_name}[{instance_id}]: {e}"
