@@ -383,6 +383,16 @@ class TickEngine:
                         self.journal.append_error(str(e))
                     await self._notify(f"Agent {self.agent_id} tick error: {e}")
 
+                # A shutdown that started *inside* the tick (the hard risk
+                # kill-switch) already ran its winddown, wrote the terminal
+                # state and unregistered this run — it only returns here
+                # because it must not cancel its own task. Recording a tick
+                # now would rewrite state=running over that STOPPED, and the
+                # next boot would read a live run to reconcile and possibly
+                # restart the very strategy the risk engine just wound down.
+                if self._shutting_down or not self._running:
+                    return
+
                 # Record the tick we just finished. A tiny atomic write, so if
                 # the process dies mid-sleep the boot pass can say which tick
                 # this run reached instead of guessing.
