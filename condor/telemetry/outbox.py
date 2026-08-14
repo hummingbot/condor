@@ -30,6 +30,8 @@ import os
 import time
 from pathlib import Path
 
+from condor.fsutil import atomic_write_text
+
 log = logging.getLogger(__name__)
 
 MAX_OUTBOX_EVENTS = 5000
@@ -149,12 +151,10 @@ def _trim() -> None:
     if len(kept) == len(events):
         return
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            for record in kept:
-                fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-        tmp.replace(path)
+        atomic_write_text(
+            path,
+            "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in kept),
+        )
     except OSError:
         log.debug("Telemetry could not trim the outbox", exc_info=True)
 

@@ -11,6 +11,8 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from condor.fsutil import atomic_write_json
+
 logger = logging.getLogger(__name__)
 
 _DATA_DIR = Path("data") / "backtests"
@@ -79,29 +81,24 @@ class BacktestStore:
         if not path.exists():
             return None
         try:
-            return json.loads(path.read_text())
+            return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
             logger.warning("Failed to read backtest file %s", path)
             return None
 
     def _write_file(self, task_id: str, data: dict[str, Any]) -> None:
-        path = self._task_path(task_id)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data))
-        tmp.replace(path)
+        atomic_write_json(self._task_path(task_id), data)
 
     def _load_index(self) -> None:
         if self._index_path.exists():
             try:
-                self._index = json.loads(self._index_path.read_text())
+                self._index = json.loads(self._index_path.read_text(encoding="utf-8"))
             except Exception:
                 logger.warning("Failed to load backtest index, rebuilding")
                 self._rebuild_index()
 
     def _persist_index(self) -> None:
-        tmp = self._index_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._index))
-        tmp.replace(self._index_path)
+        atomic_write_json(self._index_path, self._index)
 
     def _rebuild_index(self) -> None:
         """Rebuild index from individual files on disk."""
@@ -110,7 +107,7 @@ class BacktestStore:
             if path.name == "_index.json":
                 continue
             try:
-                data = json.loads(path.read_text())
+                data = json.loads(path.read_text(encoding="utf-8"))
                 task_id = path.stem
                 self._index[task_id] = {
                     "server": data.get("server", ""),
@@ -129,7 +126,7 @@ class BacktestStore:
         if not _LEGACY_FILE.exists():
             return
         try:
-            legacy_data = json.loads(_LEGACY_FILE.read_text())
+            legacy_data = json.loads(_LEGACY_FILE.read_text(encoding="utf-8"))
             if not isinstance(legacy_data, dict) or not legacy_data:
                 _LEGACY_FILE.unlink()
                 return
