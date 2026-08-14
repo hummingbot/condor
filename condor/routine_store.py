@@ -146,6 +146,18 @@ class WebRoutineContext:
         return self._user_data
 
 
+# How many finished-run results stay resident (CORR-142). Results must outlive
+# their run — the dashboard renders the detail panel after the run ends and only
+# fetches the chart PNG when the user opens that run, and an MCP agent that
+# submitted with `run_async` comes back for it via `get_instance` an unbounded
+# time later. So this is deliberately generous: it is a memory backstop, not a
+# cache TTL. What it prevents is the unbounded case — every `execute()` mints a
+# fresh instance_id, and a RoutineResult can hold a raw PNG in `chart_image`, so
+# an agent running a chart routine on a tick would otherwise pin megabytes a day
+# in a process designed to run for weeks.
+_MAX_RESULTS = 200
+
+
 class RoutineStore:
     """Singleton store for routine instances and results."""
 
@@ -271,11 +283,30 @@ class RoutineStore:
     def remove_instance(self, instance_id: str) -> None:
         self._instances.pop(instance_id, None)
         self._tasks.pop(instance_id, None)
+        # The result dies with its instance. Every read path resolves the
+        # instance first (the dashboard detail and chart endpoints via
+        # _authorized_instance, the MCP tool via get_instance), so a result left
+        # behind here is unreachable memory rather than a cache.
+        self._results.pop(instance_id, None)
 
     # ── Results ──
 
     def store_result(self, instance_id: str, result: RoutineResult) -> None:
+        """Record a run's result, keeping ``_results`` bounded to _MAX_RESULTS.
+
+        Popping before inserting refreshes recency (dicts keep insertion order),
+        so a continuous instance that stores a result every tick stays at the
+        young end and the entries evicted are the oldest untouched ones.
+
+        Not gated on the instance existing: the Telegram path calls this from
+        ``_execute_routine`` *before* it registers the instance via
+        ``_sync_instance_to_store``, so a gate here would drop every
+        Telegram-triggered result on its first run.
+        """
+        self._results.pop(instance_id, None)
         self._results[instance_id] = result
+        while len(self._results) > _MAX_RESULTS:
+            self._results.pop(next(iter(self._results)))
 
     def get_result(self, instance_id: str) -> RoutineResult | None:
         return self._results.get(instance_id)
@@ -457,12 +488,16 @@ class RoutineStore:
 
         duration = time.time() - start
         report_id = reports.get_last_report_id()
-        self._results[instance_id] = result
         # Clipped once: the instance record and the conversation note are the
         # same summary, so they cannot tell the user different stories.
         summary = result.text[:500]
 
+        # Both writes are gated on the instance still being there. A cancel that
+        # lands mid-run is recorded here *after* stop() already removed the
+        # instance, and storing the result then would resurrect an entry no read
+        # path can reach — unreachable and, without the gate, immortal.
         if instance_id in self._instances:
+            self.store_result(instance_id, result)
             self._instances[instance_id].update(
                 {
                     "status": (
@@ -708,6 +743,9 @@ class RoutineStore:
         if instance_id in self._instances:
             self._instances[instance_id]["status"] = "stopped"
             del self._instances[instance_id]
+            # Same reasoning as remove_instance: stop() drops the instance
+            # record entirely, so its result is already unreachable.
+            self._results.pop(instance_id, None)
             return True
         return False
 
