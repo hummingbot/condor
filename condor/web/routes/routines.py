@@ -65,6 +65,39 @@ class HooksRequest(BaseModel):
     trigger: str = "success"
 
 
+# ── Helpers ──
+
+
+def _owns(inst: dict, user: WebUser) -> bool:
+    """Whether ``user`` started this instance.
+
+    The owner is the ``user_id`` RoutineStore records in the instance meta.
+    An instance without one is nobody's: MCP runs that carried no user and
+    Telegram instances synced into the store both land here, and treating them
+    as unowned keeps them out of every non-admin's reach instead of handing
+    them to whoever asks first.
+    """
+    owner = inst.get("user_id")
+    return bool(owner) and owner == user.id
+
+
+def _require_instance_access(inst: dict, user: WebUser) -> None:
+    """Admins reach every instance; everyone else only their own (SEC-150)."""
+    if get_config_manager().is_admin(user.id):
+        return
+    if not _owns(inst, user):
+        raise HTTPException(status_code=403, detail="Not your instance")
+
+
+def _authorized_instance(instance_id: str, user: WebUser) -> dict:
+    """Fetch an instance, 404 if absent and 403 if it belongs to someone else."""
+    inst = get_routine_store().get_instance(instance_id)
+    if not inst:
+        raise HTTPException(404, "Instance not found")
+    _require_instance_access(inst, user)
+    return inst
+
+
 # ── Routes ──
 
 
@@ -77,19 +110,18 @@ async def list_routines(user: WebUser = Depends(get_current_user)):
 
 @router.get("/instances")
 async def list_instances(user: WebUser = Depends(get_current_user)):
-    """List all active routine instances."""
+    """List the caller's active routine instances (admins see them all)."""
     store = get_routine_store()
-    return store.list_instances()
+    instances = store.list_instances()
+    if get_config_manager().is_admin(user.id):
+        return instances
+    return [inst for inst in instances if _owns(inst, user)]
 
 
 @router.get("/instances/{instance_id}")
 async def get_instance(instance_id: str, user: WebUser = Depends(get_current_user)):
     """Get instance detail including last result."""
-    store = get_routine_store()
-    inst = store.get_instance(instance_id)
-    if not inst:
-        raise HTTPException(404, "Instance not found")
-    return inst
+    return _authorized_instance(instance_id, user)
 
 
 @router.get("/instances/{instance_id}/image")
@@ -97,8 +129,8 @@ async def get_instance_image(
     instance_id: str, user: WebUser = Depends(get_current_user)
 ):
     """Serve the chart PNG for an instance result."""
-    store = get_routine_store()
-    result = store.get_result(instance_id)
+    _authorized_instance(instance_id, user)
+    result = get_routine_store().get_result(instance_id)
     if not result or not result.chart_image:
         raise HTTPException(404, "No chart image available")
     return Response(content=result.chart_image, media_type="image/png")
@@ -234,8 +266,8 @@ async def schedule_routine_v2(
 @router.post("/instances/{instance_id}/stop")
 async def stop_instance(instance_id: str, user: WebUser = Depends(get_current_user)):
     """Stop a running or scheduled instance."""
-    store = get_routine_store()
-    if not store.stop(instance_id):
+    _authorized_instance(instance_id, user)
+    if not get_routine_store().stop(instance_id):
         raise HTTPException(404, "Instance not found")
     return {"stopped": True}
 
