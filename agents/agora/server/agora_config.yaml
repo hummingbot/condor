@@ -1,0 +1,59 @@
+# Agora Debate Engine — configuration
+#
+# The debate engine is self-contained: it drives a 12-agent debate through an
+# OpenAI-compatible chat completions endpoint (opencode-go / deepseek-v4-flash) with no
+# heavy framework dependency. This keeps the whole stack GPU-free and avoids the
+# stale TradingAgents-crypto fork.
+
+# ── Debate pairs (Hummingbot-USDT perpetuals; must exist on the venue) ──
+pairs:
+  - BTC-USDT   # crypto
+  - XAU-USDT   # spot gold
+  - CL-USDT    # WTI crude oil
+
+# Aliases the engine understands when a request names the asset by base symbol.
+pair_aliases:
+  BTC: BTC-USDT
+  XAU: XAU-USDT
+  CL: CL-USDT
+  GOLD: XAU-USDT
+  OIL: CL-USDT
+
+# ── LLM provider (OpenAI-compatible) ─────────────────────────────────
+# Use the same provider as Smart-Money Flow: opencode-go with deepseek-v4-flash.
+# Resolves identically to agent_key: custom@opencode-go:deepseek-v4-flash.
+#   backend_url -> AGORA_BACKEND_URL env, else CUSTOM_LLM_BASE_URL
+#   api_key     -> AGORA_API_KEY, else CUSTOM_LLM_API_KEY (= OPENCODE_GO_API_KEY)
+llm:
+  provider: "opencode-go"                   # label only
+  model: "deepseek-v4-pro"               # AGORA_DEEP_MODEL / AGORA_QUICK_MODEL
+  backend_url: "https://opencode.ai/zen/go/v1"
+  api_key_env: "CUSTOM_LLM_API_KEY"        # falls back to OPENCODE_GO_API_KEY
+  temperature: 0.3
+  request_timeout_seconds: 90
+  max_tokens: 2000  # reasoning models (deepseek-v4) spend tokens on chain-of-thought
+
+# ── Debate structure ─────────────────────────────────────────────────
+debate:
+  max_debate_rounds: 1        # bull<->bear rounds
+  max_risk_rounds: 1          # risk analyst rounds
+  analysts: [market, social, news, fundamentals]
+  # If True, the engine ignores the LLM and returns a deterministic mock
+  # decision. Lets the full Condor pipeline be exercised with no API key.
+  # Default True; flip to false (and set AGORA_API_KEY) for live debates.
+  mock_mode: true
+
+# ── Confidence rubric ────────────────────────────────────────────────
+confidence:
+  baseline: 60
+  thorough_debate_bonus: 10     # history > 2000 chars
+  substantive_risk_bonus: 5     # risk history > 1000 chars
+  decisive_judge_bonus: 10      # investment judge not hedging
+  decisive_risk_judge_bonus: 5  # risk judge not hedging
+  max: 95
+
+# ── Server ───────────────────────────────────────────────────────────
+server:
+  host: "127.0.0.1"
+  port: 8500
+  rate_limit_seconds: 180       # min seconds between debates per pair
