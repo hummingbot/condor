@@ -55,6 +55,28 @@ function isCredentialField(key: string, type?: string): boolean {
   return CREDENTIAL_FIELD_PATTERNS.some((p) => haystack.includes(p));
 }
 
+// Display-only label overrides for connector config fields. The real field
+// key (used for form state and credential submission) is unchanged — only
+// the label shown to the user is remapped.
+const FIELD_LABEL_OVERRIDES: Record<string, Record<string, string>> = {
+  derive_perpetual: {
+    derive_perpetual_api_key: "derive_perpetual_wallet_address",
+    derive_perpetual_api_secret: "session_private_key",
+    sub_id: "subacct_id",
+    account_type: "account_type (SM or PM2)",
+  },
+  derive_perpetual_testnet: {
+    derive_perpetual_testnet_api_key: "derive_perpetual_wallet_address",
+    derive_perpetual_testnet_api_secret: "session_private_key",
+    sub_id: "subacct_id",
+    account_type: "account_type (SM or PM2)",
+  },
+};
+
+function getFieldLabel(connectorName: string, key: string): string {
+  return FIELD_LABEL_OVERRIDES[connectorName]?.[key] ?? key;
+}
+
 export function ApiKeysSettings() {
   const { server } = useServer();
   const qc = useQueryClient();
@@ -151,13 +173,14 @@ export function ApiKeysSettings() {
       const v = val as Record<string, unknown>;
       return {
         key,
+        label: getFieldLabel(flow.connectorName, key),
         type: (v.type as string) || "string",
         required: v.required !== false,
         description: (v.description as string) || "",
         isSecret: isCredentialField(key, v.type as string | undefined),
       };
     });
-  }, [configMapData]);
+  }, [configMapData, flow.connectorName]);
 
   if (!server) {
     return (
@@ -321,7 +344,7 @@ export function ApiKeysSettings() {
             {configFields.map((f) => (
               <div key={f.key}>
                 <label className="mb-1 flex items-center gap-1 text-xs text-[var(--color-text-muted)]">
-                  {f.key}
+                  {f.label}
                   {f.required && <span className="text-[var(--color-red)]">*</span>}
                 </label>
                 {f.description && (
@@ -335,7 +358,7 @@ export function ApiKeysSettings() {
                     setFlow({ ...flow, values: { ...flow.values, [f.key]: e.target.value } })
                   }
                   className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none"
-                  placeholder={f.isSecret ? "********" : f.key}
+                  placeholder={f.isSecret ? "********" : f.label}
                 />
               </div>
             ))}
