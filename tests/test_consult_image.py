@@ -22,13 +22,21 @@ from pydantic import ValidationError
 from pydantic_ai.messages import BinaryContent
 
 
-def _valid_png() -> bytes:
+def _image_bytes(image_format: str) -> bytes:
     output = BytesIO()
-    Image.new("RGB", (2, 2), color=(10, 20, 30)).save(output, format="PNG")
+    Image.new("RGB", (2, 2), color=(10, 20, 30)).save(output, format=image_format)
     return output.getvalue()
 
 
-PNG = _valid_png()
+PNG = _image_bytes("PNG")
+JPEG = _image_bytes("JPEG")
+
+
+def _corrupt_png() -> bytes:
+    data = bytearray(PNG)
+    idat_data = data.index(b"IDAT") + 4
+    data[idat_data] ^= 0xFF
+    return bytes(data)
 
 
 def _image(data: bytes = PNG, **overrides) -> ConsultImage:
@@ -62,8 +70,8 @@ def test_valid_image_decodes_to_exact_bytes_and_builds_multimodal_input():
         ({"data_base64": ""}, "empty"),
         (
             {
-                "data_base64": base64.b64encode(b"not-png").decode("ascii"),
-                "sha256": hashlib.sha256(b"not-png").hexdigest(),
+                "data_base64": base64.b64encode(JPEG).decode("ascii"),
+                "sha256": hashlib.sha256(JPEG).hexdigest(),
             },
             "PNG",
         ),
@@ -106,6 +114,7 @@ def test_oversized_encoded_image_is_rejected_before_decode(monkeypatch):
         b"\x89PNG\r\n\x1a\n",
         b"\x89PNG\r\n\x1a\nnot-a-png",
         PNG[:-12],
+        _corrupt_png(),
     ],
 )
 def test_structurally_invalid_png_is_rejected(data):
