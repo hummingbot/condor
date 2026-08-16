@@ -1,6 +1,8 @@
 import asyncio
 import base64
 import hashlib
+import struct
+import zlib
 from io import BytesIO
 
 import pytest
@@ -36,6 +38,16 @@ def _corrupt_png() -> bytes:
     data = bytearray(PNG)
     idat_data = data.index(b"IDAT") + 4
     data[idat_data] ^= 0xFF
+    return bytes(data)
+
+
+def _excessive_dimension_png() -> bytes:
+    data = bytearray(PNG)
+    ihdr_data_start = data.index(b"IHDR") + 4
+    ihdr_data_end = ihdr_data_start + 13
+    data[ihdr_data_start : ihdr_data_start + 8] = struct.pack(">II", 100_000, 100_000)
+    crc = zlib.crc32(b"IHDR" + data[ihdr_data_start:ihdr_data_end])
+    data[ihdr_data_end : ihdr_data_end + 4] = struct.pack(">I", crc)
     return bytes(data)
 
 
@@ -120,6 +132,12 @@ def test_oversized_encoded_image_is_rejected_before_decode(monkeypatch):
 def test_structurally_invalid_png_is_rejected(data):
     with pytest.raises(HTTPException, match="invalid"):
         _decode_consult_image(_image(data))
+
+
+def test_excessive_dimension_png_is_rejected_as_invalid_input():
+    with pytest.raises(HTTPException, match="invalid") as captured:
+        _decode_consult_image(_image(_excessive_dimension_png()))
+    assert captured.value.status_code == 422
 
 
 def test_media_type_and_sha_format_are_strict():

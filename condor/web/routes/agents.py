@@ -361,7 +361,13 @@ def _decode_consult_image(image: ConsultImage) -> bytes:
             parsed_image.verify()
     except HTTPException:
         raise
-    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+    except (
+        Image.DecompressionBombError,
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ) as exc:
         raise HTTPException(status_code=422, detail="Consult image is invalid") from exc
     digest = hashlib.sha256(data).hexdigest()
     if not hmac.compare_digest(digest, image.sha256):
