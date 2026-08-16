@@ -139,6 +139,7 @@ def test_text_only_prompt_stays_plain_text():
 
 
 def test_image_capability_is_exact_and_fail_closed():
+    assert supports_consult_image("openai:gpt-5-mini") is True
     assert supports_consult_image("openrouter:openai/gpt-5-mini") is True
     assert supports_consult_image("openrouter:openai/gpt-5") is False
     assert supports_consult_image("custom@vision:gpt-5-mini") is False

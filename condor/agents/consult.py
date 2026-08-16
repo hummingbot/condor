@@ -37,7 +37,12 @@ class UnsupportedConsultImageError(ValueError):
 
 # Fail closed: provider families do not imply that every model accepts images.
 # Add only exact model keys whose native image-input contract has been verified.
-IMAGE_INPUT_MODEL_KEYS = frozenset({"openrouter:openai/gpt-5-mini"})
+IMAGE_INPUT_MODEL_KEYS = frozenset(
+    {
+        "openai:gpt-5-mini",
+        "openrouter:openai/gpt-5-mini",
+    }
+)
 
 
 def supports_consult_image(model_key: str) -> bool:

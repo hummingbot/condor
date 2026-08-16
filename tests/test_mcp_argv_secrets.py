@@ -76,6 +76,32 @@ def test_secrets_travel_on_the_env_channel_instead(session_servers):
     assert hummingbot["args"][hummingbot["args"].index("--server-name") + 1] == "prod"
 
 
+def test_consult_mcp_servers_use_synchronized_environment_without_resync(session_servers):
+    expected_modules = {
+        "condor": "mcp_servers.condor",
+        "mcp-hummingbot": "mcp_servers.hummingbot_api",
+    }
+    for server in session_servers:
+        assert server["command"] == "uv"
+        assert server["args"][:5] == [
+            "run",
+            "--no-sync",
+            "python",
+            "-m",
+            expected_modules[server["name"]],
+        ]
+
+    condor = next(server for server in session_servers if server["name"] == "condor")
+    assert "--chat-id" in condor["args"]
+    assert "--user-id" in condor["args"]
+
+    hummingbot = next(
+        server for server in session_servers if server["name"] == "mcp-hummingbot"
+    )
+    assert "--url" in hummingbot["args"]
+    assert "--server-name" in hummingbot["args"]
+
+
 def test_both_servers_carry_the_reaper_marker(session_servers):
     from condor.acp.client import bot_process_marker
 

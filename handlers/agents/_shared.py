@@ -509,7 +509,7 @@ def build_mcp_servers_for_session(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"]
+        "args": ["run", "--no-sync", "python", "-m", "mcp_servers.condor"]
         + _condor_mcp_args(
             chat_id,
             user_id,
@@ -550,6 +550,7 @@ def build_mcp_servers_for_session(
         "command": "uv",
         "args": [
             "run",
+            "--no-sync",
             "python",
             "-m",
             "mcp_servers.hummingbot_api",
