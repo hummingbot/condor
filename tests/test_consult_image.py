@@ -1,13 +1,17 @@
 import asyncio
 import base64
 import hashlib
+from io import BytesIO
 
 import pytest
+from PIL import Image
 from condor.agents.consult import (
     UnsupportedConsultImageError,
     _build_consult_prompt_input,
+    supports_consult_image,
 )
 from condor.web.routes.agents import (
+    MAX_CONSULT_IMAGE_BASE64_CHARS,
     MAX_CONSULT_IMAGE_BYTES,
     ConsultImage,
     ConsultRequest,
@@ -18,7 +22,13 @@ from pydantic import ValidationError
 from pydantic_ai.messages import BinaryContent
 
 
-PNG = b"\x89PNG\r\n\x1a\n" + b"exact-image-bytes"
+def _valid_png() -> bytes:
+    output = BytesIO()
+    Image.new("RGB", (2, 2), color=(10, 20, 30)).save(output, format="PNG")
+    return output.getvalue()
+
+
+PNG = _valid_png()
 
 
 def _image(data: bytes = PNG, **overrides) -> ConsultImage:
@@ -66,10 +76,41 @@ def test_invalid_image_payloads_fail_closed(overrides, error):
 
 
 def test_oversized_decoded_image_is_rejected():
-    data = b"\x89PNG\r\n\x1a\n" + b"x" * MAX_CONSULT_IMAGE_BYTES
+    data = b"\x89PNG\r\n\x1a\n" + b"x" * (MAX_CONSULT_IMAGE_BYTES - 7)
     with pytest.raises(HTTPException) as exc:
         _decode_consult_image(_image(data))
     assert exc.value.status_code == 413
+
+
+def test_oversized_encoded_image_is_rejected_before_decode(monkeypatch):
+    decode_called = False
+
+    def fail_if_called(*args, **kwargs):
+        nonlocal decode_called
+        decode_called = True
+        raise AssertionError("decoder must not run")
+
+    monkeypatch.setattr("condor.web.routes.agents.base64.b64decode", fail_if_called)
+    with pytest.raises(ValidationError):
+        ConsultImage(
+            media_type="image/png",
+            data_base64="A" * (MAX_CONSULT_IMAGE_BASE64_CHARS + 1),
+            sha256="0" * 64,
+        )
+    assert decode_called is False
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        b"\x89PNG\r\n\x1a\n",
+        b"\x89PNG\r\n\x1a\nnot-a-png",
+        PNG[:-12],
+    ],
+)
+def test_structurally_invalid_png_is_rejected(data):
+    with pytest.raises(HTTPException, match="invalid"):
+        _decode_consult_image(_image(data))
 
 
 def test_media_type_and_sha_format_are_strict():
@@ -86,6 +127,127 @@ def test_prompt_builder_does_not_embed_or_return_base64():
 
 def test_text_only_prompt_stays_plain_text():
     assert _build_consult_prompt_input("facts", None) == "facts"
+
+
+def test_image_capability_is_exact_and_fail_closed():
+    assert supports_consult_image("openrouter:openai/gpt-5-mini") is True
+    assert supports_consult_image("openrouter:openai/gpt-5") is False
+    assert supports_consult_image("custom@vision:gpt-5-mini") is False
+    assert supports_consult_image("claude-code") is False
+
+
+def test_supported_model_receives_exact_multimodal_bytes(monkeypatch):
+    from condor.agents import consult
+    from condor.agents.agent import Agent, AgentStore
+
+    agent = Agent(
+        slug="vision",
+        name="Vision",
+        description="",
+        instructions="instructions",
+        agent_key="openrouter:openai/gpt-5-mini",
+    )
+    received = None
+
+    class FakeClient:
+        async def start(self):
+            pass
+
+        async def prompt(self, prompt):
+            nonlocal received
+            received = prompt
+            return "answer"
+
+        async def stop(self):
+            pass
+
+    async def healthy(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(AgentStore, "get", lambda self, slug: agent)
+    monkeypatch.setattr(consult, "healthcheck_local_backend", healthy)
+    monkeypatch.setattr(consult, "PydanticAIClient", lambda **kwargs: FakeClient())
+    monkeypatch.setattr(
+        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "handlers.agents._shared.build_agent_context", lambda *a, **k: "facts"
+    )
+
+    answer = asyncio.run(
+        consult._run_agent_to_completion(
+            slug="vision",
+            user_id=1,
+            chat_id=0,
+            server_name=None,
+            task="task",
+            image_data=PNG,
+        )
+    )
+
+    assert answer == "answer"
+    assert received[0] == "facts"
+    assert isinstance(received[1], BinaryContent)
+    assert received[1].data == PNG
+
+
+@pytest.mark.parametrize("image_data", [PNG, None])
+def test_unknown_pydantic_model_rejects_only_image_input(monkeypatch, image_data):
+    from condor.agents import consult
+    from condor.agents.agent import Agent, AgentStore
+
+    agent = Agent(
+        slug="unknown",
+        name="Unknown",
+        description="",
+        instructions="instructions",
+        agent_key="openrouter:unknown-model",
+    )
+    client_created = False
+
+    class FakeClient:
+        async def start(self):
+            pass
+
+        async def prompt(self, prompt):
+            return "text answer"
+
+        async def stop(self):
+            pass
+
+    async def healthy(*args, **kwargs):
+        return None
+
+    def make_client(**kwargs):
+        nonlocal client_created
+        client_created = True
+        return FakeClient()
+
+    monkeypatch.setattr(AgentStore, "get", lambda self, slug: agent)
+    monkeypatch.setattr(consult, "healthcheck_local_backend", healthy)
+    monkeypatch.setattr(consult, "PydanticAIClient", make_client)
+    monkeypatch.setattr(
+        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+    )
+    monkeypatch.setattr(
+        "handlers.agents._shared.build_agent_context", lambda *a, **k: "facts"
+    )
+
+    call = consult._run_agent_to_completion(
+        slug="unknown",
+        user_id=1,
+        chat_id=0,
+        server_name=None,
+        task="task",
+        image_data=image_data,
+    )
+    if image_data is not None:
+        with pytest.raises(UnsupportedConsultImageError):
+            asyncio.run(call)
+        assert client_created is False
+    else:
+        assert asyncio.run(call) == "text answer"
+        assert client_created is True
 
 
 def test_acp_image_failure_is_explicit_before_client_use(monkeypatch, tmp_path):

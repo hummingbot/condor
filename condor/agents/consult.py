@@ -35,6 +35,16 @@ class UnsupportedConsultImageError(ValueError):
     """The selected consultation client cannot accept native image content."""
 
 
+# Fail closed: provider families do not imply that every model accepts images.
+# Add only exact model keys whose native image-input contract has been verified.
+IMAGE_INPUT_MODEL_KEYS = frozenset({"openrouter:openai/gpt-5-mini"})
+
+
+def supports_consult_image(model_key: str) -> bool:
+    """Return whether an exact configured model key accepts native PNG input."""
+    return model_key in IMAGE_INPUT_MODEL_KEYS
+
+
 def _build_consult_prompt_input(prompt: str, image_data: bytes | None):
     if image_data is None:
         return prompt
@@ -140,8 +150,8 @@ async def _run_agent_to_completion(
         index = store.list_index()
         available = f"\n\nAvailable agents:\n{index}" if index else ""
         return f"No agent named '{slug}' is available.{available}"
-    # Every Agent is consultable — there is no separate "expert" kind and no
-    # capability gate. Only a pydantic-ai key has a local backend to preflight, so
+    # Every Agent is consultable — there is no separate "expert" kind. Only a
+    # pydantic-ai key has a local backend to preflight, so
     # a stopped Ollama/LM Studio fails fast with a clear reason (and falls back to
     # claude-code) instead of a deep httpx error mid-run. ACP keys (claude-code/
     # gemini/copilot) need no backend and route straight to the ACP client below.
@@ -179,6 +189,11 @@ async def _run_agent_to_completion(
                     "Start the model backend, or set CONSULT_FALLBACK_MODEL to a "
                     "reachable model to auto-fall-back."
                 )
+
+    if image_data is not None and not supports_consult_image(model_key):
+        raise UnsupportedConsultImageError(
+            "The selected consultation model does not support image input"
+        )
 
     # Build the Agent's MCP toolset in the main process (ConfigManager is here).
     # agent_slug scopes the condor MCP tools' memory/skills to this Agent (its brain).
@@ -222,10 +237,6 @@ async def _run_agent_to_completion(
             api_key=api_key,
         )
     else:
-        if image_data is not None:
-            raise UnsupportedConsultImageError(
-                "The selected consultation provider does not support image input"
-            )
         from condor.acp.client import ACPClient, resolve_acp
 
         agent_cmd, model_env, model_pref = resolve_acp(model_key)

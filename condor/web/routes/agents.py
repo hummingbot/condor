@@ -26,10 +26,12 @@ import logging
 import os
 import re
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field, field_validator
 
 from condor.agents.ownership import OwnedBot
@@ -309,13 +311,14 @@ class SetStateRequest(BaseModel):
 
 
 MAX_CONSULT_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_CONSULT_IMAGE_BASE64_CHARS = 4 * ((MAX_CONSULT_IMAGE_BYTES + 2) // 3)
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ConsultImage(BaseModel):
     media_type: Literal["image/png"]
-    data_base64: str
+    data_base64: str = Field(max_length=MAX_CONSULT_IMAGE_BASE64_CHARS)
     sha256: str
 
     @field_validator("sha256")
@@ -351,6 +354,15 @@ def _decode_consult_image(image: ConsultImage) -> bytes:
         raise HTTPException(status_code=413, detail="Consult image exceeds size limit")
     if not data.startswith(_PNG_SIGNATURE):
         raise HTTPException(status_code=422, detail="Consult image is not a PNG")
+    try:
+        with Image.open(BytesIO(data)) as parsed_image:
+            if parsed_image.format != "PNG":
+                raise HTTPException(status_code=422, detail="Consult image is not a PNG")
+            parsed_image.verify()
+    except HTTPException:
+        raise
+    except (UnidentifiedImageError, OSError, SyntaxError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Consult image is invalid") from exc
     digest = hashlib.sha256(data).hexdigest()
     if not hmac.compare_digest(digest, image.sha256):
         raise HTTPException(status_code=422, detail="Consult image digest mismatch")
