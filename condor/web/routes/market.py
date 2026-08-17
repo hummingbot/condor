@@ -173,7 +173,7 @@ async def get_dex_pool(
     to handle.
     """
 
-    from handlers.dex.pool_data import lp_provider_for_dex, resolve_pool_info
+    from condor.pool_data import lp_provider_for_dex, resolve_pool_info
 
     try:
         info = await resolve_pool_info(connector, trading_pair)
@@ -559,7 +559,7 @@ async def get_token_symbol(
     executor tables can resolve a symbol without threading a server name through
     every row. Auth is still required.
     """
-    from handlers.dex.pool_data import fetch_token_symbol
+    from condor.pool_data import fetch_token_symbol
 
     if not _ADDRESS_RE.match(mint):
         raise HTTPException(status_code=400, detail="Invalid token address")

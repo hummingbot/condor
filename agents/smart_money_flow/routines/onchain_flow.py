@@ -96,7 +96,7 @@ async def _gecko_json(path: str, params: dict | None = None) -> "dict | None":
     shared with the dashboard; CoinGecko keeps the plain fetcher. Returns None on
     any failure, like its sibling — a tick must never raise.
     """
-    from handlers.dex.pool_data import gecko_request
+    from condor.pool_data import gecko_request
 
     try:
         return await gecko_request("GET", path, params=params)

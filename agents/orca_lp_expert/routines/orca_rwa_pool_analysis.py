@@ -1,7 +1,7 @@
 """Orca RWA Pool Analysis — scans Orca CLMM for tokenized real-world asset pools
 and ranks them by fee yield.
 
-Uses https://api.orca.so/v2/solana directly (same base as handlers/dex/orca_api.py).
+Uses https://api.orca.so/v2/solana directly (same base as condor/orca_api.py).
 Cloudflare-fronted: a custom User-Agent header is required or the request is 403'd.
 """
 

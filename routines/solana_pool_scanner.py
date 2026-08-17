@@ -55,7 +55,7 @@ async def _fetch_pools_page(dex_id: str, page: int) -> list[dict]:
     able to exhaust the ~30/min the whole process shares — hence the shared gate
     rather than a session of its own.
     """
-    from handlers.dex.pool_data import gecko_request
+    from condor.pool_data import gecko_request
 
     try:
         body = await gecko_request(

@@ -11,9 +11,8 @@ import asyncio
 
 import pytest
 
-from condor import dex_candles
+from condor import dex_candles, pool_data
 from condor.web.routes import market
-from handlers.dex import pool_data
 
 
 def run(coro):

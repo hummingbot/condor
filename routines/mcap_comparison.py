@@ -73,7 +73,7 @@ async def _fetch_token_info(mint: str) -> dict:
     On the process-wide gecko budget — the ~30/min free tier is per IP and shared
     with the dashboard, so this routine cannot pace itself in isolation.
     """
-    from handlers.dex.pool_data import gecko_request
+    from condor.pool_data import gecko_request
 
     data = await gecko_request("GET", f"networks/solana/tokens/{mint}")
     attrs = data.get("data", {}).get("attributes", {})

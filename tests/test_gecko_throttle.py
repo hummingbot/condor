@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from handlers.dex import pool_data
+from condor import pool_data
 
 
 def run(coro):
@@ -235,7 +235,7 @@ def test_no_gecko_call_bypasses_the_budget():
 
 
 # Everything below the repo root except pool_data.py, which owns the client.
-_REPO = Path(pool_data.__file__).resolve().parents[2]
+_REPO = Path(__file__).resolve().parents[1]
 _SKIP = {".venv", ".git", "node_modules", "__pycache__", "dist", "build"}
 
 

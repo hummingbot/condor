@@ -5,7 +5,7 @@ Orca, Raydium and Uniswap with different fee tiers, bin steps, TVL and APR, and
 which one you are in *is* the decision. So this router browses pools rather than
 pairs, from the same three sources Telegram's ``/lp`` flow offers.
 
-Everything upstream lives in ``handlers.dex.pool_data`` — the single module that
+Everything upstream lives in ``condor.pool_data`` — the single module that
 talks to GeckoTerminal — so these handlers are auth, validation and shape, with no
 fetching or normalization of their own.
 """
@@ -113,7 +113,7 @@ async def list_pools(
     """
     cm = get_config_manager()
 
-    from handlers.dex.pool_data import (
+    from condor.pool_data import (
         list_gateway_pools,
         list_gecko_pools_page,
         list_orca_pools,
@@ -193,7 +193,7 @@ async def list_dexes(
     with no options is one the browser simply does not show.
     """
 
-    from handlers.dex.pool_data import list_gecko_dexes
+    from condor.pool_data import list_gecko_dexes
 
     return {"dexes": await list_gecko_dexes(network)}
 
@@ -216,7 +216,7 @@ async def list_chains(
     """
     cm = get_config_manager()
 
-    from handlers.dex.pool_data import NETWORK_TO_GECKO
+    from condor.pool_data import NETWORK_TO_GECKO
 
     fallback = [{"network_id": DEFAULT_NETWORK, "chain": "solana", "label": "Solana"}]
     try:
@@ -270,7 +270,7 @@ async def list_pools_by_address(
     otherwise be read as an address.
     """
 
-    from handlers.dex.pool_data import fetch_pools_by_addresses
+    from condor.pool_data import fetch_pools_by_addresses
 
     wanted = [a.strip() for a in (addresses or "").split(",") if a.strip()][:30]
     if not wanted:
@@ -294,7 +294,7 @@ async def get_pool(
     if not _POOL_ADDRESS_RE.match(pool_address):
         raise HTTPException(status_code=400, detail="Invalid pool_address")
 
-    from handlers.dex.pool_data import fetch_pool_by_address
+    from condor.pool_data import fetch_pool_by_address
 
     pool = await fetch_pool_by_address(network, pool_address)
     if not pool:
@@ -355,7 +355,7 @@ async def get_pool_bins(
     if not _POOL_ADDRESS_RE.match(pool_address):
         raise HTTPException(status_code=400, detail="Invalid pool_address")
 
-    from handlers.dex.pool_data import (
+    from condor.pool_data import (
         can_fetch_liquidity,
         fetch_liquidity_bins,
         get_connector_for_dex,

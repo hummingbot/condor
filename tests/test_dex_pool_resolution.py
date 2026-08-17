@@ -21,7 +21,7 @@ import asyncio
 
 import pytest
 
-from handlers.dex import pool_data
+from condor import pool_data
 
 
 def run(coro):

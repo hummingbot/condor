@@ -1,4 +1,4 @@
-"""Pool discovery in handlers/dex/pool_data.py (FEAT-044).
+"""Pool discovery in condor/pool_data.py (FEAT-044).
 
 The DEX page is pool-first, so every row it renders has to answer three questions
 the frontend cannot: can I chart this pool, can I trade in it, can I LP in it.
@@ -15,9 +15,9 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 import condor.web.routes.dex as dex_routes
+from condor import pool_data
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
-from handlers.dex import pool_data
 
 POOL = "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj"
 SOL = "So11111111111111111111111111111111111111112"
@@ -1161,7 +1161,7 @@ def test_chains_needs_server_access(route_client):
     assert client.get("/servers/srv/dex/chains").status_code == 403
 
 
-# ── the Orca source (handlers/dex/orca_api.py + list_orca_pools) ──
+# ── the Orca source (condor/orca_api.py + list_orca_pools) ──
 #
 # Gateway proxies this very API and nulls volume, fees, price and yield on the way
 # — and ignores its own `page` argument for this connector, so every page of the

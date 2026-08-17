@@ -264,7 +264,7 @@ async def explore_geckoterminal(
     trade_volume_filter: float | None = None,
 ) -> dict[str, Any]:
     """Execute a GeckoTerminal API action and return formatted results."""
-    from handlers.dex.pool_data import gecko_request
+    from condor.pool_data import gecko_request
 
     async def _get(path: str, params: dict | None = None) -> dict:
         """One call on this process's gecko budget.

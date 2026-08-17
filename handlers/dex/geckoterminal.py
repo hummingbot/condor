@@ -17,17 +17,17 @@ from datetime import datetime
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from utils.telegram_formatters import escape_markdown_v2
-
-from ._shared import cached_call
-from .pool_data import GECKO_TO_GATEWAY_NETWORK as _GECKO_TO_GATEWAY_NETWORK
-from .pool_data import (
+from condor.pool_data import GECKO_TO_GATEWAY_NETWORK as _GECKO_TO_GATEWAY_NETWORK
+from condor.pool_data import (
     can_fetch_liquidity,
     fetch_liquidity_bins,
     gecko_call,
     gecko_request,
     get_connector_for_dex,
 )
+from utils.telegram_formatters import escape_markdown_v2
+
+from ._shared import cached_call
 from .visualizations import (
     generate_combined_chart,
     generate_liquidity_chart,
@@ -3235,7 +3235,8 @@ async def handle_gecko_add_liquidity(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Handle add liquidity from GeckoTerminal pool detail - bridges to pools.py flow"""
-    from .pool_data import get_connector_for_dex
+    from condor.pool_data import get_connector_for_dex
+
     from .pools import _show_pool_detail
 
     query = update.callback_query

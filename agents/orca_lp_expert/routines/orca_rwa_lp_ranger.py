@@ -17,8 +17,8 @@ from plotly.subplots import make_subplots
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
+from condor.pool_data import fetch_ohlcv
 from condor.reports import ReportBuilder
-from handlers.dex.pool_data import fetch_ohlcv
 from routines.base import RoutineResult
 
 logger = logging.getLogger(__name__)

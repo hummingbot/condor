@@ -4,6 +4,7 @@ import logging
 from typing import Dict, List
 
 from condor.fetchers._identifiers import validate_identifier
+from condor.pool_data import NETWORK_TO_GECKO, network_has_clmm
 
 logger = logging.getLogger(__name__)
 
@@ -51,10 +52,6 @@ async def _chartable_gateway_networks(client) -> List[str]:
     Raises whatever the gateway request raises — the caller decides how much of the
     answer a gateway failure is allowed to take down.
     """
-    # Lazy, like condor.dex_candles.uses_gecko_candles — condor.fetchers must not
-    # import handlers at module scope.
-    from handlers.dex.pool_data import NETWORK_TO_GECKO
-
     response = await client.gateway.list_networks()
     networks = (response or {}).get("networks") or []
     return sorted(
@@ -141,8 +138,6 @@ async def fetch_venues(
             must not empty the whole dropdown, and a list that still carries the
             credentialed venues is not a cached lie.
     """
-    from handlers.dex.pool_data import network_has_clmm
-
     # Credentials first: under strict this raises, and there is no point asking the
     # gateway about a server we cannot describe at all.
     connectors = await fetch_available_cex_connectors(

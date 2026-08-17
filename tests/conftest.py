@@ -39,7 +39,7 @@ def _reset_gecko_throttle():
     fast suite spends the whole minute's budget inside the first few tests and the
     rest fail on a throttle that has nothing to do with what they assert.
     """
-    from handlers.dex.pool_data import reset_gecko_throttle
+    from condor.pool_data import reset_gecko_throttle
 
     reset_gecko_throttle()
     yield

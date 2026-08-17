@@ -5,7 +5,7 @@ Gateway token management functions
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from handlers.dex.pool_data import gecko_call
+from condor.pool_data import gecko_call
 
 from ..user_preferences import get_active_server
 from ._shared import (

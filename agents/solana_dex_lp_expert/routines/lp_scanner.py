@@ -78,7 +78,7 @@ async def _gecko_get(path: str, params: dict | None = None) -> dict:
     tier is ~30 requests/minute per IP, shared with the dashboard and every other
     routine, and a scanner that fans out per venue is exactly what exhausts it.
     """
-    from handlers.dex.pool_data import gecko_request
+    from condor.pool_data import gecko_request
 
     return await gecko_request("GET", path, params=params)
 

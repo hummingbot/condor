@@ -15,9 +15,9 @@ from fastapi import FastAPI
 from starlette.testclient import TestClient
 
 import condor.web.routes.dex as dex_routes
+from condor import pool_data
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
-from handlers.dex import pool_data
 
 POOL = "8sLbNZoA1cfnvMJLPfp98ZLAnFSYCFApfJKMbiXNLwxj"
 USER = WebUser(id=111, username="u", first_name="U", role="user")

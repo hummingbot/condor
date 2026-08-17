@@ -25,12 +25,17 @@ from geckoterminal_py import GeckoTerminalAsyncClient
 from geckoterminal_py import constants as GECKO_CONSTANTS
 from glom import glom
 
+from condor import orca_api
+from condor.cache import evict_expired, get_cached, set_cached
 from config_manager import get_client
 
-from . import orca_api
-from ._shared import evict_expired, get_cached, set_cached
-
 logger = logging.getLogger(__name__)
+
+# The conversation cache these functions write into is shared with the Telegram DEX
+# handlers, which read and invalidate it by group under the "_cache" namespace (see
+# handlers/dex/_shared). Entries written under any other namespace would survive an
+# invalidation the handler thinks it performed, so this must stay in step with it.
+_CACHE_NS = "_cache"
 
 # CLMM venues an ``lp_executor`` can open a position on: (brand, the qualifiers its
 # GeckoTerminal dex id must carry, the gecko networks it exists on). Deliberately
@@ -982,13 +987,15 @@ async def fetch_ohlcv(
                 f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
                 f"_{token}_{limit}_{before_timestamp or 0}"
             )
-            cached = get_cached(user_data, cache_key, ttl=OHLCV_CACHE_TTL)
+            cached = get_cached(
+                user_data, cache_key, ttl=OHLCV_CACHE_TTL, namespace=_CACHE_NS
+            )
             if cached is not None:
                 return cached, None
             # Sweep on miss, as cached_call does. Historical windows mint a fresh
             # key per executor, so a long-lived caller would otherwise accumulate
             # one entry per chart forever.
-            evict_expired(user_data)
+            evict_expired(user_data, namespace=_CACHE_NS)
 
         # Pass all parameters explicitly:
         # - currency="token" means price in quote token (not USD)
@@ -1046,7 +1053,7 @@ async def fetch_ohlcv(
 
         # Cache result
         if user_data is not None:
-            set_cached(user_data, cache_key, ohlcv_list)
+            set_cached(user_data, cache_key, ohlcv_list, namespace=_CACHE_NS)
 
         return ohlcv_list, None
 
@@ -1099,7 +1106,9 @@ async def fetch_liquidity_bins(
         # Check cache
         cache_key = f"pool_bins_{connector}_{pool_address}"
         if user_data is not None:
-            cached = get_cached(user_data, cache_key, ttl=BINS_CACHE_TTL)
+            cached = get_cached(
+                user_data, cache_key, ttl=BINS_CACHE_TTL, namespace=_CACHE_NS
+            )
         else:
             cached = _ttl_get(
                 _pool_bins_cache, (connector, pool_address), BINS_CACHE_TTL
@@ -1170,7 +1179,7 @@ async def fetch_liquidity_bins(
 
         # Cache result
         if user_data is not None:
-            set_cached(user_data, cache_key, pool_info)
+            set_cached(user_data, cache_key, pool_info, namespace=_CACHE_NS)
         else:
             _ttl_put(
                 _pool_bins_cache, (connector, pool_address), pool_info, BINS_CACHE_TTL

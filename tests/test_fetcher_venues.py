@@ -23,7 +23,7 @@ import asyncio
 import pytest
 
 from condor.fetchers.connectors import fetch_venues
-from handlers.dex.pool_data import network_has_clmm
+from condor.pool_data import network_has_clmm
 
 
 class FakeClient:
