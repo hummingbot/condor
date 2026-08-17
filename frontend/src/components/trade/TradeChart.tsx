@@ -363,8 +363,17 @@ export function TradeChart({
         const volStr = _cvtVal ? _cvtVal(o.volume) : (Math.abs(o.volume) >= 1000 ? `$${(o.volume / 1000).toFixed(1)}K` : `$${o.volume.toFixed(0)}`);
         const feesStr = o.fees ? (_cvtVal ? _cvtVal(o.fees) : `$${o.fees.toFixed(2)}`) : "";
 
-        const sideClr = sideColor(o.side);
-        const sideBg = o.side === "buy" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)";
+        // An LP position has no direction -- it is `RANGE` -- and the buy/sell
+        // normalization files everything that is not a buy under "sell", which
+        // labelled a live two-sided range position `SELL`. Neutral for that type.
+        const isRangeSide = o.type === "lp";
+        const sideLabel = isRangeSide ? "range" : o.side;
+        const sideClr = isRangeSide ? "#9ca3af" : sideColor(o.side);
+        const sideBg = isRangeSide
+          ? "rgba(156,163,175,0.15)"
+          : o.side === "buy"
+            ? "rgba(34,197,94,0.15)"
+            : "rgba(239,68,68,0.15)";
         const statusBg = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
           ? "rgba(34,197,94,0.15)" : "rgba(156,163,175,0.15)";
         const statusClr = o.status?.toLowerCase() === "running" || o.status?.toLowerCase() === "active"
@@ -423,7 +432,7 @@ export function TradeChart({
         tooltip.innerHTML = `
           <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
             <span style="font-weight:700;font-size:12px;font-family:monospace">${escapeHtml(o.executorId.slice(0, 10))}\u2026</span>
-            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(o.side)}</span>
+            <span style="background:${sideBg};color:${sideClr};font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;text-transform:uppercase">${escapeHtml(sideLabel)}</span>
             <span style="background:${statusBg};color:${statusClr};font-size:9px;font-weight:600;padding:1px 5px;border-radius:3px">${escapeHtml(o.status)}</span>
           </div>
           <div style="display:flex;align-items:center;gap:4px;margin-bottom:2px">
@@ -715,9 +724,15 @@ export function TradeChart({
         extraLinesRef.current.push(pl);
       }
     }
-  }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines]);
+  }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines, chartReady]);
 
   // ── Executor overlays ──
+  // `chartReady` is a dependency, not a guard for its own sake: lightweight-charts
+  // is imported lazily, so on a warm cache the overlays exist before the chart
+  // does and this effect bails out. Without the flag in the deps nothing re-runs
+  // it -- executors keep a stable reference across refetches by design -- and the
+  // page renders candles with no box on them until an executor's PnL happens to
+  // move. Every effect below that draws through `chartModuleRef` needs the same.
   useEffect(() => {
     const chart = chartRef.current;
     const series = seriesRef.current;
@@ -883,7 +898,7 @@ export function TradeChart({
         }
       }
     }
-  }, [filteredOverlays, selectedExecutorId]);
+  }, [filteredOverlays, selectedExecutorId, chartReady]);
 
   // ── Zoom to selected executor (one-time action) ──
   useEffect(() => {
@@ -948,7 +963,7 @@ export function TradeChart({
       });
       positionLinesRef.current.push(pl);
     }
-  }, [positions]);
+  }, [positions, chartReady]);
 
   // ── Measure tool helpers ──
   const clearMeasure = () => {

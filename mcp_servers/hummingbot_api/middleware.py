@@ -9,7 +9,9 @@ from typing import Any, Callable, Coroutine, TypeVar
 from mcp_servers.hummingbot_api.exceptions import (
     MaxConnectionsAttemptError as HBConnectionError,
 )
-from mcp_servers.hummingbot_api.exceptions import ToolError
+from mcp_servers.hummingbot_api.exceptions import (
+    ToolError,
+)
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -36,7 +38,7 @@ def handle_errors(
     """
 
     def decorator(
-        func: Callable[..., Coroutine[Any, Any, T]]
+        func: Callable[..., Coroutine[Any, Any, T]],
     ) -> Callable[..., Coroutine[Any, Any, T]]:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> T:

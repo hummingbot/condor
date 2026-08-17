@@ -622,7 +622,7 @@ dependencies = [
     { name = "watchfiles" },
 ]
 
-[package.optional-dependencies]
+[package.dev-dependencies]
 dev = [
     { name = "black" },
     { name = "isort" },
@@ -635,23 +635,18 @@ dev = [
 requires-dist = [
     { name = "aiohttp" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
-    { name = "black", marker = "extra == 'dev'" },
     { name = "bleach", specifier = ">=6.4.0" },
     { name = "fastapi" },
     { name = "faster-whisper" },
     { name = "geckoterminal-py" },
     { name = "hummingbot-api-client", specifier = "==1.5.7" },
-    { name = "isort", marker = "extra == 'dev'" },
     { name = "kaleido" },
     { name = "markdown", specifier = ">=3.10.2" },
     { name = "matplotlib", specifier = ">=3.10.8" },
     { name = "mcp" },
     { name = "pandas" },
     { name = "plotly" },
-    { name = "pre-commit", marker = "extra == 'dev'" },
     { name = "pydantic-ai", extras = ["mcp"] },
-    { name = "pytest", marker = "extra == 'dev'" },
-    { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "python-dotenv" },
     { name = "python-jose", extras = ["cryptography"] },
     { name = "python-telegram-bot", extras = ["job-queue"] },
@@ -660,7 +655,15 @@ requires-dist = [
     { name = "uvicorn", extras = ["standard"] },
     { name = "watchfiles" },
 ]
-provides-extras = ["dev"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "black" },
+    { name = "isort" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+]
 
 [[package]]
 name = "contourpy"

@@ -5,6 +5,8 @@ import { useNavigate } from "react-router-dom";
 
 import {
   LP_EXECUTOR_TYPE,
+  LP_REFRESH_MS,
+  RECENT_LP_EXECUTORS,
   feeAmount,
   lpStateStyle,
   readLpPosition,
@@ -12,20 +14,6 @@ import {
 } from "./lp-position";
 import { api, type PoolSummary } from "@/lib/api";
 import { formatPnl, formatUsd, isExecutorActive, pnlColor } from "@/lib/formatters";
-
-/** Live enough to see a range break without hammering the API. */
-const REFRESH_MS = 20_000;
-
-/**
- * How far back the poll reads.
- *
- * The upstream search has no usable "open only" filter (its `status` values are
- * not the ones the API normalizes to), so open positions are found by reading
- * recent executors and filtering here. Unbounded that is a walk of the entire
- * history every {@link REFRESH_MS}; the search answers newest-first and an open
- * LP position is by definition recent, so the newest few hundred contain them.
- */
-const RECENT_EXECUTORS = 200;
 
 /** GeckoTerminal's multi-pool endpoint, which the labels come from, caps here. */
 const MAX_LABELLED_POOLS = 30;
@@ -68,10 +56,10 @@ export function LpPositions({ server }: { server: string }) {
     queryFn: () =>
       api.getExecutors(server, {
         executor_type: LP_EXECUTOR_TYPE,
-        limit: RECENT_EXECUTORS,
+        limit: RECENT_LP_EXECUTORS,
       }),
-    refetchInterval: REFRESH_MS,
-    staleTime: REFRESH_MS,
+    refetchInterval: LP_REFRESH_MS,
+    staleTime: LP_REFRESH_MS,
   });
 
   const positions = useMemo(() => {

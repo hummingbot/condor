@@ -1,15 +1,13 @@
-import { useMemo, useRef } from "react";
+import { useMemo } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 
+import {
+  LP_EXECUTOR_TYPE,
+  LP_REFRESH_MS,
+  RECENT_LP_EXECUTORS,
+} from "@/components/dex/lp-position";
 import { api, type ExecutorInfo } from "@/lib/api";
 import { computeMultiOverlays } from "@/lib/executor-overlays";
-
-/** Build a fingerprint string for an executor array to detect real changes */
-function executorsFingerprint(exs: ExecutorInfo[]): string {
-  return exs
-    .map((e) => `${e.id}:${e.status}:${e.pnl}:${e.entry_price}:${e.current_price}:${e.close_timestamp}`)
-    .join("|");
-}
 
 /** The pool an executor traded in, from wherever it records one. */
 function executorPool(ex: ExecutorInfo): string {
@@ -32,12 +30,16 @@ interface Options {
    */
   altPair?: string;
   /**
-   * Keep only the liquidity positions held in this exact pool.
+   * The pool the page is about, which is also how its LP positions are found.
    *
-   * On a pool-first page the pair is not the identity -- `SOL-USDC` names dozens
-   * of pools -- and a position lives in exactly one of them, so an LP executor
-   * that records a different pool is dropped. Swaps are not filtered: an order is
-   * a fact about the pair, and the router picks its own pool for it.
+   * Two jobs. It keeps only the liquidity held in *this* pool: on a pool-first
+   * page the pair is not the identity -- `SOL-USDC` names dozens of pools -- and
+   * a position lives in exactly one of them, so an LP executor recording a
+   * different pool is dropped. Swaps are not filtered: an order is a fact about
+   * the pair, and the router picks its own pool for it.
+   *
+   * It is also queried on directly, because no spelling of the pair reliably
+   * finds an LP position -- see the by-pool query below.
    */
   poolAddress?: string;
 }
@@ -69,11 +71,54 @@ export function useMainControllerData(
     refetchOnWindowFocus: false,
   });
 
-  // connector and pool are not server-side filters — apply them client-side
-  const filteredExecutors = useMemo(() => {
+  /**
+   * Every recent LP executor on the server, narrowed to the ones in this pool.
+   *
+   * Neither pair query above is guaranteed to find a position. The API's pair
+   * filter is case-sensitive and matches whatever spelling the *creator* used,
+   * while `altPair` is built from the pool row, whose symbols are upper-cased --
+   * so a real position in `GMEx-USDC` is asked for as `GMEX-USDC` and comes back
+   * empty, and the pool page renders no box on the chart and no row in the table.
+   * The pool address is the one identifier both sides spell identically, so it is
+   * matched on directly here.
+   *
+   * Same query as the `/dex` strip, key included, so arriving from there -- the
+   * usual way into a pool you hold -- costs no extra fetch.
+   */
+  const { data: poolLpExecutors } = useQuery<ExecutorInfo[]>({
+    queryKey: ["dex-lp-executors", server],
+    queryFn: () =>
+      api.getExecutors(server!, {
+        executor_type: LP_EXECUTOR_TYPE,
+        limit: RECENT_LP_EXECUTORS,
+      }),
+    enabled: !!server && !!poolAddress,
+    refetchInterval: LP_REFRESH_MS,
+    staleTime: LP_REFRESH_MS,
+  });
+
+  // connector and pool are not server-side filters — apply them client-side.
+  //
+  // No identity stabiliser sits on top of this: react-query's structural
+  // sharing (on by default) hands back the *same* array reference when a
+  // refetch returns deep-equal JSON, so an idle market already re-runs this
+  // memo zero times. The hand-rolled fingerprint+ref that used to guard it
+  // compared six fields, which made it both redundant here and a staleness
+  // trap -- a change to any seventh field kept serving the old rows.
+  const executors = useMemo(() => {
     const seen = new Set<string>();
     const rows: ExecutorInfo[] = [];
-    for (const ex of [...(cachedExecutors ?? []), ...(wantsAlt ? altExecutors ?? [] : [])]) {
+    // The by-pool rows are the whole server's LP history, so they are admitted
+    // only on an exact pool match -- unlike the pair rows, which were already
+    // scoped by the query that fetched them.
+    const inThisPool = poolAddress
+      ? (poolLpExecutors ?? []).filter((ex) => executorPool(ex) === poolAddress)
+      : [];
+    for (const ex of [
+      ...(cachedExecutors ?? []),
+      ...(wantsAlt ? (altExecutors ?? []) : []),
+      ...inThisPool,
+    ]) {
       if (seen.has(ex.id)) continue;
       seen.add(ex.id);
       if (ex.connector !== connector) continue;
@@ -84,20 +129,7 @@ export function useMainControllerData(
       rows.push(ex);
     }
     return rows;
-  }, [cachedExecutors, altExecutors, wantsAlt, connector, poolAddress]);
-
-  // Stable reference: only update when executor data actually changes
-  const prevFingerprintRef = useRef("");
-  const stableExecutorsRef = useRef<ExecutorInfo[]>([]);
-
-  const executors = useMemo(() => {
-    const fp = executorsFingerprint(filteredExecutors);
-    if (fp !== prevFingerprintRef.current) {
-      prevFingerprintRef.current = fp;
-      stableExecutorsRef.current = filteredExecutors;
-    }
-    return stableExecutorsRef.current;
-  }, [filteredExecutors]);
+  }, [cachedExecutors, altExecutors, poolLpExecutors, wantsAlt, connector, poolAddress]);
 
   const overlays = useMemo(() => computeMultiOverlays(executors), [executors]);
 
@@ -117,9 +149,14 @@ export function useMainControllerData(
       ...(positionsData.executor_positions ?? []),
       ...(positionsData.bot_positions ?? []),
     ];
-    // A position is named the same two ways its executor is, so both spellings
-    // of the market count as this market.
-    const pairs = new Set([pair, ...(wantsAlt ? [altPair] : [])]);
+    // A position is named however its executor is, and an executor found by pool
+    // may spell the market a third way neither `pair` nor `altPair` predicted --
+    // so the spellings that actually turned up count as this market too.
+    const pairs = new Set([
+      pair,
+      ...(wantsAlt ? [altPair] : []),
+      ...executors.map((ex) => ex.trading_pair).filter(Boolean),
+    ]);
     return all.filter(
       (p) =>
         // Show positions from main controller or untagged (executor-level positions)
@@ -127,7 +164,7 @@ export function useMainControllerData(
         p.connector_name === connector &&
         pairs.has(p.trading_pair),
     );
-  }, [positionsData, connector, pair, altPair, wantsAlt]);
+  }, [positionsData, connector, pair, altPair, wantsAlt, executors]);
 
   return { executors, overlays, positions, isLoadingPositions };
 }

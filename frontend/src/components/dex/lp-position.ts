@@ -4,6 +4,24 @@ import { formatUsd } from "@/lib/formatters";
 /** LP executors are the only ones the DEX pages can route to a pool. */
 export const LP_EXECUTOR_TYPE = "lp_executor";
 
+/** Live enough to see a range break without hammering the API. */
+export const LP_REFRESH_MS = 20_000;
+
+/**
+ * How far back a "which LP positions exist" poll reads.
+ *
+ * The upstream search has no usable "open only" filter (its `status` values are
+ * not the ones the API normalizes to), so open positions are found by reading
+ * recent executors and filtering client-side. Unbounded that is a walk of the
+ * entire history every {@link LP_REFRESH_MS}; the search answers newest-first and
+ * an open LP position is by definition recent, so the newest few hundred contain
+ * them.
+ *
+ * Shared by the `/dex` strip and a pool's own page so both issue the *same*
+ * query — one cache entry, and opening a pool from the strip costs no fetch.
+ */
+export const RECENT_LP_EXECUTORS = 200;
+
 function num(v: unknown): number | null {
   if (v === null || v === undefined || v === "") return null;
   const n = typeof v === "number" ? v : parseFloat(String(v));

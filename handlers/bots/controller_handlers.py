@@ -275,7 +275,9 @@ async def show_controller_configs_menu(
             nav = []
             if page > 0:
                 nav.append(
-                    InlineKeyboardButton("◀️", callback_data=f"bots:cfg_page:{page - 1}")
+                    InlineKeyboardButton(
+                        "◀️", callback_data=f"bots:cfg_page:{page - 1}"
+                    )
                 )
             nav.append(
                 InlineKeyboardButton(
@@ -284,7 +286,9 @@ async def show_controller_configs_menu(
             )
             if page < total_pages - 1:
                 nav.append(
-                    InlineKeyboardButton("▶️", callback_data=f"bots:cfg_page:{page + 1}")
+                    InlineKeyboardButton(
+                        "▶️", callback_data=f"bots:cfg_page:{page + 1}"
+                    )
                 )
             keyboard.append(nav)
 
@@ -5181,7 +5185,9 @@ def _build_deploy_progressive_message(
             value_display = f"{default} (default)" if default else "Not set"
 
         if field_name == current_field:
-            lines.append(f"➡️ *{escape_markdown_v2(label)}*{required}: _awaiting input_")
+            lines.append(
+                f"➡️ *{escape_markdown_v2(label)}*{required}: _awaiting input_"
+            )
         elif DEPLOY_FIELD_ORDER.index(field_name) < DEPLOY_FIELD_ORDER.index(
             current_field
         ):

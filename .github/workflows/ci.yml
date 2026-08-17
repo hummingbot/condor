@@ -94,8 +94,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Gates on *new* errors against eslint-baseline.json rather than on the
+      # 76 that predate this workflow -- see frontend/scripts/lint-baseline.mjs.
       - name: Lint
-        run: npm run lint
+        run: npm run lint:ci
 
       - name: Build
         run: npm run build

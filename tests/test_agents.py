@@ -744,6 +744,11 @@ def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
                 "password": 123,
             }
 
+        def has_server_access(self, user_id, server_name, *args, **kwargs):
+            # SEC-178: the resolver holds every candidate to reach, not just
+            # existence. This double owns the server it hands out.
+            return True
+
     monkeypatch.setattr(
         config_manager, "get_config_manager", lambda: _NumericPasswordServer()
     )

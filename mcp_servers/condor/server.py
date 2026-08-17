@@ -11,7 +11,9 @@ from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import available_models as available_models_tool
 from mcp_servers.condor.tools import code as code_tool
 from mcp_servers.condor.tools import consult as consult_tool
-from mcp_servers.condor.tools import context
+from mcp_servers.condor.tools import (
+    context,
+)
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
     memory,
