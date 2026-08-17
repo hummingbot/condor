@@ -5,6 +5,7 @@ import { useNavigate, useParams } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
 import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
+import { LpPositionBar } from "@/components/dex/LpPositionBar";
 import { PoolStats } from "@/components/dex/PoolStats";
 import {
   LPConfigPanel,
@@ -17,6 +18,7 @@ import {
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { TradeChart, type ChartPriceAxis } from "@/components/trade/TradeChart";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
+import { usePairBalances } from "@/hooks/usePairBalances";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
@@ -130,6 +132,15 @@ export function DexPool() {
   const pair = pool?.trading_pair ?? "";
   const lpAvailable = caps.supportsLp && !!pool?.lp_supported;
 
+  // `pair` is the executor's `<base_mint>-<quote_symbol>` form. The tickers only
+  // exist on the pool, so every symbol-shaped consumer — balance lookups, amount
+  // labels — is handed them rather than left to split the pair.
+  const baseSymbol =
+    pool?.base_symbol && pool.base_symbol !== "???" ? pool.base_symbol : undefined;
+  const quoteSymbol =
+    pool?.quote_symbol && pool.quote_symbol !== "???" ? pool.quote_symbol : undefined;
+  const balances = usePairBalances(server ?? null, network, baseSymbol, quoteSymbol);
+
   const orderConfig = useOrderConfig();
   const lpConfig = useLpConfig(server ?? null, network, pair, lpAvailable);
 
@@ -154,8 +165,18 @@ export function DexPool() {
   // and the pool is only known after the fetch resolves.
   const tab: Tab = wantedTab === "lp" && !lpAvailable ? "order" : wantedTab;
 
+  // An executor opened from here is filed under `<base_mint>-<quote>`, but the
+  // same position opened from Telegram or MCP is filed under `<base>-<quote>`.
+  // Both name this pool, so both are asked for; `pool.address` then keeps the
+  // answer to the pool actually on screen.
+  const symbolPair =
+    baseSymbol && quoteSymbol ? `${baseSymbol}-${quoteSymbol}` : "";
+
   const { executors, overlays, positions, isLoadingPositions } =
-    useMainControllerData(server ?? null, network, pair);
+    useMainControllerData(server ?? null, network, pair, {
+      altPair: symbolPair,
+      poolAddress: pool?.address,
+    });
 
   const active = tab === "lp" ? lpConfig : orderConfig;
   const currentPrice = pool?.current_price ?? null;
@@ -287,6 +308,14 @@ export function DexPool() {
 
       <div className="flex min-h-0 flex-1">
         <div className="flex min-w-0 flex-1 flex-col">
+          {/* What you already hold here, above the chart that shows where it sits */}
+          <LpPositionBar
+            executors={executors}
+            currentPrice={currentPrice}
+            selectedExecutorId={selectedExecutorId}
+            onSelect={(id) => setSelectedExecutorId((prev) => (prev === id ? null : id))}
+          />
+
           <div className="flex min-h-0 flex-1">
             <div className="min-h-0 min-w-0 flex-1 overflow-hidden">
             <TradeChart
@@ -367,6 +396,8 @@ export function DexPool() {
               connector={network}
               pair={pair}
               isSpot
+              baseSymbol={baseSymbol}
+              quoteSymbol={quoteSymbol}
               selectedExecutorId={selectedExecutorId}
               onExecutorSelect={(ex) => setSelectedExecutorId(ex?.id ?? null)}
             />
@@ -431,6 +462,10 @@ export function DexPool() {
                 isSpot
                 pair={pairLabel}
                 strategies={caps.orderStrategies}
+                baseAvailable={balances.base}
+                quoteAvailable={balances.quote}
+                baseSymbol={baseSymbol}
+                quoteSymbol={quoteSymbol}
               />
             ) : (
               <LPConfigPanel
@@ -441,6 +476,10 @@ export function DexPool() {
                 pair={pairLabel}
                 pool={lpConfig.pool}
                 poolFetching={lpConfig.poolFetching}
+                baseAvailable={balances.base}
+                quoteAvailable={balances.quote}
+                baseSymbol={baseSymbol}
+                quoteSymbol={quoteSymbol}
               />
             )}
           </div>

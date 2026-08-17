@@ -27,6 +27,7 @@ from glom import glom
 
 from config_manager import get_client
 
+from . import orca_api
 from ._shared import evict_expired, get_cached, set_cached
 
 logger = logging.getLogger(__name__)
@@ -169,6 +170,10 @@ TOKEN_POOL_TTL = 3600  # a token's main pool is stable over an hour
 # candle poll loop of the same budget.
 POOL_LIST_TTL = 60  # gecko trending/top/new/token lists
 GATEWAY_POOL_LIST_TTL = 30  # gateway CLMM lists, per (connector, search)
+# One Orca snapshot serves every page and every column sort of the Orca tab, so
+# this is a whole tab's upstream budget rather than one page's — cheaper than the
+# Gateway path it replaces, which spent a request per page and a gecko one on top.
+ORCA_POOL_LIST_TTL = 60
 
 # GeckoTerminal's OHLCV endpoint only accepts these aggregates, and its client
 # raises ValueError on anything else. Charts pick their own interval, so map an
@@ -1290,7 +1295,90 @@ def normalize_pool_data(pool: dict, source: str = "gecko") -> Dict[str, Any]:
             "source": "gateway",
         }
 
+    elif source == "orca":
+        return _normalize_orca_whirlpool(pool)
+
     return pool
+
+
+# Orca states a fee tier in millionths of the trade: 400 is 0.04%.
+_ORCA_FEE_RATE_DENOMINATOR = 10_000
+
+
+def _normalize_orca_whirlpool(pool: dict) -> Dict[str, Any]:
+    """One raw ``api.orca.so`` whirlpool → the same shape the other sources produce.
+
+    Every figure Gateway's Orca listing leaves null is present here, so unlike a
+    Gateway row this one needs no GeckoTerminal backfill and no estimated yield:
+    ``apr`` is Orca's own realized fees (rewards included) over TVL, not volume
+    times the base tier.
+    """
+    token_a = pool.get("tokenA") if isinstance(pool.get("tokenA"), dict) else {}
+    token_b = pool.get("tokenB") if isinstance(pool.get("tokenB"), dict) else {}
+    stats = pool.get("stats") if isinstance(pool.get("stats"), dict) else {}
+    day = stats.get("24h") if isinstance(stats.get("24h"), dict) else {}
+
+    base_symbol = str(token_a.get("symbol") or "???")
+    quote_symbol = str(token_b.get("symbol") or "???")
+    mint_a = str(pool.get("tokenMintA") or token_a.get("address") or "")
+    mint_b = str(pool.get("tokenMintB") or token_b.get("address") or "")
+
+    fee_rate = _finite(pool.get("feeRate"))
+    info: Dict[str, Any] = {
+        "address": str(pool.get("address") or ""),
+        "name": f"{base_symbol}-{quote_symbol}",
+        "base_token_symbol": base_symbol,
+        "quote_token_symbol": quote_symbol,
+        "base_token_address": mint_a,
+        "quote_token_address": mint_b,
+        # Carried under the Gateway row's names too, so a consumer that already
+        # reads a CLMM pool's mints does not need to know which source it came from.
+        "mint_x": mint_a,
+        "mint_y": mint_b,
+        "base_token_price_usd": None,
+        "quote_token_price_usd": None,
+        "network": "solana",
+        "dex_id": "orca",
+        "reserve_usd": pool.get("tvlUsdc"),
+        "current_price": pool.get("price"),
+        # Orca's tick spacing sits in the column Meteora's bin step does: both are
+        # "how finely can I place a position in this pool".
+        "bin_step": pool.get("tickSpacing"),
+        "base_fee_percentage": (
+            fee_rate / _ORCA_FEE_RATE_DENOMINATOR if fee_rate is not None else None
+        ),
+        "volume_24h": day.get("volume"),
+        "fees_24h": day.get("fees"),
+        # Orca reports deltas as ratios (-0.05 = -5%); the table renders percents.
+        "price_change_24h": _scale_ratio(day.get("priceDelta")),
+        "source": "orca",
+    }
+
+    # Fees *and* rewards over TVL, which is the number Orca's own UI shows — a
+    # reward-heavy pool's real yield is not its fee yield.
+    daily = _finite(day.get("yieldOverTvl"))
+    if daily is None:
+        daily = _finite(pool.get("yieldOverTvl"))
+    # Always present, even as None, so an Orca row and a Gateway one have the same
+    # keys and a consumer never has to ask which source it is holding.
+    info["apr"] = daily * 100 if daily is not None else None
+    info["apy"] = (
+        ((1 + daily) ** _DAYS_PER_YEAR - 1) * 100 if daily is not None else None
+    )
+    # Not estimated: no ``~`` on either column.
+    info["apr_estimated"] = False
+
+    # Orca states every figure as a decimal *string*. The yields above are already
+    # floats, so coercing here — rather than leaving it to ``decorate_pool`` as the
+    # other sources do — is what keeps the row from being half one and half the
+    # other for anything that reads it before decoration.
+    return coerce_pool_numbers(info)
+
+
+def _scale_ratio(value: Any) -> Optional[float]:
+    """A ratio from Orca as a percentage, or None when it reports nothing."""
+    ratio = _finite(value)
+    return None if ratio is None else ratio * 100
 
 
 def _get_nested_float(data: dict, *keys) -> Optional[float]:
@@ -1389,6 +1477,7 @@ GECKO_DEXES_TTL = 6 * 3600
 _gecko_page_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
 _gecko_dexes_cache: Dict[Tuple, Tuple[float, List[Dict[str, str]]]] = {}
 _gateway_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
+_orca_pool_list_cache: Dict[Tuple, Tuple[float, List[Dict[str, Any]]]] = {}
 _multi_pool_cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
 _pool_by_address_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 
@@ -1450,6 +1539,7 @@ _POOL_NUMERIC_FIELDS = (
     "quote_token_price_usd",
     "apr",
     "apy",
+    "fees_24h",
     "base_fee_percentage",
 )
 
@@ -1893,6 +1983,82 @@ def gateway_connector_network(connector: str) -> str:
     return LIQUIDITY_SUPPORTED_DEXES.get((connector or "").strip().lower(), "solana")
 
 
+# A day is 365 compoundings of a daily rate — the same annualization Meteora's own
+# `apy` applies to its `apr`, so a derived Orca figure sits on the same scale as
+# the Meteora one in the row above it.
+_DAYS_PER_YEAR = 365
+
+
+def _estimate_pool_yield(pool: Dict[str, Any]) -> None:
+    """Derive 24h fee/TVL and its annualization from volume and the fee tier.
+
+    For a CLMM connector whose Gateway listing reports the fee tier and TVL but no
+    yield, the two yield columns would otherwise be empty for every one of its
+    pools. Fees are mechanical — volume times the tier — so with a volume from
+    GeckoTerminal the figure Meteora reports directly can be computed rather than
+    left blank. Orca no longer needs this: it is read from its own API, which
+    reports realized fees (see ``list_orca_pools``).
+
+    Marked ``apr_estimated`` because it is: it assumes every trade paid the base
+    tier, which a dynamic-fee venue's real fees only approximate.
+    """
+    volume = _finite(pool.get("volume_24h"))
+    tvl = _finite(pool.get("reserve_usd"))
+    fee_pct = _finite(pool.get("base_fee_percentage"))
+    if not volume or not tvl or fee_pct is None or tvl <= 0:
+        return
+    fees_24h = volume * fee_pct / 100
+    daily = fees_24h / tvl
+    pool["fees_24h"] = fees_24h
+    pool["apr"] = daily * 100
+    pool["apy"] = ((1 + daily) ** _DAYS_PER_YEAR - 1) * 100
+    pool["apr_estimated"] = True
+
+
+async def _fill_gateway_pool_gaps(pools: List[Dict[str, Any]], network: str) -> None:
+    """Fill the figures a CLMM connector leaves blank, from GeckoTerminal.
+
+    Meteora's own listing answers volume, fees and APR, but no connector reports a
+    24h price change, and a row with an em-dash under the columns that say whether
+    a pool is worth entering is barely a row. GeckoTerminal indexes the same pools
+    under the same addresses, so one multi-pool request per page closes the gap.
+
+    Only rows with an actual gap are looked up, cached with the page they filled.
+    A failed lookup leaves the rows as they were: a blank column is what the
+    browser already renders. Orca used to be the worst case here — TVL and nulls —
+    and no longer passes through at all; it is read from its own API instead.
+    """
+    wanted = [
+        str(p.get("address"))
+        for p in pools
+        if p.get("address")
+        and (p.get("volume_24h") is None or p.get("price_change_24h") is None)
+    ]
+    if not wanted:
+        return
+
+    try:
+        indexed = await fetch_pools_by_addresses(network, wanted)
+    except Exception as e:  # pragma: no cover - fetch_pools_by_addresses swallows
+        logger.info("gateway pool enrichment failed net=%s: %s", network, e)
+        return
+
+    by_address = {str(row.get("address")): row for row in indexed}
+    for pool in pools:
+        row = by_address.get(str(pool.get("address")))
+        if not row:
+            continue
+        if pool.get("volume_24h") is None:
+            pool["volume_24h"] = row.get("volume_24h")
+        if pool.get("price_change_24h") is None:
+            pool["price_change_24h"] = row.get("price_change_24h")
+        # Gateway's TVL is the connector's own; gecko's only stands in for a gap.
+        if pool.get("reserve_usd") is None:
+            pool["reserve_usd"] = row.get("reserve_usd")
+        if pool.get("apr") is None and pool.get("apy") is None:
+            _estimate_pool_yield(pool)
+
+
 async def list_gateway_pools(
     client: Any,
     connector: str,
@@ -1951,8 +2117,92 @@ async def list_gateway_pools(
         if pool.get("address"):
             pools.append(pool)
 
+    # Before the cache, so the extra upstream request is spent once per page and
+    # not once per viewer of it.
+    await _fill_gateway_pool_gaps(pools, network)
+
     _ttl_put(_gateway_pool_list_cache, key, pools, GATEWAY_POOL_LIST_TTL)
     return [dict(row) for row in pools]
+
+
+# How many whirlpools one snapshot holds. Orca lists over 8,000, but ranked by TVL
+# fewer than ~500 hold more than $10k and the rest are dust the browser would never
+# page to — so this is the whole browsable set, not a first page of it.
+ORCA_SNAPSHOT_SIZE = 500
+
+
+async def _orca_snapshot(search: Optional[str]) -> Optional[List[Dict[str, Any]]]:
+    """Every browsable Orca whirlpool, normalized and ranked by TVL.
+
+    ``None`` — not ``[]`` — when the upstream failed and there is no stale copy:
+    the caller falls back to the Gateway listing on that, and an empty table is
+    the wrong thing to show for a venue with thousands of pools.
+    """
+    key = (search or "",)
+    cached = _ttl_get(_orca_pool_list_cache, key, ORCA_POOL_LIST_TTL)
+    if cached is not None:
+        return cached
+
+    # Flicking between tabs asks for the same snapshot while the first request is
+    # still in the air; without this each one opens its own.
+    async def _fetch() -> Optional[List[Dict[str, Any]]]:
+        try:
+            rows = await orca_api.fetch_whirlpools(ORCA_SNAPSHOT_SIZE, search=search)
+        except Exception as e:
+            stale, age = _stale_get(_orca_pool_list_cache, key)
+            logger.warning(
+                "orca pool list failed search=%r: %s%s",
+                search or "",
+                e,
+                f" (serving {age:.0f}s-old cache)" if stale is not None else "",
+            )
+            return stale
+
+        network = gateway_connector_network("orca")
+        pools: List[Dict[str, Any]] = []
+        for row in rows:
+            try:
+                pool = decorate_pool(normalize_pool_data(row, source="orca"), network)
+            except Exception as e:
+                logger.info("orca pool row skipped: %s", e)
+                continue
+            if pool.get("address"):
+                pools.append(pool)
+        _stale_put(_orca_pool_list_cache, key, pools)
+        return pools
+
+    return await _single_flight(("orca-pools", key), _fetch)
+
+
+async def list_orca_pools(
+    search: Optional[str] = None, limit: int = 20, page: int = 1
+) -> Optional[Tuple[List[Dict[str, Any]], bool]]:
+    """One page of Orca whirlpools, with whether another follows.
+
+    Read straight from Orca rather than through Gateway, which proxies this very
+    API and drops volume, fees, price and yield on the way — and which ignores its
+    own ``page`` argument for this connector, so every page of the tab was page one.
+
+    Sliced out of a cached snapshot because Orca paginates by cursor and the browser
+    pages by number: one upstream request per minute serves every page, which is
+    fewer than the request-per-page-plus-GeckoTerminal it replaces. ``has_more`` is
+    then a fact rather than the "a full page implies another" guess Gateway forces.
+
+    ``None`` when the upstream failed and nothing stale was cached.
+    """
+    limit = _clamp_pool_limit(limit)
+    try:
+        page = max(1, int(page))
+    except (TypeError, ValueError):
+        page = 1
+
+    pools = await _orca_snapshot((search or "").strip() or None)
+    if pools is None:
+        return None
+
+    start = (page - 1) * limit
+    window = pools[start : start + limit]
+    return [dict(row) for row in window], len(pools) > start + limit
 
 
 async def fetch_pool_by_address(

@@ -36,13 +36,24 @@ def _clear_caches(monkeypatch):
         pool_data._gateway_pool_list_cache,
         pool_data._pool_by_address_cache,
         pool_data._multi_pool_cache,
+        pool_data._orca_pool_list_cache,
     ):
         cache.clear()
+    # A single-flight task left over from another test's event loop would be
+    # awaited on a loop that is already closed.
+    pool_data._gecko_inflight.clear()
     # No test in this module may reach the real GeckoTerminal — and a Gateway
     # listing now looks pools up there too, to fill the figures Orca's connector
     # leaves null. The empty stand-in is overridden by the ``fake_gecko`` fixture
     # wherever a test actually wants rows back.
     monkeypatch.setattr(pool_data, "_gecko_client", lambda: FakeGecko())
+
+    # Nor may any test reach the real api.orca.so. Overridden by ``fake_orca``
+    # wherever a test actually wants whirlpools back.
+    async def _no_orca(*a, **kw):
+        raise AssertionError("test reached the real Orca API")
+
+    monkeypatch.setattr(pool_data.orca_api, "fetch_whirlpools", _no_orca)
     yield
 
 
@@ -1148,3 +1159,226 @@ def test_chains_falls_back_to_solana_when_gateway_is_down(route_client):
 def test_chains_needs_server_access(route_client):
     client = route_client(allowed=False)
     assert client.get("/servers/srv/dex/chains").status_code == 403
+
+
+# ── the Orca source (handlers/dex/orca_api.py + list_orca_pools) ──
+#
+# Gateway proxies this very API and nulls volume, fees, price and yield on the way
+# — and ignores its own `page` argument for this connector, so every page of the
+# Orca tab was page one. These pin the shape that replaced it, against the payload
+# api.orca.so actually returns.
+
+
+def orca_row(**over):
+    row = {
+        "address": POOL,
+        "tickSpacing": 4,
+        "feeRate": 400,  # millionths of the trade: 0.04%
+        "price": "75.4699414017526812",
+        "tvlUsdc": "25914246.8432301700048600",
+        "tokenMintA": SOL,
+        "tokenMintB": USDC,
+        "tokenA": {"address": SOL, "symbol": "SOL", "decimals": 9},
+        "tokenB": {"address": USDC, "symbol": "USDC", "decimals": 6},
+        "stats": {
+            "24h": {
+                "volume": "51745436.73117720",
+                "fees": "20697.75405187479438737000",
+                "yieldOverTvl": "0.00079852453975813900",
+                "priceDelta": "-0.005889007438397060571184406001499000",
+            }
+        },
+    }
+    row.update(over)
+    return row
+
+
+@pytest.fixture
+def fake_orca(monkeypatch):
+    """Stand in for api.orca.so. No test in this module may reach the real one."""
+
+    class FakeOrca:
+        def __init__(self, rows=None, error=None):
+            self.rows = rows if rows is not None else []
+            self.error = error
+            self.calls: list[dict] = []
+
+        async def fetch_whirlpools(self, size, search=None, **kw):
+            self.calls.append({"size": size, "search": search, **kw})
+            if self.error:
+                raise self.error
+            return self.rows
+
+    def build(rows=None, error=None):
+        fake = FakeOrca(rows, error)
+        monkeypatch.setattr(
+            pool_data.orca_api, "fetch_whirlpools", fake.fetch_whirlpools
+        )
+        return fake
+
+    return build
+
+
+def test_orca_normalization_maps_every_column_gateway_nulls():
+    """The whole point: TVL, volume, fees, price and yield in one row."""
+    pool = pool_data.normalize_pool_data(orca_row(), source="orca")
+    assert pool["source"] == "orca"
+    assert pool["address"] == POOL
+    assert pool["dex_id"] == "orca"
+    assert pool["reserve_usd"] == pytest.approx(25_914_246.84, abs=0.01)
+    assert pool["volume_24h"] == pytest.approx(51_745_436.73, abs=0.01)
+    assert pool["fees_24h"] == pytest.approx(20_697.754, abs=0.01)
+    assert pool["current_price"] == pytest.approx(75.4699, abs=1e-4)
+
+
+def test_orca_fee_rate_is_millionths_of_the_trade():
+    """400 is 0.04%, the tier Orca's own UI shows — not 400% and not 4%."""
+    pool = pool_data.normalize_pool_data(orca_row(), source="orca")
+    assert pool["base_fee_percentage"] == pytest.approx(0.04)
+
+
+def test_orca_tick_spacing_lands_in_the_bin_step_column():
+    """Both answer the same question: how finely can I place a position here."""
+    pool = pool_data.normalize_pool_data(orca_row(), source="orca")
+    assert pool["bin_step"] == 4
+
+
+def test_orca_yield_is_realized_and_not_marked_estimated():
+    """Orca reports fees *and* rewards over TVL, so nothing is derived from volume."""
+    pool = pool_data.normalize_pool_data(orca_row(), source="orca")
+    # 0.00079852 of TVL per day, as a percent, then 365 compoundings of it.
+    assert pool["apr"] == pytest.approx(0.0798525, abs=1e-6)
+    assert pool["apy"] == pytest.approx(33.63, abs=0.5)
+    assert pool["apr_estimated"] is False
+
+
+def test_orca_price_delta_is_a_ratio_rendered_as_a_percent():
+    """Orca says -0.0059; the column says -0.59%, like gecko's already does."""
+    pool = pool_data.normalize_pool_data(orca_row(), source="orca")
+    assert pool["price_change_24h"] == pytest.approx(-0.5889, abs=1e-3)
+
+
+def test_orca_pool_with_no_stats_keeps_its_other_columns():
+    """A brand-new whirlpool has no 24h window yet; that is not a broken row."""
+    pool = pool_data.normalize_pool_data(orca_row(stats={}), source="orca")
+    assert pool["reserve_usd"] == pytest.approx(25_914_246.84, abs=0.01)
+    assert pool["volume_24h"] is None
+    assert pool["apr"] is None
+
+
+def test_orca_pools_are_decorated_like_any_other_source(fake_orca):
+    fake_orca([orca_row()])
+    pools, _ = run(pool_data.list_orca_pools())
+    assert pools[0]["lp_supported"] is True
+    assert pools[0]["tradable"] is True
+    assert pools[0]["gateway_network"] == "solana-mainnet-beta"
+    assert pools[0]["trading_pair"] == f"{SOL}-USDC"
+
+
+def test_orca_pages_are_sliced_out_of_one_snapshot(fake_orca):
+    """Orca paginates by cursor and the browser by number, so one fetch serves both."""
+    fake = fake_orca([orca_row(address=f"pool{i}") for i in range(50)])
+    first, more_first = run(pool_data.list_orca_pools(limit=20, page=1))
+    second, more_second = run(pool_data.list_orca_pools(limit=20, page=2))
+    third, more_third = run(pool_data.list_orca_pools(limit=20, page=3))
+    assert [p["address"] for p in first] == [f"pool{i}" for i in range(20)]
+    assert [p["address"] for p in second] == [f"pool{i}" for i in range(20, 40)]
+    assert [p["address"] for p in third] == [f"pool{i}" for i in range(40, 50)]
+    assert (more_first, more_second, more_third) == (True, True, False)
+    # Three pages, one upstream request — the Gateway path spent one per page and
+    # a GeckoTerminal one on top.
+    assert len(fake.calls) == 1
+
+
+def test_orca_has_more_is_exact_not_a_full_page_guess(fake_orca):
+    """A snapshot that ends exactly on a page boundary has no next page."""
+    fake_orca([orca_row(address=f"pool{i}") for i in range(20)])
+    _, more = run(pool_data.list_orca_pools(limit=20, page=1))
+    assert more is False
+
+
+def test_orca_search_goes_upstream_as_a_query(fake_orca):
+    fake = fake_orca([orca_row()])
+    run(pool_data.list_orca_pools(search="BONK"))
+    assert fake.calls[0]["search"] == "BONK"
+
+
+def test_blank_orca_search_is_no_search(fake_orca):
+    fake = fake_orca([orca_row()])
+    run(pool_data.list_orca_pools(search="   "))
+    assert fake.calls[0]["search"] is None
+
+
+def test_orca_searches_are_cached_apart_from_the_unfiltered_list(fake_orca):
+    fake = fake_orca([orca_row()])
+    run(pool_data.list_orca_pools())
+    run(pool_data.list_orca_pools(search="BONK"))
+    assert [c["search"] for c in fake.calls] == [None, "BONK"]
+
+
+def test_orca_rows_with_no_address_are_dropped(fake_orca):
+    fake_orca([orca_row(address=""), orca_row()])
+    pools, _ = run(pool_data.list_orca_pools())
+    assert len(pools) == 1
+
+
+def test_orca_cached_rows_are_copies_a_caller_cannot_poison(fake_orca):
+    fake_orca([orca_row()])
+    first, _ = run(pool_data.list_orca_pools())
+    first[0]["address"] = "mutated"
+    again, _ = run(pool_data.list_orca_pools())
+    assert again[0]["address"] == POOL
+
+
+def test_orca_failure_is_none_so_the_caller_can_fall_back(fake_orca):
+    """`[]` would render "no pools" for a venue with thousands; None means fall back."""
+    fake_orca(error=RuntimeError("429 rate limited"))
+    assert run(pool_data.list_orca_pools()) is None
+
+
+def test_orca_serves_a_stale_snapshot_before_giving_up(fake_orca):
+    """A rate limit should not empty a table that was correct a minute ago."""
+    fake_orca([orca_row()])
+    run(pool_data.list_orca_pools())
+    fresh = pool_data._orca_pool_list_cache[("",)][1]
+    pool_data._orca_pool_list_cache[("",)] = (0.0, fresh)
+    fake_orca(error=RuntimeError("429 rate limited"))
+    pools, _ = run(pool_data.list_orca_pools())
+    assert [p["address"] for p in pools] == [POOL]
+
+
+def test_orca_source_lists_pools(route_client, fake_orca):
+    fake_orca([orca_row()])
+    r = route_client().get("/servers/srv/dex/pools?source=orca")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["source"] == "orca"
+    assert body["pools"][0]["address"] == POOL
+    assert body["pools"][0]["volume_24h"] == pytest.approx(51_745_436.73, abs=0.01)
+
+
+def test_orca_route_needs_no_gateway_client(route_client, fake_orca):
+    """A public API, so a server whose Gateway is down still browses Orca."""
+    fake_orca([orca_row()])
+    client = route_client(client_error=RuntimeError("gateway is down"))
+    r = client.get("/servers/srv/dex/pools?source=orca")
+    assert r.status_code == 200
+    assert r.json()["pools"][0]["address"] == POOL
+
+
+def test_orca_route_falls_back_to_gateway_when_orca_is_down(route_client, fake_orca):
+    fake_orca(error=RuntimeError("403 cloudflare"))
+    clmm = FakeClmm({"pools": [gateway_row(connector="orca")]})
+    r = route_client(client=FakeClient(clmm)).get("/servers/srv/dex/pools?source=orca")
+    assert r.status_code == 200
+    body = r.json()
+    # Reported as the source that actually served it, not the one that was asked for.
+    assert body["source"] == "gateway"
+    assert clmm.calls[0]["connector"] == "orca"
+    assert body["pools"][0]["address"] == POOL
+
+
+def test_orca_route_needs_server_access(route_client, fake_orca):
+    fake_orca([orca_row()])
+    client = route_client(allowed=False)
+    assert client.get("/servers/srv/dex/pools?source=orca").status_code == 403

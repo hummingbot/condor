@@ -68,7 +68,8 @@ async def list_pools(
     name: str,
     source: str = Query(
         default="gecko",
-        description="'gecko' (a chain's trending/top/new pools, or a token's) or "
+        description="'gecko' (a chain's trending/top/new pools, or a token's), "
+        "'orca' (Orca's own whirlpool API, with realized fees and yield) or "
         "'gateway' (a CLMM connector's own listing, with APR and bin step)",
     ),
     network: str = Query(
@@ -95,25 +96,47 @@ async def list_pools(
     page: int = Query(default=1, ge=1, description="1-based page of `limit` rows"),
     user: WebUser = Depends(require_server_access),
 ):
-    """Pools to browse, from one of the two upstreams.
+    """Pools to browse, from one of the three upstreams.
 
-    ``source`` is the discriminator because the two take genuinely different
-    arguments — gecko searches by *token address* on a chain, Gateway searches free
-    text within a connector — and one merged parameter set would mean documenting
-    which combinations are meaningless.
+    ``source`` is the discriminator because they take genuinely different arguments
+    — gecko searches by *token address* on a chain, Gateway and Orca search free
+    text within a venue — and one merged parameter set would mean documenting which
+    combinations are meaningless.
 
     An upstream failure answers ``{"pools": []}`` with a warning, like
     ``/market/venues``: the browser's empty state is something the user can act on,
-    a 502 is not.
+    a 502 is not. ``source=orca`` falls back to Gateway before it comes to that.
 
-    ``has_more`` — not a total — is what the browser's Next needs, and a total is
-    something neither upstream reports.
+    ``has_more`` — not a total — is what the browser's Next needs. Orca answers it
+    exactly, having the whole ranked set in hand; Gateway and gecko report no total,
+    so there a full page is the only evidence of another.
     """
     cm = get_config_manager()
 
-    from handlers.dex.pool_data import list_gateway_pools, list_gecko_pools_page
+    from handlers.dex.pool_data import (
+        list_gateway_pools,
+        list_gecko_pools_page,
+        list_orca_pools,
+    )
 
     source = (source or "gecko").strip().lower()
+
+    if source == "orca":
+        # Orca's own API, not Gateway's proxy of it: same pools, but with the
+        # volume, fees, price and yield the proxy nulls, and with pagination that
+        # is not stuck on page one. Gateway stays the fallback for when Orca is
+        # rate-limiting — a degraded row beats an empty table.
+        paged = await list_orca_pools(search=query, limit=limit, page=page)
+        if paged is not None:
+            pools, has_more = paged
+            return {
+                "pools": pools,
+                "source": source,
+                "page": page,
+                "has_more": has_more,
+            }
+        logger.warning("Orca API unavailable for %s; falling back to Gateway", name)
+        connector, source = "orca", "gateway"
 
     if source == "gateway":
         try:

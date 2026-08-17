@@ -54,6 +54,11 @@ function sortValue(p: PoolSummary, key: SortKey): number {
   return num(p[key as keyof PoolSummary]) ?? -Infinity;
 }
 
+/** Orca's Gateway listing carries no yield at all; the backend derives one. */
+const ESTIMATED_YIELD_HINT =
+  "Estimated: 24h volume x the pool's base fee tier, over TVL. " +
+  "This connector reports no yield of its own.";
+
 function pairLabel(p: PoolSummary): string {
   const base = p.base_symbol && p.base_symbol !== "???" ? p.base_symbol : null;
   const quote =
@@ -261,7 +266,7 @@ export function PoolBrowser({
                     sortDir={sortDir}
                     onSort={handleSort}
                     align="right"
-                    title="Last 24h of fees over TVL, as the connector reports it"
+                    title="Last 24h of fees over TVL. A ~ marks a figure derived from volume and the fee tier because the connector reports none."
                   />
                   <SortTh
                     label="APY"
@@ -270,7 +275,7 @@ export function PoolBrowser({
                     sortDir={sortDir}
                     onSort={handleSort}
                     align="right"
-                    title="The connector's annualized yield"
+                    title="Annualized yield. A ~ marks a figure derived from volume and the fee tier because the connector reports none."
                   />
                   <th className="px-4 py-3 text-right text-xs font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
                     Bin
@@ -358,10 +363,18 @@ export function PoolBrowser({
                   </td>
                   {showGatewayColumns && (
                     <>
-                      <td className="px-4 py-2.5 text-right tabular-nums">
+                      <td
+                        className="px-4 py-2.5 text-right tabular-nums"
+                        title={p.apr_estimated ? ESTIMATED_YIELD_HINT : undefined}
+                      >
+                        {p.apr_estimated && p.apr != null ? "~" : ""}
                         {pct(p.apr)}
                       </td>
-                      <td className="px-4 py-2.5 text-right tabular-nums">
+                      <td
+                        className="px-4 py-2.5 text-right tabular-nums"
+                        title={p.apr_estimated ? ESTIMATED_YIELD_HINT : undefined}
+                      >
+                        {p.apr_estimated && p.apy != null ? "~" : ""}
                         {pct(p.apy)}
                       </td>
                       <td className="px-4 py-2.5 text-right tabular-nums text-[var(--color-text-muted)]">

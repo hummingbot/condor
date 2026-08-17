@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { NoServerCard } from "@/components/NoServerCard";
+import { LpPositions } from "@/components/dex/LpPositions";
 import { PoolBrowser } from "@/components/dex/PoolBrowser";
 import {
   type PoolSource,
@@ -146,7 +147,10 @@ export function Dex() {
         server!,
         source.kind === "gateway"
           ? {
-              source: "gateway",
+              // Orca is read from its own API rather than through Gateway, which
+              // proxies it and drops volume, fees, price and yield on the way.
+              // Same tab, same columns — filled in rather than em-dashed.
+              source: source.connector === "orca" ? "orca" : "gateway",
               connector: source.connector,
               query: debouncedQuery || undefined,
               limit: PAGE_SIZE,
@@ -223,6 +227,11 @@ export function Dex() {
           and provide liquidity to it.
         </p>
       </div>
+
+      {/* Above the browser, because getting back to a pool you are already in is
+          a shorter errand than finding a new one — and it renders nothing when
+          there is nothing to get back to. */}
+      <LpPositions server={server} />
 
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
         <PoolSourceTabs
