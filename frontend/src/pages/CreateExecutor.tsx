@@ -32,6 +32,7 @@ import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPan
 import { LPConfigPanel, useLpConfig } from "@/components/executor/LPConfigPanel";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { useCandleStore } from "@/hooks/useCandleStore";
+import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
@@ -40,7 +41,7 @@ import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
-import type { ExecutorType } from "@/components/executor/types";
+import type { ExecutorType, PickSlot } from "@/components/executor/types";
 import {
   gridReducer,
   isSpotConnector,
@@ -103,6 +104,13 @@ export function CreateExecutor() {
   const connector = gridState.connector;
   const pair = gridState.pair;
   const isSpot = isSpotConnector(connector);
+  // A CLOB pair is already <BASE>-<QUOTE>, so the tickers come off the split.
+  const balances = usePairBalances(
+    server ?? null,
+    connector,
+    pair?.split("-")[0],
+    pair?.split("-")[1],
+  );
 
   // The venue the URL asked for, kept after the param is stripped below: the
   // redirect guard cannot read it from the URL any more, and it must not fire
@@ -350,9 +358,12 @@ export function CreateExecutor() {
 
   // Chart price set handler
   const handlePriceSet = useMemo(
-    () => (field: "start" | "end" | "limit", price: number) => {
+    () => (field: PickSlot, price: number) => {
       switch (executorType) {
         case "grid":
+          // The grid panel arms only start/end/limit; `limit2` belongs to the LP
+          // lower limit and would name a grid field that does not exist.
+          if (field === "limit2") break;
           gridDispatch({ type: "SET_FIELD", field: `${field}_price`, value: price });
           gridDispatch({ type: "SET_FIELD", field: "activePickField", value: null });
           break;
@@ -669,13 +680,13 @@ export function CreateExecutor() {
                   <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                 )}
                 {executorType === "order" && (
-                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} />
+                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                 )}
                 {executorType === "dca" && (
                   <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                 )}
                 {executorType === "lp" && (
-                  <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} />
+                  <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                 )}
               </div>
 

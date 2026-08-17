@@ -5,6 +5,7 @@ import {
   AmountField,
   LeverageField,
   NumberField,
+  PercentPresets,
   PriceField,
   SectionHeader,
   SelectField,
@@ -12,7 +13,7 @@ import {
   ValidationMessages,
   type FieldDispatch,
 } from "./fields";
-import type { ChartPriceMapping, ExecutorValidation } from "./types";
+import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
 
 // ── State ──
 
@@ -146,7 +147,7 @@ export function useOrderConfig() {
 
   const save = () => saveDefaults(state);
 
-  const handleChartPriceSet = (field: "start" | "end" | "limit", price: number) => {
+  const handleChartPriceSet = (field: PickSlot, price: number) => {
     if (field === "start") {
       dispatch({ type: "SET_FIELD", field: "price", value: price });
     }
@@ -184,10 +185,33 @@ interface Props {
    * book, so a DEX passes `["MARKET"]`. Defaults to all of them.
    */
   strategies?: string[];
+  /** Wallet balance behind the percentage presets; `null` when it is unknown. */
+  baseAvailable?: number | null;
+  quoteAvailable?: number | null;
+  /**
+   * Display symbols for the two tokens. A DEX `trading_pair` is
+   * `<base_mint>-<quote_symbol>`, so its base half is an address, not a ticker.
+   */
+  baseSymbol?: string;
+  quoteSymbol?: string;
 }
 
-export function OrderConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair, strategies }: Props) {
+export function OrderConfigPanel({
+  state,
+  dispatch,
+  validation,
+  currentPrice,
+  isSpot = false,
+  pair,
+  strategies,
+  baseAvailable = null,
+  quoteAvailable = null,
+  baseSymbol,
+  quoteSymbol,
+}: Props) {
   const d = dispatch as FieldDispatch;
+  const displayBase = baseSymbol || pair?.split("-")[0] || "base";
+  const displayQuote = quoteSymbol || pair?.split("-")[1] || "quote";
   const options = strategies
     ? STRATEGY_OPTIONS.filter((o) => strategies.includes(o.value))
     : STRATEGY_OPTIONS;
@@ -206,6 +230,25 @@ export function OrderConfigPanel({ state, dispatch, validation, currentPrice, is
     (state.execution_strategy === "LIMIT" || state.execution_strategy === "LIMIT_MAKER");
   const isChaser = allowed && state.execution_strategy === "LIMIT_CHASER";
 
+  // The amount is always in base units, but which balance funds it is not: a spot
+  // BUY spends quote and has to be divided by the price to become base, a spot
+  // SELL spends the base itself. A perp buys margin with quote either way, and the
+  // position it opens is that margin times the leverage.
+  const sizingPrice = needsPrice && state.price > 0 ? state.price : currentPrice;
+  const spendsBase = isSpot && state.side === 2;
+  const spendable = spendsBase ? baseAvailable : quoteAvailable;
+  const spendSymbol = spendsBase ? displayBase : displayQuote;
+  const canSize = spendsBase || (!!sizingPrice && sizingPrice > 0);
+
+  const pickPercent = (pct: number) => {
+    if (spendable === null || spendable <= 0) return;
+    const spend = spendable * pct;
+    const amount = spendsBase
+      ? spend
+      : (spend * (isSpot ? 1 : state.leverage)) / (sizingPrice as number);
+    dispatch({ type: "SET_FIELD", field: "amount", value: Number(amount.toPrecision(8)) });
+  };
+
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
       {/* Direction */}
@@ -214,14 +257,23 @@ export function OrderConfigPanel({ state, dispatch, validation, currentPrice, is
       {/* Order Config */}
       <div className="space-y-2.5">
         <SectionHeader>Order</SectionHeader>
-        <AmountField
-          value={state.amount}
-          field="amount"
-          dispatch={d}
-          currentPrice={currentPrice}
-          step={0.001}
-          pair={pair}
-        />
+        <div>
+          <AmountField
+            value={state.amount}
+            field="amount"
+            dispatch={d}
+            currentPrice={currentPrice}
+            step={0.001}
+            baseSymbol={displayBase}
+            quoteSymbol={displayQuote}
+          />
+          <PercentPresets
+            available={canSize ? spendable : null}
+            symbol={spendSymbol}
+            onPick={pickPercent}
+            label={`Available ${spendSymbol} to spend`}
+          />
+        </div>
         <SelectField
           label="Execution Strategy"
           value={state.execution_strategy}

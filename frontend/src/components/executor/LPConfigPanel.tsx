@@ -5,6 +5,7 @@ import { AlertTriangle, Sparkles } from "lucide-react";
 import {
   AdvancedSection,
   NumberField,
+  PercentPresets,
   PriceField,
   SectionHeader,
   SelectField,
@@ -12,7 +13,7 @@ import {
   ValidationMessages,
   type FieldDispatch,
 } from "./fields";
-import type { ChartPriceMapping, ExecutorValidation } from "./types";
+import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
 import { api, type DexPoolInfo } from "@/lib/api";
 import { getThemeColors } from "@/lib/theme-colors";
 
@@ -26,8 +27,16 @@ export const LP_SIDE_RANGE = 3; // both tokens, range centered
 
 export type LpSide = 1 | 2 | 3;
 
-/** The buffer between a range bound and its auto-close trigger. */
-const LIMIT_BUFFER = 0.1;
+/**
+ * How far outside the range its auto-close triggers sit, as a multiple of the
+ * range's own half-width.
+ *
+ * Proportional rather than fixed: a flat 10% buffer put the trigger for a 1%
+ * range nine range-widths away, so a position could sit out of range indefinitely
+ * without ever firing. At 1× the limits move with the preset — a 1% range closes
+ * 1% beyond its bound, a 20% range 20% beyond.
+ */
+const LIMIT_BUFFER_RATIO = 1;
 
 // ── State ──
 
@@ -141,11 +150,12 @@ export function rangeForSide(side: LpSide, price: number, pct: number) {
     lower = price * (1 - pct);
     upper = price * (1 + pct);
   }
+  const buffer = pct * LIMIT_BUFFER_RATIO;
   return {
     lower_price: lower,
     upper_price: upper,
-    lower_limit_price: lower * (1 - LIMIT_BUFFER),
-    upper_limit_price: upper * (1 + LIMIT_BUFFER),
+    lower_limit_price: lower * (1 - buffer),
+    upper_limit_price: upper * (1 + buffer),
   };
 }
 
@@ -263,18 +273,21 @@ function rangeWarnings(state: LPState, price: number | null): string[] {
 }
 
 // ── Chart pick slots ──
-// The chart carries three pick slots. Upper/lower bounds and the upper limit get
-// them; the lower limit is typed, and its PriceField offers no crosshair.
-const PICK_SLOT: Record<string, "start" | "end" | "limit"> = {
+// One slot per price: the two bounds and both auto-close triggers. The lower
+// limit rides `limit2`, the slot for a price the panel draws itself as an extra
+// line rather than one the chart owns.
+const PICK_SLOT: Record<string, PickSlot> = {
   upper_price: "start",
   lower_price: "end",
   upper_limit_price: "limit",
+  lower_limit_price: "limit2",
 };
 
-const SLOT_FIELD: Record<"start" | "end" | "limit", keyof LPState> = {
+const SLOT_FIELD: Record<PickSlot, keyof LPState> = {
   start: "upper_price",
   end: "lower_price",
   limit: "upper_limit_price",
+  limit2: "lower_limit_price",
 };
 
 export function isMeteoraProvider(provider: string): boolean {
@@ -319,7 +332,11 @@ export function useLpConfig(
               {
                 price: state.lower_limit_price,
                 label: "Lower limit",
-                color: getThemeColors().red,
+                // Amber while armed, matching how the chart marks its own lines.
+                color:
+                  state.activePickField === "lower_limit_price"
+                    ? "#fbbf24"
+                    : getThemeColors().red,
                 lineStyle: "dotted" as const,
                 lineWidth: 1,
               },
@@ -363,7 +380,7 @@ export function useLpConfig(
 
   const save = () => saveDefaults(state);
 
-  const handleChartPriceSet = (field: "start" | "end" | "limit", price: number) => {
+  const handleChartPriceSet = (field: PickSlot, price: number) => {
     dispatch({ type: "SET_FIELD", field: SLOT_FIELD[field], value: price });
     dispatch({ type: "SET_FIELD", field: "activePickField", value: null });
   };
@@ -412,6 +429,12 @@ function truncateAddress(address: string): string {
     : address;
 }
 
+/** A percentage of an available balance, at a precision an input can render. */
+function sizeFrom(available: number | null, pct: number): number {
+  if (!available || available <= 0) return 0;
+  return Number((available * pct).toPrecision(8));
+}
+
 function formatPoolPrice(price: number): string {
   if (price >= 1000) return price.toFixed(2);
   if (price >= 1) return price.toFixed(4);
@@ -428,6 +451,15 @@ interface Props {
   pair?: string;
   pool?: DexPoolInfo;
   poolFetching?: boolean;
+  /** Wallet balance behind the percentage presets; `null` when it is unknown. */
+  baseAvailable?: number | null;
+  quoteAvailable?: number | null;
+  /**
+   * Display symbols for the two tokens. A DEX `trading_pair` is
+   * `<base_mint>-<quote_symbol>`, so its base half is an address, not a ticker.
+   */
+  baseSymbol?: string;
+  quoteSymbol?: string;
 }
 
 export function LPConfigPanel({
@@ -438,6 +470,10 @@ export function LPConfigPanel({
   pair,
   pool,
   poolFetching,
+  baseAvailable = null,
+  quoteAvailable = null,
+  baseSymbol,
+  quoteSymbol,
 }: Props) {
   const d = dispatch as FieldDispatch;
 
@@ -445,8 +481,8 @@ export function LPConfigPanel({
   // price is known, so the resolved pool is a second source for the anchor.
   const price = currentPrice && currentPrice > 0 ? currentPrice : pool?.current_price ?? null;
 
-  const baseAsset = pair?.split("-")[0] || pool?.base_symbol || "base";
-  const quoteAsset = pair?.split("-")[1] || pool?.quote_symbol || "quote";
+  const baseAsset = baseSymbol || pool?.base_symbol || pair?.split("-")[0] || "base";
+  const quoteAsset = quoteSymbol || pool?.quote_symbol || pair?.split("-")[1] || "quote";
 
   // Anchor the range the first time a price is known. Not a reset: once the bounds
   // are non-zero they are the user's, and only an explicit action moves them.
@@ -598,27 +634,6 @@ export function LPConfigPanel({
         />
       </div>
 
-      {/* Amounts */}
-      <div className="space-y-2.5">
-        <SectionHeader>Amounts</SectionHeader>
-        <NumberField
-          label={`Base Amount (${baseAsset})`}
-          value={state.base_amount}
-          field="base_amount"
-          dispatch={d}
-          step={0.001}
-          min={0}
-        />
-        <NumberField
-          label={`Quote Amount (${quoteAsset})`}
-          value={state.quote_amount}
-          field="quote_amount"
-          dispatch={d}
-          step={0.001}
-          min={0}
-        />
-      </div>
-
       {/* Auto-close triggers */}
       <div className="space-y-2.5">
         <SectionHeader>Auto-Close Triggers</SectionHeader>
@@ -641,19 +656,54 @@ export function LPConfigPanel({
             state.lower_limit_price > 0 && state.lower_limit_price < state.lower_price
           }
           hint="Close when price falls to this level"
-          pickable={false}
         />
         <p className="text-[10px] text-[var(--color-text-muted)]">
           Both only fire while the position is out of range. Leave at 0 for no trigger.
         </p>
       </div>
 
-      <AdvancedSection
-        open={state.showAdvanced}
-        onToggle={() =>
-          d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })
-        }
-      >
+      {/* Amounts */}
+      <div className="space-y-2.5">
+        <SectionHeader>Amounts</SectionHeader>
+        <div>
+          <NumberField
+            label={`Base Amount (${baseAsset})`}
+            value={state.base_amount}
+            field="base_amount"
+            dispatch={d}
+            step={0.001}
+            min={0}
+          />
+          <PercentPresets
+            available={baseAvailable}
+            symbol={baseAsset}
+            onPick={(pct) =>
+              d({ type: "SET_FIELD", field: "base_amount", value: sizeFrom(baseAvailable, pct) })
+            }
+          />
+        </div>
+        <div>
+          <NumberField
+            label={`Quote Amount (${quoteAsset})`}
+            value={state.quote_amount}
+            field="quote_amount"
+            dispatch={d}
+            step={0.001}
+            min={0}
+          />
+          <PercentPresets
+            available={quoteAvailable}
+            symbol={quoteAsset}
+            onPick={(pct) =>
+              d({ type: "SET_FIELD", field: "quote_amount", value: sizeFrom(quoteAvailable, pct) })
+            }
+          />
+        </div>
+      </div>
+
+      {/* On Close — a decision about the tokens you get back, not a tuning knob. */}
+      <div className="space-y-2">
+        <SectionHeader>On Close</SectionHeader>
         <ToggleField
           label="Keep Position"
           value={state.keep_position}
@@ -665,7 +715,17 @@ export function LPConfigPanel({
           back to {quoteAsset}. This sets the config field; stopping from the
           executors table asks again.
         </p>
-        {isMeteoraProvider(state.lp_provider) && (
+      </div>
+
+      {/* Rendered only when there is something under it: everything else that
+          once lived here is now a first-class control. */}
+      {isMeteoraProvider(state.lp_provider) && (
+        <AdvancedSection
+          open={state.showAdvanced}
+          onToggle={() =>
+            d({ type: "SET_FIELD", field: "showAdvanced", value: !state.showAdvanced })
+          }
+        >
           <SelectField
             label="Meteora Strategy"
             value={state.strategy_type}
@@ -673,8 +733,8 @@ export function LPConfigPanel({
             dispatch={d}
             options={STRATEGY_TYPE_OPTIONS}
           />
-        )}
-      </AdvancedSection>
+        </AdvancedSection>
+      )}
 
       <ValidationMessages errors={validation.errors} warnings={warnings} />
     </div>

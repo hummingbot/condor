@@ -288,11 +288,16 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
 /**
  * A CLMM liquidity position, drawn as the grid it structurally is.
  *
- * `lower_price` / `upper_price` are the range the position earns fees in, and the
- * schema itself describes `upper_limit_price` / `lower_limit_price` as
- * "grid-executor style" auto-close triggers. That is a one-to-one match with
- * `GridBox`, and `TradeChart` draws boxes without ever reading `type` — so no new
- * drawing code is involved, only a second producer of the same struct.
+ * `lower_price` / `upper_price` are the range the position earns fees in, which is
+ * a one-to-one match with `GridBox`, and `TradeChart` draws boxes without ever
+ * reading `type` — so no new drawing code is involved, only a second producer of
+ * the same struct.
+ *
+ * The `*_limit_price` auto-close triggers are deliberately left off an open
+ * position: they are a decision made once, while the range is being drawn, and on
+ * the chart afterwards they are two more red lines competing with the bounds that
+ * actually say whether the position is still earning. LPConfigPanel still draws
+ * them while you set them.
  */
 function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
   const customInfo = executor.custom_info || {};
@@ -309,8 +314,6 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
   };
   const lower = num(customInfo.lower_price ?? customInfo.price_lower ?? config.lower_price);
   const upper = num(customInfo.upper_price ?? customInfo.price_upper ?? config.upper_price);
-  const upperLimit = num(customInfo.upper_limit_price ?? config.upper_limit_price);
-  const lowerLimit = num(customInfo.lower_limit_price ?? config.lower_limit_price);
 
   const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
   const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
@@ -324,19 +327,8 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
       // overlay puts start_price (the far bound) first, so upper goes first here.
       startPrice: upper,
       endPrice: lower,
-      limitPrice: upperLimit > 0 ? upperLimit : undefined,
       color: pnlHexColor(executor.pnl >= 0 ? 1 : -1),
     };
-  }
-
-  // Both triggers, as full-width lines. TradeChart only draws these for a running
-  // or selected executor, which is exactly when they are actionable.
-  const lines: PriceLine[] = [];
-  if (upperLimit > 0) {
-    lines.push({ price: upperLimit, label: "Upper limit", color: getThemeColors().red, style: "dotted" });
-  }
-  if (lowerLimit > 0) {
-    lines.push({ price: lowerLimit, label: "Lower limit", color: getThemeColors().red, style: "dotted" });
   }
 
   return {
@@ -349,7 +341,7 @@ function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
     pnlPct: executor.net_pnl_pct,
     volume: executor.volume,
     fees: executor.cum_fees_quote,
-    priceLines: lines,
+    priceLines: [],
     markers: [],
     gridBox,
     timeRange: { start, end },

@@ -312,6 +312,9 @@ export interface PoolSummary {
   /** Gateway CLMM only: Meteora reports `apr` as 24h fee/TVL, `apy` annualized. */
   apr?: number | null;
   apy?: number | null;
+  /** True when `apr`/`apy` were derived from volume x fee tier, not reported. */
+  apr_estimated?: boolean;
+  fees_24h?: number | null;
   bin_step?: number | null;
   base_fee_percentage?: number | null;
   pool_created_at?: string | null;
@@ -336,19 +339,19 @@ export interface PoolBins {
 }
 
 export interface PoolQuery {
-  source: "gecko" | "gateway";
+  source: "gecko" | "gateway" | "orca";
   /** source=gecko: the chain, as a Gateway network id or a gecko chain id. */
   network?: string;
   /** source=gecko: trending | top | new | token. */
   view?: string;
   /** source=gateway: the CLMM connector. */
   connector?: string;
-  /** source=gecko+view=token: a token address. source=gateway: free text. */
+  /** source=gecko+view=token: a token address. source=gateway|orca: free text. */
   query?: string;
   /** source=gecko: GeckoTerminal dex ids to keep. Empty means every venue. */
   dexes?: string[];
   limit?: number;
-  /** 1-based. Both upstreams page; neither reports a total. */
+  /** 1-based. Every upstream pages; only orca knows whether a next page exists. */
   page?: number;
 }
 

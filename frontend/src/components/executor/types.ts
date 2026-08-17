@@ -16,13 +16,22 @@ export interface ExtraLine {
   lineWidth?: number;
 }
 
+/**
+ * A price the chart can hand back when the user clicks it.
+ *
+ * `start` / `end` / `limit` are the three lines the chart draws itself; `limit2`
+ * is a fourth slot for a price a panel draws as an extra line (the LP lower
+ * limit), so a panel with four prices offers a crosshair for every one of them.
+ */
+export type PickSlot = "start" | "end" | "limit" | "limit2";
+
 export interface ChartPriceMapping {
   startPrice: number;
   endPrice: number;
   limitPrice: number;
   side: 1 | 2;
   minSpread: number;
-  activePickField: "start" | "end" | "limit" | null;
+  activePickField: PickSlot | null;
   extraLines?: ExtraLine[];
 }
 

@@ -4,12 +4,20 @@ import { createPortal } from "react-dom";
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { api, type ConsolidatedPosition } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
-import type { ExtraLine } from "@/components/executor/types";
+import type { ExtraLine, PickSlot } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
 import { escapeHtml, formatCompactUsd } from "@/lib/formatters";
 
-type PickField = "start" | "end" | "limit" | null;
+type PickField = PickSlot | null;
+
+/** What each pick slot is called in the hint the chart shows while picking. */
+const PICK_LABELS: Record<PickSlot, string> = {
+  start: "start",
+  end: "end",
+  limit: "limit",
+  limit2: "lower limit",
+};
 
 /**
  * The chart's price mapping, and nothing else.
@@ -48,7 +56,7 @@ interface TradeChartProps {
   totalAmountQuote?: number;
   minOrderAmountQuote?: number;
   activePickField: PickField;
-  onPriceSet: (field: "start" | "end" | "limit", price: number) => void;
+  onPriceSet: (field: PickSlot, price: number) => void;
   pricePrecision?: number;
   extraLines?: ExtraLine[];
   executorOverlays?: ExecutorOverlay[];
@@ -389,9 +397,6 @@ export function TradeChart({
             // startPrice is the box's upper edge (see computeLpOverlay).
             addRow("Upper Price", fmtPrice(o.gridBox.startPrice));
             addRow("Lower Price", fmtPrice(o.gridBox.endPrice));
-            const cfgLower = Number(cfg.lower_limit_price);
-            if (o.gridBox.limitPrice) addRow("Upper Limit", fmtPrice(o.gridBox.limitPrice));
-            if (cfgLower > 0) addRow("Lower Limit", fmtPrice(cfgLower));
             if (cfg.lp_provider != null) addRow("Provider", String(cfg.lp_provider));
           } else {
             addRow("Start Price", fmtPrice(o.gridBox.startPrice));
@@ -989,10 +994,10 @@ export function TradeChart({
       {activePickField && (
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
           <p className="text-[10px] text-[var(--color-text-muted)]">
-            Click on chart to set {activePickField} price
+            Click on chart to set {PICK_LABELS[activePickField]} price
           </p>
           <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
-            Pick mode: {activePickField}
+            Pick mode: {PICK_LABELS[activePickField]}
           </span>
         </div>
       )}

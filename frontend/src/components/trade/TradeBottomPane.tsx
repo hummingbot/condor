@@ -21,6 +21,14 @@ interface TradeBottomPaneProps {
   connector: string;
   pair: string;
   isSpot: boolean;
+  /**
+   * Tickers for the balance bar, when the pair cannot supply them. A DEX
+   * `trading_pair` is `<base_mint>-<quote_symbol>`, so splitting it looks the base
+   * balance up under a mint address and never finds one — which is why a Solana
+   * pool used to show its quote balance alone.
+   */
+  baseSymbol?: string;
+  quoteSymbol?: string;
   selectedExecutorId?: string | null;
   onExecutorSelect?: (executor: ExecutorInfo | null) => void;
 }
@@ -236,6 +244,8 @@ export function TradeBottomPane({
   connector,
   pair,
   isSpot,
+  baseSymbol,
+  quoteSymbol,
   selectedExecutorId,
   onExecutorSelect,
 }: TradeBottomPaneProps) {
@@ -264,16 +274,23 @@ export function TradeBottomPane({
     refetchInterval: 30_000,
   });
 
-  // Extract base/quote tokens from pair (e.g. "BTC-USDT" -> ["BTC", "USDT"])
-  const [baseToken, quoteToken] = pair.split("-");
+  // Extract base/quote tokens from pair (e.g. "BTC-USDT" -> ["BTC", "USDT"]),
+  // unless the caller knows better — see baseSymbol/quoteSymbol.
+  const [pairBase, pairQuote] = pair.split("-");
+  const baseToken = baseSymbol || pairBase;
+  const quoteToken = quoteSymbol || pairQuote;
 
   // Find balances for the active connector
   const connectorBalances = portfolio?.connectors?.find(
     (c) => c.connector === connector,
   )?.balances;
 
-  const baseBalance = connectorBalances?.find((b) => b.token === baseToken);
-  const quoteBalance = connectorBalances?.find((b) => b.token === quoteToken);
+  const baseBalance = connectorBalances?.find(
+    (b) => b.token.toUpperCase() === (baseToken ?? "").toUpperCase(),
+  );
+  const quoteBalance = connectorBalances?.find(
+    (b) => b.token.toUpperCase() === (quoteToken ?? "").toUpperCase(),
+  );
 
   const stopMutation = useMutation({
     mutationFn: (id: string) => {

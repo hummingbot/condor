@@ -12,7 +12,7 @@ import {
   ValidationMessages,
   type FieldDispatch,
 } from "./fields";
-import type { ChartPriceMapping, ExecutorValidation, ExtraLine } from "./types";
+import type { ChartPriceMapping, ExecutorValidation, ExtraLine, PickSlot } from "./types";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── State ──
@@ -297,7 +297,7 @@ export function useDCAConfig() {
 
   const save = () => saveDefaults(state);
 
-  const handleChartPriceSet = (_field: "start" | "end" | "limit", price: number) => {
+  const handleChartPriceSet = (_field: PickSlot, price: number) => {
     const pick = state.activePickField;
     if (pick && pick.startsWith("dca_price_")) {
       const idx = parseInt(pick.replace("dca_price_", ""), 10);
