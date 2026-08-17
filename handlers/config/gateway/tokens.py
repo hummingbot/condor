@@ -2,9 +2,10 @@
 Gateway token management functions
 """
 
-from geckoterminal_py import GeckoTerminalAsyncClient
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
+
+from handlers.dex.pool_data import gecko_call
 
 from ..user_preferences import get_active_server
 from ._shared import (
@@ -851,9 +852,8 @@ async def handle_token_input(
                             parse_mode="MarkdownV2",
                         )
 
-                    gecko_client = GeckoTerminalAsyncClient()
-                    result = await gecko_client.get_specific_token_on_network(
-                        gecko_network, address
+                    result = await gecko_call(
+                        "get_specific_token_on_network", gecko_network, address
                     )
 
                     # Extract token data

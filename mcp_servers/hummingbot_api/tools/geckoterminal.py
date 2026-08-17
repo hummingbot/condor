@@ -22,7 +22,6 @@ from mcp_servers.hummingbot_api.formatters.base import (
 
 logger = logging.getLogger("hummingbot-mcp")
 
-BASE_URL = "https://api.geckoterminal.com/api/v2"
 
 OHLCV_TIMEFRAMES = ["1m", "5m", "15m", "1h", "4h", "12h", "1d"]
 
@@ -265,196 +264,198 @@ async def explore_geckoterminal(
     trade_volume_filter: float | None = None,
 ) -> dict[str, Any]:
     """Execute a GeckoTerminal API action and return formatted results."""
-    import aiohttp
+    from handlers.dex.pool_data import gecko_request
 
-    async with aiohttp.ClientSession() as session:
+    async def _get(path: str, params: dict | None = None) -> dict:
+        """One call on this process's gecko budget.
 
-        async def _get(path: str, params: dict | None = None) -> dict:
-            url = f"{BASE_URL}/{path}"
-            headers = {"Accept": "application/json;version=20230302"}
-            async with session.get(url, headers=headers, params=params) as resp:
-                resp.raise_for_status()
-                return await resp.json()
+        NOTE: the gate in ``pool_data`` is per *process*, and this MCP server
+        runs as its own (``run_stdio_async``). So this bounds the tool's own
+        fan-out — 15 actions, some paginated — but cannot coordinate with the
+        bot process, which draws on the same per-IP limit. Genuinely sharing
+        one budget across both needs an out-of-process store.
+        """
+        return await gecko_request("GET", path, params=params)
 
-        # ── Networks ─────────────────────────────────────────────────
-        if action == "networks":
-            data = await _get("networks")
-            networks = _extract_networks(data)
-            return {
-                "formatted_output": f"Available Networks ({len(networks)}):\n\n{format_networks_table(networks)}"
-            }
+    # ── Networks ─────────────────────────────────────────────────
+    if action == "networks":
+        data = await _get("networks")
+        networks = _extract_networks(data)
+        return {
+            "formatted_output": f"Available Networks ({len(networks)}):\n\n{format_networks_table(networks)}"
+        }
 
-        # ── DEXes by network ─────────────────────────────────────────
-        elif action == "dexes":
-            if not network:
-                raise ToolError("'network' is required for action='dexes'")
-            data = await _get(f"networks/{network}/dexes")
-            dexes = _extract_dexes(data)
-            return {
-                "formatted_output": f"DEXes on {network} ({len(dexes)}):\n\n{format_dexes_table(dexes)}"
-            }
+    # ── DEXes by network ─────────────────────────────────────────
+    elif action == "dexes":
+        if not network:
+            raise ToolError("'network' is required for action='dexes'")
+        data = await _get(f"networks/{network}/dexes")
+        dexes = _extract_dexes(data)
+        return {
+            "formatted_output": f"DEXes on {network} ({len(dexes)}):\n\n{format_dexes_table(dexes)}"
+        }
 
-        # ── Trending pools ───────────────────────────────────────────
-        elif action == "trending_pools":
-            if network:
-                data = await _get(f"networks/{network}/trending_pools")
-                title = f"Trending Pools on {network}"
-            else:
-                data = await _get("networks/trending_pools")
-                title = "Trending Pools (All Networks)"
-            pools = _extract_pools(data)
-            return {
-                "formatted_output": f"{title} ({len(pools)}):\n\n{format_pools_table(pools)}"
-            }
-
-        # ── Top pools ────────────────────────────────────────────────
-        elif action == "top_pools":
-            if not network:
-                raise ToolError("'network' is required for action='top_pools'")
-            if dex_id:
-                data = await _get(f"networks/{network}/dexes/{dex_id}/pools")
-                title = f"Top Pools on {network} / {dex_id}"
-            else:
-                data = await _get(f"networks/{network}/pools")
-                title = f"Top Pools on {network}"
-            pools = _extract_pools(data)
-            return {
-                "formatted_output": f"{title} ({len(pools)}):\n\n{format_pools_table(pools)}"
-            }
-
-        # ── New pools ────────────────────────────────────────────────
-        elif action == "new_pools":
-            if network:
-                data = await _get(f"networks/{network}/new_pools")
-                title = f"New Pools on {network}"
-            else:
-                data = await _get("networks/new_pools")
-                title = "New Pools (All Networks)"
-            pools = _extract_pools(data)
-            return {
-                "formatted_output": f"{title} ({len(pools)}):\n\n{format_pools_table(pools)}"
-            }
-
-        # ── Pool detail ──────────────────────────────────────────────
-        elif action == "pool_detail":
-            if not network or not pool_address:
-                raise ToolError(
-                    "'network' and 'pool_address' are required for action='pool_detail'"
-                )
-            data = await _get(f"networks/{network}/pools/{pool_address}")
-            pools = _extract_pools(data)
-            if pools:
-                p = pools[0]
-                lines = [
-                    f"Pool: {p.get('name', 'N/A')}",
-                    f"Address: {p.get('address', 'N/A')}",
-                    f"DEX: {p.get('dex_id', 'N/A')}",
-                    f"Base Token Price: {format_currency(p.get('base_token_price_usd'), decimals=6)}",
-                    f"Quote Token Price: {format_currency(p.get('quote_token_price_usd'), decimals=6)}",
-                    f"Reserve (USD): {format_number(p.get('reserve_in_usd'))}",
-                    f"FDV: {format_number(p.get('fdv_usd'))}",
-                    f"Market Cap: {format_number(p.get('market_cap_usd'))}",
-                    f"24h Volume: {format_number(p.get('volume_h24'))}",
-                    f"1h Change: {p.get('price_change_h1', 'N/A')}%",
-                    f"24h Change: {p.get('price_change_h24', 'N/A')}%",
-                    f"24h Txns: {p.get('txns_h24_buys', 'N/A')} buys / {p.get('txns_h24_sells', 'N/A')} sells",
-                    f"Created: {p.get('pool_created_at', 'N/A')}",
-                ]
-                return {"formatted_output": "\n".join(lines)}
-            return {"formatted_output": "Pool not found."}
-
-        # ── Multiple pools ───────────────────────────────────────────
-        elif action == "multi_pools":
-            if not network or not pool_addresses:
-                raise ToolError(
-                    "'network' and 'pool_addresses' are required for action='multi_pools'"
-                )
-            addresses_str = ",".join(pool_addresses)
-            data = await _get(f"networks/{network}/pools/multi/{addresses_str}")
-            pools = _extract_pools(data)
-            return {
-                "formatted_output": f"Pools on {network} ({len(pools)}):\n\n{format_pools_table(pools)}"
-            }
-
-        # ── Pools by token ───────────────────────────────────────────
-        elif action == "token_pools":
-            if not network or not token_address:
-                raise ToolError(
-                    "'network' and 'token_address' are required for action='token_pools'"
-                )
-            data = await _get(f"networks/{network}/tokens/{token_address}/pools")
-            pools = _extract_pools(data)
-            return {
-                "formatted_output": f"Top Pools for token on {network} ({len(pools)}):\n\n{format_pools_table(pools)}"
-            }
-
-        # ── Token info ───────────────────────────────────────────────
-        elif action == "token_info":
-            if not network or not token_address:
-                raise ToolError(
-                    "'network' and 'token_address' are required for action='token_info'"
-                )
-            data = await _get(f"networks/{network}/tokens/{token_address}")
-            token_data = _extract_token_info(data)
-            return {"formatted_output": format_token_info(token_data)}
-
-        # ── OHLCV candles ────────────────────────────────────────────
-        elif action == "ohlcv":
-            if not network or not pool_address:
-                raise ToolError(
-                    "'network' and 'pool_address' are required for action='ohlcv'"
-                )
-            tf_unit, tf_period = _parse_timeframe(timeframe)
-            params: dict[str, Any] = {
-                "aggregate": tf_period,
-                "limit": limit,
-                "currency": currency,
-                "token": token,
-            }
-            if before_timestamp:
-                params["before_timestamp"] = before_timestamp
-            data = await _get(
-                f"networks/{network}/pools/{pool_address}/ohlcv/{tf_unit}",
-                params=params,
-            )
-            candles = _extract_ohlcv(data)
-            # Sort by timestamp ascending and deduplicate
-            seen: set[int] = set()
-            unique = []
-            for c in candles:
-                if c["timestamp"] not in seen:
-                    seen.add(c["timestamp"])
-                    unique.append(c)
-            unique.sort(key=lambda x: x["timestamp"])
-            return {
-                "formatted_output": (
-                    f"OHLCV for pool {truncate_address(pool_address)} on {network} ({timeframe}, {len(unique)} candles):\n\n"
-                    f"{format_ohlcv_table(unique)}"
-                )
-            }
-
-        # ── Trades ───────────────────────────────────────────────────
-        elif action == "trades":
-            if not network or not pool_address:
-                raise ToolError(
-                    "'network' and 'pool_address' are required for action='trades'"
-                )
-            params = {}
-            if trade_volume_filter is not None:
-                params["trade_volume_in_usd_greater_than"] = trade_volume_filter
-            data = await _get(
-                f"networks/{network}/pools/{pool_address}/trades", params=params or None
-            )
-            trades = _extract_trades(data)
-            return {
-                "formatted_output": (
-                    f"Recent Trades for pool {truncate_address(pool_address)} on {network} ({len(trades)}):\n\n"
-                    f"{format_trades_table(trades)}"
-                )
-            }
-
+    # ── Trending pools ───────────────────────────────────────────
+    elif action == "trending_pools":
+        if network:
+            data = await _get(f"networks/{network}/trending_pools")
+            title = f"Trending Pools on {network}"
         else:
+            data = await _get("networks/trending_pools")
+            title = "Trending Pools (All Networks)"
+        pools = _extract_pools(data)
+        return {
+            "formatted_output": f"{title} ({len(pools)}):\n\n{format_pools_table(pools)}"
+        }
+
+    # ── Top pools ────────────────────────────────────────────────
+    elif action == "top_pools":
+        if not network:
+            raise ToolError("'network' is required for action='top_pools'")
+        if dex_id:
+            data = await _get(f"networks/{network}/dexes/{dex_id}/pools")
+            title = f"Top Pools on {network} / {dex_id}"
+        else:
+            data = await _get(f"networks/{network}/pools")
+            title = f"Top Pools on {network}"
+        pools = _extract_pools(data)
+        return {
+            "formatted_output": f"{title} ({len(pools)}):\n\n{format_pools_table(pools)}"
+        }
+
+    # ── New pools ────────────────────────────────────────────────
+    elif action == "new_pools":
+        if network:
+            data = await _get(f"networks/{network}/new_pools")
+            title = f"New Pools on {network}"
+        else:
+            data = await _get("networks/new_pools")
+            title = "New Pools (All Networks)"
+        pools = _extract_pools(data)
+        return {
+            "formatted_output": f"{title} ({len(pools)}):\n\n{format_pools_table(pools)}"
+        }
+
+    # ── Pool detail ──────────────────────────────────────────────
+    elif action == "pool_detail":
+        if not network or not pool_address:
             raise ToolError(
-                f"Unknown action '{action}'. Available actions: networks, dexes, trending_pools, top_pools, "
-                f"new_pools, pool_detail, multi_pools, token_pools, token_info, ohlcv, trades"
+                "'network' and 'pool_address' are required for action='pool_detail'"
             )
+        data = await _get(f"networks/{network}/pools/{pool_address}")
+        pools = _extract_pools(data)
+        if pools:
+            p = pools[0]
+            lines = [
+                f"Pool: {p.get('name', 'N/A')}",
+                f"Address: {p.get('address', 'N/A')}",
+                f"DEX: {p.get('dex_id', 'N/A')}",
+                f"Base Token Price: {format_currency(p.get('base_token_price_usd'), decimals=6)}",
+                f"Quote Token Price: {format_currency(p.get('quote_token_price_usd'), decimals=6)}",
+                f"Reserve (USD): {format_number(p.get('reserve_in_usd'))}",
+                f"FDV: {format_number(p.get('fdv_usd'))}",
+                f"Market Cap: {format_number(p.get('market_cap_usd'))}",
+                f"24h Volume: {format_number(p.get('volume_h24'))}",
+                f"1h Change: {p.get('price_change_h1', 'N/A')}%",
+                f"24h Change: {p.get('price_change_h24', 'N/A')}%",
+                f"24h Txns: {p.get('txns_h24_buys', 'N/A')} buys / {p.get('txns_h24_sells', 'N/A')} sells",
+                f"Created: {p.get('pool_created_at', 'N/A')}",
+            ]
+            return {"formatted_output": "\n".join(lines)}
+        return {"formatted_output": "Pool not found."}
+
+    # ── Multiple pools ───────────────────────────────────────────
+    elif action == "multi_pools":
+        if not network or not pool_addresses:
+            raise ToolError(
+                "'network' and 'pool_addresses' are required for action='multi_pools'"
+            )
+        addresses_str = ",".join(pool_addresses)
+        data = await _get(f"networks/{network}/pools/multi/{addresses_str}")
+        pools = _extract_pools(data)
+        return {
+            "formatted_output": f"Pools on {network} ({len(pools)}):\n\n{format_pools_table(pools)}"
+        }
+
+    # ── Pools by token ───────────────────────────────────────────
+    elif action == "token_pools":
+        if not network or not token_address:
+            raise ToolError(
+                "'network' and 'token_address' are required for action='token_pools'"
+            )
+        data = await _get(f"networks/{network}/tokens/{token_address}/pools")
+        pools = _extract_pools(data)
+        return {
+            "formatted_output": f"Top Pools for token on {network} ({len(pools)}):\n\n{format_pools_table(pools)}"
+        }
+
+    # ── Token info ───────────────────────────────────────────────
+    elif action == "token_info":
+        if not network or not token_address:
+            raise ToolError(
+                "'network' and 'token_address' are required for action='token_info'"
+            )
+        data = await _get(f"networks/{network}/tokens/{token_address}")
+        token_data = _extract_token_info(data)
+        return {"formatted_output": format_token_info(token_data)}
+
+    # ── OHLCV candles ────────────────────────────────────────────
+    elif action == "ohlcv":
+        if not network or not pool_address:
+            raise ToolError(
+                "'network' and 'pool_address' are required for action='ohlcv'"
+            )
+        tf_unit, tf_period = _parse_timeframe(timeframe)
+        params: dict[str, Any] = {
+            "aggregate": tf_period,
+            "limit": limit,
+            "currency": currency,
+            "token": token,
+        }
+        if before_timestamp:
+            params["before_timestamp"] = before_timestamp
+        data = await _get(
+            f"networks/{network}/pools/{pool_address}/ohlcv/{tf_unit}",
+            params=params,
+        )
+        candles = _extract_ohlcv(data)
+        # Sort by timestamp ascending and deduplicate
+        seen: set[int] = set()
+        unique = []
+        for c in candles:
+            if c["timestamp"] not in seen:
+                seen.add(c["timestamp"])
+                unique.append(c)
+        unique.sort(key=lambda x: x["timestamp"])
+        return {
+            "formatted_output": (
+                f"OHLCV for pool {truncate_address(pool_address)} on {network} ({timeframe}, {len(unique)} candles):\n\n"
+                f"{format_ohlcv_table(unique)}"
+            )
+        }
+
+    # ── Trades ───────────────────────────────────────────────────
+    elif action == "trades":
+        if not network or not pool_address:
+            raise ToolError(
+                "'network' and 'pool_address' are required for action='trades'"
+            )
+        params = {}
+        if trade_volume_filter is not None:
+            params["trade_volume_in_usd_greater_than"] = trade_volume_filter
+        data = await _get(
+            f"networks/{network}/pools/{pool_address}/trades", params=params or None
+        )
+        trades = _extract_trades(data)
+        return {
+            "formatted_output": (
+                f"Recent Trades for pool {truncate_address(pool_address)} on {network} ({len(trades)}):\n\n"
+                f"{format_trades_table(trades)}"
+            )
+        }
+
+    else:
+        raise ToolError(
+            f"Unknown action '{action}'. Available actions: networks, dexes, trending_pools, top_pools, "
+            f"new_pools, pool_detail, multi_pools, token_pools, token_info, ohlcv, trades"
+        )

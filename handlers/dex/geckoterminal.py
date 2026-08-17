@@ -14,7 +14,6 @@ import io
 import logging
 from datetime import datetime
 
-from geckoterminal_py import GeckoTerminalAsyncClient
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -22,7 +21,13 @@ from utils.telegram_formatters import escape_markdown_v2
 
 from ._shared import cached_call
 from .pool_data import GECKO_TO_GATEWAY_NETWORK as _GECKO_TO_GATEWAY_NETWORK
-from .pool_data import can_fetch_liquidity, fetch_liquidity_bins, get_connector_for_dex
+from .pool_data import (
+    can_fetch_liquidity,
+    fetch_liquidity_bins,
+    gecko_call,
+    gecko_request,
+    get_connector_for_dex,
+)
 from .visualizations import (
     generate_combined_chart,
     generate_liquidity_chart,
@@ -856,11 +861,10 @@ async def show_trending_pools(
         cache_key = f"gecko_trending_{network or 'all'}"
 
         async def fetch_trending():
-            client = GeckoTerminalAsyncClient()
             if network and network != "all":
-                result = await client.get_trending_pools_by_network(network)
+                result = await gecko_call("get_trending_pools_by_network", network)
             else:
-                result = await client.get_trending_pools()
+                result = await gecko_call("get_trending_pools")
             logger.info(f"GeckoTerminal trending response type: {type(result)}")
             return _extract_pools_from_response(result, 10)
 
@@ -992,8 +996,7 @@ async def show_top_pools(
         cache_key = f"gecko_top_{network}"
 
         async def fetch_top():
-            client = GeckoTerminalAsyncClient()
-            result = await client.get_top_pools_by_network(network)
+            result = await gecko_call("get_top_pools_by_network", network)
             return _extract_pools_from_response(result, 10)
 
         pools = await cached_call(
@@ -1129,11 +1132,10 @@ async def show_new_pools(
         cache_key = f"gecko_new_{network or 'all'}"
 
         async def fetch_new():
-            client = GeckoTerminalAsyncClient()
             if network and network != "all":
-                result = await client.get_new_pools_by_network(network)
+                result = await gecko_call("get_new_pools_by_network", network)
             else:
-                result = await client.get_new_pools_all_networks()
+                result = await gecko_call("get_new_pools_all_networks")
             return _extract_pools_from_response(result, 10)
 
         pools = await cached_call(
@@ -1221,8 +1223,7 @@ async def handle_gecko_networks(
         cache_key = "gecko_networks"
 
         async def fetch_networks():
-            client = GeckoTerminalAsyncClient()
-            result = await client.get_networks()
+            result = await gecko_call("get_networks")
             return _extract_pools_from_response(result, 100)
 
         networks = await cached_call(
@@ -1403,9 +1404,8 @@ async def process_gecko_search(
         token_address = user_input.strip()
 
         # Use the selected network directly
-        client = GeckoTerminalAsyncClient()
-        result = await client.get_top_pools_by_network_token(
-            selected_network, token_address
+        result = await gecko_call(
+            "get_top_pools_by_network_token", selected_network, token_address
         )
         pools = _extract_pools_from_response(result, 10)
 
@@ -1565,8 +1565,7 @@ async def _show_pool_chart(
         network = pool_data["network"]
         address = pool_data["address"]
 
-        client = GeckoTerminalAsyncClient()
-        result = await client.get_ohlcv(network, address, timeframe)
+        result = await gecko_call("get_ohlcv", network, address, timeframe)
 
         logger.info(f"OHLCV raw response type: {type(result)}")
 
@@ -2075,8 +2074,7 @@ async def show_ohlcv_chart(
         network = pool_data["network"]
         address = pool_data["address"]
 
-        client = GeckoTerminalAsyncClient()
-        result = await client.get_ohlcv(network, address, timeframe)
+        result = await gecko_call("get_ohlcv", network, address, timeframe)
 
         logger.info(f"OHLCV raw response type: {type(result)}")
 
@@ -2424,8 +2422,7 @@ async def show_gecko_combined(
         connector = get_connector_for_dex(dex_id)
 
         # Fetch OHLCV data
-        client = GeckoTerminalAsyncClient()
-        ohlcv_result = await client.get_ohlcv(network, address, timeframe)
+        ohlcv_result = await gecko_call("get_ohlcv", network, address, timeframe)
 
         # Parse OHLCV response
         ohlcv_data = []
@@ -2603,8 +2600,7 @@ async def show_recent_trades(
         network = pool_data["network"]
         address = pool_data["address"]
 
-        client = GeckoTerminalAsyncClient()
-        result = await client.get_trades(network, address, 20)
+        result = await gecko_call("get_trades", network, address, 20)
 
         logger.info(f"Trades raw response type: {type(result)}")
 
@@ -2845,8 +2841,9 @@ async def handle_gecko_token_info(
     )
 
     try:
-        client = GeckoTerminalAsyncClient()
-        result = await client.get_specific_token_on_network(network, token_address)
+        result = await gecko_call(
+            "get_specific_token_on_network", network, token_address
+        )
 
         # Extract token data
         token_data = {}
@@ -3034,9 +3031,8 @@ async def handle_gecko_token_search(
     await query.answer("Searching pools...")
 
     try:
-        client = GeckoTerminalAsyncClient()
-        result = await client.get_top_pools_by_network_token(
-            network, token_info.get("address", "")
+        result = await gecko_call(
+            "get_top_pools_by_network_token", network, token_info.get("address", "")
         )
         pools = _extract_pools_from_response(result, 10)
 
@@ -3587,9 +3583,6 @@ async def handle_gecko_add_tokens(
     update: Update, context: ContextTypes.DEFAULT_TYPE
 ) -> None:
     """Add pool tokens to Gateway configuration"""
-    import httpx
-    from geckoterminal_py import GeckoTerminalAsyncClient
-
     from config_manager import get_config_manager
 
     query = update.callback_query
@@ -3609,36 +3602,29 @@ async def handle_gecko_add_tokens(
     if not base_addr and not quote_addr and pool_address:
         await query.answer("Fetching token info...")
         try:
-            # Use direct API call since geckoterminal_py doesn't have get_pool method
-            url = f"https://api.geckoterminal.com/api/v2/networks/{gecko_network}/pools/{pool_address}"
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    url, params={"include": "base_token,quote_token"}
-                )
-                if response.status_code == 200:
-                    result = response.json()
-                    data = result.get("data", {})
-                    relationships = data.get("relationships", {})
-                    base_token_id = (
-                        relationships.get("base_token", {})
-                        .get("data", {})
-                        .get("id", "")
-                    )
-                    quote_token_id = (
-                        relationships.get("quote_token", {})
-                        .get("data", {})
-                        .get("id", "")
-                    )
-                    base_addr = _parse_token_address_from_id(base_token_id)
-                    quote_addr = _parse_token_address_from_id(quote_token_id)
+            # A raw path because geckoterminal_py exposes no get_pool, but still
+            # through gecko_request so it draws on the same shared budget.
+            result = await gecko_request(
+                "GET",
+                f"networks/{gecko_network}/pools/{pool_address}",
+                params={"include": "base_token,quote_token"},
+            )
+            data = result.get("data", {})
+            relationships = data.get("relationships", {})
+            base_token_id = (
+                relationships.get("base_token", {}).get("data", {}).get("id", "")
+            )
+            quote_token_id = (
+                relationships.get("quote_token", {}).get("data", {}).get("id", "")
+            )
+            base_addr = _parse_token_address_from_id(base_token_id)
+            quote_addr = _parse_token_address_from_id(quote_token_id)
         except Exception as e:
             logger.warning(f"Failed to fetch pool info for tokens: {e}")
 
     if not base_addr and not quote_addr:
         await query.answer("No token addresses available", show_alert=True)
         return
-
-    gecko_client = GeckoTerminalAsyncClient()
 
     # Map GeckoTerminal network to Gateway network
     network_mapping = {
@@ -3672,8 +3658,8 @@ async def handle_gecko_add_tokens(
         """Fetch token info and add to gateway. Returns symbol or error indicator."""
         try:
             # Fetch from GeckoTerminal
-            result = await gecko_client.get_specific_token_on_network(
-                gecko_network, token_address
+            result = await gecko_call(
+                "get_specific_token_on_network", gecko_network, token_address
             )
 
             token_data = {}

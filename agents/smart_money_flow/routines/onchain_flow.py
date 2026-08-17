@@ -32,7 +32,6 @@ CATEGORY = "Analysis"
 
 # Keyless endpoints (CoinGecko + GeckoTerminal free tier, public Solana RPC).
 CG = "https://api.coingecko.com/api/v3"
-GECKO = "https://api.geckoterminal.com/api/v2"
 XRPL_NODES = [
     "https://xrplcluster.com/",
     "https://s1.ripple.com:51234",
@@ -90,6 +89,22 @@ async def _get_json(url: str, timeout: float = 12) -> "dict | list | None":
         return None
 
 
+async def _gecko_json(path: str, params: dict | None = None) -> "dict | None":
+    """A GeckoTerminal call on the process-wide budget.
+
+    Separate from ``_get_json`` because only this host is rate-limited per IP and
+    shared with the dashboard; CoinGecko keeps the plain fetcher. Returns None on
+    any failure, like its sibling — a tick must never raise.
+    """
+    from handlers.dex.pool_data import gecko_request
+
+    try:
+        return await gecko_request("GET", path, params=params)
+    except Exception as exc:  # never raise into a tick
+        logger.warning("flow: gecko %s failed: %s", path, type(exc).__name__)
+        return None
+
+
 def _clamp(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
 
@@ -133,8 +148,9 @@ async def fetch_solana_pulse(top_n: int = 10) -> dict | None:
     read. Solana carries materially deeper on-chain liquidity than XRPL, so it is
     the DEFAULT on-chain signal source.
     """
-    data = await _get_json(
-        f"{GECKO}/networks/solana/tokens/{SOL_MINT}/pools?page=1&include=base_token,dex"
+    data = await _gecko_json(
+        f"networks/solana/tokens/{SOL_MINT}/pools",
+        {"page": 1, "include": "base_token,dex"},
     )
     if not data:
         return None

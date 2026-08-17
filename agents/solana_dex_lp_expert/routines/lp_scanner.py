@@ -20,7 +20,6 @@ import asyncio
 import logging
 import re
 
-import aiohttp
 from pydantic import BaseModel, Field, field_validator
 from telegram.ext import ContextTypes
 
@@ -31,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 CATEGORY = "Analysis"
 
-GECKO_BASE = "https://api.geckoterminal.com/api/v2"
 GECKO_NETWORK = "solana"  # GeckoTerminal network id
 CLMM_NETWORK = "solana-mainnet-beta"  # hummingbot-api CLMM network id
 _WINDOW_TO_FIELD = {"1h": "volume_1h", "6h": "volume_6h", "24h": "volume_24h"}
@@ -73,17 +71,16 @@ class Config(BaseModel):
         return v
 
 
-async def _gecko_get(
-    session: aiohttp.ClientSession, path: str, params: dict | None = None
-) -> dict:
-    url = f"{GECKO_BASE}/{path}"
-    headers = {"Accept": "application/json;version=20230302"}
-    async with session.get(
-        url, headers=headers, params=params, timeout=aiohttp.ClientTimeout(total=25)
-    ) as resp:
-        if resp.status != 200:
-            raise RuntimeError(f"GeckoTerminal {path} -> HTTP {resp.status}")
-        return await resp.json()
+async def _gecko_get(path: str, params: dict | None = None) -> dict:
+    """One GeckoTerminal call on the process-wide budget.
+
+    Goes through ``pool_data`` rather than opening a session here: gecko's free
+    tier is ~30 requests/minute per IP, shared with the dashboard and every other
+    routine, and a scanner that fans out per venue is exactly what exhausts it.
+    """
+    from handlers.dex.pool_data import gecko_request
+
+    return await gecko_request("GET", path, params=params)
 
 
 def _num(v, default=0.0) -> float:
@@ -110,17 +107,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # 1. Source candidates from GeckoTerminal: global trending + top-per-venue.
     raw: list[dict] = []
     try:
-        async with aiohttp.ClientSession() as session:
-            tasks = [_gecko_get(session, f"networks/{GECKO_NETWORK}/trending_pools")]
-            for v in venues:
-                tasks.append(
-                    _gecko_get(
-                        session,
-                        f"networks/{GECKO_NETWORK}/dexes/{v}/pools",
-                        {"page": 1},
-                    )
-                )
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks = [_gecko_get(f"networks/{GECKO_NETWORK}/trending_pools")]
+        for v in venues:
+            tasks.append(
+                _gecko_get(f"networks/{GECKO_NETWORK}/dexes/{v}/pools", {"page": 1})
+            )
+        results = await asyncio.gather(*tasks, return_exceptions=True)
         for r in results:
             if isinstance(r, Exception):
                 logger.warning(f"lp_scanner: gecko source failed: {r}")
