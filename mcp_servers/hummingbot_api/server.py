@@ -754,8 +754,10 @@ async def manage_executors(
     - positions_summary → View all positions (add connector_name + trading_pair to filter)
     - clear_position + connector_name + trading_pair → Clear externally-closed position
     - performance_report → Get executor performance report (optionally filter by controller_id)
-    - orphaned → List terminated executors that may still own an on-chain LP position (recover before opening new ones)
-    - resolve_orphan + executor_id → Mark an orphaned position as recovered after closing it via the gateway tools
+    - orphaned → List terminated executors that may still own an on-chain LP position (recover before opening new ones).
+      Reports the dex, pool and network needed to close each one with `manage_clmm(action="close")`
+    - resolve_orphan + executor_id → Mark an orphaned position as recovered, after closing it with `manage_clmm`.
+      Stopping a terminated executor does NOT close its position
 
     Args:
         action: Action to perform. Leave empty to see executor types or config schema.

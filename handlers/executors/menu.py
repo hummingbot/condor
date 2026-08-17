@@ -920,7 +920,8 @@ async def handle_confirm_stop_executor(
                 text += (
                     f"\n\n🚨 *Orphaned position still open on\\-chain:*\n"
                     f"`{escape_markdown_v2(str(stop_result.get('position_address')))}`\n"
-                    "Close it via the gateway tools, then mark it recovered\\."
+                    "Stopping did not close it — the executor had already terminated\\. "
+                    "Ask the agent to close it with `manage_clmm`, then mark it recovered\\."
                 )
         else:
             text = f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`"
