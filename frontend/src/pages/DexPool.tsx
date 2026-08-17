@@ -7,10 +7,8 @@ import { NoServerCard } from "@/components/NoServerCard";
 import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { LpPositionBar } from "@/components/dex/LpPositionBar";
 import { PoolStats } from "@/components/dex/PoolStats";
-import {
-  LPConfigPanel,
-  useLpConfig,
-} from "@/components/executor/LPConfigPanel";
+import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
+import { useLpConfig } from "@/components/executor/lp-config";
 import {
   OrderConfigPanel,
   useOrderConfig,

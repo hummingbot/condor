@@ -11,9 +11,9 @@ import {
   SelectField,
   SideSelector,
   ValidationMessages,
-  ORDER_TYPE_OPTIONS,
   type FieldDispatch,
 } from "./fields";
+import { ORDER_TYPE_OPTIONS } from "./field-options";
 import type { ChartPriceMapping, ExecutorValidation, ExtraLine, PickSlot } from "./types";
 import { getThemeColors } from "@/lib/theme-colors";
 

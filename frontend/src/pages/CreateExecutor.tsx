@@ -29,7 +29,8 @@ import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfig
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
 import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
 import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPanel";
-import { LPConfigPanel, useLpConfig } from "@/components/executor/LPConfigPanel";
+import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
+import { useLpConfig } from "@/components/executor/lp-config";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { usePairBalances } from "@/hooks/usePairBalances";
@@ -139,7 +140,21 @@ export function CreateExecutor() {
   const [rightPanel, setRightPanel] = useState<"config" | "depth" | "markets">("config");
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
-  const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
+  // The selection belongs to the market it was made in, so it carries that
+  // market with it and simply stops matching when the market changes. Clearing
+  // it from an effect instead used to cost a second render pass on every
+  // connector/pair switch, and left one render where the chart still had a
+  // selected executor from the market it had already navigated away from.
+  const [selection, setSelection] = useState<{ market: string; id: string | null }>({
+    market: "",
+    id: null,
+  });
+  const selectionMarket = `${connector}:${pair}`;
+  const selectedExecutorId = selection.market === selectionMarket ? selection.id : null;
+  const setSelectedExecutorId = useCallback(
+    (id: string | null) => setSelection({ market: selectionMarket, id }),
+    [selectionMarket],
+  );
 
   const { onMouseDown: startHDrag } = useResizeDrag({
     axis: "x",
@@ -225,12 +240,12 @@ export function CreateExecutor() {
     gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: newLookback });
   }, [server]);
 
-  // Persist last-used connector/pair to localStorage & clear executor selection
+  // Persist last-used connector/pair to localStorage. The executor selection is
+  // not cleared here -- it expires on its own, see `selection` above.
   useEffect(() => {
     try {
       localStorage.setItem(LAST_MARKET_KEY, JSON.stringify({ connector, pair }));
     } catch { /* ok */ }
-    setSelectedExecutorId(null);
   }, [connector, pair]);
 
   // A /trade URL naming a gateway network is a link to the wrong page now: its
@@ -356,9 +371,22 @@ export function CreateExecutor() {
     }
   }, [executorType, gridState, positionConfig.chartProps, orderConfig.chartProps, dcaConfig.chartProps, lpConfig.chartProps]);
 
-  // Chart price set handler
-  const handlePriceSet = useMemo(
-    () => (field: PickSlot, price: number) => {
+  // Chart price set handler.
+  //
+  // Each per-type panel hands back a fresh config object every render, so naming
+  // them as deps would rebuild this callback on every render and defeat the
+  // stable identity the chart memoizes on. Pinning the deps to `[executorType]`
+  // bought that stability with a stale closure -- the callback kept calling
+  // whichever `handleChartPriceSet` existed when the type last changed, not the
+  // current one. A latest-value ref gives the stability without the staleness.
+  const priceSetTargets = useRef({ positionConfig, orderConfig, dcaConfig, lpConfig });
+  useEffect(() => {
+    priceSetTargets.current = { positionConfig, orderConfig, dcaConfig, lpConfig };
+  });
+
+  const handlePriceSet = useCallback(
+    (field: PickSlot, price: number) => {
+      const targets = priceSetTargets.current;
       switch (executorType) {
         case "grid":
           // The grid panel arms only start/end/limit; `limit2` belongs to the LP
@@ -368,20 +396,20 @@ export function CreateExecutor() {
           gridDispatch({ type: "SET_FIELD", field: "activePickField", value: null });
           break;
         case "position":
-          positionConfig.handleChartPriceSet(field, price);
+          targets.positionConfig.handleChartPriceSet(field, price);
           break;
         case "order":
-          orderConfig.handleChartPriceSet(field, price);
+          targets.orderConfig.handleChartPriceSet(field, price);
           break;
         case "dca":
-          dcaConfig.handleChartPriceSet(field, price);
+          targets.dcaConfig.handleChartPriceSet(field, price);
           break;
         case "lp":
-          lpConfig.handleChartPriceSet(field, price);
+          targets.lpConfig.handleChartPriceSet(field, price);
           break;
       }
     },
-    [executorType], // eslint-disable-line react-hooks/exhaustive-deps
+    [executorType],
   );
 
   // Create mutation

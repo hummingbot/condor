@@ -7,6 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
+    "lint:ci": "node scripts/lint-baseline.mjs",
+    "lint:baseline": "node scripts/lint-baseline.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

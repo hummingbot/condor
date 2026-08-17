@@ -8,7 +8,8 @@ import {
   Sparkles,
 } from "lucide-react";
 
-import { LeverageField, SelectField, ToggleField, ORDER_TYPE_OPTIONS, type FieldDispatch } from "@/components/executor/fields";
+import { LeverageField, SelectField, ToggleField, type FieldDispatch } from "@/components/executor/fields";
+import { ORDER_TYPE_OPTIONS } from "@/components/executor/field-options";
 import type { GridState, GridAction } from "@/lib/gridExecutor";
 
 interface GridConfigPanelProps {

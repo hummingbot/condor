@@ -9,6 +9,8 @@ import {
 
 // ── Generic dispatch type ──
 
+import { PERCENT_PRESETS, SIDE_OPTIONS } from "./field-options";
+
 export type FieldDispatch = (action: { type: "SET_FIELD"; field: string; value: unknown }) => void;
 
 // ── PriceField ──
@@ -106,7 +108,6 @@ export function PriceField({
 // ── PercentPresets ──
 
 /** Fractions of the available balance the presets offer. */
-export const PERCENT_PRESETS = [0.1, 0.25, 0.5, 1] as const;
 
 function formatAvailable(value: number): string {
   if (value === 0) return "0";
@@ -530,16 +531,7 @@ export function LeverageField({
 
 // ── Shared constants ──
 
-export const ORDER_TYPE_OPTIONS = [
-  { value: 1, label: "Market" },
-  { value: 2, label: "Limit" },
-  { value: 3, label: "Limit Maker" },
-];
 
-export const SIDE_OPTIONS = [
-  { value: 1, label: "LONG", color: "var(--color-green)" },
-  { value: 2, label: "SHORT", color: "var(--color-red)" },
-];
 
 export function SideSelector({ side, dispatch }: { side: 1 | 2; dispatch: FieldDispatch }) {
   return (

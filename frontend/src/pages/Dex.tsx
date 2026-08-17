@@ -6,10 +6,8 @@ import { useNavigate } from "react-router-dom";
 import { NoServerCard } from "@/components/NoServerCard";
 import { LpPositions } from "@/components/dex/LpPositions";
 import { PoolBrowser } from "@/components/dex/PoolBrowser";
-import {
-  type PoolSource,
-  PoolSourceTabs,
-} from "@/components/dex/PoolSourceTabs";
+import { PoolSourceTabs } from "@/components/dex/PoolSourceTabs";
+import type { PoolSource } from "@/components/dex/pool-source";
 import { useServer } from "@/hooks/useServer";
 import { api, type PoolSummary } from "@/lib/api";
 import { useDexFavorites } from "@/lib/dexFavorites";
