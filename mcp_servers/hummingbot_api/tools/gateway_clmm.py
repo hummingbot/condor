@@ -23,7 +23,14 @@ from mcp_servers.hummingbot_api.schemas import CLMMRequest, GatewayCLMMRequest
 logger = logging.getLogger("hummingbot-mcp")
 
 # Gateway routes CLMM calls on the bare connector name (see trading/clmm close/open routes).
-SUPPORTED_CLMM_CONNECTORS = {"meteora", "raydium", "orca", "uniswap", "pancakeswap", "pancakeswap-sol"}
+SUPPORTED_CLMM_CONNECTORS = {
+    "meteora",
+    "raydium",
+    "orca",
+    "uniswap",
+    "pancakeswap",
+    "pancakeswap-sol",
+}
 
 
 def format_pools_as_table(pools: list[dict[str, Any]]) -> str:
@@ -256,7 +263,9 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
         )
     connector = _normalize_connector(request.connector)
     if not request.network:
-        raise ToolError("network is required (e.g. 'solana-mainnet-beta', 'ethereum-mainnet')")
+        raise ToolError(
+            "network is required (e.g. 'solana-mainnet-beta', 'ethereum-mainnet')"
+        )
 
     net = request.network
     action = request.action
@@ -266,39 +275,53 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
     if action == "position_info":
         _require_clmm(request, "pool_address")
         result = await gc.get_positions_owned(
-            connector=connector, network=net, pool_address=request.pool_address,
+            connector=connector,
+            network=net,
+            pool_address=request.pool_address,
             wallet_address=request.wallet_address,
         )
 
     elif action == "open":
         _require_clmm(request, "pool_address", "lower_price", "upper_price")
         if request.base_token_amount is None and request.quote_token_amount is None:
-            raise ToolError("open requires base_token_amount, quote_token_amount, or both")
+            raise ToolError(
+                "open requires base_token_amount, quote_token_amount, or both"
+            )
         result = await gc.open_position(
-            connector=connector, network=net, pool_address=request.pool_address,
+            connector=connector,
+            network=net,
+            pool_address=request.pool_address,
             lower_price=_dec(request.lower_price, "lower_price"),
             upper_price=_dec(request.upper_price, "upper_price"),
             base_token_amount=_opt_dec(request.base_token_amount),
             quote_token_amount=_opt_dec(request.quote_token_amount),
-            slippage_pct=_opt_dec(request.slippage_pct), wallet_address=request.wallet_address,
+            slippage_pct=_opt_dec(request.slippage_pct),
+            wallet_address=request.wallet_address,
             extra_params=request.extra_params,
         )
 
     elif action == "add_liquidity":
         _require_clmm(request, "position_address")
         if request.base_token_amount is None and request.quote_token_amount is None:
-            raise ToolError("add_liquidity requires base_token_amount, quote_token_amount, or both")
+            raise ToolError(
+                "add_liquidity requires base_token_amount, quote_token_amount, or both"
+            )
         result = await gc.add_liquidity(
-            connector=connector, network=net, position_address=request.position_address,
+            connector=connector,
+            network=net,
+            position_address=request.position_address,
             base_token_amount=_opt_dec(request.base_token_amount),
             quote_token_amount=_opt_dec(request.quote_token_amount),
-            slippage_pct=_opt_dec(request.slippage_pct), wallet_address=request.wallet_address,
+            slippage_pct=_opt_dec(request.slippage_pct),
+            wallet_address=request.wallet_address,
         )
 
     elif action == "remove_liquidity":
         _require_clmm(request, "position_address", "percentage_to_remove")
         result = await gc.remove_liquidity(
-            connector=connector, network=net, position_address=request.position_address,
+            connector=connector,
+            network=net,
+            position_address=request.position_address,
             percentage=_dec(request.percentage_to_remove, "percentage_to_remove"),
             wallet_address=request.wallet_address,
         )
@@ -306,15 +329,21 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
     elif action == "close":
         _require_clmm(request, "position_address")
         result = await gc.close_position(
-            connector=connector, network=net, position_address=request.position_address,
-            pool_address=request.pool_address, wallet_address=request.wallet_address,
+            connector=connector,
+            network=net,
+            position_address=request.position_address,
+            pool_address=request.pool_address,
+            wallet_address=request.wallet_address,
         )
 
     elif action == "collect_fees":
         _require_clmm(request, "position_address")
         result = await gc.collect_fees(
-            connector=connector, network=net, position_address=request.position_address,
-            pool_address=request.pool_address, wallet_address=request.wallet_address,
+            connector=connector,
+            network=net,
+            position_address=request.position_address,
+            pool_address=request.pool_address,
+            wallet_address=request.wallet_address,
         )
 
     else:
@@ -328,5 +357,3 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
         "position_address": request.position_address,
         "result": result,
     }
-
-

@@ -13,6 +13,7 @@ own fields. Two are easy to get wrong and are pinned here:
 
 The repo has no async test setup, so coroutines are driven with asyncio.run().
 """
+
 import asyncio
 
 from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
@@ -66,7 +67,9 @@ class _Client:
 def _list_orphans(orphans):
     client = _Client({"count": len(orphans), "orphans": orphans})
     request = ManageExecutorsRequest(action="orphaned")
-    return asyncio.run(manage_executors(client=client, request=request))["formatted_output"]
+    return asyncio.run(manage_executors(client=client, request=request))[
+        "formatted_output"
+    ]
 
 
 def test_listing_emits_a_runnable_close_call():
@@ -98,7 +101,7 @@ def test_listing_says_stopping_will_not_close_it():
     output = _list_orphans([ORPHAN])
 
     assert "Stopping the executor will NOT close it" in output
-    assert 'resolve_orphan' in output
+    assert "resolve_orphan" in output
 
 
 def test_no_close_call_when_the_position_address_is_unknown():

@@ -231,7 +231,10 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
                 f"{header}\nPool: {result.get('pool_address')}\n"
                 "No open positions for this wallet in this pool."
             )
-        lines = [f"{header}", f"Pool: {result.get('pool_address')} — {len(payload)} position(s)"]
+        lines = [
+            f"{header}",
+            f"Pool: {result.get('pool_address')} — {len(payload)} position(s)",
+        ]
         for p in payload:
             lines.append(
                 f"  • {p.get('address')} — Base: {p.get('baseTokenAmount')}  "

@@ -13,6 +13,7 @@ Two details carry the recovery path and are pinned here:
 
 The repo has no async test setup, so coroutines are driven with asyncio.run().
 """
+
 import asyncio
 
 import pytest
@@ -139,7 +140,11 @@ def test_no_action_returns_the_guide_without_touching_the_client():
 
 def test_connector_is_required():
     with pytest.raises(ToolError, match="connector is required"):
-        _run(CLMMRequest(action="close", network="solana-mainnet-beta", position_address="POS"))
+        _run(
+            CLMMRequest(
+                action="close", network="solana-mainnet-beta", position_address="POS"
+            )
+        )
 
 
 def test_network_is_required():
@@ -149,7 +154,9 @@ def test_network_is_required():
 
 def test_close_requires_position_address():
     with pytest.raises(ToolError, match="position_address is required"):
-        _run(CLMMRequest(action="close", connector="orca", network="solana-mainnet-beta"))
+        _run(
+            CLMMRequest(action="close", connector="orca", network="solana-mainnet-beta")
+        )
 
 
 def test_remove_liquidity_requires_a_percentage():
@@ -181,7 +188,9 @@ def test_open_requires_at_least_one_amount():
 
 def test_guards_run_before_the_client_is_dereferenced():
     """A validation failure must not depend on having a client at all."""
-    request = CLMMRequest(action="close", connector="orca", network="solana-mainnet-beta")
+    request = CLMMRequest(
+        action="close", connector="orca", network="solana-mainnet-beta"
+    )
 
     with pytest.raises(ToolError, match="position_address is required"):
         _run(request, client=None)

@@ -9,6 +9,7 @@ missing (the API client is never touched on that path).
 
 The repo has no async test setup, so the coroutine is driven with asyncio.run().
 """
+
 import asyncio
 
 from mcp_servers.hummingbot_api.schemas import ManageExecutorsRequest
