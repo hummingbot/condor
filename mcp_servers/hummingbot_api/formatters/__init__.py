@@ -49,6 +49,7 @@ from .executors import (
 # Gateway formatters
 from .gateway import (
     format_amm_result,
+    format_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
     format_gateway_container_result,

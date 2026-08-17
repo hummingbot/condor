@@ -14,6 +14,7 @@ from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
     format_amm_result,
     format_bot_logs_as_table,
+    format_clmm_result,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
     format_gateway_container_result,
@@ -24,6 +25,7 @@ from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
 from mcp_servers.hummingbot_api.schemas import (
     AMMRequest,
+    CLMMRequest,
     GatewayCLMMRequest,
     GatewayConfigRequest,
     GatewayContainerRequest,
@@ -49,6 +51,9 @@ from mcp_servers.hummingbot_api.tools.gateway import (
 from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
     explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
+)
+from mcp_servers.hummingbot_api.tools.gateway_clmm import (
+    manage_clmm_impl,
 )
 from mcp_servers.hummingbot_api.tools.gateway_swap import (
     manage_gateway_swaps as manage_gateway_swaps_impl,
@@ -968,6 +973,100 @@ async def manage_amm(
     client = await hummingbot_client.get_client()
     result = await manage_amm_impl(client, request)
     return format_amm_result(action, result)
+
+
+@mcp.tool()
+@handle_errors("manage CLMM", GATEWAY_LOG_HINT)
+async def manage_clmm(
+    action: (
+        Literal[
+            "position_info",
+            "open",
+            "add_liquidity",
+            "remove_liquidity",
+            "close",
+            "collect_fees",
+        ]
+        | None
+    ) = None,
+    connector: str | None = None,
+    network: str | None = None,
+    wallet_address: str | None = None,
+    pool_address: str | None = None,
+    position_address: str | None = None,
+    lower_price: str | None = None,
+    upper_price: str | None = None,
+    base_token_amount: str | None = None,
+    quote_token_amount: str | None = None,
+    percentage_to_remove: str | None = None,
+    slippage_pct: str | None = None,
+    extra_params: dict | None = None,
+) -> str:
+    """Direct CLMM position operations, chain- & DEX-agnostic (Meteora / Raydium / Orca / Uniswap / PancakeSwap).
+
+    Stateless — you hold position state in your journal. Progressive disclosure: call with NO
+    `action` to load the CLMM guide.
+
+    THE UNMANAGED PATH. For normal LP work use `manage_executors` with `lp_executor`, which owns
+    range monitoring, rebalancing and bounded close retries. Use this tool when no executor can do
+    that for you — above all to RECOVER AN ORPHANED POSITION: a terminated executor cannot be told
+    to close anything (`manage_executors(action="stop")` on one is correctly a no-op), so the
+    position must be closed by address here, then marked with
+    `manage_executors(action="resolve_orphan")`.
+
+    Actions:
+    - position_info → your positions in a pool with amounts, range, and uncollected fees
+    - open → create a position NO executor tracks (not range-monitored or auto-closed)
+    - add_liquidity / remove_liquidity → resize an existing position, keeping its range
+    - close → withdraw everything, collect fees, close the account
+    - collect_fees → fees only, position untouched
+
+    remove_liquidity at 100% leaves an EMPTY POSITION OPEN; only `close` closes the account. To
+    recover an orphan, use `close`.
+
+    Positions opened by an lp_executor are not in the API database (the bot opens them straight
+    against Gateway), so close/collect_fees on those REQUIRE `pool_address` — the orphan listing
+    reports it. Without it the call fails with a 400 saying so.
+
+    Pool discovery lives in `explore_dex_pools`.
+
+    Args:
+        action: CLMM action. Leave empty to load the CLMM guide.
+        connector: CLMM connector: meteora | raydium | orca (Solana), uniswap | pancakeswap (EVM).
+            A '<name>/clmm' form is accepted, so an orphan's lp_provider passes through unchanged.
+        network: Network ID in 'chain-network' format (e.g. 'solana-mainnet-beta', 'ethereum-mainnet').
+            For an orphan record this is the `connector_name` field.
+        wallet_address: Wallet address (optional, uses default if not provided).
+        pool_address: Pool contract address. Required for open and position_info, and for
+            close/collect_fees on a position the API never recorded.
+        position_address: Position NFT address (add_liquidity, remove_liquidity, close, collect_fees).
+        lower_price: Lower price bound of the range (open).
+        upper_price: Upper price bound of the range (open).
+        base_token_amount: Base token amount (open / add_liquidity).
+        quote_token_amount: Quote token amount (open / add_liquidity).
+        percentage_to_remove: Percentage of liquidity to remove, 0-100 (remove_liquidity).
+        slippage_pct: Maximum slippage percentage.
+        extra_params: Connector-specific params for open (e.g. {"strategyType": 0} for Meteora DLMM).
+    """
+    request = CLMMRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        wallet_address=wallet_address,
+        pool_address=pool_address,
+        position_address=position_address,
+        lower_price=lower_price,
+        upper_price=upper_price,
+        base_token_amount=base_token_amount,
+        quote_token_amount=quote_token_amount,
+        percentage_to_remove=percentage_to_remove,
+        slippage_pct=slippage_pct,
+        extra_params=extra_params,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_clmm_impl(client, request)
+    return format_clmm_result(action, result)
 
 
 # GeckoTerminal Tools

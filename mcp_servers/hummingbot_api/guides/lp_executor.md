@@ -179,7 +179,9 @@ manage_executors(
 
 **Orphaned positions (executor terminated with a live on-chain position):**
 - `manage_executors(action="orphaned")` lists terminated executors that may still own an on-chain position: involuntary holds (`POSITION_HOLD` with `hold_reason` set — a close that exhausted its retries), legacy `FAILED` executors whose final state carries a `position_address`, and `SYSTEM_CLEANUP` LP executors from an API restart (position address unknown — reconcile against `get_portfolio_overview(include_lp_positions=True)` or the gateway positions-owned endpoints)
-- Recover by closing the position via the gateway tools (remove liquidity by position address). A fresh `lp_executor` CANNOT adopt an existing position — it always mints a new one, which would stack a second funded position on top of the orphan
+- Each entry reports the `lp_provider` (the DEX, e.g. `orca/clmm`) and `pool_address` needed to close it. Note `connector_name` holds the **network** (e.g. `solana-mainnet-beta`), not the DEX
+- Recover with `manage_clmm(action="close", connector=<lp_provider>, network=<connector_name>, position_address=..., pool_address=...)`. `pool_address` is REQUIRED here: LP-executor positions are opened by the bot straight against Gateway, so the API database has no row to read the pool from and the close returns 400 without it
+- Stopping the executor will NOT close the position — it has already terminated, so `manage_executors(action="stop")` is correctly a no-op. A fresh `lp_executor` CANNOT adopt an existing position either; it always mints a new one, which would stack a second funded position on top of the orphan
 - After the position is closed on-chain, mark it recovered with `manage_executors(action="resolve_orphan", executor_id="...")` so it stops appearing in orphan listings and warnings
 - If an `lp_rebalancer` controller was managing the executor, restart the controller (or its bot) after resolving: the controller's orphan halt is held in memory and only clears on restart. `resolve_orphan` updates the API database, not the running controller
 - Do NOT open new positions on the same funds until the orphan is recovered

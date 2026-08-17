@@ -316,9 +316,12 @@ async def manage_executors(
                 if result.get("orphaned_position"):
                     formatted += (
                         f"\n🚨 ORPHANED POSITION: {result.get('position_address')} is still "
-                        "open on-chain with no automated owner. Close it via the gateway "
-                        "tools (remove liquidity by position address), then mark it "
-                        f"recovered with action=\"resolve_orphan\", executor_id=\"{request.executor_id}\".\n"
+                        "open on-chain with no automated owner. Stopping the executor does not "
+                        "close it — it has already terminated. Close it with "
+                        "manage_clmm(action=\"close\", position_address=..., pool_address=...), "
+                        "then mark it recovered with action=\"resolve_orphan\", "
+                        f"executor_id=\"{request.executor_id}\".\n"
+                        "Run action=\"orphaned\" to get the dex, pool and network for the call.\n"
                     )
                 elif result.get("position_address"):
                     formatted += f"Position address (final state): {result.get('position_address')}\n"
@@ -364,15 +367,30 @@ async def manage_executors(
                     )
                     if o.get("position_address"):
                         formatted += f"    position: {o['position_address']}\n"
+                    if o.get("lp_provider") or o.get("pool_address"):
+                        formatted += (
+                            f"    dex: {o.get('lp_provider')}  pool: {o.get('pool_address')}\n"
+                        )
                     if o.get("needs_onchain_reconciliation"):
                         formatted += (
                             "    position address unknown (API restart) - reconcile against "
                             "on-chain positions (get_portfolio_overview include_lp_positions=True)\n"
                         )
+                    elif o.get("lp_provider") and o.get("pool_address"):
+                        # Spell the recovery call out: the executor is terminated, so stopping it is
+                        # a no-op and the position can only be closed by address.
+                        formatted += (
+                            "    close with: manage_clmm(action=\"close\", "
+                            f"connector=\"{o.get('lp_provider')}\", "
+                            f"network=\"{o.get('connector_name')}\", "
+                            f"position_address=\"{o.get('position_address')}\", "
+                            f"pool_address=\"{o.get('pool_address')}\")\n"
+                        )
                 formatted += (
-                    "\nRecover each by closing the position via the gateway tools "
-                    "(remove liquidity by position address), then mark it recovered with "
-                    "action=\"resolve_orphan\", executor_id=\"...\"."
+                    "\nRecover each by closing the position with manage_clmm(action=\"close\") - "
+                    "pool_address is required because LP-executor positions are not in the API "
+                    "database. Stopping the executor will NOT close it; it has already terminated. "
+                    "Then mark it recovered with action=\"resolve_orphan\", executor_id=\"...\"."
                 )
 
             return {

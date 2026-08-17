@@ -212,3 +212,62 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
         return f"{header}\nSignature/Tx: {sig}  Status: {payload.get('status')}{extra}"
 
     return f"{header}\n{payload}"
+
+
+def format_clmm_result(action: str, result: dict[str, Any]) -> str:
+    """Format manage_clmm results into a human-readable string."""
+    # Progressive disclosure: the guide is returned directly.
+    if action is None or result.get("action") is None:
+        return result.get("formatted_output", str(result))
+
+    connector = result.get("connector", "")
+    network = result.get("network", "")
+    payload = result.get("result", {})
+    header = f"CLMM {action} [{connector} · {network}]"
+
+    if action == "position_info" and isinstance(payload, list):
+        if not payload:
+            return (
+                f"{header}\nPool: {result.get('pool_address')}\n"
+                "No open positions for this wallet in this pool."
+            )
+        lines = [f"{header}", f"Pool: {result.get('pool_address')} — {len(payload)} position(s)"]
+        for p in payload:
+            lines.append(
+                f"  • {p.get('address')} — Base: {p.get('baseTokenAmount')}  "
+                f"Quote: {p.get('quoteTokenAmount')}  "
+                f"Range: {p.get('lowerPrice')}–{p.get('upperPrice')}  Price: {p.get('price')}"
+            )
+            lines.append(
+                f"    Uncollected fees — base: {p.get('baseFeeAmount')}  quote: {p.get('quoteFeeAmount')}"
+            )
+        return "\n".join(lines)
+
+    if action == "open" and isinstance(payload, dict):
+        return (
+            f"{header}\n"
+            f"Position: {payload.get('position_address')}\n"
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}\n"
+            f"Range: {payload.get('lower_price')}–{payload.get('upper_price')}\n"
+            "This position is NOT tracked by any executor — it will not be range-monitored, "
+            "rebalanced, or auto-closed."
+        )
+
+    if action in ("close", "collect_fees") and isinstance(payload, dict):
+        return (
+            f"{header}\n"
+            f"Position: {payload.get('position_address')}\n"
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}\n"
+            f"Fees collected — base: {payload.get('base_fee_collected')}  "
+            f"quote: {payload.get('quote_fee_collected')}"
+        )
+
+    if action in ("add_liquidity", "remove_liquidity") and isinstance(payload, dict):
+        tx = payload.get("transaction_hash") or payload.get("signature")
+        return (
+            f"{header}\n"
+            f"Position: {result.get('position_address')}\n"
+            f"Tx: {tx}  Status: {payload.get('status')}"
+        )
+
+    return f"{header}\n{payload}"

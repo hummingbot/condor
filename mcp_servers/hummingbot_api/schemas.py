@@ -694,3 +694,70 @@ class AMMRequest(BaseModel):
     max_gas: int | None = Field(
         default=None, description="Uniswap (EVM) max gas limit (optional, create_pool)"
     )
+
+
+class CLMMRequest(BaseModel):
+    """Request model for the direct, chain- & DEX-agnostic CLMM tool (manage_clmm).
+
+    Drives concentrated-liquidity position operations across Meteora DLMM, Raydium CLMM, Orca
+    Whirlpools (Solana), and Uniswap V3 / PancakeSwap V3 (EVM).
+
+    Progressive disclosure: action=None returns the CLMM guide.
+
+    This is the direct, unmanaged path. The managed path for normal LP work is
+    manage_executors(lp_executor), which owns range monitoring, rebalancing and close retries.
+    Use manage_clmm to inspect positions and to recover orphaned ones that no executor owns
+    any more — a terminated executor cannot be told to close its position.
+    """
+
+    action: (
+        Literal[
+            "position_info",
+            "open",
+            "add_liquidity",
+            "remove_liquidity",
+            "close",
+            "collect_fees",
+        ]
+        | None
+    ) = Field(default=None, description="CLMM action. Leave empty to load the CLMM guide.")
+
+    connector: str | None = Field(
+        default=None,
+        description="CLMM connector (required for any action): 'meteora', 'raydium', 'orca' (Solana), "
+                    "'uniswap', 'pancakeswap' (EVM). A '<name>/clmm' form is accepted, so an orphan record's "
+                    "lp_provider (e.g. 'orca/clmm') can be passed through unchanged.",
+    )
+    network: str | None = Field(
+        default=None,
+        description="Network ID in 'chain-network' format. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'bsc-mainnet'",
+    )
+    wallet_address: str | None = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    pool_address: str | None = Field(
+        default=None,
+        description="Pool contract address. Required for open and position_info. Also required to close or "
+                    "collect fees on a position the API never recorded — every lp_executor position, since the "
+                    "bot opens those straight against Gateway.",
+    )
+    position_address: str | None = Field(
+        default=None,
+        description="Position NFT address. Required for add_liquidity, remove_liquidity, close, collect_fees.",
+    )
+
+    # Range params (open)
+    lower_price: str | None = Field(default=None, description="Lower price bound of the position range (open)")
+    upper_price: str | None = Field(default=None, description="Upper price bound of the position range (open)")
+
+    # Liquidity params
+    base_token_amount: str | None = Field(default=None, description="Base token amount (open / add_liquidity)")
+    quote_token_amount: str | None = Field(default=None, description="Quote token amount (open / add_liquidity)")
+    percentage_to_remove: str | None = Field(
+        default=None,
+        description="Percentage of liquidity to remove, 0-100 (remove_liquidity). 100 empties the position but "
+                    "leaves the account open — use action='close' to withdraw and close it.",
+    )
+    slippage_pct: str | None = Field(default=None, description="Maximum slippage percentage (as string)")
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Connector-specific parameters for open (e.g. {'strategyType': 0} for Meteora DLMM)",
+    )

@@ -1,21 +1,29 @@
 """
 Gateway CLMM tools for Hummingbot MCP Server
 
-Handles DEX CLMM read-only operations via Hummingbot Gateway:
-- Pool exploration (list pools, get pool info)
-- Position queries (get positions)
+Two tools live here:
+- explore_gateway_clmm_pools: read-only pool discovery (list pools, get pool info)
+- manage_clmm: direct position operations (open, add, remove, close, collect fees)
 
-For opening/closing LP positions, use `manage_executors` with `lp_executor` type.
+The managed path for normal LP work is `manage_executors` with `lp_executor`, which owns range
+monitoring, rebalancing and close retries. manage_clmm is the direct path, and the only way to
+recover an orphaned position: once an executor has terminated it cannot be told to close anything,
+so the position has to be closed by address.
 """
 
 import logging
+from decimal import Decimal
+from pathlib import Path
 from typing import Any
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
 from mcp_servers.hummingbot_api.formatters.base import format_number, get_field
-from mcp_servers.hummingbot_api.schemas import GatewayCLMMRequest
+from mcp_servers.hummingbot_api.schemas import CLMMRequest, GatewayCLMMRequest
 
 logger = logging.getLogger("hummingbot-mcp")
+
+# Gateway routes CLMM calls on the bare connector name (see trading/clmm close/open routes).
+SUPPORTED_CLMM_CONNECTORS = {"meteora", "raydium", "orca", "uniswap", "pancakeswap", "pancakeswap-sol"}
 
 
 def format_pools_as_table(pools: list[dict[str, Any]]) -> str:
@@ -195,3 +203,130 @@ async def explore_gateway_clmm_pools(
 
     else:
         raise ToolError(f"Unknown action: {request.action}")
+
+
+def _clmm_guide() -> str:
+    guide_file = Path(__file__).parent.parent / "guides" / "gateway_clmm.md"
+    if guide_file.exists():
+        return guide_file.read_text().strip()
+    raise ToolError("CLMM guide not found (guides/gateway_clmm.md)")
+
+
+def _dec(value: str | None, name: str) -> Decimal:
+    if value is None:
+        raise ToolError(f"{name} is required for this action")
+    try:
+        return Decimal(str(value))
+    except Exception as exc:
+        raise ToolError(f"{name} must be a number, got {value!r}") from exc
+
+
+def _opt_dec(value: str | None) -> Decimal | None:
+    return None if value is None else Decimal(str(value))
+
+
+def _require_clmm(request: CLMMRequest, *fields: str) -> None:
+    for f in fields:
+        if getattr(request, f) is None:
+            raise ToolError(f"{f} is required for the '{request.action}' action")
+
+
+def _normalize_connector(connector: str) -> str:
+    """Accept both 'orca' and the 'orca/clmm' form an lp_executor config records as lp_provider."""
+    name = connector.lower().strip()
+    if name.endswith("/clmm"):
+        name = name[: -len("/clmm")]
+    if name not in SUPPORTED_CLMM_CONNECTORS:
+        raise ToolError(
+            f"Unsupported CLMM connector '{connector}'. Supported: {', '.join(sorted(SUPPORTED_CLMM_CONNECTORS))}"
+        )
+    return name
+
+
+async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
+    """Validate per-action and dispatch to client.gateway_clmm.*."""
+    # Progressive disclosure: no action → load the guide.
+    if request.action is None:
+        return {"action": None, "formatted_output": _clmm_guide()}
+
+    if not request.connector:
+        raise ToolError(
+            "connector is required (meteora | raydium | orca | uniswap | pancakeswap). "
+            "Call manage_clmm with no action to load the guide."
+        )
+    connector = _normalize_connector(request.connector)
+    if not request.network:
+        raise ToolError("network is required (e.g. 'solana-mainnet-beta', 'ethereum-mainnet')")
+
+    net = request.network
+    action = request.action
+    # Dereferenced only after per-action validation so guard errors never depend on the client.
+    gc = None if client is None else client.gateway_clmm
+
+    if action == "position_info":
+        _require_clmm(request, "pool_address")
+        result = await gc.get_positions_owned(
+            connector=connector, network=net, pool_address=request.pool_address,
+            wallet_address=request.wallet_address,
+        )
+
+    elif action == "open":
+        _require_clmm(request, "pool_address", "lower_price", "upper_price")
+        if request.base_token_amount is None and request.quote_token_amount is None:
+            raise ToolError("open requires base_token_amount, quote_token_amount, or both")
+        result = await gc.open_position(
+            connector=connector, network=net, pool_address=request.pool_address,
+            lower_price=_dec(request.lower_price, "lower_price"),
+            upper_price=_dec(request.upper_price, "upper_price"),
+            base_token_amount=_opt_dec(request.base_token_amount),
+            quote_token_amount=_opt_dec(request.quote_token_amount),
+            slippage_pct=_opt_dec(request.slippage_pct), wallet_address=request.wallet_address,
+            extra_params=request.extra_params,
+        )
+
+    elif action == "add_liquidity":
+        _require_clmm(request, "position_address")
+        if request.base_token_amount is None and request.quote_token_amount is None:
+            raise ToolError("add_liquidity requires base_token_amount, quote_token_amount, or both")
+        result = await gc.add_liquidity(
+            connector=connector, network=net, position_address=request.position_address,
+            base_token_amount=_opt_dec(request.base_token_amount),
+            quote_token_amount=_opt_dec(request.quote_token_amount),
+            slippage_pct=_opt_dec(request.slippage_pct), wallet_address=request.wallet_address,
+        )
+
+    elif action == "remove_liquidity":
+        _require_clmm(request, "position_address", "percentage_to_remove")
+        result = await gc.remove_liquidity(
+            connector=connector, network=net, position_address=request.position_address,
+            percentage=_dec(request.percentage_to_remove, "percentage_to_remove"),
+            wallet_address=request.wallet_address,
+        )
+
+    elif action == "close":
+        _require_clmm(request, "position_address")
+        result = await gc.close_position(
+            connector=connector, network=net, position_address=request.position_address,
+            pool_address=request.pool_address, wallet_address=request.wallet_address,
+        )
+
+    elif action == "collect_fees":
+        _require_clmm(request, "position_address")
+        result = await gc.collect_fees(
+            connector=connector, network=net, position_address=request.position_address,
+            pool_address=request.pool_address, wallet_address=request.wallet_address,
+        )
+
+    else:
+        raise ToolError(f"Unknown action: {action}")
+
+    return {
+        "action": action,
+        "connector": connector,
+        "network": net,
+        "pool_address": request.pool_address,
+        "position_address": request.position_address,
+        "result": result,
+    }
+
+
