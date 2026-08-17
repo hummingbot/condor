@@ -441,15 +441,23 @@ def _bot_id_args() -> list[str]:
     return ["--bot-id", marker] if marker else []
 
 
-def _env_entries(**values: str) -> list[dict[str, str]]:
+def _env_entries(**values: Any) -> list[dict[str, str]]:
     """ACP ``env`` entries (``{"name", "value"}``), skipping empty values.
 
     This is the channel every secret an MCP subprocess needs must travel on: the
     ACP bridge and the pydantic-ai stdio client both overlay these onto the
     child's inherited environment, which — unlike argv — no other local user can
     read out of ``ps``.
+
+    Values are coerced to ``str``: YAML loads an unquoted numeric credential as
+    int (e.g. ``password: 123``), and an int in the environment mapping breaks
+    subprocess spawning — for pydantic-ai backends (lmstudio:/ollama:/
+    openrouter:) it surfaces as a StdioServerParameters validation error.
     """
-    return [{"name": name, "value": value} for name, value in values.items() if value]
+    entries = (
+        (name, str(value)) for name, value in values.items() if value is not None
+    )
+    return [{"name": name, "value": value} for name, value in entries if value]
 
 
 def _condor_mcp_args(
@@ -481,12 +489,34 @@ def _condor_mcp_args(
     ]
     args.extend(_bot_id_args())
     if agent_slug:
-        args.extend(["--agent-slug", agent_slug])
+        args.extend(["--agent-slug", str(agent_slug)])
     if server_name:
-        args.extend(["--server-name", server_name])
+        args.extend(["--server-name", str(server_name)])
     if delegate_worker:
         args.append("--delegate-worker")
     return args
+
+
+def _hummingbot_mcp_args(server: dict[str, Any], server_name: str) -> list[str]:
+    """Build CLI args for the hummingbot MCP subprocess.
+
+    Only non-secret coordinates travel here — the API username/password go in
+    the server's ``env`` instead, since argv is world-readable via ``ps``
+    (SEC-095). Every element is a string: YAML loads unquoted numerics as int
+    (e.g. ``port: 8000``), and pydantic-ai's StdioServerParameters rejects
+    non-string args when starting LM Studio / other local-model sessions.
+    """
+    api_url = f"http://{server['host']}:{server['port']}"
+    return [
+        "run",
+        "python",
+        "-m",
+        "mcp_servers.hummingbot_api",
+        "--url",
+        api_url,
+        "--server-name",
+        str(server_name),
+    ] + _bot_id_args()
 
 
 def build_mcp_servers_for_session(
@@ -563,8 +593,6 @@ def build_mcp_servers_for_session(
         )
         return [condor]
 
-    api_url = f"http://{server['host']}:{server['port']}"
-
     # Credentials go in env, not argv: the API username/password used to sit on
     # the command line, where any local `ps` recovered them (SEC-095). The
     # non-secret coordinates (url, server name) stay on argv, where they make a
@@ -572,17 +600,7 @@ def build_mcp_servers_for_session(
     mcp_hummingbot = {
         "name": "mcp-hummingbot",
         "command": "uv",
-        "args": [
-            "run",
-            "python",
-            "-m",
-            "mcp_servers.hummingbot_api",
-            "--url",
-            api_url,
-            "--server-name",
-            server_name,
-        ]
-        + _bot_id_args(),
+        "args": _hummingbot_mcp_args(server, server_name),
         "env": _env_entries(
             HUMMINGBOT_API_USERNAME=server["username"],
             HUMMINGBOT_API_PASSWORD=server["password"],

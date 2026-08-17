@@ -2,6 +2,8 @@
 
 A Telegram bot for monitoring and trading with Hummingbot via the **Hummingbot API**.
 
+**Help shape Condor** — [take the 2-minute survey](https://forms.gle/7NpG3RtgfLrmpUNY8). Tell us what's working, what's confusing, and what you need next. Your answers go to the Hummingbot Foundation team and directly shape the roadmap.
+
 > **Why we recommend Tailscale for production**
 >
 > Condor controls real trading through Hummingbot API: orders, balances, bots, and stored exchange keys. That has always required strong passwords and careful configuration—but **the risk surface has grown**. Trading agents, MCP tools, and other AI assistants make powerful API actions easier to trigger, while cloud VPSes are constantly scanned for open ports like **8000**.
@@ -412,6 +414,7 @@ See `flows/` directory for detailed command flow documentation:
 
 ## Support
 
+- **Feedback**: [2-minute survey](https://forms.gle/7NpG3RtgfLrmpUNY8) — what's working, what's missing, what to build next
 - **Docs**: https://condor.hummingbot.org
 - **Installation guide**: https://condor.hummingbot.org/getting-started/installing
 - **Tailscale guide**: https://hummingbot.org/hummingbot-api/tailscale/

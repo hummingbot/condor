@@ -721,3 +721,44 @@ def test_session_mcp_servers_carry_agent_slug(monkeypatch):
     servers = build_mcp_servers_for_session(42, 42)
     condor = next(s for s in servers if s["name"] == "condor")
     assert "--agent-slug" not in condor["args"]
+
+
+def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
+    """YAML ``password: 123`` loads as int; spawning an MCP subprocess needs str.
+
+    The credentials ride the ``env`` channel rather than argv (SEC-095), so both
+    channels are checked: an int anywhere in the args list or the env mapping
+    trips pydantic-ai's StdioServerParameters validation, which is why this only
+    ever surfaced on the lmstudio:/ollama:/openrouter: backends.
+    """
+    import config_manager
+    from handlers.agents._shared import build_mcp_servers_for_session
+
+    class _NumericPasswordServer:
+        def get_accessible_servers(self, user_id):
+            return ["local"]
+
+        def get_server(self, name):
+            return {
+                "host": "localhost",
+                "port": 8000,
+                "username": 999,
+                "password": 123,
+            }
+
+    monkeypatch.setattr(
+        config_manager, "get_config_manager", lambda: _NumericPasswordServer()
+    )
+    monkeypatch.setattr(config_manager, "get_effective_server", lambda *a, **k: "local")
+
+    servers = build_mcp_servers_for_session(42, 42)
+    for server in servers:
+        assert all(isinstance(a, str) for a in server["args"]), server["name"]
+        for entry in server["env"]:
+            assert isinstance(entry["name"], str)
+            assert isinstance(entry["value"], str), f"{server['name']}/{entry['name']}"
+
+    hb = next(s for s in servers if s["name"] == "mcp-hummingbot")
+    env = {e["name"]: e["value"] for e in hb["env"]}
+    assert env["HUMMINGBOT_API_USERNAME"] == "999"
+    assert env["HUMMINGBOT_API_PASSWORD"] == "123"
