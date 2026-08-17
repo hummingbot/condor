@@ -955,6 +955,9 @@ async def fetch_ohlcv(
 ) -> Tuple[Optional[List], Optional[str]]:
     """Fetch OHLCV data for any pool via GeckoTerminal
 
+    Concurrent callers asking for the same upstream window share one request, no
+    matter what key each of them caches the answer under.
+
     Args:
         pool_address: Pool contract address
         network: Network identifier (will be converted to GeckoTerminal format)
@@ -997,59 +1000,84 @@ async def fetch_ohlcv(
             # one entry per chart forever.
             evict_expired(user_data, namespace=_CACHE_NS)
 
-        # Pass all parameters explicitly:
-        # - currency="token" means price in quote token (not USD)
-        # - token="base" means OHLCV for the base token
-        result = await gecko_call(
-            "get_ohlcv",
-            gecko_network,
-            pool_address,
-            timeframe,
-            before_timestamp=before_timestamp,
-            currency=currency,
-            token=token,
-            limit=limit,
+        async def _fetch_upstream() -> Optional[List]:
+            # Pass all parameters explicitly:
+            # - currency="token" means price in quote token (not USD)
+            # - token="base" means OHLCV for the base token
+            result = await gecko_call(
+                "get_ohlcv",
+                gecko_network,
+                pool_address,
+                timeframe,
+                before_timestamp=before_timestamp,
+                currency=currency,
+                token=token,
+                limit=limit,
+            )
+
+            # Parse response - handle different formats
+            rows = None
+
+            try:
+                import pandas as pd
+
+                if isinstance(result, pd.DataFrame):
+                    if not result.empty:
+                        # Convert DataFrame to list format
+                        rows = result.values.tolist()
+            except ImportError:
+                pass
+
+            if rows is None:
+                if isinstance(result, list):
+                    rows = result
+                elif isinstance(result, dict):
+                    # Try nested structure
+                    data = result.get("data", result)
+                    if isinstance(data, dict):
+                        attrs = data.get("attributes", data)
+                        rows = attrs.get("ohlcv_list", [])
+                    elif isinstance(data, list):
+                        rows = data
+
+            # Debug logging: show price range from OHLCV data
+            if rows:
+                try:
+                    closes = [float(c[4]) for c in rows if len(c) > 4 and c[4]]
+                    if closes:
+                        logger.info(
+                            f"OHLCV {pool_address[:8]}... {timeframe} currency={currency}: "
+                            f"{len(rows)} candles, price range [{min(closes):.6f} - {max(closes):.6f}]"
+                        )
+                except Exception as e:
+                    logger.debug(f"Could not log OHLCV price range: {e}")
+
+            return rows
+
+        # Coalesce on the UPSTREAM window — pool, timeframe, currency, priced side
+        # and window — never on the caller's cache key. The TTL caches above are
+        # per-caller and only help once an answer has landed, so two callers whose
+        # own keys differ (a chart keyed by trading pair and one keyed by pool, the
+        # dashboard's shared cache and a chat's user_data) still resolve to the very
+        # same GeckoTerminal window and would each spend a request for it. Keyed
+        # here, they collapse onto one. A fetch that raises reaches every waiter and
+        # is cached by nobody. The rows are shared between callers: read-only.
+        ohlcv_list = await _single_flight(
+            (
+                "ohlcv",
+                gecko_network,
+                pool_address,
+                timeframe,
+                currency,
+                token,
+                limit,
+                before_timestamp or 0,
+            ),
+            _fetch_upstream,
         )
-
-        # Parse response - handle different formats
-        ohlcv_list = None
-
-        try:
-            import pandas as pd
-
-            if isinstance(result, pd.DataFrame):
-                if not result.empty:
-                    # Convert DataFrame to list format
-                    ohlcv_list = result.values.tolist()
-        except ImportError:
-            pass
-
-        if ohlcv_list is None:
-            if isinstance(result, list):
-                ohlcv_list = result
-            elif isinstance(result, dict):
-                # Try nested structure
-                data = result.get("data", result)
-                if isinstance(data, dict):
-                    attrs = data.get("attributes", data)
-                    ohlcv_list = attrs.get("ohlcv_list", [])
-                elif isinstance(data, list):
-                    ohlcv_list = data
 
         if not ohlcv_list:
             return None, "No OHLCV data available"
-
-        # Debug logging: show price range from OHLCV data
-        if ohlcv_list:
-            try:
-                closes = [float(c[4]) for c in ohlcv_list if len(c) > 4 and c[4]]
-                if closes:
-                    logger.info(
-                        f"OHLCV {pool_address[:8]}... {timeframe} currency={currency}: "
-                        f"{len(ohlcv_list)} candles, price range [{min(closes):.6f} - {max(closes):.6f}]"
-                    )
-            except Exception as e:
-                logger.debug(f"Could not log OHLCV price range: {e}")
 
         # Cache result
         if user_data is not None:
