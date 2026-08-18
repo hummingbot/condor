@@ -17,10 +17,13 @@ pure data + scoring functions are importable for testing without Telegram.
 Execution venue is independent of this signal: pair the read with Derive perps
 (`derive_perpetual`) — or any perp connector — via the agent's trading context.
 """
+
 import asyncio
 import logging
+
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
+
 from config_manager import get_client
 
 logger = logging.getLogger(__name__)
@@ -29,7 +32,6 @@ CATEGORY = "Analysis"
 
 # Keyless endpoints (CoinGecko + GeckoTerminal free tier, public Solana RPC).
 CG = "https://api.coingecko.com/api/v3"
-GECKO = "https://api.geckoterminal.com/api/v2"
 XRPL_NODES = [
     "https://xrplcluster.com/",
     "https://s1.ripple.com:51234",
@@ -47,6 +49,7 @@ SOL_MINT = "So11111111111111111111111111111111111111112"  # anchors the Solana p
 
 class Config(BaseModel):
     """Compute the Smart-Money Flow composite: cross-market + Solana on-chain pulse."""
+
     context_assets: str = Field(
         default="bitcoin,ethereum,solana",
         description="Comma-separated CoinGecko ids for regime + per-asset flow read",
@@ -63,10 +66,13 @@ class Config(BaseModel):
         default="",
         description="OPTIONAL comma-separated XRPL addresses to watch (empty = skip)",
     )
-    top_n_trending: int = Field(default=7, description="Trending coins to factor into momentum")
+    top_n_trending: int = Field(
+        default=7, description="Trending coins to factor into momentum"
+    )
 
 
 # ── helpers ────────────────────────────────────────────────────────────────
+
 
 async def _get_json(url: str, timeout: float = 12) -> "dict | list | None":
     import httpx
@@ -83,6 +89,22 @@ async def _get_json(url: str, timeout: float = 12) -> "dict | list | None":
         return None
 
 
+async def _gecko_json(path: str, params: dict | None = None) -> "dict | None":
+    """A GeckoTerminal call on the process-wide budget.
+
+    Separate from ``_get_json`` because only this host is rate-limited per IP and
+    shared with the dashboard; CoinGecko keeps the plain fetcher. Returns None on
+    any failure, like its sibling — a tick must never raise.
+    """
+    from condor.pool_data import gecko_request
+
+    try:
+        return await gecko_request("GET", path, params=params)
+    except Exception as exc:  # never raise into a tick
+        logger.warning("flow: gecko %s failed: %s", path, type(exc).__name__)
+        return None
+
+
 def _clamp(x: float, lo: float = -1.0, hi: float = 1.0) -> float:
     return max(lo, min(hi, x))
 
@@ -95,6 +117,7 @@ def _num(v) -> float:
 
 
 # ── raw fetchers (pure async, importable) ──────────────────────────────────
+
 
 async def fetch_global() -> "dict | list | None":
     return await _get_json(f"{CG}/global")
@@ -125,7 +148,10 @@ async def fetch_solana_pulse(top_n: int = 10) -> dict | None:
     read. Solana carries materially deeper on-chain liquidity than XRPL, so it is
     the DEFAULT on-chain signal source.
     """
-    data = await _get_json(f"{GECKO}/networks/solana/tokens/{SOL_MINT}/pools?page=1&include=base_token,dex")
+    data = await _gecko_json(
+        f"networks/solana/tokens/{SOL_MINT}/pools",
+        {"page": 1, "include": "base_token,dex"},
+    )
     if not data:
         return None
     pools = []
@@ -135,13 +161,15 @@ async def fetch_solana_pulse(top_n: int = 10) -> dict | None:
         tvl = _num(a.get("reserve_in_usd"))
         if tvl < 50_000:  # skip dust/illiquid pools (meaningless momentum)
             continue
-        pools.append({
-            "name": a.get("name", "?"),
-            "dex": a.get("dex_id", ""),
-            "vol24h": vol,
-            "chg24h": _num(a.get("price_change_percentage", {}).get("h24")),
-            "tvl": tvl,
-        })
+        pools.append(
+            {
+                "name": a.get("name", "?"),
+                "dex": a.get("dex_id", ""),
+                "vol24h": vol,
+                "chg24h": _num(a.get("price_change_percentage", {}).get("h24")),
+                "tvl": tvl,
+            }
+        )
     if not pools:
         return None
     total_vol = sum(p["vol24h"] for p in pools)
@@ -165,8 +193,12 @@ async def fetch_xrpl_amm_pulse(issuer: str) -> dict | None:
         return None
     payload = {
         "method": "amm_info",
-        "params": [{"asset": {"currency": "XRP"},
-                    "asset2": {"currency": "RLUSD", "issuer": issuer}}],
+        "params": [
+            {
+                "asset": {"currency": "XRP"},
+                "asset2": {"currency": "RLUSD", "issuer": issuer},
+            }
+        ],
     }
     import httpx
 
@@ -185,18 +217,26 @@ async def fetch_xrpl_amm_pulse(issuer: str) -> dict | None:
                 xrp = 0.0
             return {"xrp_liquidity": xrp, "trading_fee_bps": amm.get("trading_fee")}
         except Exception as exc:
-            logger.warning("flow: xrpl amm pulse failed on %s: %s", node, type(exc).__name__)
+            logger.warning(
+                "flow: xrpl amm pulse failed on %s: %s", node, type(exc).__name__
+            )
             continue
     return None
 
 
 # ── synthesis (pure, importable) ───────────────────────────────────────────
 
+
 def synthesize(global_d, markets_d, trending_syms, solana_pulse, xrpl_amm) -> dict:
     """Turn raw fetches into a multi-asset flow composite. Returns a structured dict."""
     # --- risk regime from /global ---
-    regime = {"label": "NEUTRAL", "mcap_change_24h": 0.0, "btc_dominance": 0.0,
-              "eth_dominance": 0.0, "score": 0.0}
+    regime = {
+        "label": "NEUTRAL",
+        "mcap_change_24h": 0.0,
+        "btc_dominance": 0.0,
+        "eth_dominance": 0.0,
+        "score": 0.0,
+    }
     if global_d:
         g = global_d.get("data", {})
         mc = _num(g.get("market_cap_change_percentage_24h_usd"))
@@ -208,12 +248,16 @@ def synthesize(global_d, markets_d, trending_syms, solana_pulse, xrpl_amm) -> di
         regime["eth_dominance"] = round(eth_d, 2)
         risk_score = _clamp(mc / 5.0) - _clamp((btc_d - 50.0) / 10.0) * 0.3
         regime["score"] = round(_clamp(risk_score), 3)
-        regime["label"] = "RISK-ON" if regime["score"] > 0.15 else ("RISK-OFF" if regime["score"] < -0.15 else "NEUTRAL")
+        regime["label"] = (
+            "RISK-ON"
+            if regime["score"] > 0.15
+            else ("RISK-OFF" if regime["score"] < -0.15 else "NEUTRAL")
+        )
 
     # --- per-asset flow intensity from /coins/markets ---
     trending_set = {s.upper() for s in trending_syms}
     assets_out = []
-    for m in (markets_d or []):
+    for m in markets_d or []:
         sym = (m.get("symbol") or "").upper()
         mcap = _num(m.get("market_cap"))
         vol = _num(m.get("total_volume"))
@@ -226,14 +270,16 @@ def synthesize(global_d, markets_d, trending_syms, solana_pulse, xrpl_amm) -> di
         flow = _clamp(vol_mcap * 5.0, -0.5, 0.5) * 0.4 + _clamp(chg / 6.0) * 0.6
         if sym in trending_set:
             flow = _clamp(flow + 0.1)
-        assets_out.append({
-            "symbol": sym,
-            "pair": f"{sym}-USDC",
-            "flow_score": round(flow, 3),
-            "volume_to_mcap": round(vol_mcap, 3),
-            "price_change_24h": round(chg, 2),
-            "trending": sym in trending_set,
-        })
+        assets_out.append(
+            {
+                "symbol": sym,
+                "pair": f"{sym}-USDC",
+                "flow_score": round(flow, 3),
+                "volume_to_mcap": round(vol_mcap, 3),
+                "price_change_24h": round(chg, 2),
+                "trending": sym in trending_set,
+            }
+        )
     assets_out.sort(key=lambda a: abs(a["flow_score"]), reverse=True)
 
     # --- on-chain pulse (Solana default; XRPL optional) ---
@@ -276,24 +322,33 @@ def _format_verdict(sig: dict) -> str:
         f"- Verdict: **{sig['direction']}** ({sig['rationale']})",
     ]
     if best:
-        lines.append(f"- Best flow: **{best['symbol']}** score {best['flow_score']:+.2f} "
-                     f"(vol/mcap {best['volume_to_mcap']}, 24h {best['price_change_24h']:+.2f}%, trend={best['trending']})")
+        lines.append(
+            f"- Best flow: **{best['symbol']}** score {best['flow_score']:+.2f} "
+            f"(vol/mcap {best['volume_to_mcap']}, 24h {best['price_change_24h']:+.2f}%, trend={best['trending']})"
+        )
     sp = sig["onchain"].get("solana")
     if sp:
-        lines.append(f"- Solana on-chain pulse: flow {sp['flow_score']:+.2f}, "
-                     f"top-pool vol24h ${sp['total_vol24h']:,.0f}, median chg {sp['median_chg24h']:+.1f}%")
+        lines.append(
+            f"- Solana on-chain pulse: flow {sp['flow_score']:+.2f}, "
+            f"top-pool vol24h ${sp['total_vol24h']:,.0f}, median chg {sp['median_chg24h']:+.1f}%"
+        )
         for p in sp["pools"][:4]:
-            lines.append(f"    - {p['name'][:24]:24} vol ${p['vol24h']:,.0f} chg {p['chg24h']:+.1f}%")
+            lines.append(
+                f"    - {p['name'][:24]:24} vol ${p['vol24h']:,.0f} chg {p['chg24h']:+.1f}%"
+            )
     if sig["onchain"].get("xrpl"):
         lines.append(f"- XRPL AMM pulse: {sig['onchain']['xrpl']}")
     lines.append("- Per-asset:")
     for a in sig["assets"][:5]:
-        lines.append(f"    - {a['symbol']}: {a['flow_score']:+.2f}  "
-                     f"(vol/mcap {a['volume_to_mcap']}, 24h {a['price_change_24h']:+.2f}%, trend={a['trending']})")
+        lines.append(
+            f"    - {a['symbol']}: {a['flow_score']:+.2f}  "
+            f"(vol/mcap {a['volume_to_mcap']}, 24h {a['price_change_24h']:+.2f}%, trend={a['trending']})"
+        )
     return "\n".join(lines)
 
 
 # ── orchestration ──────────────────────────────────────────────────────────
+
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Entry point invoked by manage_routines. Fetches, scores, reports, returns."""
@@ -305,7 +360,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         fetch_markets(ids),
         fetch_solana_pulse(config.solana_top_n),
     )
-    xrpl_amm = await fetch_xrpl_amm_pulse(config.xrpl_amm_issuer) if config.xrpl_amm_issuer else None
+    xrpl_amm = (
+        await fetch_xrpl_amm_pulse(config.xrpl_amm_issuer)
+        if config.xrpl_amm_issuer
+        else None
+    )
 
     sig = synthesize(global_d, markets, trending, solana, xrpl_amm)
 
@@ -314,8 +373,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         from condor.reports import ReportBuilder
 
         builder = ReportBuilder("Smart-Money Flow")
-        builder.source("routine", "onchain_flow").tags(["flow", "on-chain", "solana", "smart-money"])
-        builder.section("01 / RISK REGIME", "Cross-market risk-on/off from total mcap momentum and BTC dominance")
+        builder.source("routine", "onchain_flow").tags(
+            ["flow", "on-chain", "solana", "smart-money"]
+        )
+        builder.section(
+            "01 / RISK REGIME",
+            "Cross-market risk-on/off from total mcap momentum and BTC dominance",
+        )
         builder.kpi("Regime", sig["regime"]["label"])
         builder.kpi("Mcap 24h", f"{sig['regime']['mcap_change_24h']:+.2f}%")
         builder.kpi("BTC Dominance", f"{sig['regime']['btc_dominance']:.1f}%")
@@ -323,14 +387,29 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         builder.kpi("Solana Flow", f"{sig['solana_flow']:+.2f}")
         sp = sig["onchain"].get("solana")
         if sp:
-            builder.section("02 / SOLANA ON-CHAIN PULSE", "SOL top pools by 24h volume — crypto-native flow")
+            builder.section(
+                "02 / SOLANA ON-CHAIN PULSE",
+                "SOL top pools by 24h volume — crypto-native flow",
+            )
             builder.kpi("Top-pool Vol 24h", f"${sp['total_vol24h']:,.0f}")
             builder.kpi("Median Chg 24h", f"{sp['median_chg24h']:+.1f}%")
             builder.kpi("On-chain Flow", f"{sp['flow_score']:+.2f}")
             builder.table(sp["pools"][:8], ["name", "dex", "vol24h", "chg24h", "tvl"])
         if sig["assets"]:
-            builder.section("03 / CROSS-MARKET CONTEXT", "Market-wide flow intensity (BTC/ETH/SOL)")
-            builder.table(sig["assets"][:6], ["symbol", "pair", "flow_score", "volume_to_mcap", "price_change_24h", "trending"])
+            builder.section(
+                "03 / CROSS-MARKET CONTEXT", "Market-wide flow intensity (BTC/ETH/SOL)"
+            )
+            builder.table(
+                sig["assets"][:6],
+                [
+                    "symbol",
+                    "pair",
+                    "flow_score",
+                    "volume_to_mcap",
+                    "price_change_24h",
+                    "trending",
+                ],
+            )
         builder.markdown(_format_verdict(sig))
         builder.manual_order()
         await builder.save()

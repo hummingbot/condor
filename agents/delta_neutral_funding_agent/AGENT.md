@@ -11,6 +11,8 @@ tools:
 - manage_bots
 - manage_routines
 - search_history
+- manage_trading_agent
+- trading_agent_journal_read
 - manage_memory
 - manage_skill
 when_to_consult: When the user asks about delta-neutral funding strategies on HIP-3

@@ -20,6 +20,15 @@ watching. Since FEAT-012 a small ``{task_id}.status.json`` is written alongside 
 when the task starts, so a delegation killed by a restart is reported as
 ``interrupted`` instead of vanishing without a trace. It is never auto-restarted:
 delegations are one-shot and re-running could duplicate side effects.
+
+Ephemeral does not mean free: the registry is bounded on both axes since
+CORR-143. A finished delegation is retired once its transcript, events sidecar
+and status record are on disk, and only the most recent
+:data:`MAX_FINISHED_DELEGATIONS` of them stay resident -- older ones are served
+from :mod:`condor.agents.delegation_history` instead. Within one delegation the
+event stream is bounded too (:data:`MAX_EVENTS_PER_DELEGATION`, with tool
+payloads clipped to what a reader would have been shown anyway), so no single
+runaway session can pin an unbounded transcript.
 """
 
 from __future__ import annotations
@@ -39,10 +48,47 @@ _delegations: dict[str, "DelegateTask"] = {}
 # Default per-task wall-clock budget; a hung ACP subprocess is cancelled after this.
 DEFAULT_TIMEOUT_S = 900
 
-# Ceiling on a single tool output wherever a transcript is *read* -- the on-disk
+# Ceiling on a single tool payload wherever a transcript is *read* -- the on-disk
 # markdown and the wire projection share it so the two can never disagree about
-# where a huge output was cut. ``dt.events`` itself keeps the full output.
+# where a huge output was cut. Since CORR-143 the event sink applies the same
+# ceiling as it folds, so what a delegation keeps in RAM is what every reader
+# would have shown anyway; :func:`_clip_output` is idempotent precisely so that
+# clipping once at write time and again at read time yields the same string.
 MAX_TOOL_OUTPUT = 2000
+TRUNCATION_MARKER = "\n… (truncated)"
+
+# How many events one delegation retains. The event stream is the heavy half of
+# a DelegateTask, so it is bounded per task and not only across tasks: past this
+# the sink drops the oldest events. Generous on purpose -- an ordinary
+# delegation never reaches it; what it stops is a runaway session pinning an
+# unbounded transcript in a process designed to run for weeks.
+MAX_EVENTS_PER_DELEGATION = 500
+
+# How much of one merged thought/text run stays in a single event. Consecutive
+# chunks are folded into the last entry, so without a roll-over a chatty agent
+# grows one string without bound -- which no count of events can cap. Past this
+# the sink opens a new entry, subject to the event bound like every other one.
+MAX_CHUNK_CHARS = 4000
+
+# The in-memory record of a cut: the sink drops the oldest events past the bound
+# and folds how many into this marker, so a transcript never silently claims to
+# be complete. It reaches readers as a plain text note (``events_for_wire``), so
+# no client has to learn a new event type.
+DROPPED_EVENT_TYPE = "dropped"
+
+# How many *terminal* delegations stay resident (CORR-143). Deliberately a count
+# bound and not a TTL: the MCP ``delegate`` contract is submit-now/collect-later
+# with no deadline, so there is no grace window that is the right one to expire
+# on. What makes a late collect safe is the disk fallback, not a timer --
+# ``GET /agents/delegations/{task_id}`` and its ``/events`` sibling both fall
+# through to :mod:`condor.agents.delegation_history`, which rebuilds the record
+# from the ``{task_id}.status.json`` and ``{task_id}.events.json`` files written
+# in ``_run``'s finally block, i.e. before an entry can ever be evicted. The two
+# registry-only readers (``GET /agents/delegations`` and the ``/delegations``
+# Telegram list) are per-process snapshots by contract and have the merged
+# ``/delegations/history`` route as their complete view. In-flight delegations
+# are never evicted, at any count.
+MAX_FINISHED_DELEGATIONS = 25
 
 # What happens to the conversation that asked for the work when the task ends.
 #
@@ -232,22 +278,35 @@ def _make_event_sink(dt: DelegateTask):
     tl = dt.events
     tc_map: dict[str, dict] = {}
 
+    def append(entry: dict) -> None:
+        tl.append(entry)
+        _bound_events(tl)
+
+    def merge_chunk(kind: str, text: str) -> None:
+        # Roll into a new entry once the current run is long enough: merging for
+        # ever would grow one string without bound, which no count of events can
+        # cap (CORR-143).
+        if tl and tl[-1]["type"] == kind and len(tl[-1]["text"]) < MAX_CHUNK_CHARS:
+            tl[-1]["text"] += text
+        else:
+            append({"type": kind, "text": text})
+
     def sink(event) -> None:
         if isinstance(event, ThoughtChunk):
-            if tl and tl[-1]["type"] == "thought":
-                tl[-1]["text"] += event.text
-            else:
-                tl.append({"type": "thought", "text": event.text})
+            merge_chunk("thought", event.text)
         elif isinstance(event, TextChunk):
-            if tl and tl[-1]["type"] == "text":
-                tl[-1]["text"] += event.text
-            else:
-                tl.append({"type": "text", "text": event.text})
+            merge_chunk("text", event.text)
         elif isinstance(event, (ToolCallEvent, ToolCallUpdate)):
             tc = fold_tool_call_event(tc_map, event)
             if tc is not None:
                 tc["type"] = "tool"
-                tl.append(tc)
+                append(tc)
+            # An output arrives on a *patch*, which the fold applies in place and
+            # reports as ``None`` -- so the payload bound is applied to the
+            # folded entry looked up here, not to the return value.
+            folded = tc_map.get(event.tool_call_id)
+            if folded is not None:
+                _bound_tool_payloads(folded)
 
     return sink
 
@@ -302,6 +361,10 @@ async def _run(dt: DelegateTask, bot, timeout_s: int) -> None:
             # already in the chat and in the transcript.
             if dt.on_complete == ON_COMPLETE_RESUME and dt.status == "done":
                 await _resume_conversation(dt)
+        # Last of all, and only once the transcript, the sidecar and the status
+        # record are on disk: this may drop older finished entries, and nothing
+        # may be evicted that a reader cannot still find in history.
+        retire_delegation(dt)
 
 
 async def stop_delegation(task_id: str) -> bool:
@@ -315,11 +378,88 @@ async def stop_delegation(task_id: str) -> bool:
 
 
 def _clip_output(value) -> str:
-    """Stringify a tool output, bounded at :data:`MAX_TOOL_OUTPUT`."""
+    """Stringify a tool payload, bounded at :data:`MAX_TOOL_OUTPUT`.
+
+    Idempotent: an already-clipped string comes back unchanged, so the sink can
+    apply the bound as the stream arrives (CORR-143) and the two readers can
+    keep applying it on the way out without stacking a second marker.
+    """
     out = str(value)
-    if len(out) > MAX_TOOL_OUTPUT:
-        return out[:MAX_TOOL_OUTPUT] + "\n… (truncated)"
-    return out
+    if out.endswith(TRUNCATION_MARKER) or len(out) <= MAX_TOOL_OUTPUT:
+        return out
+    return out[:MAX_TOOL_OUTPUT] + TRUNCATION_MARKER
+
+
+def _bound_tool_payloads(tc: dict) -> None:
+    """Clip a folded tool entry's payloads to what a reader would have shown.
+
+    The output is what gets big (a market-data dump, a file read), and both
+    projections already cut it at :data:`MAX_TOOL_OUTPUT` -- keeping the full
+    string in RAM bought nothing. The input is normally small and is left in its
+    original shape so the dashboard can render it as JSON; only one that
+    serializes past the same ceiling degrades to its clipped string form, since
+    an ``Edit``/``Write`` call can carry a whole file in its arguments.
+    """
+    import json
+
+    out = tc.get("output")
+    if out is not None:
+        tc["output"] = _clip_output(out)
+    inp = tc.get("input")
+    if inp is not None and not isinstance(inp, str):
+        serialized = json.dumps(inp, default=str)
+        if len(serialized) > MAX_TOOL_OUTPUT:
+            tc["input"] = _clip_output(serialized)
+
+
+def _bound_events(events: list[dict]) -> None:
+    """Keep an event stream under :data:`MAX_EVENTS_PER_DELEGATION`, oldest first.
+
+    The head is what gets dropped: a reader of a runaway session cares about how
+    it ended, and the tail is also what the completion notice is drawn from. The
+    count of dropped events is folded into a leading marker so the cut is
+    visible in the transcript rather than silent.
+    """
+    if len(events) <= MAX_EVENTS_PER_DELEGATION:
+        return
+    if not events or events[0].get("type") != DROPPED_EVENT_TYPE:
+        events.insert(0, {"type": DROPPED_EVENT_TYPE, "count": 0})
+    marker = events[0]
+    while len(events) > MAX_EVENTS_PER_DELEGATION:
+        events.pop(1)  # index 0 is the marker
+        marker["count"] += 1
+
+
+def _dropped_note(count: int) -> str:
+    return f"_… {count} earlier event(s) dropped to bound memory (CORR-143)_"
+
+
+def retire_delegation(dt: "DelegateTask") -> int:
+    """Move a finished delegation to the young end and evict the oldest ones.
+
+    Called once ``_run`` has persisted the transcript, the events sidecar and
+    the status record, so everything evicted here is already readable from disk.
+    Re-inserting refreshes recency (dicts keep insertion order), which makes the
+    registry's tail *finish* order rather than start order -- a slow delegation
+    started first must not be the first evicted when it finally lands.
+
+    Returns how many entries were evicted. Public so the same retirement can be
+    exercised directly rather than only through a live task.
+    """
+    if _delegations.get(dt.task_id) is dt:
+        # Never re-register a task that was already dropped: the pop/insert pair
+        # would resurrect it as the newest entry.
+        _delegations.pop(dt.task_id)
+        _delegations[dt.task_id] = dt
+
+    finished = [t for t, d in _delegations.items() if d.status in TERMINAL_STATES]
+    evicted = 0
+    for task_id in finished[: max(len(finished) - MAX_FINISHED_DELEGATIONS, 0)]:
+        _delegations.pop(task_id, None)
+        evicted += 1
+    if evicted:
+        log.debug("Evicted %s finished delegation(s) from the registry", evicted)
+    return evicted
 
 
 def events_for_wire(events: list[dict]) -> list[dict]:
@@ -338,6 +478,10 @@ def events_for_wire(events: list[dict]) -> list[dict]:
         kind = ev.get("type")
         if kind in ("thought", "text"):
             wire.append({"type": kind, "text": ev.get("text") or ""})
+        elif kind == DROPPED_EVENT_TYPE:
+            # Projected as a text note rather than a new wire type: every client
+            # already renders text, and a cut nobody renders is a silent lie.
+            wire.append({"type": "text", "text": _dropped_note(ev.get("count") or 0)})
         elif kind == "tool":
             inp = ev.get("input")
             out = ev.get("output")
@@ -367,7 +511,9 @@ def _render_session(events: list[dict]) -> str:
     tool_n = 0
     for ev in events:
         kind = ev.get("type")
-        if kind == "thought":
+        if kind == DROPPED_EVENT_TYPE:
+            parts.append(_dropped_note(ev.get("count") or 0))
+        elif kind == "thought":
             text = (ev.get("text") or "").strip()
             if text:
                 quoted = "\n".join(f"> {line}" for line in text.splitlines())

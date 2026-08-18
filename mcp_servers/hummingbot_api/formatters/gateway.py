@@ -1,6 +1,7 @@
 """
 Gateway formatters for the Hummingbot MCP server.
 """
+
 from typing import Any
 
 
@@ -11,8 +12,8 @@ def format_gateway_container_result(result: dict[str, Any]) -> str:
     if result_action == "get_status":
         status = result.get("status", {})
         running = status.get("running", False)
-        container_id = status.get('container_id')
-        created_at = status.get('created_at')
+        container_id = status.get("container_id")
+        created_at = status.get("created_at")
 
         container_id_display = f"{container_id[:12]}..." if container_id else "None"
         created_at_display = created_at[:19] if created_at else "None"
@@ -198,7 +199,12 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
     if action in ("quote_swap", "quote_liquidity") and isinstance(payload, dict):
         return f"{header}\n{payload}"
 
-    if action in ("execute_swap", "add_liquidity", "remove_liquidity", "create_pool") and isinstance(payload, dict):
+    if action in (
+        "execute_swap",
+        "add_liquidity",
+        "remove_liquidity",
+        "create_pool",
+    ) and isinstance(payload, dict):
         sig = payload.get("signature")
         extra = ""
         if action == "create_pool":

@@ -67,11 +67,15 @@ def _fmt_pct(v: float) -> str:
     return f"{v:+.1f}%"
 
 
-async def _fetch_token_info(session: aiohttp.ClientSession, mint: str) -> dict:
-    """Fetch current token info (price, fdv, mcap) from GeckoTerminal."""
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/tokens/{mint}"
-    async with session.get(url) as resp:
-        data = await resp.json()
+async def _fetch_token_info(mint: str) -> dict:
+    """Fetch current token info (price, fdv, mcap) from GeckoTerminal.
+
+    On the process-wide gecko budget — the ~30/min free tier is per IP and shared
+    with the dashboard, so this routine cannot pace itself in isolation.
+    """
+    from condor.pool_data import gecko_request
+
+    data = await gecko_request("GET", f"networks/solana/tokens/{mint}")
     attrs = data.get("data", {}).get("attributes", {})
     price = float(attrs.get("price_usd") or 0)
     fdv = float(attrs.get("fdv_usd") or 0)
@@ -144,17 +148,18 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     # Step 1: Fetch GeckoTerminal token info + DefiLlama fees (parallel, aiohttp)
     async with aiohttp.ClientSession() as session:
-        # Token info from GeckoTerminal (sequential — rate limits)
+        # Token info from GeckoTerminal. No hand-rolled sleep between calls: the
+        # shared gate paces these against every other caller in the process,
+        # which a local sleep cannot.
         for name, td in active_tokens.items():
             try:
-                token_info[name] = await _fetch_token_info(session, td["mint"])
+                token_info[name] = await _fetch_token_info(td["mint"])
                 logger.info(
                     f"{name}: price=${token_info[name]['price']:.4f}, mcap={_fmt_mcap(token_info[name]['mcap'])}"
                 )
             except Exception as e:
                 logger.warning(f"Failed to fetch token info for {name}: {e}")
                 token_info[name] = {"price": 0, "fdv": 0, "mcap": 0}
-            await asyncio.sleep(1)
 
         # DefiLlama fees (parallel — no rate limit issues)
         fee_tasks = {

@@ -13,7 +13,7 @@ from condor.reports import (
     list_reports_grouped,
 )
 from condor.web.auth import get_current_user
-from condor.web.models import ReportSummary, ReportsListResponse, WebUser
+from condor.web.models import ReportsListResponse, ReportSummary, WebUser
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 

@@ -1,11 +1,12 @@
-export type ExecutorType = "grid" | "position" | "order" | "dca";
-
-export const EXECUTOR_TYPES: { value: ExecutorType; label: string; icon: string }[] = [
-  { value: "grid", label: "Grid", icon: "Grid3X3" },
-  { value: "position", label: "Position", icon: "TrendingUp" },
-  { value: "order", label: "Order", icon: "ArrowUpDown" },
-  { value: "dca", label: "DCA", icon: "Layers" },
-];
+/**
+ * An executor type the trade panel implements a tab for.
+ *
+ * This is the single union: `connectorCapabilities` reports which of these a venue
+ * supports, `TYPE_TABS` / `TYPE_LABELS` render them, and four switches in
+ * `CreateExecutor` are exhaustive over it — so adding a member here is what makes
+ * the compiler point at every site that has to learn about it.
+ */
+export type ExecutorType = "grid" | "position" | "order" | "dca" | "lp";
 
 export interface ExtraLine {
   price: number;
@@ -15,13 +16,22 @@ export interface ExtraLine {
   lineWidth?: number;
 }
 
+/**
+ * A price the chart can hand back when the user clicks it.
+ *
+ * `start` / `end` / `limit` are the three lines the chart draws itself; `limit2`
+ * is a fourth slot for a price a panel draws as an extra line (the LP lower
+ * limit), so a panel with four prices offers a crosshair for every one of them.
+ */
+export type PickSlot = "start" | "end" | "limit" | "limit2";
+
 export interface ChartPriceMapping {
   startPrice: number;
   endPrice: number;
   limitPrice: number;
   side: 1 | 2;
   minSpread: number;
-  activePickField: "start" | "end" | "limit" | null;
+  activePickField: PickSlot | null;
   extraLines?: ExtraLine[];
 }
 

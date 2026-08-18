@@ -2,7 +2,7 @@
 
 import logging
 
-from fastapi import APIRouter, Depends, Form, UploadFile, File, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
@@ -39,6 +39,7 @@ async def transcribe_audio(
     if effective_lang is None or effective_model is None:
         try:
             from config_manager import get_config_manager
+
             cm = get_config_manager()
             voice_prefs = cm.get_user_preferences(user.id).get("voice", {})
             if effective_lang is None:

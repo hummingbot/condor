@@ -1,7 +1,9 @@
+import logging
+
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
+
 from config_manager import get_client
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +121,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 "so level math and the liquidation guard would both be wrong"
             )
             if flat:
-                reason += ". Account is flat, so HEDGE could be set if two-sided is wanted"
+                reason += (
+                    ". Account is flat, so HEDGE could be set if two-sided is wanted"
+                )
             else:
-                reason += ". Account is not flat, so the mode cannot be changed right now"
+                reason += (
+                    ". Account is not flat, so the mode cannot be changed right now"
+                )
 
     lines = [f"Position Mode — {config.connector_name}", f"mode: {mode}"]
     if shrug_note:

@@ -22,9 +22,13 @@ from __future__ import annotations
 import json
 import logging
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from condor.fsutil import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -79,6 +83,30 @@ def resolve_agent_dirs(agent_id: str) -> tuple[Path | None, Path | None]:
 
 
 MAX_SNAPSHOTS = 100
+
+# Retention for the per-tick append-only sections of journal.md (PERF-136).
+# Ticks and Snapshots gain one line per tick, so on a long-running session they
+# grow without bound and every tick pays to rewrite them. Past the cap the
+# oldest lines are *moved* -- not deleted -- to ``journal_archive.md`` next to
+# journal.md, and the section keeps a marker line saying what went where.
+# 1000 lines is ~17h of history at a 60s tick and ~4 days at a 5m tick. No
+# reader of these two sections needs more: nothing reads a Ticks line's content
+# at all (only the tick number, from the last one), and Snapshots feeds the
+# drawdown peak -- carried across the trim in the marker -- plus a fallback
+# equity curve. Everything else lives in Summary and Decisions, both already
+# bounded and untouched here.
+MAX_TICK_LINES = 1000
+MAX_SNAPSHOT_LINES = 1000
+
+# Sidecar holding everything trimmed out of journal.md. Append-only, never read
+# in the trading hot path: it exists so the audit trail survives the trim and a
+# human (or the agent, via the journal_read MCP tool) can still go back.
+ARCHIVE_NAME = "journal_archive.md"
+
+# Marker left in place of the archived lines. Deliberately starts with "- " so
+# it reads as part of the list, and with a word that no entry parser accepts, so
+# _parse_snapshots / _count_ticks skip it instead of parsing it as data.
+ARCHIVE_MARKER_PREFIX = "- archived "
 
 JOURNAL_TEMPLATE = """\
 # Journal - {agent_id}
@@ -189,12 +217,36 @@ def next_experiment_number(agent_dir: Path) -> int:
 TICK_LINE_PREFIX = "- tick#"
 
 
+def highest_tick_number(text: str) -> int:
+    """Highest tick number recorded in ``text`` (0 if it holds no tick line).
+
+    The tick *number* is read back from the line rather than derived from the
+    line count, so numbering survives the retention trim (PERF-136): a journal
+    whose first 1000 ticks were archived still resumes at 1001. Lines are
+    appended in order, so the last one normally wins, but the max is taken
+    anyway -- the MCP journal_write tool can edit the file out of band.
+    """
+    highest = 0
+    seen = 0
+    for line in text.splitlines():
+        if not line.startswith(TICK_LINE_PREFIX):
+            continue
+        seen += 1
+        head = line[len(TICK_LINE_PREFIX) :].split("|", 1)[0].strip()
+        try:
+            highest = max(highest, int(head))
+        except ValueError:
+            continue
+    # A tick line with an unparseable number is not a reason to restart from
+    # zero and overwrite history: fall back to counting what is there.
+    return highest or seen
+
+
 def count_journal_ticks(journal_path: Path) -> int:
-    """Count tick entries in a session's journal.md (lines record_tick writes)."""
+    """Number of ticks a session has run, from its journal.md."""
     if not journal_path.exists():
         return 0
-    text = journal_path.read_text(errors="replace")
-    return sum(1 for line in text.splitlines() if line.startswith(TICK_LINE_PREFIX))
+    return highest_tick_number(journal_path.read_text(errors="replace"))
 
 
 EXPERIMENT_TEMPLATE = """\
@@ -309,8 +361,6 @@ class JournalManager:
     def __init__(
         self,
         agent_id: str,
-        strategy_name: str = "",
-        strategy_description: str = "",
         session_dir: Path | None = None,
         agent_dir: Path | None = None,
     ):
@@ -340,6 +390,14 @@ class JournalManager:
         self._cache_stamp: tuple[int, int] | None = None
         self._cache_text: str = ""
         self._parsed_cache: dict[str, list[dict]] = {}
+
+        # Write batching (PERF-136): inside ``with journal.batch():`` the
+        # updated document is held here and hits the disk once, on exit.
+        self._batch_depth = 0
+        self._pending_text: str | None = None
+        # Last section this process appended to journal_archive.md, so the
+        # sidecar gets one header per run of same-section lines, not per line.
+        self._archive_last_section: str | None = None
 
         if not self._path.exists():
             self._path.write_text(JOURNAL_TEMPLATE.format(agent_id=agent_id))
@@ -489,6 +547,9 @@ class JournalManager:
 
     def read_full(self) -> str:
         """Return the entire journal contents (cached until the file changes)."""
+        if self._pending_text is not None:
+            # Mid-batch: the authoritative document is the one in memory.
+            return self._pending_text
         try:
             stat = self._path.stat()
         except OSError:
@@ -500,9 +561,38 @@ class JournalManager:
             self._parsed_cache.clear()
         return self._cache_text
 
+    @contextmanager
+    def batch(self) -> Iterator[JournalManager]:
+        """Coalesce every journal write in the block into a single file write.
+
+        A tick writes the journal three to five times (record_tick,
+        record_snapshot, write_summary, plus append_action on violations) and
+        each one used to rewrite the whole file. Inside this block the updates
+        are applied to an in-memory document -- readers inside the block see
+        them -- and the result is written once on exit, including on error, so
+        a tick that raises still journals what it had recorded.
+        """
+        self._batch_depth += 1
+        try:
+            yield self
+        finally:
+            self._batch_depth -= 1
+            if self._batch_depth == 0:
+                self.flush()
+
+    def flush(self) -> None:
+        """Write out a batched document, if any is pending."""
+        text, self._pending_text = self._pending_text, None
+        if text is not None:
+            self._write_journal(text)
+
     def _write_journal(self, text: str) -> None:
         """Write journal.md and invalidate the read cache."""
-        self._path.write_text(text)
+        if self._batch_depth > 0:
+            self._pending_text = text
+            self._parsed_cache.clear()
+            return
+        atomic_write_text(self._path, text)
         self._cache_stamp = None
         self._parsed_cache.clear()
 
@@ -798,8 +888,7 @@ class JournalManager:
         return self._tick_count
 
     def _count_ticks(self) -> int:
-        section = self._get_section("Ticks")
-        return len([l for l in section.splitlines() if l.startswith(TICK_LINE_PREFIX)])
+        return highest_tick_number(self._get_section("Ticks"))
 
     def record_tick(self, response_summary: str = "", actions: int = 0) -> int:
         """Record a tick entry. Returns the new tick number."""
@@ -810,7 +899,7 @@ class JournalManager:
             f"{TICK_LINE_PREFIX}{self._tick_count} | {now} "
             f"| actions={actions} | {summary}"
         )
-        self._append_to_section("Ticks", entry)
+        self._append_bounded("Ticks", entry, MAX_TICK_LINES)
         return self._tick_count
 
     # ------------------------------------------------------------------
@@ -865,7 +954,7 @@ class JournalManager:
             f"- {now} | pnl=${total_pnl:+.2f} | volume=${total_volume:,.0f} "
             f"| open={open_count} | exposure=${position_size:.2f}"
         )
-        self._append_to_section("Snapshots", entry)
+        self._append_bounded("Snapshots", entry, MAX_SNAPSHOT_LINES)
 
     # ------------------------------------------------------------------
     # Queries (used by RiskEngine)
@@ -890,32 +979,6 @@ class JournalManager:
         self._parsed_cache["executors"] = results
         return results
 
-    def _parse_ticks(self) -> list[dict]:
-        self.read_full()  # refresh parsed cache if the file changed
-        cached = self._parsed_cache.get("ticks")
-        if cached is not None:
-            return cached
-        section = self._get_section("Ticks")
-        results = []
-        for line in section.splitlines():
-            if not line.startswith(TICK_LINE_PREFIX):
-                continue
-            entry: dict[str, Any] = {}
-            parts = line[2:].split(" | ")
-            for part in parts:
-                if part.startswith("tick#"):
-                    entry["tick"] = int(part.replace("tick#", ""))
-                elif part.startswith("actions="):
-                    entry["actions"] = int(part.replace("actions=", ""))
-                else:
-                    if re.match(r"\d{4}-\d{2}-\d{2}", part.strip()):
-                        entry["timestamp"] = part.strip()
-                    else:
-                        entry["summary"] = part.strip()
-            results.append(entry)
-        self._parsed_cache["ticks"] = results
-        return results
-
     def _parse_snapshots(self) -> list[dict]:
         self.read_full()  # refresh parsed cache if the file changed
         cached = self._parsed_cache.get("snapshots")
@@ -924,24 +987,9 @@ class JournalManager:
         section = self._get_section("Snapshots")
         results = []
         for line in section.splitlines():
-            if not line.startswith("- "):
+            if not line.startswith("- ") or line.startswith(ARCHIVE_MARKER_PREFIX):
                 continue
-            entry: dict[str, Any] = {}
-            for part in line[2:].split(" | "):
-                part = part.strip()
-                if part.startswith("pnl=$"):
-                    entry["pnl"] = float(part.replace("pnl=$", "").replace("+", ""))
-                elif part.startswith("volume=$"):
-                    entry["volume"] = float(
-                        part.replace("volume=$", "").replace(",", "")
-                    )
-                elif part.startswith("exposure=$"):
-                    entry["exposure"] = float(part.replace("exposure=$", ""))
-                elif part.startswith("open="):
-                    entry["open"] = int(part.replace("open=", ""))
-                elif re.match(r"\d{4}-\d{2}-\d{2}", part):
-                    entry["timestamp"] = part
-            results.append(entry)
+            results.append(_parse_snapshot_line(line))
         self._parsed_cache["snapshots"] = results
         return results
 
@@ -976,8 +1024,11 @@ class JournalManager:
         if not snapshots:
             return 0.0
         pnls = [s.get("pnl", 0) for s in snapshots]
-        peak = max(pnls)
         current = pnls[-1]
+        archived_peak = self._archived_peak_pnl()
+        if archived_peak is not None:
+            pnls.append(archived_peak)  # the high-water mark outlives the trim
+        peak = max(pnls)
         drawdown = peak - current
         if drawdown <= 0:
             return 0.0
@@ -986,7 +1037,13 @@ class JournalManager:
             return 0.0
         return drawdown / exposure * 100
 
-    def get_pnl_series(self, hours: int = 24) -> list[dict]:
+    def get_pnl_series(self) -> list[dict]:
+        """PnL points still held in journal.md (at most MAX_SNAPSHOT_LINES).
+
+        Older points are in ``journal_archive.md``; this is the equity-curve
+        fallback used when the bot's own series is empty, so a bounded tail is
+        what it needs -- it must not re-read the whole history every tick.
+        """
         return [
             {"timestamp": s.get("timestamp", ""), "pnl": s.get("pnl", 0)}
             for s in self._parse_snapshots()
@@ -1036,6 +1093,72 @@ class JournalManager:
             new_text = text.rstrip() + f"\n\n## {name}\n{content}\n"
         self._write_journal(new_text)
 
+    def _append_bounded(self, section: str, entry: str, max_lines: int) -> None:
+        """Append a line to a section, keeping at most ``max_lines`` of them.
+
+        Overflow is *moved* to ``journal_archive.md`` and replaced by a single
+        marker line naming the file and how much went into it, so the journal
+        never claims to be a complete record when it isn't. Costs the same one
+        read + one write as a plain append.
+        """
+        lines = [l for l in self._get_section(section).splitlines() if l.strip()]
+        marker = ""
+        if lines and lines[0].startswith(ARCHIVE_MARKER_PREFIX):
+            marker = lines.pop(0)
+        lines.append(entry)
+        if len(lines) > max_lines:
+            cut = len(lines) - max_lines
+            dropped, keep = lines[:cut], lines[cut:]
+            try:
+                self._archive_lines(section, dropped)
+            except OSError:
+                # Could not park them safely -> do not drop them. The section
+                # stays one line over the cap and the trim retries next tick.
+                log.exception("journal: archiving %s failed, keeping lines", section)
+            else:
+                lines = keep
+                marker = _next_marker(section, marker, dropped)
+        body = [marker, *lines] if marker else lines
+        self._replace_section(section, "\n".join(body))
+
+    def _archive_lines(self, section: str, lines: list[str]) -> None:
+        """Append trimmed lines to the session's archive sidecar.
+
+        Append-only and outside the journal's read path, so it costs O(lines
+        written) rather than O(history) -- the point of the trim. A failure
+        here must never take down a trading tick, but it must not silently
+        destroy the lines either, so it is logged loudly and the trim is
+        abandoned (the caller keeps them in journal.md for another round).
+        """
+        path = self._session_dir / ARCHIVE_NAME
+        header = ""
+        if not path.exists():
+            header = (
+                f"# Journal archive - {self.agent_id}\n\n"
+                "Entries trimmed out of journal.md to keep it bounded. "
+                "Append-only; nothing here is ever rewritten.\n"
+            )
+        if section != self._archive_last_section:
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+            header += f"\n## {section} (archived {now} UTC)\n"
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write(header + "\n".join(lines) + "\n")
+        self._archive_last_section = section
+
+    def _archived_peak_pnl(self) -> float | None:
+        """Peak PnL of the snapshots already archived, from the marker line.
+
+        get_drawdown_pct measures the fall from the session's high-water mark,
+        so the trim must not lower that mark -- a forgotten peak would quietly
+        make the risk gate less protective than it was yesterday.
+        """
+        for line in self._get_section("Snapshots").splitlines():
+            if not line.startswith(ARCHIVE_MARKER_PREFIX):
+                break
+            m = re.search(r"peak_pnl=\$([+-]?[\d.]+)", line)
+            return float(m.group(1)) if m else None
+        return None
+
     def _append_to_section(self, section: str, entry: str) -> None:
         """Append a line to a section."""
         text = self.read_full()
@@ -1064,13 +1187,58 @@ class JournalManager:
         section = self._get_section("Recent Actions")
         return len([l for l in section.splitlines() if l.startswith("- ")])
 
-    def get_data_dir(self) -> Path:
-        """Return the session data directory."""
-        return self._session_dir
 
-    def size_bytes(self) -> int:
-        """Current file size."""
-        return self._path.stat().st_size if self._path.exists() else 0
+def _parse_snapshot_line(line: str) -> dict[str, Any]:
+    """Parse one ``record_snapshot`` line into its fields."""
+    entry: dict[str, Any] = {}
+    for part in line[2:].split(" | "):
+        part = part.strip()
+        if part.startswith("pnl=$"):
+            entry["pnl"] = float(part.replace("pnl=$", "").replace("+", ""))
+        elif part.startswith("volume=$"):
+            entry["volume"] = float(part.replace("volume=$", "").replace(",", ""))
+        elif part.startswith("exposure=$"):
+            entry["exposure"] = float(part.replace("exposure=$", ""))
+        elif part.startswith("open="):
+            entry["open"] = int(part.replace("open=", ""))
+        elif re.match(r"\d{4}-\d{2}-\d{2}", part):
+            entry["timestamp"] = part
+    return entry
+
+
+def _next_marker(section: str, prev_marker: str, dropped: list[str]) -> str:
+    """Build the marker line that stands in for the archived entries.
+
+    It is what a reader sees at the boundary, so it says how many entries are
+    missing and where they went -- and, for Snapshots, carries forward the peak
+    PnL that get_drawdown_pct would otherwise lose with the lines.
+    """
+    prev_count = 0
+    if prev_marker:
+        m = re.search(r"archived (\d+)", prev_marker)
+        prev_count = int(m.group(1)) if m else 0
+    total = prev_count + len(dropped)
+
+    if section == "Snapshots":
+        peaks = [
+            entry["pnl"]
+            for entry in (_parse_snapshot_line(l) for l in dropped)
+            if "pnl" in entry
+        ]
+        m = re.search(r"peak_pnl=\$([+-]?[\d.]+)", prev_marker or "")
+        if m:
+            peaks.append(float(m.group(1)))
+        peak = f" | peak_pnl=${max(peaks):+.2f}" if peaks else ""
+        return (
+            f"{ARCHIVE_MARKER_PREFIX}{total} earlier snapshot"
+            f"{'' if total == 1 else 's'} to {ARCHIVE_NAME}{peak}"
+        )
+
+    noun = section.rstrip("s").lower()
+    return (
+        f"{ARCHIVE_MARKER_PREFIX}{total} earlier {noun}"
+        f"{'' if total == 1 else 's'} to {ARCHIVE_NAME}"
+    )
 
 
 def _normalize(text: str) -> str:

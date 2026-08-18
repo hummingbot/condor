@@ -20,11 +20,15 @@ import sys
 logger = logging.getLogger(__name__)
 
 # How often to check for updates (seconds)
-UPDATE_CHECK_INTERVAL = int(os.environ.get("UPDATE_CHECK_INTERVAL", "3600"))  # 1h default
+UPDATE_CHECK_INTERVAL = int(
+    os.environ.get("UPDATE_CHECK_INTERVAL", "3600")
+)  # 1h default
 
 CONDOR_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HUMMINGBOT_API_DIR = os.path.normpath(
-    os.environ.get("HUMMINGBOT_API_DIR", os.path.join(CONDOR_DIR, "..", "hummingbot-api"))
+    os.environ.get(
+        "HUMMINGBOT_API_DIR", os.path.join(CONDOR_DIR, "..", "hummingbot-api")
+    )
 )
 FRONTEND_DIR = os.path.join(CONDOR_DIR, "frontend")
 
@@ -124,7 +128,9 @@ async def check_for_updates(repo_dir: str = CONDOR_DIR) -> dict:
 
         # Get local and remote commits
         _, local = await _run_git("rev-parse", "--short", "HEAD", repo_dir=repo_dir)
-        _, remote = await _run_git("rev-parse", "--short", f"origin/{branch}", repo_dir=repo_dir)
+        _, remote = await _run_git(
+            "rev-parse", "--short", f"origin/{branch}", repo_dir=repo_dir
+        )
         result["local_commit"] = local
         result["remote_commit"] = remote
 
@@ -142,7 +148,10 @@ async def check_for_updates(repo_dir: str = CONDOR_DIR) -> dict:
         if commits_behind > 0:
             # Get log of new commits
             _, log = await _run_git(
-                "log", "--oneline", f"HEAD..origin/{branch}", "--max-count=10",
+                "log",
+                "--oneline",
+                f"HEAD..origin/{branch}",
+                "--max-count=10",
                 repo_dir=repo_dir,
             )
             result["commit_log"] = log
@@ -165,12 +174,35 @@ async def pull_updates(repo_dir: str = CONDOR_DIR) -> tuple[bool, str]:
     # Check for uncommitted changes
     rc, status = await _run_git("status", "--porcelain", repo_dir=repo_dir)
     if status:
-        return False, "Cannot update: there are uncommitted changes. Please commit or stash first."
+        return (
+            False,
+            "Cannot update: there are uncommitted changes. Please commit or stash first.",
+        )
+
+    # The sha we are leaving, so a successful pull can report what it moved.
+    before = await get_local_commit(repo_dir)
 
     # Pull
     rc, output = await _run_git("pull", "origin", branch, repo_dir=repo_dir)
     if rc != 0:
         return False, f"Pull failed:\n{output}"
+
+    # Version adoption telemetry (FEAT-023): two short shas and how far behind
+    # this install had drifted. Only for the Condor repo itself, and a no-op
+    # unless the admin opted in.
+    try:
+        after = await get_local_commit(repo_dir)
+        if repo_dir == CONDOR_DIR and before and after and before != after:
+            _, behind = await _run_git(
+                "rev-list", "--count", f"{before}..{after}", repo_dir=repo_dir
+            )
+            from condor.telemetry import taps as telemetry_taps
+
+            telemetry_taps.version_change(
+                before, after, int(behind) if behind.strip().isdigit() else 0
+            )
+    except Exception:
+        logger.debug("Could not record version change", exc_info=True)
 
     return True, output
 
@@ -196,7 +228,11 @@ async def paths_changed(
     if old_commit == new_commit:
         return False
     rc, out = await _run_git(
-        "diff", "--name-only", f"{old_commit}..{new_commit}", "--", *paths,
+        "diff",
+        "--name-only",
+        f"{old_commit}..{new_commit}",
+        "--",
+        *paths,
         repo_dir=repo_dir,
     )
     if rc != 0:
@@ -303,15 +339,19 @@ def hb_api_available() -> bool:
     return os.path.isdir(HUMMINGBOT_API_DIR)
 
 
-async def get_docker_container_info(container_name: str = "hummingbot-api") -> dict | None:
+async def get_docker_container_info(
+    container_name: str = "hummingbot-api",
+) -> dict | None:
     """
     Inspect a Docker container and return basic info.
 
     Returns {"status", "started_at", "image"} or None if unavailable.
     """
     rc, output = await _run_cmd(
-        "docker", "inspect",
-        "--format", '{{.State.Status}}|{{.State.StartedAt}}|{{.Config.Image}}',
+        "docker",
+        "inspect",
+        "--format",
+        "{{.State.Status}}|{{.State.StartedAt}}|{{.Config.Image}}",
         container_name,
         timeout=30,
     )
@@ -367,7 +407,9 @@ async def update_hb_api() -> tuple[bool, str]:
 
     # Docker compose build
     rc, output = await _run_cmd(
-        "docker", "compose", "build",
+        "docker",
+        "compose",
+        "build",
         cwd=HUMMINGBOT_API_DIR,
         timeout=DOCKER_TIMEOUT,
     )
@@ -376,7 +418,10 @@ async def update_hb_api() -> tuple[bool, str]:
 
     # Docker compose up -d
     rc, output = await _run_cmd(
-        "docker", "compose", "up", "-d",
+        "docker",
+        "compose",
+        "up",
+        "-d",
         cwd=HUMMINGBOT_API_DIR,
         timeout=DOCKER_TIMEOUT,
     )

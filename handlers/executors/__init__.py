@@ -87,14 +87,9 @@ async def executors_callback_handler(
     # Import handlers lazily to avoid circular imports
     from .grid import handle_connector_select as grid_handle_connector_select
     from .grid import handle_deploy as grid_handle_deploy
-    from .grid import (
-        handle_interval_select,
-    )
+    from .grid import handle_interval_select
     from .grid import handle_pair_input as grid_handle_pair_input
-    from .grid import (
-        show_step_2_combined,
-        start_grid_wizard,
-    )
+    from .grid import show_step_2_combined, start_grid_wizard
     from .menu import (
         handle_close,
         handle_confirm_stop_executor,
@@ -107,14 +102,9 @@ async def executors_callback_handler(
     )
     from .position import handle_connector_select as pos_handle_connector_select
     from .position import handle_deploy as pos_handle_deploy
-    from .position import (
-        handle_entry_price_select as pos_handle_entry_price,
-    )
+    from .position import handle_entry_price_select as pos_handle_entry_price
     from .position import handle_pair_input as pos_handle_pair_input
-    from .position import (
-        show_step_2_config,
-        start_position_wizard,
-    )
+    from .position import show_step_2_config, start_position_wizard
 
     # Menu actions
     if action == "menu":

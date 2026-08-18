@@ -14,6 +14,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
+from condor.pool_data import (
+    fetch_liquidity_bins,
+    fetch_ohlcv,
+    gecko_call,
+    get_gecko_network,
+)
 from config_manager import get_client
 from handlers.config.user_preferences import get_dex_last_pool, set_dex_last_pool
 from utils.telegram_formatters import (
@@ -26,7 +32,6 @@ from utils.telegram_formatters import (
 )
 
 from ._shared import DEFAULT_CACHE_TTL, get_cached, invalidate_cache, set_cached
-from .pool_data import fetch_liquidity_bins, fetch_ohlcv, get_gecko_network
 from .visualizations import (
     generate_aggregated_liquidity_chart,
     generate_combined_chart,
@@ -1768,8 +1773,6 @@ async def handle_add_to_gateway(
     Fetches token details from GeckoTerminal and adds both base and quote tokens
     to the Gateway configuration for the network.
     """
-    from geckoterminal_py import GeckoTerminalAsyncClient
-
     from config_manager import get_config_manager
 
     query = update.callback_query
@@ -1821,14 +1824,13 @@ async def handle_add_to_gateway(
 
     added_tokens = []
     errors = []
-    gecko_client = GeckoTerminalAsyncClient()
 
     async def add_token_to_gateway(token_address: str) -> bool:
         """Fetch token info and add to gateway"""
         try:
             # Fetch from GeckoTerminal
-            result = await gecko_client.get_specific_token_on_network(
-                gecko_network, token_address
+            result = await gecko_call(
+                "get_specific_token_on_network", gecko_network, token_address
             )
 
             if isinstance(result, dict):

@@ -24,7 +24,9 @@ def _get_model(model_size: str = DEFAULT_MODEL):
         from faster_whisper import WhisperModel
 
         log.info("Loading Whisper model '%s' ...", model_size)
-        _models[model_size] = WhisperModel(model_size, device="cpu", compute_type="int8")
+        _models[model_size] = WhisperModel(
+            model_size, device="cpu", compute_type="int8"
+        )
         log.info("Whisper model loaded: %s", model_size)
     return _models[model_size]
 
@@ -74,6 +76,9 @@ def _transcribe_sync(
     text = " ".join(seg.text.strip() for seg in segments)
     log.info(
         "Transcribed %.1fs audio → %d chars (lang=%s, model=%s)",
-        info.duration, len(text), info.language, model_size,
+        info.duration,
+        len(text),
+        info.language,
+        model_size,
     )
     return text

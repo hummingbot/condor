@@ -15,6 +15,8 @@ import logging
 import time
 from typing import Any
 
+from condor.fetchers.executors import normalize_executor_side
+
 logger = logging.getLogger(__name__)
 
 # Polling defaults for run_and_save. The timeout is deliberately generous: a caller
@@ -55,6 +57,32 @@ def coerce_controller_config(config: dict) -> dict:
             v = coerce_controller_config(v)
         out[k] = v
     return out
+
+
+def normalize_backtest_task(task: Any) -> Any:
+    """Normalize the executor sides inside a backtest envelope, in place.
+
+    The backtesting engine reports a side the way the raw API does -- ``1``,
+    ``TradeType.BUY``, ``LONG`` -- and this payload is the one wire that never went
+    through :func:`condor.fetchers.executors.normalize_executor_side`, so the
+    dashboard carried a TypeScript reimplementation of the rule to render a backtest
+    (ARCH-121). Applying the canonical normalizer here makes the backtest wire match
+    the executor wire, leaving exactly one definition of the rule.
+
+    Accepts either the task envelope (``{status, config, result, ...}``) or a bare
+    result payload, and only rewrites a ``side`` that is actually present, so it adds
+    nothing to the raw payload the dashboard also renders as JSON.
+    """
+    if not isinstance(task, dict):
+        return task
+    result = task.get("result")
+    payload = result if isinstance(result, dict) else task
+    executors = payload.get("executors")
+    if isinstance(executors, list):
+        for ex in executors:
+            if isinstance(ex, dict) and "side" in ex:
+                ex["side"] = normalize_executor_side(ex["side"])
+    return task
 
 
 async def run_and_save(
@@ -130,7 +158,7 @@ async def _poll_task(
                 f"Backtest {task_id} returned an unreadable task: {task}"
             )
         if task.get("status") in _TERMINAL:
-            return task
+            return normalize_backtest_task(task)
         if time.monotonic() >= deadline:
             raise BacktestError(
                 f"Backtest {task_id} is still {task.get('status') or 'running'} after "

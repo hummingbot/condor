@@ -23,7 +23,9 @@ class JSONRPCError(Exception):
             detail = str(data.get("details") or data.get("message") or "") or str(data)
         elif data:
             detail = str(data)
-        super().__init__(f"[{code}] {message}" + (f": {detail[:300]}" if detail else ""))
+        super().__init__(
+            f"[{code}] {message}" + (f": {detail[:300]}" if detail else "")
+        )
 
 
 # Standard JSON-RPC 2.0 error codes
@@ -91,7 +93,9 @@ class JSONRPCPeer:
                 if "error" in data:
                     err = data["error"]
                     future.set_exception(
-                        JSONRPCError(err.get("code", -1), err.get("message", ""), err.get("data"))
+                        JSONRPCError(
+                            err.get("code", -1), err.get("message", ""), err.get("data")
+                        )
                     )
                 else:
                     future.set_result(data.get("result"))
@@ -108,7 +112,10 @@ class JSONRPCPeer:
             if msg_id is not None:
                 resp = {
                     "jsonrpc": "2.0",
-                    "error": {"code": METHOD_NOT_FOUND, "message": f"Method not found: {method}"},
+                    "error": {
+                        "code": METHOD_NOT_FOUND,
+                        "message": f"Method not found: {method}",
+                    },
                     "id": msg_id,
                 }
                 writer.write((json.dumps(resp) + "\n").encode())
@@ -116,7 +123,11 @@ class JSONRPCPeer:
             return
 
         try:
-            result = handler(**params) if not asyncio.iscoroutinefunction(handler) else await handler(**params)
+            result = (
+                handler(**params)
+                if not asyncio.iscoroutinefunction(handler)
+                else await handler(**params)
+            )
         except Exception as e:
             log.exception("Handler error for %s", method)
             if msg_id is not None:

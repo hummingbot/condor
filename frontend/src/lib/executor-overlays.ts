@@ -283,6 +283,74 @@ function computeGridOverlay(executor: ExecutorInfo): ExecutorOverlay {
   };
 }
 
+// ── LP Executor Overlay ──
+
+/**
+ * A CLMM liquidity position, drawn as the grid it structurally is.
+ *
+ * `lower_price` / `upper_price` are the range the position earns fees in, which is
+ * a one-to-one match with `GridBox`, and `TradeChart` draws boxes without ever
+ * reading `type` — so no new drawing code is involved, only a second producer of
+ * the same struct.
+ *
+ * The `*_limit_price` auto-close triggers are deliberately left off an open
+ * position: they are a decision made once, while the range is being drawn, and on
+ * the chart afterwards they are two more red lines competing with the bounds that
+ * actually say whether the position is still earning. LPConfigPanel still draws
+ * them while you set them.
+ */
+function computeLpOverlay(executor: ExecutorInfo): ExecutorOverlay {
+  const customInfo = executor.custom_info || {};
+  const config = executor.config || {};
+  const side = normSide(String(customInfo.side || executor.side || config.side));
+
+  // custom_info wins: a CLMM position is snapped to the venue's bins, so the
+  // on-chain bounds are not the requested ones, and the box has to show where the
+  // liquidity actually sits. Same precedence handlers/dex/liquidity.py applies when
+  // it reads positions back.
+  const num = (v: unknown) => {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  };
+  const lower = num(customInfo.lower_price ?? customInfo.price_lower ?? config.lower_price);
+  const upper = num(customInfo.upper_price ?? customInfo.price_upper ?? config.upper_price);
+
+  const start = executor.timestamp > 0 ? executor.timestamp : Math.floor(Date.now() / 1000);
+  const end = executor.close_timestamp > 0 ? executor.close_timestamp : Math.floor(Date.now() / 1000);
+
+  let gridBox: GridBox | undefined;
+  if (lower > 0 && upper > 0 && start > 0) {
+    gridBox = {
+      startTime: start,
+      endTime: end,
+      // startPrice is the box's dashed edge and endPrice its solid one; the grid
+      // overlay puts start_price (the far bound) first, so upper goes first here.
+      startPrice: upper,
+      endPrice: lower,
+      color: pnlHexColor(executor.pnl >= 0 ? 1 : -1),
+    };
+  }
+
+  return {
+    executorId: executor.id,
+    type: "lp",
+    side,
+    status: executor.status,
+    closeType: executor.close_type,
+    pnl: executor.pnl,
+    pnlPct: executor.net_pnl_pct,
+    volume: executor.volume,
+    fees: executor.cum_fees_quote,
+    priceLines: [],
+    markers: [],
+    gridBox,
+    timeRange: { start, end },
+    config: executor.config,
+    entryPrice: lower,
+    exitPrice: upper,
+  };
+}
+
 // ── Order Executor Overlay ──
 
 function computeOrderOverlay(executor: ExecutorInfo): ExecutorOverlay {
@@ -487,6 +555,8 @@ export function computeExecutorOverlay(executor: ExecutorInfo): ExecutorOverlay 
       return computeGridOverlay(executor);
     case "order":
       return computeOrderOverlay(executor);
+    case "lp":
+      return computeLpOverlay(executor);
     default:
       return computeGenericOverlay(executor);
   }

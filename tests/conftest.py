@@ -3,6 +3,8 @@
 import importlib.util
 import sys
 
+import pytest
+
 from condor.memory.paths import shared_routines_root
 
 
@@ -27,3 +29,17 @@ def load_shared_routine(name: str):
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(autouse=True)
+def _reset_gecko_throttle():
+    """Give every test the full GeckoTerminal budget.
+
+    The limiter is process-wide and window-based on real time, so without this a
+    fast suite spends the whole minute's budget inside the first few tests and the
+    rest fail on a throttle that has nothing to do with what they assert.
+    """
+    from condor.pool_data import reset_gecko_throttle
+
+    reset_gecko_throttle()
+    yield

@@ -39,6 +39,13 @@ PERMISSION_HIERARCHY = {
     ServerPermission.OWNER: 1,
 }
 
+# The user preference that hands a non-admin seat the in-process code runner
+# (SEC-151). It is stored under ``user_preferences[<id>]`` like any other
+# preference, but it is a *capability grant*: only an admin may set it, and
+# ``condor/web/routes/code.py`` reads it as the fallback arm of its gate.
+# Declared here so the gate and the thing that grants it share one spelling.
+CODE_RUN_PREFERENCE = "code_run"
+
 
 class ConfigManager:
     """
@@ -150,6 +157,7 @@ class ConfigManager:
         self._data.setdefault("server_access", {})
         self._data.setdefault("chat_defaults", {})
         self._data.setdefault("user_preferences", {})
+        self._data.setdefault("telemetry", {})
         # Migrate audit_log from config.yml to separate file (one-time)
         if "audit_log" in self._data:
             self._audit_log = self._data.pop("audit_log")
@@ -174,6 +182,7 @@ class ConfigManager:
             "server_access": {},
             "chat_defaults": {},
             "user_preferences": {},
+            "telemetry": {},
             "version": self.VERSION,
         }
 
@@ -215,7 +224,12 @@ class ConfigManager:
                 "users": self._data.get("users", {}),
                 "server_access": self._data.get("server_access", {}),
                 "chat_defaults": self._data.get("chat_defaults", {}),
+                # Omitting this dropped every preference on the next save —
+                # including the code_run grant, which _load_config reads back
+                # and routes/code.py gates on (ARCH-177).
+                "user_preferences": self._data.get("user_preferences", {}),
                 "web_jwt_secret": self._data.get("web_jwt_secret"),
+                "telemetry": self._data.get("telemetry", {}),
                 "version": self._data.get("version", self.VERSION),
             }
             # Keep a copy of the last known-good file before truncating it,
@@ -586,6 +600,27 @@ class ConfigManager:
     # USER MANAGEMENT
     # =========================================================================
 
+    # ── Telemetry (FEAT-023) ──
+    # Consent and the install's random identity live here because this file is
+    # the one durable, process-wide store the MCP subprocess can also read.
+    # Nothing in this section is transmitted except `install_id` and `level`;
+    # `install_secret` never leaves the machine. See PRIVACY.md.
+
+    def get_telemetry(self) -> dict:
+        """The telemetry section. Empty dict on an install that never opted in."""
+        section = self._data.get("telemetry")
+        return dict(section) if isinstance(section, dict) else {}
+
+    def update_telemetry(self, **changes) -> dict:
+        """Merge keys into the telemetry section and persist."""
+        section = self._data.setdefault("telemetry", {})
+        if not isinstance(section, dict):
+            section = {}
+            self._data["telemetry"] = section
+        section.update(changes)
+        self._save_config()
+        return dict(section)
+
     def get_user(self, user_id: int) -> Optional[dict]:
         """Get user record."""
         return self._data.get("users", {}).get(user_id)
@@ -725,6 +760,46 @@ class ConfigManager:
             self._save_config()
             return True
         return False
+
+    def has_code_run_grant(self, user_id: int) -> bool:
+        """Whether this user carries the explicit ``code_run`` grant.
+
+        Says nothing about admins: being an admin is a separate arm of the gate
+        in ``condor/web/routes/code.py``. This answers only "was the capability
+        handed to them", which is what an admin UI needs to render.
+        """
+        return bool(self.get_user_preference(user_id, CODE_RUN_PREFERENCE, False))
+
+    def set_code_run_grant(self, user_id: int, granted: bool, admin_id: int) -> bool:
+        """Grant or revoke the ``code_run`` capability. Returns True if changed.
+
+        Handing this out is handing out arbitrary Python in the bot's own
+        process — every server's credentials, the web JWT secret, os.environ —
+        so it is audited on both edges like ``approve_user``/``block_user``, and
+        the caller is expected to have already checked ``is_admin(admin_id)``.
+
+        Revoking deletes the key rather than writing ``False``, so config.yml
+        keeps only the users who actually hold the grant. Either way the write
+        lands in config.yml immediately and the next request re-reads it, so a
+        grant takes effect without restarting the bot.
+        """
+        if user_id not in self._data.get("users", {}):
+            return False
+        if self.has_code_run_grant(user_id) == bool(granted):
+            return False
+
+        if granted:
+            self.set_user_preference(user_id, CODE_RUN_PREFERENCE, True)
+        else:
+            self.delete_user_preference(user_id, CODE_RUN_PREFERENCE)
+
+        self._audit(
+            "code_run_granted" if granted else "code_run_revoked",
+            "user",
+            str(user_id),
+            admin_id,
+        )
+        return True
 
     # =========================================================================
     # SERVER ACCESS CONTROL

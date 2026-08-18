@@ -649,8 +649,7 @@ def test_consult_denies_server_without_access(monkeypatch):
 
     monkeypatch.setattr(consult_module, "run_consult", _fail_run_consult)
     monkeypatch.setattr(
-        config_manager,
-        "get_config_manager",
+        "condor.web.auth.get_config_manager",
         lambda: SimpleNamespace(has_server_access=lambda uid, name: False),
     )
 
@@ -679,8 +678,7 @@ def test_consult_forces_caller_user_id(monkeypatch):
 
     monkeypatch.setattr(consult_module, "run_consult", _capture_run_consult)
     monkeypatch.setattr(
-        config_manager,
-        "get_config_manager",
+        "condor.web.auth.get_config_manager",
         lambda: SimpleNamespace(has_server_access=lambda uid, name: True),
     )
 
@@ -745,6 +743,11 @@ def test_numeric_credentials_reach_the_subprocess_as_strings(monkeypatch):
                 "username": 999,
                 "password": 123,
             }
+
+        def has_server_access(self, user_id, server_name, *args, **kwargs):
+            # SEC-178: the resolver holds every candidate to reach, not just
+            # existence. This double owns the server it hands out.
+            return True
 
     monkeypatch.setattr(
         config_manager, "get_config_manager", lambda: _NumericPasswordServer()

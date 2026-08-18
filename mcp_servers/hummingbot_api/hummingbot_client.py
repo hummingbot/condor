@@ -56,7 +56,9 @@ class HummingbotClient:
                 await self._client.accounts.list_accounts()
 
                 self._initialized = True
-                logger.info(f"Successfully connected to Hummingbot API at {settings.api_url}")
+                logger.info(
+                    f"Successfully connected to Hummingbot API at {settings.api_url}"
+                )
                 return self._client
 
             except Exception as e:
@@ -65,7 +67,11 @@ class HummingbotClient:
                 logger.warning(f"Connection attempt {attempt + 1} failed: {e}")
 
                 # Don't retry on authentication errors
-                if "401" in error_str or "unauthorized" in error_str or "authentication" in error_str:
+                if (
+                    "401" in error_str
+                    or "unauthorized" in error_str
+                    or "authentication" in error_str
+                ):
                     self._failed_url = settings.api_url
                     self._last_error = MaxConnectionsAttemptError(
                         f"❌ Authentication failed when connecting to Hummingbot API at {settings.api_url}\n\n"
@@ -87,7 +93,12 @@ class HummingbotClient:
         self._failed_url = settings.api_url
         error_str = str(last_error).lower() if last_error else ""
 
-        if "connection" in error_str or "refused" in error_str or "unreachable" in error_str or "timeout" in error_str:
+        if (
+            "connection" in error_str
+            or "refused" in error_str
+            or "unreachable" in error_str
+            or "timeout" in error_str
+        ):
             error_message = (
                 f"❌ Cannot reach Hummingbot API at {settings.api_url}\n\n"
                 f"The API server is not responding. This usually means:\n"
@@ -101,7 +112,10 @@ class HummingbotClient:
             )
 
             # Add Docker networking warning for localhost URLs
-            if "localhost" in settings.api_url and os.getenv("DOCKER_CONTAINER") == "true":
+            if (
+                "localhost" in settings.api_url
+                and os.getenv("DOCKER_CONTAINER") == "true"
+            ):
                 system = platform.system()
                 if system in ["Darwin", "Windows"]:
                     error_message += (

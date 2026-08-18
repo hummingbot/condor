@@ -147,7 +147,7 @@ export function ConnectHyperliquid({
         const reason = (failed[0].result as PromiseRejectedResult).reason as { message?: string };
         setPartial(
           `Connected, but ${failed.map((f) => f.name).join(", ")} could not be saved ` +
-            `(${reason?.message || "validation failed"}). Retry it from the API Keys list — no re-signing needed.`,
+            `(${reason?.message || "validation failed"}). Retry it from the Keys and Wallets list — no re-signing needed.`,
         );
       }
 

@@ -27,7 +27,10 @@ dependencies = [
     "bleach>=6.4.0",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
+# PEP 735 group: this is what ``uv sync --dev`` installs. Declared as an
+# optional-dependencies extra it was invisible to ``--dev``, so CI ran
+# ``black --check`` with no black on PATH and failed to spawn it.
 dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 
 [tool.isort]

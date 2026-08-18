@@ -28,7 +28,11 @@ from condor.runtime.confirmations import get_registry as get_confirmation_regist
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
-from handlers.agents._shared import build_initial_context, get_project_dir
+from handlers.agents._shared import (
+    build_initial_context,
+    get_project_dir,
+    platform_formatting,
+)
 
 log = logging.getLogger(__name__)
 
@@ -155,6 +159,21 @@ class AgentSession:
                         PROMPT_OVERALL_TIMEOUT,
                         self.key,
                     )
+                    # Cancel at the agent before walking away, exactly as
+                    # abort() does. Breaking out only stops us *relaying*: the
+                    # turn would keep generating and keep running tools against
+                    # a permission callback nobody is watching, and the next
+                    # prompt would overlap it at the subprocess. Bounded by
+                    # TIMEOUTS.prompt_cancel with a local fallback, so this
+                    # cannot hang the caller.
+                    try:
+                        await self.client.abort_prompt()
+                    except Exception:  # noqa: BLE001 - never mask the timeout
+                        log.warning(
+                            "Could not cancel timed-out prompt for session %s",
+                            self.key,
+                            exc_info=True,
+                        )
                     yield PromptDone(stop_reason="timeout")
                     break
         finally:
@@ -244,6 +263,29 @@ async def _enforce_session_budget(user_id: int) -> None:
             victim.conversation_id or "none",
         )
         await _destroy_session_internal(victim.key)
+
+
+def bound_agent_context(
+    bound: binding.SessionBinding, user_id: int, platform: str
+) -> str:
+    """The opening context of a chat bound to a specialist Agent.
+
+    A specialist opens with its own identity and domain memory rather than the
+    chat's context, which is what makes it a different brain instead of a skin
+    — but it meant it was also the one brain that never passed through
+    :func:`build_initial_context`, and so never heard how the surface it is
+    speaking into renders a reply: no tables and no charts on the dashboard, no
+    length rules on Telegram. The formatting section is appended here, at the
+    branch that skips the other path, so both teach it exactly once.
+    """
+    return "\n\n".join(
+        (
+            binding.agent_identity_context(
+                bound.agent_slug, user_id, bound.instructions, bound.label
+            ),
+            platform_formatting(platform),
+        )
+    )
 
 
 def _resolve_conversation(
@@ -348,13 +390,13 @@ async def get_or_create_session(
         await _enforce_session_budget(spec.user_id)
 
     # MCP subprocess env expects a numeric chat id; surfaces without a chat
-    # (web, mcp) fall back to the user id.
-    effective_chat_id = (
-        spec.chat_id if spec.chat_id is not None else (spec.user_id or 0)
-    )
+    # (web, mcp) fall back to the user id. The same pair goes down on argv via
+    # binding.resolve, which is what the subprocess actually reads first — so
+    # both channels take it from one derivation (SEC-180).
+    effective_user_id, effective_chat_id = spec.effective_ids()
     extra_env = {
         "CONDOR_CHAT_ID": str(effective_chat_id),
-        "CONDOR_USER_ID": str(spec.user_id or effective_chat_id),
+        "CONDOR_USER_ID": str(effective_user_id),
         # Which session the MCP subprocess belongs to. The *conversation* id does
         # not exist yet here (it is minted below, after the client is up), but the
         # key does and is stable for the subprocess's whole life — so tools that
@@ -458,9 +500,7 @@ async def get_or_create_session(
         # the chat's — that is what makes it a different brain, not a skin.
         initial_context = ""
         if bound.is_agent and spec.user_id:
-            initial_context = binding.agent_identity_context(
-                bound.agent_slug, spec.user_id, bound.instructions, bound.label
-            )
+            initial_context = bound_agent_context(bound, spec.user_id, spec.platform)
         elif spec.user_id:
             initial_context = build_initial_context(
                 spec.user_id,
@@ -470,16 +510,30 @@ async def get_or_create_session(
                 platform=spec.platform,
                 server_name=spec.server_name,
             )
-        # Resolve the server name that was actually used for this session
-        resolved_server = spec.server_name
-        if not resolved_server and spec.user_id:
-            from config_manager import get_config_manager, get_effective_server
+        # Resolve the server name that was actually used for this session. The
+        # chat default is the ambient answer, but ``chat_defaults`` is a global
+        # map keyed by chat id and ``spec`` is an unvalidated request body on
+        # the web, so naming someone else's chat would otherwise resolve their
+        # server here (SEC-178). Every candidate is therefore held to existence
+        # *and* reach, subjected on the run's own principal — the same id the
+        # MCP toolset is built for, so the label and the credentials downstream
+        # can never disagree about who this session belongs to.
+        from config_manager import get_config_manager, get_effective_server
 
+        cm = get_config_manager()
+        subject_id, _ = spec.effective_ids()
+
+        def usable(name: str | None) -> bool:
+            return bool(name and cm.get_server(name)) and cm.has_server_access(
+                subject_id, name
+            )
+
+        resolved_server = spec.server_name
+        if not usable(resolved_server):
             resolved_server = get_effective_server(spec.chat_id, user_data)
-            if not resolved_server:
-                cm = get_config_manager()
-                accessible = cm.get_accessible_servers(spec.user_id)
-                resolved_server = accessible[0] if accessible else None
+        if not usable(resolved_server):
+            accessible = cm.get_accessible_servers(subject_id)
+            resolved_server = accessible[0] if accessible else None
 
         # The durable conversation behind this session. An empty id mints a new
         # one; a supplied id replays that transcript's tail into the opening

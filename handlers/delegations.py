@@ -20,11 +20,7 @@ import logging
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from condor.agents.delegate import (
-    get_all_delegations,
-    get_delegation,
-    stop_delegation,
-)
+from condor.agents.delegate import get_all_delegations, get_delegation, stop_delegation
 from handlers import clear_all_input_states
 from utils.auth import restricted
 from utils.telegram_formatters import escape_markdown_v2

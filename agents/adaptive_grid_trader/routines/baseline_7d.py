@@ -1,7 +1,9 @@
+import logging
+
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
+
 from config_manager import get_client
-import logging
 
 logger = logging.getLogger(__name__)
 

@@ -194,14 +194,17 @@ def test_atomic_write_uses_unique_tmp_per_writer(memory_root, monkeypatch):
     target = s.memories_dir / "one.md"
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    orig = Path.write_text
+    # Observed at the rename, not at the write call, so the assertion survives
+    # any change of write mechanism inside condor.fsutil (ARCH-148).
+    import os
 
-    def spy(self, text, *args, **kwargs):
-        if self.name.endswith(".tmp"):
-            seen.append(self.name)
-        return orig(self, text, *args, **kwargs)
+    orig = os.replace
 
-    monkeypatch.setattr(Path, "write_text", spy)
+    def spy(src, dst):
+        seen.append(os.path.basename(src))
+        return orig(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
     _atomic_write(target, "a")
     _atomic_write(target, "b")
 

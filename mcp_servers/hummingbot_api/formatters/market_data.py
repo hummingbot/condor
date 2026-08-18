@@ -4,6 +4,7 @@ Market data formatters for prices, candles, and order books.
 This module provides table formatters for market data including
 prices, OHLCV candles, and order book snapshots.
 """
+
 from typing import Any
 
 from .base import (

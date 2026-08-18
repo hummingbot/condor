@@ -20,6 +20,7 @@ import {
   INTERVALS,
   LOOKBACK_OPTIONS,
 } from "@/lib/gridExecutor";
+import type { PickSlot } from "@/components/executor/types";
 
 // ── Page ──
 
@@ -140,7 +141,9 @@ export function CreateGridExecutor() {
   });
 
   const handlePriceSet = useMemo(
-    () => (field: "start" | "end" | "limit", price: number) => {
+    () => (field: PickSlot, price: number) => {
+      // The grid panel arms only start/end/limit; a fourth slot names no field.
+      if (field === "limit2") return;
       dispatch({ type: "SET_FIELD", field: `${field}_price`, value: price });
       dispatch({ type: "SET_FIELD", field: "activePickField", value: null });
     },

@@ -24,6 +24,14 @@
   --chart-up: #22c55e;
   --chart-down: #ef4444;
 
+  /* Categorical series, fixed order (chat charts). Validated for CVD
+     separation, lightness band and contrast against --chart-bg — never
+     reordered, never extended by generating a hue. */
+  --chart-series-1: #3f9ae0;
+  --chart-series-2: #c98200;
+  --chart-series-3: #8a5fd6;
+  --chart-series-4: #0e9e6a;
+
   color-scheme: dark;
 }
 
@@ -50,6 +58,12 @@
   --chart-up: #16a34a;
   --chart-down: #dc2626;
 
+  /* Categorical series, fixed order (chat charts) — light steps. */
+  --chart-series-1: #0072b2;
+  --chart-series-2: #d55e00;
+  --chart-series-3: #7d4dd6;
+  --chart-series-4: #009e73;
+
   color-scheme: light;
 }
 
@@ -75,6 +89,13 @@
   --chart-text: #7b8ba4;
   --chart-up: #0072b2;
   --chart-down: #e69f00;
+
+  /* Categorical series, fixed order (chat charts) — same hues as dark, which
+     already clear the CVD separation target on this surface. */
+  --chart-series-1: #3f9ae0;
+  --chart-series-2: #c98200;
+  --chart-series-3: #8a5fd6;
+  --chart-series-4: #0e9e6a;
 
   color-scheme: dark;
 }

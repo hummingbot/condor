@@ -39,7 +39,7 @@ _ohlcv_cache: dict = {}
 
 def uses_gecko_candles(connector: str) -> bool:
     """Whether this connector's candles come from GeckoTerminal, not the API."""
-    from handlers.dex.pool_data import NETWORK_TO_GECKO
+    from condor.pool_data import NETWORK_TO_GECKO
 
     return connector in NETWORK_TO_GECKO
 
@@ -62,7 +62,7 @@ async def _pool_ohlcv(
     use_cache: bool = True,
 ) -> list:
     """Raw OHLCV rows for one pool, or [] on any miss. Never raises."""
-    from handlers.dex.pool_data import fetch_ohlcv
+    from condor.pool_data import fetch_ohlcv
 
     try:
         rows, err = await fetch_ohlcv(
@@ -98,7 +98,7 @@ async def _resolve_pool(connector: str, trading_pair: str) -> tuple[str, str]:
     ticker pair on a network whose bases are addresses, for instance, where a
     lookup would only spend a request to fail.
     """
-    from handlers.dex.pool_data import (
+    from condor.pool_data import (
         fetch_pair_top_pool,
         fetch_token_top_pool,
         uses_symbol_pairs,
@@ -141,11 +141,7 @@ async def fetch_dex_candles(
     Returns candle dicts (``timestamp``/``open``/``high``/``low``/``close``/
     ``volume``), ascending.
     """
-    from handlers.dex.pool_data import (
-        candles_needed,
-        normalize_timeframe,
-        timeframe_seconds,
-    )
+    from condor.pool_data import candles_needed, normalize_timeframe, timeframe_seconds
 
     timeframe = normalize_timeframe(interval)
     tf_seconds = timeframe_seconds(timeframe)

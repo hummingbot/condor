@@ -168,7 +168,9 @@ export function extractResults(taskResults: Record<string, unknown>): BacktestDa
           id: String(e.id ?? e.executor_id ?? ""),
           timestamp: (e.timestamp ?? 0) as number,
           closeTimestamp: (e.close_timestamp ?? 0) as number,
-          side: normalizeSide(e.side),
+          // Already canonical BUY/SELL: the backtest route runs the payload through
+          // the same `normalize_executor_side` the executor wire uses (ARCH-121).
+          side: String(e.side ?? ""),
           closeType: String(e.close_type ?? ""),
           netPnlQuote: (e.net_pnl_quote ?? 0) as number,
           filledAmountQuote: (e.filled_amount_quote ?? 0) as number,
@@ -214,14 +216,4 @@ export function extractResults(taskResults: Record<string, unknown>): BacktestDa
     executors,
     raw: taskResults,
   };
-}
-
-export function normalizeSide(side: unknown): string {
-  if (typeof side === "string") {
-    if (side === "1" || side.toUpperCase() === "BUY" || side === "TradeType.BUY") return "BUY";
-    if (side === "2" || side.toUpperCase() === "SELL" || side === "TradeType.SELL") return "SELL";
-    return side;
-  }
-  if (typeof side === "number") return side === 1 ? "BUY" : "SELL";
-  return String(side ?? "");
 }

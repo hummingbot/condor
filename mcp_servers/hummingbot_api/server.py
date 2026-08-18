@@ -46,9 +46,7 @@ from mcp_servers.hummingbot_api.tools.gateway import (
 from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_container as manage_gateway_container_impl,
 )
-from mcp_servers.hummingbot_api.tools.gateway_amm import (
-    manage_amm_impl,
-)
+from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
     explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
 )
@@ -241,7 +239,7 @@ async def set_account_position_mode_and_leverage(
         account_name: Account name (default: master_account)
         connector_name: Exchange connector name (e.g., 'binance_perpetual')
         trading_pair: Trading pair (e.g., ETH-USD) only required for setting leverage
-        position_mode: Position mode ('HEDGE' or 'ONE-WAY')
+        position_mode: Position mode ('HEDGE' or 'ONEWAY')
         leverage: Leverage to set (optional, required for HEDGE mode)
     """
     client = await hummingbot_client.get_client()

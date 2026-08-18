@@ -119,6 +119,17 @@ Write a state entry:
 
 If you observed anything useful this tick (e.g. a config underperforming vs its backtest, a pair in a choppy regime, a config that caught a clean trend), write a learning entry. These learnings will inform Steps 1–3 on future ticks.
 
+### Step 8 — Notify user
+Call `send_notification` with a brief tick summary. Keep it short (4–6 lines):
+```
+🤖 EMA Trend Loop — Tick <N>
+Bot: <running|stopped>
+Controllers: <name> <state> <unrealized_pnl> | ...
+Session PnL: <total realized + unrealized>
+Action: <what you did this tick, or "monitoring">
+```
+Always send this even if nothing changed — the user needs to know the agent is alive.
+
 ## Risk rules
 - Max global drawdown: 15% of total_amount_quote
 - Max per-position loss before stopping controller: 10%

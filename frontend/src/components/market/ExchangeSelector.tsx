@@ -1,6 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown } from "lucide-react";
 
+/**
+ * Every venue this selector lists has an order book. Gateway networks live on
+ * the DEX page, where the pool — not the venue — is the unit of navigation, so
+ * there is no second group here to head.
+ */
 interface ExchangeSelectorProps {
   connectors: string[];
   value: string;
@@ -46,21 +51,36 @@ export function ExchangeSelector({
         <div className="absolute left-0 top-full z-50 mt-px min-w-[180px] overflow-hidden rounded-b-lg border border-t-0 border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl shadow-black/30">
           <div className="max-h-72 overflow-y-auto py-1">
             {connectors.map((c) => (
-              <button
-                key={c}
-                onClick={() => { onChange(c); setOpen(false); }}
-                className={`flex w-full items-center px-3 py-1.5 text-left text-xs transition-colors ${
-                  c === value
-                    ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
-                    : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
-                }`}
-              >
-                {formatName(c)}
-              </button>
+              <ConnectorOption key={c} name={c} value={value} onSelect={onChange} onClose={() => setOpen(false)} />
             ))}
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+function ConnectorOption({
+  name,
+  value,
+  onSelect,
+  onClose,
+}: {
+  name: string;
+  value: string;
+  onSelect: (v: string) => void;
+  onClose: () => void;
+}) {
+  return (
+    <button
+      onClick={() => { onSelect(name); onClose(); }}
+      className={`flex w-full items-center px-3 py-1.5 text-left text-xs transition-colors ${
+        name === value
+          ? "bg-[var(--color-primary)]/10 font-medium text-[var(--color-primary)]"
+          : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+      }`}
+    >
+      {formatName(name)}
+    </button>
   );
 }

@@ -1,8 +1,10 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import {
   Activity,
   Bot,
   Brain,
+  Bug,
+  Droplets,
   Eye,
   Moon,
   Settings,
@@ -15,6 +17,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { ReportIssueDialog } from "@/components/ReportIssueDialog";
 import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
@@ -27,6 +30,7 @@ const NAV_ITEMS = [
   { to: "/", icon: Brain, label: "Agents" },
   { to: "/portfolio", icon: Wallet, label: "Portfolio" },
   { to: "/trade", icon: Swords, label: "Trade" },
+  { to: "/dex", icon: Droplets, label: "DEX" },
   { to: "/bots", icon: Bot, label: "Bots" },
   { to: "/executors", icon: Activity, label: "Executors" },
   { to: "/routines", icon: Zap, label: "Routines" },
@@ -54,6 +58,7 @@ function AppShellBody() {
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
   const { hasKeys, isLoading: keysLoading } = useCredentials();
+  const [reportOpen, setReportOpen] = useState(false);
 
   // The chat workspace takes the full height and owns its own scrolling, so
   // the shell drops `main`'s padding for it. It lives at `/` — the entry point
@@ -123,6 +128,14 @@ function AppShellBody() {
           <CurrencySelector />
 
           <div className="flex items-center gap-1">
+            <button
+              onClick={() => setReportOpen(true)}
+              className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
+              title="Report an issue"
+            >
+              <Bug className="h-4 w-4" />
+            </button>
+
             <NavLink
               to="/settings"
               className={({ isActive }) =>
@@ -166,6 +179,8 @@ function AppShellBody() {
         </ErrorBoundary>
         {showKeysOverlay && <ConnectKeysOverlay />}
       </main>
+
+      <ReportIssueDialog open={reportOpen} onClose={() => setReportOpen(false)} />
     </div>
   );
 }

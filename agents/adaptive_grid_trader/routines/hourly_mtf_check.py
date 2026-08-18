@@ -1,9 +1,11 @@
-from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
-from config_manager import get_client
 import asyncio
 import logging
 import math
+
+from pydantic import BaseModel, Field
+from telegram.ext import ContextTypes
+
+from config_manager import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -12,16 +14,24 @@ CATEGORY = "Analysis"
 
 class Config(BaseModel):
     """Multi-timeframe analysis → LONG_GRID / SHORT_GRID / TWO_SIDED_GRID / HOLD recommendation."""
+
     trading_pair: str = Field(default="BTC-USDT")
     connector_name: str = Field(default="binance_perpetual")
-    lifetime_hours: float = Field(default=8.0, description="Expected grid lifetime for range calculation (6-12h typical due to anti-flip rule)")
+    lifetime_hours: float = Field(
+        default=8.0,
+        description="Expected grid lifetime for range calculation (6-12h typical due to anti-flip rule)",
+    )
     atr_period: int = Field(default=14)
-    baseline_atr: float = Field(default=0.0, description="From baseline_7d — 0 means compute from 1h candles only")
+    baseline_atr: float = Field(
+        default=0.0,
+        description="From baseline_7d — 0 means compute from 1h candles only",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _parse_candles(result) -> list:
     """Defensively parse candles from API response."""
@@ -115,7 +125,9 @@ def _confidence(trend_4h: str, trend_1d: str, closes_1h: list) -> str:
     slow = _compute_ema(closes_1h, 21)
     if fast and slow and slow[-1]:
         diff = (fast[-1] - slow[-1]) / slow[-1] * 100
-        aligned = (trend_4h == "BULLISH" and diff > 0.3) or (trend_4h == "BEARISH" and diff < -0.3)
+        aligned = (trend_4h == "BULLISH" and diff > 0.3) or (
+            trend_4h == "BEARISH" and diff < -0.3
+        )
         return "HIGH" if aligned else "MEDIUM"
     return "MEDIUM"
 
@@ -123,6 +135,7 @@ def _confidence(trend_4h: str, trend_1d: str, closes_1h: list) -> str:
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     client = await get_client(context._chat_id, context=context)
@@ -132,11 +145,17 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # -- 1. Fetch three timeframes in parallel --
     try:
         raw_1h, raw_4h, raw_1d = await asyncio.gather(
-            client.market_data.get_candles(config.connector_name, config.trading_pair, "1h", max_records=50),
+            client.market_data.get_candles(
+                config.connector_name, config.trading_pair, "1h", max_records=50
+            ),
             # _trend_direction needs slow EMA period + 2 = 23 candles minimum,
             # so keep a margin above that or the timeframe reads NEUTRAL forever.
-            client.market_data.get_candles(config.connector_name, config.trading_pair, "4h", max_records=60),
-            client.market_data.get_candles(config.connector_name, config.trading_pair, "1d", max_records=60),
+            client.market_data.get_candles(
+                config.connector_name, config.trading_pair, "4h", max_records=60
+            ),
+            client.market_data.get_candles(
+                config.connector_name, config.trading_pair, "1d", max_records=60
+            ),
         )
     except Exception as e:
         logger.error(f"[hourly_mtf_check] candle fetch failed: {e}")
@@ -156,7 +175,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         atr_1h = (atr_1h + config.baseline_atr) / 2.0
 
     window_24 = candles_1h[-24:] if len(candles_1h) >= 24 else candles_1h
-    vol_level, range_high, range_low, range_pct, range_pos = _volatility_level(atr_1h, window_24)
+    vol_level, range_high, range_low, range_pct, range_pos = _volatility_level(
+        atr_1h, window_24
+    )
     current_price = float(candles_1h[-1].get("close", 0) or 0)
 
     # 4h: trend direction
@@ -168,20 +189,28 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # -- 3. Signal synthesis --
     if trend_4h == "BULLISH" and trend_1d == "BULLISH":
         profile = "LONG_GRID"
-        rationale = ("Both medium (4h) and macro (1d) timeframes confirm bullish momentum. "
-                     "Grid skewed upward — capture breakout while limiting downside exposure.")
+        rationale = (
+            "Both medium (4h) and macro (1d) timeframes confirm bullish momentum. "
+            "Grid skewed upward — capture breakout while limiting downside exposure."
+        )
     elif trend_4h == "BEARISH" and trend_1d == "BEARISH":
         profile = "SHORT_GRID"
-        rationale = ("Both medium (4h) and macro (1d) timeframes confirm bearish pressure. "
-                     "Grid skewed downward — profit from continued decline with capped upside risk.")
+        rationale = (
+            "Both medium (4h) and macro (1d) timeframes confirm bearish pressure. "
+            "Grid skewed downward — profit from continued decline with capped upside risk."
+        )
     elif vol_level in ("LOW", "MODERATE"):
         profile = "TWO_SIDED_GRID"
-        rationale = ("Timeframes disagree or both neutral with contained volatility — "
-                     "price is likely range-bound. Symmetric two-sided grid maximises fee capture.")
+        rationale = (
+            "Timeframes disagree or both neutral with contained volatility — "
+            "price is likely range-bound. Symmetric two-sided grid maximises fee capture."
+        )
     else:
         profile = "HOLD"
-        rationale = ("Conflicting signals combined with elevated volatility — "
-                     "directional conviction is insufficient. Avoid new grid entry.")
+        rationale = (
+            "Conflicting signals combined with elevated volatility — "
+            "directional conviction is insufficient. Avoid new grid entry."
+        )
 
     closes_1h = [float(c.get("close", 0) or 0) for c in candles_1h]
     conf = _confidence(trend_4h, trend_1d, closes_1h)
@@ -209,29 +238,85 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # -- Build levels table --
     if profile == "LONG_GRID":
         levels_rows = [
-            {"Level": "limit_price", "Price": f"{limit_price:,.4f}", "Description": "Abort / stop-loss if breached"},
-            {"Level": "start_price", "Price": f"{start_price:,.4f}", "Description": "Grid lower bound"},
-            {"Level": "current_price", "Price": f"{current_price:,.4f}", "Description": "Reference at analysis time"},
-            {"Level": "end_price", "Price": f"{end_price:,.4f}", "Description": "Grid upper bound / TP zone"},
+            {
+                "Level": "limit_price",
+                "Price": f"{limit_price:,.4f}",
+                "Description": "Abort / stop-loss if breached",
+            },
+            {
+                "Level": "start_price",
+                "Price": f"{start_price:,.4f}",
+                "Description": "Grid lower bound",
+            },
+            {
+                "Level": "current_price",
+                "Price": f"{current_price:,.4f}",
+                "Description": "Reference at analysis time",
+            },
+            {
+                "Level": "end_price",
+                "Price": f"{end_price:,.4f}",
+                "Description": "Grid upper bound / TP zone",
+            },
         ]
     elif profile == "SHORT_GRID":
         levels_rows = [
-            {"Level": "end_price", "Price": f"{end_price:,.4f}", "Description": "Grid upper bound"},
-            {"Level": "current_price", "Price": f"{current_price:,.4f}", "Description": "Reference at analysis time"},
-            {"Level": "start_price", "Price": f"{start_price:,.4f}", "Description": "Grid lower bound / TP zone"},
-            {"Level": "limit_price", "Price": f"{limit_price:,.4f}", "Description": "Abort / stop-loss if breached"},
+            {
+                "Level": "end_price",
+                "Price": f"{end_price:,.4f}",
+                "Description": "Grid upper bound",
+            },
+            {
+                "Level": "current_price",
+                "Price": f"{current_price:,.4f}",
+                "Description": "Reference at analysis time",
+            },
+            {
+                "Level": "start_price",
+                "Price": f"{start_price:,.4f}",
+                "Description": "Grid lower bound / TP zone",
+            },
+            {
+                "Level": "limit_price",
+                "Price": f"{limit_price:,.4f}",
+                "Description": "Abort / stop-loss if breached",
+            },
         ]
     elif profile == "TWO_SIDED_GRID":
         levels_rows = [
-            {"Level": "start_price", "Price": f"{start_price:,.4f}", "Description": "Grid lower bound (−2D)"},
-            {"Level": "current_price", "Price": f"{current_price:,.4f}", "Description": "Reference / centre"},
-            {"Level": "end_price", "Price": f"{end_price:,.4f}", "Description": "Grid upper bound (+2D)"},
+            {
+                "Level": "start_price",
+                "Price": f"{start_price:,.4f}",
+                "Description": "Grid lower bound (−2D)",
+            },
+            {
+                "Level": "current_price",
+                "Price": f"{current_price:,.4f}",
+                "Description": "Reference / centre",
+            },
+            {
+                "Level": "end_price",
+                "Price": f"{end_price:,.4f}",
+                "Description": "Grid upper bound (+2D)",
+            },
         ]
     else:
         levels_rows = [
-            {"Level": "ref_low", "Price": f"{start_price:,.4f}", "Description": "Reference lower (−D) — NOT ACTIONABLE"},
-            {"Level": "current_price", "Price": f"{current_price:,.4f}", "Description": "Reference at analysis time"},
-            {"Level": "ref_high", "Price": f"{end_price:,.4f}", "Description": "Reference upper (+D) — NOT ACTIONABLE"},
+            {
+                "Level": "ref_low",
+                "Price": f"{start_price:,.4f}",
+                "Description": "Reference lower (−D) — NOT ACTIONABLE",
+            },
+            {
+                "Level": "current_price",
+                "Price": f"{current_price:,.4f}",
+                "Description": "Reference at analysis time",
+            },
+            {
+                "Level": "ref_high",
+                "Price": f"{end_price:,.4f}",
+                "Description": "Reference upper (+D) — NOT ACTIONABLE",
+            },
         ]
 
     # -- 5. ReportBuilder --
@@ -239,10 +324,15 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         from condor.reports import ReportBuilder
 
         builder = ReportBuilder(f"MTF Check — {config.trading_pair}")
-        builder.source("routine", "hourly_mtf_check").tags(["grid", "mtf", "analysis", "adaptive"])
+        builder.source("routine", "hourly_mtf_check").tags(
+            ["grid", "mtf", "analysis", "adaptive"]
+        )
 
         # Section 1: Timeframe Summary
-        builder.section("01 / TIMEFRAME SUMMARY", "Per-timeframe: trend direction, ATR/volatility, signal")
+        builder.section(
+            "01 / TIMEFRAME SUMMARY",
+            "Per-timeframe: trend direction, ATR/volatility, signal",
+        )
         tf_rows = [
             {
                 "Timeframe": "1h (Range & Vol)",
@@ -275,10 +365,25 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 "Signal": trend_1d,
             },
         ]
-        builder.table(tf_rows, ["Timeframe", "Candles", "ATR(14)", "24h Range", "Range %", "Volatility", "Price in Range", "Signal"])
+        builder.table(
+            tf_rows,
+            [
+                "Timeframe",
+                "Candles",
+                "ATR(14)",
+                "24h Range",
+                "Range %",
+                "Volatility",
+                "Price in Range",
+                "Signal",
+            ],
+        )
 
         # Section 2: Signal Synthesis
-        builder.section("02 / SIGNAL SYNTHESIS", "Agreement analysis across timeframes and final profile decision")
+        builder.section(
+            "02 / SIGNAL SYNTHESIS",
+            "Agreement analysis across timeframes and final profile decision",
+        )
         builder.kpi("4h Trend", trend_4h)
         builder.kpi("1d Trend", trend_1d)
         builder.kpi("1h Volatility", vol_level)
@@ -288,12 +393,18 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             f"**4h vs 1d agreement:** {agreement_str}  \n"
             f"**Current price:** {current_price:,.4f}  \n"
             f"**ATR(1h, {config.atr_period}):** {atr_1h:.6f}"
-            + (f"  *(blended with baseline {config.baseline_atr})*" if config.baseline_atr > 0 else "") +
-            f"  \n**D = ATR × √{config.lifetime_hours:.1f}h = {D:.6f}**"
+            + (
+                f"  *(blended with baseline {config.baseline_atr})*"
+                if config.baseline_atr > 0
+                else ""
+            )
+            + f"  \n**D = ATR × √{config.lifetime_hours:.1f}h = {D:.6f}**"
         )
 
         # Section 3: Recommendation
-        builder.section("03 / RECOMMENDATION", "Actionable grid profile with concrete price levels")
+        builder.section(
+            "03 / RECOMMENDATION", "Actionable grid profile with concrete price levels"
+        )
         builder.kpi("Profile", profile)
         builder.kpi("Confidence", conf)
         builder.kpi("D Value", f"{D:.4f}")
@@ -302,7 +413,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         actionable = profile != "HOLD"
         if limit_price is not None:
             builder.kpi("Limit Price", f"{limit_price:,.4f}")
-        builder.kpi("Start Price", f"{start_price:,.4f}" + ("" if actionable else " (ref)"))
+        builder.kpi(
+            "Start Price", f"{start_price:,.4f}" + ("" if actionable else " (ref)")
+        )
         builder.kpi("End Price", f"{end_price:,.4f}" + ("" if actionable else " (ref)"))
 
         builder.table(levels_rows, ["Level", "Price", "Description"])
@@ -322,12 +435,18 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"Current price: {current_price:,.4f} | ATR(1h): {atr_1h:.6f} | D: {D:.6f}",
     ]
     if profile == "LONG_GRID":
-        lines.append(f"limit_price={limit_price:.4f} | start_price={start_price:.4f} | end_price={end_price:.4f}")
+        lines.append(
+            f"limit_price={limit_price:.4f} | start_price={start_price:.4f} | end_price={end_price:.4f}"
+        )
     elif profile == "SHORT_GRID":
-        lines.append(f"start_price={start_price:.4f} | end_price={end_price:.4f} | limit_price={limit_price:.4f}")
+        lines.append(
+            f"start_price={start_price:.4f} | end_price={end_price:.4f} | limit_price={limit_price:.4f}"
+        )
     elif profile == "TWO_SIDED_GRID":
         lines.append(f"start_price={start_price:.4f} | end_price={end_price:.4f}")
     else:
-        lines.append(f"ref_low={start_price:.4f} | ref_high={end_price:.4f} [NOT ACTIONABLE]")
+        lines.append(
+            f"ref_low={start_price:.4f} | ref_high={end_price:.4f} [NOT ACTIONABLE]"
+        )
     lines.append(f"Rationale: {rationale}")
     return "\n".join(lines)

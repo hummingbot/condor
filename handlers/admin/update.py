@@ -52,8 +52,7 @@ async def _check_and_show(message_or_query, context: ContextTypes.DEFAULT_TYPE) 
 
     if condor_info["error"]:
         sections.append(
-            f"*Condor*\n"
-            f"Error: `{escape_markdown_v2(condor_info['error'])}`"
+            f"*Condor*\n" f"Error: `{escape_markdown_v2(condor_info['error'])}`"
         )
     else:
         local = escape_markdown_v2(condor_info["local_commit"])
@@ -114,7 +113,9 @@ async def _check_and_show(message_or_query, context: ContextTypes.DEFAULT_TYPE) 
                 hb_remote = escape_markdown_v2(hb_git["remote_commit"])
                 hb_behind = hb_git["commits_behind"]
                 hb_log_lines = hb_git["commit_log"].split("\n")[:5]
-                hb_log_display = "\n".join(escape_markdown_v2_code(l) for l in hb_log_lines)
+                hb_log_display = "\n".join(
+                    escape_markdown_v2_code(l) for l in hb_log_lines
+                )
                 if hb_behind > 5:
                     hb_log_display += f"\n_\\.\\.\\.and {hb_behind - 5} more_"
                 sections.append(
@@ -130,29 +131,51 @@ async def _check_and_show(message_or_query, context: ContextTypes.DEFAULT_TYPE) 
     keyboard = []
 
     if condor_has_update and hb_has_update:
-        keyboard.append([InlineKeyboardButton("Update All", callback_data="admin:update_all")])
-        keyboard.append([
-            InlineKeyboardButton("Update Condor", callback_data="admin:update_pull"),
-            InlineKeyboardButton("Update HB API", callback_data="admin:update_hb"),
-        ])
+        keyboard.append(
+            [InlineKeyboardButton("Update All", callback_data="admin:update_all")]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "Update Condor", callback_data="admin:update_pull"
+                ),
+                InlineKeyboardButton("Update HB API", callback_data="admin:update_hb"),
+            ]
+        )
     elif condor_has_update:
-        keyboard.append([InlineKeyboardButton("Update Condor & Restart", callback_data="admin:update_pull")])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "Update Condor & Restart", callback_data="admin:update_pull"
+                )
+            ]
+        )
     elif hb_has_update:
-        keyboard.append([InlineKeyboardButton("Update HB API", callback_data="admin:update_hb")])
+        keyboard.append(
+            [InlineKeyboardButton("Update HB API", callback_data="admin:update_hb")]
+        )
 
-    keyboard.append([InlineKeyboardButton("Refresh", callback_data="admin:update_check")])
-    keyboard.append([InlineKeyboardButton("Force Restart", callback_data="admin:update_restart")])
+    keyboard.append(
+        [InlineKeyboardButton("Refresh", callback_data="admin:update_check")]
+    )
+    keyboard.append(
+        [InlineKeyboardButton("Force Restart", callback_data="admin:update_restart")]
+    )
     keyboard.append([InlineKeyboardButton("Back", callback_data="admin:back")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     if is_callback:
         await message_or_query.edit_message_text(
-            text, parse_mode="MarkdownV2", reply_markup=reply_markup,
+            text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup,
         )
     else:
         await msg.edit_text(
-            text, parse_mode="MarkdownV2", reply_markup=reply_markup,
+            text,
+            parse_mode="MarkdownV2",
+            reply_markup=reply_markup,
         )
 
 
@@ -226,12 +249,18 @@ async def _fail(
     keyboard = []
     if retry_restart:
         keyboard.append(
-            [InlineKeyboardButton("Restart Anyway", callback_data="admin:update_restart")]
+            [
+                InlineKeyboardButton(
+                    "Restart Anyway", callback_data="admin:update_restart"
+                )
+            ]
         )
     keyboard.append([InlineKeyboardButton("Back", callback_data="admin:update_check")])
 
     await query.edit_message_text(
-        text, parse_mode="MarkdownV2", reply_markup=InlineKeyboardMarkup(keyboard),
+        text,
+        parse_mode="MarkdownV2",
+        reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
@@ -263,7 +292,9 @@ async def _update_condor(query) -> bool:
     success, dep_msg = await install_dependencies()
     if not success:
         await _fail(
-            query, "Dependencies failed", dep_msg,
+            query,
+            "Dependencies failed",
+            dep_msg,
             note="Code was pulled but deps failed. Fix it manually before restarting.",
             retry_restart=True,
         )
@@ -276,7 +307,9 @@ async def _update_condor(query) -> bool:
         success, build_msg = await build_frontend()
         if not success:
             await _fail(
-                query, "Dashboard build failed", build_msg,
+                query,
+                "Dashboard build failed",
+                build_msg,
                 note=(
                     "Code and deps are updated, but the dashboard would come back "
                     "on the previous bundle."
@@ -324,7 +357,8 @@ async def _do_update_hb(query, context: ContextTypes.DEFAULT_TYPE) -> None:
         [InlineKeyboardButton("Back", callback_data="admin:update_check")],
     ]
     await query.edit_message_text(
-        text, parse_mode="MarkdownV2",
+        text,
+        parse_mode="MarkdownV2",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
@@ -338,7 +372,9 @@ async def _do_update_all(query, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _progress(query, "Updating hummingbot-api...")
     hb_ok, hb_msg = await update_hb_api()
     if not hb_ok:
-        await _fail(query, "HB API update failed", hb_msg, note="Condor update skipped.")
+        await _fail(
+            query, "HB API update failed", hb_msg, note="Condor update skipped."
+        )
         return
 
     if await _update_condor(query):
@@ -427,6 +463,4 @@ def schedule_update_checks(application) -> None:
         first=30,  # first check 30s after startup
         name=UPDATE_CHECK_JOB,
     )
-    logger.info(
-        "Scheduled update checks every %ds", UPDATE_CHECK_INTERVAL
-    )
+    logger.info("Scheduled update checks every %ds", UPDATE_CHECK_INTERVAL)

@@ -5,12 +5,17 @@ import json
 import logging
 import math
 import time
-from typing import Any, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional
 
 from fastapi import WebSocket
 
 from condor import dex_candles
+from condor.asyncutil import TaskSet
+from condor.fetchers.market_data import fetch_historical_candles, normalize_candle
 from condor.web.auth import decode_jwt
+
+if TYPE_CHECKING:
+    from condor.server_data_service import CacheKey
 
 logger = logging.getLogger(__name__)
 
@@ -22,12 +27,51 @@ _CHANNEL_TO_SDT = {
     "prices": "PRICES",
 }
 
-# Reverse mapping for listener compatibility
+# Reverse mapping, for naming the channel a cache write belongs to
 _SDT_TO_CHANNEL_PREFIX = {
     "PORTFOLIO": "portfolio",
     "BOTS_STATUS": "bots",
     "PRICES": "prices",
 }
+
+# CacheKey params a data type's channel is scoped by, in channel-segment order.
+# A data type absent from this table has a server-wide channel (`{prefix}:{server}`)
+# and its key must carry no params at all — an account-scoped portfolio or any
+# other parameterized variant is a *different* dataset and must not be broadcast
+# to the server-wide channel. This is the single source of truth for both
+# directions: channel -> key params when subscribing, key -> channel when
+# broadcasting.
+_CHANNEL_KEY_PARAMS: dict[str, tuple[str, ...]] = {
+    "PRICES": ("connector_name", "trading_pair"),
+}
+
+
+def channel_for_key(key: CacheKey) -> str | None:
+    """WS channel a written SDS ``CacheKey`` belongs to, or ``None`` if none does.
+
+    ``None`` means "no channel carries this data" (a data type the dashboard does
+    not stream, e.g. portfolio history, or a parameterized variant of a
+    server-wide type) — never a silent drop of data a channel was waiting for:
+    a key that names a channel but is missing the params to address it is logged.
+    """
+    prefix = _SDT_TO_CHANNEL_PREFIX.get(key.data_type.name)
+    if not prefix:
+        return None
+
+    params = key.params_dict
+    param_names = _CHANNEL_KEY_PARAMS.get(key.data_type.name, ())
+    if set(params) != set(param_names):
+        logger.debug(
+            "No %s channel for key with params %s (expected %s)",
+            prefix,
+            sorted(params),
+            list(param_names),
+        )
+        return None
+
+    segments = [params[name] for name in param_names]
+    return ":".join([prefix, key.server, *segments])
+
 
 # Interval string -> seconds for buffer sizing
 _INTERVAL_SECONDS: dict[str, int] = {
@@ -66,6 +110,29 @@ def _coerce_duration(value: object) -> int | None:
         logger.warning("Ignoring invalid candle duration from client: %r", value)
         return None
     return duration if duration > 0 else None
+
+
+def parse_candle_channel(channel: str) -> tuple[str, str, str, str, str | None] | None:
+    """Split a candle channel into its parts, or ``None`` if it is malformed.
+
+    The channel is ``candles:{server}:{connector}:{pair}:{interval}[:{pool_address}]``.
+    The pool address is an **optional sixth segment**, set by the DEX page so a
+    chart is pinned to the exact pool the user opened instead of whichever pool
+    ``dex_candles._resolve_pool`` judges deepest for the pair. A five-part channel
+    (every CLOB chart) parses to ``pool_address=None`` and is byte-identical to
+    what it was before the segment existed.
+
+    Every consumer must go through here: unpacking five names off ``split(":")``
+    raises ``ValueError`` on a six-part channel, and each of the three call sites
+    fails silently in a different way (a stream that never backfills, a backfill
+    that never ticks).
+    """
+    parts = channel.split(":")
+    if len(parts) < 5:
+        return None
+    server_name, connector, pair, interval = parts[1:5]
+    pool_address = parts[5] if len(parts) > 5 else None
+    return server_name, connector, pair, interval, pool_address or None
 
 
 class _CandleBuffer:
@@ -182,32 +249,11 @@ class WebSocketManager:
         # Strong refs to fire-and-forget one-shot tasks (backfill, warm cache)
         # so the GC can't cancel them mid-flight (the event loop only keeps a
         # weak reference). Entries auto-remove on completion.
-        self._oneshot_tasks: set[asyncio.Task] = set()
+        self._oneshot_tasks = TaskSet(logger, "One-shot task %s failed: %s")
         # Lazily-built registry of per-type stream lifecycles (see _stream_registry)
         self._stream_registry_cache: dict | None = None
 
     # -- Helpers --
-
-    def _track_oneshot(self, task: asyncio.Task) -> None:
-        """Keep a strong reference to a fire-and-forget task until it finishes,
-        so the GC can't silently cancel it (the event loop only holds a weak
-        reference). The reference is dropped automatically on completion."""
-        self._oneshot_tasks.add(task)
-        task.add_done_callback(self._on_oneshot_done)
-
-    def _on_oneshot_done(self, task: asyncio.Task) -> None:
-        """Release the strong reference and surface failures on this module's
-        logger. Nobody awaits a one-shot task, so without this a crash would
-        only show up as asyncio's "Task exception was never retrieved" at GC
-        time, leaving a channel silently stalled."""
-        self._oneshot_tasks.discard(task)
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            logger.error(
-                "One-shot task %s failed: %s", task.get_name(), exc, exc_info=exc
-            )
 
     @staticmethod
     def _server_from_channel(channel: str) -> str | None:
@@ -221,28 +267,7 @@ class WebSocketManager:
     @staticmethod
     def _normalize_candle(c: Any) -> dict | None:
         """Normalize a candle from any format to a uniform dict with float values."""
-        try:
-            if isinstance(c, dict):
-                return {
-                    "timestamp": float(c.get("timestamp", 0)),
-                    "open": float(c.get("open", 0)),
-                    "high": float(c.get("high", 0)),
-                    "low": float(c.get("low", 0)),
-                    "close": float(c.get("close", 0)),
-                    "volume": float(c.get("volume", 0)),
-                }
-            elif isinstance(c, (list, tuple)) and len(c) >= 6:
-                return {
-                    "timestamp": float(c[0]),
-                    "open": float(c[1]),
-                    "high": float(c[2]),
-                    "low": float(c[3]),
-                    "close": float(c[4]),
-                    "volume": float(c[5]),
-                }
-        except (TypeError, ValueError):
-            pass
-        return None
+        return normalize_candle(c)
 
     # -- Lifecycle --
 
@@ -286,12 +311,8 @@ class WebSocketManager:
         self._last_candle_ws_update.clear()
         self._candle_first_msg_logged.clear()
 
-        # Cancel any still-pending one-shot tasks (snapshot: cancel() fires the
-        # done-callback that mutates the set).
-        for task in list(self._oneshot_tasks):
-            if not task.done():
-                task.cancel()
-        self._oneshot_tasks.clear()
+        # Cancel any still-pending one-shot tasks.
+        self._oneshot_tasks.cancel_all()
 
         if self._cleanup_task and not self._cleanup_task.done():
             self._cleanup_task.cancel()
@@ -360,13 +381,12 @@ class WebSocketManager:
             sds.unsubscribe(cache_key, "ws_manager")
             logger.debug("WS unsubscribed SDS for channel %s", channel)
 
-            # Stop portfolio history refresh when no subscribers remain
+            # The history ranges ride on this subscription — drop them too, or
+            # their polls would outlive the last dashboard client watching.
             if channel.startswith("portfolio:"):
-                from condor.web.routes.portfolio import stop_history_refresh
-
                 server_name = channel.split(":")[1] if ":" in channel else ""
                 if server_name:
-                    stop_history_refresh(server_name)
+                    self._unsubscribe_portfolio_history(server_name)
 
     # -- Message handling --
 
@@ -456,7 +476,7 @@ class WebSocketManager:
                 old_max = buf.max_size
                 buf.set_duration(dur)
                 if buf.max_size > old_max and buf.needs_backfill:
-                    self._track_oneshot(
+                    self._oneshot_tasks.track(
                         asyncio.create_task(
                             self._backfill_candles(channel),
                             name=f"backfill:{channel}",
@@ -498,10 +518,10 @@ class WebSocketManager:
 
     async def _backfill_candles(self, channel: str) -> None:
         """Fetch historical candles to fill the buffer gap."""
-        parts = channel.split(":")
-        if len(parts) < 5:
+        parsed = parse_candle_channel(channel)
+        if parsed is None:
             return
-        _, server_name, connector, pair, interval = parts
+        server_name, connector, pair, interval, pool_address = parsed
         buf = self._candle_buffers.get(channel)
         if buf is None:
             return
@@ -525,7 +545,7 @@ class WebSocketManager:
 
             if dex_candles.uses_gecko_candles(connector):
                 candles = await dex_candles.fetch_dex_candles(
-                    connector, None, pair, interval, start_time, end_time
+                    connector, pool_address, pair, interval, start_time, end_time
                 )
                 if candles:
                     buf.upsert_many(candles)
@@ -539,33 +559,15 @@ class WebSocketManager:
                 return
 
             client = await cm.get_client(server_name)
-            result = await client.market_data.get_historical_candles(
+            candles = await fetch_historical_candles(
+                client,
                 connector,
                 pair,
                 interval,
                 start_time=start_time,
                 end_time=end_time,
+                limit=min(buf.max_size, 5000),
             )
-
-            candles_raw = (
-                result
-                if isinstance(result, list)
-                else result.get("data", []) if isinstance(result, dict) else []
-            )
-            # Fallback to regular candles if historical returned nothing
-            if not candles_raw:
-                result = await client.market_data.get_candles(
-                    connector, pair, interval, min(buf.max_size, 5000)
-                )
-                candles_raw = (
-                    result
-                    if isinstance(result, list)
-                    else result.get("data", []) if isinstance(result, dict) else []
-                )
-
-            candles = [
-                c for r in candles_raw if (c := self._normalize_candle(r)) is not None
-            ]
             if candles:
                 buf.upsert_many(candles)
                 logger.info(
@@ -598,10 +600,12 @@ class WebSocketManager:
         sds = get_server_data_service()
         data_type = ServerDataType[sdt_name]
 
-        # Build params for price channels
-        params = {}
-        if sdt_name == "PRICES" and len(parts) >= 4:
-            params = {"connector_name": parts[2], "trading_pair": parts[3]}
+        # Params the channel scopes its key by, read off the channel segments
+        # that follow the server (same table the broadcast direction uses).
+        param_names = _CHANNEL_KEY_PARAMS.get(sdt_name, ())
+        if len(parts) < 2 + len(param_names):
+            return
+        params = dict(zip(param_names, parts[2:]))
 
         try:
             cache_key = await sds.subscribe(
@@ -619,20 +623,81 @@ class WebSocketManager:
                 if result != prev:
                     await self.broadcast(channel, result)
 
-            # Pre-warm portfolio history cache on subscription
+            # Portfolio history rides on the portfolio subscription: one SDS
+            # key per range, primed now and polled until the last client leaves.
             if prefix == "portfolio":
-                from condor.web.routes.portfolio import warm_portfolio_history
-
-                self._track_oneshot(
+                self._oneshot_tasks.track(
                     asyncio.create_task(
-                        warm_portfolio_history(server_name),
-                        name=f"warm_portfolio_history:{server_name}",
+                        self._subscribe_portfolio_history(channel, server_name),
+                        name=f"portfolio_history:{server_name}",
                     )
                 )
         except Exception as e:
             logger.debug("Failed to subscribe SDS for %s: %s", channel, e)
 
-    # -- SDS listener (legacy-compatible signature) --
+    async def _subscribe_portfolio_history(
+        self, channel: str, server_name: str
+    ) -> None:
+        """Subscribe one SDS key per history range behind a portfolio channel.
+
+        Runs off the subscribe path as a one-shot task: SDS primes each key with
+        a real backend fetch and the WS client must not wait for four of them.
+        Subscribing is idempotent per (key, subscriber), so a second client on
+        the same channel never starts a second poll. If the channel is torn down
+        while the priming is in flight, unsubscribe again — otherwise the poll
+        would outlive its last subscriber.
+        """
+        from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
+        from condor.server_data_service import ServerDataType, get_server_data_service
+
+        sds = get_server_data_service()
+
+        async def _sub(range_key: str) -> None:
+            try:
+                await sds.subscribe(
+                    server=server_name,
+                    data_type=ServerDataType.PORTFOLIO_HISTORY,
+                    subscriber_id="ws_manager",
+                    range_key=range_key,
+                )
+            except Exception as e:
+                logger.debug(
+                    "Failed to subscribe portfolio history %s/%s: %s",
+                    server_name,
+                    range_key,
+                    e,
+                )
+
+        await asyncio.gather(*[_sub(rk) for rk in PORTFOLIO_HISTORY_RANGES])
+
+        if channel not in self._sds_subscriptions:
+            self._unsubscribe_portfolio_history(server_name)
+
+    def _unsubscribe_portfolio_history(self, server_name: str) -> None:
+        """Drop this manager's history subscriptions for a server.
+
+        SDS stops polling a key once it has no subscribers left, so this is what
+        ends the history refresh.
+        """
+        from condor.fetchers.portfolio import PORTFOLIO_HISTORY_RANGES
+        from condor.server_data_service import (
+            CacheKey,
+            ServerDataType,
+            get_server_data_service,
+        )
+
+        sds = get_server_data_service()
+        for range_key in PORTFOLIO_HISTORY_RANGES:
+            sds.unsubscribe(
+                CacheKey.make(
+                    server_name,
+                    ServerDataType.PORTFOLIO_HISTORY,
+                    range_key=range_key,
+                ),
+                "ws_manager",
+            )
+
+    # -- SDS listener --
 
     @staticmethod
     def _transform_executors(raw_data: Any) -> list[dict]:
@@ -664,24 +729,15 @@ class WebSocketManager:
             server_name, data.get("controllers", []), data.get("bots", [])
         )
 
-    def _on_data_update(
-        self, server_name: str, cache_key: str, data_type: Any, value: Any
-    ) -> None:
-        """Called by SDS when cache is updated. Maps to WS channels and broadcasts."""
-        dt_name = data_type.name if hasattr(data_type, "name") else str(data_type)
-        prefix = _SDT_TO_CHANNEL_PREFIX.get(dt_name)
-        if not prefix:
+    def _on_data_update(self, key: CacheKey, value: Any) -> None:
+        """Called by SDS on every cache write. Maps the key to a WS channel and
+        broadcasts. ``key`` is an SDS ``CacheKey``: server, data type and params."""
+        channel = channel_for_key(key)
+        if channel is None:
             return
 
-        # Build channel name
-        if dt_name == "PRICES":
-            parts = cache_key.split(":")
-            if len(parts) >= 3:
-                channel = f"prices:{server_name}:{parts[1]}:{parts[2]}"
-            else:
-                return
-        else:
-            channel = f"{prefix}:{server_name}"
+        dt_name = key.data_type.name
+        server_name = key.server
 
         has_subscribers = any(channel in conn.channels for conn in self._connections)
         if not has_subscribers:
@@ -704,7 +760,7 @@ class WebSocketManager:
                 logger.debug("Failed to transform bots data for WS: %s", e)
                 return
 
-        self._track_oneshot(
+        self._oneshot_tasks.track(
             asyncio.create_task(
                 self._broadcast_update(channel, value),
                 name=f"broadcast:{channel}",
@@ -1006,10 +1062,10 @@ class WebSocketManager:
                 backoff = min(backoff * 2, 60)
 
     async def _candle_stream(self, channel: str) -> None:
-        parts = channel.split(":")
-        if len(parts) < 5:
+        parsed = parse_candle_channel(channel)
+        if parsed is None:
             return
-        _, server_name, connector, pair, interval = parts
+        server_name, connector, pair, interval, pool_address = parsed
 
         from config_manager import get_config_manager
 
@@ -1179,10 +1235,10 @@ class WebSocketManager:
         from — this loop *is* the feed, so it polls from the first tick and never
         waits for staleness.
         """
-        parts = channel.split(":")
-        if len(parts) < 5:
+        parsed = parse_candle_channel(channel)
+        if parsed is None:
             return
-        _, server_name, connector, pair, interval = parts
+        server_name, connector, pair, interval, pool_address = parsed
         interval_sec = _INTERVAL_SECONDS.get(interval, 60)
         gecko = dex_candles.uses_gecko_candles(connector)
         # How long without a WS update before we consider it stale
@@ -1228,7 +1284,7 @@ class WebSocketManager:
                     if gecko:
                         candles = await dex_candles.fetch_dex_candles(
                             connector,
-                            None,
+                            pool_address,
                             pair,
                             interval,
                             now - interval_sec * 5,
@@ -1240,27 +1296,17 @@ class WebSocketManager:
                     else:
                         cm = get_config_manager()
                         client = await cm.get_client(server_name)
-                        result = await client.market_data.get_historical_candles(
+                        # No `limit`: this poll only wants the fresh tail of the
+                        # live range, so an empty historical answer stays empty
+                        # rather than pulling a full unrelated window.
+                        candles = await fetch_historical_candles(
+                            client,
                             connector,
                             pair,
                             interval,
                             start_time=now - interval_sec * 5,
                             end_time=now,
                         )
-                        candles_raw = (
-                            result
-                            if isinstance(result, list)
-                            else (
-                                result.get("data", [])
-                                if isinstance(result, dict)
-                                else []
-                            )
-                        )
-                        candles = [
-                            c
-                            for r in candles_raw
-                            if (c := self._normalize_candle(r)) is not None
-                        ]
                     if candles:
                         buf = self._candle_buffers.get(channel)
                         # Broadcast if we have newer candles OR if the latest
@@ -1494,6 +1540,15 @@ class WebSocketManager:
                 sds = get_server_data_service()
                 client = await cm.get_client(server_name)
                 all_raw: list[dict] = []
+                # Rows already through ExecutorInfo, accumulated page by page.
+                # Transforming the *whole* accumulated list on every page made
+                # this quadratic: with FIRST_PAGE/NEXT_PAGE/MAX_PREFETCH below,
+                # a 5k history cost ~27k pydantic validations instead of 5k, all
+                # on the event loop the candle and bots broadcasts share.
+                # ``_transform_executors`` is a pure per-item map over a list
+                # (``extract_executors_list`` passes a list through untouched),
+                # so transforming each page once yields the identical snapshot.
+                transformed: list[dict] = []
                 page_num = 0
                 FIRST_PAGE = 50
                 NEXT_PAGE = 500
@@ -1508,16 +1563,19 @@ class WebSocketManager:
                     max_items=MAX_PREFETCH,
                 ):
                     all_raw.extend(page)
+                    transformed.extend(self._transform_executors(page))
 
-                    # Transform and broadcast accumulated results after each page
-                    executors = self._transform_executors(all_raw)
-                    if executors:
-                        await self.broadcast(channel, executors)
+                    # Broadcast the accumulated snapshot after each page. It is
+                    # copied because ``broadcast`` retains what it is handed as
+                    # the channel's last-known payload, which the next page
+                    # would otherwise keep mutating underneath it.
+                    if transformed:
+                        await self.broadcast(channel, list(transformed))
                         logger.info(
                             "Executor pre-fetch page %d: %d executors (total %d) for %s",
                             page_num,
                             len(page),
-                            len(executors),
+                            len(transformed),
                             channel,
                         )
                     page_num += 1

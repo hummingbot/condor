@@ -8,6 +8,7 @@ import time
 import aiohttp
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
+
 from config_manager import get_client
 
 logger = logging.getLogger(__name__)
@@ -889,6 +890,7 @@ async def _run_pair_mode(config: Config) -> str:
 
     # ── 7. ReportBuilder ──────────────────────────────────────────────────────
     import plotly.graph_objects as go
+
     from condor.reports import ReportBuilder
 
     builder = ReportBuilder(
@@ -1258,6 +1260,7 @@ async def _run_universe_mode(config: Config, context) -> str:
 
     # ── 9. ReportBuilder ──────────────────────────────────────────────────────
     import plotly.graph_objects as go
+
     from condor.reports import ReportBuilder
 
     builder = ReportBuilder(f"HIP-3 Pairs Backtest: {issuer_upper}")

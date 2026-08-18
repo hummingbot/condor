@@ -30,20 +30,20 @@ async def start_deploy_gateway(query, context: ContextTypes.DEFAULT_TYPE) -> Non
             message_text = (
                 header + "*Select Docker Image:*\n\n"
                 "Choose which Gateway image to deploy\\.\n"
-                "The latest stable version is recommended\\."
+                "The development version is recommended\\."
             )
 
             keyboard = [
                 [
                     InlineKeyboardButton(
-                        "hummingbot/gateway:latest (recommended)",
-                        callback_data="gateway_deploy_image_latest",
+                        "hummingbot/gateway:development (recommended)",
+                        callback_data="gateway_deploy_image_development",
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        "hummingbot/gateway:development",
-                        callback_data="gateway_deploy_image_development",
+                        "hummingbot/gateway:latest",
+                        callback_data="gateway_deploy_image_latest",
                     )
                 ],
                 [

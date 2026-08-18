@@ -14,7 +14,7 @@ import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 
-from condor.acp.client import ACPClient, PromptDone
+from condor.acp.client import ACPClient, PromptDone, TextChunk
 from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.runtime import SessionKey
 from condor.runtime import sessions as session_module
@@ -277,3 +277,47 @@ def test_pydantic_ai_abort_flag_does_not_leak_into_the_next_prompt():
 
     assert events[-1].stop_reason == "end_turn"
     assert run.consumed == 2
+
+
+# ── the session-level wall-clock timeout also cancels at the agent (CORR-140) ──
+
+
+def test_prompt_overall_timeout_aborts_the_turn_at_the_agent(monkeypatch):
+    """A runaway prompt is killed, not just stopped being listened to.
+
+    The timeout branch used to break out of the relay loop only: the agent kept
+    generating and kept running tools against a permission callback nobody was
+    watching, and the lock was freed so the next prompt overlapped it at the
+    subprocess. It must send ``session/cancel`` exactly like Stop does.
+    """
+    monkeypatch.setattr(session_module, "PROMPT_OVERALL_TIMEOUT", 0)
+    client = _client(answers_cancel=True)
+    stdin = client._process.stdin
+    session = _session(client, "slot-timeout")
+
+    async def scenario():
+        events = []
+
+        async def consume():
+            async for event in session.prompt_stream("write me an essay"):
+                events.append(event)
+
+        task = asyncio.create_task(consume())
+        await asyncio.sleep(0.05)
+        # One event past the deadline is what trips the wall-clock check.
+        client._event_queue.put_nowait(TextChunk(text="thinking..."))
+        await asyncio.wait_for(task, timeout=5)
+        return events
+
+    events = asyncio.run(scenario())
+
+    # The turn ended as a timeout for the caller...
+    assert isinstance(events[-1], PromptDone)
+    assert events[-1].stop_reason == "timeout"
+    # ...and the agent was actually told to stop, exactly once.
+    assert stdin.methods().count("session/cancel") == 1
+    # Nothing in flight for the next prompt to overlap with.
+    assert client._current_req_id is None
+    assert client._peer._pending == {}
+    assert session.is_busy is False
+    assert session._lock.locked() is False

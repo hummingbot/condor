@@ -22,6 +22,8 @@ from enum import Enum
 from functools import partial
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
+from condor.asyncutil import TaskSet
+
 logger = logging.getLogger(__name__)
 
 
@@ -34,6 +36,7 @@ class ServerDataType(Enum):
     """All data types fetchable from a Hummingbot server."""
 
     PORTFOLIO = "portfolio"
+    PORTFOLIO_HISTORY = "portfolio_history"
     PRICES = "prices"
     POSITIONS = "positions"
     ACTIVE_ORDERS = "active_orders"
@@ -45,50 +48,78 @@ class ServerDataType(Enum):
     CANDLE_CONNECTORS = "candle_connectors"
     SERVER_STATUS = "server_status"
     ALL_CONNECTORS = "all_connectors"
+    VENUES = "venues"
     TICKERS = "tickers"
     TICKER_POOL = "ticker_pool"
 
 
 @dataclass(frozen=True)
 class DataTypeDefaults:
-    """Default interval, TTL, and stale threshold for a data type."""
+    """Default polling interval and cache TTL for a data type."""
 
     interval: float  # Default polling interval (seconds)
-    ttl: float  # How long cached data is considered valid without subscribers
-    stale_threshold: float  # Data younger than this is always returned
+    ttl: float  # How long cached data is considered valid
+    # Optional per-param TTL override: (param_name, {param_value: ttl}). Some
+    # data types cache variants that go stale at very different rates — a 1D
+    # portfolio-history window is worthless after minutes while a 3M one holds
+    # for hours — and the key params say which variant this is.
+    ttl_by_param: Optional[Tuple[str, Dict[str, float]]] = None
+
+    def ttl_for(self, params: Dict[str, str]) -> float:
+        """TTL for a specific cache key's params."""
+        if not self.ttl_by_param:
+            return self.ttl
+        param_name, table = self.ttl_by_param
+        return table.get(params.get(param_name, ""), self.ttl)
+
+    def interval_for(self, params: Dict[str, str]) -> float:
+        """Default poll cadence for a specific cache key's params.
+
+        Derived from that key's own TTL rather than a second per-param table:
+        polling a variant far more often than its data goes stale is pure
+        waste, and two tables that must agree eventually stop agreeing. The
+        declared ``interval:ttl`` ratio is what carries over, so a variant that
+        stays valid 60x longer is polled 60x less often.
+        """
+        if not self.ttl_by_param or not self.ttl:
+            return self.interval
+        return self.interval * (self.ttl_for(params) / self.ttl)
 
 
 _DEFAULTS: Dict[ServerDataType, DataTypeDefaults] = {
-    ServerDataType.PORTFOLIO: DataTypeDefaults(interval=10, ttl=60, stale_threshold=5),
-    ServerDataType.PRICES: DataTypeDefaults(interval=3, ttl=30, stale_threshold=2),
-    ServerDataType.POSITIONS: DataTypeDefaults(interval=10, ttl=60, stale_threshold=5),
-    ServerDataType.ACTIVE_ORDERS: DataTypeDefaults(
-        interval=10, ttl=60, stale_threshold=5
+    ServerDataType.PORTFOLIO: DataTypeDefaults(interval=10, ttl=60),
+    # One entry per range window, each with its own freshness horizon: a 1D
+    # window at 5m candles is stale within minutes, a 3M window at 1d candles
+    # holds for hours. ``interval == ttl`` here, so ``interval_for`` polls each
+    # range exactly at its own TTL instead of refetching the 3M series 60x per
+    # window like the dashboard's old shared 120s loop did.
+    ServerDataType.PORTFOLIO_HISTORY: DataTypeDefaults(
+        interval=120,
+        ttl=120,
+        ttl_by_param=(
+            "range_key",
+            {"1D": 120, "1W": 600, "1M": 3600, "3M": 7200},
+        ),
     ),
-    ServerDataType.TRADING_RULES: DataTypeDefaults(
-        interval=300, ttl=600, stale_threshold=30
-    ),
-    ServerDataType.CONNECTORS: DataTypeDefaults(
-        interval=300, ttl=600, stale_threshold=30
-    ),
-    ServerDataType.BOTS_STATUS: DataTypeDefaults(interval=5, ttl=30, stale_threshold=3),
-    ServerDataType.EXECUTORS: DataTypeDefaults(interval=2, ttl=30, stale_threshold=1),
-    ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120, stale_threshold=10),
-    ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(
-        interval=300, ttl=600, stale_threshold=30
-    ),
-    ServerDataType.SERVER_STATUS: DataTypeDefaults(
-        interval=60, ttl=120, stale_threshold=15
-    ),
-    ServerDataType.ALL_CONNECTORS: DataTypeDefaults(
-        interval=300, ttl=600, stale_threshold=30
-    ),
-    ServerDataType.TICKERS: DataTypeDefaults(interval=60, ttl=180, stale_threshold=30),
+    ServerDataType.PRICES: DataTypeDefaults(interval=3, ttl=30),
+    ServerDataType.POSITIONS: DataTypeDefaults(interval=10, ttl=60),
+    ServerDataType.ACTIVE_ORDERS: DataTypeDefaults(interval=10, ttl=60),
+    ServerDataType.TRADING_RULES: DataTypeDefaults(interval=300, ttl=600),
+    ServerDataType.CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
+    ServerDataType.BOTS_STATUS: DataTypeDefaults(interval=5, ttl=30),
+    ServerDataType.EXECUTORS: DataTypeDefaults(interval=2, ttl=30),
+    ServerDataType.BOT_RUNS: DataTypeDefaults(interval=30, ttl=120),
+    ServerDataType.CANDLE_CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
+    ServerDataType.SERVER_STATUS: DataTypeDefaults(interval=60, ttl=120),
+    ServerDataType.ALL_CONNECTORS: DataTypeDefaults(interval=300, ttl=600),
+    # Venue traits follow the CONNECTORS cadence, not the "chains change ~never"
+    # one: the credentialed connector list is one of the inputs, so the answer
+    # changes the moment a user adds API keys.
+    ServerDataType.VENUES: DataTypeDefaults(interval=300, ttl=600),
+    ServerDataType.TICKERS: DataTypeDefaults(interval=60, ttl=180),
     # Whole-server ticker pool: one poll feeds every per-connector ticker view and
     # all currency conversion, so reads never hit the network.
-    ServerDataType.TICKER_POOL: DataTypeDefaults(
-        interval=60, ttl=300, stale_threshold=60
-    ),
+    ServerDataType.TICKER_POOL: DataTypeDefaults(interval=60, ttl=300),
 }
 
 
@@ -265,6 +296,10 @@ class ServerDataService:
         self._last_cleanup = time.time()
         # Sync listeners (e.g. WebSocketManager broadcasts)
         self._listeners: List[Callable] = []
+        # Strong refs to fire-and-forget subscriber-callback tasks so the GC
+        # can't cancel them mid-flight (the event loop only keeps a weak
+        # reference). Entries auto-remove on completion.
+        self._callback_tasks = TaskSet(logger, "SDS callback error for %s: %s")
 
     # ------ Fetch registry ------
 
@@ -306,13 +341,15 @@ class ServerDataService:
     ) -> CacheKey:
         """Subscribe to data updates. Returns the CacheKey.
 
-        If interval is 0 or not provided, the default for the data type is used.
+        If interval is 0 or not provided, the data type's default cadence is
+        used — derived per key from its own TTL, so a long-lived variant is
+        polled as rarely as its freshness contract allows.
         Callback signature: async callback(key: CacheKey, old_value, new_value)
         """
-        if interval <= 0:
-            interval = _DEFAULTS[data_type].interval
-
         key = CacheKey.make(server, data_type, **params)
+        if interval <= 0:
+            interval = _DEFAULTS[data_type].interval_for(key.params_dict)
+
         sub = Subscription(
             subscriber_id=subscriber_id,
             key=key,
@@ -373,12 +410,8 @@ class ServerDataService:
         defaults = _DEFAULTS[data_type]
         age = time.time() - entry.fetched_at
 
-        # Always return if within stale threshold
-        if age <= defaults.stale_threshold:
-            return entry.value
-
-        # Past the stale threshold: still usable until the TTL expires
-        return entry.value if age <= defaults.ttl else None
+        # Cached data is usable until the TTL expires
+        return entry.value if age <= defaults.ttl_for(key.params_dict) else None
 
     async def get_or_fetch(
         self, server: str, data_type: ServerDataType, **params
@@ -448,40 +481,29 @@ class ServerDataService:
             len(keys_to_remove),
         )
 
-    # ------ Listener compatibility (for WebSocketManager) ------
+    # ------ Cache-write listeners (for WebSocketManager) ------
 
     def add_listener(self, callback: Callable) -> None:
-        """Add a sync listener: callback(server_name, cache_key_str, data_type_name, value)"""
+        """Add a sync listener: ``callback(key: CacheKey, value: Any)``.
+
+        Fired on every cache write. The listener gets the typed key — server,
+        data type and params — so it never has to parse anything back out of a
+        formatted string.
+        """
         self._listeners.append(callback)
 
     def remove_listener(self, callback: Callable) -> None:
-        self._listeners = [cb for cb in self._listeners if cb is not callback]
+        # Compared by equality, not identity: the only listener is a bound
+        # method (``ws_manager._on_data_update``), and attribute access builds a
+        # fresh method object every time, so ``is`` never matched the one that
+        # was registered and stop() left a dead manager wired to the singleton.
+        self._listeners = [cb for cb in self._listeners if cb != callback]
 
     def _notify_listeners(self, key: CacheKey, value: Any) -> None:
-        """Notify listeners with server/channel/data_type/value arguments.
-
-        The WS manager uses the data_type name string to map to channels.
-        """
-        if not self._listeners:
-            return
-
-        # Build a channel-compatible cache_key string
-        params = key.params_dict
-        if key.data_type == ServerDataType.PRICES:
-            cache_key_str = f"cex_prices:{params.get('connector_name', '')}:{params.get('trading_pair', '')}"
-        elif key.data_type == ServerDataType.PORTFOLIO:
-            account = params.get("account_name", "")
-            cache_key_str = f"cex_balances:{account}" if account else "portfolio"
-        elif key.data_type == ServerDataType.BOTS_STATUS:
-            cache_key_str = "bots_status"
-        elif key.data_type == ServerDataType.EXECUTORS:
-            cache_key_str = "executors"
-        else:
-            cache_key_str = key.data_type.value
-
+        """Hand the written key and its value to every listener, unchanged."""
         for cb in self._listeners:
             try:
-                cb(key.server, cache_key_str, key.data_type, value)
+                cb(key, value)
             except Exception as e:
                 logger.debug("SDS listener error: %s", e)
 
@@ -633,6 +655,7 @@ class ServerDataService:
         if self._poll_task and not self._poll_task.done():
             self._poll_task.cancel()
             logger.info("ServerDataService stopped")
+        self._callback_tasks.cancel_all()
 
     # ------ Poll loop ------
 
@@ -768,16 +791,24 @@ class ServerDataService:
         return result
 
     def _fire_callbacks(self, key: CacheKey, old_value: Any, new_value: Any) -> None:
-        """Fire subscriber callbacks asynchronously."""
+        """Fire subscriber callbacks asynchronously.
+
+        Each callback runs as a tracked task: a failing subscriber is logged
+        and never blocks the others or the caller.
+        """
         subs = self._subscriptions.get(key)
         if not subs:
             return
         for sub in subs.values():
             if sub.callback:
                 try:
-                    asyncio.ensure_future(sub.callback(key, old_value, new_value))
+                    task = asyncio.ensure_future(
+                        sub.callback(key, old_value, new_value)
+                    )
                 except Exception as e:
                     logger.debug("SDS callback error for %s: %s", sub.subscriber_id, e)
+                else:
+                    self._callback_tasks.track(task, sub.subscriber_id)
 
     def _cleanup_stale(self) -> None:
         """Remove cache entries with no subscribers and expired TTL."""
@@ -787,7 +818,10 @@ class ServerDataService:
             if key in self._subscriptions and self._subscriptions[key]:
                 continue  # Active subscribers, keep
             defaults = _DEFAULTS.get(key.data_type)
-            if defaults and now - entry.fetched_at > defaults.ttl * 2:
+            if (
+                defaults
+                and now - entry.fetched_at > defaults.ttl_for(key.params_dict) * 2
+            ):
                 stale.append(key)
         for key in stale:
             del self._cache[key]
@@ -849,16 +883,19 @@ def register_default_fetches() -> None:
         fetch_current_price,
         fetch_executors,
         fetch_portfolio,
+        fetch_portfolio_history,
         fetch_positions,
         fetch_server_status,
         fetch_ticker_pool,
         fetch_tickers,
         fetch_trading_rules,
+        fetch_venues,
     )
 
     sds = get_server_data_service()
 
     sds.register_fetch(ServerDataType.PORTFOLIO, fetch_portfolio)
+    sds.register_fetch(ServerDataType.PORTFOLIO_HISTORY, fetch_portfolio_history)
     sds.register_fetch(ServerDataType.PRICES, fetch_current_price)
     # strict=True on the cached reads: a failed call must reach
     # _do_fetch_and_cache's except branch (record_error, keep the last good
@@ -874,6 +911,7 @@ def register_default_fetches() -> None:
         ServerDataType.CONNECTORS, partial(fetch_available_cex_connectors, strict=True)
     )
     sds.register_fetch(ServerDataType.ALL_CONNECTORS, fetch_connectors)
+    sds.register_fetch(ServerDataType.VENUES, partial(fetch_venues, strict=True))
     sds.register_fetch(ServerDataType.BOTS_STATUS, fetch_bots_status)
     sds.register_fetch(ServerDataType.EXECUTORS, fetch_executors)
     sds.register_fetch(ServerDataType.BOT_RUNS, fetch_bot_runs)

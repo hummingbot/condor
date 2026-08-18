@@ -17,10 +17,7 @@ import time
 import pytest
 from fastapi import HTTPException
 
-from condor.fetchers.executors import (
-    EXECUTORS_PAGE_SIZE,
-    summarize_executors_by_quote,
-)
+from condor.fetchers.executors import EXECUTORS_PAGE_SIZE, summarize_executors_by_quote
 from condor.web.models import WebUser
 from condor.web.routes.executors import _summary_cache, executors_summary
 
@@ -119,7 +116,9 @@ def test_summary_spans_the_whole_history_not_one_page(summary_env):
 
     result = _summary("1D")
 
-    assert result.count == EXECUTORS_PAGE_SIZE + 120, "the window was truncated to a page"
+    assert (
+        result.count == EXECUTORS_PAGE_SIZE + 120
+    ), "the window was truncated to a page"
     assert result.pnl == pytest.approx(EXECUTORS_PAGE_SIZE + 120)
     assert len(client.calls) > 1, "a full-history total needs the whole walk"
     assert client.calls[0]["limit"] == EXECUTORS_PAGE_SIZE
@@ -127,7 +126,11 @@ def test_summary_spans_the_whole_history_not_one_page(summary_env):
 
 def test_executors_outside_the_window_are_excluded(summary_env):
     """A 1D total holds yesterday's executors and not last week's."""
-    rows = [_executor(0, age_days=0.5), _executor(1, age_days=3), _executor(2, age_days=20)]
+    rows = [
+        _executor(0, age_days=0.5),
+        _executor(1, age_days=3),
+        _executor(2, age_days=20),
+    ]
     summary_env(rows, {"USDT-USDT": 1.0})
 
     assert _summary("1D").count == 1
@@ -160,7 +163,9 @@ def test_an_unpriceable_quote_is_reported_not_hidden(summary_env):
 
     result = _summary("1D")
 
-    assert result.pnl == pytest.approx(4.0), "an unconvertible row is kept at face value"
+    assert result.pnl == pytest.approx(
+        4.0
+    ), "an unconvertible row is kept at face value"
     assert result.converted is False
 
 
@@ -222,11 +227,20 @@ def test_an_unknown_period_is_a_bad_request(summary_env):
     assert exc.value.status_code == 400
 
 
-def test_access_is_checked_before_any_work(summary_env, monkeypatch):
-    """No server access, no walk."""
-    client = summary_env([_executor(0)], {})
+def test_access_is_checked_before_any_work(monkeypatch):
+    """No server access, no walk.
+
+    Since SEC-147 the guard is the ``require_server_access`` dependency, which
+    FastAPI resolves before the endpoint coroutine is ever awaited — so "before
+    any work" is structural, not a matter of statement order in the body. That
+    the route carries the dependency is pinned by
+    ``tests/test_web_server_access_dependency.py``.
+    """
+    from condor.web.auth import require_server_access
+    from condor.web.models import WebUser
+
     monkeypatch.setattr(
-        "condor.web.routes.executors.get_config_manager",
+        "condor.web.auth.get_config_manager",
         lambda: type(
             "_Denied",
             (),
@@ -235,10 +249,9 @@ def test_access_is_checked_before_any_work(summary_env, monkeypatch):
     )
 
     with pytest.raises(HTTPException) as exc:
-        _summary()
+        asyncio.run(require_server_access("srv", user=WebUser(id=1, role="user")))
 
     assert exc.value.status_code == 403
-    assert client.calls == []
 
 
 # ── the pure aggregation ──

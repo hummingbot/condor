@@ -10,6 +10,9 @@ tools:
 - manage_controllers
 - manage_bots
 - search_history
+- manage_routines
+- manage_trading_agent
+- trading_agent_journal_read
 - manage_memory
 - manage_skill
 when_to_consult: When the user asks about market regime, whether spreads are appropriate,

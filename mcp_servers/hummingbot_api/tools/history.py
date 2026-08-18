@@ -6,12 +6,14 @@ Provides access to historical data:
 - Perpetual positions (open and closed)
 - CLMM positions (open and closed)
 """
+
 import logging
 from typing import Any, Literal
 
 from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
-from . import trading as trading_tools
+
 from . import gateway_clmm as gateway_clmm_tools
+from . import trading as trading_tools
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -83,14 +85,16 @@ async def search_history(
 
             formatted_output = f"Order History\n{'=' * 100}\n\n{result['orders_table']}"
 
-            if result['pagination'].get('has_more'):
-                formatted_output += f"\n\n... and more (use offset={offset + limit} to see more)"
+            if result["pagination"].get("has_more"):
+                formatted_output += (
+                    f"\n\n... and more (use offset={offset + limit} to see more)"
+                )
 
             return {
                 "data_type": "orders",
-                "total_count": result['total_returned'],
-                "results": result['orders'],
-                "formatted_output": formatted_output
+                "total_count": result["total_returned"],
+                "results": result["orders"],
+                "formatted_output": formatted_output,
             }
 
         # ============================================
@@ -109,9 +113,9 @@ async def search_history(
 
             return {
                 "data_type": "perp_positions",
-                "total_count": result['total_positions'],
-                "results": result['positions'],
-                "formatted_output": formatted_output
+                "total_count": result["total_positions"],
+                "results": result["positions"],
+                "formatted_output": formatted_output,
             }
 
         # ============================================
@@ -131,9 +135,13 @@ async def search_history(
             if wallet_address:
                 search_params["wallet_address"] = wallet_address
             if connector_names:
-                search_params["connector"] = connector_names[0] if len(connector_names) == 1 else None
+                search_params["connector"] = (
+                    connector_names[0] if len(connector_names) == 1 else None
+                )
             if trading_pairs:
-                search_params["trading_pair"] = trading_pairs[0] if len(trading_pairs) == 1 else None
+                search_params["trading_pair"] = (
+                    trading_pairs[0] if len(trading_pairs) == 1 else None
+                )
             if status:
                 search_params["status"] = status
             if position_addresses:
@@ -147,7 +155,7 @@ async def search_history(
                     "data_type": "clmm_positions",
                     "total_count": 0,
                     "results": [],
-                    "formatted_output": "No CLMM positions found"
+                    "formatted_output": "No CLMM positions found",
                 }
 
             positions = result.get("data", [])
@@ -170,7 +178,11 @@ async def search_history(
                     upper = f"{float(pos.get('upper_price', 0)):.4f}"[:10]
                     status_val = pos.get("status", "N/A")[:8]
                     created = pos.get("created_at", "N/A")[:20]
-                    closed = pos.get("closed_at", "N/A")[:20] if pos.get("closed_at") else "-"
+                    closed = (
+                        pos.get("closed_at", "N/A")[:20]
+                        if pos.get("closed_at")
+                        else "-"
+                    )
 
                     table_lines.append(
                         f"{connector:<10} | {network:<20} | {pair:<15} | {lower:<10} | {upper:<10} | "
@@ -178,7 +190,9 @@ async def search_history(
                     )
 
                 if total_count > limit:
-                    table_lines.append(f"\n... and {total_count - limit} more positions (use offset={offset + limit} to see more)")
+                    table_lines.append(
+                        f"\n... and {total_count - limit} more positions (use offset={offset + limit} to see more)"
+                    )
 
                 formatted_output = "\n".join(table_lines)
             else:
@@ -188,7 +202,7 @@ async def search_history(
                 "data_type": "clmm_positions",
                 "total_count": total_count,
                 "results": positions,
-                "formatted_output": formatted_output
+                "formatted_output": formatted_output,
             }
 
         else:
@@ -196,7 +210,7 @@ async def search_history(
                 "data_type": data_type,
                 "total_count": 0,
                 "results": [],
-                "formatted_output": f"Unknown data type: {data_type}"
+                "formatted_output": f"Unknown data type: {data_type}",
             }
 
     except Exception as e:

@@ -15,10 +15,12 @@ from telegram.ext import (
     CommandHandler,
     ContextTypes,
     MessageHandler,
+    TypeHandler,
     filters,
 )
 
 from condor.persistence import SafePicklePersistence
+from condor.telemetry import taps as telemetry_taps
 from handlers import cancel_command, clear_all_input_states
 from utils.auth import restricted
 from utils.config import TELEGRAM_TOKEN, WEB_PORT, WEB_URL
@@ -301,6 +303,13 @@ def register_handlers(application: Application) -> None:
     # Clear existing handlers
     application.handlers.clear()
 
+    # Usage telemetry observer (FEAT-023). PTB dispatches every update to every
+    # group, so one handler in group -1 sees every command and every callback
+    # without touching a single handler below. It only reads — it must never
+    # call into @restricted, or observing would become an authorization side
+    # effect — and it is a no-op unless the admin opted in.
+    application.add_handler(TypeHandler(Update, telemetry_taps.telegram_tap), group=-1)
+
     # Add command handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("portfolio", portfolio_command))
@@ -376,6 +385,16 @@ def register_handlers(application: Application) -> None:
 
     application.add_handler(
         CallbackQueryHandler(admin_callback_handler, pattern="^admin:")
+    )
+
+    # Telemetry consent prompt (FEAT-023): three buttons, admin only
+    from condor.telemetry import prompt as telemetry_prompt
+
+    application.add_handler(
+        CallbackQueryHandler(
+            telemetry_prompt.callback_handler,
+            pattern=f"^{telemetry_prompt.CALLBACK_PREFIX}:",
+        )
     )
 
     # Add callback query handler for portfolio settings
@@ -594,6 +613,20 @@ async def startup(application: Application) -> None:
 
     schedule_update_checks(application)
 
+    # Usage telemetry (FEAT-023). init() resolves the consent level once so the
+    # taps never read the disk on a hot path, and only materializes the
+    # install's random ids when telemetry is actually on. The jobs are
+    # registered either way and return immediately while consent is absent, so
+    # opting in mid-run works without a restart.
+    from condor import telemetry
+
+    try:
+        level = telemetry.init(hosted=True)
+        telemetry_taps.register_jobs(application)
+        logger.info("Telemetry level: %s", level)
+    except Exception:
+        logger.exception("Telemetry init failed (continuing without it)")
+
     # Start file watcher
     asyncio.create_task(watch_and_reload(application))
 
@@ -646,6 +679,16 @@ async def teardown(application: Application) -> None:
     from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 
     await hummingbot_client.close()
+
+    # Record the clean exit and give the outbox one last chance. Both are no-ops
+    # unless the admin opted in, and neither can fail the shutdown.
+    try:
+        from condor import telemetry
+
+        telemetry.shutdown("signal")
+        await telemetry.flush("teardown")
+    except Exception:
+        logger.debug("Telemetry teardown failed", exc_info=True)
 
 
 async def watch_and_reload(application: Application) -> None:
@@ -716,9 +759,14 @@ def get_persistence() -> SafePicklePersistence:
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle errors gracefully."""
     if isinstance(context.error, NetworkError):
+        # Expected and self-healing; reported as an upstream blip, not a bug.
+        telemetry_taps.on_upstream_error("telegram", "poll", "network")
         logger.warning(f"Network error (will retry): {context.error}")
         return
 
+    # Type, a hash of the message, and our own stack frames. Never the message
+    # itself — that is where balances, hostnames and keys leak.
+    telemetry_taps.on_error(context.error, where="telegram", surface="telegram")
     logger.exception("Exception while handling an update:", exc_info=context.error)
 
 
@@ -840,6 +888,13 @@ async def _run_dual(application: Application) -> None:
             )
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")
+
+        # Ask, once, whether this install wants to be counted (FEAT-023). Sent
+        # next to the boot notification because that is the one moment the admin
+        # is already looking. Until it is answered, nothing is collected.
+        from condor.telemetry.prompt import maybe_prompt_admin
+
+        await maybe_prompt_admin(application.bot)
 
     logger.info("Starting Condor: Telegram bot + web dashboard on port %s", WEB_PORT)
 

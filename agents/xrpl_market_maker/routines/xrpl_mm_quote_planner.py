@@ -1,4 +1,5 @@
 """Plan XRPL CLOB maker quotes: reference fair value, spread bounds, viability verdict."""
+
 import asyncio
 import logging
 import math
@@ -27,10 +28,30 @@ OWNER_RESERVE_XRP = 0.2
 # 733 days of Bitget perp 1H bars. Values are vol relative to the daily average.
 # Trough 04:00-11:00 UTC (Asia afternoon / pre-Europe); peak 13:00-15:00 UTC (US open).
 HOUR_VOL_MULT = {
-    0: 1.03, 1: 1.10, 2: 0.95, 3: 0.89, 4: 0.82, 5: 0.85,
-    6: 0.82, 7: 0.82, 8: 0.91, 9: 0.83, 10: 0.78, 11: 0.82,
-    12: 0.92, 13: 1.28, 14: 1.50, 15: 1.40, 16: 1.16, 17: 1.21,
-    18: 1.07, 19: 1.04, 20: 1.02, 21: 0.97, 22: 0.97, 23: 0.82,
+    0: 1.03,
+    1: 1.10,
+    2: 0.95,
+    3: 0.89,
+    4: 0.82,
+    5: 0.85,
+    6: 0.82,
+    7: 0.82,
+    8: 0.91,
+    9: 0.83,
+    10: 0.78,
+    11: 0.82,
+    12: 0.92,
+    13: 1.28,
+    14: 1.50,
+    15: 1.40,
+    16: 1.16,
+    17: 1.21,
+    18: 1.07,
+    19: 1.04,
+    20: 1.02,
+    21: 0.97,
+    22: 0.97,
+    23: 0.82,
 }
 MS_PER_HOUR = 3_600_000
 
@@ -38,11 +59,15 @@ MS_PER_HOUR = 3_600_000
 class Config(BaseModel):
     """Plan maker quotes for an XRPL CLOB pair against a CEX reference price."""
 
-    xrpl_pair: str = Field(default="RLUSD-XRP", description="Pair as the xrpl connector names it")
+    xrpl_pair: str = Field(
+        default="RLUSD-XRP", description="Pair as the xrpl connector names it"
+    )
     reference_connector: str = Field(
         default="bitget_perpetual", description="CEX connector supplying fair value"
     )
-    reference_pair: str = Field(default="XRP-USDT", description="Reference pair for XRP/USD")
+    reference_pair: str = Field(
+        default="XRP-USDT", description="Reference pair for XRP/USD"
+    )
     tick_interval_sec: int = Field(default=300, description="Seconds between LLM ticks")
     requote_interval_sec: int = Field(
         default=0,
@@ -51,9 +76,12 @@ class Config(BaseModel):
         "tick — the bot requotes without the agent, so the LLM tick must not set the floor",
     )
     levels_per_side: int = Field(default=3, description="Quote levels per side")
-    total_amount_quote: float = Field(default=100.0, description="Capital to deploy, USD")
+    total_amount_quote: float = Field(
+        default=100.0, description="Capital to deploy, USD"
+    )
     adverse_k: float = Field(
-        default=1.0, description="Multiplier on expected adverse move; higher = wider floor"
+        default=1.0,
+        description="Multiplier on expected adverse move; higher = wider floor",
     )
     use_vol_clock: bool = Field(
         default=True,
@@ -63,9 +91,12 @@ class Config(BaseModel):
         default=0.1, description="Assumed AMM fee %% if amm_info is unreachable"
     )
     amm_asset2_issuer: str = Field(
-        default="", description="Issuer address of the non-XRP asset (blank = skip amm_info)"
+        default="",
+        description="Issuer address of the non-XRP asset (blank = skip amm_info)",
     )
-    amm_asset2_currency: str = Field(default="RLUSD", description="Non-XRP asset currency code")
+    amm_asset2_currency: str = Field(
+        default="RLUSD", description="Non-XRP asset currency code"
+    )
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -115,7 +146,12 @@ async def _fetch_amm_fee_pct(currency: str, issuer: str) -> tuple[float | None, 
         return None, "no issuer configured — amm_info skipped"
     payload = {
         "method": "amm_info",
-        "params": [{"asset": {"currency": "XRP"}, "asset2": {"currency": currency, "issuer": issuer}}],
+        "params": [
+            {
+                "asset": {"currency": "XRP"},
+                "asset2": {"currency": currency, "issuer": issuer},
+            }
+        ],
     }
     try:
         async with httpx.AsyncClient(timeout=10) as http:
@@ -180,9 +216,14 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     try:
         candles_raw, ref_prices = await asyncio.gather(
             client.market_data.get_candles(
-                config.reference_connector, config.reference_pair, interval="1m", max_records=120
+                config.reference_connector,
+                config.reference_pair,
+                interval="1m",
+                max_records=120,
             ),
-            client.market_data.get_prices(config.reference_connector, [config.reference_pair]),
+            client.market_data.get_prices(
+                config.reference_connector, [config.reference_pair]
+            ),
         )
     except Exception as exc:
         return f"reference_price: ERROR fetching {config.reference_pair} — {exc}"
@@ -198,7 +239,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     implied_xrpl_price = (1.0 / ref_mid) if ref_mid > 0 else 0.0
 
     out.append("=== REFERENCE (fair value source) ===")
-    out.append(f"reference_pair: {config.reference_pair} @ {config.reference_connector}")
+    out.append(
+        f"reference_pair: {config.reference_pair} @ {config.reference_connector}"
+    )
     out.append(f"reference_mid_usd: {ref_mid:.6f}")
     out.append(f"implied_{config.xrpl_pair}: {implied_xrpl_price:.6f}  (1 / XRP-USD)")
 
@@ -251,7 +294,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         f"(UTC {_utc(now_ms)}-{_utc(fwd_end_ms)}, quote live window)"
     )
     out.append(f"vol_adjusted: {vol_adj * math.sqrt(60) * 100:.4f}% per minute")
-    out.append(f"tick_interval_sec: {config.tick_interval_sec}  (LLM reasoning cadence)")
+    out.append(
+        f"tick_interval_sec: {config.tick_interval_sec}  (LLM reasoning cadence)"
+    )
     out.append(
         f"requote_interval_sec: {requote_sec}  (quote exposure — THIS sets the floor)"
     )
@@ -281,7 +326,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     out.append("")
     out.append("=== SPREAD CEILING (AMM fee to undercut) ===")
     out.append(f"amm_trading_fee_pct: {amm_fee_pct:.4f}%   ({fee_note})")
-    out.append(f"spread_ceiling_bps: {ceiling_bps:.2f}  (quote wider and flow routes to the AMM)")
+    out.append(
+        f"spread_ceiling_bps: {ceiling_bps:.2f}  (quote wider and flow routes to the AMM)"
+    )
 
     # 4. Viability — the load-bearing verdict.
     viable = floor_bps < ceiling_bps
@@ -345,7 +392,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # A controller's total_amount_quote is denominated in the pair's QUOTE asset. On
     # RLUSD-XRP that is XRP, not USD — passing a USD figure straight through oversizes
     # the deployment by the XRP price (~3x), silently breaching the risk limit.
-    quote_asset = config.xrpl_pair.split("-")[-1].upper() if "-" in config.xrpl_pair else ""
+    quote_asset = (
+        config.xrpl_pair.split("-")[-1].upper() if "-" in config.xrpl_pair else ""
+    )
     if quote_asset == "XRP" and ref_mid > 0:
         amount_in_quote = config.total_amount_quote / ref_mid
         out.append(
@@ -375,8 +424,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         bids = (book or {}).get("bids") or []
         asks = (book or {}).get("asks") or []
         if bids and asks:
-            best_bid = float(bids[0][0] if isinstance(bids[0], (list, tuple)) else bids[0]["price"])
-            best_ask = float(asks[0][0] if isinstance(asks[0], (list, tuple)) else asks[0]["price"])
+            best_bid = float(
+                bids[0][0] if isinstance(bids[0], (list, tuple)) else bids[0]["price"]
+            )
+            best_ask = float(
+                asks[0][0] if isinstance(asks[0], (list, tuple)) else asks[0]["price"]
+            )
             mid = (best_bid + best_ask) / 2
             out.append(f"best_bid: {best_bid:.6f}")
             out.append(f"best_ask: {best_ask:.6f}")
@@ -391,6 +444,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             out.append("status: EMPTY OR UNAVAILABLE — do not quote blind")
     except Exception as exc:
         out.append(f"status: ERROR — {exc}")
-        out.append("action: treat as a hard stop; do not place offers without live book state")
+        out.append(
+            "action: treat as a hard stop; do not place offers without live book state"
+        )
 
     return "\n".join(out)

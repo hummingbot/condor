@@ -136,7 +136,15 @@ class LoopSupervisor:
         )
 
     def record_tick(self, engine) -> None:
-        """Cheap per-tick counter update; keeps the last tick honest on a crash."""
+        """Cheap per-tick counter update; keeps the last tick honest on a crash.
+
+        Never for an engine that already left the registry: stop/shutdown wrote
+        its final state on the way out, and rewriting RUNNING over it would make
+        the next boot read a finished run as interrupted — and restart it when
+        the session opted into ``restart_on_boot``.
+        """
+        if self._engines.get(engine.agent_id) is not engine:
+            return
         self.record(engine, LoopState.RUNNING)
 
     # ── Lifecycle ──

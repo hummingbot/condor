@@ -20,6 +20,8 @@ import asyncio
 import logging
 from typing import Any
 
+from condor.runtime.timeouts import resolve_tick_timeout
+
 from .strategy import Strategy, _parse_frontmatter
 
 log = logging.getLogger(__name__)
@@ -298,10 +300,11 @@ async def _run_llm_cleanup(
 ) -> None:
     """Best-effort LLM nuance pass on top of the guaranteed deterministic floor.
 
-    Bounded by a hard 300s timeout (the same ceiling the tick ACP session runs
-    under) and fully fail-open: the safety-critical winddown already happened, so
-    any hang or error here is logged and swallowed — it can never strand a position
-    the way an LLM-only shutdown could.
+    Bounded by the same budget the tick agent session runs under (the shared
+    timeout policy, overridable per run with ``tick_timeout_sec``) and fully
+    fail-open: the safety-critical winddown already happened, so any hang or
+    error here is logged and swallowed — it can never strand a position the way
+    an LLM-only shutdown could.
     """
     agent = getattr(engine, "agent", None)
     if not body or agent is None:
@@ -312,7 +315,10 @@ async def _run_llm_cleanup(
         running = await _get_running_executors(engine, client)
         positions = await _fetch_positions(client, engine.agent_id)
         context = _build_llm_context(policy, running, positions, failures)
-        async with asyncio.timeout(300):
+        cleanup_timeout = resolve_tick_timeout(
+            strategy=engine.config.get("tick_timeout_sec")
+        )
+        async with asyncio.timeout(cleanup_timeout):
             await _run_agent_to_completion(
                 slug=agent.slug,
                 user_id=engine.user_id,
@@ -374,10 +380,11 @@ async def run_shutdown(engine: Any, reason: str) -> None:
         log.error(msg)
         await engine._notify(msg)
         if engine.journal:
-            engine.journal.append_action(
-                engine.journal.tick_count + 1, "shutdown_failed", "no API client"
-            )
-            engine.journal.record_tick("shutdown failed (no client): " + reason)
+            with engine.journal.batch():
+                engine.journal.append_action(
+                    engine.journal.tick_count + 1, "shutdown_failed", "no API client"
+                )
+                engine.journal.record_tick("shutdown failed (no client): " + reason)
         return
 
     stopped, failures = await _deterministic_baseline(engine, client, policy)
@@ -406,9 +413,12 @@ async def run_shutdown(engine: Any, reason: str) -> None:
 
     if engine.journal:
         verified = "flat" if not stranded else f"{len(stranded)} stranded"
-        engine.journal.append_action(
-            engine.journal.tick_count + 1,
-            "shutdown_done",
-            f"stopped={stopped}, failures={len(failures)}, verify={verified}",
-        )
-        engine.journal.record_tick("shutdown: " + reason)
+        # Both journal.md updates of this winddown go into one batch, so the file
+        # is rewritten once instead of twice (PERF-136 idiom, PERF-173).
+        with engine.journal.batch():
+            engine.journal.append_action(
+                engine.journal.tick_count + 1,
+                "shutdown_done",
+                f"stopped={stopped}, failures={len(failures)}, verify={verified}",
+            )
+            engine.journal.record_tick("shutdown: " + reason)

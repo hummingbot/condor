@@ -8,22 +8,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 logger = logging.getLogger(__name__)
 
 
-from config_manager import get_config_manager
-from condor.web.auth import get_current_user
+from condor.fetchers.executors import EXECUTORS_POLL_MAX, MAX_EXECUTORS_FETCH
+from condor.fetchers.executors import extract_executors_list as _extract_executors_list
+from condor.fetchers.executors import fetch_all_executors, summarize_executors_by_quote
+from condor.web.auth import require_server_access
 from condor.web.models import (
     CreateExecutorRequest,
     ExecutorInfo,
     ExecutorPeriodSummary,
     WebUser,
 )
-from condor.fetchers.executors import (
-    describe_executor_error,
-    fetch_all_executors,
-    extract_executors_list as _extract_executors_list,
-    summarize_executors_by_quote,
-    EXECUTORS_POLL_MAX,
-    MAX_EXECUTORS_FETCH,
-)
+from condor.web.routes._errors import upstream_error
+from config_manager import get_config_manager
 
 router = APIRouter(tags=["executors"])
 
@@ -46,24 +42,6 @@ _PERIOD_TTLS: dict[str, int] = {"1D": 60, "1W": 300, "1M": 900}
 _summary_cache: dict[tuple[str, str], tuple[float, ExecutorPeriodSummary]] = {}
 
 
-def _executor_error(action: str, exc: Exception) -> HTTPException:
-    """Map an executor call failure to an HTTPException that leaks nothing.
-
-    An upstream 4xx is the caller's own bad request and stays a 400; anything
-    else — an upstream 5xx, a timeout, a refused connection — is the gateway
-    failing, so 502. The detail carries the API's message but never the raw
-    exception, whose string embeds the backend URL and port.
-
-    Reads go through this too, not only mutations: the listing endpoints are the
-    dashboard's hottest path, so any backend blip is the most reachable way for
-    that address to reach a browser. Callers log the exception before raising —
-    the address belongs in the server log, not in the response.
-    """
-    status, message = describe_executor_error(exc)
-    code = 400 if status is not None and 400 <= status < 500 else 502
-    return HTTPException(status_code=code, detail=f"{action}: {message}")
-
-
 @router.get("/servers/{name}/executors", response_model=list[ExecutorInfo])
 async def list_executors(
     name: str,
@@ -71,12 +49,15 @@ async def list_executors(
     trading_pair: str = Query(default="", description="Filter by trading pair"),
     status: str = Query(default="", description="Filter by status"),
     controller_id: str = Query(default="", description="Filter by controller id"),
-    limit: int = Query(default=0, ge=0, le=MAX_EXECUTORS_FETCH, description="Max executors to return (0 = default SDS cache)"),
-    user: WebUser = Depends(get_current_user),
+    limit: int = Query(
+        default=0,
+        ge=0,
+        le=MAX_EXECUTORS_FETCH,
+        description="Max executors to return (0 = default SDS cache)",
+    ),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -102,13 +83,15 @@ async def list_executors(
             result = executors_list
         except Exception as e:
             logger.exception("Failed to fetch executors for server %s", name)
-            raise _executor_error("Failed to fetch executors", e)
+            raise upstream_error("Failed to fetch executors", e)
     else:
         try:
-            result = await get_server_data_service().get_or_fetch(name, ServerDataType.EXECUTORS)
+            result = await get_server_data_service().get_or_fetch(
+                name, ServerDataType.EXECUTORS
+            )
         except Exception as e:
             logger.exception("Failed to fetch executors for server %s", name)
-            raise _executor_error("Failed to fetch executors", e)
+            raise upstream_error("Failed to fetch executors", e)
         if result is None:
             raise HTTPException(status_code=502, detail="Failed to fetch executors")
 
@@ -145,7 +128,7 @@ async def list_executors_page(
     trading_pair: str = Query(default=""),
     status: str = Query(default=""),
     controller_id: str = Query(default=""),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Fetch a single page of executors with a next_cursor for progressive loading.
 
@@ -157,8 +140,6 @@ async def list_executors_page(
     from the API instead, so the stream continues past the poll's page budget.
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     has_filters = bool(executor_type or trading_pair or status or controller_id)
 
@@ -192,7 +173,7 @@ async def list_executors_page(
                 rows = await fetch_all_executors(client, max_items=offset + limit + 1)
             except Exception as e:
                 logger.exception("Failed to page executors for server %s", name)
-                raise _executor_error("Failed to fetch executors", e)
+                raise upstream_error("Failed to fetch executors", e)
             return _offset_page(rows, offset, limit)
         # Cold cache on the first page: fall through to opaque API cursors,
         # which page the rest of the scroll in one request each.
@@ -214,7 +195,7 @@ async def list_executors_page(
         result = await client.executors.search_executors(**kwargs)
     except Exception as e:
         logger.exception("Failed to page executors for server %s", name)
-        raise _executor_error("Failed to fetch executors", e)
+        raise upstream_error("Failed to fetch executors", e)
 
     page = _extract_executors_list(result)
     next_cursor = None
@@ -278,7 +259,7 @@ async def _usd_summary(
 async def executors_summary(
     name: str,
     period: str = Query(default="1D", description="Window: 1D, 1W or 1M"),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """PnL, volume and executor count over a period, across the whole history.
 
@@ -293,8 +274,6 @@ async def executors_summary(
     at its one request per tick.
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     period = period.upper()
     window = _PERIOD_SECONDS.get(period)
@@ -315,7 +294,7 @@ async def executors_summary(
         executors = await fetch_all_executors(client)
     except Exception as e:
         logger.exception("Failed to summarize executors for server %s", name)
-        raise _executor_error("Failed to fetch executors", e)
+        raise upstream_error("Failed to fetch executors", e)
 
     summary = await _usd_summary(
         name, period, summarize_executors_by_quote(executors, now - window)
@@ -324,27 +303,61 @@ async def executors_summary(
     return summary
 
 
+async def _ensure_dex_tokens_listed(client, config: dict) -> None:
+    """Register a DEX executor's tokens with Gateway before it is created.
+
+    The pool workspace already does this when it opens, so for the web UI this is
+    a no-op resolved from an in-process memo. It exists for the callers that never
+    open one — agents, Telegram, MCP — because an unlisted mint reads as a zero
+    balance in Gateway, which is enough to have an order rejected for funds the
+    wallet is holding.
+
+    Best effort by design: a token that cannot be registered is not a reason to
+    refuse an order Gateway may well execute anyway.
+    """
+    connector = str(config.get("connector_name") or "")
+    if not connector:
+        return
+    try:
+        from condor.fetchers.gateway_tokens import (
+            ensure_tokens_listed,
+            token_addresses,
+        )
+        from condor.pool_data import GECKO_TO_GATEWAY_NETWORK, NETWORK_TO_GECKO
+
+        # A CEX connector ("binance") maps to no chain and drops out here; only a
+        # Gateway network id ("solana-mainnet-beta") reaches the token list.
+        network = GECKO_TO_GATEWAY_NETWORK.get(NETWORK_TO_GECKO.get(connector, ""))
+        if not network:
+            return
+        addresses = token_addresses(config.get("trading_pair"))
+        if addresses:
+            await ensure_tokens_listed(client, network, addresses)
+    except Exception as e:
+        logger.warning("could not ensure tokens for %s: %s", connector, e)
+
+
 @router.post("/servers/{name}/executors")
 async def create_executor_endpoint(
     name: str,
     body: CreateExecutorRequest,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
     # Inject executor type into config
     config = {**body.config, "type": body.executor_type}
 
+    await _ensure_dex_tokens_listed(client, config)
+
     from condor.fetchers.executors import create_executor
 
     try:
         result = await create_executor(client, config, account_name=body.account_name)
     except Exception as e:
-        raise _executor_error("Failed to create executor", e)
+        raise upstream_error("Failed to create executor", e)
     executor_id = ""
     if isinstance(result, dict):
         executor_id = str(result.get("executor_id") or result.get("id") or "")
@@ -356,11 +369,9 @@ async def stop_executor_endpoint(
     name: str,
     executor_id: str,
     keep_position: bool = Query(default=False),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -369,25 +380,23 @@ async def stop_executor_endpoint(
     try:
         result = await stop_executor(client, executor_id, keep_position=keep_position)
     except Exception as e:
-        raise _executor_error("Failed to stop executor", e)
+        raise upstream_error("Failed to stop executor", e)
     return {"status": "ok", "result": result}
 
 
 @router.get("/servers/{name}/executors/positions")
 async def get_positions_held(
     name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
         result = await client.executors.get_positions_summary()
     except Exception as e:
         logger.exception("Failed to fetch held positions for server %s", name)
-        raise _executor_error("Failed to fetch positions", e)
+        raise upstream_error("Failed to fetch positions", e)
 
     # Normalize: extract positions list from various shapes
     if isinstance(result, dict):
@@ -399,7 +408,10 @@ async def get_positions_held(
     else:
         positions = []
 
-    return {"positions": positions, "summary": result if isinstance(result, dict) else {}}
+    return {
+        "positions": positions,
+        "summary": result if isinstance(result, dict) else {},
+    }
 
 
 @router.delete("/servers/{name}/executors/positions/{connector}/{pair}")
@@ -408,11 +420,9 @@ async def clear_position_held(
     connector: str,
     pair: str,
     controller_id: str = Query(default=""),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
@@ -427,5 +437,5 @@ async def clear_position_held(
         )
     except Exception as e:
         logger.exception("Failed to clear held position on server %s", name)
-        raise _executor_error("Failed to clear position", e)
+        raise upstream_error("Failed to clear position", e)
     return {"status": "ok", "result": result}

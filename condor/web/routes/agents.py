@@ -39,7 +39,7 @@ from condor.agents.sessions_index import (
     list_session_snapshots,
     list_sessions,
 )
-from condor.web.auth import get_current_user
+from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import ReportSummary, WebUser
 
 # ── Simple in-memory TTL cache for performance data ──
@@ -101,6 +101,7 @@ class RunningInstance(BaseModel):
     total_amount_quote: float = 100.0
     trading_context: str = ""
     frequency_sec: int = 60
+    tick_timeout_sec: int = 600
     execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
 
@@ -777,6 +778,7 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         total_amount_quote=info.get("total_amount_quote", 100),
         trading_context=info.get("trading_context", ""),
         frequency_sec=info.get("frequency_sec", 60),
+        tick_timeout_sec=info.get("tick_timeout_sec", 600),
         agent_key=info.get("agent_key", ""),
         execution_mode=info.get("execution_mode", "loop"),
         risk_limits=info.get("risk_limits", {}),
@@ -1166,10 +1168,8 @@ async def update_agent_config(
     # A pin decides which account the Agent's tools trade on, so it is gated
     # like every other server-scoped write. An empty string clears the pin and
     # needs no access at all.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
 
     # Picker sentinels ("openrouter:", "custom:") are drill-downs that open a
     # model list, not startable models: stored here they would fail at every
@@ -1226,10 +1226,8 @@ async def consult_agent(
     # routes do — otherwise any session could consult against a server it was
     # never granted (IDOR). Only enforce when a server is actually requested;
     # serverless consults need no server scope.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
 
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
@@ -1286,10 +1284,8 @@ async def delegate_agent(
 
     # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
     # to ``server_name``'s live credentials, so refuse a server the caller can't access.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
 
     conversation_id = await _conversation_for_session(req.session_key)
 
@@ -1737,10 +1733,35 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     """Spawn a TickEngine session for ``strategy`` under ``agent``."""
     from condor.agents.config import load_full_config
     from condor.agents.engine import TickEngine
+    from config_manager import get_config_manager
 
     config_dict = load_full_config(strategy.dir, strategy.default_config)
     if req.config:
         config_dict.update(req.config)
+
+    # ``TickEngine._resolve_server`` trades on ``config["server_name"]`` and the
+    # request body is a free-form dict, so without this gate any authenticated
+    # user could start a live loop on another user's stored credentials — the
+    # same check the config pin and consult/delegate already apply. A name the
+    # body asked for is held to it strictly; an inherited one (strategy default,
+    # or the "local" that AgentConfig fills in) only matters when it resolves to
+    # a real server, since otherwise the engine falls through to the caller's
+    # own accessible servers, which is scoped already.
+    cm = get_config_manager()
+    server_name = config_dict.get("server_name")
+    asked_for_it = bool(req.config and req.config.get("server_name"))
+    if server_name and (asked_for_it or cm.get_server(server_name)):
+        check_server_access(user_id, server_name)
+        # A name the body asked for must also name something. An unknown one
+        # used to be waved through on the reasoning that it borrows no
+        # credentials, but ``has_server_access`` answers True for an admin on
+        # any string, and the loop it starts outlives the check: the engine
+        # would bind to whatever gets created under that name later (SEC-164).
+        # Refused only *after* the access check, so a caller with no access
+        # still gets the same "No access" a real server gives them and this
+        # route never reveals which names exist.
+        if not cm.get_server(server_name):
+            raise HTTPException(status_code=404, detail="Server not found")
 
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context

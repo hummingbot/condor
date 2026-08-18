@@ -4,11 +4,7 @@ from functools import wraps
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from config_manager import (
-    ServerPermission,
-    UserRole,
-    get_config_manager,
-)
+from config_manager import ServerPermission, UserRole, get_config_manager
 
 logger = logging.getLogger(__name__)
 

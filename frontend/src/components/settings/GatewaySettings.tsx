@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  Globe,
   Loader2,
   Play,
   RefreshCw,
@@ -12,11 +13,12 @@ import {
 import { useEffect, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
+import { OWNER_ONLY_HINT, useServerPermission } from "@/hooks/useServerPermission";
 import { api } from "@/lib/api";
 
 const IMAGE_OPTIONS = [
-  { label: "Latest", value: "hummingbot/gateway:latest" },
   { label: "Development", value: "hummingbot/gateway:development" },
+  { label: "Latest", value: "hummingbot/gateway:latest" },
 ];
 
 function formatRelativeTime(dateStr: string): string {
@@ -40,8 +42,230 @@ function formatDuration(sec: number): string {
   return `${Math.floor(sec / 60)}m ${Math.floor(sec % 60)}s`;
 }
 
+// Config keys that describe the network itself and must not be edited from the UI.
+const READONLY_NETWORK_KEYS = new Set([
+  "chain_id",
+  "native_currency_symbol",
+  "gecko_id",
+  "default_network",
+  "default_networks",
+  "default_wallet",
+]);
+
+function NetworkConfigEditor({ server, networkId }: { server: string; networkId: string }) {
+  const qc = useQueryClient();
+  // Updating a network config is owner-only on the backend (SEC-166); ask about
+  // *this* server rather than the selected one, since it arrives as a prop.
+  const { isOwner } = useServerPermission(server);
+  const [draft, setDraft] = useState<Record<string, string>>({});
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["gateway-network-config", server, networkId],
+    queryFn: () => api.getGatewayNetworkConfig(server, networkId),
+  });
+
+  const saveMut = useMutation({
+    mutationFn: (config: Record<string, unknown>) =>
+      api.updateGatewayNetworkConfig(server, networkId, config),
+    onSuccess: () => {
+      setDraft({});
+      qc.invalidateQueries({ queryKey: ["gateway-network-config", server, networkId] });
+    },
+  });
+
+  if (isLoading) {
+    return (
+      <div className="flex items-center gap-2 p-3 text-xs text-[var(--color-text-muted)]">
+        <Loader2 className="h-3 w-3 animate-spin" /> Loading config...
+      </div>
+    );
+  }
+  if (error || !data) {
+    return (
+      <p className="p-3 text-xs text-[var(--color-red)]">
+        Failed to load config{error ? `: ${(error as Error).message}` : ""}
+      </p>
+    );
+  }
+
+  const config = data.config ?? {};
+  const editableEntries = Object.entries(config).filter(
+    ([key, value]) =>
+      !READONLY_NETWORK_KEYS.has(key) &&
+      (typeof value === "string" || typeof value === "number" || typeof value === "boolean"),
+  );
+
+  const changed = Object.entries(draft).filter(
+    ([key, value]) => value !== String(config[key] ?? ""),
+  );
+
+  const save = () => {
+    const updates: Record<string, unknown> = {};
+    for (const [key, value] of changed) {
+      const original = config[key];
+      if (typeof original === "number") {
+        const num = Number(value);
+        if (isNaN(num)) continue;
+        updates[key] = num;
+      } else if (typeof original === "boolean") {
+        updates[key] = value === "true";
+      } else {
+        updates[key] = value;
+      }
+    }
+    if (Object.keys(updates).length > 0) saveMut.mutate(updates);
+  };
+
+  return (
+    <div className="space-y-2 p-3">
+      {editableEntries.map(([key, value]) => {
+        const current = draft[key] ?? String(value ?? "");
+        const isDirty = draft[key] !== undefined && draft[key] !== String(value ?? "");
+        return (
+          <div key={key} className="flex items-center gap-2">
+            <label
+              className="w-44 shrink-0 truncate font-mono text-xs text-[var(--color-text-muted)]"
+              title={key}
+            >
+              {key}
+            </label>
+            {typeof value === "boolean" ? (
+              <input
+                type="checkbox"
+                checked={current === "true"}
+                onChange={(e) => setDraft((d) => ({ ...d, [key]: String(e.target.checked) }))}
+                className="h-3.5 w-3.5"
+              />
+            ) : (
+              <input
+                value={current}
+                onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
+                className={`flex-1 rounded-md border bg-[var(--color-bg)] px-2 py-1 font-mono text-xs text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none ${
+                  isDirty ? "border-[var(--color-primary)]/60" : "border-[var(--color-border)]"
+                }`}
+              />
+            )}
+          </div>
+        );
+      })}
+
+      <div className="flex items-center gap-2 pt-1">
+        <button
+          onClick={save}
+          disabled={changed.length === 0 || saveMut.isPending || !isOwner}
+          title={isOwner ? undefined : OWNER_ONLY_HINT}
+          className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saveMut.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Check className="h-3 w-3" />}
+          Save {changed.length > 0 ? `(${changed.length})` : ""}
+        </button>
+        {changed.length > 0 && (
+          <button
+            onClick={() => setDraft({})}
+            className="rounded-md px-2 py-1.5 text-xs text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)]"
+          >
+            Discard
+          </button>
+        )}
+        {saveMut.isSuccess && changed.length === 0 && (
+          <span className="flex items-center gap-1 text-xs text-emerald-400">
+            <Check className="h-3 w-3" /> Saved
+          </span>
+        )}
+        {saveMut.error && (
+          <span className="text-xs text-[var(--color-red)]">{saveMut.error.message}</span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GatewayNetworks({ server, running }: { server: string; running: boolean }) {
+  const [open, setOpen] = useState(false);
+  const [expanded, setExpanded] = useState<string | null>(null);
+
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["gateway-networks", server],
+    queryFn: () => api.getGatewayNetworks(server),
+    enabled: open && running,
+  });
+
+  const networks = data?.networks ?? [];
+  const chains = [...new Set(networks.map((n) => n.chain))].sort();
+
+  return (
+    <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">
+      <button
+        onClick={() => setOpen(!open)}
+        className="flex w-full items-center justify-between p-3 text-sm text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+      >
+        <div className="flex items-center gap-2">
+          <Globe className="h-4 w-4" />
+          <span className="font-medium">Networks & RPC</span>
+        </div>
+        {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
+      </button>
+      {open && (
+        <div className="border-t border-[var(--color-border)] p-3 space-y-3">
+          {!running ? (
+            <p className="text-xs text-[var(--color-text-muted)]">
+              Start the Gateway to view and edit network configuration.
+            </p>
+          ) : isLoading ? (
+            <div className="flex items-center gap-2 text-xs text-[var(--color-text-muted)]">
+              <Loader2 className="h-3 w-3 animate-spin" /> Loading networks...
+            </div>
+          ) : error ? (
+            <p className="text-xs text-[var(--color-red)]">{(error as Error).message}</p>
+          ) : (
+            chains.map((chain) => (
+              <div key={chain}>
+                <p className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-[var(--color-text-muted)]">
+                  {chain}
+                </p>
+                <div className="space-y-1">
+                  {networks
+                    .filter((n) => n.chain === chain)
+                    .map((n) => (
+                      <div
+                        key={n.network_id}
+                        className="rounded-md border border-[var(--color-border)] bg-[var(--color-bg)]"
+                      >
+                        <button
+                          onClick={() =>
+                            setExpanded(expanded === n.network_id ? null : n.network_id)
+                          }
+                          className="flex w-full items-center justify-between px-3 py-2 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+                        >
+                          <span className="font-mono">{n.network}</span>
+                          {expanded === n.network_id ? (
+                            <ChevronDown className="h-3 w-3" />
+                          ) : (
+                            <ChevronRight className="h-3 w-3" />
+                          )}
+                        </button>
+                        {expanded === n.network_id && (
+                          <div className="border-t border-[var(--color-border)]">
+                            <NetworkConfigEditor server={server} networkId={n.network_id} />
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function GatewaySettings() {
   const { server } = useServer();
+  // Container pull/start/stop/restart are owner-only on the backend (SEC-166).
+  // This only predicts the refusal — `_require_owner` is what enforces it.
+  const { isOwner } = useServerPermission();
   const qc = useQueryClient();
   const [showLogs, setShowLogs] = useState(false);
   const [showDeploy, setShowDeploy] = useState(false);
@@ -164,8 +388,9 @@ export function GatewaySettings() {
               <>
                 <button
                   onClick={() => restartMut.mutate()}
-                  disabled={restartMut.isPending}
-                  className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:opacity-50"
+                  disabled={restartMut.isPending || !isOwner}
+                  title={isOwner ? undefined : OWNER_ONLY_HINT}
+                  className="flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs font-medium text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {restartMut.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
                   Restart
@@ -174,8 +399,9 @@ export function GatewaySettings() {
                   <div className="flex items-center gap-1">
                     <button
                       onClick={() => stopMut.mutate()}
-                      disabled={stopMut.isPending}
-                      className="rounded-md bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--color-red)]/80"
+                      disabled={stopMut.isPending || !isOwner}
+                      title={isOwner ? undefined : OWNER_ONLY_HINT}
+                      className="rounded-md bg-[var(--color-red)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--color-red)]/80 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       {stopMut.isPending ? "Stopping..." : "Confirm Stop"}
                     </button>
@@ -189,7 +415,9 @@ export function GatewaySettings() {
                 ) : (
                   <button
                     onClick={() => setConfirmStop(true)}
-                    className="flex items-center gap-1.5 rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-[var(--color-red)] transition-colors hover:bg-red-500/10"
+                    disabled={!isOwner}
+                    title={isOwner ? undefined : OWNER_ONLY_HINT}
+                    className="flex items-center gap-1.5 rounded-md border border-red-500/30 px-3 py-1.5 text-xs font-medium text-[var(--color-red)] transition-colors hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     <Square className="h-3 w-3" /> Stop
                   </button>
@@ -224,6 +452,16 @@ export function GatewaySettings() {
               </div>
             )}
           </div>
+        )}
+
+        {/* A refusal that outruns the disabled state (stale permission, a share just
+            revoked) still has to say something: show the API's own detail rather than
+            leaving the container apparently untouched and the click unexplained. */}
+        {stopMut.error && (
+          <p className="mt-3 text-xs text-[var(--color-red)]">{stopMut.error.message}</p>
+        )}
+        {restartMut.error && (
+          <p className="mt-3 text-xs text-[var(--color-red)]">{restartMut.error.message}</p>
         )}
       </div>
 
@@ -275,8 +513,9 @@ export function GatewaySettings() {
               {pullImage !== "custom" && (
                 <button
                   onClick={() => pullMut.mutate()}
-                  disabled={pulling}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                  disabled={pulling || !isOwner}
+                  title={isOwner ? undefined : OWNER_ONLY_HINT}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {pulling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                   Pull
@@ -294,8 +533,9 @@ export function GatewaySettings() {
                 />
                 <button
                   onClick={() => pullMut.mutate()}
-                  disabled={pulling || !pullCustomImage}
-                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+                  disabled={pulling || !pullCustomImage || !isOwner}
+                  title={isOwner ? undefined : OWNER_ONLY_HINT}
+                  className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {pulling ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
                   Pull
@@ -401,8 +641,9 @@ export function GatewaySettings() {
 
             <button
               onClick={() => startMut.mutate()}
-              disabled={startMut.isPending || (image === "custom" && !customImage)}
-              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:opacity-50"
+              disabled={startMut.isPending || (image === "custom" && !customImage) || !isOwner}
+              title={isOwner ? undefined : OWNER_ONLY_HINT}
+              className="flex items-center gap-1.5 rounded-md bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white transition-colors hover:bg-[var(--color-primary)]/80 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {startMut.isPending && <Loader2 className="h-3 w-3 animate-spin" />}
               Start Gateway
@@ -414,6 +655,9 @@ export function GatewaySettings() {
           </div>
         </div>
       )}
+
+      {/* Networks & RPC */}
+      <GatewayNetworks server={server} running={running} />
 
       {/* Logs */}
       <div className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)]">

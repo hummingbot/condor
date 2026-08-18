@@ -6,7 +6,12 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from ..user_preferences import get_active_server
-from ._shared import escape_markdown_v2, extract_network_id, get_default_networks, logger
+from ._shared import (
+    escape_markdown_v2,
+    extract_network_id,
+    get_default_networks,
+    logger,
+)
 
 
 async def show_networks_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -218,10 +223,10 @@ async def show_network_details(
                 [
                     InlineKeyboardButton(
                         toggle_text,
-                        callback_data=f"gateway_network_toggle_default_{network_id}"
+                        callback_data=f"gateway_network_toggle_default_{network_id}",
                     )
                 ],
-                [InlineKeyboardButton("« Back", callback_data="gateway_networks")]
+                [InlineKeyboardButton("« Back", callback_data="gateway_networks")],
             ]
 
         reply_markup = InlineKeyboardMarkup(keyboard)
@@ -471,8 +476,7 @@ async def toggle_default_network(
 
         # Update the config
         await client.gateway.update_network_config(
-            network_id,
-            {"default_networks": default_networks}
+            network_id, {"default_networks": default_networks}
         )
 
         # Show success and refresh

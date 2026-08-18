@@ -1,10 +1,47 @@
-import { memo } from "react";
-import ReactMarkdown from "react-markdown";
+import { isValidElement, memo, type ReactNode } from "react";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { ChevronDown, ChevronRight, Loader2, Square, User, Bot } from "lucide-react";
 import type { ChatMessage as ChatMessageType } from "@/hooks/useChatSocket";
 import { useLiveDisclosure } from "@/hooks/useLiveDisclosure";
+import { ChartBlock } from "./ChartBlock";
 import { ToolCallStatus } from "./ToolCallStatus";
+
+/** Flatten a fence's children back into the source text it was parsed from. */
+function fenceText(children: ReactNode): string {
+  if (typeof children === "string") return children;
+  if (Array.isArray(children)) return children.map(fenceText).join("");
+  return "";
+}
+
+/**
+ * What the markdown pipeline can render, beyond markdown.
+ *
+ * A ```chart fence becomes a real chart; every other fence stays the code
+ * block it already was. The override sits on `pre` rather than on `code`
+ * because react-markdown v10 dropped the `inline` prop and still wraps fences
+ * in a <pre> — replacing the wrapper is what keeps the chart out of a
+ * whitespace-preserving box it was never meant to live in.
+ */
+function markdownComponents(live: boolean): Components {
+  return {
+    pre({ children, ...props }) {
+      const child = Array.isArray(children) ? children[0] : children;
+      if (isValidElement<{ className?: string; children?: ReactNode }>(child)) {
+        const className = child.props.className ?? "";
+        if (className.split(" ").includes("language-chart")) {
+          return <ChartBlock raw={fenceText(child.props.children)} live={live} />;
+        }
+      }
+      return <pre {...props}>{children}</pre>;
+    },
+  };
+}
+
+// Both variants are built once: a fresh `components` object per render would
+// remount every block in the bubble on each streamed chunk.
+const LIVE_COMPONENTS = markdownComponents(true);
+const STATIC_COMPONENTS = markdownComponents(false);
 
 function ThoughtBlock({ text, live }: { text: string; live: boolean }) {
   const { expanded, toggle } = useLiveDisclosure(live);
@@ -70,7 +107,9 @@ export const ChatMessageView = memo(function ChatMessageView({
     return (
       <div className="my-3 flex justify-start">
         <div className="chat-markdown max-w-[85%] rounded-xl border border-dashed border-[var(--color-border)] px-3.5 py-2 text-sm text-[var(--color-text-muted)]">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={STATIC_COMPONENTS}>
+            {message.text}
+          </ReactMarkdown>
         </div>
       </div>
     );
@@ -106,13 +145,18 @@ export const ChatMessageView = memo(function ChatMessageView({
     );
   }
 
+  // A bubble that shrink-wraps its text is right for prose and wrong for a
+  // chart: a plot squeezed into the width of the sentence above it is
+  // unreadable. A chart-bearing answer claims the whole chat column instead.
+  const hasChart = message.text.includes("```chart");
+
   return (
     <div className="flex justify-start mb-3">
-      <div className="flex items-start gap-2 max-w-[85%]">
+      <div className={`flex items-start gap-2 ${hasChart ? "w-full" : "max-w-[85%]"}`}>
         <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-[var(--color-accent)]/20">
           <Bot className="h-3.5 w-3.5 text-[var(--color-accent)]" />
         </div>
-        <div className="min-w-0">
+        <div className={`min-w-0 ${hasChart ? "flex-1" : ""}`}>
           {/* The thought is the live thing only until the answer starts
               landing in this same bubble. Keying the collapse on `text` too
               means a lost `prompt_done` cannot leave it stuck open. */}
@@ -120,7 +164,12 @@ export const ChatMessageView = memo(function ChatMessageView({
           <ToolCallStatus toolCalls={message.toolCalls} live={live} />
           {message.text && (
             <div className="chat-markdown rounded-2xl rounded-tl-sm bg-[var(--color-surface-hover)] px-3.5 py-2 text-sm">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.text}</ReactMarkdown>
+              <ReactMarkdown
+                remarkPlugins={[remarkGfm]}
+                components={live ? LIVE_COMPONENTS : STATIC_COMPONENTS}
+              >
+                {message.text}
+              </ReactMarkdown>
             </div>
           )}
           {!message.text && message.toolCalls.length === 0 && !message.thought && (

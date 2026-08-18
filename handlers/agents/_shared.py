@@ -246,6 +246,19 @@ _WEB_FORMATTING = (
     "- No message length limits, but stay concise.\n"
     "- Use tables for structured data (portfolios, prices, comparisons).\n"
     "- Use code blocks for configs, JSON, or commands.\n"
+    "- CHARTS: when the answer is a numeric series or comparison (a price or\n"
+    "  PnL curve, volume per venue, a distribution), draw it with a ```chart\n"
+    "  fence holding one JSON object. The dashboard renders it as an\n"
+    "  interactive chart:\n"
+    "  ```chart\n"
+    '  {"type": "line", "title": "SOL/USDC 24h", "x": "time",\n'
+    '   "series": [{"key": "price", "name": "Price"}],\n'
+    '   "data": [{"time": "12:00", "price": 150.1}, {"time": "16:00", "price": 152.4}]}\n'
+    "  ```\n"
+    '  "type" is "line", "area" or "bar"; "x" and every series "key" name\n'
+    "  fields of the data rows. Max 4 series and 200 points (downsample longer\n"
+    '  series). A series may set "color": "up", "down", "yellow" or a hex.\n'
+    "  Chart for the shape, table for exact values; use both when both matter.\n"
     "- Respond in the user's language."
 )
 
@@ -258,13 +271,24 @@ _TELEGRAM_FORMATTING = (
 )
 
 
+def platform_formatting(platform: str = "telegram") -> str:
+    """The reply-formatting rules for a platform.
+
+    Public because a bound Agent opens the chat with its own identity context
+    instead of :func:`build_initial_context`, and would otherwise be the only
+    brain in the product that never hears how the surface it is speaking into
+    renders a reply.
+    """
+    return _WEB_FORMATTING if platform == "web" else _TELEGRAM_FORMATTING
+
+
 def _build_system_prompt(platform: str = "telegram") -> str:
     """Condor's own AGENT.md plus the platform's formatting rules."""
     agent = _chat_agent()
     return (
         "[System context -- do not repeat this to the user]\n\n"
         f"{agent.instructions if agent else ''}\n\n"
-        f"{_WEB_FORMATTING if platform == 'web' else _TELEGRAM_FORMATTING}"
+        f"{platform_formatting(platform)}"
     )
 
 
@@ -511,7 +535,9 @@ def build_mcp_servers_for_session(
 
     ``server_name`` pins the run to that Condor server (an Agent with
     ``server_required``); when omitted, the chat's ambient server is resolved
-    from the user's preferences, then from the first accessible server.
+    from the user's preferences, then from the first accessible server. Each
+    candidate must exist *and* be reachable by ``user_id`` — a name this user
+    has no grant on resolves to the next candidate, never to its credentials.
 
     ``agent_slug`` scopes the condor MCP tools' memory/skills to that Agent's
     own stores (``agents/{slug}/``). Without it the tools target the chat
@@ -527,12 +553,28 @@ def build_mcp_servers_for_session(
 
     cm = get_config_manager()
 
-    # Resolve which hummingbot server to use (explicit override > user preferences)
-    if not server_name:
-        server_name = get_effective_server(chat_id, user_data)
-    if not server_name:
+    # Resolve which hummingbot server to use (explicit override > user
+    # preferences). Every candidate is held to existence *and* reach, because
+    # the name that comes out of here decides whose API credentials go into the
+    # subprocess env below. ``chat_id`` is not a principal — ``chat_defaults``
+    # is a global map keyed by chat, so a caller who can name someone else's
+    # chat could name their server too (SEC-178, the SEC-164 shape). The subject
+    # is always ``user_id``, the authenticated owner of the run; the same
+    # predicate guards TickEngine._resolve_server.
+    def usable(name: str | None) -> bool:
+        return bool(name and cm.get_server(name)) and cm.has_server_access(
+            user_id, name
+        )
+
+    def candidates():
+        # Lazy on purpose: resolving the chat default writes back into
+        # ``user_data``, so it must not run when a pin already answered.
+        yield server_name
+        yield get_effective_server(chat_id, user_data)
         accessible = cm.get_accessible_servers(user_id)
-        server_name = accessible[0] if accessible else None
+        yield accessible[0] if accessible else None
+
+    server_name = next((name for name in candidates() if usable(name)), None)
 
     # Condor MCP -- runs as stdio subprocess, tools work locally without TCP bridge
     # Pass resolved server_name so start_agent uses the correct server

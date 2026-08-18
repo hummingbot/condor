@@ -6,10 +6,14 @@ All business logic lives in mcp_servers.condor.tools.*
 
 from mcp.server.fastmcp import FastMCP
 
+from condor.telemetry import taps as telemetry_taps
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import available_models as available_models_tool
+from mcp_servers.condor.tools import code as code_tool
 from mcp_servers.condor.tools import consult as consult_tool
-from mcp_servers.condor.tools import context
+from mcp_servers.condor.tools import (
+    context,
+)
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
     memory,
@@ -19,6 +23,23 @@ from mcp_servers.condor.tools import (
     servers,
     skills,
     trading_agent,
+)
+
+# FEAT-047: the branch above the routines one in cost — a one-off computation is
+# a snippet, not a file. Identical for every seat (chat, worker, agent), so it is
+# defined once and spliced into all three routing texts.
+_RUN_CODE_RULE = (
+    "- FOR A ONE-OFF COMPUTATION OVER DATA — candles → returns → filter, a "
+    "spread across venues, a quick aggregation — write it as Python and call "
+    '`run_code(code="...")` instead of chaining raw tools and doing the '
+    "arithmetic by hand. It runs in the bot with the same primitives a routine "
+    "has (`context`, `client`, pandas, `ReportBuilder`, every `condor.*` "
+    "module); `print()` is the output and an optional `result` variable is the "
+    "return value. On failure it returns the traceback — fix the snippet and "
+    "re-run. Keep snippets short and `await` inside loops. If you have run "
+    "essentially the same snippet three times, or you want it scheduled or "
+    "shared, promote it to a routine with "
+    '`manage_routines(action="create_routine")`.\n'
 )
 
 _CHAT_ROUTINES_RULE = (
@@ -97,6 +118,7 @@ def _coordinator_base(routines_rule: str) -> str:
         'the user when finished), use `delegate(action="start", agent="<slug>", '
         'task="...")` instead and poll with `delegate(action="get", task_id="...")`.\n'
         f"{routines_rule}"
+        f"{_RUN_CODE_RULE}"
         "- Only fall back to raw tools when nothing matches.\n"
         "Anti-pattern: answering a domain request (deploy/tune an executor, analyze "
         "logs, author a routine) with a chain of raw `mcp-hummingbot`/`manage_*` "
@@ -177,6 +199,7 @@ def _agent_base(slug: str, name: str, worker: bool = False) -> str:
         '`manage_routines(action="run", name="X", config={})` instead of '
         "reimplementing it by hand.\n"
         f"{routines_rule}"
+        f"{_RUN_CODE_RULE}"
         f"{'' if worker else self_delegation_rule}"
         "- You MAY consult a PEER agent listed below for work outside your own "
         'domain (`consult(agent="<slug>", task="...", context="...")`, or '
@@ -282,6 +305,7 @@ mcp = FastMCP("condor", instructions=_build_instructions())
 
 @mcp.tool()
 @handle_errors("consult agent")
+@telemetry_taps.tracked("consult")
 async def consult(agent: str, task: str, context: str = "") -> dict:
     """Consult a specialized domain agent and get its answer.
 
@@ -303,6 +327,7 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
 
 @mcp.tool()
 @handle_errors("delegate task")
+@telemetry_taps.tracked("delegate")
 async def delegate(
     action: str,
     agent: str = "",
@@ -359,6 +384,7 @@ async def delegate(
 
 @mcp.tool()
 @handle_errors("send notification")
+@telemetry_taps.tracked("send_notification")
 async def send_notification(
     text: str,
     parse_mode: str = "Markdown",
@@ -377,6 +403,7 @@ async def send_notification(
 
 @mcp.tool()
 @handle_errors("manage routines")
+@telemetry_taps.tracked("manage_routines")
 async def manage_routines(
     action: str,
     name: str | None = None,
@@ -450,7 +477,73 @@ async def manage_routines(
 
 
 @mcp.tool()
+@handle_errors("run code")
+@telemetry_taps.tracked("run_code")
+async def run_code(
+    code: str | None = None,
+    action: str = "run",
+    label: str = "",
+    timeout: int | None = None,
+    run_id: str | None = None,
+    agent: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Run a Python snippet inside Condor and get its output back.
+
+    The scratchpad below a routine: for a ONE-OFF computation over data — fetch
+    candles, build a DataFrame, compute returns, filter the series — write the
+    Python instead of chaining raw tools and doing the arithmetic by hand. There
+    is no file to author and no config schema to declare.
+
+    The snippet is a plain script body running in the bot process with the same
+    primitives a routine has:
+    - top-level `await` works, with no wrapper function
+    - `print(...)` is the output (use `print`, not `logging` — logging is not
+      captured); an optional `result` variable is the return value
+    - `context` is the routine context (active server, bot, chat), `client` is
+      the Hummingbot API client for that server (None if none resolves)
+    - every `condor.*` module is importable, including
+      `from condor.reports import ReportBuilder` — a snippet that saves one
+      produces a real dashboard report and its id comes back as `report_id`
+
+    On failure you get `status="error"` and a traceback whose line numbers are
+    YOUR snippet's: read it, fix the code, run it again. Keep snippets short and
+    `await` inside loops — a snippet that never yields blocks the bot until the
+    timeout cuts it.
+
+    Run essentially the same snippet a third time, or want it scheduled, shared
+    or visible to the user? Promote it to a routine with
+    `manage_routines(action="create_routine")`. That is the durable artifact;
+    this is the scratchpad.
+
+    Actions:
+    - "run" (default): execute `code` and wait for it (requires code)
+    - "history": list recent runs, newest first, with label and status
+    - "get": read one past run back in full — code, stdout, result, traceback
+      (requires run_id)
+
+    Args:
+        action: run | history | get.
+        code: The Python snippet to execute (for "run").
+        label: Short purpose of the run ("returns of SOL 1h"), shown in history
+            and used as the report source name.
+        timeout: Seconds to allow the snippet (for "run"). Default 60, max 120.
+        run_id: Id of a past run (for "get").
+        agent: Whose runs to list (for "history"). Defaults to your own; pass
+            "all" for every assistant's.
+        limit: How many runs to list (for "history"). Default 20.
+
+    Returns:
+        For "run": {run_id, status: ok|error|timeout, stdout, result, error,
+        traceback, report_id, duration_ms}. Long stdout/result are clipped with
+        "truncated": true — read the whole run with action="get".
+    """
+    return await code_tool.run_code(code, action, label, timeout, run_id, agent, limit)
+
+
+@mcp.tool()
 @handle_errors("manage servers")
+@telemetry_taps.tracked("manage_servers")
 async def manage_servers(
     action: str,
     name: str | None = None,
@@ -473,6 +566,7 @@ async def manage_servers(
 
 @mcp.tool()
 @handle_errors("get user context")
+@telemetry_taps.tracked("get_user_context")
 async def get_user_context() -> dict:
     """Get the current user's context within Condor.
 
@@ -487,6 +581,7 @@ async def get_user_context() -> dict:
 
 @mcp.tool()
 @handle_errors("get available models")
+@telemetry_taps.tracked("get_available_models")
 async def get_available_models(
     openrouter_query: str = "", openrouter_limit: int = 20
 ) -> dict:
@@ -543,6 +638,7 @@ async def get_available_models(
 
 @mcp.tool()
 @handle_errors("manage trading agent")
+@telemetry_taps.tracked("manage_trading_agent")
 async def manage_trading_agent(
     action: str,
     agent_id: str | None = None,
@@ -628,7 +724,9 @@ async def manage_trading_agent(
         skills: List of optional skill names to enable (for create/update_strategy).
         config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
             For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
-            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
+            execution_mode, frequency_sec, tick_timeout_sec (wall-clock budget for one tick's
+            agent session; 0 = runtime default of 600s), total_amount_quote, trading_context,
+            risk_limits, server_name, max_ticks.
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
         when_to_consult: One-line hint describing when to route work to this agent (create/update_agent). Purely for routing — every agent is consultable with or without it; it falls back to the description.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
@@ -657,6 +755,7 @@ async def manage_trading_agent(
 
 @mcp.tool()
 @handle_errors("manage memory")
+@telemetry_taps.tracked("manage_memory")
 async def manage_memory(
     action: str,
     name: str | None = None,
@@ -710,6 +809,7 @@ async def manage_memory(
 
 @mcp.tool()
 @handle_errors("manage skill")
+@telemetry_taps.tracked("manage_skill")
 async def manage_skill(
     action: str,
     name: str | None = None,
@@ -818,6 +918,7 @@ async def manage_skill(
 
 @mcp.tool()
 @handle_errors("manage notes")
+@telemetry_taps.tracked("manage_notes")
 async def manage_notes(
     action: str,
     key: str | None = None,
@@ -855,6 +956,7 @@ async def manage_notes(
 
 @mcp.tool()
 @handle_errors("journal read")
+@telemetry_taps.tracked("trading_agent_journal_read")
 async def trading_agent_journal_read(
     agent_id: str,
     section: str = "recent",
@@ -882,6 +984,7 @@ async def trading_agent_journal_read(
 
 @mcp.tool()
 @handle_errors("journal write")
+@telemetry_taps.tracked("trading_agent_journal_write")
 async def trading_agent_journal_write(
     agent_id: str,
     entry_type: str,
@@ -933,4 +1036,15 @@ async def trading_agent_journal_write(
 
 
 if __name__ == "__main__":
+    # This server runs in its own process, spawned by the agent: a different
+    # interpreter, a different heap, and no job_queue. hosted=False makes emit()
+    # append to `spool.<pid>.jsonl`, which the host process drains and deletes.
+    # Still a no-op unless the install opted in.
+    try:
+        from condor import telemetry
+
+        telemetry.init(hosted=False)
+    except Exception:  # noqa: BLE001 - never block the server on telemetry
+        pass
+
     mcp.run()

@@ -21,14 +21,12 @@ VALID_CONFIG = {
     "version": 1,
 }
 
-INVALID_YAML = textwrap.dedent(
-    """\
+INVALID_YAML = textwrap.dedent("""\
     servers:
       prod:
         url: http://localhost:8000
        username: broken-indentation
-    """
-)
+    """)
 
 
 @pytest.fixture

@@ -4,6 +4,7 @@ Executor-related formatters for table display.
 This module provides table formatters for executor types, executor lists,
 positions held, and executor configuration schemas.
 """
+
 from typing import Any
 
 from .base import (
@@ -44,15 +45,20 @@ def format_executor_types_table(executor_types: list[dict[str, Any]]) -> str:
     rows = []
     for exec_type in executor_types:
         name = str(get_field(exec_type, "name", default="unknown"))[:20]
-        description = truncate_string(str(get_field(exec_type, "description", default="")), max_len=40)
-        use_when = truncate_string(str(get_field(exec_type, "use_when", default="")), max_len=40)
-        avoid_when = truncate_string(str(get_field(exec_type, "avoid_when", default="")), max_len=40)
+        description = truncate_string(
+            str(get_field(exec_type, "description", default="")), max_len=40
+        )
+        use_when = truncate_string(
+            str(get_field(exec_type, "use_when", default="")), max_len=40
+        )
+        avoid_when = truncate_string(
+            str(get_field(exec_type, "avoid_when", default="")), max_len=40
+        )
 
         row = f"{name:20} | {description:40} | {use_when:40} | {avoid_when}"
         rows.append(row)
 
     return f"{header}\n{separator}\n" + "\n".join(rows)
-
 
 
 def format_executors_table(executors: list[dict[str, Any]]) -> str:
@@ -78,7 +84,9 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
     rows = []
     for executor in executors:
         exec_id = str(get_field(executor, "id", "executor_id", default=""))
-        exec_type = str(get_field(executor, "type", "executor_type", default="unknown"))[:15]
+        exec_type = str(
+            get_field(executor, "type", "executor_type", default="unknown")
+        )[:15]
         connector = str(get_field(executor, "connector_name", default=""))[:17]
         trading_pair = str(get_field(executor, "trading_pair", default=""))[:10]
         status = str(get_field(executor, "status", default="unknown"))
@@ -92,10 +100,20 @@ def format_executors_table(executors: list[dict[str, Any]]) -> str:
         side = str(side)[:4] if side else ""
 
         # Volume is filled_amount_quote
-        volume = format_number(get_field(executor, "filled_amount_quote", default=None), decimals=2, compact=True)
-        pnl = format_number(get_field(executor, "net_pnl_quote", "pnl", default=None), decimals=2, compact=False)
+        volume = format_number(
+            get_field(executor, "filled_amount_quote", default=None),
+            decimals=2,
+            compact=True,
+        )
+        pnl = format_number(
+            get_field(executor, "net_pnl_quote", "pnl", default=None),
+            decimals=2,
+            compact=False,
+        )
 
-        created = format_timestamp(get_field(executor, "timestamp", "created_at", default=0))
+        created = format_timestamp(
+            get_field(executor, "timestamp", "created_at", default=0)
+        )
 
         row = f"{exec_id:44} | {exec_type:15} | {connector:17} | {trading_pair:10} | {status:10} | {close_type:20} | {side:4} | {volume:>11} | {pnl:>9} | {created}"
         rows.append(row)
@@ -157,7 +175,9 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
 
     entry_price = get_field(executor, "entry_price", default=None)
     if entry_price is not None and entry_price != "N/A":
-        output += f"Entry Price: {format_number(entry_price, decimals=6, compact=False)}\n"
+        output += (
+            f"Entry Price: {format_number(entry_price, decimals=6, compact=False)}\n"
+        )
 
     current_price = get_field(executor, "current_price", default=None)
     if current_price is not None and current_price != "N/A":
@@ -201,7 +221,11 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
         output += f"Created: {format_timestamp(created, '%Y-%m-%d %H:%M:%S')}\n"
 
     close_timestamp = get_field(executor, "close_timestamp", default=None)
-    if close_timestamp is not None and close_timestamp != "N/A" and close_timestamp != 0:
+    if (
+        close_timestamp is not None
+        and close_timestamp != "N/A"
+        and close_timestamp != 0
+    ):
         output += f"Closed: {format_timestamp(close_timestamp, '%Y-%m-%d %H:%M:%S')}\n"
 
     # Show full config if present (creation parameters)
@@ -224,13 +248,17 @@ def format_executor_detail(executor: dict[str, Any]) -> str:
             output += f"  end_price: {format_number(max(grid_levels), decimals=2, compact=False)}\n"
             output += f"  num_levels: {len(grid_levels)}\n"
             sorted_levels = sorted(grid_levels)
-            spreads = [(sorted_levels[i+1] - sorted_levels[i]) / sorted_levels[i]
-                       for i in range(len(sorted_levels) - 1)]
+            spreads = [
+                (sorted_levels[i + 1] - sorted_levels[i]) / sorted_levels[i]
+                for i in range(len(sorted_levels) - 1)
+            ]
             avg_spread = sum(spreads) / len(spreads) if spreads else 0
             output += f"  avg_spread_between_levels: {format_percentage(avg_spread)}\n"
             if isinstance(grid_tp, list) and len(grid_tp) > 1:
-                tp_diffs = [abs(grid_tp[i] - grid_levels[i]) / grid_levels[i]
-                            for i in range(min(len(grid_tp), len(grid_levels)))]
+                tp_diffs = [
+                    abs(grid_tp[i] - grid_levels[i]) / grid_levels[i]
+                    for i in range(min(len(grid_tp), len(grid_levels)))
+                ]
                 avg_tp = sum(tp_diffs) / len(tp_diffs) if tp_diffs else 0
                 output += f"  avg_take_profit: {format_percentage(avg_tp)}\n"
 
@@ -277,7 +305,9 @@ def format_positions_held_table(positions: list[dict[str, Any]]) -> str:
         amount_val = get_field(position, "net_amount_base", "amount", default=None)
         amount = format_number(amount_val, decimals=6, compact=False)
         # Handle both 'entry_price' and 'buy_breakeven_price' field names
-        entry_price_val = get_field(position, "buy_breakeven_price", "entry_price", default=None)
+        entry_price_val = get_field(
+            position, "buy_breakeven_price", "entry_price", default=None
+        )
         entry_price = format_number(entry_price_val, decimals=4, compact=False)
         # Compute notional value (amount * entry_price)
         notional_val = None
@@ -287,8 +317,16 @@ def format_positions_held_table(positions: list[dict[str, Any]]) -> str:
             except (ValueError, TypeError):
                 pass
         notional = format_number(notional_val, decimals=2, compact=False)
-        current_price = format_number(get_field(position, "current_price", default=None), decimals=4, compact=False)
-        unrealized_pnl = format_number(get_field(position, "unrealized_pnl_quote", "unrealized_pnl", default=None), decimals=2, compact=False)
+        current_price = format_number(
+            get_field(position, "current_price", default=None),
+            decimals=4,
+            compact=False,
+        )
+        unrealized_pnl = format_number(
+            get_field(position, "unrealized_pnl_quote", "unrealized_pnl", default=None),
+            decimals=2,
+            compact=False,
+        )
         leverage = str(get_field(position, "leverage", default="1"))[:8]
 
         row = f"{connector:19} | {trading_pair:12} | {side:4} | {amount:>12} | {notional:>12} | {entry_price:>12} | {current_price:>13} | {unrealized_pnl:>14} | {leverage:>8}"
@@ -340,7 +378,9 @@ def format_positions_summary(summary: dict[str, Any]) -> str:
     return output
 
 
-def format_executor_schema_table(schema: dict[str, Any], defaults: dict[str, Any] | None = None) -> str:
+def format_executor_schema_table(
+    schema: dict[str, Any], defaults: dict[str, Any] | None = None
+) -> str:
     """
     Format executor configuration schema as a table.
 
@@ -379,7 +419,9 @@ def format_executor_schema_table(schema: dict[str, Any], defaults: dict[str, Any
         if isinstance(param_info, dict):
             param_type = param_info.get("type", param_info.get("anyOf", "unknown"))
             if isinstance(param_type, list):
-                param_type = "/".join(str(t.get("type", t)) for t in param_type if isinstance(t, dict))
+                param_type = "/".join(
+                    str(t.get("type", t)) for t in param_type if isinstance(t, dict)
+                )
             param_type = str(param_type)[:17]
 
             required = "Yes" if param_name in required_fields else "No"
@@ -390,9 +432,13 @@ def format_executor_schema_table(schema: dict[str, Any], defaults: dict[str, Any
             default_str = truncate_string(str(default_val), max_len=16)
 
             user_default = defaults.get(param_name, "")
-            user_default_str = truncate_string(str(user_default), max_len=16) if user_default else "-"
+            user_default_str = (
+                truncate_string(str(user_default), max_len=16) if user_default else "-"
+            )
 
-            description = truncate_string(str(param_info.get("description", "")), max_len=40)
+            description = truncate_string(
+                str(param_info.get("description", "")), max_len=40
+            )
 
             row = f"{param_name:28} | {param_type:17} | {required:8} | {default_str:16} | {user_default_str:16} | {description}"
             rows.append(row)

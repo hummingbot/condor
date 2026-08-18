@@ -31,3 +31,18 @@ if _web_url_raw:
 else:
     WEB_PORT = int(_web_port_raw) if _web_port_raw else 8088
     WEB_URL = f"http://localhost:{WEB_PORT}"
+
+# ── Telemetry (FEAT-023) ──
+# Opt-in and OFF by default. Nothing is collected, buffered or sent unless the
+# install's admin has explicitly consented, or an operator sets CONDOR_TELEMETRY
+# here. An unset value is *not* "on": it means "no override", and the stored
+# consent decides — whose default is `unknown`, which emits nothing.
+#   off   - nothing, ever. emit() returns immediately.
+#   ping  - install / heartbeat / version_change / shutdown only.
+#   usage - the full allowlisted taxonomy in condor/telemetry/schema.py.
+CONDOR_TELEMETRY = os.environ.get("CONDOR_TELEMETRY", "").strip().lower() or None
+
+# Where a batch would be POSTed. Deliberately unset by default and NOT baked
+# into the source: with no URL the send path is inert, and events can only ever
+# accumulate in the local capped outbox. See PRIVACY.md.
+CONDOR_TELEMETRY_URL = os.environ.get("CONDOR_TELEMETRY_URL", "").strip() or None

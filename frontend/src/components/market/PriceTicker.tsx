@@ -10,9 +10,15 @@ interface PriceTickerProps {
   pair: string;
   /** Candle interval to track — defaults to "1m" for most responsive updates */
   interval?: string;
+  /**
+   * Whether `/market/prices` answers for this connector. False for gateway DEX
+   * networks, where the candle close is the only price and the REST call would
+   * only 502; bid/ask/spread are then simply absent.
+   */
+  hasRestPrice?: boolean;
 }
 
-export function PriceTicker({ server, connector, pair, interval = "1m" }: PriceTickerProps) {
+export function PriceTicker({ server, connector, pair, interval = "1m", hasRestPrice = true }: PriceTickerProps) {
   const prevPriceRef = useRef<number>(0);
   const [candlePrice, setCandlePrice] = useState<number>(0);
 
@@ -47,7 +53,7 @@ export function PriceTicker({ server, connector, pair, interval = "1m" }: PriceT
   const { data: price } = useQuery({
     queryKey: ["price", server, connector, pair],
     queryFn: () => api.getPrice(server, connector, pair),
-    enabled: !!server && !!connector && !!pair,
+    enabled: !!server && !!connector && !!pair && hasRestPrice,
     refetchInterval: 15_000,
   });
 

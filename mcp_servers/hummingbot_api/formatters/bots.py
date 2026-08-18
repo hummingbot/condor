@@ -3,6 +3,7 @@ Bot-related formatters for logs and status information.
 
 This module provides table formatters for bot logs and active bot status.
 """
+
 from typing import Any
 
 from .base import (
@@ -121,13 +122,30 @@ def format_active_bots_as_table(bots_data: dict[str, Any]) -> str:
             # Bot with controllers
             for controller_name, controller_data in performance.items():
                 ctrl_state = format_controller_state(controller_data)
-                ctrl_perf = controller_data.get("performance", {}) if isinstance(controller_data, dict) else {}
+                ctrl_perf = (
+                    controller_data.get("performance", {})
+                    if isinstance(controller_data, dict)
+                    else {}
+                )
 
-                realized_pnl = format_number(get_field(ctrl_perf, "realized_pnl_quote", default=None), compact=False)
-                unrealized_pnl = format_number(get_field(ctrl_perf, "unrealized_pnl_quote", default=None), compact=False)
-                global_pnl = format_number(get_field(ctrl_perf, "global_pnl_quote", default=None), compact=False)
-                global_pnl_pct = format_percentage(get_field(ctrl_perf, "global_pnl_pct", default=None))
-                volume = format_number(get_field(ctrl_perf, "volume_traded", default=None), compact=False)
+                realized_pnl = format_number(
+                    get_field(ctrl_perf, "realized_pnl_quote", default=None),
+                    compact=False,
+                )
+                unrealized_pnl = format_number(
+                    get_field(ctrl_perf, "unrealized_pnl_quote", default=None),
+                    compact=False,
+                )
+                global_pnl = format_number(
+                    get_field(ctrl_perf, "global_pnl_quote", default=None),
+                    compact=False,
+                )
+                global_pnl_pct = format_percentage(
+                    get_field(ctrl_perf, "global_pnl_pct", default=None)
+                )
+                volume = format_number(
+                    get_field(ctrl_perf, "volume_traded", default=None), compact=False
+                )
 
                 row = (
                     f"{bot_name} | "

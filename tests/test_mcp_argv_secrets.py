@@ -25,6 +25,9 @@ def session_servers(monkeypatch):
         def get_accessible_servers(self, user_id):
             return ["prod"]
 
+        def has_server_access(self, user_id, name, *a, **kw):
+            return True
+
         def get_server(self, name):
             return {
                 "host": "10.0.0.5",

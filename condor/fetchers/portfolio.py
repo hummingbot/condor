@@ -1,16 +1,42 @@
 """Fetch portfolio / balance data from Hummingbot API."""
 
 import logging
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from condor.fetchers.connectors import fetch_available_cex_connectors
 
 logger = logging.getLogger(__name__)
 
+# Selectable history windows: range key -> (lookback seconds, candle interval).
+# Lives here rather than in the REST route because both the route and the WS
+# manager (which subscribes one SDS key per range) need it, and neither layer
+# may import the other.
+PORTFOLIO_HISTORY_RANGES: Dict[str, Tuple[int, str]] = {
+    "1D": (86400, "5m"),
+    "1W": (604800, "1h"),
+    "1M": (2592000, "4h"),
+    "3M": (7776000, "1d"),
+}
+
+# The poll cadence is not declared here: each range is polled at its own TTL,
+# which ``ServerDataType.PORTFOLIO_HISTORY``'s defaults already state (see
+# ``DataTypeDefaults.interval_for``). A second table here would only be one
+# more thing that has to agree with that one.
+
 
 async def fetch_portfolio(client, **_kw) -> Any:
     """Fetch full portfolio state from a server."""
     return await client.portfolio.get_state()
+
+
+async def fetch_portfolio_history(client, range_key: str = "1D", **_kw) -> Any:
+    """Fetch the raw portfolio history snapshots for one range window."""
+    range_seconds, interval = PORTFOLIO_HISTORY_RANGES[range_key]
+    start_time = int(time.time()) - range_seconds
+    return await client.portfolio.get_history(
+        start_time=start_time, interval=interval, limit=500
+    )
 
 
 async def fetch_portfolio_refreshed(client, **_kw) -> Any:
