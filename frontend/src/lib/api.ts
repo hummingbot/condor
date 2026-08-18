@@ -355,10 +355,35 @@ export interface PoolQuery {
   page?: number;
 }
 
+/**
+ * How much of the shared GeckoTerminal budget is left, and whether it just ran out.
+ *
+ * Every DEX view reads the same per-IP budget, and every failure behind it
+ * degrades to an empty list — so without this a throttled fetch and a chain with
+ * no pools look identical in the table.
+ */
+export interface DexUpstream {
+  /** The breaker is open: gecko answered 429 and Condor has stopped calling. */
+  rate_limited: boolean;
+  /** *This* response was short because the request was refused. Can be true while
+   *  `rate_limited` is false: a spent per-minute budget refuses without tripping. */
+  throttled_request: boolean;
+  /** Seconds left on the cooldown, at the time the response was produced. */
+  retry_in: number;
+  requests_last_minute: number;
+  budget: number;
+  /** Monotonic counters, so a poller can spot a refusal it did not witness. */
+  throttled_calls: number;
+  count_429: number;
+  seconds_since_429: number | null;
+}
+
 /** A page of pools. `has_more`, not a count — no upstream reports a total. */
 export interface PoolPage {
   pools: PoolSummary[];
   has_more: boolean;
+  /** Absent on the Gateway/Orca tabs, which do not read GeckoTerminal. */
+  upstream?: DexUpstream;
 }
 
 /** One venue GeckoTerminal indexes on a chain, for the browser's dex filter. */
@@ -1363,9 +1388,17 @@ export const api = {
     if (q.dexes?.length) params.set("dexes", q.dexes.join(","));
     params.set("limit", String(q.limit ?? 20));
     params.set("page", String(q.page ?? 1));
-    return apiFetch<{ pools: PoolSummary[]; has_more?: boolean }>(
-      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`,
-    ).then((r) => ({ pools: r.pools ?? [], has_more: !!r.has_more }));
+    return apiFetch<{
+      pools: PoolSummary[];
+      has_more?: boolean;
+      upstream?: DexUpstream;
+    }>(`/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`).then(
+      (r) => ({
+        pools: r.pools ?? [],
+        has_more: !!r.has_more,
+        upstream: r.upstream,
+      }),
+    );
   },
 
   /**
@@ -1389,10 +1422,29 @@ export const api = {
    * address, so its TVL and volume are re-read rather than replayed from
    * whenever it was starred.
    */
-  getDexPoolsByAddress: (server: string, network: string, addresses: string[]) =>
-    apiFetch<{ pools: PoolSummary[] }>(
+  getDexPoolsByAddress: (
+    server: string,
+    network: string,
+    addresses: string[],
+  ): Promise<PoolPage> =>
+    apiFetch<{ pools: PoolSummary[]; upstream?: DexUpstream }>(
       `/api/v1/servers/${encodeURIComponent(server)}/dex/pools-by-address?network=${encodeURIComponent(network)}&addresses=${encodeURIComponent(addresses.join(","))}`,
-    ).then((r) => r.pools ?? []),
+    ).then((r) => ({
+      pools: r.pools ?? [],
+      has_more: false,
+      upstream: r.upstream,
+    })),
+
+  /**
+   * Whether GeckoTerminal is currently throttling Condor.
+   *
+   * Reads process-local counters only, so polling it while a cooldown banner
+   * counts down costs nothing of the budget the banner is waiting on.
+   */
+  getDexUpstream: (server: string) =>
+    apiFetch<DexUpstream>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/upstream`,
+    ),
 
   /** One pool by address, so /dex/{network}/{address} renders from the URL alone. */
   getDexPoolByAddress: (server: string, address: string, network: string) =>

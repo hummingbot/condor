@@ -94,6 +94,7 @@ export function LpPositions({ server }: { server: string }) {
         Object.entries(byNetwork).map(([network, addresses]) =>
           api
             .getDexPoolsByAddress(server, network, addresses)
+            .then((r) => r.pools)
             .catch(() => [] as PoolSummary[]),
         ),
       );

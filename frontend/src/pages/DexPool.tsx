@@ -7,6 +7,7 @@ import { NoServerCard } from "@/components/NoServerCard";
 import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { LpPositionBar } from "@/components/dex/LpPositionBar";
 import { PoolStats } from "@/components/dex/PoolStats";
+import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { useLpConfig } from "@/components/executor/lp-config";
 import {
@@ -15,6 +16,7 @@ import {
 } from "@/components/executor/OrderConfigPanel";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
 import { TradeChart, type ChartPriceAxis } from "@/components/trade/TradeChart";
+import { useDexUpstream } from "@/hooks/useDexUpstream";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
@@ -41,6 +43,9 @@ export function DexPool() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const { network = "", address = "" } = useParams();
+  // The pool, its stats and its candles all come from the same shared
+  // GeckoTerminal budget: when it is spent this page silently stops updating.
+  const upstream = useDexUpstream(server ?? null);
 
   const [wantedTab, setTab] = useState<Tab>("order");
   // 5m over 3 days, matching the executor pages. Not 1m: GeckoTerminal caps a
@@ -230,17 +235,38 @@ export function DexPool() {
   }
 
   if (poolError || !pool) {
+    // A pool that could not be *read* is not a pool that does not exist: the
+    // route answers 503 with a reason when GeckoTerminal refused, and retrying
+    // in a few seconds is the fix — not walking back to the browser.
+    const throttled = upstream.limited || /rate limit/i.test(poolError?.message ?? "");
     return (
       <div className="flex min-h-[60vh] flex-col items-center justify-center gap-3">
-        <p className="text-sm text-[var(--color-text-muted)]">
-          No pool at {address.slice(0, 8)}… on {network}.
+        <p className="max-w-md text-center text-sm text-[var(--color-text-muted)]">
+          {throttled
+            ? (poolError?.message ??
+              "GeckoTerminal is rate limiting Condor, so this pool could not be read.")
+            : `No pool at ${address.slice(0, 8)}… on ${network}.`}
         </p>
-        <button
-          onClick={() => navigate("/dex")}
-          className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-        >
-          Back to pools
-        </button>
+        <div className="flex gap-2">
+          {throttled && (
+            <button
+              onClick={() =>
+                queryClient.invalidateQueries({
+                  queryKey: ["dex-pool-by-address", server, network, address],
+                })
+              }
+              className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+            >
+              {upstream.retryIn > 0 ? `Retry (${upstream.retryIn}s)` : "Retry"}
+            </button>
+          )}
+          <button
+            onClick={() => navigate("/dex")}
+            className="rounded-md border border-[var(--color-border)] px-3 py-1.5 text-xs text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
+          >
+            Back to pools
+          </button>
+        </div>
       </div>
     );
   }
@@ -252,6 +278,10 @@ export function DexPool() {
 
   return (
     <div className="-m-6 flex h-[calc(100%+3rem)] flex-col">
+      {/* Nothing on this page fails loudly when the budget is spent — the chart
+          just stops moving and the stats freeze — so it is said here instead. */}
+      <UpstreamNotice state={upstream} className="shrink-0 border-b" />
+
       {/* Top bar */}
       <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--color-border)] px-3 py-2">
         <button

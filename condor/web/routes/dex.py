@@ -164,6 +164,7 @@ async def list_pools(
     if view == "token" and not _ADDRESS_RE.match(token):
         raise HTTPException(status_code=400, detail="Invalid token address")
 
+    before = _throttle_counter()
     result = await list_gecko_pools_page(
         network,
         view=view,
@@ -177,6 +178,9 @@ async def list_pools(
         "source": source,
         "page": page,
         "has_more": result["has_more"],
+        # Reported on the same response as the rows so the browser can say why a
+        # page came back short, without a second round-trip to find out.
+        "upstream": _upstream_state(_throttle_counter() > before),
     }
 
 
@@ -252,6 +256,66 @@ async def list_chains(
     return {"chains": chains}
 
 
+def _throttle_counter() -> int:
+    """Every refusal this process has made, as one monotonic number.
+
+    Both refusals count: a 429 from gecko and a request this process declined to
+    send because the shared budget was already spent. The second one leaves no
+    trace in ``rate_limited`` — it raises without opening the breaker — so a
+    counter is the only way a caller can ask "was *my* fetch throttled?".
+    """
+    from condor.pool_data import gecko_health
+
+    health = gecko_health()
+    return int(health.get("throttled_calls") or 0) + int(health.get("count_429") or 0)
+
+
+def _upstream_state(throttled_request: bool = False) -> dict:
+    """What GeckoTerminal's shared budget looks like right now.
+
+    Every DEX view — the pool browser, a pool's stats, its chart — reads the same
+    per-IP budget, and every failure downstream of it degrades to an empty list.
+    So "no pools on this chain" and "throttled, ask again in a moment" arrive at
+    the browser looking identical unless the state is reported alongside the rows.
+
+    ``throttled_request`` is the stronger signal of the two and belongs to the
+    call being answered: the budget can be spent without the breaker being open,
+    in which case ``rate_limited`` is False while the rows are still missing.
+    """
+    from condor.pool_data import gecko_health
+
+    health = gecko_health()
+    last_429 = health.get("last_429_age")
+    return {
+        "rate_limited": bool(health.get("rate_limited")),
+        "throttled_request": bool(throttled_request),
+        "retry_in": round(float(health.get("cooldown_remaining") or 0.0), 1),
+        "requests_last_minute": int(health.get("requests_last_minute") or 0),
+        "budget": int(health.get("budget") or 0),
+        "throttled_calls": int(health.get("throttled_calls") or 0),
+        "count_429": int(health.get("count_429") or 0),
+        "seconds_since_429": (
+            round(float(last_429), 1) if last_429 is not None else None
+        ),
+    }
+
+
+@router.get("/servers/{name}/dex/upstream")
+async def get_upstream(
+    name: str,
+    user: WebUser = Depends(require_server_access),
+):
+    """Whether GeckoTerminal is currently throttling Condor.
+
+    Reads process-local counters only — no outbound request — so the browser can
+    poll it while a banner counts a cooldown down without spending the very
+    budget it is waiting on. Declared above ``/dex/pools/{pool_address}`` for the
+    same reason ``pools-by-address`` is: a path segment would be read as an
+    address.
+    """
+    return _upstream_state()
+
+
 @router.get("/servers/{name}/dex/pools-by-address")
 async def list_pools_by_address(
     name: str,
@@ -274,8 +338,10 @@ async def list_pools_by_address(
 
     wanted = [a.strip() for a in (addresses or "").split(",") if a.strip()][:30]
     if not wanted:
-        return {"pools": []}
-    return {"pools": await fetch_pools_by_addresses(network, wanted)}
+        return {"pools": [], "upstream": _upstream_state()}
+    before = _throttle_counter()
+    pools = await fetch_pools_by_addresses(network, wanted)
+    return {"pools": pools, "upstream": _upstream_state(_throttle_counter() > before)}
 
 
 @router.get("/servers/{name}/dex/pools/{pool_address}")
@@ -287,8 +353,10 @@ async def get_pool(
 ):
     """One pool by address, so ``/dex/{network}/{address}`` renders from a URL alone.
 
-    404 when the pool is genuinely unknown *or* the lookup failed: either way the
-    workspace has nothing to draw, and the two are indistinguishable to the user.
+    404 when the pool is genuinely unknown, 503 when the lookup was refused by the
+    shared GeckoTerminal budget: the workspace has nothing to draw either way, but
+    only one of the two is worth retrying, and the user cannot tell them apart
+    unless the route does.
     """
 
     if not _POOL_ADDRESS_RE.match(pool_address):
@@ -296,8 +364,23 @@ async def get_pool(
 
     from condor.pool_data import fetch_pool_by_address
 
+    before = _throttle_counter()
     pool = await fetch_pool_by_address(network, pool_address)
     if not pool:
+        # A throttled lookup is a different answer from an unknown pool, and the
+        # difference is the whole point: one is worth retrying in a moment, the
+        # other never resolves. 503 rather than 404 so the browser can say so and
+        # offer a retry instead of sending the user back to the browser.
+        state = _upstream_state(_throttle_counter() > before)
+        if state["throttled_request"] or state["rate_limited"]:
+            wait = state["retry_in"] or 20
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "GeckoTerminal is rate limiting Condor, so this pool could "
+                    f"not be read. Try again in about {wait:.0f}s."
+                ),
+            )
         raise HTTPException(status_code=404, detail="Pool not found")
     return pool
 

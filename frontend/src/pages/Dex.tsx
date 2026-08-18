@@ -7,7 +7,9 @@ import { NoServerCard } from "@/components/NoServerCard";
 import { LpPositions } from "@/components/dex/LpPositions";
 import { PoolBrowser } from "@/components/dex/PoolBrowser";
 import { PoolSourceTabs } from "@/components/dex/PoolSourceTabs";
+import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
 import type { PoolSource } from "@/components/dex/pool-source";
+import { useDexUpstream } from "@/hooks/useDexUpstream";
 import { useServer } from "@/hooks/useServer";
 import { api, type PoolSummary } from "@/lib/api";
 import { useDexFavorites } from "@/lib/dexFavorites";
@@ -46,6 +48,9 @@ export function Dex() {
   const { server } = useServer();
   const navigate = useNavigate();
   const { favorites } = useDexFavorites();
+  // Everything on this page comes from one shared GeckoTerminal budget; when it
+  // is spent the tables empty out, so the reason is shown above them.
+  const upstream = useDexUpstream(server ?? null);
   const [source, setSource] = useState<PoolSource>({
     kind: "gecko",
     view: "trending",
@@ -125,7 +130,11 @@ export function Dex() {
     source.kind !== "favorites" &&
     (source.kind === "gateway" || !isSearch || isAddress);
 
-  const { data: pagedPools, isFetching } = useQuery({
+  const {
+    data: pagedPools,
+    isFetching,
+    dataUpdatedAt: poolsUpdatedAt,
+  } = useQuery({
     queryKey: [
       "dex-pools",
       server,
@@ -187,7 +196,11 @@ export function Dex() {
     [favorites, network],
   );
 
-  const { data: favoritePools = [], isFetching: favoritesFetching } = useQuery({
+  const {
+    data: favoritePage,
+    isFetching: favoritesFetching,
+    dataUpdatedAt: favoritesUpdatedAt,
+  } = useQuery({
     queryKey: ["dex-favorites", server, network, favoriteAddresses.join(",")],
     queryFn: () =>
       api.getDexPoolsByAddress(server!, network, favoriteAddresses),
@@ -195,6 +208,17 @@ export function Dex() {
       !!server && source.kind === "favorites" && !!favoriteAddresses.length,
     staleTime: POOL_STALE_MS,
   });
+  const favoritePools = favoritePage?.pools ?? [];
+
+  // A response knows it was throttled before the next poll of /dex/upstream does,
+  // and it is the response whose empty table the user is looking at.
+  const reportUpstream = upstream.report;
+  useEffect(() => {
+    reportUpstream(pagedPools?.upstream, poolsUpdatedAt);
+  }, [pagedPools, poolsUpdatedAt, reportUpstream]);
+  useEffect(() => {
+    reportUpstream(favoritePage?.upstream, favoritesUpdatedAt);
+  }, [favoritePage, favoritesUpdatedAt, reportUpstream]);
 
   if (!server) {
     return (
@@ -208,13 +232,22 @@ export function Dex() {
     ? favoritesFetching && !favoritePools.length
     : isFetching && !pagedPools;
 
+  // A throttled fetch and a chain with no pools both arrive as zero rows, and
+  // only one of them is worth waiting out — so the table says which it was.
+  const throttledPage =
+    (isFavorites ? favoritePage?.upstream : pagedPools?.upstream)
+      ?.throttled_request ?? false;
   const emptyMessage = isFavorites
-    ? "No favorites yet — star a pool to keep it here."
+    ? throttledPage
+      ? "GeckoTerminal is rate limiting Condor — your favorites will reappear in a moment."
+      : "No favorites yet — star a pool to keep it here."
     : isSearch && !isAddress
       ? debouncedQuery
         ? "That is not a pool or token address."
         : "Paste a pool or token address to find it."
-      : "No pools found.";
+      : throttledPage || upstream.limited
+        ? "GeckoTerminal is rate limiting Condor — no pools could be read. This clears on its own in a few seconds."
+        : "No pools found.";
 
   return (
     <div className="flex flex-col gap-4">
@@ -232,6 +265,8 @@ export function Dex() {
       <LpPositions server={server} />
 
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)]">
+        <UpstreamNotice state={upstream} className="border-b" />
+
         <PoolSourceTabs
           source={source}
           onSourceChange={setSource}
