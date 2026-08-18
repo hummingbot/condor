@@ -303,6 +303,40 @@ async def executors_summary(
     return summary
 
 
+async def _ensure_dex_tokens_listed(client, config: dict) -> None:
+    """Register a DEX executor's tokens with Gateway before it is created.
+
+    The pool workspace already does this when it opens, so for the web UI this is
+    a no-op resolved from an in-process memo. It exists for the callers that never
+    open one — agents, Telegram, MCP — because an unlisted mint reads as a zero
+    balance in Gateway, which is enough to have an order rejected for funds the
+    wallet is holding.
+
+    Best effort by design: a token that cannot be registered is not a reason to
+    refuse an order Gateway may well execute anyway.
+    """
+    connector = str(config.get("connector_name") or "")
+    if not connector:
+        return
+    try:
+        from condor.fetchers.gateway_tokens import (
+            ensure_tokens_listed,
+            token_addresses,
+        )
+        from condor.pool_data import GECKO_TO_GATEWAY_NETWORK, NETWORK_TO_GECKO
+
+        # A CEX connector ("binance") maps to no chain and drops out here; only a
+        # Gateway network id ("solana-mainnet-beta") reaches the token list.
+        network = GECKO_TO_GATEWAY_NETWORK.get(NETWORK_TO_GECKO.get(connector, ""))
+        if not network:
+            return
+        addresses = token_addresses(config.get("trading_pair"))
+        if addresses:
+            await ensure_tokens_listed(client, network, addresses)
+    except Exception as e:
+        logger.warning("could not ensure tokens for %s: %s", connector, e)
+
+
 @router.post("/servers/{name}/executors")
 async def create_executor_endpoint(
     name: str,
@@ -315,6 +349,8 @@ async def create_executor_endpoint(
 
     # Inject executor type into config
     config = {**body.config, "type": body.executor_type}
+
+    await _ensure_dex_tokens_listed(client, config)
 
     from condor.fetchers.executors import create_executor
 

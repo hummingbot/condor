@@ -378,6 +378,15 @@ export interface DexUpstream {
   seconds_since_429: number | null;
 }
 
+/**
+ * What became of one token Condor tried to register with Gateway.
+ *
+ * `symbol_taken` is the one worth surfacing: another token on the list already
+ * holds this ticker, so Gateway refused to save this one and its balance will
+ * keep reading 0 until a human decides which token owns the symbol.
+ */
+export type DexTokenVerdict = "listed" | "added" | "symbol_taken" | "failed";
+
 /** A page of pools. `has_more`, not a count — no upstream reports a total. */
 export interface PoolPage {
   pools: PoolSummary[];
@@ -1444,6 +1453,21 @@ export const api = {
   getDexUpstream: (server: string) =>
     apiFetch<DexUpstream>(
       `/api/v1/servers/${encodeURIComponent(server)}/dex/upstream`,
+    ),
+
+  /**
+   * Make sure Gateway's token list holds a pool's two tokens.
+   *
+   * Gateway resolves a swap by mint address on its own, but not a *balance*: it
+   * skips token accounts whose mint is not on the list, so an unregistered token
+   * reads as 0 and the panel greys out its percentage presets. Called when a pool
+   * opens rather than when an order is sent, and idempotent server-side, so
+   * re-opening the same pool costs nothing.
+   */
+  ensureDexTokens: (server: string, network: string, addresses: string[]) =>
+    apiFetch<{ tokens: Record<string, DexTokenVerdict> }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/tokens`,
+      { method: "POST", body: JSON.stringify({ network, addresses }) },
     ),
 
   /** One pool by address, so /dex/{network}/{address} renders from the URL alone. */

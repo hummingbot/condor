@@ -37,6 +37,11 @@ log = logging.getLogger(__name__)
 MAX_OUTBOX_EVENTS = 5000
 MAX_OUTBOX_AGE_S = 7 * 24 * 3600
 MAX_BATCH_BYTES = 512 * 1024
+# Collectors cap an envelope by event count as well as by size — the reference
+# collector refuses more than 500 with 413 too_many_events. Splitting on bytes
+# alone let a backlog build envelopes no collector would ever accept, so the
+# outbox could never drain. Keep this at or below the smallest cap we target.
+MAX_BATCH_EVENTS = 500
 POST_TIMEOUT_S = 10
 
 
@@ -183,13 +188,15 @@ def purge() -> None:
 
 
 def batches(events: list[dict]) -> list[list[dict]]:
-    """Split into envelopes no bigger than :data:`MAX_BATCH_BYTES`."""
+    """Split into envelopes within both :data:`MAX_BATCH_BYTES` and
+    :data:`MAX_BATCH_EVENTS`."""
     out: list[list[dict]] = []
     current: list[dict] = []
     size = 0
     for event in events:
         length = len(json.dumps(event, separators=(",", ":")))
-        if current and size + length > MAX_BATCH_BYTES:
+        full = size + length > MAX_BATCH_BYTES or len(current) >= MAX_BATCH_EVENTS
+        if current and full:
             out.append(current)
             current, size = [], 0
         current.append(event)

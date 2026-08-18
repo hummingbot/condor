@@ -1,5 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, CheckCircle, ChevronLeft, ChevronRight, Copy, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CheckCircle,
+  ChevronLeft,
+  ChevronRight,
+  Copy,
+  X,
+} from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -105,6 +113,45 @@ export function DexPool() {
     enabled: !!server && !!network && !!address,
     staleTime: 60 * 1000,
   });
+
+  // Registering the pool's tokens with Gateway is part of opening the pool, not
+  // part of sending an order: an unlisted mint reads as a zero balance, so the
+  // percentage presets and the LP amounts would be sized against a wallet that
+  // looks empty long before anything is submitted. Idempotent and memoized
+  // server-side, so a reload or a second visit sends this and gets a no-op.
+  const { data: tokenVerdicts } = useQuery({
+    queryKey: ["dex-ensure-tokens", server, network, pool?.address],
+    queryFn: () =>
+      api
+        .ensureDexTokens(server!, network, [
+          pool!.base_token_address,
+          pool!.quote_token_address,
+        ])
+        .then((r) => r.tokens),
+    enabled:
+      !!server && !!network && !!(pool?.base_token_address || pool?.quote_token_address),
+    staleTime: Infinity,
+    retry: false,
+  });
+
+  // A token that was *just* added is one the portfolio was fetched without, so
+  // its balance is still missing from the copy the panels are reading.
+  useEffect(() => {
+    if (Object.values(tokenVerdicts ?? {}).includes("added")) {
+      queryClient.invalidateQueries({ queryKey: ["portfolio", server] });
+    }
+  }, [tokenVerdicts, queryClient, server]);
+
+  // Reported rather than swallowed: Gateway refuses to list a token whose ticker
+  // another token already holds, and the only visible symptom is a balance that
+  // stays 0 for a wallet that is not empty.
+  const unlistedTokens = useMemo(
+    () =>
+      Object.entries(tokenVerdicts ?? {})
+        .filter(([, verdict]) => verdict === "symbol_taken" || verdict === "failed")
+        .map(([address]) => address),
+    [tokenVerdicts],
+  );
 
   const { data: venues = [] } = useQuery({
     queryKey: ["venues", server],
@@ -281,6 +328,27 @@ export function DexPool() {
       {/* Nothing on this page fails loudly when the budget is spent — the chart
           just stops moving and the stats freeze — so it is said here instead. */}
       <UpstreamNotice state={upstream} className="shrink-0 border-b" />
+
+      {/* Gateway lists a token by ticker, so a pool whose token shares a ticker
+          with one already on the list cannot be registered — and the only symptom
+          is a balance that reads 0 for a wallet that is not empty. */}
+      {unlistedTokens.length > 0 && (
+        <div
+          role="status"
+          className="flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-b border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs"
+        >
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-[var(--color-yellow)]" />
+          <span className="font-medium text-[var(--color-yellow)]">
+            {unlistedTokens.length === 1 ? "A token is" : "Tokens are"} not in
+            Gateway&apos;s token list
+          </span>
+          <span className="text-[var(--color-text-muted)]">
+            Balances for {unlistedTokens.map((a) => `${a.slice(0, 6)}…`).join(", ")}{" "}
+            will read 0 — add {unlistedTokens.length === 1 ? "it" : "them"} under
+            Gateway tokens to size orders from this wallet.
+          </span>
+        </div>
+      )}
 
       {/* Top bar */}
       <div className="flex shrink-0 flex-wrap items-center gap-x-4 gap-y-2 border-b border-[var(--color-border)] px-3 py-2">

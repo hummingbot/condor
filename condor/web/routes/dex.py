@@ -16,6 +16,7 @@ import logging
 import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from condor import dex_candles
 from condor.web.auth import require_server_access
@@ -314,6 +315,60 @@ async def get_upstream(
     address.
     """
     return _upstream_state()
+
+
+class EnsureTokensRequest(BaseModel):
+    """The tokens a pool is made of, as the browser already knows them."""
+
+    network: str = Field(description="Gateway network id, e.g. solana-mainnet-beta")
+    addresses: list[str] = Field(
+        default_factory=list,
+        description="Token mints/contracts to register — a pool's base and quote",
+    )
+
+
+@router.post("/servers/{name}/dex/tokens")
+async def ensure_dex_tokens(
+    name: str,
+    body: EnsureTokensRequest,
+    user: WebUser = Depends(require_server_access),
+):
+    """Make sure Gateway's token list holds this pool's tokens.
+
+    Called when a pool workspace opens rather than when an order is placed,
+    because the panel needs the tokens *before* the trade: an unlisted mint reads
+    as a zero balance, which greys out the percentage presets and sizes an LP
+    position against a wallet that looks empty. Idempotent and memoized, so
+    re-opening a pool costs nothing.
+
+    Never fatal. A pool whose tokens could not be registered is still browsable,
+    chartable and (on Solana, where Gateway resolves a mint on chain) tradable —
+    so a failure is reported per token and left for the panel to surface, not
+    raised.
+    """
+    from condor.fetchers.gateway_tokens import ensure_tokens_listed, token_addresses
+    from condor.pool_data import GECKO_TO_GATEWAY_NETWORK, NETWORK_TO_GECKO
+
+    # Canonicalized rather than taken as given: a pool row can name its chain the
+    # gecko way (``solana``) while Gateway only answers to ``solana-mainnet-beta``.
+    gateway_network = GECKO_TO_GATEWAY_NETWORK.get(
+        NETWORK_TO_GECKO.get(body.network, "")
+    )
+    if not gateway_network:
+        raise HTTPException(status_code=400, detail="Unknown network")
+
+    addresses = token_addresses(*body.addresses)
+    if not addresses:
+        return {"tokens": {}}
+
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+    try:
+        verdicts = await ensure_tokens_listed(client, gateway_network, addresses)
+    except Exception as e:
+        logger.warning("ensure tokens failed on %s: %s", gateway_network, e)
+        verdicts = {address: "failed" for address in addresses}
+    return {"tokens": verdicts}
 
 
 @router.get("/servers/{name}/dex/pools-by-address")
