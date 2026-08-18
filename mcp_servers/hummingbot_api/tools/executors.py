@@ -4,6 +4,7 @@ Executor management tools for Hummingbot MCP Server.
 This module provides business logic for managing trading executors including
 creation, viewing, stopping, and position management with progressive disclosure.
 """
+
 import logging
 from typing import Any
 
@@ -23,7 +24,9 @@ logger = logging.getLogger("hummingbot-mcp")
 _INTERNAL_FIELDS = {"type", "executor_type", "id"}
 
 
-def validate_executor_config(config: dict[str, Any], schema: dict[str, Any]) -> list[str]:
+def validate_executor_config(
+    config: dict[str, Any], schema: dict[str, Any]
+) -> list[str]:
     """Validate config keys against the backend schema properties.
 
     Returns a list of error strings. An empty list means the config is valid.
@@ -33,7 +36,9 @@ def validate_executor_config(config: dict[str, Any], schema: dict[str, Any]) -> 
     return errors
 
 
-def _validate_level(config: dict[str, Any], schema: dict[str, Any], path: str, errors: list[str]) -> None:
+def _validate_level(
+    config: dict[str, Any], schema: dict[str, Any], path: str, errors: list[str]
+) -> None:
     """Recursively validate config keys against schema properties."""
     properties = schema.get("properties", {})
     if not properties:
@@ -47,15 +52,23 @@ def _validate_level(config: dict[str, Any], schema: dict[str, Any], path: str, e
         if key not in allowed:
             field_list = ", ".join(sorted(allowed - _INTERNAL_FIELDS))
             location = f" inside '{path}'" if path else ""
-            errors.append(f"Unknown field '{key}'{location}. Allowed fields: {field_list}")
+            errors.append(
+                f"Unknown field '{key}'{location}. Allowed fields: {field_list}"
+            )
             continue
         # Recurse into nested objects
         prop_schema = properties[key]
-        if isinstance(prop_schema, dict) and isinstance(config[key], dict) and "properties" in prop_schema:
+        if (
+            isinstance(prop_schema, dict)
+            and isinstance(config[key], dict)
+            and "properties" in prop_schema
+        ):
             _validate_level(config[key], prop_schema, key, errors)
 
 
-async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict[str, Any]:
+async def manage_executors(
+    client: Any, request: ManageExecutorsRequest
+) -> dict[str, Any]:
     """
     Manage executors with progressive disclosure.
 
@@ -90,7 +103,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
     elif flow_stage == "show_schema":
         # Stage 2: Show config schema with user defaults
         try:
-            schema = await client.executors.get_executor_config_schema(request.executor_type)
+            schema = await client.executors.get_executor_config_schema(
+                request.executor_type
+            )
         except Exception as e:
             return {
                 "action": "show_schema",
@@ -114,7 +129,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
             formatted += f"\n\nYour saved defaults for {request.executor_type}:\n"
             for key, value in user_defaults.items():
                 formatted += f"  {key}: {value}\n"
-            formatted += f"\nPreferences file: {executor_preferences.get_preferences_path()}"
+            formatted += (
+                f"\nPreferences file: {executor_preferences.get_preferences_path()}"
+            )
 
         return {
             "action": "show_schema",
@@ -128,7 +145,11 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
 
     elif flow_stage == "create":
         # Stage 3: Create executor
-        executor_type = request.executor_type or request.executor_config.get("type") or request.executor_config.get("executor_type")
+        executor_type = (
+            request.executor_type
+            or request.executor_config.get("type")
+            or request.executor_config.get("executor_type")
+        )
 
         if not executor_type:
             return {
@@ -138,7 +159,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
             }
 
         # Merge with defaults
-        merged_config = executor_preferences.merge_with_defaults(executor_type, request.executor_config)
+        merged_config = executor_preferences.merge_with_defaults(
+            executor_type, request.executor_config
+        )
 
         # Ensure type is set in config
         if "type" not in merged_config and "executor_type" not in merged_config:
@@ -164,14 +187,19 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
 
         account = request.account_name or "master_account"
         # Check both top-level param and executor_config (agents sometimes put it in the wrong place)
-        controller_id = request.controller_id or merged_config.pop("controller_id", None) or "main"
+        controller_id = (
+            request.controller_id or merged_config.pop("controller_id", None) or "main"
+        )
 
         import logging as _logging
+
         _logging.getLogger(__name__).info(
             "create_executor: controller_id=%r (request=%r, config_had=%r), type=%s, account=%s",
-            controller_id, request.controller_id,
+            controller_id,
+            request.controller_id,
             "controller_id" in (request.executor_config or {}),
-            executor_type, account,
+            executor_type,
+            account,
         )
 
         try:
@@ -183,7 +211,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
 
             # Save as default if requested
             if request.save_as_default:
-                executor_preferences.update_defaults(executor_type, request.executor_config)
+                executor_preferences.update_defaults(
+                    executor_type, request.executor_config
+                )
 
             executor_id = result.get("executor_id") or result.get("id")
 
@@ -238,7 +268,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
                 controller_ids=request.controller_ids,
             )
 
-            executors = result.get("data", result) if isinstance(result, dict) else result
+            executors = (
+                result.get("data", result) if isinstance(result, dict) else result
+            )
             if not isinstance(executors, list):
                 executors = [executors] if executors else []
 
@@ -253,7 +285,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
                 "action": "search",
                 "executors": executors,
                 "count": len(executors),
-                "cursor": result.get("next_cursor") if isinstance(result, dict) else None,
+                "cursor": (
+                    result.get("next_cursor") if isinstance(result, dict) else None
+                ),
                 "formatted_output": formatted,
             }
 
@@ -345,7 +379,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
         # Stage 8: Get saved preferences (returns raw markdown content)
         raw_content = executor_preferences.get_raw_content()
 
-        formatted = f"Preferences file: {executor_preferences.get_preferences_path()}\n\n"
+        formatted = (
+            f"Preferences file: {executor_preferences.get_preferences_path()}\n\n"
+        )
         formatted += raw_content
 
         return {
@@ -377,10 +413,14 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
         formatted = "Preferences documentation updated to latest version.\n\n"
         if preserved_count > 0:
             preserved_names = [k for k, v in preserved.items() if v]
-            formatted += f"Preserved {preserved_count} config(s): {', '.join(preserved_names)}\n"
+            formatted += (
+                f"Preserved {preserved_count} config(s): {', '.join(preserved_names)}\n"
+            )
         else:
             formatted += "No existing configs to preserve.\n"
-        formatted += f"\nPreferences file: {executor_preferences.get_preferences_path()}"
+        formatted += (
+            f"\nPreferences file: {executor_preferences.get_preferences_path()}"
+        )
 
         return {
             "action": "reset_preferences",
@@ -413,7 +453,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
                     positions = [result] if not isinstance(result, list) else result
                     formatted += format_positions_held_table(positions)
                 else:
-                    formatted += "No position found for this connector/pair combination."
+                    formatted += (
+                        "No position found for this connector/pair combination."
+                    )
 
                 return {
                     "action": "positions_summary",
@@ -428,13 +470,17 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
                 controller_id=request.controller_id,
             )
 
-            positions = result.get("positions", result) if isinstance(result, dict) else result
+            positions = (
+                result.get("positions", result) if isinstance(result, dict) else result
+            )
             if not isinstance(positions, list):
                 positions = [positions] if positions else []
 
             formatted = f"Positions Held Summary\n\n"
 
-            if isinstance(result, dict) and any(k in result for k in ["total_positions", "total_value", "by_connector"]):
+            if isinstance(result, dict) and any(
+                k in result for k in ["total_positions", "total_value", "by_connector"]
+            ):
                 formatted += format_positions_summary(result)
                 if positions:
                     formatted += "\n\nPositions Detail:\n"
@@ -445,7 +491,9 @@ async def manage_executors(client: Any, request: ManageExecutorsRequest) -> dict
             return {
                 "action": "positions_summary",
                 "positions": positions,
-                "summary": result if isinstance(result, dict) else {"positions": positions},
+                "summary": (
+                    result if isinstance(result, dict) else {"positions": positions}
+                ),
                 "formatted_output": formatted,
             }
 

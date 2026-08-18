@@ -7,6 +7,7 @@ streaming via session/update notifications.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -19,6 +20,33 @@ from typing import Any, AsyncIterator, Awaitable, Callable
 from .jsonrpc import JSONRPCPeer
 
 log = logging.getLogger(__name__)
+
+
+def normalize_tool_call(payload: dict[str, Any]) -> dict[str, Any]:
+    """Canonical ``{tool, title, input}`` view of an ACP ``toolCall`` (SEC-093).
+
+    The ACP wire carries a tool call's arguments under ``rawInput``; every
+    consumer in this repo reads ``input`` (``is_dangerous_tool_call``,
+    ``condor.agents.risk``, ``format_tool_summary``, the transcript recorder).
+    Left untranslated, the whole action-gated half of the danger list resolved
+    ``action == ""`` and took the auto-approve fast path, so no confirmation
+    was ever raised. This is the single seam that translates the wire shape —
+    consumers stay on one contract instead of each learning ACP's spelling.
+
+    The arguments are passed through **as they arrive**, without coercing a
+    missing or malformed value into ``{}``: the gate has to be able to tell
+    "no arguments I can read" from "an empty argument set", and fail closed on
+    the former.
+    """
+    title = payload.get("title") or ""
+    normalized = dict(payload)
+    normalized["title"] = title
+    normalized["tool"] = payload.get("tool") or title
+    args = payload.get("rawInput")
+    if args is None:
+        args = payload.get("input")
+    normalized["input"] = args
+    return normalized
 
 
 def _descendant_pids(root: int) -> set[int]:
@@ -100,20 +128,39 @@ def _ps_rows() -> list[tuple[int, int, str]]:
     return rows
 
 
+def bot_process_marker(token: str) -> str:
+    """Non-secret argv marker identifying subprocesses spawned by THIS bot.
+
+    ``ps`` output is world-readable, so the bot token itself must never sit on a
+    child's command line (SEC-095). A digest of the token gives the same
+    discrimination the raw token gave — one running bot's trees vs. another's,
+    vs. an interactive Claude Code session — while revealing nothing: the hash
+    is one-way, and the token is a high-entropy secret so it cannot be guessed
+    back from it.
+
+    Empty token → empty marker, so a tokenless dev run tags nothing (and the
+    reaper, which refuses an empty marker, seeds on nothing).
+    """
+    if not token:
+        return ""
+    return "condor-bot-" + hashlib.sha256(token.encode()).hexdigest()[:12]
+
+
 def reap_stale_acp_trees(token: str, *, wait_s: float = 2.0) -> int:
     """Kill leaked ACP/MCP subprocess trees from a prior crashed run.
 
     A hard kill (``kill -9``, OOM, power loss) bypasses the graceful shutdown
     path, orphaning the ``claude-agent-acp → claude → MCP`` tree. Call this at
     startup, BEFORE spawning any of our own subprocesses: at that point anything
-    whose cmdline carries this bot's ``token`` is necessarily a stale leak. We
-    seed on those, climb to the owning ``claude-agent-acp`` root, and kill the
-    whole tree. Interactive Claude Code sessions are never touched (their MCP
-    servers carry no token, and we explicitly exclude their signatures).
+    carrying this bot's process marker is necessarily a stale leak. We seed on
+    those, climb to the owning ``claude-agent-acp`` root, and kill the whole
+    tree. Interactive Claude Code sessions are never touched (their MCP servers
+    carry no marker, and we explicitly exclude their signatures).
 
     Returns the number of processes signalled.
     """
-    if not token:
+    marker = bot_process_marker(token)
+    if not marker:
         return 0
     rows = _ps_rows()
     if not rows:
@@ -124,8 +171,8 @@ def reap_stale_acp_trees(token: str, *, wait_s: float = 2.0) -> int:
     def _protected(a: str) -> bool:
         return "dangerously-skip-permissions" in a or "claude-code-acp" in a
 
-    # Seeds: our own MCP servers are launched with --bot-token <token>.
-    seeds = [pid for pid, _, args in rows if token in args and not _protected(args)]
+    # Seeds: our own MCP servers are launched with --bot-id <marker>.
+    seeds = [pid for pid, _, args in rows if marker in args and not _protected(args)]
     if not seeds:
         return 0
 
@@ -172,6 +219,27 @@ ACP_COMMANDS: dict[str, str] = {
     "copilot": "npx @github/copilot --acp --stdio",
     "codex": "npx @agentclientprotocol/codex-acp",
 }
+
+# Session markers Claude Code exports into the shells it spawns. If the bot was
+# launched from inside a Claude Code session (`uv run python main.py` typed at a
+# Claude Code prompt), main.py inherits them and passes them on to every ACP
+# subprocess — and the `claude` CLI behind claude-agent-acp then refuses to boot
+# with "Claude Code cannot be launched inside another Claude Code session". The
+# bridge reports that as a bare `[-32603] Internal error` (data.details:
+# "Query closed before response received"), which says nothing about the cause.
+# Our ACP children are their own top-level sessions, so we drop the markers.
+# Only the session-identity vars go — CLAUDE_CONFIG_DIR, ANTHROPIC_* and other
+# real configuration must survive.
+_CLAUDE_SESSION_ENV_VARS = (
+    "CLAUDECODE",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_EXECPATH",
+    "CLAUDE_PID",
+    "CLAUDE_EFFORT",
+)
 
 # ACP bases whose model can be picked via a suffix (e.g. "claude-acp:opus").
 # The suffix is selected at runtime via session/set_model against the agent's
@@ -392,6 +460,8 @@ class ACPClient:
     async def start(self) -> None:
         """Spawn subprocess, run ACP handshake (initialize + session/new)."""
         env = dict(os.environ)
+        for var in _CLAUDE_SESSION_ENV_VARS:
+            env.pop(var, None)
         if self.extra_env:
             env.update(self.extra_env)
 
@@ -786,7 +856,7 @@ class ACPClient:
                     title=update.get("title", ""),
                     status=update.get("status", "pending"),
                     kind=update.get("kind", "other"),
-                    input=update.get("input"),
+                    input=normalize_tool_call(update)["input"],
                 )
             )
         elif kind == "tool_call_update":
@@ -809,9 +879,21 @@ class ACPClient:
     ) -> dict[str, Any]:
         options = options or []
 
-        # If we have a permission callback, delegate to it
+        # If we have a permission callback, delegate to it. The wire shape is
+        # translated first (SEC-093) so the gate sees the arguments it decides
+        # on, and a callback that blows up denies rather than escaping into the
+        # RPC layer, where the error would surface as something other than a
+        # refusal.
         if self.permission_callback:
-            return await self.permission_callback(toolCall or {}, options)
+            tool_call = normalize_tool_call(toolCall or {})
+            try:
+                return await self.permission_callback(tool_call, options)
+            except Exception:
+                log.exception(
+                    "Permission callback failed for %s — denying",
+                    tool_call.get("title") or "<unknown tool>",
+                )
+                return {"outcome": {"outcome": "cancelled"}}
 
         # Default: auto-approve
         for opt in options:

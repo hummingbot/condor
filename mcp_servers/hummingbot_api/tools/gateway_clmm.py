@@ -7,6 +7,7 @@ Handles DEX CLMM read-only operations via Hummingbot Gateway:
 
 For opening/closing LP positions, use `manage_executors` with `lp_executor` type.
 """
+
 import logging
 from typing import Any
 
@@ -74,16 +75,16 @@ def format_pools_as_detailed_table(pools: list[dict[str, Any]]) -> str:
     rows = []
     for pool in pools:
         # Extract nested volume fields
-        volume = pool.get('volume', {})
-        volume_hour_1 = volume.get('hour_1', 'N/A')
-        volume_hour_12 = volume.get('hour_12', 'N/A')
-        volume_hour_24 = volume.get('hour_24', 'N/A')
+        volume = pool.get("volume", {})
+        volume_hour_1 = volume.get("hour_1", "N/A")
+        volume_hour_12 = volume.get("hour_12", "N/A")
+        volume_hour_24 = volume.get("hour_24", "N/A")
 
         # Extract nested fee_tvl_ratio fields
-        fee_tvl_ratio = pool.get('fee_tvl_ratio', {})
-        fee_tvl_ratio_hour_1 = fee_tvl_ratio.get('hour_1', 'N/A')
-        fee_tvl_ratio_hour_12 = fee_tvl_ratio.get('hour_12', 'N/A')
-        fee_tvl_ratio_hour_24 = fee_tvl_ratio.get('hour_24', 'N/A')
+        fee_tvl_ratio = pool.get("fee_tvl_ratio", {})
+        fee_tvl_ratio_hour_1 = fee_tvl_ratio.get("hour_1", "N/A")
+        fee_tvl_ratio_hour_12 = fee_tvl_ratio.get("hour_12", "N/A")
+        fee_tvl_ratio_hour_24 = fee_tvl_ratio.get("hour_24", "N/A")
 
         row = (
             f"{get_field(pool, 'address', default='N/A')} | "
@@ -110,7 +111,9 @@ def format_pools_as_detailed_table(pools: list[dict[str, Any]]) -> str:
     return f"{header}\n{separator}\n" + "\n".join(rows)
 
 
-async def explore_gateway_clmm_pools(client: Any, request: GatewayCLMMRequest) -> dict[str, Any]:
+async def explore_gateway_clmm_pools(
+    client: Any, request: GatewayCLMMRequest
+) -> dict[str, Any]:
     """
     Explore Gateway CLMM pools: list pools and get pool information.
 
@@ -136,7 +139,7 @@ async def explore_gateway_clmm_pools(client: Any, request: GatewayCLMMRequest) -
             search_term=request.search_term,
             sort_key=request.sort_key,
             order_by=request.order_by,
-            include_unknown=request.include_unknown
+            include_unknown=request.include_unknown,
         )
 
         pools = result.get("pools", [])
@@ -155,14 +158,14 @@ async def explore_gateway_clmm_pools(client: Any, request: GatewayCLMMRequest) -
                 "search_term": request.search_term,
                 "sort_key": request.sort_key,
                 "order_by": request.order_by,
-                "include_unknown": request.include_unknown
+                "include_unknown": request.include_unknown,
             },
             "pagination": {
                 "page": request.page,
                 "limit": request.limit,
-                "total": result.get("total", 0)
+                "total": result.get("total", 0),
             },
-            "pools_table": formatted_table
+            "pools_table": formatted_table,
         }
 
     # ============================================
@@ -178,7 +181,7 @@ async def explore_gateway_clmm_pools(client: Any, request: GatewayCLMMRequest) -
         result = await client.gateway_clmm.get_pool_info(
             connector=request.connector,
             network=request.network,
-            pool_address=request.pool_address
+            pool_address=request.pool_address,
         )
 
         return {
@@ -186,10 +189,8 @@ async def explore_gateway_clmm_pools(client: Any, request: GatewayCLMMRequest) -
             "connector": request.connector,
             "network": request.network,
             "pool_address": request.pool_address,
-            "result": result
+            "result": result,
         }
 
     else:
         raise ToolError(f"Unknown action: {request.action}")
-
-

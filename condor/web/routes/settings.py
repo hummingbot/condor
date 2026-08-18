@@ -5,18 +5,22 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from config_manager import ServerPermission, get_config_manager
-from condor.web.auth import get_current_user
+from condor.web.auth import get_current_user, require_server_access_query
 from condor.web.models import (
     AddCredentialRequest,
     AddServerRequest,
     CredentialInfo,
+    GatewayNetworkUpdateRequest,
     GatewayPullRequest,
     GatewayStartRequest,
+    GatewayWalletAddRequest,
+    GatewayWalletDefaultRequest,
     ServerInfo,
     UpdateServerRequest,
     WebUser,
 )
+from condor.web.routes._errors import upstream_error
+from config_manager import ServerPermission, get_config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +31,22 @@ router = APIRouter(prefix="/settings", tags=["settings"])
 
 
 def _require_owner(cm, user_id: int, server_name: str):
+    """Enforce the OWNER line on top of the TRADER floor every route already has.
+
+    The rule this file draws (SEC-153, extended to the gateway by SEC-166):
+
+    * **Reading** a server's state — status, logs, wallet and network listings,
+      configured connectors — needs TRADER. A shared trader has to be able to
+      see what they are trading against, and to tell the owner when it is down.
+    * **Trading** on a server needs TRADER. That is what the share is for.
+    * **Mutating a server's configuration or its infrastructure** needs OWNER.
+      Exchange credentials, the gateway container lifecycle, the private keys
+      in its keystore and the RPC endpoints it dials are all the owner's
+      machine, not a trading action — and each of them can break the owner's
+      running bots for everyone else on the server.
+
+    Admins keep the bypass they hold everywhere else in this module.
+    """
     perm = cm.get_server_permission(user_id, server_name)
     if perm != ServerPermission.OWNER and not cm.is_admin(user_id):
         raise HTTPException(status_code=403, detail="Owner access required")
@@ -35,8 +55,15 @@ def _require_owner(cm, user_id: int, server_name: str):
 async def _get_client(cm, server_name: str):
     try:
         return await cm.get_client(server_name)
-    except Exception as e:
+    except ValueError as e:
+        # The config manager's own rejection ("no such server"). Its text names
+        # nothing the caller did not already type, so it can be shown as-is.
         raise HTTPException(status_code=502, detail=f"Cannot connect to server: {e}")
+    except Exception as e:
+        # Anything else came off the wire, and its string carries the backend
+        # address — log it, show the caller only the safe description.
+        logger.exception("Cannot connect to server '%s'", server_name)
+        raise upstream_error("Cannot connect to server", e)
 
 
 # ── Servers ──
@@ -48,6 +75,7 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
     accessible = cm.list_accessible_servers(user.id)
 
     from condor.server_data_service import ServerDataType, get_server_data_service
+
     sds = get_server_data_service()
 
     # Fetch status for all servers concurrently (uses SDS cache, instant if warm)
@@ -61,13 +89,15 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
     for (name, cfg), status in zip(accessible.items(), statuses):
         perm = cm.get_server_permission(user.id, name)
         online = status.get("status") == "online"
-        results.append(ServerInfo(
-            name=name,
-            host=cfg.get("host", ""),
-            port=cfg.get("port", 0),
-            online=online,
-            permission=perm.value if perm else "trader",
-        ))
+        results.append(
+            ServerInfo(
+                name=name,
+                host=cfg.get("host", ""),
+                port=cfg.get("port", 0),
+                online=online,
+                permission=perm.value if perm else "trader",
+            )
+        )
 
     return sorted(results, key=lambda s: (not s.online, s.name))
 
@@ -137,11 +167,9 @@ async def set_default_server(name: str, user: WebUser = Depends(get_current_user
 @router.get("/gateway/status")
 async def gateway_status(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         info = await client.gateway.get_status()
@@ -162,11 +190,12 @@ async def gateway_status(
 async def gateway_pull(
     req: GatewayPullRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
+    # Pulling an image rewrites what code will run on the owner's host next
+    # restart — infrastructure, not trading.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         # Parse "image:tag" format (e.g. "hummingbot/gateway:latest")
@@ -176,91 +205,297 @@ async def gateway_pull(
         result = await client.docker.pull_image(image_name, tag)
         return {"pulled": True, "image": req.image, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to pull gateway image '%s' on '%s'", req.image, server)
+        raise upstream_error("Failed to pull gateway image", e)
 
 
 @router.get("/gateway/pull-status")
 async def gateway_pull_status(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         result = await client.docker.get_pull_status()
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to fetch gateway pull status from '%s'", server)
+        raise upstream_error("Failed to fetch pull status", e)
 
 
 @router.post("/gateway/start")
 async def gateway_start(
     req: GatewayStartRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
+    # The caller picks the image and port of a container started on the owner's
+    # host. That is the owner's decision, not a shared trader's.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
-        result = await client.gateway.start({
-            "image": req.image,
-            "port": req.port,
-        })
+        result = await client.gateway.start(
+            {
+                "image": req.image,
+                "port": req.port,
+            }
+        )
         return {"started": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to start gateway on '%s'", server)
+        raise upstream_error("Failed to start gateway", e)
 
 
 @router.post("/gateway/stop")
 async def gateway_stop(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
+    # Stopping the gateway cuts DEX connectivity for every bot on the server,
+    # including the owner's. Same line delete_credential draws.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.stop()
         return {"stopped": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to stop gateway on '%s'", server)
+        raise upstream_error("Failed to stop gateway", e)
 
 
 @router.post("/gateway/restart")
 async def gateway_restart(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
+    # A restart drops in-flight DEX orders for everyone on the server.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.gateway.restart()
         return {"restarted": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to restart gateway on '%s'", server)
+        raise upstream_error("Failed to restart gateway", e)
 
 
 @router.get("/gateway/logs")
 async def gateway_logs(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         logs = await client.gateway.get_logs()
         return {"logs": logs}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to fetch gateway logs from '%s'", server)
+        raise upstream_error("Failed to fetch gateway logs", e)
+
+
+# ── Gateway Networks (RPC) ──
+
+
+@router.get("/gateway/networks")
+async def gateway_networks(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    cm = get_config_manager()
+    client = await _get_client(cm, server)
+    try:
+        result = await client.gateway.list_networks()
+        networks = (
+            result.get("networks", result) if isinstance(result, dict) else result
+        )
+        return {"networks": networks}
+    except Exception as e:
+        logger.exception("Failed to list gateway networks from '%s'", server)
+        raise upstream_error("Failed to list gateway networks", e)
+
+
+@router.get("/gateway/networks/{network_id}")
+async def gateway_network_config(
+    network_id: str,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    cm = get_config_manager()
+    client = await _get_client(cm, server)
+    try:
+        config = await client.gateway.get_network_config(network_id)
+        return {"network_id": network_id, "config": config}
+    except Exception as e:
+        logger.exception(
+            "Failed to fetch gateway network config '%s' from '%s'", network_id, server
+        )
+        raise upstream_error("Failed to fetch network config", e)
+
+
+@router.post("/gateway/networks/{network_id}")
+async def gateway_network_update(
+    network_id: str,
+    req: GatewayNetworkUpdateRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    cm = get_config_manager()
+    # Network config carries the RPC endpoint every transaction from this server
+    # is signed and broadcast through — repointing it is a server-wide change.
+    _require_owner(cm, user.id, server)
+    client = await _get_client(cm, server)
+    try:
+        result = await client.gateway.update_network_config(network_id, req.config)
+        return {"updated": True, "network_id": network_id, "result": result}
+    except Exception as e:
+        logger.exception(
+            "Failed to update gateway network config '%s' on '%s'", network_id, server
+        )
+        raise upstream_error("Failed to update network config", e)
+
+
+# ── Gateway Wallets ──
+
+
+@router.get("/gateway/wallets")
+async def gateway_wallets(
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    cm = get_config_manager()
+    client = await _get_client(cm, server)
+    try:
+        wallets = await client.accounts.list_gateway_wallets()
+        return {"wallets": wallets}
+    except Exception as e:
+        logger.exception("Failed to list gateway wallets from '%s'", server)
+        raise upstream_error("Failed to list gateway wallets", e)
+
+
+async def _gateway_default_address(client, chain: str) -> str | None:
+    """Current default wallet address for a chain, or None if there is none."""
+    try:
+        groups = await client.accounts.list_gateway_wallets()
+    except Exception:
+        logger.warning(
+            "Could not read gateway wallets to preserve default for '%s'", chain
+        )
+        return None
+    for group in groups or []:
+        if isinstance(group, dict) and group.get("chain") == chain:
+            return group.get("default_address") or None
+    return None
+
+
+@router.post("/gateway/wallets")
+async def gateway_wallet_add(
+    req: GatewayWalletAddRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    cm = get_config_manager()
+    # Importing a private key into the owner's gateway makes that key usable by
+    # everyone on the server. Whose keys live on the host is the owner's call.
+    _require_owner(cm, user.id, server)
+    client = await _get_client(cm, server)
+    # Gateway's add-wallet always promotes the new key to the chain default, so when the user
+    # opted out we capture the existing default first and restore it after the import.
+    previous_default = (
+        None if req.set_default else await _gateway_default_address(client, req.chain)
+    )
+    try:
+        result = await client.accounts.add_gateway_wallet(
+            chain=req.chain, private_key=req.private_key
+        )
+        address = result.get("address") if isinstance(result, dict) else None
+        is_default = True
+        if req.set_default and address:
+            await client.accounts.set_default_gateway_wallet(
+                chain=req.chain, address=address
+            )
+        elif previous_default and previous_default != address:
+            try:
+                await client.accounts.set_default_gateway_wallet(
+                    chain=req.chain, address=previous_default
+                )
+                is_default = False
+            except Exception:
+                logger.exception(
+                    "Imported wallet on '%s' but failed to restore previous default on chain '%s'",
+                    server,
+                    req.chain,
+                )
+        return {
+            "added": True,
+            "chain": req.chain,
+            "address": address,
+            "is_default": is_default,
+        }
+    except Exception as e:
+        # Never include the request payload here — it carries the private key.
+        logger.exception(
+            "Failed to add gateway wallet on chain '%s' via '%s'", req.chain, server
+        )
+        raise upstream_error("Failed to add wallet", e)
+
+
+@router.post("/gateway/wallets/default")
+async def gateway_wallet_set_default(
+    req: GatewayWalletDefaultRequest,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    cm = get_config_manager()
+    # The default wallet is the one every subsequent DEX trade signs with, so
+    # switching it silently redirects the owner's flow to another address.
+    _require_owner(cm, user.id, server)
+    client = await _get_client(cm, server)
+    try:
+        result = await client.accounts.set_default_gateway_wallet(
+            chain=req.chain, address=req.address
+        )
+        return {
+            "default": True,
+            "chain": req.chain,
+            "address": req.address,
+            "result": result,
+        }
+    except Exception as e:
+        logger.exception(
+            "Failed to set default gateway wallet on '%s' via '%s'", req.chain, server
+        )
+        raise upstream_error("Failed to set default wallet", e)
+
+
+@router.delete("/gateway/wallets/{chain}/{address}")
+async def gateway_wallet_remove(
+    chain: str,
+    address: str,
+    server: str = Query(...),
+    user: WebUser = Depends(require_server_access_query),
+):
+    cm = get_config_manager()
+    # Removing a key strands any bot trading from that address — owner only.
+    _require_owner(cm, user.id, server)
+    client = await _get_client(cm, server)
+    try:
+        result = await client.accounts.remove_gateway_wallet(
+            chain=chain, address=address
+        )
+        return {"removed": True, "chain": chain, "address": address, "result": result}
+    except Exception as e:
+        logger.exception(
+            "Failed to remove gateway wallet %s on '%s' via '%s'",
+            address,
+            chain,
+            server,
+        )
+        raise upstream_error("Failed to remove wallet", e)
 
 
 # ── Voice Preferences ──
@@ -271,12 +506,16 @@ async def get_voice_settings(user: WebUser = Depends(get_current_user)):
     """Get voice/transcription preferences for the current user."""
     cm = get_config_manager()
     prefs = cm.get_user_preferences(user.id)
-    voice = prefs.get("voice", {
-        "whisper_model": "small",
-        "language": None,
-        "auto_send": True,
-    })
-    from condor.preferences import WHISPER_MODELS, VOICE_LANGUAGES
+    voice = prefs.get(
+        "voice",
+        {
+            "whisper_model": "small",
+            "language": None,
+            "auto_send": True,
+        },
+    )
+    from condor.preferences import VOICE_LANGUAGES, WHISPER_MODELS
+
     return {
         "voice": voice,
         "available_models": WHISPER_MODELS,
@@ -292,11 +531,14 @@ async def update_voice_settings(
     """Update voice/transcription preferences."""
     cm = get_config_manager()
     prefs = cm.get_user_preferences(user.id)
-    voice = prefs.get("voice", {
-        "whisper_model": "small",
-        "language": None,
-        "auto_send": True,
-    })
+    voice = prefs.get(
+        "voice",
+        {
+            "whisper_model": "small",
+            "language": None,
+            "auto_send": True,
+        },
+    )
     allowed_keys = {"whisper_model", "language", "auto_send"}
     for key in allowed_keys:
         if key in body:
@@ -304,6 +546,7 @@ async def update_voice_settings(
 
     # Validate whisper_model
     from condor.preferences import WHISPER_MODELS
+
     if voice.get("whisper_model") not in WHISPER_MODELS:
         voice["whisper_model"] = "base"
 
@@ -321,11 +564,9 @@ async def update_voice_settings(
 @router.get("/credentials")
 async def list_credentials(
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         creds_raw = await client.accounts.list_account_credentials("master_account")
@@ -336,40 +577,56 @@ async def list_credentials(
                 if isinstance(item, str):
                     credentials.append({"connector_name": item, "connector_type": ""})
                 elif isinstance(item, dict):
-                    credentials.append({
-                        "connector_name": item.get("connector_name", item.get("name", "")),
-                        "connector_type": item.get("connector_type", item.get("type", "")),
-                    })
+                    credentials.append(
+                        {
+                            "connector_name": item.get(
+                                "connector_name", item.get("name", "")
+                            ),
+                            "connector_type": item.get(
+                                "connector_type", item.get("type", "")
+                            ),
+                        }
+                    )
         return {"credentials": credentials}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("Failed to list credentials on '%s'", server)
+        raise upstream_error("Failed to list credentials", e)
 
 
 @router.get("/connectors")
 async def list_connectors(
     server: str = Query(...),
     type: str = Query(None),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
-    cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
     sds = get_server_data_service()
     raw = await sds.get_or_fetch(server, ServerDataType.ALL_CONNECTORS)
     if raw is None:
-        raise HTTPException(status_code=502, detail="Cannot fetch connectors from server")
+        raise HTTPException(
+            status_code=502, detail="Cannot fetch connectors from server"
+        )
 
     # API returns plain strings — filter out testnet/gateway connectors
-    names = [c for c in raw if isinstance(c, str) and "testnet" not in c.lower() and "sandbox" not in c.lower() and "/" not in c]
+    names = [
+        c
+        for c in raw
+        if isinstance(c, str)
+        and "testnet" not in c.lower()
+        and "sandbox" not in c.lower()
+        and "/" not in c
+    ]
     if type:
         if type.lower() == "perpetual":
             names = [c for c in names if "perpetual" in c.lower()]
         else:
             names = [c for c in names if "perpetual" not in c.lower()]
-    connectors = [{"name": c, "type": "perpetual" if "perpetual" in c.lower() else "spot"} for c in names]
+    connectors = [
+        {"name": c, "type": "perpetual" if "perpetual" in c.lower() else "spot"}
+        for c in names
+    ]
     return {"connectors": connectors}
 
 
@@ -377,28 +634,30 @@ async def list_connectors(
 async def connector_config_map(
     name: str,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
     client = await _get_client(cm, server)
     try:
         config_map = await client.connectors.get_config_map(name)
         return {"config_map": config_map}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(
+            "Failed to fetch config map for connector '%s' on '%s'", name, server
+        )
+        raise upstream_error("Failed to fetch connector config map", e)
 
 
 @router.post("/credentials")
 async def add_credential(
     req: AddCredentialRequest,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
+    # Credentials are server configuration, not trading: a shared trader must not
+    # overwrite the owner's exchange keys. Same line update_server/delete_server draw.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.accounts.add_credential(
@@ -408,21 +667,25 @@ async def add_credential(
         )
         # Invalidate configured connectors cache
         from condor.server_data_service import ServerDataType, get_server_data_service
+
         get_server_data_service().invalidate(server, ServerDataType.CONNECTORS)
         return {"added": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(
+            "Failed to add credentials for '%s' on '%s'", req.connector_name, server
+        )
+        raise upstream_error("Failed to add credentials", e)
 
 
 @router.delete("/credentials/{connector}")
 async def delete_credential(
     connector: str,
     server: str = Query(...),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, server):
-        raise HTTPException(status_code=403, detail="No access")
+    # Deleting a key kills the owner's running bots' connectivity — owner only.
+    _require_owner(cm, user.id, server)
     client = await _get_client(cm, server)
     try:
         result = await client.accounts.delete_credential(
@@ -431,12 +694,16 @@ async def delete_credential(
         )
         # Invalidate configured connectors + portfolio caches so the removed key disappears immediately
         from condor.server_data_service import ServerDataType, get_server_data_service
+
         sds = get_server_data_service()
         sds.invalidate(server, ServerDataType.CONNECTORS)
         sds.invalidate(server, ServerDataType.PORTFOLIO)
         return {"deleted": True, "result": result}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception(
+            "Failed to delete credentials for '%s' on '%s'", connector, server
+        )
+        raise upstream_error("Failed to delete credentials", e)
 
 
 # ── Custom OpenAI-compatible LLM endpoints ──
@@ -550,3 +817,59 @@ async def delete_custom_provider(
     if not remove_custom_provider(load_user_data_for(user.id), name):
         raise HTTPException(status_code=404, detail=f"No saved endpoint '{name}'")
     return {"deleted": True, "name": name}
+
+
+# ── Telemetry (FEAT-023) ──
+
+
+@router.get("/telemetry")
+async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
+    """What this install has agreed to, and whether it could send anything.
+
+    ``endpoint_configured`` is the honest answer to "is this thing on": with no
+    ``CONDOR_TELEMETRY_URL`` set — the shipped state — nothing can be
+    transmitted no matter what the consent says, and events only accumulate in
+    a capped local file.
+    """
+    from condor.telemetry import consent, emitter, outbox
+
+    return {
+        "consent": consent.state(),
+        "level": consent.level(),
+        "env_overridden": consent.env_overridden(),
+        "endpoint_configured": bool(outbox.endpoint()),
+        "pending_events": emitter.buffered(),
+        "privacy_doc": "PRIVACY.md",
+    }
+
+
+@router.put("/telemetry")
+async def set_telemetry_settings(
+    level: str = Query(..., description="off | ping | usage"),
+    user: WebUser = Depends(get_current_user),
+):
+    """Change the install's telemetry level. Admin only, and reversible.
+
+    Setting ``off`` is a withdrawal, not a pause: the buffer and the outbox are
+    deleted, so nothing already recorded can be sent later.
+    """
+    from condor.telemetry import consent
+
+    cm = get_config_manager()
+    if not cm.is_admin(user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Telemetry is an install-wide setting; only the admin can change it",
+        )
+    if level not in consent.LEVELS:
+        raise HTTPException(
+            status_code=400, detail=f"level must be one of {', '.join(consent.LEVELS)}"
+        )
+    if consent.env_overridden():
+        raise HTTPException(
+            status_code=409,
+            detail="CONDOR_TELEMETRY is set in the environment and overrides this setting",
+        )
+
+    applied = consent.set_level(level)
+    return {"level": applied, "consent": consent.state()}

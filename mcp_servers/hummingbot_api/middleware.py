@@ -1,11 +1,17 @@
 """
 Middleware decorators for common tool patterns.
 """
+
 import functools
 import logging
 from typing import Any, Callable, Coroutine, TypeVar
 
-from mcp_servers.hummingbot_api.exceptions import MaxConnectionsAttemptError as HBConnectionError, ToolError
+from mcp_servers.hummingbot_api.exceptions import (
+    MaxConnectionsAttemptError as HBConnectionError,
+)
+from mcp_servers.hummingbot_api.exceptions import (
+    ToolError,
+)
 
 logger = logging.getLogger("hummingbot-mcp")
 
@@ -17,7 +23,9 @@ GATEWAY_LOG_HINT = "\n\n💡 Check gateway logs for more details: manage_gateway
 def handle_errors(
     action_name: str,
     error_suffix: str = "",
-) -> Callable[[Callable[..., Coroutine[Any, Any, T]]], Callable[..., Coroutine[Any, Any, T]]]:
+) -> Callable[
+    [Callable[..., Coroutine[Any, Any, T]]], Callable[..., Coroutine[Any, Any, T]]
+]:
     """
     Decorator for standardized error handling in tool functions.
 
@@ -28,7 +36,10 @@ def handle_errors(
         action_name: Description of the action for error messages (e.g., "get prices")
         error_suffix: Optional string appended to error messages (e.g., GATEWAY_LOG_HINT)
     """
-    def decorator(func: Callable[..., Coroutine[Any, Any, T]]) -> Callable[..., Coroutine[Any, Any, T]]:
+
+    def decorator(
+        func: Callable[..., Coroutine[Any, Any, T]],
+    ) -> Callable[..., Coroutine[Any, Any, T]]:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> T:
             try:
@@ -40,5 +51,7 @@ def handle_errors(
             except Exception as e:
                 logger.error(f"{action_name} failed: {str(e)}", exc_info=True)
                 raise ToolError(f"Failed to {action_name}: {str(e)}{error_suffix}")
+
         return wrapper
+
     return decorator

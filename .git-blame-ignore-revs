@@ -1,0 +1,6 @@
+# Revisions listed here are skipped by `git blame`.
+# Enable locally with:
+#   git config blame.ignoreRevsFile .git-blame-ignore-revs
+#
+# (style) mechanical format sweep: isort then black over the Python tree (READ-133)
+3fa941fa3e49fb647b94916b92d11e481e7b7fdd

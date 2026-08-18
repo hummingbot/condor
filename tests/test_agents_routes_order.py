@@ -36,5 +36,18 @@ def test_delegation_detail_and_stop_not_shadowed():
     )
 
 
+def test_history_not_shadowed_by_the_task_id_route():
+    """``/delegations/history`` is a literal, and `{task_id}` would swallow it."""
+    assert (
+        _first_full_match("GET", "/agents/delegations/history")
+        == "list_delegation_history"
+    )
+
+
+def test_notify_is_not_shadowed_by_a_slug_route():
+    """``/agents/notify`` is a literal too (ARCH-088)."""
+    assert _first_full_match("POST", "/agents/notify") == "notify_user"
+
+
 def test_agent_detail_still_matches_real_slug():
     assert _first_full_match("GET", "/agents/my-agent") == "get_agent"

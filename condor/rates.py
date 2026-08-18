@@ -17,7 +17,7 @@ def _normalize(token: str) -> str:
 
 
 def merge_price_pool(
-    tickers_by_connector: Dict[str, Dict[str, dict]]
+    tickers_by_connector: Dict[str, Dict[str, dict]],
 ) -> Dict[str, float]:
     """Merge per-connector tickers into one `{pair: price}` pool.
 

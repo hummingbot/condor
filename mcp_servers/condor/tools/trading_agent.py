@@ -540,6 +540,7 @@ def journal_write(
     risk_note: str = "",
     tick: int = 0,
     category: str = "",
+    section: str = "",
 ) -> dict:
     if not agent_id:
         return {"error": "agent_id is required"}
@@ -573,6 +574,14 @@ def journal_write(
             }
     if not session_dir:
         return {"error": "no journal available for this agent"}
+
+    if entry_type == "canvas":
+        # The canvas (FEAT-036) rides on this tool rather than its own so it
+        # inherits the engine resolution and the experiment-mode skip above.
+        from condor.agents import canvas
+
+        return canvas.write_section(session_dir, section, text, tick=tick)
+
     jm = JournalManager(agent_id, session_dir=session_dir, agent_dir=agent_dir)
 
     if entry_type == "learning":

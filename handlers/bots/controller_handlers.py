@@ -29,8 +29,6 @@ from handlers.cex._shared import (
 )
 from utils.telegram_formatters import escape_markdown_v2, format_error_message
 
-from .controllers import get_controller_info, get_supported_controller_types
-
 from ._shared import (
     GRID_STRIKE_DEFAULTS,
     GRID_STRIKE_FIELD_ORDER,
@@ -56,6 +54,7 @@ from ._shared import (
     init_new_controller_config,
     set_controller_config,
 )
+from .controllers import get_controller_info, get_supported_controller_types
 from .controllers.grid_strike.grid_analysis import (
     calculate_natr,
     generate_theoretical_grid,
@@ -276,7 +275,9 @@ async def show_controller_configs_menu(
             nav = []
             if page > 0:
                 nav.append(
-                    InlineKeyboardButton("◀️", callback_data=f"bots:cfg_page:{page - 1}")
+                    InlineKeyboardButton(
+                        "◀️", callback_data=f"bots:cfg_page:{page - 1}"
+                    )
                 )
             nav.append(
                 InlineKeyboardButton(
@@ -285,7 +286,9 @@ async def show_controller_configs_menu(
             )
             if page < total_pages - 1:
                 nav.append(
-                    InlineKeyboardButton("▶️", callback_data=f"bots:cfg_page:{page + 1}")
+                    InlineKeyboardButton(
+                        "▶️", callback_data=f"bots:cfg_page:{page + 1}"
+                    )
                 )
             keyboard.append(nav)
 
@@ -5182,7 +5185,9 @@ def _build_deploy_progressive_message(
             value_display = f"{default} (default)" if default else "Not set"
 
         if field_name == current_field:
-            lines.append(f"➡️ *{escape_markdown_v2(label)}*{required}: _awaiting input_")
+            lines.append(
+                f"➡️ *{escape_markdown_v2(label)}*{required}: _awaiting input_"
+            )
         elif DEPLOY_FIELD_ORDER.index(field_name) < DEPLOY_FIELD_ORDER.index(
             current_field
         ):
@@ -8016,11 +8021,11 @@ async def _pmm_show_advanced(context, chat_id, message_id, config):
 # PMM V1 WIZARD
 # ============================================
 
-from .controllers.pmm_v1 import generate_id as pv1_generate_id
-from .controllers.pmm_v1 import validate_config as pv1_validate_config
-from .controllers.pmm_v1 import parse_spreads as pv1_parse_spreads
 from .controllers.pmm_v1 import FIELD_ORDER as PV1_FIELD_ORDER
 from .controllers.pmm_v1 import FIELDS as PV1_FIELDS
+from .controllers.pmm_v1 import generate_id as pv1_generate_id
+from .controllers.pmm_v1 import parse_spreads as pv1_parse_spreads
+from .controllers.pmm_v1 import validate_config as pv1_validate_config
 
 
 async def show_new_pmm_v1_form(

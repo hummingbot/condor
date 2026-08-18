@@ -13,11 +13,14 @@ Bot data comes from client.bot_orchestration.get_active_bots_status():
     → close_type_counts  (CloseType.XXX → count)
   bots_data[bot_name]["error_logs"]  → errors
 """
+
 import logging
 from collections import Counter
 from datetime import datetime, timezone
+
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
+
 from config_manager import get_client
 
 logger = logging.getLogger(__name__)
@@ -53,9 +56,17 @@ def _side_label(raw: str) -> str:
 
 class Config(BaseModel):
     """Unified MM dashboard: portfolio inventory, bot positions, PnL, and errors."""
-    connector_name: str = Field(default="binance_perpetual", description="Focus connector for portfolio (empty=all)")
-    trading_pair: str = Field(default="", description="Filter bot positions by pair (empty = all)")
-    min_value_usd: float = Field(default=1.0, description="Hide tokens below this USD value")
+
+    connector_name: str = Field(
+        default="binance_perpetual",
+        description="Focus connector for portfolio (empty=all)",
+    )
+    trading_pair: str = Field(
+        default="", description="Filter bot positions by pair (empty = all)"
+    )
+    min_value_usd: float = Field(
+        default=1.0, description="Hide tokens below this USD value"
+    )
     include_errors: bool = Field(default=True, description="Include error log summary")
 
 
@@ -89,7 +100,8 @@ async def _fetch_portfolio(client, connector_name: str, min_value_usd: float):
                 continue
 
             significant = [
-                t for t in tokens
+                t
+                for t in tokens
                 if isinstance(t, dict) and float(t.get("value", 0)) >= min_value_usd
             ]
             if not significant:
@@ -107,16 +119,20 @@ async def _fetch_portfolio(client, connector_name: str, min_value_usd: float):
                 pct = (value / total_value * 100) if total_value > 0 else 0
                 in_use = units - available
                 use_flag = f" (in_use: {in_use:.4f})" if in_use > 0.001 else ""
-                summary_lines.append(f"  {token}: {units:,.4f} = ${value:,.2f} ({pct:.1f}%){use_flag}")
-                inv_rows.append({
-                    "Account": acct_name,
-                    "Connector": conn_name,
-                    "Token": token,
-                    "Units": round(units, 4),
-                    "Value (USD)": f"${value:,.2f}",
-                    "Weight": f"{pct:.1f}%",
-                    "In Use": f"{in_use:.4f}" if in_use > 0.001 else "-",
-                })
+                summary_lines.append(
+                    f"  {token}: {units:,.4f} = ${value:,.2f} ({pct:.1f}%){use_flag}"
+                )
+                inv_rows.append(
+                    {
+                        "Account": acct_name,
+                        "Connector": conn_name,
+                        "Token": token,
+                        "Units": round(units, 4),
+                        "Value (USD)": f"${value:,.2f}",
+                        "Weight": f"{pct:.1f}%",
+                        "In Use": f"{in_use:.4f}" if in_use > 0.001 else "-",
+                    }
+                )
             summary_lines.append(f"  Subtotal: ${total_value:,.2f}")
             summary_lines.append("")
 
@@ -129,8 +145,7 @@ async def _fetch_portfolio(client, connector_name: str, min_value_usd: float):
         pass
     if total_val is None and inv_rows:
         total_val = sum(
-            float(r["Value (USD)"].replace("$", "").replace(",", ""))
-            for r in inv_rows
+            float(r["Value (USD)"].replace("$", "").replace(",", "")) for r in inv_rows
         )
 
     return inv_rows, total_val, None, summary_lines
@@ -158,8 +173,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     except Exception as e:
         bots_error = f"Failed to fetch bot status: {e}"
 
-    ctrl_rows = []       # per-controller perf table
-    pos_rows = []        # open positions table
+    ctrl_rows = []  # per-controller perf table
+    pos_rows = []  # open positions table
     close_totals: Counter = Counter()
     total_realized = total_unrealized = total_volume = 0.0
     total_errors = 0
@@ -172,7 +187,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         # Error logs
         if config.include_errors:
             errs = [
-                e for e in (bot_data.get("error_logs") or [])
+                e
+                for e in (bot_data.get("error_logs") or [])
                 if isinstance(e, dict)
                 and str(e.get("level_name", "")).upper() in _ERROR_LEVELS
             ]
@@ -195,7 +211,11 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             positions = inner.get("positions_summary") or []
             pair = ""
             connector = ""
-            if positions and isinstance(positions, list) and isinstance(positions[0], dict):
+            if (
+                positions
+                and isinstance(positions, list)
+                and isinstance(positions[0], dict)
+            ):
                 pair = positions[0].get("trading_pair", "")
                 connector = positions[0].get("connector_name", "")
 
@@ -217,16 +237,20 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 label = _close_label(str(raw_ct))
                 ctrl_closes[label] += int(cnt)
             close_totals.update(ctrl_closes)
-            close_str = " | ".join(f"{k}:{v}" for k, v in ctrl_closes.most_common()) or "—"
+            close_str = (
+                " | ".join(f"{k}:{v}" for k, v in ctrl_closes.most_common()) or "—"
+            )
 
-            ctrl_rows.append({
-                "Controller": ctrl_name,
-                "Pair": pair or "—",
-                "Realized PnL": f"${realized:,.4f}",
-                "Unrealized PnL": f"${unrealized:,.4f}",
-                "Volume": f"${volume:,.2f}",
-                "Closes": close_str,
-            })
+            ctrl_rows.append(
+                {
+                    "Controller": ctrl_name,
+                    "Pair": pair or "—",
+                    "Realized PnL": f"${realized:,.4f}",
+                    "Unrealized PnL": f"${unrealized:,.4f}",
+                    "Volume": f"${volume:,.2f}",
+                    "Closes": close_str,
+                }
+            )
 
             # Open positions
             for pos in positions:
@@ -239,22 +263,26 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 bp = float(pos.get("breakeven_price", 0) or 0)
                 pos_unreal = float(pos.get("unrealized_pnl_quote", 0) or 0)
                 pos_real = float(pos.get("realized_pnl_quote", 0) or 0)
-                pos_rows.append({
-                    "Controller": ctrl_name,
-                    "Pair": pos_pair,
-                    "Connector": pos_conn,
-                    "Side": side,
-                    "Amount": f"{amount:,.2f}",
-                    "Breakeven": f"${bp:,.6f}",
-                    "Unrealized PnL": f"${pos_unreal:,.4f}",
-                    "Realized PnL": f"${pos_real:,.4f}",
-                })
+                pos_rows.append(
+                    {
+                        "Controller": ctrl_name,
+                        "Pair": pos_pair,
+                        "Connector": pos_conn,
+                        "Side": side,
+                        "Amount": f"{amount:,.2f}",
+                        "Breakeven": f"${bp:,.6f}",
+                        "Unrealized PnL": f"${pos_unreal:,.4f}",
+                        "Realized PnL": f"${pos_real:,.4f}",
+                    }
+                )
 
     net_pnl = total_realized + total_unrealized
 
     # ── Summary text ─────────────────────────────────────────────────────────
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    close_summary = " | ".join(f"{k}:{v}" for k, v in close_totals.most_common()) or "none"
+    close_summary = (
+        " | ".join(f"{k}:{v}" for k, v in close_totals.most_common()) or "none"
+    )
 
     lines = [f"**MM Dashboard** — {now}", ""]
 
@@ -263,7 +291,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         lines.append(f"Portfolio: {portfolio_error}")
     else:
         total_str = f"${total_value:,.2f}" if total_value else "unknown"
-        lines.append(f"Portfolio total: {total_str} | {len(inv_rows)} asset(s) on {config.connector_name or 'all'}")
+        lines.append(
+            f"Portfolio total: {total_str} | {len(inv_rows)} asset(s) on {config.connector_name or 'all'}"
+        )
     if portfolio_summary:
         lines.append("")
         lines.extend(portfolio_summary)
@@ -273,7 +303,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         lines.append(bots_error)
     else:
         lines.append(f"Controllers: {len(ctrl_rows)} | Open positions: {len(pos_rows)}")
-        lines.append(f"Realized PnL: ${total_realized:,.4f} | Unrealized: ${total_unrealized:,.4f} | Net: ${net_pnl:,.4f}")
+        lines.append(
+            f"Realized PnL: ${total_realized:,.4f} | Unrealized: ${total_unrealized:,.4f} | Net: ${net_pnl:,.4f}"
+        )
         lines.append(f"Volume: ${total_volume:,.2f}")
         lines.append(f"Closes: {close_summary}")
 
@@ -289,37 +321,68 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     summary = "\n".join(lines)
 
     # ── Persistent report ─────────────────────────────────────────────────────
-    try:
-        from condor.reports import ReportBuilder
-        builder = ReportBuilder("MM Dashboard")
-        builder.source("routine", "mm_dashboard").tags(
-            ["portfolio", "bots", "positions", "market-making"]
+    from condor.reports import ReportBuilder
+
+    builder = ReportBuilder("MM Dashboard")
+    builder.source("routine", "mm_dashboard").tags(
+        ["portfolio", "bots", "positions", "market-making"]
+    )
+
+    if total_value:
+        builder.kpi("Portfolio Value", f"${total_value:,.2f}")
+    builder.kpi("Active Controllers", str(len(ctrl_rows)))
+    builder.kpi("Open Positions", str(len(pos_rows)))
+    builder.kpi("Realized PnL", f"${total_realized:,.4f}")
+    builder.kpi("Unrealized PnL", f"${total_unrealized:,.4f}")
+    builder.kpi("Net PnL", f"${net_pnl:,.4f}")
+    builder.kpi("Volume", f"${total_volume:,.2f}")
+    if config.include_errors:
+        builder.kpi("Errors", str(total_errors))
+
+    if pos_rows:
+        builder.table(
+            pos_rows,
+            [
+                "Controller",
+                "Pair",
+                "Connector",
+                "Side",
+                "Amount",
+                "Breakeven",
+                "Unrealized PnL",
+                "Realized PnL",
+            ],
         )
+    if ctrl_rows:
+        builder.table(
+            ctrl_rows,
+            [
+                "Controller",
+                "Pair",
+                "Realized PnL",
+                "Unrealized PnL",
+                "Volume",
+                "Closes",
+            ],
+        )
+    if inv_rows:
+        builder.table(
+            inv_rows,
+            [
+                "Account",
+                "Connector",
+                "Token",
+                "Units",
+                "Value (USD)",
+                "Weight",
+                "In Use",
+            ],
+        )
+    elif portfolio_error:
+        builder.markdown(f"**Portfolio unavailable**: {portfolio_error}")
 
-        if total_value:
-            builder.kpi("Portfolio Value", f"${total_value:,.2f}")
-        builder.kpi("Active Controllers", str(len(ctrl_rows)))
-        builder.kpi("Open Positions", str(len(pos_rows)))
-        builder.kpi("Realized PnL", f"${total_realized:,.4f}")
-        builder.kpi("Unrealized PnL", f"${total_unrealized:,.4f}")
-        builder.kpi("Net PnL", f"${net_pnl:,.4f}")
-        builder.kpi("Volume", f"${total_volume:,.2f}")
-        if config.include_errors:
-            builder.kpi("Errors", str(total_errors))
-
-        if pos_rows:
-            builder.table(pos_rows, ["Controller", "Pair", "Connector", "Side", "Amount", "Breakeven", "Unrealized PnL", "Realized PnL"])
-        if ctrl_rows:
-            builder.table(ctrl_rows, ["Controller", "Pair", "Realized PnL", "Unrealized PnL", "Volume", "Closes"])
-        if inv_rows:
-            builder.table(inv_rows, ["Account", "Connector", "Token", "Units", "Value (USD)", "Weight", "In Use"])
-        elif portfolio_error:
-            builder.markdown(f"**Portfolio unavailable**: {portfolio_error}")
-
-        builder.markdown(summary)
-        builder.manual_order()
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    builder.markdown(summary)
+    builder.manual_order()
+    await builder.save()
 
     return summary

@@ -24,8 +24,8 @@ CACHE_TTL_SECONDS = 3600
 
 @dataclass(frozen=True)
 class OpenRouterModel:
-    slug: str            # e.g. "anthropic/claude-sonnet-4-5"
-    name: str            # human-friendly name from the API
+    slug: str  # e.g. "anthropic/claude-sonnet-4-5"
+    name: str  # human-friendly name from the API
     context_length: int  # tokens
     prompt_price: float  # USD per 1M input tokens, 0 if free
     completion_price: float

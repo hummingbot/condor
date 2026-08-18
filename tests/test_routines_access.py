@@ -28,10 +28,23 @@ class FakeRoutineStore:
         self.schedule_calls = []
         self.continuous_calls = []
         self.agents = []
+        self.conversations = []
+        self.session_keys = []
 
-    async def execute(self, routine_name, config, server_name, user_id=0, agent=""):
+    async def execute(
+        self,
+        routine_name,
+        config,
+        server_name,
+        user_id=0,
+        agent="",
+        conversation_id="",
+        session_key="",
+    ):
         self.execute_calls.append((routine_name, server_name, user_id))
         self.agents.append(agent)
+        self.conversations.append(conversation_id)
+        self.session_keys.append(session_key)
         return "inst-run"
 
     async def schedule(
@@ -41,19 +54,44 @@ class FakeRoutineStore:
         return "inst-sched"
 
     async def start_continuous(
-        self, routine_name, config, server_name, user_id=0, agent=""
+        self,
+        routine_name,
+        config,
+        server_name,
+        user_id=0,
+        agent="",
+        conversation_id="",
+        session_key="",
     ):
         self.continuous_calls.append((routine_name, server_name, user_id))
         self.agents.append(agent)
+        self.conversations.append(conversation_id)
+        self.session_keys.append(session_key)
         return "inst-cont"
+
+
+class FakeControllers:
+    async def list_controller_configs(self):
+        return [{"id": "pmm_b"}, {"id": "pmm_a"}]
+
+
+class FakeClient:
+    controllers = FakeControllers()
 
 
 class FakeConfigManager:
     def __init__(self, allowed):
         self._allowed = allowed  # set of (user_id, server_name)
+        self.clients_built = []
 
     def has_server_access(self, user_id, server_name, *args, **kwargs):
         return (user_id, server_name) in self._allowed
+
+    async def get_client(self, server_name):
+        # A denied request must never reach this: building the client is what
+        # reads the other user's server (SEC-159).
+        self.clients_built.append(server_name)
+        return FakeClient()
 
 
 @pytest.fixture
@@ -62,11 +100,25 @@ def client_and_store(monkeypatch):
     cm = FakeConfigManager(allowed={(USER.id, OWNED_SERVER)})
     monkeypatch.setattr(routines_module, "get_routine_store", lambda: store)
     monkeypatch.setattr(routines_module, "get_config_manager", lambda: cm)
+    monkeypatch.setattr("condor.web.auth.get_config_manager", lambda: cm)
 
     app = FastAPI()
     app.include_router(routines_module.router)
     app.dependency_overrides[get_current_user] = lambda: USER
     return TestClient(app), store
+
+
+@pytest.fixture
+def client_and_cm(monkeypatch):
+    """Same wiring, exposing the config manager for the field-options route."""
+    cm = FakeConfigManager(allowed={(USER.id, OWNED_SERVER)})
+    monkeypatch.setattr(routines_module, "get_config_manager", lambda: cm)
+    monkeypatch.setattr("condor.web.auth.get_config_manager", lambda: cm)
+
+    app = FastAPI()
+    app.include_router(routines_module.router)
+    app.dependency_overrides[get_current_user] = lambda: USER
+    return TestClient(app), cm
 
 
 # ── Denied: no access to the target server ──
@@ -211,3 +263,90 @@ def test_dashboard_runs_leave_attribution_to_the_routine(client_and_store):
         json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
     )
     assert store.agents == [""]
+
+
+# ── ARCH-089: the run remembers which conversation asked for it ──
+
+
+def _resolves_to(monkeypatch, conversation_id: str):
+    async def fake(session_key: str) -> str:
+        return conversation_id if session_key else ""
+
+    monkeypatch.setattr(
+        routines_module.client, "conversation_for_session", fake, raising=False
+    )
+
+
+def test_a_session_key_reaches_the_store_as_a_conversation(
+    client_and_store, monkeypatch
+):
+    """The middle link of the chain: the route is what turns a key into an id."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/start",
+        json={
+            "routine_name": "agent/watcher",
+            "server_name": OWNED_SERVER,
+            "session_key": "web:1:slot-1",
+        },
+    )
+    assert store.conversations == ["conv-1"]
+
+
+def test_the_session_key_itself_reaches_the_store_too(client_and_store, monkeypatch):
+    """The id says where to *record* the outcome; the key says where to *show*
+    it while the tab is still open."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/run",
+        json={
+            "routine_name": "some_routine",
+            "server_name": OWNED_SERVER,
+            "session_key": "web:1:slot-1",
+        },
+    )
+    assert store.session_keys == ["web:1:slot-1"]
+
+
+def test_a_dashboard_run_has_no_conversation_behind_it(client_and_store, monkeypatch):
+    """Omitted -> the run reports nowhere, exactly as before ARCH-089."""
+    client, store = client_and_store
+    _resolves_to(monkeypatch, "conv-1")
+
+    client.post(
+        "/routines/run",
+        json={"routine_name": "some_routine", "server_name": OWNED_SERVER},
+    )
+    assert store.conversations == [""]
+
+
+# ── SEC-159: the field-options route is server-scoped too ──
+
+
+def test_field_options_denied_on_foreign_server(client_and_cm):
+    """``?server=`` on /options/{source} used to enumerate any server's configs."""
+    client, cm = client_and_cm
+    resp = client.get(f"/routines/options/controller_configs?server={FOREIGN_SERVER}")
+    assert resp.status_code == 403
+    assert resp.json()["detail"] == "No access"
+    assert cm.clients_built == []
+
+
+def test_field_options_allowed_on_owned_server(client_and_cm):
+    client, cm = client_and_cm
+    resp = client.get(f"/routines/options/controller_configs?server={OWNED_SERVER}")
+    assert resp.status_code == 200
+    assert resp.json() == {"options": ["pmm_a", "pmm_b"]}
+    assert cm.clients_built == [OWNED_SERVER]
+
+
+def test_field_options_requires_an_explicit_server(client_and_cm):
+    """The guard makes ``server`` required; it no longer falls back to "local"."""
+    client, cm = client_and_cm
+    resp = client.get("/routines/options/controller_configs")
+    assert resp.status_code == 422
+    assert cm.clients_built == []

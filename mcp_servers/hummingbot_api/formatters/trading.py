@@ -4,6 +4,7 @@ Trading-related formatters for orders and positions.
 This module provides table formatters for trading data including
 orders and positions.
 """
+
 from typing import Any
 
 from .base import format_number, get_field, get_timestamp_field
@@ -26,7 +27,9 @@ def format_orders_as_table(orders: list[dict[str, Any]]) -> str:
         return "No orders found."
 
     def format_time(item: dict) -> str:
-        return get_timestamp_field(item, "created_at", "creation_timestamp", "timestamp")
+        return get_timestamp_field(
+            item, "created_at", "creation_timestamp", "timestamp"
+        )
 
     def format_pair(item: dict) -> str:
         return str(get_field(item, "trading_pair", default="N/A"))[:12]
@@ -38,13 +41,18 @@ def format_orders_as_table(orders: list[dict[str, Any]]) -> str:
         return str(get_field(item, "order_type", "type", default="N/A"))[:6]
 
     def format_amount(item: dict) -> str:
-        return format_number(get_field(item, "amount", "order_size", default=None), compact=False)
+        return format_number(
+            get_field(item, "amount", "order_size", default=None), compact=False
+        )
 
     def format_price(item: dict) -> str:
         return format_number(get_field(item, "price", default=None), compact=False)
 
     def format_filled(item: dict) -> str:
-        return format_number(get_field(item, "filled_amount", "executed_amount_base", default=None), compact=False)
+        return format_number(
+            get_field(item, "filled_amount", "executed_amount_base", default=None),
+            compact=False,
+        )
 
     def format_status(item: dict) -> str:
         return str(get_field(item, "status", default="N/A"))[:8]
@@ -106,16 +114,24 @@ def format_positions_as_table(positions: list[dict[str, Any]]) -> str:
         return str(get_field(item, "position_side", "side", default="N/A"))[:5]
 
     def format_amount(item: dict) -> str:
-        return format_number(get_field(item, "amount", "position_size", default=None), compact=False)
+        return format_number(
+            get_field(item, "amount", "position_size", default=None), compact=False
+        )
 
     def format_entry(item: dict) -> str:
-        return format_number(get_field(item, "entry_price", default=None), compact=False)
+        return format_number(
+            get_field(item, "entry_price", default=None), compact=False
+        )
 
     def format_current(item: dict) -> str:
-        return format_number(get_field(item, "current_price", "mark_price", default=None), compact=False)
+        return format_number(
+            get_field(item, "current_price", "mark_price", default=None), compact=False
+        )
 
     def format_pnl(item: dict) -> str:
-        return format_number(get_field(item, "unrealized_pnl", default=None), compact=False)
+        return format_number(
+            get_field(item, "unrealized_pnl", default=None), compact=False
+        )
 
     def format_leverage(item: dict) -> str:
         return str(get_field(item, "leverage", default="N/A"))

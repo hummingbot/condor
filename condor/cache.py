@@ -125,9 +125,7 @@ def evict_expired(
         del cache[k]
 
     if stale_keys:
-        logger.debug(
-            "Evicted %d stale entries from '%s'", len(stale_keys), namespace
-        )
+        logger.debug("Evicted %d stale entries from '%s'", len(stale_keys), namespace)
     return len(stale_keys)
 
 

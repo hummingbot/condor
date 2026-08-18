@@ -226,6 +226,38 @@ def test_resolve_tick_timeout_precedence():
     assert resolve_tick_timeout("loop") == TimeoutPolicy().tick_default
 
 
+def test_agent_session_budget_defaults_to_ten_minutes():
+    """The out-of-the-box budget for one agent session is 10 minutes."""
+    assert TimeoutPolicy().tick_default == 600
+    assert resolve_tick_timeout("dry_run") == 600
+
+
+def test_agent_session_budget_is_configurable_by_env(monkeypatch):
+    monkeypatch.setenv("CONDOR_TIMEOUT_TICK_DEFAULT", "1200")
+    assert TimeoutPolicy.load().tick_default == 1200
+
+
+def test_tick_timeout_sec_is_a_run_config_field():
+    """A run can widen its own budget without touching the deployment env."""
+    from condor.agents.config import AgentConfig
+
+    assert AgentConfig().tick_timeout_sec == 0  # 0 = defer to the policy
+    cfg = AgentConfig.from_dict({"tick_timeout_sec": 1800})
+    assert resolve_tick_timeout(strategy=cfg.tick_timeout_sec) == 1800
+
+
+def test_engine_tick_has_no_hardcoded_budget():
+    """engine/_tick and the shutdown pass resolve the budget, not a literal."""
+    import inspect
+
+    from condor.agents import engine, shutdown
+
+    tick_src = inspect.getsource(engine.TickEngine._tick)
+    assert "resolve_tick_timeout" in tick_src
+    assert "asyncio.timeout(300)" not in tick_src
+    assert "asyncio.timeout(300)" not in inspect.getsource(shutdown)
+
+
 def test_timeouts_are_sourced_from_the_policy():
     """The migrated call sites read the policy instead of their own literal."""
     from condor.runtime import sessions

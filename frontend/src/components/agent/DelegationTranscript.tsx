@@ -120,14 +120,23 @@ export function DelegationTranscript({ taskId }: { taskId: string }) {
 
   if (error) {
     return (
-      <p className="text-xs text-red-400">
-        Could not load the transcript. A delegation only keeps one for as long as
-        the process that ran it.
-      </p>
+      <p className="text-xs text-red-400">Could not load the transcript.</p>
     );
   }
 
   const events = data?.events ?? [];
+
+  // A record written before the events sidecar existed has only the markdown
+  // that was rendered to disk. Flat rather than collapsible, but complete — and
+  // far better than telling the user the transcript is gone.
+  if (events.length === 0 && data?.markdown) {
+    return (
+      <div className="chat-markdown text-xs text-[var(--color-text)]">
+        <ReactMarkdown remarkPlugins={[remarkGfm]}>{data.markdown}</ReactMarkdown>
+      </div>
+    );
+  }
+
   if (events.length === 0) {
     return (
       <p className="text-xs text-[var(--color-text-muted)]">

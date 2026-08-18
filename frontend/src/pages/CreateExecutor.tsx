@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -7,6 +7,7 @@ import {
   BarChart3,
   CheckCircle,
   Copy,
+  Droplets,
   Grid3X3,
   Layers,
   List,
@@ -28,7 +29,11 @@ import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfig
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
 import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
 import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPanel";
+import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
+import { useLpConfig } from "@/components/executor/lp-config";
 import { TradeBottomPane } from "@/components/trade/TradeBottomPane";
+import { useCandleStore } from "@/hooks/useCandleStore";
+import { usePairBalances } from "@/hooks/usePairBalances";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { useMainControllerData } from "@/hooks/useMainControllerData";
@@ -36,7 +41,8 @@ import { useRates } from "@/hooks/useRates";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
-import type { ExecutorType } from "@/components/executor/types";
+import { connectorCapabilities } from "@/lib/connector-capabilities";
+import type { ExecutorType, PickSlot } from "@/components/executor/types";
 import {
   gridReducer,
   isSpotConnector,
@@ -54,6 +60,7 @@ const TYPE_TABS: { value: ExecutorType; label: string; icon: React.ReactNode }[]
   { value: "position", label: "Position", icon: <TrendingUp className="h-3.5 w-3.5" /> },
   { value: "grid", label: "Grid", icon: <Grid3X3 className="h-3.5 w-3.5" /> },
   { value: "dca", label: "DCA", icon: <Layers className="h-3.5 w-3.5" /> },
+  { value: "lp", label: "LP", icon: <Droplets className="h-3.5 w-3.5" /> },
 ];
 
 const TYPE_LABELS: Record<ExecutorType, string> = {
@@ -61,6 +68,7 @@ const TYPE_LABELS: Record<ExecutorType, string> = {
   position: "Position Executor",
   order: "Order Executor",
   dca: "DCA Executor",
+  lp: "LP Executor",
 };
 
 // ── Page ──
@@ -97,10 +105,23 @@ export function CreateExecutor() {
   const connector = gridState.connector;
   const pair = gridState.pair;
   const isSpot = isSpotConnector(connector);
+  // A CLOB pair is already <BASE>-<QUOTE>, so the tickers come off the split.
+  const balances = usePairBalances(
+    server ?? null,
+    connector,
+    pair?.split("-")[0],
+    pair?.split("-")[1],
+  );
+
+  // The venue the URL asked for, kept after the param is stripped below: the
+  // redirect guard cannot read it from the URL any more, and it must not fire
+  // for a *persisted* gateway network (that one just resets to a CLOB venue).
+  const urlConnectorRef = useRef<string | null>(null);
 
   // Apply connector/pair from URL params (e.g. from Executors detail panel)
   useEffect(() => {
     const urlConnector = searchParams.get("connector");
+    urlConnectorRef.current = urlConnector;
     const urlPair = searchParams.get("pair");
     if (urlConnector) {
       gridDispatch({ type: "SET_CONNECTOR", value: urlConnector });
@@ -119,7 +140,21 @@ export function CreateExecutor() {
   const [rightPanel, setRightPanel] = useState<"config" | "depth" | "markets">("config");
   const [rightPanelWidth, setRightPanelWidth] = useState(288);
   const [bottomPaneHeight, setBottomPaneHeight] = useState(200);
-  const [selectedExecutorId, setSelectedExecutorId] = useState<string | null>(null);
+  // The selection belongs to the market it was made in, so it carries that
+  // market with it and simply stops matching when the market changes. Clearing
+  // it from an effect instead used to cost a second render pass on every
+  // connector/pair switch, and left one render where the chart still had a
+  // selected executor from the market it had already navigated away from.
+  const [selection, setSelection] = useState<{ market: string; id: string | null }>({
+    market: "",
+    id: null,
+  });
+  const selectionMarket = `${connector}:${pair}`;
+  const selectedExecutorId = selection.market === selectionMarket ? selection.id : null;
+  const setSelectedExecutorId = useCallback(
+    (id: string | null) => setSelection({ market: selectionMarket, id }),
+    [selectionMarket],
+  );
 
   const { onMouseDown: startHDrag } = useResizeDrag({
     axis: "x",
@@ -141,11 +176,43 @@ export function CreateExecutor() {
     cursor: "row-resize",
   });
 
-  const { data: connectors = [] } = useQuery({
-    queryKey: ["connected-exchanges", server],
-    queryFn: () => api.getConnectedExchanges(server!),
+  // One query, one answer: every venue the panel can offer, each with the traits
+  // the UI decisions below rest on. The server dedups (a venue in both of its input
+  // lists is a Hummingbot connector), so there is no merge to get wrong here.
+  const { data: venues = [], isPending: venuesPending } = useQuery({
+    queryKey: ["venues", server],
+    queryFn: () => api.getVenues(server!),
     enabled: !!server,
+    staleTime: 5 * 60 * 1000,
   });
+
+  // The list has to be in before the panel may *correct* a selection: judging a
+  // persisted venue against an empty list would bounce it on every reload and
+  // switch its tab to Order.
+  const listsReady = !!server && !venuesPending;
+
+  // Order-book venues first, then swap-only ones — the grouping ExchangeSelector
+  // renders, and it keeps allConnectors[0] (the reset fallback) a tradable venue
+  // rather than whichever chain sorts first alphabetically.
+  // Trade is for venues with an order book — whether or not the venue is
+  // decentralized: hyperliquid and xrpl belong here, solana-mainnet-beta does
+  // not. Everything Condor trades through Gateway lives on /dex instead, where
+  // the pool rather than the pair is the unit of navigation.
+  const allConnectors = useMemo(
+    () => venues.filter((v) => v.hummingbotMarketData).map((v) => v.name),
+    [venues],
+  );
+
+
+  const caps = useMemo(
+    () => connectorCapabilities(connector, venues),
+    [connector, venues],
+  );
+
+  // Pool resolution only means something where an LP position can exist, so the
+  // query is off elsewhere rather than asking about a pair that has no pool.
+  // Declared above the connector/pair propagation effects that dispatch into it.
+  const lpConfig = useLpConfig(server ?? null, connector, pair, caps.supportsLp);
 
   // WS for executor data (candle streams are managed by candleStore)
   const wsChannels = useMemo(
@@ -158,7 +225,7 @@ export function CreateExecutor() {
   const { executors: mainExecutors, overlays: mainOverlays, positions: mainPositions, isLoadingPositions } =
     useMainControllerData(server, connector, pair);
 
-  const rulesData = useTradingRules(server ?? "", connector);
+  const rulesData = useTradingRules(server ?? "", connector, caps.hasTradingRules);
 
   // Currency conversion for chart tooltip values
   const quoteCurrency = pair.split("-")[1] || "USDT";
@@ -173,20 +240,43 @@ export function CreateExecutor() {
     gridDispatch({ type: "SET_FIELD", field: "lookbackSeconds", value: newLookback });
   }, [server]);
 
-  // Persist last-used connector/pair to localStorage & clear executor selection
+  // Persist last-used connector/pair to localStorage. The executor selection is
+  // not cleared here -- it expires on its own, see `selection` above.
   useEffect(() => {
     try {
       localStorage.setItem(LAST_MARKET_KEY, JSON.stringify({ connector, pair }));
     } catch { /* ok */ }
-    setSelectedExecutorId(null);
   }, [connector, pair]);
 
-  // Sync connector to filtered list
+  // A /trade URL naming a gateway network is a link to the wrong page now: its
+  // pools, not its pairs, are the thing to pick. Send it to /dex rather than
+  // silently swapping in a CEX. Only a *known* non-CLOB venue redirects, so a
+  // typo still falls through to the reset below.
   useEffect(() => {
-    if (connectors.length && !connectors.includes(connector)) {
-      gridDispatch({ type: "SET_CONNECTOR", value: connectors[0] });
+    if (!listsReady) return;
+    const wanted = urlConnectorRef.current;
+    if (wanted && venues.some((v) => v.name === wanted && !v.hummingbotMarketData)) {
+      urlConnectorRef.current = null;
+      navigate("/dex", { replace: true });
     }
-  }, [connectors, connector]);
+  }, [listsReady, venues, navigate]);
+
+  // Sync connector to the offered venues. A venue the server no longer reports
+  // cannot stay selected, or the panel queries endpoints for a venue that is gone.
+  // A persisted solana-mainnet-beta retires itself here — no migration code.
+  useEffect(() => {
+    if (listsReady && allConnectors.length && !allConnectors.includes(connector)) {
+      gridDispatch({ type: "SET_CONNECTOR", value: allConnectors[0] });
+    }
+  }, [listsReady, allConnectors, connector]);
+
+  // Executor types the venue does not support cannot stay selected (Grid on a CEX
+  // → pick a DEX → land on Order).
+  useEffect(() => {
+    if (listsReady && !caps.executorTypes.includes(executorType)) {
+      handleTypeChange("order");
+    }
+  }, [listsReady, caps, executorType]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Reset pair when connector changes
   useEffect(() => {
@@ -204,23 +294,38 @@ export function CreateExecutor() {
     positionConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
     orderConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
     dcaConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
+    lpConfig.dispatch({ type: "SET_CONNECTOR", value: connector });
   }, [connector]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     positionConfig.dispatch({ type: "SET_PAIR", value: pair });
     orderConfig.dispatch({ type: "SET_PAIR", value: pair });
     dcaConfig.dispatch({ type: "SET_PAIR", value: pair });
+    lpConfig.dispatch({ type: "SET_PAIR", value: pair });
   }, [pair]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Current price
+  // Current price. /market/prices only answers for a Hummingbot connector, so a
+  // venue without that trait reads the last close off the candle stream instead. The store is
+  // a singleton over one shared channel and TradeChart already subscribes with these
+  // exact arguments, so this costs no extra connection.
   const { data: priceData } = useQuery({
     queryKey: ["price", server, connector, pair],
     queryFn: () => api.getPrice(server!, connector, pair),
-    enabled: !!server && !!connector && !!pair,
+    enabled: !!server && !!connector && !!pair && caps.hasRestPrice,
     refetchInterval: 5000,
   });
 
-  const currentPrice = priceData?.mid_price ?? null;
+  const { candles: sharedCandles } = useCandleStore(
+    server ?? null,
+    connector,
+    pair,
+    gridState.interval,
+  );
+
+  const currentPrice = !caps.hasRestPrice
+    ? (sharedCandles[sharedCandles.length - 1]?.close ?? null)
+    : (priceData?.mid_price ?? null);
+
 
   // Price precision
   const pricePrecision = useMemo(() => {
@@ -232,6 +337,10 @@ export function CreateExecutor() {
     return Math.max(0, Math.ceil(-Math.log10(inc)));
   }, [rulesData, pair]);
 
+  // Depth and Markets have no DEX answer. Derived rather than reset in an effect, so
+  // a CEX selection is remembered and comes back when the user returns to a CEX.
+  const activePanel = caps.hasOrderBook ? rightPanel : "config";
+
   // ── Active config derived values ──
   const activeValidation = useMemo(() => {
     switch (executorType) {
@@ -239,8 +348,9 @@ export function CreateExecutor() {
       case "position": return positionConfig.validation;
       case "order": return orderConfig.validation;
       case "dca": return dcaConfig.validation;
+      case "lp": return lpConfig.validation;
     }
-  }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation]);
+  }, [executorType, gridValidation, positionConfig.validation, orderConfig.validation, dcaConfig.validation, lpConfig.validation]);
 
   // Chart props depend on active type
   const chartProps = useMemo(() => {
@@ -257,29 +367,49 @@ export function CreateExecutor() {
       case "position": return positionConfig.chartProps;
       case "order": return orderConfig.chartProps;
       case "dca": return dcaConfig.chartProps;
+      case "lp": return lpConfig.chartProps;
     }
-  }, [executorType, gridState, positionConfig.chartProps, orderConfig.chartProps, dcaConfig.chartProps]);
+  }, [executorType, gridState, positionConfig.chartProps, orderConfig.chartProps, dcaConfig.chartProps, lpConfig.chartProps]);
 
-  // Chart price set handler
-  const handlePriceSet = useMemo(
-    () => (field: "start" | "end" | "limit", price: number) => {
+  // Chart price set handler.
+  //
+  // Each per-type panel hands back a fresh config object every render, so naming
+  // them as deps would rebuild this callback on every render and defeat the
+  // stable identity the chart memoizes on. Pinning the deps to `[executorType]`
+  // bought that stability with a stale closure -- the callback kept calling
+  // whichever `handleChartPriceSet` existed when the type last changed, not the
+  // current one. A latest-value ref gives the stability without the staleness.
+  const priceSetTargets = useRef({ positionConfig, orderConfig, dcaConfig, lpConfig });
+  useEffect(() => {
+    priceSetTargets.current = { positionConfig, orderConfig, dcaConfig, lpConfig };
+  });
+
+  const handlePriceSet = useCallback(
+    (field: PickSlot, price: number) => {
+      const targets = priceSetTargets.current;
       switch (executorType) {
         case "grid":
+          // The grid panel arms only start/end/limit; `limit2` belongs to the LP
+          // lower limit and would name a grid field that does not exist.
+          if (field === "limit2") break;
           gridDispatch({ type: "SET_FIELD", field: `${field}_price`, value: price });
           gridDispatch({ type: "SET_FIELD", field: "activePickField", value: null });
           break;
         case "position":
-          positionConfig.handleChartPriceSet(field, price);
+          targets.positionConfig.handleChartPriceSet(field, price);
           break;
         case "order":
-          orderConfig.handleChartPriceSet(field, price);
+          targets.orderConfig.handleChartPriceSet(field, price);
           break;
         case "dca":
-          dcaConfig.handleChartPriceSet(field, price);
+          targets.dcaConfig.handleChartPriceSet(field, price);
+          break;
+        case "lp":
+          targets.lpConfig.handleChartPriceSet(field, price);
           break;
       }
     },
-    [executorType], // eslint-disable-line react-hooks/exhaustive-deps
+    [executorType],
   );
 
   // Create mutation
@@ -327,6 +457,10 @@ export function CreateExecutor() {
         case "dca":
           payload = dcaConfig.buildPayload(connector, pair, isSpot);
           break;
+        case "lp":
+          // No isSpot: an LP position has no leverage, and connector is the network.
+          payload = lpConfig.buildPayload(connector, pair);
+          break;
       }
 
       return api.createExecutor(server, payload);
@@ -338,6 +472,7 @@ export function CreateExecutor() {
         case "position": positionConfig.save(); break;
         case "order": orderConfig.save(); break;
         case "dca": dcaConfig.save(); break;
+        case "lp": lpConfig.save(); break;
       }
       // Show success modal
       setSuccessInfo({ id: data.executor_id, type: executorType, connector, pair });
@@ -372,10 +507,11 @@ export function CreateExecutor() {
             connector={connector}
             value={pair}
             onChange={(v) => gridDispatch({ type: "SET_PAIR", value: v })}
+            hasTradingRules={caps.hasTradingRules}
           />
           <div className="relative border-l border-[var(--color-border)]">
             <ExchangeSelector
-              connectors={connectors}
+              connectors={allConnectors}
               value={connector}
               onChange={(v) => gridDispatch({ type: "SET_CONNECTOR", value: v })}
             />
@@ -384,7 +520,7 @@ export function CreateExecutor() {
 
         {/* Price ticker */}
         <div className="flex flex-1 items-center px-4 py-2">
-          <PriceTicker server={server} connector={connector} pair={pair} />
+          <PriceTicker server={server} connector={connector} pair={pair} hasRestPrice={caps.hasRestPrice} />
         </div>
 
         {/* Interval + Range */}
@@ -505,7 +641,7 @@ export function CreateExecutor() {
             <button
               onClick={() => setRightPanel("config")}
               className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                rightPanel === "config"
+                activePanel === "config"
                   ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               }`}
@@ -513,10 +649,11 @@ export function CreateExecutor() {
               <Settings2 className="h-3.5 w-3.5" />
               Execute
             </button>
+            {caps.hasOrderBook && (
             <button
               onClick={() => setRightPanel("depth")}
               className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                rightPanel === "depth"
+                activePanel === "depth"
                   ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               }`}
@@ -524,10 +661,12 @@ export function CreateExecutor() {
               <BarChart3 className="h-3.5 w-3.5" />
               Data
             </button>
+            )}
+            {caps.hasOrderBook && (
             <button
               onClick={() => setRightPanel("markets")}
               className={`flex flex-1 items-center justify-center gap-1.5 px-2 py-2 text-[11px] font-medium transition-colors ${
-                rightPanel === "markets"
+                activePanel === "markets"
                   ? "border-b-2 border-[var(--color-primary)] text-[var(--color-primary)]"
                   : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
               }`}
@@ -535,14 +674,15 @@ export function CreateExecutor() {
               <List className="h-3.5 w-3.5" />
               Markets
             </button>
+            )}
           </div>
 
-          {rightPanel === "config" ? (
+          {activePanel === "config" ? (
             <>
               {/* Type Tabs */}
               <div className="border-b border-[var(--color-border)]">
                 <div className="flex">
-                  {TYPE_TABS.map((tab) => (
+                  {TYPE_TABS.filter((t) => caps.executorTypes.includes(t.value)).map((tab) => (
                     <button
                       key={tab.value}
                       onClick={() => handleTypeChange(tab.value)}
@@ -568,10 +708,13 @@ export function CreateExecutor() {
                   <PositionConfigPanel state={positionConfig.state} dispatch={positionConfig.dispatch} validation={positionConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
                 )}
                 {executorType === "order" && (
-                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                  <OrderConfigPanel state={orderConfig.state} dispatch={orderConfig.dispatch} validation={orderConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} strategies={caps.orderStrategies} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                 )}
                 {executorType === "dca" && (
                   <DCAConfigPanel state={dcaConfig.state} dispatch={dcaConfig.dispatch} validation={dcaConfig.validation} currentPrice={currentPrice} isSpot={isSpot} pair={pair} />
+                )}
+                {executorType === "lp" && (
+                  <LPConfigPanel state={lpConfig.state} dispatch={lpConfig.dispatch} validation={lpConfig.validation} currentPrice={currentPrice} pair={pair} pool={lpConfig.pool} poolFetching={lpConfig.poolFetching} baseAvailable={balances.base} quoteAvailable={balances.quote} />
                 )}
               </div>
 
@@ -596,7 +739,7 @@ export function CreateExecutor() {
                 </button>
               </div>
             </>
-          ) : rightPanel === "depth" ? (
+          ) : activePanel === "depth" ? (
             <MarketDepthPanel server={server} connector={connector} pair={pair} />
           ) : (
             <MarketsPanel

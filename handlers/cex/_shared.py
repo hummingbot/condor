@@ -177,6 +177,7 @@ async def get_trading_rules(
     client,
     connector_name: str,
     ttl: int = 300,  # Trading rules change less frequently, 5 min cache
+    strict: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Get trading rules for a connector with caching.
 
@@ -185,13 +186,22 @@ async def get_trading_rules(
         client: API client
         connector_name: Name of the connector
         ttl: Cache TTL in seconds
+        strict: Propagate the fetch error instead of reporting the connector as
+            having no rules. Callers that gate on the answer need the
+            distinction: an unreachable API is not an empty connector.
 
     Returns:
         Dict of trading_pair -> rules
     """
     cache_key = f"trading_rules_{connector_name}"
     return await cached_call(
-        user_data, cache_key, fetch_trading_rules, ttl, client, connector_name
+        user_data,
+        cache_key,
+        fetch_trading_rules,
+        ttl,
+        client,
+        connector_name,
+        strict=strict,
     )
 
 
@@ -496,19 +506,47 @@ async def validate_trading_pair(
         - error_message: Error message if invalid, None if valid
         - suggestions: List of similar trading pairs if invalid, empty if valid
         - correct_pair: Correctly formatted pair if found, None if not found
+
+    This gate fails closed: when the rules cannot be resolved the pair is
+    reported as invalid, so a backend outage blocks order entry instead of
+    waving an unvalidated pair through to placement.
     """
     # Normalize input
     pair_normalized = trading_pair.upper().replace("_", "-").replace("/", "-")
 
-    # Get trading rules for the connector
-    trading_rules = await get_trading_rules(user_data, client, connector_name, ttl)
+    # Get trading rules for the connector. strict=True so a failed request
+    # raises here instead of arriving as an empty dict indistinguishable from a
+    # connector that genuinely lists nothing.
+    try:
+        trading_rules = await get_trading_rules(
+            user_data, client, connector_name, ttl, strict=True
+        )
+    except Exception as e:
+        logger.warning(
+            f"Could not fetch trading rules for {connector_name}, "
+            f"cannot validate '{trading_pair}': {e}"
+        )
+        return (
+            False,
+            f"Could not reach {connector_name} to validate the pair. "
+            "Try again in a moment.",
+            [],
+            None,
+        )
 
     if not trading_rules:
-        # No rules available, can't validate - allow through
+        # The connector answered, but with nothing to validate against.
         logger.warning(
-            f"No trading rules available for {connector_name}, skipping validation"
+            f"No trading rules available for {connector_name}, cannot validate "
+            f"'{trading_pair}'"
         )
-        return True, None, [], None
+        return (
+            False,
+            f"{connector_name} returned no trading rules, so the pair could "
+            "not be validated. Try again in a moment.",
+            [],
+            None,
+        )
 
     # Get all available pairs
     available_pairs = list(trading_rules.keys())

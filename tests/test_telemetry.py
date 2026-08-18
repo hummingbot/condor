@@ -1,0 +1,514 @@
+"""Telemetry (FEAT-023) — the tests that make the privacy promise checkable.
+
+The interesting assertions here are the negative ones. Most of this file exists
+to prove that things do *not* happen: that a default install emits nothing, that
+forbidden values cannot reach an envelope even when a caller hands them over,
+and that a tap can never take the host down with it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import threading
+import time
+
+import pytest
+
+from condor.telemetry import consent, context, emitter, outbox, schema, taps
+
+
+@pytest.fixture
+def install(tmp_path, monkeypatch):
+    """An isolated install: its own config.yml, its own runtime dir, no env."""
+    import config_manager as cm_module
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", None, raising=False)
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY_URL", None, raising=False)
+    monkeypatch.setattr(
+        "condor.agents.agent._DATA_ROOT", str(tmp_path / "data"), raising=False
+    )
+    cm_module.ConfigManager.reset_instance()
+    emitter.discard_buffer()
+    emitter.set_hosted(True)
+    consent.refresh()
+    yield tmp_path
+    cm_module.ConfigManager.reset_instance()
+    emitter.discard_buffer()
+    consent.refresh()
+
+
+def _grant(level="usage"):
+    from config_manager import get_config_manager
+
+    get_config_manager()  # materialize config.yml in the tmp cwd
+    consent.grant(level)
+
+
+# ── The default is silence ───────────────────────────────────────────────
+
+
+def test_a_fresh_install_is_off_and_stays_off(install):
+    """No consent recorded means no telemetry — not "buffered until asked"."""
+    assert consent.state() == consent.UNKNOWN
+    assert consent.level() == consent.OFF
+
+    for name in schema.EVENTS:
+        emitter.emit(name, surface="telegram")
+
+    assert emitter.buffered() == 0
+    assert emitter.dropped() == 0
+
+
+def test_nothing_is_written_to_disk_when_off(install):
+    """Acceptance criterion: no condor/.runtime/telemetry directory is created."""
+    emitter.set_hosted(False)  # the spooling path, which is the one that does I/O
+    emitter.emit("command", name="portfolio", surface="telegram")
+    assert not outbox.root().exists()
+    assert not (install / "config.yml").exists()
+
+
+def test_env_off_overrides_a_granted_consent(install, monkeypatch):
+    _grant("usage")
+    assert consent.level() == consent.USAGE
+
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "off", raising=False)
+    consent.refresh()
+
+    assert consent.level() == consent.OFF
+    emitter.emit("command", name="bots", surface="telegram")
+    assert emitter.buffered() == 0
+
+
+def test_a_nonsense_env_level_is_ignored_not_obeyed(install, monkeypatch):
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "yes-please", raising=False)
+    consent.refresh()
+    assert consent.level() == consent.OFF
+
+
+def test_ping_level_sends_only_the_adoption_events(install):
+    _grant("ping")
+    emitter.emit("heartbeat", uptime_h=1.0)
+    emitter.emit("command", name="portfolio", surface="telegram")
+    emitter.emit("trade", venue="cex", connector="binance", side="buy")
+
+    names = [e["name"] for e in emitter.drain()[0]]
+    assert names == ["heartbeat"]
+
+
+# ── Nothing transmits ────────────────────────────────────────────────────
+
+
+def test_flush_is_a_no_op_without_consent(install, monkeypatch):
+    """A full session of activity must produce zero outbound requests."""
+    calls = []
+    monkeypatch.setattr(outbox, "post", lambda env: calls.append(env))
+
+    for _ in range(50):
+        emitter.emit("command", name="portfolio", surface="telegram")
+    taps.on_error(RuntimeError("boom"), where="test")
+
+    assert asyncio.run(emitter.flush("test")) == 0
+    assert calls == []
+    assert not outbox.root().exists()
+
+
+def test_no_endpoint_means_events_only_ever_reach_a_local_file(install):
+    """The shipped state: consent granted, but nowhere to send. Nothing leaves."""
+    _grant("usage")
+    emitter.emit("command", name="portfolio", surface="telegram")
+
+    assert outbox.endpoint() is None
+    assert asyncio.run(emitter.flush("test")) == 0
+
+    stashed = outbox.take_stashed()
+    assert [e["name"] for e in stashed] == ["command"]
+
+
+def test_undelivered_events_are_retried_and_never_duplicated(install, monkeypatch):
+    _grant("usage")
+    monkeypatch.setattr(outbox, "endpoint", lambda: "http://collector.invalid")
+
+    attempts = []
+
+    async def failing_post(envelope):
+        attempts.append(envelope)
+        return False
+
+    monkeypatch.setattr(outbox, "post", failing_post)
+    emitter.emit("command", name="bots", surface="telegram")
+    assert asyncio.run(emitter.flush("first")) == 0
+
+    sent = []
+
+    async def ok_post(envelope):
+        sent.append(envelope)
+        return True
+
+    monkeypatch.setattr(outbox, "post", ok_post)
+    assert asyncio.run(emitter.flush("retry")) == 1
+
+    ids = [e["id"] for env in sent for e in env["events"]]
+    assert len(ids) == len(set(ids)) == 1
+
+
+def test_the_outbox_respects_its_cap(install):
+    _grant("usage")
+    now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    events = [
+        {"id": str(i), "ts": now, "name": "command", "props": {}}
+        for i in range(outbox.MAX_OUTBOX_EVENTS + 250)
+    ]
+    outbox.stash(events)
+    assert len(outbox.take_stashed()) == outbox.MAX_OUTBOX_EVENTS
+
+
+def test_denying_consent_destroys_what_was_collected(install):
+    _grant("usage")
+    emitter.emit("command", name="portfolio", surface="telegram")
+    outbox.stash(
+        [
+            {
+                "id": "x",
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "name": "command",
+            }
+        ]
+    )
+    assert outbox.outbox_path().exists()
+
+    consent.deny()
+
+    assert consent.level() == consent.OFF
+    assert emitter.buffered() == 0
+    assert not outbox.outbox_path().exists()
+
+
+# ── The leak test ────────────────────────────────────────────────────────
+
+FORBIDDEN = {
+    "amount": 12345.67,
+    "balance": 98765.43,
+    "pnl": -420.0,
+    "api_key": "sk-live-DEADBEEFCAFE",
+    "secret_key": "topsecret",
+    "wallet": "7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU",
+    "wallet_address": "0xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "trading_pair": "SOL-USDC",
+    "pair": "BTC-USDT",
+    "server_url": "http://10.0.0.4:8000",
+    "server_name": "my-vps",
+    "hostname": "trading-box.local",
+    "user_id": 843214321,
+    "username": "federico",
+    "chat_id": 12345,
+    "prompt": "buy me some sol",
+    "reply": "sure thing",
+    "order_id": "OID-99182",
+    "message": "Insufficient balance: 12.5 SOL",
+    "big": "x" * 10_000,
+}
+
+
+def test_no_forbidden_value_survives_any_declared_event(install):
+    """Feed every event a props dict stuffed with everything we promised never
+    to collect, and assert none of it comes out the other side."""
+    _grant("usage")
+
+    for name in schema.EVENTS:
+        clean = schema.sanitize(name, dict(FORBIDDEN))
+        blob = json.dumps(clean)
+
+        for key, value in FORBIDDEN.items():
+            assert key not in clean, f"{name} let through the key {key!r}"
+            assert str(value) not in blob, f"{name} let through the value of {key!r}"
+
+        for value in clean.values():
+            if isinstance(value, str):
+                assert len(value) <= schema.MAX_STR
+            if isinstance(value, list):
+                assert all(len(v) <= schema.MAX_STR for v in value)
+
+
+def test_an_undeclared_property_is_dropped_not_passed_through(install):
+    clean = schema.sanitize(
+        "trade",
+        {"venue": "cex", "connector": "binance", "amount": 5.0, "pair": "SOL-USDC"},
+    )
+    assert clean == {"venue": "cex", "connector": "binance"}
+
+
+def test_an_unknown_enum_value_is_snapped_to_other(install):
+    clean = schema.sanitize(
+        "command", {"name": "totally_made_up", "surface": "carrier_pigeon"}
+    )
+    assert clean == {"name": "other", "surface": "other"}
+
+
+def test_a_long_free_form_string_is_truncated(install):
+    clean = schema.sanitize("upstream_error", {"service": "llm", "op": "z" * 500})
+    assert len(clean["op"]) == schema.MAX_STR
+
+
+# ── emit() never raises ──────────────────────────────────────────────────
+
+
+class Unserializable:
+    def __repr__(self):  # pragma: no cover - must never be reached in a payload
+        raise RuntimeError("even repr explodes")
+
+
+def test_emit_survives_everything_a_caller_can_do_to_it(install):
+    _grant("usage")
+
+    emitter.emit("no_such_event_name", whatever=1)
+    emitter.emit("command", name=Unserializable(), surface=Unserializable())
+    emitter.emit("command", **{})
+    emitter.emit("error", frames=None, sig=None, where=None)
+
+    # And from a thread that has no event loop at all.
+    failures = []
+
+    def in_thread():
+        try:
+            emitter.emit("command", name="portfolio", surface="telegram")
+        except BaseException as exc:  # pragma: no cover - the assertion is below
+            failures.append(exc)
+
+    thread = threading.Thread(target=in_thread)
+    thread.start()
+    thread.join()
+    assert failures == []
+
+
+def test_a_broken_schema_cannot_break_the_caller(install, monkeypatch):
+    """The blast-radius test: telemetry failing must never propagate."""
+    _grant("usage")
+
+    def explode(*_a, **_kw):
+        raise ValueError("schema is on fire")
+
+    monkeypatch.setattr(schema, "sanitize", explode)
+    emitter.emit("command", name="portfolio", surface="telegram")  # must not raise
+
+    monkeypatch.setattr(consent, "level", explode)
+    emitter.emit("command", name="portfolio", surface="telegram")  # must not raise
+
+    # Undone here, not at teardown: the `install` fixture unwinds after
+    # monkeypatch and would otherwise call the exploding stub itself.
+    monkeypatch.undo()
+
+
+def test_a_broken_tap_cannot_break_a_handler(install, monkeypatch):
+    _grant("usage")
+    monkeypatch.setattr(taps, "emit", lambda *a, **kw: 1 / 0)
+
+    taps.on_error(RuntimeError("x"), where="test")
+    taps.confirmation("manage_bots", "allow")
+    taps.strategy_run({"execution_mode": "loop"}, ticks=3)
+    taps.routine_run(
+        routine="x", kind="oneshot", trigger="manual", duration_ms=1, ok=True
+    )
+    taps.agent_turn(kind="chat")
+    taps.version_change("aaa", "bbb", 2)
+
+
+def test_the_web_tap_lets_route_exceptions_through(install):
+    """Swallowing here would turn a 500 into "no response returned"."""
+    _grant("usage")
+
+    class Req:
+        url = type("U", (), {"path": "/api/v1/bots"})()
+        method = "GET"
+        scope = {}
+
+    async def boom(_request):
+        raise RuntimeError("the route failed")
+
+    with pytest.raises(RuntimeError, match="the route failed"):
+        asyncio.run(taps.web_tap(Req(), boom))
+
+
+# ── The taps report shapes, not content ──────────────────────────────────
+
+
+def test_an_error_reports_its_type_and_a_hash_never_its_message(install):
+    _grant("usage")
+    secret = "Insufficient balance 12.5 SOL on wallet 7xKXtg2CW87d97TXJSD"
+    try:
+        raise ValueError(secret)
+    except ValueError as exc:
+        taps.on_error(exc, where="handlers.trading", surface="telegram")
+
+    event = emitter.drain()[0][0]
+    blob = json.dumps(event)
+    assert event["props"]["exc_type"] == "ValueError"
+    assert secret not in blob
+    assert "12.5" not in blob
+    assert len(event["props"]["sig"]) == 12
+    # Frames are repo-relative, so no home directory and no username.
+    for frame in event["props"].get("frames", []):
+        assert not frame.startswith("/")
+
+
+def test_a_callback_verb_drops_the_identifier_after_it(install):
+    """`admin:approve_12345` must report `approve`, never the id."""
+    assert taps._verb_of("approve_12345") == "approve"
+    assert taps._verb_of("view_MyPrivateBotName") == "view"
+    assert taps._verb_of("set_slippage") == "set_slippage"
+
+
+def test_the_user_hash_is_not_the_telegram_id_and_is_install_scoped(install):
+    _grant("usage")
+    first = taps.user_hash(843214321)
+    assert first and "843214321" not in first
+    assert len(first) == 16
+    assert taps.user_hash(843214321) == first
+
+    # A different install secret yields a different hash for the same person.
+    consent._update(install_secret="a-completely-different-secret")
+    assert taps.user_hash(843214321) != first
+
+
+def test_a_private_routine_is_reported_as_custom(install):
+    assert taps.shipped_routine_name("definitely_not_a_shipped_routine") == "custom"
+
+
+def test_the_install_context_carries_no_identity(install):
+    _grant("usage")
+    blob = json.dumps(context.envelope([], 0, "usage"))
+    import getpass
+    import socket
+
+    for identifying in (socket.gethostname(), getpass.getuser(), str(install)):
+        if identifying:
+            assert identifying not in blob
+
+
+# ── Out of process ───────────────────────────────────────────────────────
+
+
+def test_a_process_without_a_flush_job_spools_to_its_own_file(install):
+    """The MCP server has its own interpreter and no job_queue; an in-memory
+    ring there would be silently lost."""
+    _grant("usage")
+    emitter.set_hosted(False)
+    emitter.emit("mcp_tool", tool="manage_bots", ok=True, duration_ms=12)
+
+    assert emitter.buffered() == 0
+    assert outbox.spool_path().exists()
+
+    emitter.set_hosted(True)
+    drained = outbox.drain_spools()
+    assert [e["name"] for e in drained] == ["mcp_tool"]
+    assert not outbox.spool_path().exists()
+
+
+# ── Cost and limits ──────────────────────────────────────────────────────
+
+
+def test_the_rate_limiter_confesses_instead_of_flooding(install):
+    _grant("usage")
+    for _ in range(emitter.RATE_PER_MIN + 40):
+        emitter.emit("error", where="loop", exc_type="ValueError", sig="abc")
+
+    events, dropped = emitter.drain()
+    assert len(events) == emitter.RATE_PER_MIN
+    assert dropped == 40
+
+
+def test_emit_costs_under_50_microseconds_on_the_hot_path(install):
+    _grant("usage")
+    iterations = 2000
+    started = time.perf_counter()
+    for _ in range(iterations):
+        emitter.emit("command", name="portfolio", surface="telegram")
+    per_call = (time.perf_counter() - started) / iterations
+    assert per_call < 50e-6, f"emit() took {per_call * 1e6:.1f}us"
+
+
+def test_emit_is_free_when_off(install):
+    """The gate a trading path actually pays for."""
+    iterations = 2000
+    started = time.perf_counter()
+    for _ in range(iterations):
+        emitter.emit("command", name="portfolio", surface="telegram")
+    per_call = (time.perf_counter() - started) / iterations
+    assert per_call < 50e-6
+
+
+def test_the_ring_cannot_grow_without_bound(install):
+    _grant("usage")
+    for _ in range(emitter.RING_MAX * 2):
+        emitter._buffer.append({"id": "x", "name": "command", "props": {}})
+    assert emitter.buffered() == emitter.RING_MAX
+
+
+# ── The Telegram seam ────────────────────────────────────────────────────
+
+
+class _FakeUpdate:
+    """Just enough of an Update for the tap, which only ever reads."""
+
+    def __init__(self, text: str = "", callback: str = "", user_id: int = 55):
+        self.effective_user = type("U", (), {"id": user_id})()
+        self.message = type("M", (), {"text": text})() if text else None
+        self.callback_query = type("C", (), {"data": callback})() if callback else None
+
+
+def test_the_telegram_tap_reports_the_command_never_the_message(install):
+    _grant("usage")
+    asyncio.run(taps.telegram_tap(_FakeUpdate(text="/trade SOL-USDC buy 12.5"), None))
+
+    events = [e for e in emitter.drain()[0] if e["name"] == "command"]
+    assert len(events) == 1
+    blob = json.dumps(events[0])
+    assert events[0]["props"]["name"] == "trade"
+    assert "SOL-USDC" not in blob and "12.5" not in blob
+
+
+def test_an_unknown_command_does_not_widen_the_value_space(install):
+    _grant("usage")
+    asyncio.run(taps.telegram_tap(_FakeUpdate(text="/some_private_fork_command"), None))
+    events = [e for e in emitter.drain()[0] if e["name"] == "command"]
+    assert events[0]["props"]["name"] == "other"
+
+
+def test_a_callback_reports_module_and_verb_only(install):
+    _grant("usage")
+    asyncio.run(
+        taps.telegram_tap(_FakeUpdate(callback="admin:approve_843214321"), None)
+    )
+    event = emitter.drain()[0][0]
+    assert event["name"] == "action"
+    assert event["props"] == {
+        "module": "admin",
+        "verb": "approve",
+        "surface": "telegram",
+    }
+    assert "843214321" not in json.dumps(event)
+
+
+def test_the_telegram_tap_emits_nothing_before_consent(install):
+    """The acceptance criterion, at the seam rather than at the emitter."""
+    assert consent.state() == consent.UNKNOWN
+    for update in (
+        _FakeUpdate(text="/portfolio"),
+        _FakeUpdate(text="/keys"),
+        _FakeUpdate(callback="bots:deploy_mybot"),
+    ):
+        asyncio.run(taps.telegram_tap(update, None))
+    assert emitter.buffered() == 0
+    assert not outbox.root().exists()
+
+
+def test_the_telegram_tap_never_raises_into_the_handler(install):
+    _grant("usage")
+
+    class Hostile:
+        @property
+        def effective_user(self):
+            raise RuntimeError("nope")
+
+    asyncio.run(taps.telegram_tap(Hostile(), None))  # must not raise

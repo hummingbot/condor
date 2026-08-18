@@ -26,6 +26,7 @@ from enum import Enum
 from typing import Any, Protocol
 
 from condor.runtime.timeouts import TIMEOUTS
+from condor.telemetry import taps as telemetry_taps
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +45,12 @@ class ConfirmationStatus(str, Enum):
     TIMEOUT = "timeout"
 
 
+def _tool_of(pending: "PendingConfirmation") -> str:
+    """The tool name out of a tool_call payload, for telemetry only."""
+    call = pending.tool_call or {}
+    return str(call.get("name") or call.get("kind") or "unknown")
+
+
 @dataclass
 class PendingConfirmation:
     """One approval request, awaiting a human."""
@@ -52,6 +59,11 @@ class PendingConfirmation:
     session_key: str
     user_id: int
     summary: str
+    # Who is asking, in human terms: the bound agent and the trading server it
+    # would act on. A surface that renders "Approve this action?" without it
+    # cannot say *whose* action, which is exactly the ambiguity a chat with
+    # several agents in it introduces.
+    origin: str = ""
     tool_call: dict = field(default_factory=dict)
     options: list[dict] = field(default_factory=list)
     status: ConfirmationStatus = ConfirmationStatus.PENDING
@@ -75,6 +87,7 @@ class PendingConfirmation:
             "session_key": self.session_key,
             "user_id": self.user_id,
             "summary": self.summary,
+            "origin": self.origin,
             "tool_call": self.tool_call,
             "options": self.options,
             "status": self.status.value,
@@ -107,6 +120,7 @@ class ConfirmationRegistry:
         tool_call: dict,
         options: list[dict],
         timeout_seconds: int = CONFIRMATION_TIMEOUT,
+        origin: str = "",
     ) -> PendingConfirmation:
         """Create a pending entry. Synchronous and I/O-free by design.
 
@@ -118,6 +132,7 @@ class ConfirmationRegistry:
             session_key=session_key,
             user_id=user_id,
             summary=summary,
+            origin=origin,
             tool_call=tool_call,
             options=options,
             timeout_seconds=timeout_seconds,
@@ -176,6 +191,9 @@ class ConfirmationRegistry:
         )
         pending.selected_option_id = option_id
         pending._event.set()
+        # Which tool was asked about and what was decided (FEAT-023). Never the
+        # summary, the arguments or who decided.
+        telemetry_taps.confirmation(_tool_of(pending), "allow" if approved else "deny")
         return True
 
     def get(self, confirmation_id: str) -> PendingConfirmation | None:
@@ -228,6 +246,7 @@ class ConfirmationRegistry:
             ):
                 pending.status = ConfirmationStatus.TIMEOUT
                 pending._event.set()  # wake any waiter immediately
+                telemetry_taps.confirmation(_tool_of(pending), "timeout")
             elif pending.status is not ConfirmationStatus.PENDING:
                 # Give the waiter a grace period to read the outcome first.
                 if now - pending.expires_at > CLEANUP_INTERVAL:
@@ -286,6 +305,32 @@ def _select_allow(options: list[dict]) -> dict:
 CANCELLED: dict[str, Any] = {"outcome": {"outcome": "cancelled"}}
 
 
+def describe_origin(session_key: str) -> str:
+    """Name the identity behind a session: ``"<agent> on <server>"``.
+
+    Read from the live session at ask time rather than captured when the
+    callback was built: the callback outlives agent and server switches, the
+    session record does not, so this is the only place the answer is current.
+    Best-effort — an unknown session simply goes unattributed.
+    """
+    try:
+        from condor.runtime.keys import SessionKey
+        from condor.runtime.sessions import get_session
+
+        session = get_session(SessionKey.parse(session_key))
+    except Exception:  # noqa: BLE001 - attribution must never block an approval
+        log.debug("Could not describe origin of %s", session_key, exc_info=True)
+        return ""
+    if session is None:
+        return ""
+
+    who = session.label or session.agent_slug or session.agent_key
+    where = session.server_name
+    if who and where:
+        return f"{who} on {where}"
+    return who or where or ""
+
+
 def build_permission_callback(
     session_key: str,
     user_id: int,
@@ -322,6 +367,7 @@ def build_permission_callback(
             session_key=session_key,
             user_id=user_id,
             summary=format_tool_summary(tool_call),
+            origin=describe_origin(session_key),
             tool_call=tool_call,
             options=options,
             timeout_seconds=timeout_seconds,

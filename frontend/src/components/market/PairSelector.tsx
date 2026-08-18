@@ -11,15 +11,65 @@ interface PairSelectorProps {
   connector: string;
   value: string;
   onChange: (pair: string) => void;
+  /**
+   * Whether `/market/trading-rules` answers for this connector. False for gateway
+   * DEX networks, which have no pair list at all — the selector becomes free-text
+   * entry backed by a recents list.
+   */
+  hasTradingRules?: boolean;
 }
 
 const MAX_VISIBLE = 50;
+
+/** Recently-entered DEX pairs, per network. */
+const DEX_PAIRS_KEY = "condor_dex_pairs";
+const MAX_DEX_RECENTS = 12;
+
+function loadDexRecents(connector: string): string[] {
+  try {
+    const raw = localStorage.getItem(`${DEX_PAIRS_KEY}:${connector}`);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed.filter((p) => typeof p === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// An EVM 0x-address or a base58 Solana pubkey. A DEX pair may carry a raw mint as
+// its base (`<mint>-SOL`) — base58 is case-sensitive, so such a side must survive
+// normalization untouched. Mirrors ADDRESS_RE in condor/dex_candles.py.
+const ADDRESS_RE = /^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/;
+
+/** `sol-usdc` → `SOL-USDC`, leaving an address side exactly as typed. */
+function normalizeDexPair(input: string): string {
+  const trimmed = input.trim();
+  const dash = trimmed.lastIndexOf("-");
+  if (dash <= 0) return ADDRESS_RE.test(trimmed) ? trimmed : trimmed.toUpperCase();
+  const base = trimmed.slice(0, dash);
+  const quote = trimmed.slice(dash + 1);
+  const up = (side: string) =>
+    ADDRESS_RE.test(side) ? side : side.toUpperCase();
+  return `${up(base)}-${up(quote)}`;
+}
+
+function rememberDexPair(connector: string, pair: string) {
+  try {
+    const next = [pair, ...loadDexRecents(connector).filter((p) => p !== pair)].slice(
+      0,
+      MAX_DEX_RECENTS,
+    );
+    localStorage.setItem(`${DEX_PAIRS_KEY}:${connector}`, JSON.stringify(next));
+  } catch {
+    /* ok */
+  }
+}
 
 export function PairSelector({
   server,
   connector,
   value,
   onChange,
+  hasTradingRules = true,
 }: PairSelectorProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
@@ -31,11 +81,15 @@ export function PairSelector({
   const { data: rulesData, isLoading } = useQuery({
     queryKey: ["trading-rules", server, connector],
     queryFn: () => api.getTradingRules(server, connector),
-    enabled: !!server && !!connector,
+    enabled: !!server && !!connector && hasTradingRules,
     staleTime: 5 * 60 * 1000,
   });
 
-  const { byPair, rankByPair, hasTickers } = useTickers(server, connector);
+  const { byPair, rankByPair, hasTickers } = useTickers(
+    server,
+    connector,
+    hasTradingRules,
+  );
 
   // Tradable pairs come from trading rules; tickers only decide the order and the
   // volume badge, so the selector still works on servers without /market-data/tickers.
@@ -120,6 +174,11 @@ export function PairSelector({
       setOpen(false);
     }
   };
+
+  // A gateway network has no pair list to offer: the user types the pair.
+  if (!hasTradingRules) {
+    return <DexPairEntry connector={connector} value={value} onChange={onChange} />;
+  }
 
   // Fallback to plain text input if no rules available
   if (!isLoading && pairs.length === 0) {
@@ -239,12 +298,144 @@ export function PairSelector({
   );
 }
 
+/**
+ * Pair entry for a gateway DEX network.
+ *
+ * There is no tradable-pair list to browse — Gateway resolves whatever the user
+ * names — so this is free-text `BASE-QUOTE` entry, the same grammar the Telegram
+ * DEX flow uses, with the pairs already tried on this network kept as shortcuts.
+ * A raw mint address is a valid base (`<mint>-SOL`); `_resolve_pool` expects
+ * exactly that shape and `PairLabel` renders it back as a ticker.
+ */
+function DexPairEntry({
+  connector,
+  value,
+  onChange,
+}: {
+  connector: string;
+  value: string;
+  onChange: (pair: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const containerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [recents, setRecents] = useState<string[]>(() => loadDexRecents(connector));
+
+  useEffect(() => {
+    setRecents(loadDexRecents(connector));
+  }, [connector]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [open]);
+
+  useEffect(() => {
+    if (open) {
+      setDraft(value);
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+  }, [open, value]);
+
+  const commit = (raw: string) => {
+    const pair = normalizeDexPair(raw);
+    if (!pair) return;
+    rememberDexPair(connector, pair);
+    setRecents(loadDexRecents(connector));
+    onChange(pair);
+    setOpen(false);
+  };
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        onClick={() => setOpen(!open)}
+        className="group flex items-center gap-1 px-4 py-2.5 transition-colors hover:bg-[var(--color-surface-hover)] focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-[var(--color-primary)]"
+      >
+        {value ? (
+          <span className="max-w-[13rem] truncate text-[15px] font-semibold text-[var(--color-text)]" title={value}>
+            {value}
+          </span>
+        ) : (
+          <span className="text-sm text-[var(--color-text-muted)]">Enter pair</span>
+        )}
+        <ChevronDown className="ml-1 h-3.5 w-3.5 text-[var(--color-text-muted)] transition-transform group-hover:text-[var(--color-text)]" />
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full z-50 mt-1 w-80 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-xl shadow-black/40">
+          <div className="flex items-center gap-2 border-b border-[var(--color-border)] px-3 py-2">
+            <input
+              ref={inputRef}
+              type="text"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  commit(draft);
+                } else if (e.key === "Escape") {
+                  setOpen(false);
+                }
+              }}
+              placeholder="SOL-USDC or <mint>-SOL"
+              spellCheck={false}
+              autoComplete="off"
+              className="flex-1 bg-transparent text-sm text-[var(--color-text)] placeholder:text-[var(--color-text-muted)] focus:outline-none"
+            />
+            <button
+              onClick={() => commit(draft)}
+              disabled={!draft.trim()}
+              className="shrink-0 rounded border border-[var(--color-border)] px-2 py-0.5 text-[10px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:opacity-40"
+            >
+              Set
+            </button>
+          </div>
+
+          {recents.length > 0 && (
+            <div className="max-h-64 overflow-y-auto py-1">
+              <p className="px-3 pb-0.5 pt-1 text-[9px] font-semibold uppercase tracking-wider text-[var(--color-text-muted)]">
+                Recent
+              </p>
+              {recents.map((p) => (
+                <button
+                  key={p}
+                  onClick={() => commit(p)}
+                  className={`flex w-full items-center px-3 py-1.5 text-left text-sm ${
+                    p === value
+                      ? "text-[var(--color-primary)]"
+                      : "text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+                  }`}
+                >
+                  <span className="truncate" title={p}>{p}</span>
+                </button>
+              ))}
+            </div>
+          )}
+
+          <p className="border-t border-[var(--color-border)] px-3 py-1.5 text-[10px] text-[var(--color-text-muted)]">
+            Gateway resolves the pool from the pair — a token mint works as the base.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // Export the rules map hook for TradingRulesInfo
-export function useTradingRules(server: string, connector: string) {
+export function useTradingRules(server: string, connector: string, enabled = true) {
   const { data } = useQuery({
     queryKey: ["trading-rules", server, connector],
     queryFn: () => api.getTradingRules(server, connector),
-    enabled: !!server && !!connector,
+    enabled: !!server && !!connector && enabled,
     staleTime: 5 * 60 * 1000,
   });
   return data;

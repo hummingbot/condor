@@ -6,10 +6,14 @@ All business logic lives in mcp_servers.condor.tools.*
 
 from mcp.server.fastmcp import FastMCP
 
+from condor.telemetry import taps as telemetry_taps
 from mcp_servers.condor.middleware import handle_errors
 from mcp_servers.condor.tools import available_models as available_models_tool
+from mcp_servers.condor.tools import code as code_tool
 from mcp_servers.condor.tools import consult as consult_tool
-from mcp_servers.condor.tools import context
+from mcp_servers.condor.tools import (
+    context,
+)
 from mcp_servers.condor.tools import delegate as delegate_tool
 from mcp_servers.condor.tools import (
     memory,
@@ -21,6 +25,22 @@ from mcp_servers.condor.tools import (
     trading_agent,
 )
 
+# FEAT-047: the branch above the routines one in cost — a one-off computation is
+# a snippet, not a file. Identical for every seat (chat, worker, agent), so it is
+# defined once and spliced into all three routing texts.
+_RUN_CODE_RULE = (
+    "- FOR A ONE-OFF COMPUTATION OVER DATA — candles → returns → filter, a "
+    "spread across venues, a quick aggregation — write it as Python and call "
+    '`run_code(code="...")` instead of chaining raw tools and doing the '
+    "arithmetic by hand. It runs in the bot with the same primitives a routine "
+    "has (`context`, `client`, pandas, `ReportBuilder`, every `condor.*` "
+    "module); `print()` is the output and an optional `result` variable is the "
+    "return value. On failure it returns the traceback — fix the snippet and "
+    "re-run. Keep snippets short and `await` inside loops. If you have run "
+    "essentially the same snippet three times, or you want it scheduled or "
+    "shared, promote it to a routine with "
+    '`manage_routines(action="create_routine")`.\n'
+)
 
 _CHAT_ROUTINES_RULE = (
     "- ROUTINES ARE SPECIAL: any request to CREATE, EDIT, FIX, DEBUG, or "
@@ -98,6 +118,7 @@ def _coordinator_base(routines_rule: str) -> str:
         'the user when finished), use `delegate(action="start", agent="<slug>", '
         'task="...")` instead and poll with `delegate(action="get", task_id="...")`.\n'
         f"{routines_rule}"
+        f"{_RUN_CODE_RULE}"
         "- Only fall back to raw tools when nothing matches.\n"
         "Anti-pattern: answering a domain request (deploy/tune an executor, analyze "
         "logs, author a routine) with a chain of raw `mcp-hummingbot`/`manage_*` "
@@ -106,12 +127,24 @@ def _coordinator_base(routines_rule: str) -> str:
     )
 
 
-def _agent_base(slug: str, name: str) -> str:
+def _agent_base(slug: str, name: str, worker: bool = False) -> str:
     """Routing rules for a subprocess launched AS an Agent (``--agent-slug``).
 
     Same three-tier priority, read from the specialist's seat: its skills are
     its own playbooks (plus the ones Condor publishes), routine authoring is its
-    own work, and consulting is for work outside its domain — never for itself.
+    own work, and consulting a PEER is for work outside its domain.
+
+    An agent may also start a fresh BACKGROUND session of *itself* (FEAT-041).
+    That is not handing the work to someone else — the copy carries the same
+    identity, playbooks and memory — so it is the one form of delegation that
+    stays inside the agent's own domain, and the right move for a long
+    mechanical job (a sweep, a wide scan) that would otherwise fill the
+    interactive conversation.
+
+    ``worker`` marks that background seat. It reads the same identity and the
+    same playbooks; what changes is that it has no user to ask and must not
+    spawn a copy of itself in turn. The no-recursion line is a courtesy — the
+    actual stop is in ``tools/delegate.py``, because a prompt is not a guard.
     """
     from condor.agents.agent import identity_header
 
@@ -129,7 +162,33 @@ def _agent_base(slug: str, name: str) -> str:
         'then TEST it with `manage_routines(action="run", name="...")` and fix '
         "until the output is clean before reporting.\n"
     )
+    # FEAT-041: the same agent, in a second seat. Named explicitly with the
+    # agent's own slug because it is NOT in the [PEER AGENTS] index — an agent is
+    # not its own peer, and without this line the roster reads as "everyone but
+    # you", which is exactly how it used to refuse.
+    self_delegation_rule = (
+        "- SPAWN A BACKGROUND COPY OF YOURSELF for long work that is YOURS: "
+        f'`delegate(action="start", agent="{slug}", task="...")` starts a fresh '
+        "session of you — same identity, same playbooks, same memory — that runs "
+        "unattended until done and pings the user. Reach for it when the work is "
+        "long or mechanical (a parameter sweep, a wide scan, a batch of runs) and "
+        "would otherwise fill this conversation. This is NOT handing the work to "
+        "another agent and it is NOT outside your domain: it is you, working in "
+        'the background. Add `on_complete="resume"` to be handed the result in a '
+        "new turn here — then end your turn and continue when it arrives.\n"
+    )
+    worker_framing = (
+        f"You are a BACKGROUND WORKER instance of {name}: a detached session that "
+        "`delegate` started to carry ONE task to completion, unattended. There is "
+        "no user in the loop to ask — make the reasonable call, do the work "
+        "yourself, and report what you actually did and verified.\n"
+        "You must NEVER spawn another copy of yourself: "
+        f'`delegate(action="start", agent="{slug}", ...)` is refused for you in '
+        "code. Finish the task in this session (polling with "
+        '`delegate(action="get"/"list")` is fine).\n\n'
+    )
     return (
+        f"{worker_framing if worker else ''}"
         f"{identity_header(slug, name)}\n\n"
         "ROUTING RULE — you are the specialist, so domain work is yours to do. "
         "Before reaching for raw tools (including tools from other connected MCP "
@@ -140,6 +199,8 @@ def _agent_base(slug: str, name: str) -> str:
         '`manage_routines(action="run", name="X", config={})` instead of '
         "reimplementing it by hand.\n"
         f"{routines_rule}"
+        f"{_RUN_CODE_RULE}"
+        f"{'' if worker else self_delegation_rule}"
         "- You MAY consult a PEER agent listed below for work outside your own "
         'domain (`consult(agent="<slug>", task="...", context="...")`, or '
         '`delegate(action="start", agent="<slug>", task="...")` for a long '
@@ -177,6 +238,11 @@ def _build_instructions() -> str:
     marks the detached Condor that ``delegate`` starts to author a routine. It
     reads ``_worker_base`` — the coordinator text with authoring made its own job
     and delegation closed off.
+
+    A specialist has that background seat too (FEAT-041), since an agent can now
+    start a delegation of *itself*. It reads its own ``_agent_base`` in both
+    seats — ``worker=True`` swaps the "spawn a copy of yourself" invitation for
+    the unattended framing — never ``_worker_base``, which is Condor's.
     """
     from mcp_servers.condor.settings import settings
 
@@ -191,10 +257,11 @@ def _build_instructions() -> str:
             pass  # Unknown/unreadable slug degrades to the coordinator text.
 
     if agent:
-        base = _agent_base(slug, agent.name)
+        # A specialist reads its OWN framing in both seats — never Condor's
+        # `_worker_base`, which would tell it it is Condor. The flag only picks
+        # which half of `_agent_base` it gets (FEAT-041).
+        base = _agent_base(slug, agent.name, worker=settings.delegate_worker)
     elif settings.delegate_worker:
-        # Same record as the chat, different seat (FEAT-032): a specialist already
-        # reads `_agent_base`, so the flag only ever re-frames Condor itself.
         base = _worker_base()
     else:
         base = _chat_base()
@@ -238,6 +305,7 @@ mcp = FastMCP("condor", instructions=_build_instructions())
 
 @mcp.tool()
 @handle_errors("consult agent")
+@telemetry_taps.tracked("consult")
 async def consult(agent: str, task: str, context: str = "") -> dict:
     """Consult a specialized domain agent and get its answer.
 
@@ -259,11 +327,13 @@ async def consult(agent: str, task: str, context: str = "") -> dict:
 
 @mcp.tool()
 @handle_errors("delegate task")
+@telemetry_taps.tracked("delegate")
 async def delegate(
     action: str,
     agent: str = "",
     task: str = "",
     task_id: str = "",
+    on_complete: str = "notify",
 ) -> dict:
     """Delegate a one-off task to a background agent instance.
 
@@ -287,20 +357,34 @@ async def delegate(
     - "get": Get a delegation's status + result/error (requires task_id).
     - "stop": Cancel a running delegation (requires task_id).
 
+    An agent may pass its OWN slug to start a background copy of itself (FEAT-041)
+    — same identity, playbooks and memory, running unattended on a long job while
+    the interactive session stays responsive. That copy cannot spawn a further copy
+    of itself; the recursion stops at depth one.
+
     Args:
         action: start | list | get | stop.
-        agent: Agent slug to delegate to (for start).
+        agent: Agent slug to delegate to (for start). Your own slug is allowed and
+            means "a background session of me".
         task: The one-off task, in plain language (for start).
         task_id: Delegation id returned by start (for get/stop).
+        on_complete: What this conversation gets when the task ends (for start).
+            "notify" (default) pings the user with the result and nothing else —
+            the result is FOR THE HUMAN. "resume" additionally hands the result
+            back to you in a new turn of THIS conversation, so use it when you
+            intend to do something with the result yourself ("research X, then
+            draft the summary"). With "resume" you must end your turn after
+            starting the task: you will be woken with the answer.
 
     Returns:
         Action-specific result dict.
     """
-    return await delegate_tool.delegate(action, agent, task, task_id)
+    return await delegate_tool.delegate(action, agent, task, task_id, on_complete)
 
 
 @mcp.tool()
 @handle_errors("send notification")
+@telemetry_taps.tracked("send_notification")
 async def send_notification(
     text: str,
     parse_mode: str = "Markdown",
@@ -319,48 +403,147 @@ async def send_notification(
 
 @mcp.tool()
 @handle_errors("manage routines")
+@telemetry_taps.tracked("manage_routines")
 async def manage_routines(
     action: str,
     name: str | None = None,
     config: dict | None = None,
-    strategy_id: str | None = None,
+    agent: str | None = None,
     code: str | None = None,
+    strategy_id: str | None = None,
+    shared: bool | None = None,
 ) -> dict:
     """Manage and run Condor routines (auto-discoverable Python scripts).
 
     Actions -- Discovery & Execution:
     - "list": List all available routines with name, description, type, and scope
     - "describe": Show config schema for a routine (requires name)
-    - "run": Execute a one-shot routine and return its result (requires name, optional config)
+    - "run": Execute a one-shot routine and WAIT for its result (requires name, optional config).
+      Blocks for up to 120s, so use it only for routines that finish fast.
+    - "run_async": Submit a one-shot routine and return its instance_id immediately,
+      without waiting (requires name, optional config). Use this for slow work — a
+      backtest, a wide scan — then read the result later with "get_instance" instead
+      of holding up the conversation.
+    - "get_instance": Read a run back by id (requires name=instance_id). Returns
+      status="running" while it is still going, or the finished result and report_id.
     - "start": Start a continuous routine as a background task (requires name, optional config)
     - "stop": Stop a running routine instance (requires name=instance_id)
     - "list_instances": List all running/scheduled routine instances
 
-    Actions -- Agent-Local Routine CRUD (requires strategy_id or CONDOR_AGENT_SLUG):
+    Actions -- Agent-Local Routine CRUD (requires agent or CONDOR_AGENT_SLUG):
     - "create_routine": Create a new agent-local routine (requires name, code)
     - "read_routine": Read source code of a routine (requires name)
     - "edit_routine": Update an agent-local routine (requires name, code)
     - "delete_routine": Delete an agent-local routine (requires name)
 
-    Agent-local routines live in agents/{slug}/routines/ and are only
-    visible to that strategy's agent. They follow the same pattern as global
+    Agent-local routines live in agents/{slug}/routines/ and are visible only to
+    that AGENT — they are shared across all of its strategies, there is no
+    per-strategy routine library. They follow the same pattern as global
     routines: a Config(BaseModel) class and an async run(config, context) function.
+
+    Beside those per-agent libraries there is ONE shared library
+    (agents/_shared/routines) that every assistant also reads, mirroring
+    manage_skill's `shared`. A routine there is listed with scope="shared" and
+    runs under its bare name from any seat. Publication is the library it lives
+    in, not a flag in the file: `shared=True` on "create_routine" writes there.
+    Only Condor may publish — for an agent the flag is ignored and the routine
+    lands in its own dir. Shared routines are read-only to agents: to specialize
+    one, "create_routine" a local routine with the SAME name and it shadows the
+    published one. Publish deliberately — a shared routine lands in every
+    agent's context, and it must work with no chat (no chat_id).
 
     Args:
         action: The action to perform.
-        name: Routine name (required for all except list/list_instances). For "stop", pass the instance_id as name.
+        name: Routine name (required for all except list/list_instances). For "stop"
+            and "get_instance", pass the instance_id as name.
         config: Config overrides for run/start (optional, merged with defaults).
-        strategy_id: Strategy ID for agent-local routine CRUD operations.
+        agent: Slug of the agent whose routine library to target (agent-local
+            CRUD, and "list"/"run" against another agent's routines). Omit to use
+            the current assistant's own library.
         code: Python source code for create_routine / edit_routine.
+        strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
+            composite "agent_slug.strategy_slug" key resolves to its owning
+            agent; prefer passing that agent's slug as `agent`.
+        shared: Target the shared library every assistant reads (routine CRUD).
+            Condor only, and only without `agent` — for an agent it is ignored
+            and the write stays in its own dir.
 
     Returns:
         Action-specific result dict.
     """
-    return await routines.manage_routines(action, name, config, strategy_id, code)
+    return await routines.manage_routines(
+        action, name, config, agent, code, strategy_id, shared
+    )
+
+
+@mcp.tool()
+@handle_errors("run code")
+@telemetry_taps.tracked("run_code")
+async def run_code(
+    code: str | None = None,
+    action: str = "run",
+    label: str = "",
+    timeout: int | None = None,
+    run_id: str | None = None,
+    agent: str | None = None,
+    limit: int = 20,
+) -> dict:
+    """Run a Python snippet inside Condor and get its output back.
+
+    The scratchpad below a routine: for a ONE-OFF computation over data — fetch
+    candles, build a DataFrame, compute returns, filter the series — write the
+    Python instead of chaining raw tools and doing the arithmetic by hand. There
+    is no file to author and no config schema to declare.
+
+    The snippet is a plain script body running in the bot process with the same
+    primitives a routine has:
+    - top-level `await` works, with no wrapper function
+    - `print(...)` is the output (use `print`, not `logging` — logging is not
+      captured); an optional `result` variable is the return value
+    - `context` is the routine context (active server, bot, chat), `client` is
+      the Hummingbot API client for that server (None if none resolves)
+    - every `condor.*` module is importable, including
+      `from condor.reports import ReportBuilder` — a snippet that saves one
+      produces a real dashboard report and its id comes back as `report_id`
+
+    On failure you get `status="error"` and a traceback whose line numbers are
+    YOUR snippet's: read it, fix the code, run it again. Keep snippets short and
+    `await` inside loops — a snippet that never yields blocks the bot until the
+    timeout cuts it.
+
+    Run essentially the same snippet a third time, or want it scheduled, shared
+    or visible to the user? Promote it to a routine with
+    `manage_routines(action="create_routine")`. That is the durable artifact;
+    this is the scratchpad.
+
+    Actions:
+    - "run" (default): execute `code` and wait for it (requires code)
+    - "history": list recent runs, newest first, with label and status
+    - "get": read one past run back in full — code, stdout, result, traceback
+      (requires run_id)
+
+    Args:
+        action: run | history | get.
+        code: The Python snippet to execute (for "run").
+        label: Short purpose of the run ("returns of SOL 1h"), shown in history
+            and used as the report source name.
+        timeout: Seconds to allow the snippet (for "run"). Default 60, max 120.
+        run_id: Id of a past run (for "get").
+        agent: Whose runs to list (for "history"). Defaults to your own; pass
+            "all" for every assistant's.
+        limit: How many runs to list (for "history"). Default 20.
+
+    Returns:
+        For "run": {run_id, status: ok|error|timeout, stdout, result, error,
+        traceback, report_id, duration_ms}. Long stdout/result are clipped with
+        "truncated": true — read the whole run with action="get".
+    """
+    return await code_tool.run_code(code, action, label, timeout, run_id, agent, limit)
 
 
 @mcp.tool()
 @handle_errors("manage servers")
+@telemetry_taps.tracked("manage_servers")
 async def manage_servers(
     action: str,
     name: str | None = None,
@@ -383,6 +566,7 @@ async def manage_servers(
 
 @mcp.tool()
 @handle_errors("get user context")
+@telemetry_taps.tracked("get_user_context")
 async def get_user_context() -> dict:
     """Get the current user's context within Condor.
 
@@ -397,6 +581,7 @@ async def get_user_context() -> dict:
 
 @mcp.tool()
 @handle_errors("get available models")
+@telemetry_taps.tracked("get_available_models")
 async def get_available_models(
     openrouter_query: str = "", openrouter_limit: int = 20
 ) -> dict:
@@ -414,12 +599,16 @@ async def get_available_models(
 
     Returns a dict with:
       - acp_clis: subscription/CLI bridges (claude-code, gemini, copilot, …),
-        each with ``agent_key`` and ``available`` — the CLI is installed and
-        launchable. ``available`` does NOT mean signed in: every bridge needs its
-        own interactive login (Claude/Google/GitHub/OpenAI) that cannot be probed
-        from here. Treat a bridge as a candidate to CONFIRM with the user, and
-        prefer a credential you can verify (a set ``cloud_keys`` provider, or a
-        loaded local model) when recommending unprompted.
+        each with ``agent_key``, ``available`` — the CLI is installed and
+        launchable — and ``logged_in``: true a credential for its interactive
+        login (Claude/Google/GitHub/OpenAI) was found on this machine, false none
+        was found where that CLI keeps one, null no marker exists to read
+        (Copilot) or the bridge isn't installed. ``available`` alone does NOT
+        mean signed in, and ``logged_in`` is a heuristic (a credential file can
+        still hold an expired token), so treat a bridge with ``logged_in`` false
+        or null as a candidate to CONFIRM with the user, and prefer a credential
+        you can verify (a set ``cloud_keys`` provider, or a loaded local model)
+        when recommending unprompted.
       - cloud_keys: {provider: bool} — whether OPENROUTER/OPENAI/ANTHROPIC/GROQ/
         GOOGLE keys are set in the environment.
       - custom_endpoints: the user's own saved OpenAI-compatible endpoints, each
@@ -449,6 +638,7 @@ async def get_available_models(
 
 @mcp.tool()
 @handle_errors("manage trading agent")
+@telemetry_taps.tracked("manage_trading_agent")
 async def manage_trading_agent(
     action: str,
     agent_id: str | None = None,
@@ -534,11 +724,13 @@ async def manage_trading_agent(
         skills: List of optional skill names to enable (for create/update_strategy).
         config: Agent config overrides (for create/update_strategy/start) or routine config (for run_routine).
             For start_agent, supports: agent_key (override strategy default), model_base_url (for LM Studio/vLLM),
-            execution_mode, frequency_sec, total_amount_quote, trading_context, risk_limits, server_name, max_ticks.
+            execution_mode, frequency_sec, tick_timeout_sec (wall-clock budget for one tick's
+            agent session; 0 = runtime default of 600s), total_amount_quote, trading_context,
+            risk_limits, server_name, max_ticks.
         tools: Tool-name allowlist for the agent (create/update_agent). Empty/None = unrestricted.
         when_to_consult: One-line hint describing when to route work to this agent (create/update_agent). Purely for routing — every agent is consultable with or without it; it falls back to the description.
         server_required: Whether the agent needs a Hummingbot server (create/update_agent). Default True.
-        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server. Empty/None = follow the ambient chat server.
+        server_name: Pin the agent to a specific hummingbot-api server (create/update_agent). LEAVE EMPTY unless the user explicitly asks to pin this agent to one server — empty means follow the ambient chat server, which is what travels to other installs. When set, the agent's mcp-hummingbot subprocess and any strategy it deploys use THIS server regardless of the chat's active server, and on a machine without that server the agent is broken. Do not fill it in with whatever server the chat happens to be on.
 
     Returns:
         Action-specific result dict.
@@ -563,6 +755,7 @@ async def manage_trading_agent(
 
 @mcp.tool()
 @handle_errors("manage memory")
+@telemetry_taps.tracked("manage_memory")
 async def manage_memory(
     action: str,
     name: str | None = None,
@@ -572,11 +765,14 @@ async def manage_memory(
     query: str | None = None,
     max_entries: int = 30,
 ) -> dict:
-    """Manage your persistent memory ABOUT THE USER (shared across sessions and agents).
+    """Manage your persistent memory ABOUT THE USER (yours alone, across sessions).
 
-    This is what you remember about the user: their preferences, stable facts,
-    feedback they gave you, and reference pointers. It is keyed by the user (not
-    the chat), so the /agent chat and the user's trading agents all share it.
+    This is what YOU remember about the user: their preferences, stable facts,
+    feedback they gave you, and reference pointers. It persists across sessions
+    and is keyed by (assistant, user) — so each agent has its OWN store: what the
+    chat writes is invisible to the trading agents and vice versa. Write what
+    matters for your own work; do not assume another agent will see it. (Skills,
+    by contrast, CAN be published across agents — see manage_skill's `shared`.)
     The index of your memories is auto-injected into your context as
     [USER MEMORY]; use "read" to pull the full body of a specific memory.
 
@@ -613,6 +809,7 @@ async def manage_memory(
 
 @mcp.tool()
 @handle_errors("manage skill")
+@telemetry_taps.tracked("manage_skill")
 async def manage_skill(
     action: str,
     name: str | None = None,
@@ -622,6 +819,7 @@ async def manage_skill(
     references_routine: str | None = None,
     query: str | None = None,
     max_entries: int = 30,
+    agent: str | None = None,
     strategy_id: str | None = None,
     file: str | None = None,
     content: str | None = None,
@@ -651,16 +849,20 @@ async def manage_skill(
     slug and stays inside the skill folder. ("write_file" only touches companion
     files — edit the playbook body itself with "edit".)
 
-    Skills are scoped per-assistant: a launched agent WRITES only to its own
-    library. From the chat you can target a specific agent's local skill library
-    with strategy_id (an "agent_slug.strategy_slug" key, or a bare agent slug) —
-    use this to author or inspect an agent's skills while building it. Without
-    strategy_id the current assistant's library is used.
+    Skills are scoped PER-AGENT (one library per agent, shared by everyone using
+    it; there is no per-strategy library). A launched agent WRITES only to its
+    own. From the chat, pass `agent="<slug>"` to author or inspect a specific
+    agent's library — DO THIS whenever the playbook belongs to a domain agent
+    rather than to the chat, otherwise the skill silently lands in Condor's own
+    library and only the chat sees it. Without `agent`, the current assistant's
+    library is used.
 
-    An agent also READS the playbooks Condor publishes: a chat skill created with
-    shared=True appears in every agent's index as if it were its own (marked
-    `inherited` on read) — that is how a playbook like `routine_cookbook` reaches
-    every agent. Inherited skills are read-only: to specialize one, "create" a
+    Beside those per-agent libraries there is ONE shared library that every
+    assistant also reads, so a playbook like `routine_cookbook` reaches everyone.
+    Publication is the library a skill lives in, not a flag: `shared=True` MOVES
+    it there (companion files included) and `shared=False` moves it back. Only
+    Condor may publish — for an agent the flag is ignored. Shared skills are
+    read-only to agents (read reports `inherited`): to specialize one, "create" a
     local skill with the SAME name and it shadows the published one. Publish
     deliberately — a shared skill lands in every agent's context.
 
@@ -683,13 +885,16 @@ async def manage_skill(
         references_routine: Optional routine name to link; "" clears it (create/edit).
         query: Search string (for search).
         max_entries: Cap for search results (default 30).
-        strategy_id: Target a specific agent's local skill library (chat-side
-            authoring). Composite "agent_slug.strategy_slug" key or bare agent slug.
+        agent: Slug of the agent whose skill library to target (chat-side
+            authoring). Omit to use the current assistant's own library.
+        strategy_id: DEPRECATED alias of `agent`, kept for older callers. A
+            composite "agent_slug.strategy_slug" key resolves to its owning
+            agent; prefer passing that agent's slug as `agent`.
         file: Bare name of a bundled companion file (for read_file/write_file).
         content: Full contents to write to the companion file (for write_file).
-        shared: Publish this playbook to every agent (create/edit). Only honored
-            in Condor's own library — ignored when targeting an agent's. Omit to
-            leave publication unchanged.
+        shared: Publish this playbook to every assistant by moving it into the
+            shared library (create/edit); False moves it back. Condor only —
+            ignored for an agent. Omit to leave publication unchanged.
 
     Returns:
         Action-specific result dict.
@@ -703,6 +908,7 @@ async def manage_skill(
         references_routine=references_routine,
         query=query,
         max_entries=max_entries,
+        agent=agent,
         strategy_id=strategy_id,
         file=file,
         content=content,
@@ -712,6 +918,7 @@ async def manage_skill(
 
 @mcp.tool()
 @handle_errors("manage notes")
+@telemetry_taps.tracked("manage_notes")
 async def manage_notes(
     action: str,
     key: str | None = None,
@@ -749,6 +956,7 @@ async def manage_notes(
 
 @mcp.tool()
 @handle_errors("journal read")
+@telemetry_taps.tracked("trading_agent_journal_read")
 async def trading_agent_journal_read(
     agent_id: str,
     section: str = "recent",
@@ -776,6 +984,7 @@ async def trading_agent_journal_read(
 
 @mcp.tool()
 @handle_errors("journal write")
+@telemetry_taps.tracked("trading_agent_journal_write")
 async def trading_agent_journal_write(
     agent_id: str,
     entry_type: str,
@@ -784,26 +993,35 @@ async def trading_agent_journal_write(
     risk_note: str = "",
     tick: int = 0,
     category: str = "",
+    section: str = "",
 ) -> dict:
     """Write to the trading agent's journal. Keep entries SHORT (one line).
 
     Args:
         agent_id: The trading agent instance ID.
-        entry_type: "action", "learning", or "state".
+        entry_type: "action", "learning", "state", or "canvas".
             - "action": What you did this tick (auto-trimmed to last 10).
             - "learning": A new insight. Duplicates are auto-filtered. Only write
               if this is genuinely new and not already in learnings (max 20).
             - "state": Overwrite the current state snapshot (e.g. price, position, grids).
-        text: The entry content. Keep it to ONE short line.
+            - "canvas": Revise ONE section of your session canvas — the running
+              narrative shown to the user in the session report. Requires
+              `section`. Only revise a section when it is now wrong; a quiet
+              tick needs no canvas call.
+        text: The entry content. Keep it to ONE short line (a canvas section may
+            be a short paragraph, truncated past ~1200 chars).
         reasoning: One-sentence reasoning (for actions only).
         risk_note: Optional risk note (for actions only).
-        tick: Current tick number (for actions only).
+        tick: Current tick number (for actions and canvas revisions).
         category: Learning category: "market" (observations, patterns, volatility)
             or "execution" (errors, fills, timing). Only used when entry_type="learning".
             Defaults to "market".
+        section: Which canvas section to replace — "thesis", "working",
+            "changed", or "questions". Only used when entry_type="canvas".
 
     Returns:
-        {"written": true}
+        {"written": true} — or {"skipped": "..."} in dry-run / run-once mode,
+        which keep no journal.
     """
     return trading_agent.journal_write(
         agent_id,
@@ -813,8 +1031,20 @@ async def trading_agent_journal_write(
         risk_note,
         tick,
         category,
+        section,
     )
 
 
 if __name__ == "__main__":
+    # This server runs in its own process, spawned by the agent: a different
+    # interpreter, a different heap, and no job_queue. hosted=False makes emit()
+    # append to `spool.<pid>.jsonl`, which the host process drains and deletes.
+    # Still a no-op unless the install opted in.
+    try:
+        from condor import telemetry
+
+        telemetry.init(hosted=False)
+    except Exception:  # noqa: BLE001 - never block the server on telemetry
+        pass
+
     mcp.run()

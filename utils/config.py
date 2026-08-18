@@ -43,3 +43,18 @@ _bind_port_raw = os.environ.get("BIND_PORT", "").strip()
 
 BIND_HOST = str(_bind_host_raw) if _bind_host_raw else "0.0.0.0"
 BIND_PORT = int(_bind_port_raw) if _bind_port_raw else WEB_PORT
+
+# ── Telemetry (FEAT-023) ──
+# Opt-in and OFF by default. Nothing is collected, buffered or sent unless the
+# install's admin has explicitly consented, or an operator sets CONDOR_TELEMETRY
+# here. An unset value is *not* "on": it means "no override", and the stored
+# consent decides — whose default is `unknown`, which emits nothing.
+#   off   - nothing, ever. emit() returns immediately.
+#   ping  - install / heartbeat / version_change / shutdown only.
+#   usage - the full allowlisted taxonomy in condor/telemetry/schema.py.
+CONDOR_TELEMETRY = os.environ.get("CONDOR_TELEMETRY", "").strip().lower() or None
+
+# Where a batch would be POSTed. Deliberately unset by default and NOT baked
+# into the source: with no URL the send path is inert, and events can only ever
+# accumulate in the local capped outbox. See PRIVACY.md.
+CONDOR_TELEMETRY_URL = os.environ.get("CONDOR_TELEMETRY_URL", "").strip() or None

@@ -1,10 +1,11 @@
-import { useMemo, useReducer } from "react";
+import { useEffect, useMemo, useReducer } from "react";
 import { Sparkles } from "lucide-react";
 
 import {
   AmountField,
   LeverageField,
   NumberField,
+  PercentPresets,
   PriceField,
   SectionHeader,
   SelectField,
@@ -12,7 +13,7 @@ import {
   ValidationMessages,
   type FieldDispatch,
 } from "./fields";
-import type { ChartPriceMapping, ExecutorValidation } from "./types";
+import type { ChartPriceMapping, ExecutorValidation, PickSlot } from "./types";
 
 // ── State ──
 
@@ -146,7 +147,7 @@ export function useOrderConfig() {
 
   const save = () => saveDefaults(state);
 
-  const handleChartPriceSet = (field: "start" | "end" | "limit", price: number) => {
+  const handleChartPriceSet = (field: PickSlot, price: number) => {
     if (field === "start") {
       dispatch({ type: "SET_FIELD", field: "price", value: price });
     }
@@ -179,12 +180,74 @@ interface Props {
   currentPrice: number | null;
   isSpot?: boolean;
   pair?: string;
+  /**
+   * Execution strategies this venue allows. A gateway swap has no resting order
+   * book, so a DEX passes `["MARKET"]`. Defaults to all of them.
+   */
+  strategies?: string[];
+  /** Wallet balance behind the percentage presets; `null` when it is unknown. */
+  baseAvailable?: number | null;
+  quoteAvailable?: number | null;
+  /**
+   * Display symbols for the two tokens. A DEX `trading_pair` is
+   * `<base_mint>-<quote_symbol>`, so its base half is an address, not a ticker.
+   */
+  baseSymbol?: string;
+  quoteSymbol?: string;
 }
 
-export function OrderConfigPanel({ state, dispatch, validation, currentPrice, isSpot = false, pair }: Props) {
+export function OrderConfigPanel({
+  state,
+  dispatch,
+  validation,
+  currentPrice,
+  isSpot = false,
+  pair,
+  strategies,
+  baseAvailable = null,
+  quoteAvailable = null,
+  baseSymbol,
+  quoteSymbol,
+}: Props) {
   const d = dispatch as FieldDispatch;
-  const needsPrice = state.execution_strategy === "LIMIT" || state.execution_strategy === "LIMIT_MAKER";
-  const isChaser = state.execution_strategy === "LIMIT_CHASER";
+  const displayBase = baseSymbol || pair?.split("-")[0] || "base";
+  const displayQuote = quoteSymbol || pair?.split("-")[1] || "quote";
+  const options = strategies
+    ? STRATEGY_OPTIONS.filter((o) => strategies.includes(o.value))
+    : STRATEGY_OPTIONS;
+
+  // A strategy carried over from another venue (LIMIT on binance → solana) has to
+  // fall back, or the panel would submit a strategy the venue cannot honor.
+  const allowed = options.some((o) => o.value === state.execution_strategy);
+  useEffect(() => {
+    if (!allowed) {
+      d({ type: "SET_FIELD", field: "execution_strategy", value: "MARKET" });
+    }
+  }, [allowed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const needsPrice =
+    allowed &&
+    (state.execution_strategy === "LIMIT" || state.execution_strategy === "LIMIT_MAKER");
+  const isChaser = allowed && state.execution_strategy === "LIMIT_CHASER";
+
+  // The amount is always in base units, but which balance funds it is not: a spot
+  // BUY spends quote and has to be divided by the price to become base, a spot
+  // SELL spends the base itself. A perp buys margin with quote either way, and the
+  // position it opens is that margin times the leverage.
+  const sizingPrice = needsPrice && state.price > 0 ? state.price : currentPrice;
+  const spendsBase = isSpot && state.side === 2;
+  const spendable = spendsBase ? baseAvailable : quoteAvailable;
+  const spendSymbol = spendsBase ? displayBase : displayQuote;
+  const canSize = spendsBase || (!!sizingPrice && sizingPrice > 0);
+
+  const pickPercent = (pct: number) => {
+    if (spendable === null || spendable <= 0) return;
+    const spend = spendable * pct;
+    const amount = spendsBase
+      ? spend
+      : (spend * (isSpot ? 1 : state.leverage)) / (sizingPrice as number);
+    dispatch({ type: "SET_FIELD", field: "amount", value: Number(amount.toPrecision(8)) });
+  };
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
@@ -194,20 +257,29 @@ export function OrderConfigPanel({ state, dispatch, validation, currentPrice, is
       {/* Order Config */}
       <div className="space-y-2.5">
         <SectionHeader>Order</SectionHeader>
-        <AmountField
-          value={state.amount}
-          field="amount"
-          dispatch={d}
-          currentPrice={currentPrice}
-          step={0.001}
-          pair={pair}
-        />
+        <div>
+          <AmountField
+            value={state.amount}
+            field="amount"
+            dispatch={d}
+            currentPrice={currentPrice}
+            step={0.001}
+            baseSymbol={displayBase}
+            quoteSymbol={displayQuote}
+          />
+          <PercentPresets
+            available={canSize ? spendable : null}
+            symbol={spendSymbol}
+            onPick={pickPercent}
+            label={`Available ${spendSymbol} to spend`}
+          />
+        </div>
         <SelectField
           label="Execution Strategy"
           value={state.execution_strategy}
           field="execution_strategy"
           dispatch={d}
-          options={STRATEGY_OPTIONS}
+          options={options}
         />
         <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
         {!isSpot && (

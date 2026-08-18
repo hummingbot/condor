@@ -2,6 +2,8 @@
 
 A Telegram bot for monitoring and trading with Hummingbot via the **Hummingbot API**.
 
+**Help shape Condor** — [take the 2-minute survey](https://forms.gle/7NpG3RtgfLrmpUNY8). Tell us what's working, what's confusing, and what you need next. Your answers go to the Hummingbot Foundation team and directly shape the roadmap.
+
 > **Why we recommend Tailscale for production**
 >
 > Condor controls real trading through Hummingbot API: orders, balances, bots, and stored exchange keys. That has always required strong passwords and careful configuration—but **the risk surface has grown**. Trading agents, MCP tools, and other AI assistants make powerful API actions easier to trigger, while cloud VPSes are constantly scanned for open ports like **8000**.
@@ -10,14 +12,23 @@ A Telegram bot for monitoring and trading with Hummingbot via the **Hummingbot A
 >
 > Full walkthrough: [Securing Condor and Hummingbot API with Tailscale](https://hummingbot.org/blog/posts/securing-condor-and-hummingbot-api-with-tailscale/) · [Hummingbot API Tailscale guide](https://hummingbot.org/hummingbot-api/tailscale/)
 
+> **Privacy:** Condor collects nothing by default. It ships with usage telemetry
+> **off** and no collector address, and it stays that way unless an admin
+> explicitly opts in from the one prompt it sends on first boot. What that
+> option would and would not collect — and how to verify it is off — is spelled
+> out in [PRIVACY.md](PRIVACY.md).
+
 ## Features
 
 - **Portfolio Dashboard** - Comprehensive portfolio view with PNL tracking, 24h changes, and graphical analysis
 - **Bot Monitoring** - Track active Hummingbot trading bots with real-time status and metrics
 - **CLOB Trading** - Place orders on centralized exchanges (Binance, Bybit, etc.) with interactive menus
 - **DEX Trading** - Swap tokens and manage CLMM liquidity positions via Gateway
+- **Web Dashboard** - Browser UI (via **`/web`**) with a live trade panel that covers both CEX and DEX venues: order book trading, DEX swaps, and CLMM liquidity positions created and drawn directly on the chart
 - **Configuration** - Manage API servers, exchange credentials, and Gateway through Telegram (`/servers`, `/keys`, `/gateway`)
 - **AI Assistant** - Natural language trading help via **`/agent`** (optional OpenAI or OpenRouter keys, or any custom OpenAI-compatible endpoint like Venice AI; MCP tools when configured)
+- **AI Agents** - Domain agents that can be consulted, delegated to, or run on a loop — each can author its own tick strategy (analysis order, decision rules, risk limits) and run it autonomously with dry-run support
+- **Issue Reporting** - A **Report an issue** button in the web dashboard prefills a GitHub issue draft (with opt-in, review-before-send diagnostics) that you submit from your own GitHub account
 
 ## What you need
 
@@ -79,7 +90,8 @@ The following applies after **Install Condor**. If you used **Install only Hummi
 | Another device on your tailnet (Condor, browser) | `http://hummingbot-api:8000` |
 
 - Open the **Telegram** chat with your Condor bot. When startup succeeds, admins receive a message such as **"Condor is online and ready."**
-- **Logs:** Condor runs in a **tmux** session named `condor`. Attach with `tmux attach -t condor`. Detach without stopping the bot: **Ctrl+B**, then **D**. To stop Condor completely: `tmux kill-session -t condor`.
+- **Logs:** Condor runs in a **tmux** session named `condor`. Attach with `make logs` (or `tmux attach -t condor`). Detach without stopping the bot: **Ctrl+B**, then **D**.
+- **Control:** `make run` starts Condor in that session, `make stop` stops it, `make restart` does both, `make status` shows whether it is up. Use `make run-fg` to run in the foreground when a startup error needs debugging.
 - In Telegram, use **`/servers`** for Hummingbot API URLs and auth, **`/keys`** for exchange credentials, and **`/gateway`** for DEX setup (or **`/start`** for the setup shortcuts) so commands like `/portfolio` and `/trade` can reach your stack.
 - If Condor and the API are on **different machines**, install [Tailscale](https://tailscale.com/download) on the Condor host and add the API in **`/servers`** with host **`hummingbot-api`** (not a public IP). See [Secure Connection via Tailscale](#secure-connection-via-tailscale) below.
 - If something fails, see **Troubleshooting** below.
@@ -402,10 +414,11 @@ See `flows/` directory for detailed command flow documentation:
 
 ## Support
 
+- **Feedback**: [2-minute survey](https://forms.gle/7NpG3RtgfLrmpUNY8) — what's working, what's missing, what to build next
 - **Docs**: https://condor.hummingbot.org
 - **Installation guide**: https://condor.hummingbot.org/getting-started/installing
 - **Tailscale guide**: https://hummingbot.org/hummingbot-api/tailscale/
-- **Issues**: https://github.com/hummingbot/condor/issues
+- **Issues**: https://github.com/hummingbot/condor/issues — or use the **Report an issue** button in the web dashboard to prefill a bug report or feature request with diagnostics
 
 ---
 

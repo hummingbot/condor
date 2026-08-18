@@ -7,8 +7,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from config_manager import get_config_manager
-from condor.web.auth import get_current_user
+from condor.fetchers.executors import normalize_executor_side
+from condor.web.auth import require_server_access
 from condor.web.models import (
     ArchivedBotPerformance,
     ArchivedBotSummary,
@@ -17,6 +17,7 @@ from condor.web.models import (
     PnlPoint,
     WebUser,
 )
+from config_manager import get_config_manager
 
 logger = logging.getLogger(__name__)
 
@@ -59,22 +60,13 @@ async def _get_bot_summary(client: Any, db_path: str) -> ArchivedBotSummary | No
         return None
 
 
-def _normalize_side(raw_side: Any) -> str:
-    """Normalize side value from int/string variants."""
-    s = str(raw_side).strip().upper()
-    if s in ("1", "BUY", "LONG"):
-        return "BUY"
-    if s in ("2", "SELL", "SHORT"):
-        return "SELL"
-    return s
-
-
 def _parse_json_field(val: Any) -> dict:
     """Parse a field that may be a JSON string or already a dict."""
     if isinstance(val, dict):
         return val
     if isinstance(val, str) and val.strip().startswith("{"):
         import json
+
         try:
             return json.loads(val)
         except Exception:
@@ -114,10 +106,7 @@ def _normalize_executors(raw: list[dict]) -> list[NormalizedExecutor]:
         )
 
         # Resolve trading pair
-        trading_pair = str(
-            ex.get("trading_pair", "")
-            or config.get("trading_pair", "")
-        )
+        trading_pair = str(ex.get("trading_pair", "") or config.get("trading_pair", ""))
 
         # Resolve prices
         entry_price = float(
@@ -138,26 +127,32 @@ def _normalize_executors(raw: list[dict]) -> list[NormalizedExecutor]:
         volume = float(ex.get("filled_amount_quote", 0) or ex.get("volume", 0) or 0)
         net_pnl_pct = float(ex.get("net_pnl_pct", 0) or 0)
 
-        result.append(NormalizedExecutor(
-            id=str(ex.get("id", "") or ex.get("executor_id", "")),
-            type=str(ex.get("type", "") or ex.get("executor_type", "") or config.get("type", "position")),
-            connector=connector,
-            trading_pair=trading_pair,
-            side=_normalize_side(side_raw),
-            status=str(ex.get("status", "") or "closed"),
-            close_type=str(ex.get("close_type", "") or ""),
-            pnl=pnl,
-            volume=volume,
-            timestamp=_to_epoch_seconds(ex.get("timestamp")),
-            close_timestamp=_to_epoch_seconds(ex.get("close_timestamp")),
-            entry_price=entry_price,
-            current_price=close_price,
-            cum_fees_quote=fees,
-            net_pnl_pct=net_pnl_pct,
-            controller_id=str(ex.get("controller_id", "")),
-            custom_info=custom_info,
-            config=config,
-        ))
+        result.append(
+            NormalizedExecutor(
+                id=str(ex.get("id", "") or ex.get("executor_id", "")),
+                type=str(
+                    ex.get("type", "")
+                    or ex.get("executor_type", "")
+                    or config.get("type", "position")
+                ),
+                connector=connector,
+                trading_pair=trading_pair,
+                side=normalize_executor_side(side_raw),
+                status=str(ex.get("status", "") or "closed"),
+                close_type=str(ex.get("close_type", "") or ""),
+                pnl=pnl,
+                volume=volume,
+                timestamp=_to_epoch_seconds(ex.get("timestamp")),
+                close_timestamp=_to_epoch_seconds(ex.get("close_timestamp")),
+                entry_price=entry_price,
+                current_price=close_price,
+                cum_fees_quote=fees,
+                net_pnl_pct=net_pnl_pct,
+                controller_id=str(ex.get("controller_id", "")),
+                custom_info=custom_info,
+                config=config,
+            )
+        )
     return result
 
 
@@ -246,10 +241,12 @@ async def _fetch_and_cache_performance(
     _executors_cache[cache_key] = executors
 
     # Derive primary connector and trading pair
-    primary_connector, primary_trading_pair = _derive_primary_pair(executors, exchanges, trading_pairs)
+    primary_connector, primary_trading_pair = _derive_primary_pair(
+        executors, exchanges, trading_pairs
+    )
 
     # Calculate PnL from trades
-    from handlers.bots.archived_chart import calculate_pnl_from_trades
+    from condor.archived_pnl import calculate_pnl_from_trades
 
     pnl_data = calculate_pnl_from_trades(all_trades)
 
@@ -312,10 +309,8 @@ async def _fetch_and_cache_performance(
 
 
 @router.get("/servers/{name}/archived")
-async def list_archived_bots(name: str, user: WebUser = Depends(get_current_user)):
+async def list_archived_bots(name: str, user: WebUser = Depends(require_server_access)):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -351,16 +346,18 @@ async def list_archived_bots(name: str, user: WebUser = Depends(get_current_user
     return {"bots": bots}
 
 
-@router.get("/servers/{name}/archived/performance", response_model=ArchivedBotPerformance)
+@router.get(
+    "/servers/{name}/archived/performance", response_model=ArchivedBotPerformance
+)
 async def get_archived_performance(
     name: str,
     db_path: str = Query(..., description="Database path"),
-    include_executors: bool = Query(False, description="Include full executor list in response"),
-    user: WebUser = Depends(get_current_user),
+    include_executors: bool = Query(
+        False, description="Include full executor list in response"
+    ),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
@@ -379,11 +376,9 @@ async def get_archived_executors(
     db_path: str = Query(..., description="Database path"),
     offset: int = Query(0, ge=0),
     limit: int = Query(50, ge=1, le=200),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     cache_key = (name, db_path)
 

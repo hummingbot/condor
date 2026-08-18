@@ -228,6 +228,175 @@ def test_ws_manager_delegates_to_shared_transform():
     assert WebSocketManager._transform_bots(SAMPLE_RAW) == build_bots_page(SAMPLE_RAW)
 
 
+def test_live_zero_wins_over_stale_db_snapshot():
+    """CORR-109: a legitimate live 0 must not fall back to the DB snapshot.
+
+    Scenario: a controller was stopped at -50 realized / 1200 volume, then the
+    same config id was redeployed. Live reports 0 for both; the dashboard must
+    show 0, not the previous deploy's numbers.
+    """
+    raw = {
+        "status": "success",
+        "data": {
+            "alpha": {
+                "status": "running",
+                "performance": {
+                    "ctrl_a": {
+                        "status": "running",
+                        "performance": {
+                            "realized_pnl_quote": 0.0,
+                            "unrealized_pnl_quote": 0.0,
+                            "global_pnl_pct": 0.0,
+                            "volume_traded": 0.0,
+                        },
+                    },
+                },
+            },
+        },
+    }
+    page = build_bots_page(
+        raw,
+        ctrl_configs={"ctrl_a": {"id": "cfg-a", "controller_name": "pmm_simple"}},
+        latest_perf={
+            "cfg-a": {
+                "performance": {
+                    "realized_pnl_quote": -50.0,
+                    "unrealized_pnl_quote": -5.0,
+                    "global_pnl_pct": -0.3,
+                    "volume_traded": 1200.0,
+                },
+            },
+        },
+    )
+
+    (row,) = page["controllers"]
+    assert row["realized_pnl_quote"] == 0.0
+    assert row["unrealized_pnl_quote"] == 0.0
+    assert row["global_pnl_quote"] == 0.0
+    assert row["global_pnl_pct"] == 0.0
+    assert row["volume_traded"] == 0.0
+
+    # Stale DB values must not leak into the server-wide totals either.
+    assert page["total_pnl"] == 0.0
+    assert page["total_volume"] == 0.0
+
+
+def test_missing_live_field_still_falls_back_to_db_snapshot():
+    """CORR-109: presence-based merge keeps the fallback for absent keys."""
+    raw = {
+        "status": "success",
+        "data": {
+            "alpha": {
+                "status": "running",
+                "performance": {
+                    "ctrl_a": {
+                        "status": "running",
+                        # realized/volume omitted entirely -> DB snapshot wins
+                        "performance": {"unrealized_pnl_quote": 1.0},
+                    },
+                },
+            },
+        },
+    }
+    page = build_bots_page(
+        raw,
+        ctrl_configs={"ctrl_a": {"id": "cfg-a", "controller_name": "pmm_simple"}},
+        latest_perf={
+            "cfg-a": {
+                "performance": {
+                    "realized_pnl_quote": -50.0,
+                    "volume_traded": 1200.0,
+                },
+            },
+        },
+    )
+
+    (row,) = page["controllers"]
+    assert row["realized_pnl_quote"] == -50.0
+    assert row["unrealized_pnl_quote"] == 1.0
+    assert row["volume_traded"] == 1200.0
+    assert page["total_pnl"] == -49.0
+    assert page["total_volume"] == 1200.0
+
+
+def test_live_empty_collections_win_over_stale_db_snapshot():
+    """CORR-127: a live empty {} / [] must not fall back to the DB snapshot.
+
+    Scenario: the same config id was redeployed. The new deploy has closed
+    nothing and holds no positions, so live reports an empty histogram and an
+    empty positions list; the dashboard must show empty, not the previous
+    deploy's close reasons and open positions.
+    """
+    raw = {
+        "status": "success",
+        "data": {
+            "alpha": {
+                "status": "running",
+                "performance": {
+                    "ctrl_a": {
+                        "status": "running",
+                        "performance": {
+                            "close_type_counts": {},
+                            "positions_summary": [],
+                        },
+                    },
+                },
+            },
+        },
+    }
+    page = build_bots_page(
+        raw,
+        ctrl_configs={"ctrl_a": {"id": "cfg-a", "controller_name": "pmm_simple"}},
+        latest_perf={
+            "cfg-a": {
+                "performance": {
+                    "close_type_counts": {"STOP_LOSS": 7},
+                    "positions_summary": [{"pair": "ETH-USDT"}],
+                },
+            },
+        },
+    )
+
+    (row,) = page["controllers"]
+    assert row["close_type_counts"] == {}
+    assert row["positions_summary"] == []
+
+
+def test_missing_live_collections_still_fall_back_to_db_snapshot():
+    """CORR-127: presence-based merge keeps the fallback for absent keys."""
+    raw = {
+        "status": "success",
+        "data": {
+            "alpha": {
+                "status": "running",
+                "performance": {
+                    "ctrl_a": {
+                        "status": "running",
+                        # both collection keys omitted entirely -> DB snapshot wins
+                        "performance": {"realized_pnl_quote": 1.0},
+                    },
+                },
+            },
+        },
+    }
+    page = build_bots_page(
+        raw,
+        ctrl_configs={"ctrl_a": {"id": "cfg-a", "controller_name": "pmm_simple"}},
+        latest_perf={
+            "cfg-a": {
+                "performance": {
+                    "close_type_counts": {"STOP_LOSS": 7},
+                    "positions_summary": [{"pair": "ETH-USDT"}],
+                },
+            },
+        },
+    )
+
+    (row,) = page["controllers"]
+    assert row["close_type_counts"] == {"STOP_LOSS": 7}
+    assert row["positions_summary"] == [{"pair": "ETH-USDT"}]
+
+
 def test_extract_bots_list_handles_malformed_inputs():
     assert extract_bots_list(None) == []
     assert extract_bots_list("<html>error</html>") == []

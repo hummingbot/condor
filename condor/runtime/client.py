@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import AsyncIterator, Literal
 
+from condor.acp.pydantic_ai_client import model_prefix
 from condor.runtime import conversations
-from condor.runtime.events import RuntimeEvent
+from condor.runtime.events import EventType, RuntimeEvent
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import PromptRequest, SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
+from condor.telemetry import taps as telemetry_taps
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +60,11 @@ def _local():
     return sessions
 
 
+def bound_agent_context(bound, user_id: int, platform: str) -> str:
+    """Opening context for a chat bound to a specialist Agent."""
+    return _local().bound_agent_context(bound, user_id, platform)
+
+
 async def create_session(
     spec: SessionSpec,
     *,
@@ -74,6 +82,32 @@ async def get_info(key: SessionKey) -> SessionInfo | None:
     """Serializable view of a session, or None when it does not exist."""
     session = _local().get_session(key)
     return session.info() if session else None
+
+
+async def conversation_for_session(session_key: str) -> str:
+    """Resolve a session key to the conversation currently on that session.
+
+    The one place that knows how to turn a raw key into a conversation id, so
+    every producer of async work that reports back to its origin — delegations,
+    notifications, routine runs — agrees on what "the conversation behind this
+    call" means.
+
+    Answered on demand rather than cached at spawn because the conversation id
+    does not exist when the MCP subprocess starts (``get_or_create_session``
+    mints it after the client is up) — by call time it is settled.
+
+    A missing, malformed or dead key is not an error: it means "no conversation
+    behind this call", which is the truth for a consult-, tick- or
+    scheduler-started run and for anything predating this provenance.
+    """
+    if not session_key:
+        return ""
+    try:
+        info = await get_info(SessionKey.parse(session_key))
+        return info.conversation_id if info else ""
+    except Exception:
+        log.debug("Could not resolve session key %r", session_key, exc_info=True)
+        return ""
 
 
 async def list_sessions(user_id: int | None = None) -> list[SessionInfo]:
@@ -106,6 +140,27 @@ def _deny_pending_confirmations(raw_key: str) -> None:
         return
     if denied:
         log.info("Denied %d pending confirmation(s) on steering %s", denied, raw_key)
+
+
+# Session surfaces are short codes; the telemetry taxonomy spells them out.
+_SURFACES = {"tg": "telegram", "web": "web", "mcp": "mcp", "": "other"}
+
+
+def _turn_kind(req: PromptRequest, key: SessionKey) -> str:
+    """Which kind of turn this was, from what the request already carries."""
+    kind = (getattr(req, "user_kind", "") or "").lower()
+    if kind in ("consult", "delegate", "tick"):
+        return kind
+    return "chat"
+
+
+def _model_of(agent_key: str) -> str:
+    """The model id without any custom-endpoint nickname.
+
+    ``custom@venice:llama-3.3-70b`` reports ``llama-3.3-70b``: the nickname is
+    something the operator typed and may name their employer or their host.
+    """
+    return agent_key.split(":", 1)[1] if ":" in agent_key else agent_key
 
 
 async def prompt(
@@ -166,13 +221,30 @@ async def prompt(
         req.text,
         agent_key=session.agent_key,
         agent_slug=session.agent_slug,
+        # Empty for a turn the user typed; set when something else drove it
+        # (a background task waking the chat), so the opening line is recorded
+        # as a system note rather than as the user's words.
+        user_kind=req.user_kind,
     )
+    # Turn shape for telemetry (FEAT-023): counts and categories only. Nothing
+    # about what was asked, answered, or which file a tool touched.
+    started = time.monotonic()
+    tool_kinds: dict[str, int] = {}
+    outcome = "aborted"
     try:
         async for event in session.prompt_stream(req.text, lock_timeout=lock_timeout):
             runtime_event = RuntimeEvent.from_acp(event, session_key=raw_key)
+            if runtime_event.type is EventType.TOOL_CALL:
+                # The ACP `kind` ("read", "execute", …), never the `title`: a
+                # title is free text and routinely contains a file path.
+                kind = str(runtime_event.field("kind") or "other")
+                tool_kinds[kind] = tool_kinds.get(kind, 0) + 1
+            elif runtime_event.type is EventType.DONE:
+                outcome = "done"
             recorder.observe(runtime_event)
             yield runtime_event
     except Exception as exc:  # noqa: BLE001 - surfaced to the caller as an event
+        outcome = "error"
         log.exception("Prompt failed for session %s", raw_key)
         failure = RuntimeEvent.error(str(exc), session_key=raw_key)
         recorder.observe(failure)
@@ -184,6 +256,19 @@ async def prompt(
         # abandoned async generator only ever gets GeneratorExit. Losing the
         # half-written reply is the bug this feature exists to fix.
         recorder.flush()
+        # Here for the same reason: this is the one funnel Telegram, the
+        # dashboard and MCP all cross, and it is the only place that sees an
+        # abandoned turn end.
+        telemetry_taps.agent_turn(
+            kind=_turn_kind(req, key),
+            provider=model_prefix(session.agent_key) or "acp",
+            model=_model_of(session.agent_key),
+            tool_calls=sum(tool_kinds.values()),
+            duration_ms=int((time.monotonic() - started) * 1000),
+            outcome=outcome,
+            surface=_SURFACES.get(getattr(key, "surface", ""), "other"),
+            tools=tool_kinds,
+        )
 
 
 async def prompt_once(key: SessionKey, text: str) -> str:

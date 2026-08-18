@@ -39,7 +39,7 @@ from condor.agents.sessions_index import (
     list_session_snapshots,
     list_sessions,
 )
-from condor.web.auth import get_current_user
+from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import ReportSummary, WebUser
 
 # ── Simple in-memory TTL cache for performance data ──
@@ -53,12 +53,6 @@ _PERF_TTL = 30.0  # seconds
 # fetched successfully, with open_count == 0, and not in controller mode land
 # here; everything else keeps flowing through the 30s TTL path above.
 _CLOSED_PERF_CACHE: dict[str, Any] = {}
-
-# Upper bound on concurrent per-instance history calls against one API server.
-# The fan-out is bounded rather than unlimited so a strategy owning many bot
-# instances never bursts the whole cap at the backend at once (same bound
-# handlers/bots/archived.py and routines/archived_analyzer.py already use).
-MAX_CONCURRENT_HISTORY_FETCHES = 10
 
 
 def _cache_get(key: str) -> Any | None:
@@ -102,11 +96,12 @@ class RunningInstance(BaseModel):
     fees: float = 0.0
     open_count: int = 0
     closed_count: int = 0
-    win_rate: float = 0.0
+    win_rate: float | None = None
     server_name: str = ""
     total_amount_quote: float = 100.0
     trading_context: str = ""
     frequency_sec: int = 60
+    tick_timeout_sec: int = 600
     execution_mode: str = "loop"
     risk_limits: dict[str, Any] = {}
 
@@ -160,10 +155,31 @@ class AgentPerformanceModel(BaseModel):
     volume: float = 0.0
     fees: float = 0.0
     trade_count: int = 0
-    win_rate: float = 0.0
+    # None = no closed executor rows to derive it from; see AgentPerformance.
+    # Rendering it as 0% would report a bot-mode session as all-losses.
+    win_rate: float | None = None
     open_count: int = 0
     closed_count: int = 0
     executors: list[dict[str, Any]] = []
+    # ── Bot-mode attribution ────────────────────────────────────────────────
+    # A session trading through bots earns nothing under its own agent_id: its
+    # executors live inside the bot instance's own database and never reach the
+    # agent_id-keyed table, and the only rows Condor can synthesize for them are
+    # the positions open right now. A flat bot therefore renders as a session that
+    # did nothing. These four fields carry what the aggregator already knew and
+    # this model used to drop on the floor — which bots ran, which controllers,
+    # what each closed, and whether the fee figure means anything.
+    #
+    # Populated by the per-session detail route, which resolves one session's
+    # ownership exactly. The strategy rollup leaves them empty (it distributes a
+    # bot's history across sessions rather than resolving instances per session)
+    # and sets only ``fees_known``.
+    bot_names: list[str] = []
+    bot_instances: list[str] = []
+    unresolved_bases: list[str] = []
+    controllers: list[dict[str, Any]] = []
+    close_type_counts: dict[str, int] = {}
+    fees_known: bool = True
 
 
 class StrategyPerformanceResponse(BaseModel):
@@ -250,6 +266,12 @@ class AgentConfigRequest(BaseModel):
         description="Pin the Agent to this Hummingbot API server. Empty string "
         "clears the pin and lets it follow the chat's ambient selection.",
     )
+    agent_key: str | None = Field(
+        default=None,
+        description="The model this Agent answers on, everywhere it runs — "
+        "chat, consult, delegate and loops. Empty string clears it, falling "
+        "back to the chat's default model.",
+    )
 
 
 class CreateStrategyRequest(BaseModel):
@@ -305,6 +327,19 @@ class DelegateRequest(BaseModel):
     timeout_s: int = 900
     # Canonical key of the session asking for the work (posted by the condor MCP
     # server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
+    session_key: str = ""
+    # "notify" (push + transcript note) or "resume" (additionally wake the
+    # asking conversation with the result). See FEAT-034.
+    on_complete: str = "notify"
+
+
+class NotifyRequest(BaseModel):
+    text: str
+    parse_mode: str = "Markdown"
+    chat_id: int = 0  # Telegram chat to push to (0 = nothing to push to)
+    user_id: int | None = None  # Accepted for compat but ignored (see handler)
+    # Canonical key of the session announcing something (posted by the condor
+    # MCP server from CONDOR_SESSION_KEY). Resolved to a conversation id below.
     session_key: str = ""
 
 
@@ -440,18 +475,23 @@ def _session_ownership(
 
 def _owner_windows(
     real_sessions: list, strategy_dir: Path, default_config: dict | None
-) -> dict[str, list[tuple[float, Any]]]:
-    """``{base: [(since, session), …]}`` — each base's owners, oldest takeover first.
+) -> dict[str, list[tuple[float, Any, float]]]:
+    """``{base: [(since, session, until), …]}`` — owners, oldest takeover first.
 
     The windows a base's owners occupy tile ``[since_i, since_{i+1})`` and the last
     one runs to now, so slicing over them reproduces the bot's whole cumulative with
     no gap and no double count. Keyed per base rather than globally per session
     number: two bases handed over at different moments never share a timeline.
+
+    ``until`` is the instant the session released the bot, or ``0.0`` while it
+    still holds it. A released last window stops there rather than running to now,
+    which is the one case where the tiling deliberately leaves a gap: PnL a bot
+    earned with no session operating it belongs to no session.
     """
-    owners: dict[str, list[tuple[float, Any]]] = {}
+    owners: dict[str, list[tuple[float, Any, float]]] = {}
     for s in real_sessions:
         for ob in _session_ownership(strategy_dir, default_config, s.session_num):
-            owners.setdefault(ob.base, []).append((ob.since, s))
+            owners.setdefault(ob.base, []).append((ob.since, s, ob.until))
     for lst in owners.values():
         lst.sort(key=lambda t: (t[0], t[1].session_num))
     return owners
@@ -469,14 +509,17 @@ def _current_owner_bases(
     gate for merging them into one session's view. Same rule
     :func:`_apply_bot_mode_pnl` applies to live unrealized PnL, kept here as one
     lookup over the same windows so the rollup and the per-session detail can
-    never disagree about who holds the open book.
+    never disagree about who holds the open book. A session that released the bot
+    is not its current owner, so an ended session shows no live open book.
     """
-    last: dict[str, tuple[float, int]] = {}
+    last: dict[str, tuple[float, int, float]] = {}
     for n in session_nums:
         for ob in _session_ownership(strategy_dir, default_config, n):
-            if last.get(ob.base, (float("-inf"), -1)) <= (ob.since, n):
-                last[ob.base] = (ob.since, n)
-    return sorted(base for base, (_, owner) in last.items() if owner == num)
+            if last.get(ob.base, (float("-inf"), -1, 0.0))[:2] <= (ob.since, n):
+                last[ob.base] = (ob.since, n, ob.until)
+    return sorted(
+        base for base, (_, owner, until) in last.items() if owner == num and until <= 0
+    )
 
 
 async def _apply_bot_mode_pnl(
@@ -502,8 +545,8 @@ async def _apply_bot_mode_pnl(
     from condor.fetchers.bot_performance import (
         bot_executor_rows,
         fetch_all_bot_performance,
-        fetch_instance_history,
-        partition_instances,
+        fetch_archived_instances,
+        fetch_base_histories,
         resolve_bots,
         slice_history,
     )
@@ -521,61 +564,72 @@ async def _apply_bot_mode_pnl(
         log.warning("bot perf fetch for %s failed: %s", strategy_dir.name, e)
         return
 
-    instances_by_base = partition_instances(all_perf, bases)
-    all_instances = sorted({i for lst in instances_by_base.values() for i in lst})
-    MAX_INSTANCES = 24
-    if len(all_instances) > MAX_INSTANCES:
-        log.warning(
-            "bot history for %s: %d instances, capping at %d newest "
-            "(older sessions may under-report)",
-            strategy_dir.name,
-            len(all_instances),
-            MAX_INSTANCES,
-        )
-        all_instances = all_instances[-MAX_INSTANCES:]
-    # One round-trip per instance, fanned out concurrently instead of walked one
-    # at a time, capped so the API server never sees more than
-    # MAX_CONCURRENT_HISTORY_FETCHES in flight. Results come back positionally
-    # aligned with all_instances, and a fetch that raises is normalized to the
-    # empty list fetch_instance_history already returns on API error — one bad
-    # instance degrades exactly as before instead of losing the whole rollup.
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_HISTORY_FETCHES)
-
-    async def _bounded_history(instance_name: str):
-        async with semaphore:
-            return await fetch_instance_history(client, instance_name)
-
-    histories = await asyncio.gather(
-        *(_bounded_history(inst) for inst in all_instances), return_exceptions=True
+    now = time.time()
+    # The oldest takeover across every base sets how far back the histories must
+    # reach; sampling resolution is chosen from it so no owner's window falls off
+    # the end of the retained rows.
+    earliest = min(
+        (since for lst in owners.values() for since, _, _ in lst if since > 0),
+        default=0.0,
     )
-    history = {
-        inst: [] if isinstance(rows, BaseException) else rows
-        for inst, rows in zip(all_instances, histories)
-    }
+    # Archived instances carry the realized PnL of every bot a session stopped —
+    # the normal end state of a finished session, and invisible in the live
+    # snapshot. Same universe the live agent's own view uses, so the dashboard and
+    # the tick loop cannot disagree about what a session earned.
+    archived = await fetch_archived_instances(client)
+    histories_by_base = await fetch_base_histories(
+        client, all_perf, bases, earliest, now, extra_names=archived
+    )
 
     live = resolve_bots(all_perf, bases)
-    now = time.time()
     for base in bases:
         window_owners = owners[base]
-        insts = [history[k] for k in instances_by_base.get(base, []) if k in history]
+        insts = histories_by_base.get(base, [])
 
-        # Realized / volume / trades: one window per owner, tiling the timeline.
-        for i, (since, s) in enumerate(window_owners):
+        # Realized / volume / trades / fees: one window per owner, tiling the
+        # timeline. A released window (the session stopped and left the bot
+        # running) ends at its release instant, so PnL earned while no session
+        # was operating the bot is attributed to nobody instead of accruing to
+        # whoever happened to hold last.
+        sliced_fees = 0.0
+        for i, (since, s, until) in enumerate(window_owners):
             end = window_owners[i + 1][0] if i + 1 < len(window_owners) else now
-            realized, volume, trades = slice_history(insts, since, end)
+            if until > 0:
+                end = min(end, until)
+            if end <= since:
+                continue
+            realized, volume, trades, fees = slice_history(insts, since, end)
             s.realized_pnl += realized
             s.volume += volume
+            # Sliced closes are round-trip closes, so they are this session's
+            # trades AND its closed positions — the same two counters
+            # _merge_bot_perf bumps, so the session detail and this rollup report
+            # one number.
             s.trade_count += int(round(trades))
+            s.closed_count += int(round(trades))
+            s.fees += fees
+            sliced_fees += fees
+            # Volume with no fee is a missing column, not a free trade.
+            if volume > 0 and fees == 0.0:
+                s.fees_known = False
             s.total_pnl = s.realized_pnl + s.unrealized_pnl
 
-        # Live unrealized + open positions → the base's current owner.
+        # Live unrealized + open positions → the base's current owner, unless it
+        # has released the bot: an ended session holds no open book.
         bot = live.get(base)
         if not bot:
             continue
-        operator = window_owners[-1][1]
+        last_since, operator, last_until = window_owners[-1]
+        if last_until > 0:
+            continue
         b_rows = bot_executor_rows(bot)
         operator.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
-        operator.fees += float(bot.get("cum_fees_quote", 0) or 0)
+        # Fees come from the sliced history when the backend reports a cumulative
+        # figure. When it does not, that column is all zeros and the only fees
+        # available are the live open-position ones — attributed to the current
+        # operator as before rather than silently dropped.
+        if sliced_fees == 0.0:
+            operator.fees += float(bot.get("cum_fees_quote", 0) or 0)
         operator.open_count += sum(1 for r in b_rows if r["status"] == "RUNNING")
         operator.executors = list(operator.executors) + b_rows
         operator.total_pnl = operator.realized_pnl + operator.unrealized_pnl
@@ -719,11 +773,12 @@ def _instance_from_engine(engine, perf_by_id: dict) -> RunningInstance:
         fees=p.fees if p else 0.0,
         open_count=p.open_count if p else 0,
         closed_count=p.closed_count if p else 0,
-        win_rate=p.win_rate if p else 0.0,
+        win_rate=p.win_rate if p else None,
         server_name=info.get("server_name", ""),
         total_amount_quote=info.get("total_amount_quote", 100),
         trading_context=info.get("trading_context", ""),
         frequency_sec=info.get("frequency_sec", 60),
+        tick_timeout_sec=info.get("tick_timeout_sec", 600),
         agent_key=info.get("agent_key", ""),
         execution_mode=info.get("execution_mode", "loop"),
         risk_limits=info.get("risk_limits", {}),
@@ -865,8 +920,24 @@ def _is_admin(user: WebUser) -> bool:
     return get_config_manager().is_admin(user.id)
 
 
-def _owned_delegation(task_id: str, user: WebUser):
-    """The delegation, or an error — admins see everything, everyone else only their own.
+def _can_see_delegation(record: dict, user: WebUser) -> bool:
+    """Admins see everything; everyone else only what they started.
+
+    A record whose ``user_id`` was never written (a transcript from before the
+    status file carried one) belongs to nobody and is therefore admin-only —
+    unowned must not mean unguarded.
+    """
+    return _is_admin(user) or (
+        bool(record.get("user_id")) and record["user_id"] == user.id
+    )
+
+
+def _visible_record(task_id: str, user: WebUser) -> dict:
+    """A delegation record: live if this process still holds it, else from disk.
+
+    The fallback is what makes every read route work for a task that outlived
+    the process that ran it (FEAT-035) — the registry stays the authority for
+    anything running *now*, and history answers for everything else.
 
     Same idiom as ``_require_ownership`` in ``sessions.py``: the caller is
     compared against the record's own ``user_id``, which ``DelegateTask``
@@ -874,13 +945,15 @@ def _owned_delegation(task_id: str, user: WebUser):
     task, matching ``conversations.py``.
     """
     from condor.agents.delegate import get_delegation
+    from condor.agents.delegation_history import read_history
 
     dt = get_delegation(task_id)
-    if dt is None:
+    record = dt.to_dict() if dt is not None else read_history(task_id)
+    if record is None:
         raise HTTPException(status_code=404, detail=f"Delegation '{task_id}' not found")
-    if dt.user_id != user.id and not _is_admin(user):
+    if not _can_see_delegation(record, user):
         raise HTTPException(status_code=403, detail="Not your delegation")
-    return dt
+    return record
 
 
 @router.get("/delegations")
@@ -905,12 +978,54 @@ async def list_delegations(user: WebUser = Depends(get_current_user)):
     }
 
 
+@router.get("/delegations/history")
+async def list_delegation_history(
+    agent: str | None = None,
+    limit: int = 100,
+    user: WebUser = Depends(get_current_user),
+):
+    """Every delegation ever recorded, newest first — across restarts (FEAT-035).
+
+    Registered above ``/delegations/{task_id}`` so the literal path wins, for the
+    same reason the whole block sits above ``/{slug}``.
+
+    Returns *summary* rows: the bodies (``result``/``error``) are dropped, since
+    a hundred rows must not ship a hundred answers — a row that gets opened
+    fetches itself from ``/delegations/{task_id}``. Live tasks are included from
+    the registry (and shadow their own on-disk copy), so this list is complete on
+    its own rather than only telling half the story.
+    """
+    from condor.agents.delegate import get_all_delegations
+    from condor.agents.delegation_history import list_history
+
+    live = {
+        dt.task_id: dt.to_dict()
+        for dt in get_all_delegations().values()
+        if agent in (None, dt.agent_slug)
+    }
+    records = [
+        r
+        for r in list_history(agent_slug=agent, limit=limit)
+        if r["task_id"] not in live
+    ]
+    records.extend(live.values())
+    records.sort(key=lambda r: r.get("started_at") or 0.0, reverse=True)
+
+    return {
+        "delegations": [
+            {k: v for k, v in r.items() if k not in ("result", "error")}
+            for r in records[:limit]
+            if _can_see_delegation(r, user)
+        ]
+    }
+
+
 @router.get("/delegations/{task_id}")
 async def get_delegation_status(
     task_id: str, user: WebUser = Depends(get_current_user)
 ):
-    """Get a delegation's status + result/error."""
-    return _owned_delegation(task_id, user).to_dict()
+    """Get a delegation's status + result/error, live or from disk."""
+    return _visible_record(task_id, user)
 
 
 @router.get("/delegations/{task_id}/events")
@@ -926,14 +1041,27 @@ async def get_delegation_events(
 
     ``status`` rides along so a client knows when to stop polling without a
     second request.
-    """
-    from condor.agents.delegate import events_for_wire
 
-    dt = _owned_delegation(task_id, user)
+    Once the process that ran it is gone the events come from the sidecar on
+    disk, in the same projection — so a finished delegation renders exactly like
+    a running one. Records older than that sidecar have only their markdown
+    transcript, returned in ``markdown`` for the client to render instead.
+    """
+    from condor.agents.delegate import events_for_wire, get_delegation
+    from condor.agents.delegation_history import read_history_events
+
+    record = _visible_record(task_id, user)
+    dt = get_delegation(task_id)
+    if dt is not None:
+        events, markdown = events_for_wire(dt.events), ""
+    else:
+        events, markdown = read_history_events(task_id)
+
     return {
         "task_id": task_id,
-        "status": dt.status,
-        "events": events_for_wire(dt.events),
+        "status": record["status"],
+        "events": events,
+        "markdown": markdown,
     }
 
 
@@ -941,10 +1069,15 @@ async def get_delegation_events(
 async def stop_delegation_route(
     task_id: str, user: WebUser = Depends(get_current_user)
 ):
-    """Cancel a running delegation (status -> stopped)."""
+    """Cancel a running delegation (status -> stopped).
+
+    Gated on the record rather than the live object so stopping something this
+    process no longer holds answers ``stopped: false`` — the honest outcome —
+    instead of a 404 that reads like the task never existed.
+    """
     from condor.agents.delegate import stop_delegation
 
-    _owned_delegation(task_id, user)
+    _visible_record(task_id, user)
     stopped = await stop_delegation(task_id)
     return {"stopped": stopped}
 
@@ -1021,33 +1154,43 @@ async def update_agent_md(
 async def update_agent_config(
     slug: str, req: AgentConfigRequest, user: WebUser = Depends(get_current_user)
 ):
-    """Set the Agent's server pin without hand-editing front matter.
+    """Set the Agent's server pin or model without hand-editing front matter.
 
     ``AgentStore.update`` re-renders the whole front matter, so this is the same
     write the MCP ``manage_trading_agent`` tool already performs — the web layer
     simply had no door to it, which is why the UI could only offer a text editor.
     """
     from config_manager import get_config_manager
+    from handlers.agents._shared import AGENT_OPTIONS
 
     agent = _get_agent(slug)
 
     # A pin decides which account the Agent's tools trade on, so it is gated
     # like every other server-scoped write. An empty string clears the pin and
     # needs no access at all.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
+
+    # Picker sentinels ("openrouter:", "custom:") are drill-downs that open a
+    # model list, not startable models: stored here they would fail at every
+    # session start, in every mode the Agent runs in.
+    if req.agent_key and AGENT_OPTIONS.get(req.agent_key, {}).get("picker"):
+        raise HTTPException(
+            status_code=400, detail=f"'{req.agent_key}' is not a model, but a picker"
+        )
 
     if req.server_name is not None:
         agent.server_name = req.server_name
     if req.server_required is not None:
         agent.server_required = req.server_required
+    if req.agent_key is not None:
+        agent.agent_key = req.agent_key
     _agent_store().update(agent)
     return {
         "updated": True,
         "server_name": agent.server_name,
         "server_required": agent.server_required,
+        "agent_key": agent.agent_key,
     }
 
 
@@ -1083,10 +1226,8 @@ async def consult_agent(
     # routes do — otherwise any session could consult against a server it was
     # never granted (IDOR). Only enforce when a server is actually requested;
     # serverless consults need no server scope.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
 
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
@@ -1108,25 +1249,14 @@ async def consult_agent(
 async def _conversation_for_session(session_key: str) -> str:
     """Resolve a session key to the conversation currently on that session.
 
-    Answered here rather than cached at spawn because the conversation id does
-    not exist when the MCP subprocess starts (``sessions.get_or_create_session``
-    mints it after the client is up) — by delegate time it is settled.
-
-    A missing, malformed or dead key is not an error: it means "no conversation
-    behind this task", which is the truth for a consult- or tick-started
-    delegation and for anything predating this provenance.
+    The resolution itself lives in ``condor.runtime.client`` — routine runs need
+    the same answer (ARCH-089) and a second copy could drift from this one. Kept
+    as a thin local name because the runtime import stays lazy here, as it does
+    for the rest of this module's runtime touchpoints.
     """
-    if not session_key:
-        return ""
-    try:
-        from condor.runtime import client
-        from condor.runtime.keys import SessionKey
+    from condor.runtime import client
 
-        info = await client.get_info(SessionKey.parse(session_key))
-        return info.conversation_id if info else ""
-    except Exception:
-        log.debug("Could not resolve session key %r", session_key, exc_info=True)
-        return ""
+    return await client.conversation_for_session(session_key)
 
 
 @router.post("/{slug}/delegate")
@@ -1139,19 +1269,38 @@ async def delegate_agent(
     auto-approve) until done, then notifies the user. The async sibling of
     ``/consult``.
     """
-    from condor.agents.delegate import start_delegation
+    from condor.agents.delegate import ON_COMPLETE_CHOICES, start_delegation
+    from condor.runtime import wake
     from config_manager import get_config_manager
 
     _get_agent(slug)
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
+    if req.on_complete not in ON_COMPLETE_CHOICES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"on_complete must be one of {list(ON_COMPLETE_CHOICES)}",
+        )
 
     # Same server-scope gate as consult: a delegate binds the agent's MCP toolset
     # to ``server_name``'s live credentials, so refuse a server the caller can't access.
-    if req.server_name and not get_config_manager().has_server_access(
-        user.id, req.server_name
-    ):
-        raise HTTPException(status_code=403, detail="No access")
+    if req.server_name:
+        check_server_access(user.id, req.server_name)
+
+    conversation_id = await _conversation_for_session(req.session_key)
+
+    # Depth 1, structurally. A delegate worker cannot delegate at all
+    # (FEAT-032), and a delegation started from *inside* a wake turn is forced
+    # back to "notify" here -- otherwise a chain of resumes could keep waking
+    # itself. Between the two the recursion is bounded with no counter, no TTL
+    # and no rate limiter.
+    on_complete = req.on_complete
+    if on_complete == "resume" and wake.is_waking(conversation_id):
+        log.info(
+            "Forcing on_complete=notify: conversation %s is already mid-wake",
+            conversation_id,
+        )
+        on_complete = "notify"
 
     # Web callers always act as themselves (mirror consult): honoring
     # ``req.user_id`` here would let any authenticated session run a delegation
@@ -1163,9 +1312,94 @@ async def delegate_agent(
         server_name=req.server_name,
         task=req.task,
         timeout_s=req.timeout_s,
-        conversation_id=await _conversation_for_session(req.session_key),
+        conversation_id=conversation_id,
+        session_key=req.session_key,
+        on_complete=on_complete,
     )
     return {"task_id": dt.task_id, "status": dt.status}
+
+
+def _delivered(result: Any) -> bool:
+    """Did a ``send_message`` on the resolved bot actually deliver?
+
+    The ladder returns two different things: a live python-telegram-bot raises
+    on failure and returns a ``Message``, while ``_HttpBot`` never raises and
+    hands back Telegram's raw envelope (or ``None`` when it has no token). Only
+    the envelope can say "no" quietly, so that is the case worth reading.
+    """
+    if result is None:
+        return False
+    if isinstance(result, dict):
+        return bool(result.get("ok"))
+    return True
+
+
+async def _push_to_telegram(chat_id: int, text: str, parse_mode: str) -> bool:
+    """Push a notification through the shared outbound-bot ladder.
+
+    Retries once without ``parse_mode`` because the overwhelmingly common
+    failure is an unescaped ``_`` or ``*`` in text a model wrote: the user must
+    get the message, ugly, rather than not get it at all.
+    """
+    from condor.agents.delegate import resolve_bot
+
+    bot = resolve_bot()
+    if parse_mode:
+        try:
+            if _delivered(
+                await bot.send_message(
+                    chat_id=chat_id, text=text, parse_mode=parse_mode
+                )
+            ):
+                return True
+        except Exception:
+            log.debug("Notification rejected with parse_mode=%s", parse_mode)
+    try:
+        return _delivered(await bot.send_message(chat_id=chat_id, text=text))
+    except Exception:
+        log.warning("Could not deliver notification to chat %s", chat_id)
+        return False
+
+
+@router.post("/notify")
+async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_user)):
+    """Announce something to the user, in the conversation *and* on Telegram.
+
+    The MCP ``send_notification`` tool used to POST straight to Telegram, which
+    made it the one user-visible tool that never crossed back into the main
+    process — so it could not know where its caller lived, and the conversation
+    that announced something kept no trace of it (ARCH-088). Crossing back also
+    gets it the same bot ladder every other outbound message uses.
+
+    The transcript note is the ``system`` turn ``_record_completion_turn``
+    writes for a finished delegation, with ``kind="notification"``; a missing or
+    dead ``session_key`` simply means there is no conversation behind this call,
+    which is the truth for a routine- or tick-started agent.
+    """
+    if not req.text:
+        raise HTTPException(status_code=400, detail="text is required")
+
+    # The caller is the JWT, never ``req.user_id``: mirror consult/delegate so an
+    # authenticated session cannot write into another user's transcript.
+    conversation_id = await _conversation_for_session(req.session_key)
+    recorded = False
+    if conversation_id:
+        try:
+            from condor.runtime.conversations import record_system
+
+            record_system(user.id, conversation_id, req.text, kind="notification")
+            recorded = True
+        except Exception:
+            log.debug(
+                "Could not note a notification in conversation %s",
+                conversation_id,
+                exc_info=True,
+            )
+
+    sent = False
+    if req.chat_id:
+        sent = await _push_to_telegram(req.chat_id, req.text, req.parse_mode)
+    return {"sent": sent, "recorded": recorded}
 
 
 # ── Strategy CRUD ──
@@ -1374,7 +1608,10 @@ async def get_session_executors(
     user: WebUser = Depends(get_current_user),
 ):
     """Return executors + performance for a single session."""
-    from condor.agents.performance import fetch_agent_performance
+    from condor.agents.performance import (
+        fetch_agent_performance,
+        fetch_agent_pnl_series,
+    )
 
     strategy = _get_strategy(slug, sslug)
     agent_id = f"{_runkey(slug, sslug)}_{session_num}"
@@ -1387,6 +1624,7 @@ async def get_session_executors(
             "performance": AgentPerformanceModel(
                 agent_id=agent_id, session_num=session_num
             ).model_dump(),
+            "pnl_series": [],
         }
     # Bot-mode: the session operates named bots whose executors live in the bot
     # container, not the agent_id-keyed table. Merge the live positions of every
@@ -1402,7 +1640,14 @@ async def get_session_executors(
     bot_names = _current_owner_bases(
         strategy.dir, strategy.default_config, session_nums, session_num
     )
-    perf = await fetch_agent_performance(client, agent_id, bot_names=bot_names)
+    # Slice the bot to this session's window for the same reason the rollup does:
+    # merging the lifetime aggregate here made the session detail disagree with
+    # the session's own row in the strategy list.
+    owned = _session_ownership(strategy.dir, strategy.default_config, session_num)
+    since = min((b.since for b in owned if b.since > 0), default=0.0)
+    perf = await fetch_agent_performance(
+        client, agent_id, bot_names=bot_names, since=since
+    )
     model = AgentPerformanceModel(
         agent_id=agent_id,
         session_num=session_num,
@@ -1416,8 +1661,36 @@ async def get_session_executors(
         open_count=perf.open_count,
         closed_count=perf.closed_count,
         executors=perf.executors,
+        bot_names=perf.bot_names,
+        bot_instances=perf.bot_instances,
+        unresolved_bases=perf.unresolved_bases,
+        controllers=perf.controllers,
+        # Base-lifetime, not window-sliced: the payload counts closes per
+        # controller with no timestamp to slice on. Equal to the session's own
+        # closes whenever the session deployed the bases it owns (the normal
+        # case); a superset when it adopted a base another session had traded.
+        # The UI labels it as the bots' breakdown for exactly that reason.
+        close_type_counts=perf.close_type_counts,
+        fees_known=perf.fees_known,
     )
-    return {"executors": perf.executors, "performance": model.model_dump()}
+    # The equity curve, sliced from the same ownership window as the figures
+    # above. The journal's per-tick snapshots are only what the aggregator
+    # believed at the time, so a session that ran while it was blind to its bots
+    # has a permanently flat record; this is derived and therefore self-correcting.
+    # A bot released mid-window stops the curve where the session stopped owning.
+    released = max((b.until for b in owned if b.until > 0), default=0.0)
+    try:
+        pnl_series = await fetch_agent_pnl_series(
+            client, bot_names or [b.base for b in owned], since, until=released
+        )
+    except Exception as e:
+        log.warning("pnl series for %s failed: %s", agent_id, e)
+        pnl_series = []
+    return {
+        "executors": perf.executors,
+        "performance": model.model_dump(),
+        "pnl_series": pnl_series,
+    }
 
 
 # ── Strategy lifecycle ──
@@ -1460,10 +1733,35 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     """Spawn a TickEngine session for ``strategy`` under ``agent``."""
     from condor.agents.config import load_full_config
     from condor.agents.engine import TickEngine
+    from config_manager import get_config_manager
 
     config_dict = load_full_config(strategy.dir, strategy.default_config)
     if req.config:
         config_dict.update(req.config)
+
+    # ``TickEngine._resolve_server`` trades on ``config["server_name"]`` and the
+    # request body is a free-form dict, so without this gate any authenticated
+    # user could start a live loop on another user's stored credentials — the
+    # same check the config pin and consult/delegate already apply. A name the
+    # body asked for is held to it strictly; an inherited one (strategy default,
+    # or the "local" that AgentConfig fills in) only matters when it resolves to
+    # a real server, since otherwise the engine falls through to the caller's
+    # own accessible servers, which is scoped already.
+    cm = get_config_manager()
+    server_name = config_dict.get("server_name")
+    asked_for_it = bool(req.config and req.config.get("server_name"))
+    if server_name and (asked_for_it or cm.get_server(server_name)):
+        check_server_access(user_id, server_name)
+        # A name the body asked for must also name something. An unknown one
+        # used to be waved through on the reasoning that it borrows no
+        # credentials, but ``has_server_access`` answers True for an admin on
+        # any string, and the loop it starts outlives the check: the engine
+        # would bind to whatever gets created under that name later (SEC-164).
+        # Refused only *after* the access check, so a caller with no access
+        # still gets the same "No access" a real server gives them and this
+        # route never reveals which names exist.
+        if not cm.get_server(server_name):
+            raise HTTPException(status_code=404, detail="Server not found")
 
     if req.trading_context:
         config_dict["trading_context"] = req.trading_context
@@ -1686,6 +1984,63 @@ async def get_journal(
     journal_path = session_dir / "journal.md"
     content = journal_path.read_text() if journal_path.exists() else ""
     return {"content": content}
+
+
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/canvas")
+async def get_session_canvas(
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
+):
+    """The agent's own thesis for this session, plus how it changed.
+
+    The canvas is the only artifact in a session that says *why* — the numbers
+    say what happened, the snapshots say what was called, and neither says what
+    the agent believed. It was written on every tick and read by nothing outside
+    the live report.
+
+    ``sections`` is the current text keyed by section; ``revisions`` is every
+    edit newest first, so a thesis can be read against the tick that changed it.
+    """
+    from condor.agents import canvas as canvas_mod
+
+    strategy = _get_strategy(slug, sslug)
+    session_dir = find_session_dir(strategy.dir, session_num)
+    if not session_dir:
+        raise HTTPException(status_code=404, detail=f"Session {session_num} not found")
+    return {
+        "sections": canvas_mod.read_sections(session_dir),
+        "section_titles": canvas_mod.SECTION_TITLES,
+        "section_order": list(canvas_mod.CANVAS_SECTIONS),
+        "last_revised_tick": canvas_mod.last_revised_tick(session_dir),
+        "revisions": canvas_mod.recent_revisions(session_dir, limit=50),
+    }
+
+
+@router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/report")
+async def get_session_report(
+    slug: str,
+    sslug: str,
+    session_num: int,
+    user: WebUser = Depends(get_current_user),
+):
+    """The live report ``SessionReport`` keeps for this session, if there is one.
+
+    Matched on the ``{run_key}/session_{N}`` source name the report is saved
+    under, which is the only handle tying a report to the session that produced
+    it. Returns ``{"report": null}`` rather than 404 for a session whose loop
+    predates the live report or never ticked — a missing report is a normal
+    state, not an error the caller should have to distinguish.
+    """
+    _get_strategy(slug, sslug)
+    from condor.reports import list_reports
+
+    run_key = _runkey(slug, sslug)
+    source = f"{run_key}/session_{session_num}"
+    reports, _total = list_reports(source_type="routine", search=run_key, limit=100)
+    matched = [r for r in reports if r.get("source_name", "") == source]
+    return {"report": ReportSummary(**matched[0]).model_dump() if matched else None}
 
 
 @router.get("/{slug}/strategies/{sslug}/sessions/{session_num}/snapshots")

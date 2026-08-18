@@ -6,6 +6,7 @@ Manages servers, users, permissions, and settings in a single config.yml file.
 import asyncio
 import logging
 import secrets
+import shutil
 import time
 from enum import Enum
 from pathlib import Path
@@ -38,6 +39,13 @@ PERMISSION_HIERARCHY = {
     ServerPermission.OWNER: 1,
 }
 
+# The user preference that hands a non-admin seat the in-process code runner
+# (SEC-151). It is stored under ``user_preferences[<id>]`` like any other
+# preference, but it is a *capability grant*: only an admin may set it, and
+# ``condor/web/routes/code.py`` reads it as the fallback arm of its gate.
+# Declared here so the gate and the thing that grants it share one spelling.
+CODE_RUN_PREFERENCE = "code_run"
+
 
 class ConfigManager:
     """
@@ -64,6 +72,9 @@ class ConfigManager:
         self._client_locks: Dict[str, asyncio.Lock] = (
             {}
         )  # per-server lock for get_client
+        # True when an existing config file could not be read: the in-memory
+        # state is empty and MUST NOT be written back over the file on disk.
+        self._load_failed = False
         self._load_config()
         self._load_audit_log()
 
@@ -85,54 +96,101 @@ class ConfigManager:
 
         return ADMIN_USER_ID
 
+    @property
+    def _backup_path(self) -> Path:
+        """Path of the rotating backup written before each save."""
+        return self.config_path.with_suffix(self.config_path.suffix + ".bak")
+
+    def _read_config_file(self, path: Path) -> Optional[dict]:
+        """Read and parse a config file. Returns None if unreadable."""
+        try:
+            with open(path, "r") as f:
+                return yaml.safe_load(f) or {}
+        except Exception as e:
+            logger.error(f"Failed to load config from {path}: {e}")
+            return None
+
     def _load_config(self):
-        """Load configuration from YAML file."""
+        """Load configuration from YAML file.
+
+        A read failure is never a write: an existing but unreadable config is
+        left untouched on disk (we fall back to the `.bak`, and otherwise run
+        with empty in-memory state and refuse to save) so it can be recovered
+        by hand.
+        """
         if not self.config_path.exists():
             self._init_default_config()
             return
 
-        try:
-            with open(self.config_path, "r") as f:
-                self._data = yaml.safe_load(f) or {}
+        data = self._read_config_file(self.config_path)
 
-            # Ensure all sections exist
-            self._data.setdefault("servers", {})
-            self._data.setdefault("default_server", None)
-            self._data.setdefault("users", {})
-            self._data.setdefault("server_access", {})
-            self._data.setdefault("chat_defaults", {})
-            self._data.setdefault("user_preferences", {})
-            # Migrate audit_log from config.yml to separate file (one-time)
-            if "audit_log" in self._data:
-                self._audit_log = self._data.pop("audit_log")
-                self._save_audit_log()
-                self._save_config()  # Save config without audit_log
+        if data is None and self._backup_path.exists():
+            logger.warning(
+                f"Config {self.config_path} unreadable, "
+                f"attempting recovery from {self._backup_path}"
+            )
+            data = self._read_config_file(self._backup_path)
+            if data is not None:
+                logger.info("Successfully recovered config from backup")
 
-            # Always trust admin_id from env
-            admin_id = self._get_admin_from_env()
+        if data is None:
+            self._load_failed = True
+            self._data = self._default_data()
+            self._audit_log = []
+            admin_id = self._data.get("admin_id")
             if admin_id:
-                self._data["admin_id"] = admin_id
                 self._ensure_admin_user(admin_id)
+            logger.error(
+                f"Config {self.config_path} is unreadable and no usable backup "
+                f"exists. Running with empty in-memory config and REFUSING to "
+                f"save, so the file is preserved for manual recovery. "
+                f"Fix or remove it and restart."
+            )
+            return
 
-            logger.info(f"Loaded config from {self.config_path}")
-        except Exception as e:
-            logger.error(f"Failed to load config: {e}")
-            self._init_default_config()
+        self._data = data
 
-    def _init_default_config(self):
-        """Initialize with default configuration."""
+        # Ensure all sections exist
+        self._data.setdefault("servers", {})
+        self._data.setdefault("default_server", None)
+        self._data.setdefault("users", {})
+        self._data.setdefault("server_access", {})
+        self._data.setdefault("chat_defaults", {})
+        self._data.setdefault("user_preferences", {})
+        self._data.setdefault("telemetry", {})
+        # Migrate audit_log from config.yml to separate file (one-time)
+        if "audit_log" in self._data:
+            self._audit_log = self._data.pop("audit_log")
+            self._save_audit_log()
+            self._save_config()  # Save config without audit_log
+
+        # Always trust admin_id from env
         admin_id = self._get_admin_from_env()
-        self._data = {
+        if admin_id:
+            self._data["admin_id"] = admin_id
+            self._ensure_admin_user(admin_id)
+
+        logger.info(f"Loaded config from {self.config_path}")
+
+    def _default_data(self) -> dict:
+        """Build an empty config structure."""
+        return {
             "servers": {},
             "default_server": None,
-            "admin_id": admin_id,
+            "admin_id": self._get_admin_from_env(),
             "users": {},
             "server_access": {},
             "chat_defaults": {},
             "user_preferences": {},
+            "telemetry": {},
             "version": self.VERSION,
         }
+
+    def _init_default_config(self):
+        """Initialize with default configuration."""
+        self._data = self._default_data()
         self._audit_log = []
+        admin_id = self._data.get("admin_id")
         if admin_id:
             self._ensure_admin_user(admin_id)
         self._save_config()
@@ -151,6 +209,13 @@ class ConfigManager:
 
     def _save_config(self):
         """Save configuration to YAML file."""
+        if self._load_failed:
+            logger.warning(
+                f"Not saving config: {self.config_path} could not be read at "
+                f"startup and would be overwritten with empty state"
+            )
+            return
+
         try:
             data = {
                 "servers": self._data.get("servers", {}),
@@ -159,9 +224,22 @@ class ConfigManager:
                 "users": self._data.get("users", {}),
                 "server_access": self._data.get("server_access", {}),
                 "chat_defaults": self._data.get("chat_defaults", {}),
+                # Omitting this dropped every preference on the next save —
+                # including the code_run grant, which _load_config reads back
+                # and routes/code.py gates on (ARCH-177).
+                "user_preferences": self._data.get("user_preferences", {}),
                 "web_jwt_secret": self._data.get("web_jwt_secret"),
+                "telemetry": self._data.get("telemetry", {}),
                 "version": self._data.get("version", self.VERSION),
             }
+            # Keep a copy of the last known-good file before truncating it,
+            # so a partial write can be recovered from on the next load.
+            if self.config_path.exists():
+                try:
+                    shutil.copy2(self.config_path, self._backup_path)
+                except OSError as e:
+                    logger.warning(f"Failed to back up config: {e}")
+
             with open(self.config_path, "w") as f:
                 yaml.dump(
                     data,
@@ -458,7 +536,14 @@ class ConfigManager:
             # 3. First accessible server
             return await self.get_client(accessible[0])
 
-        # No user_id - use chat default with proper fallbacks
+        # No user_id — no access list to check against, so the caller's explicit
+        # choice wins over the chat default. This branch used to drop
+        # preferred_server entirely, which meant a routine run (web, MCP or agent)
+        # and any handler that omits user_id ran against the chat default no matter
+        # which server was actually selected.
+        if preferred_server and preferred_server in self._data["servers"]:
+            return await self.get_client(preferred_server)
+
         server_name = self.get_chat_default_server(chat_id)
         if not server_name:
             raise ValueError("No servers configured")
@@ -514,6 +599,27 @@ class ConfigManager:
     # =========================================================================
     # USER MANAGEMENT
     # =========================================================================
+
+    # ── Telemetry (FEAT-023) ──
+    # Consent and the install's random identity live here because this file is
+    # the one durable, process-wide store the MCP subprocess can also read.
+    # Nothing in this section is transmitted except `install_id` and `level`;
+    # `install_secret` never leaves the machine. See PRIVACY.md.
+
+    def get_telemetry(self) -> dict:
+        """The telemetry section. Empty dict on an install that never opted in."""
+        section = self._data.get("telemetry")
+        return dict(section) if isinstance(section, dict) else {}
+
+    def update_telemetry(self, **changes) -> dict:
+        """Merge keys into the telemetry section and persist."""
+        section = self._data.setdefault("telemetry", {})
+        if not isinstance(section, dict):
+            section = {}
+            self._data["telemetry"] = section
+        section.update(changes)
+        self._save_config()
+        return dict(section)
 
     def get_user(self, user_id: int) -> Optional[dict]:
         """Get user record."""
@@ -654,6 +760,46 @@ class ConfigManager:
             self._save_config()
             return True
         return False
+
+    def has_code_run_grant(self, user_id: int) -> bool:
+        """Whether this user carries the explicit ``code_run`` grant.
+
+        Says nothing about admins: being an admin is a separate arm of the gate
+        in ``condor/web/routes/code.py``. This answers only "was the capability
+        handed to them", which is what an admin UI needs to render.
+        """
+        return bool(self.get_user_preference(user_id, CODE_RUN_PREFERENCE, False))
+
+    def set_code_run_grant(self, user_id: int, granted: bool, admin_id: int) -> bool:
+        """Grant or revoke the ``code_run`` capability. Returns True if changed.
+
+        Handing this out is handing out arbitrary Python in the bot's own
+        process — every server's credentials, the web JWT secret, os.environ —
+        so it is audited on both edges like ``approve_user``/``block_user``, and
+        the caller is expected to have already checked ``is_admin(admin_id)``.
+
+        Revoking deletes the key rather than writing ``False``, so config.yml
+        keeps only the users who actually hold the grant. Either way the write
+        lands in config.yml immediately and the next request re-reads it, so a
+        grant takes effect without restarting the bot.
+        """
+        if user_id not in self._data.get("users", {}):
+            return False
+        if self.has_code_run_grant(user_id) == bool(granted):
+            return False
+
+        if granted:
+            self.set_user_preference(user_id, CODE_RUN_PREFERENCE, True)
+        else:
+            self.delete_user_preference(user_id, CODE_RUN_PREFERENCE)
+
+        self._audit(
+            "code_run_granted" if granted else "code_run_revoked",
+            "user",
+            str(user_id),
+            admin_id,
+        )
+        return True
 
     # =========================================================================
     # SERVER ACCESS CONTROL

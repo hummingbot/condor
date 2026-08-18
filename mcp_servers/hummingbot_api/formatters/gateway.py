@@ -1,6 +1,7 @@
 """
 Gateway formatters for the Hummingbot MCP server.
 """
+
 from typing import Any
 
 
@@ -11,8 +12,8 @@ def format_gateway_container_result(result: dict[str, Any]) -> str:
     if result_action == "get_status":
         status = result.get("status", {})
         running = status.get("running", False)
-        container_id = status.get('container_id')
-        created_at = status.get('created_at')
+        container_id = status.get("container_id")
+        created_at = status.get("created_at")
 
         container_id_display = f"{container_id[:12]}..." if container_id else "None"
         created_at_display = created_at[:19] if created_at else "None"
@@ -141,3 +142,73 @@ def format_gateway_clmm_pool_result(action: str, result: dict[str, Any]) -> str:
         )
 
     return f"Gateway CLMM Pool Exploration Result: {result}"
+
+
+def format_amm_result(action: str, result: dict[str, Any]) -> str:
+    """Format manage_amm results into a human-readable string."""
+    # Progressive disclosure: the guide is returned directly.
+    if action is None or result.get("action") is None:
+        return result.get("formatted_output", str(result))
+
+    connector = result.get("connector", "")
+    network = result.get("network", "")
+    payload = result.get("result", {})
+    header = f"AMM {action} [{connector} · {network}]"
+
+    if action == "pool_info" and isinstance(payload, dict):
+        return (
+            f"{header}\n"
+            f"Pool: {payload.get('address')}\n"
+            f"Price: {payload.get('price')} (quote per base)\n"
+            f"Base: {payload.get('base_token_amount')}  Quote: {payload.get('quote_token_amount')}\n"
+            f"Fee: {payload.get('fee_pct')}%"
+        )
+
+    if action == "position_info" and isinstance(payload, dict):
+        positions = payload.get("positions") or []
+        lines = [
+            f"{header}",
+            f"Pool: {payload.get('pool_address')}  Wallet: {payload.get('wallet_address')}",
+            f"Aggregate — LP: {payload.get('lp_token_amount')}  "
+            f"Base: {payload.get('base_token_amount')}  Quote: {payload.get('quote_token_amount')}",
+        ]
+        if positions:
+            lines.append(f"Positions ({len(positions)}):")
+            for p in positions:
+                lines.append(
+                    f"  • {p.get('position_address')} — LP: {p.get('lp_token_amount')}  "
+                    f"Base: {p.get('base_token_amount')}  Quote: {p.get('quote_token_amount')}"
+                )
+        return "\n".join(lines)
+
+    if action == "positions_owned" and isinstance(payload, list):
+        lines = [f"{header} — {len(payload)} pool(s) with positions"]
+        for pi in payload:
+            positions = pi.get("positions") or []
+            lines.append(
+                f"  Pool {pi.get('pool_address')}: {len(positions)} position(s), "
+                f"aggregate base={pi.get('base_token_amount')} quote={pi.get('quote_token_amount')}"
+            )
+            for p in positions:
+                lines.append(
+                    f"    • {p.get('position_address')} — LP: {p.get('lp_token_amount')}  "
+                    f"Base: {p.get('base_token_amount')}  Quote: {p.get('quote_token_amount')}"
+                )
+        return "\n".join(lines)
+
+    if action in ("quote_swap", "quote_liquidity") and isinstance(payload, dict):
+        return f"{header}\n{payload}"
+
+    if action in (
+        "execute_swap",
+        "add_liquidity",
+        "remove_liquidity",
+        "create_pool",
+    ) and isinstance(payload, dict):
+        sig = payload.get("signature")
+        extra = ""
+        if action == "create_pool":
+            extra = f"\nPool: {payload.get('pool_address')}  Seed price: {payload.get('price')}"
+        return f"{header}\nSignature/Tx: {sig}  Status: {payload.get('status')}{extra}"
+
+    return f"{header}\n{payload}"

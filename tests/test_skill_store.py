@@ -43,13 +43,16 @@ def _write_skill(
     references_routine=None,
     shared=False,
 ):
-    """Author a builtin SKILL.md under the right agent home.
+    """Author a builtin SKILL.md under the right library.
 
-    ``shared`` publishes a chat playbook to every agent (FEAT-031); it is the
-    frontmatter flag, so it is only meaningful under ``agents/condor``, which is
-    where a falsy ``agent_slug`` writes (FEAT-033).
+    ``shared`` publishes the playbook to every assistant (FEAT-031). Publication
+    is the DIRECTORY, not a flag: a shared playbook lives in
+    ``agents/_shared/skills`` and ``agent_slug`` is therefore ignored for it.
     """
-    base = root / "agents" / (agent_slug or "condor") / "skills"
+    if shared:
+        base = root / "agents" / "_shared" / "skills"
+    else:
+        base = root / "agents" / (agent_slug or "condor") / "skills"
     d = base / slug
     d.mkdir(parents=True, exist_ok=True)
     fm = [
@@ -60,8 +63,6 @@ def _write_skill(
     ]
     if references_routine:
         fm.append(f"references_routine: {references_routine}")
-    if shared:
-        fm.append("shared: true")
     (d / "SKILL.md").write_text("---\n" + "\n".join(fm) + "\n---\n\n" + body + "\n")
     return d
 
@@ -310,11 +311,11 @@ def test_write_file_rejects_skill_md_and_traversal(project_root):
     assert not (s.skills_dir / "secret.md").exists()
 
 
-# ── inheritance: Condor publishes, agents inherit (FEAT-031) ──
+# ── the shared library: Condor publishes, everyone reads (FEAT-031) ──
 
 
 def test_agent_inherits_a_shared_chat_skill(project_root):
-    """A `shared: true` chat playbook resolves for an agent, flagged inherited."""
+    """A published playbook resolves for an agent, flagged inherited."""
     _write_skill(
         project_root,
         None,
@@ -333,8 +334,9 @@ def test_agent_inherits_a_shared_chat_skill(project_root):
     assert [h["name"] for h in agent.search("cookbook")] == ["routine_cookbook"]
 
 
-def test_unflagged_chat_skill_is_not_found_for_an_agent(project_root):
-    """Unpublished is INVISIBLE, not merely unlisted — no body on request."""
+def test_unpublished_chat_skill_is_not_found_for_an_agent(project_root):
+    """Unpublished is INVISIBLE, not merely unlisted — it is not on any path
+    the agent reads, so there is no body to serve."""
     _write_skill(project_root, None, "agent_builder", when_to_use="build an agent")
     agent = SkillStore("backpack_mm")
 
@@ -344,15 +346,26 @@ def test_unflagged_chat_skill_is_not_found_for_an_agent(project_root):
     assert "error" in agent.read_file("agent_builder", "x.md")
 
 
-def test_chat_inherits_nothing_and_still_reads_its_own(project_root):
-    """The chat IS the publisher: its own dir is the whole truth for it."""
+def test_chat_reads_the_shared_library_as_its_publisher(project_root):
+    """The chat reads shared skills like everyone — but may WRITE them."""
     _write_skill(project_root, None, "published", when_to_use="x", shared=True)
     chat = SkillStore()
 
-    assert chat.inherited_dir is None
-    assert chat.read("published")["name"] == "published"
-    assert "inherited" not in chat.read("published")
+    read = chat.read("published")
+    assert read["shared"] is True
+    # Not `inherited`: the chat can publish, so edit/delete are open to it.
+    assert "inherited" not in read
     assert chat.list_index().count("[published]") == 1  # not listed twice
+    assert chat.edit("published", body="revised")["body"] == "revised"
+
+
+def test_agent_sees_shared_as_both_shared_and_inherited(project_root):
+    """`shared` names the library; `inherited` says you cannot write it."""
+    _write_skill(project_root, None, "published", when_to_use="x", shared=True)
+
+    read = SkillStore("backpack_mm").read("published")
+    assert read["shared"] is True
+    assert read["inherited"] is True
 
 
 def test_local_skill_shadows_the_inherited_one(project_root):
@@ -400,11 +413,15 @@ def test_inherited_companion_file_is_readable(project_root):
 
 
 def test_inherited_companion_read_still_rejects_traversal(project_root):
-    """The traversal guard anchors on the RESOLVED dir, inherited included."""
+    """The traversal guard anchors on the RESOLVED dir, the shared one included."""
     _write_skill(project_root, None, "routine_cookbook", when_to_use="x", shared=True)
-    _write_skill(project_root, None, "agent_builder", when_to_use="private")
-    chat_root = SkillStore().skills_dir
-    (chat_root / "secret.md").write_text("top secret")
+    _write_skill(
+        project_root, None, "agent_builder", when_to_use="private", shared=True
+    )
+    # Plant the bait in the shared root — the dir the agent actually resolves
+    # against — so `../` has something real to reach for.
+    shared_root = SkillStore("backpack_mm").shared_dir
+    (shared_root / "secret.md").write_text("top secret")
 
     agent = SkillStore("backpack_mm")
     for bad in (
@@ -488,6 +505,44 @@ def test_publishing_is_chat_only_and_survives_overwrite(project_root):
     assert SkillStore("backpack_mm").read("local") is None
 
 
+def test_the_shared_library_is_not_an_agent():
+    """`agents/_shared` must never be discovered as an agent.
+
+    The shared library lives under `agents/` for locality, so the whole design
+    rests on the `_` prefix keeping it out of the registry — otherwise it would
+    show up in agent pickers, `list_agents`, and routine ownership.
+    """
+    from condor.agents.agent import AgentStore
+    from condor.memory.paths import shared_skills_root
+
+    assert shared_skills_root().parent.name.startswith("_")
+    store = AgentStore()
+    assert store.get("_shared") is None
+    assert "_shared" not in [a.slug for a in store.list_all()]
+
+
+def test_publishing_moves_the_folder_with_its_companions(project_root):
+    """Publish/unpublish RELOCATES the skill — it never leaves a second copy.
+
+    A stale copy in the chat's own library would shadow the published one and
+    quietly undo the publish, so the move is what makes the directory the whole
+    truth about who can see a playbook.
+    """
+    chat = SkillStore()
+    chat.create("cookbook", "d", "w", "body")
+    chat.write_file("cookbook", "tpl.md", "template")
+    own, shared = chat.skills_dir / "cookbook", chat.shared_dir / "cookbook"
+    assert own.exists() and not shared.exists()
+
+    chat.create("cookbook", "d", "w", "body", shared=True)
+    assert shared.exists() and not own.exists()
+    assert (shared / "tpl.md").read_text() == "template"  # companion travelled
+
+    chat.edit("cookbook", shared=False)
+    assert own.exists() and not shared.exists()
+    assert (own / "tpl.md").read_text() == "template"
+
+
 def test_create_requires_all_fields(project_root):
     err = SkillStore().create("only_name", "", "", "")
     assert "error" in err
@@ -507,14 +562,17 @@ def test_atomic_write_uses_unique_tmp_per_writer(project_root, monkeypatch):
     target = s.skills_dir / "one" / "SKILL.md"
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    orig = Path.write_text
+    # Observed at the rename, not at the write call, so the assertion survives
+    # any change of write mechanism inside condor.fsutil (ARCH-148).
+    import os
 
-    def spy(self, text, *args, **kwargs):
-        if self.name.endswith(".tmp"):
-            seen.append(self.name)
-        return orig(self, text, *args, **kwargs)
+    orig = os.replace
 
-    monkeypatch.setattr(Path, "write_text", spy)
+    def spy(src, dst):
+        seen.append(os.path.basename(src))
+        return orig(src, dst)
+
+    monkeypatch.setattr(os, "replace", spy)
     _atomic_write(target, "a")
     _atomic_write(target, "b")
 

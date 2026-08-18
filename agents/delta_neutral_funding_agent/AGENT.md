@@ -11,6 +11,8 @@ tools:
 - manage_bots
 - manage_routines
 - search_history
+- manage_trading_agent
+- trading_agent_journal_read
 - manage_memory
 - manage_skill
 when_to_consult: When the user asks about delta-neutral funding strategies on HIP-3
@@ -20,7 +22,7 @@ when_to_consult: When the user asks about delta-neutral funding strategies on HI
   funding MM on a configured pair — use delegate so the agent runs the full
   deployment in the background and pings when done.
 server_required: true
-server_name: moneymaker
+server_name: ''
 created_by: 456181693
 created_at: '2026-07-30T00:00:00+00:00'
 ---

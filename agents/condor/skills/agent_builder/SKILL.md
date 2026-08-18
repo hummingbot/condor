@@ -91,6 +91,19 @@ manage_trading_agent(
 > `active_agent_key` and their saved `custom_llm_endpoints` if you need to show or
 > confirm the choice.
 
+> **Leave `server_name` empty.** Same discipline, different field. An empty
+> `server_name` means "follow whichever server the chat is on", which is right for
+> almost every agent — and it is the only value that travels, because an agent is
+> shared, committed, and read on machines whose server list is nothing like the
+> creating operator's. Naming the server you happen to be on **pins** the agent to
+> it: its `mcp-hummingbot` subprocess and every strategy it deploys use that server
+> forever, regardless of the chat, and on anyone else's install it names a server
+> that does not exist. Pass a name **only** when the user explicitly says this agent
+> must always trade on that specific server. It is not a field to fill in helpfully
+> because `server_required: true` sits next to it. The pin can be set or cleared
+> later from the agent's page (the server chip beside its model), so leaving it
+> empty costs nothing.
+
 The **AGENT.md body (`instructions`)** is the brain — write it as the agent's own system
 prompt, kept tight: **who it is** (its domain + what it explicitly does NOT handle),
 **what it knows** (durable domain knowledge), and **how it answers** (lead with the
@@ -127,11 +140,10 @@ as the upgrade, then guide the user through it one routine at a time:
 2. **Create** — hand the writing to a background worker
    (`delegate(action="start", agent="condor", task="...")`); it follows the
    `routine_cookbook` playbook and tests the routine before reporting. Tell it the
-   target agent so it passes the right `strategy_id`. Routines live at
-   the agent level and are shared across consults and any future loop. Pass the **agent
-   slug** as `strategy_id` (it accepts a bare agent slug or `agent_slug.strategy_slug`):
+   target agent so it passes the right `agent`. Routines live at the agent level
+   and are shared across consults and any future loop — pass the **agent slug**:
    ```
-   manage_routines(action="create_routine", strategy_id="<agent_slug>",
+   manage_routines(action="create_routine", agent="<agent_slug>",
                    name="band_scanner", code="<python>")
    ```
 3. **Analyze the output** — run it and read it together; iterate until it's clean and
@@ -152,56 +164,23 @@ Only if the user wants the agent to act autonomously. The agent can already loop
 this step — `start_agent(strategy_id="<agent_slug>")` ticks a default playbook driven by
 its AGENT.md — but that default is deliberately generic. A **strategy** is the specific
 tick playbook the engine runs in a **session**, and it is what you want for anything that
-trades. Make clear the loop does NOT have to trade — define the tick task however the
-user wants:
+trades.
 
-- read routine X's output and **decide whether to trade** (create/stop executors),
-- or just **send a report / notification**,
-- or watch a condition and act only when it's met,
+**How a strategy is authored, dry-run and launched lives in the shared `strategy_builder`
+playbook — read it (`manage_skill(action="read", name="strategy_builder")`) and follow it,
+passing `agent_slug="<agent_slug>"`.** It is the single source of truth, and it is shared
+precisely so an agent can give *itself* a loop without coming back through you. Don't
+restate its mechanics here; your job at this step is only to:
 
-…running at a **frequency the user sets** (`frequency_sec`).
+- decide **with the user** whether a dedicated strategy is warranted at all,
+- make clear the loop does NOT have to trade — it can read routine X's output and decide
+  to trade, send a report, or watch a condition — at a **frequency the user sets**
+  (`frequency_sec`),
+- then run `strategy_builder` for the agent you just created.
 
-If the loop creates executors, BEFORE writing the strategy fetch the schema for every
-executor type it will use — `manage_executors(executor_type="grid_strike")`, etc. — and
-embed the required fields/types directly into the instructions; the tick LLM has no other
-way to learn them. Same for any controller config it manages (`manage_controllers`).
-
-```
-manage_trading_agent(
-    action="create_strategy",
-    agent_slug="<agent_slug>",             # the agent must already exist
-    name="BRL MM",
-    description="…",
-    instructions="<tick system prompt>",
-    # agent_key omitted → inherits the owning agent's model; overridable at launch
-    config={"connector_name": "binance", "frequency_sec": 60,
-            "total_amount_quote": 100, "execution_mode": "loop"}
-)
-```
-
-Strategy instructions (the tick system prompt) MUST include: **Objective**; **Analysis**
-(which routine to call by name and how to read it); **Decision logic** (act / report /
-hold); and — only if it trades — an **Executor config** with the FULL schema (every
-required field, type, range, ordering rule), **Parameter inference** (how to derive
-prices/side/TP from routine output + market data), **Risk rules** (max position, position
-limits, stop behaviour), and **Error recovery** (on a failed create, re-fetch the schema,
-fix, retry once, journal it).
-
-**Dry run before live** (if it trades):
-```
-manage_trading_agent(action="start_agent", strategy_id="<agent_slug.strategy_slug>",
-    config={"execution_mode": "dry_run", "agent_key": "ollama:llama3.1",
-            "trading_context": "Trade BTC-USDT on binance_perpetual",
-            "frequency_sec": 60, "total_amount_quote": 100,
-            "risk_limits": {"max_position_size_quote": 200, "max_open_executors": 3}})
-```
-Review with `trading_agent_journal_read(agent_id=…, section="run:1")`: routines called
-right, decision logic sound, conditional language ("would place…"), no real create/stop
-calls, risk rules respected. Don't go live until the user is satisfied.
-
-**Go live:** offer `run_once` (single live tick), `loop` (continuous), or `loop` +
-`max_ticks`. Confirm the live model, start, confirm it's running, give monitoring
-commands. Always include risk limits when a loop agent can trade.
+If the agent is capable enough to author its own loop, prefer handing it the job:
+`consult(agent="<agent_slug>", task="give yourself a loop that …")`. It reads the same
+shared playbook and knows its own domain better than you do.
 
 ## Monitoring existing agents
 1. `manage_trading_agent(action="list_agent_definitions")` — all agents, with their
@@ -282,6 +261,9 @@ it into a questionnaire — it's the easiest thing to change later.
 enforced on pydantic-ai consults and loops (empty = unrestricted; not enforceable on ACP
 keys). An agent keeps its own domain memory (`manage_memory`) and reusable playbooks
 (`manage_skill`/`agents/{slug}/skills/`) — the agent OWNS skills; it is not itself a skill.
+A new agent also reads the **shared** library (`agents/_shared/skills/`) from birth, so it
+gets `routine_cookbook` and friends for free — write only what is specific to its domain,
+and target it explicitly with `manage_skill(..., agent="<slug>")`.
 
 **Editing & deleting:** read the current brain with `get_agent(agent_slug=…)`, edit with
 `update_agent(agent_slug=…, instructions=…)`. `delete_agent` refuses while the agent still
@@ -294,6 +276,10 @@ owns strategies — delete those first (`delete_strategy`).
   else.
 - Only the step label as a header. Be direct; status as key: value.
 - Every agent is consultable (always set `when_to_consult`).
+- **Never invent an `agent_key` or a `server_name`.** Both default to "follow the
+  operator" — pass either one only when the user named it. A guessed model or a
+  helpfully-filled server pin fails on someone else's install, long after creation
+  reported success.
 - Create the AGENT.md FIRST — routines and strategies require an existing agent_slug.
 - One routine per analysis task; run it and show the output before moving on.
 - A loop doesn't have to trade — it can report or watch. Always include risk limits when

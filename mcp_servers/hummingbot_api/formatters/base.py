@@ -6,6 +6,7 @@ percentages, and currency values used throughout the application.
 It also includes field accessor utilities for safely extracting values
 from dictionaries with fallback support.
 """
+
 from datetime import datetime, timezone
 from typing import Any
 
@@ -75,7 +76,7 @@ def format_timestamp(ts: Any, format_str: str = "%m/%d %H:%M") -> str:
             dt = datetime.fromtimestamp(timestamp, tz=timezone.utc)
         else:
             # Try parsing ISO format string
-            dt = datetime.fromisoformat(str(ts).replace('Z', '+00:00'))
+            dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
             # Convert to UTC if timezone-aware
             if dt.tzinfo is not None:
                 dt = dt.astimezone(timezone.utc)
@@ -190,7 +191,7 @@ def truncate_string(text: str, max_len: int = 80, suffix: str = "...") -> str:
     """
     if len(text) <= max_len:
         return text
-    return text[:max_len - len(suffix)] + suffix
+    return text[: max_len - len(suffix)] + suffix
 
 
 def truncate_address(address: str, prefix_len: int = 8, suffix_len: int = 6) -> str:
@@ -286,10 +287,7 @@ def get_timestamp_field(item: dict[str, Any], *keys: str) -> str:
 
 
 def get_truncated(
-    item: dict[str, Any],
-    key: str,
-    max_len: int,
-    default: str = "N/A"
+    item: dict[str, Any], key: str, max_len: int, default: str = "N/A"
 ) -> str:
     """
     Get a string field and truncate it to a maximum length.
@@ -320,7 +318,7 @@ def get_formatted_number(
     *keys: str,
     decimals: int = 2,
     compact: bool = True,
-    default: str = "N/A"
+    default: str = "N/A",
 ) -> str:
     """
     Get a numeric field and format it.
@@ -351,7 +349,7 @@ def get_formatted_currency(
     *keys: str,
     symbol: str = "$",
     decimals: int = 2,
-    default: str = "N/A"
+    default: str = "N/A",
 ) -> str:
     """
     Get a numeric field and format it as currency.
@@ -377,10 +375,7 @@ def get_formatted_currency(
 
 
 def get_formatted_percentage(
-    item: dict[str, Any],
-    *keys: str,
-    decimals: int = 2,
-    default: str = "N/A"
+    item: dict[str, Any], *keys: str, decimals: int = 2, default: str = "N/A"
 ) -> str:
     """
     Get a decimal field and format it as percentage.

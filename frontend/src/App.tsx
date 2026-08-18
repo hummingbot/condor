@@ -11,6 +11,8 @@ import { Agents } from "@/pages/Agents";
 import { BotDetail } from "@/pages/BotDetail";
 import { Bots } from "@/pages/Bots";
 import { CreateExecutor } from "@/pages/CreateExecutor";
+import { Dex } from "@/pages/Dex";
+import { DexPool } from "@/pages/DexPool";
 import { Executors } from "@/pages/Executors";
 import { Login } from "@/pages/Login";
 import { Portfolio } from "@/pages/Portfolio";
@@ -66,10 +68,13 @@ export default function App() {
                   </ProtectedRoute>
                 }
               >
-                <Route path="/" element={<Portfolio />} />
+                <Route path="/" element={<Agents />} />
+                <Route path="/portfolio" element={<Portfolio />} />
                 <Route path="/bots" element={<Bots />} />
                 <Route path="/bots/:id" element={<BotDetail />} />
                 <Route path="/trade" element={<CreateExecutor />} />
+            <Route path="/dex" element={<Dex />} />
+            <Route path="/dex/:network/:address" element={<DexPool />} />
                 <Route path="/executors" element={<Executors />} />
                 <Route path="/executors/new" element={<Navigate to="/trade" replace />} />
                 <Route path="/executors/new-grid" element={<Navigate to="/trade?type=grid" replace />} />
@@ -77,7 +82,7 @@ export default function App() {
                 <Route path="/archived" element={<Navigate to="/bots?tab=archived" replace />} />
                 <Route path="/routines" element={<Routines />} />
                 <Route path="/reports" element={<Navigate to="/routines?tab=reports" replace />} />
-                <Route path="/agents" element={<Agents />} />
+                <Route path="/agents" element={<Navigate to="/" replace />} />
                 <Route path="/agents/:slug" element={<AgentDetail />} />
                 <Route path="/agents/:slug/strategies/:sslug" element={<StrategyDetail />} />
                 <Route path="/settings" element={<Settings />} />

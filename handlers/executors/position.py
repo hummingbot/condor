@@ -16,10 +16,7 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import BadRequest
 from telegram.ext import ContextTypes
 
-from handlers.bots._shared import (
-    fetch_current_price,
-    get_available_cex_connectors,
-)
+from handlers.bots._shared import fetch_current_price, get_available_cex_connectors
 from handlers.cex._shared import (
     get_cex_balances,
     get_correct_pair_format,
@@ -33,6 +30,7 @@ from ._shared import (
     SIDE_SHORT,
     clear_executors_state,
     create_executor,
+    describe_executor_error,
     get_executor_config,
     get_executors_client,
     init_new_executor_config,
@@ -45,8 +43,12 @@ logger = logging.getLogger(__name__)
 
 # Order type mapping
 ORDER_TYPE_MAP = {
-    "MARKET": 1, "LIMIT": 2, "LIMIT_MAKER": 3,
-    "1": 1, "2": 2, "3": 3,
+    "MARKET": 1,
+    "LIMIT": 2,
+    "LIMIT_MAKER": 3,
+    "1": 1,
+    "2": 2,
+    "3": 3,
 }
 ORDER_TYPE_LABELS = {1: "MARKET", 2: "LIMIT", 3: "LIMIT_MAKER"}
 
@@ -81,7 +83,9 @@ def _is_perpetual(connector: str) -> bool:
     return "_perpetual" in connector.lower()
 
 
-def _format_config_block(config: Dict[str, Any], current_price: Optional[float] = None) -> str:
+def _format_config_block(
+    config: Dict[str, Any], current_price: Optional[float] = None
+) -> str:
     """Format config as key=value block for display inside a code block."""
     side = normalize_side(config.get("side", SIDE_LONG))
     side_label = "LONG" if side == SIDE_LONG else "SHORT"
@@ -212,33 +216,43 @@ def _build_step_2_text(
     return "\n".join(lines)
 
 
-def _build_step_2_keyboard(current_price: Optional[float] = None) -> InlineKeyboardMarkup:
+def _build_step_2_keyboard(
+    current_price: Optional[float] = None,
+) -> InlineKeyboardMarkup:
     """Build the keyboard for step 2."""
     keyboard = []
 
     # Entry price quick-pick buttons
     if current_price and current_price > 0:
-        keyboard.append([
-            InlineKeyboardButton("📊 Market", callback_data="executors:pos_entry:market"),
-            InlineKeyboardButton(
-                f"📊 Current ({current_price:,.6g})",
-                callback_data="executors:pos_entry:current",
-            ),
-        ])
-        keyboard.append([
-            InlineKeyboardButton("-2%", callback_data="executors:pos_entry:-2"),
-            InlineKeyboardButton("-1%", callback_data="executors:pos_entry:-1"),
-            InlineKeyboardButton("+1%", callback_data="executors:pos_entry:+1"),
-            InlineKeyboardButton("+2%", callback_data="executors:pos_entry:+2"),
-        ])
+        keyboard.append(
+            [
+                InlineKeyboardButton(
+                    "📊 Market", callback_data="executors:pos_entry:market"
+                ),
+                InlineKeyboardButton(
+                    f"📊 Current ({current_price:,.6g})",
+                    callback_data="executors:pos_entry:current",
+                ),
+            ]
+        )
+        keyboard.append(
+            [
+                InlineKeyboardButton("-2%", callback_data="executors:pos_entry:-2"),
+                InlineKeyboardButton("-1%", callback_data="executors:pos_entry:-1"),
+                InlineKeyboardButton("+1%", callback_data="executors:pos_entry:+1"),
+                InlineKeyboardButton("+2%", callback_data="executors:pos_entry:+2"),
+            ]
+        )
 
     keyboard.append(
         [InlineKeyboardButton("🚀 Deploy", callback_data="executors:pos_deploy")]
     )
-    keyboard.append([
-        InlineKeyboardButton("⬅️ Back", callback_data="executors:create_position"),
-        InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-    ])
+    keyboard.append(
+        [
+            InlineKeyboardButton("⬅️ Back", callback_data="executors:create_position"),
+            InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
+        ]
+    )
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -426,26 +440,35 @@ async def handle_pair_input(
             context.user_data, client, connector, pair
         )
 
-        if not is_valid:
-            await _show_pair_suggestions(
-                update, context, pair, error_msg, suggestions, connector
-            )
-            return
-
-        # Use the correct pair format returned by validation
-        if correct_pair:
-            pair = correct_pair
-        else:
+        if is_valid and not correct_pair:
             # Fallback: Get correctly formatted pair from trading rules
             trading_rules = await get_trading_rules(
                 context.user_data, client, connector
             )
-            fallback_pair = get_correct_pair_format(trading_rules, pair)
-            if fallback_pair:
-                pair = fallback_pair
+            correct_pair = get_correct_pair_format(trading_rules, pair)
 
     except Exception as e:
-        logger.warning(f"Could not validate trading pair: {e}")
+        # Fail closed: anything that breaks around the validator leaves the pair
+        # unvalidated, so it must not reach the config. The user gets the same
+        # surface as an explicitly invalid pair.
+        logger.warning(f"Could not validate trading pair '{pair}' on {connector}: {e}")
+        is_valid = False
+        error_msg = (
+            f"Could not reach {connector} to validate the pair. "
+            "Try again in a moment."
+        )
+        suggestions = []
+        correct_pair = None
+
+    if not is_valid:
+        await _show_pair_suggestions(
+            update, context, pair, error_msg, suggestions, connector
+        )
+        return
+
+    # Use the correct pair format resolved during validation
+    if correct_pair:
+        pair = correct_pair
 
     config["trading_pair"] = pair
     set_executor_config(context, config)
@@ -736,7 +759,12 @@ async def handle_config_input(
             continue
 
         # Handle order type fields: accept MARKET/LIMIT/LIMIT_MAKER or 1/2/3
-        if key in ("open_order_type", "take_profit_order_type", "stop_loss_order_type", "time_limit_order_type"):
+        if key in (
+            "open_order_type",
+            "take_profit_order_type",
+            "stop_loss_order_type",
+            "time_limit_order_type",
+        ):
             mapped = ORDER_TYPE_MAP.get(value.upper())
             if mapped:
                 updates[key] = mapped
@@ -843,7 +871,8 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 set_executor_config(context, config)
             else:
                 await query.answer(
-                    "Could not fetch price to convert total_amount_quote", show_alert=True
+                    "Could not fetch price to convert total_amount_quote",
+                    show_alert=True,
                 )
                 return
         except Exception as e:
@@ -935,88 +964,63 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         invalidate_cache(context.user_data, "all")
         context.user_data.pop("running_executors", None)
 
-        is_success = (
-            result.get("status") == "success"
-            or "created" in str(result).lower()
-            or result.get("executor_id") is not None
-            or result.get("id") is not None
+        # create_executor raises on failure, so reaching here *is* the success
+        # signal — see the same note in grid.py.
+        executor_id = "unknown"
+        if isinstance(result, dict):
+            executor_id = result.get("executor_id") or result.get("id") or "unknown"
+
+        # Save deployed pair and last-used config to user preferences
+        from handlers.config.user_preferences import (
+            add_executor_deployed_pair,
+            set_executor_last_config,
         )
 
-        if is_success:
-            executor_id = result.get("executor_id", result.get("id", "unknown"))
+        deployed_pair = config.get("trading_pair", "")
+        if deployed_pair:
+            add_executor_deployed_pair(context.user_data, deployed_pair)
 
-            # Save deployed pair and last-used config to user preferences
-            from handlers.config.user_preferences import (
-                add_executor_deployed_pair,
-                set_executor_last_config,
-            )
+        # Save config params so next position wizard starts with these values
+        set_executor_last_config(context.user_data, "position", config)
 
-            deployed_pair = config.get("trading_pair", "")
-            if deployed_pair:
-                add_executor_deployed_pair(context.user_data, deployed_pair)
-
-            # Save config params so next position wizard starts with these values
-            set_executor_last_config(context.user_data, "position", config)
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "📋 View Executors", callback_data="executors:menu"
-                    ),
-                    InlineKeyboardButton("❌ Close", callback_data="executors:close"),
-                ]
+        keyboard = [
+            [
+                InlineKeyboardButton(
+                    "📋 View Executors", callback_data="executors:menu"
+                ),
+                InlineKeyboardButton("❌ Close", callback_data="executors:close"),
             ]
+        ]
 
-            pair_display = config.get("trading_pair", "")
-            side_val = normalize_side(config.get("side", SIDE_LONG))
-            side_emoji = "🟢" if side_val == SIDE_LONG else "🔴"
-            side_label = "LONG" if side_val == SIDE_LONG else "SHORT"
-            leverage = config.get("leverage", 1)
+        pair_display = config.get("trading_pair", "")
+        side_val = normalize_side(config.get("side", SIDE_LONG))
+        side_emoji = "🟢" if side_val == SIDE_LONG else "🔴"
+        side_label = "LONG" if side_val == SIDE_LONG else "SHORT"
+        leverage = config.get("leverage", 1)
 
-            # Build amount display with notional
-            amount_str = f"{amount:.6g}"
-            if total_quote > 0:
-                amount_str += f" (~${total_quote:.2f})"
+        # Build amount display with notional
+        amount_str = f"{amount:.6g}"
+        if total_quote > 0:
+            amount_str += f" (~${total_quote:.2f})"
 
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=loading_msg_id,
-                text=f"✅ *Position Executor Deployed*\n"
-                f"─────────────────────────\n\n"
-                f"{side_emoji} *{escape_markdown_v2(pair_display)}* \\| {escape_markdown_v2(side_label)} {leverage}x\n"
-                f"💰 Amount: `{escape_markdown_v2(amount_str)}`\n"
-                f"🆔 `{escape_markdown_v2(str(executor_id)[:30])}`\n\n"
-                f"_The executor is now running\\._",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=loading_msg_id,
+            text=f"✅ *Position Executor Deployed*\n"
+            f"─────────────────────────\n\n"
+            f"{side_emoji} *{escape_markdown_v2(pair_display)}* \\| {escape_markdown_v2(side_label)} {leverage}x\n"
+            f"💰 Amount: `{escape_markdown_v2(amount_str)}`\n"
+            f"🆔 `{escape_markdown_v2(str(executor_id)[:30])}`\n\n"
+            f"_The executor is now running\\._",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
-            clear_executors_state(context)
-
-        else:
-            error_msg = result.get("message", result.get("error", str(result)))
-
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "🔄 Try Again", callback_data="executors:pos_step2"
-                    ),
-                    InlineKeyboardButton("❌ Cancel", callback_data="executors:menu"),
-                ]
-            ]
-
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=loading_msg_id,
-                text=f"❌ *Deploy Failed*\n"
-                f"─────────────────────────\n\n"
-                f"{escape_markdown_v2(str(error_msg)[:300])}",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
+        clear_executors_state(context)
 
     except Exception as e:
         logger.error(f"Error deploying position executor: {e}", exc_info=True)
+        _, error_msg = describe_executor_error(e)
 
         keyboard = [
             [
@@ -1031,7 +1035,7 @@ async def handle_deploy(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=loading_msg_id,
-                text=f"*❌ Error*\n\n{escape_markdown_v2(str(e)[:300])}",
+                text=format_error_message(f"Deploy failed: {error_msg[:300]}"),
                 parse_mode="MarkdownV2",
                 reply_markup=InlineKeyboardMarkup(keyboard),
             )

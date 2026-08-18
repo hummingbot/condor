@@ -25,6 +25,13 @@ export function useCandleStore(
   connector: string,
   pair: string,
   interval: string,
+  /**
+   * Pin the stream to one DEX pool. A gateway pair like `SOL-USDC` exists in
+   * dozens of pools, and without this the backend charts whichever one it judges
+   * deepest — which is exactly the guess the DEX page exists to overturn. Omitted
+   * (every CLOB chart) the channel keeps its five segments, byte for byte.
+   */
+  poolAddress?: string,
 ): {
   candles: CandleData[];
   isStale: boolean;
@@ -32,7 +39,8 @@ export function useCandleStore(
   setDuration: (seconds: number) => void;
 } {
   const key = server
-    ? `candles:${server}:${connector}:${pair}:${interval}`
+    ? `candles:${server}:${connector}:${pair}:${interval}` +
+      (poolAddress ? `:${poolAddress}` : "")
     : "";
 
   const [candles, setCandles] = useState<CandleData[]>([]);

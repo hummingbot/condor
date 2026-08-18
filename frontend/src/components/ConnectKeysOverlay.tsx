@@ -19,10 +19,11 @@ export function ConnectKeysOverlay() {
 
           {/* Copy */}
           <h2 className="mb-2 text-xl font-bold text-[var(--color-text)]">
-            Connect Your Exchange
+            Connect an Exchange or Wallet
           </h2>
           <p className="mb-6 max-w-xs text-sm leading-relaxed text-[var(--color-text-muted)]">
-            Add your exchange API keys to unlock portfolio tracking, trading, and bot management.
+            Add exchange API keys or a DEX wallet to unlock portfolio tracking, trading, and bot
+            management.
           </p>
 
           {/* CTA */}
@@ -30,7 +31,7 @@ export function ConnectKeysOverlay() {
             onClick={() => navigate("/settings?tab=keys")}
             className="flex items-center gap-2 rounded-lg bg-[var(--color-primary)] px-6 py-2.5 text-sm font-semibold text-white transition-all hover:bg-[var(--color-primary-hover)] hover:shadow-lg hover:shadow-[var(--color-primary)]/20 active:scale-[0.98]"
           >
-            Connect API Keys
+            Connect Keys &amp; Wallets
             <ArrowRight className="h-4 w-4" />
           </button>
 

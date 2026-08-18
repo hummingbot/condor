@@ -128,6 +128,10 @@ export function InstanceCard({ instance }: { instance: import("@/lib/api").Runni
           <span className="text-[var(--color-text-muted)]">frequency</span>
           <span className="text-[var(--color-text)]">{instance.frequency_sec}s</span>
         </div>
+        <div className="flex justify-between">
+          <span className="text-[var(--color-text-muted)]">tick timeout</span>
+          <span className="text-[var(--color-text)]">{instance.tick_timeout_sec}s</span>
+        </div>
         {Object.entries(riskLimits).map(([k, v]) => {
           // These are risk LIMITS (max_*), not current values — keep the "max"
           // so e.g. "open executors: 10" isn't misread as 10 executors open now.
@@ -177,10 +181,20 @@ export function PerformancePanel({
   const openPos = Number(totals.open_positions ?? 0);
   const pnlColor = totalPnl >= 0 ? "text-[var(--color-green)]" : "text-[var(--color-red)]";
 
-  const closed = sessions.reduce((s, x) => s + x.closed_count, 0);
-  const wins = sessions.reduce((s, x) => s + Math.round(x.win_rate * x.closed_count), 0);
-  const winRate = closed > 0 ? (wins / closed) * 100 : 0;
+  // Only sessions whose closes carry an outcome can be averaged. A bot-mode
+  // session reports its closes with win_rate === null (the controller snapshot
+  // says how many positions closed, not how they ended); counting those closes
+  // in the denominator would read every one of them as a loss.
+  const rated = sessions.filter((x) => x.win_rate != null);
+  const closed = rated.reduce((s, x) => s + x.closed_count, 0);
+  const wins = rated.reduce((s, x) => s + Math.round((x.win_rate as number) * x.closed_count), 0);
+  const winRate = closed > 0 ? (wins / closed) * 100 : null;
   const trades = sessions.reduce((s, x) => s + x.trade_count, 0);
+
+  // A backend that reports no cumulative fee column leaves bot-mode fees
+  // derivable only from open positions, so a flat bot sums to $0.00 — which is
+  // "not reported", not "traded for free". One unknown makes the total a floor.
+  const feesKnown = sessions.every((x) => x.fees_known !== false);
 
   // PnL chart data from session-level performance
   const pnlData = useMemo(() => sessionsToDataPoints(sessions), [sessions]);
@@ -215,15 +229,25 @@ export function PerformancePanel({
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Fees</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">{formatCurrency(fees)}</span>
+            <span className="text-lg font-mono text-[var(--color-text)]" title={feesKnown ? undefined : "Not reported by this backend"}>
+              {feesKnown ? formatCurrency(fees) : "—"}
+            </span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Win Rate</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">{winRate.toFixed(0)}%</span>
+            <span className="text-lg font-mono text-[var(--color-text)]">
+              {winRate === null ? "—" : `${winRate.toFixed(0)}%`}
+            </span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Trades</span>
-            <span className="text-lg font-mono text-[var(--color-text)]">{trades}</span>
+            {/* Only round-trip closes count, which reads a directional
+                controller's risk stop as churn. Rendering "0" beside real volume
+                asserts something the volume contradicts — say "unknown" instead
+                and let the session view show the close-type breakdown. */}
+            <span className="text-lg font-mono text-[var(--color-text)]" title={trades === 0 && volume > 0 ? "No round-trip closes recorded — open the session for the close-type breakdown" : undefined}>
+              {trades === 0 && volume > 0 ? "—" : trades}
+            </span>
           </div>
           <div>
             <span className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">Open</span>
@@ -302,7 +326,9 @@ export function PerformancePanel({
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">
                           {formatCurrencyVolume(s.volume)}
                         </td>
-                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.trade_count}</td>
+                        <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">
+                          {s.trade_count === 0 && s.volume > 0 ? "—" : s.trade_count}
+                        </td>
                         <td className="px-2 py-1.5 text-right text-[var(--color-text-muted)]">{s.open_count}</td>
                         {onSessionClick && (
                           <td className="px-2 py-1.5 text-[var(--color-text-muted)]">

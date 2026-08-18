@@ -40,6 +40,11 @@ export function StartSessionDialog({
   const [serverName, setServerName] = useState((agentConfig.server_name as string) || "");
   const [totalAmountQuote, setTotalAmountQuote] = useState(String(agentConfig.total_amount_quote ?? 100));
   const [frequencySec, setFrequencySec] = useState(String(agentConfig.frequency_sec ?? 60));
+  // 0 in the config means "use the backend default" (10 min); show the resolved
+  // number so the field never reads as an unlimited budget.
+  const [tickTimeoutSec, setTickTimeoutSec] = useState(
+    String(Number(agentConfig.tick_timeout_sec) || 600),
+  );
   const [maxPositionSize, setMaxPositionSize] = useState(String(riskDefaults.max_position_size_quote ?? 500));
   const [maxOpenExecutors, setMaxOpenExecutors] = useState(String(riskDefaults.max_open_executors ?? 5));
   const [maxDrawdown, setMaxDrawdown] = useState(String(riskDefaults.max_drawdown_pct ?? -1));
@@ -56,6 +61,7 @@ export function StartSessionDialog({
         server_name: serverName,
         total_amount_quote: Number(totalAmountQuote) || 100,
         frequency_sec: Number(frequencySec) || 60,
+        tick_timeout_sec: Number(tickTimeoutSec) || 600,
         execution_mode: executionMode,
         risk_limits: {
           max_position_size_quote: Number(maxPositionSize) || 500,
@@ -160,8 +166,8 @@ export function StartSessionDialog({
             </select>
           </div>
 
-          {/* Budget + Frequency row */}
-          <div className={`grid gap-4 ${executionMode === "loop" ? "grid-cols-2" : "grid-cols-1"}`}>
+          {/* Budget + Frequency + Tick timeout row */}
+          <div className={`grid gap-4 ${executionMode === "loop" ? "grid-cols-3" : "grid-cols-2"}`}>
             <div>
               <label className={labelClass}>
                 Total Amount Quote
@@ -190,6 +196,20 @@ export function StartSessionDialog({
                 />
               </div>
             )}
+            <div>
+              <label className={labelClass} title="Wall-clock budget for one tick's agent session">
+                <Clock className="h-3.5 w-3.5" />
+                Tick Timeout (sec)
+              </label>
+              <input
+                type="number"
+                min={30}
+                step={30}
+                value={tickTimeoutSec}
+                onChange={(e) => setTickTimeoutSec(e.target.value)}
+                className={inputClass}
+              />
+            </div>
           </div>
 
           {/* Risk Limits */}

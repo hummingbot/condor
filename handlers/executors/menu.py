@@ -19,6 +19,7 @@ from utils.telegram_formatters import escape_markdown_v2, format_error_message
 from ._shared import (
     SIDE_LONG,
     clear_executors_state,
+    describe_executor_error,
     format_executor_pnl,
     format_executor_status_line,
     get_executor_fees,
@@ -283,8 +284,7 @@ async def show_history(
         # so fetch without status filter and exclude running ones.
         result = await search_running_executors(client, status=None, limit=100)
         history = [
-            ex for ex in result
-            if str(ex.get("status", "")).upper() != "RUNNING"
+            ex for ex in result if str(ex.get("status", "")).upper() != "RUNNING"
         ]
 
         # Sort by timestamp descending (most recent first)
@@ -469,7 +469,9 @@ async def show_history_detail(
     context.user_data["current_executor_id"] = full_id
 
     # Reuse the detail rendering
-    await _render_executor_detail(update, context, executor, back_callback="executors:history")
+    await _render_executor_detail(
+        update, context, executor, back_callback="executors:history"
+    )
 
 
 # ============================================
@@ -525,7 +527,9 @@ async def show_executor_detail(
         context.user_data["current_executor"] = executor
         context.user_data["current_executor_id"] = full_id
 
-        await _render_executor_detail(update, context, executor, back_callback="executors:menu")
+        await _render_executor_detail(
+            update, context, executor, back_callback="executors:menu"
+        )
 
     except Exception as e:
         logger.error(f"Error showing executor detail: {e}", exc_info=True)
@@ -601,9 +605,9 @@ async def _render_executor_detail(
         take_profit = config.get("take_profit", 0) or tbc.get("take_profit", 0)
         time_limit = config.get("time_limit", 0) or tbc.get("time_limit", 0)
         trailing_cfg = tbc.get("trailing_stop") or {}
-        trailing_act = config.get(
-            "trailing_stop_activation", 0
-        ) or trailing_cfg.get("activation_price", 0)
+        trailing_act = config.get("trailing_stop_activation", 0) or trailing_cfg.get(
+            "activation_price", 0
+        )
         trailing_delta = config.get("trailing_stop_delta", 0) or trailing_cfg.get(
             "trailing_delta", 0
         )
@@ -677,8 +681,12 @@ async def _render_executor_detail(
             mid_price = (start_price + end_price) / 2
             grid_range = (end_price - start_price) / start_price
             min_step = max(min_spread, 0)
-            max_levels_by_amount = int(amount / min_order_quote) if min_order_quote else 1
-            max_levels_by_step = int(grid_range / min_step) if min_step > 0 else max_levels_by_amount
+            max_levels_by_amount = (
+                int(amount / min_order_quote) if min_order_quote else 1
+            )
+            max_levels_by_step = (
+                int(grid_range / min_step) if min_step > 0 else max_levels_by_amount
+            )
             n_levels = max(1, min(max_levels_by_amount, max_levels_by_step))
             amount_per_level = amount / n_levels
             step = grid_range / max(n_levels - 1, 1)
@@ -686,10 +694,16 @@ async def _render_executor_detail(
 
             lines.append("")
             lines.append(f"📏 *Grid Metrics*")
-            lines.append(f"  Levels: `{n_levels}` \\| Step: `{escape_markdown_v2(f'{step:.4%}')}`")
-            lines.append(f"  Per Level: `${escape_markdown_v2(f'{amount_per_level:,.2f}')}`")
+            lines.append(
+                f"  Levels: `{n_levels}` \\| Step: `{escape_markdown_v2(f'{step:.4%}')}`"
+            )
+            lines.append(
+                f"  Per Level: `${escape_markdown_v2(f'{amount_per_level:,.2f}')}`"
+            )
             if coerce_tp and eff_tp != take_profit:
-                lines.append(f"  Eff\\. TP: `{escape_markdown_v2(f'{eff_tp:.4%}')}` \\(coerced to step\\)")
+                lines.append(
+                    f"  Eff\\. TP: `{escape_markdown_v2(f'{eff_tp:.4%}')}` \\(coerced to step\\)"
+                )
 
     lines.append("")
     lines.append(f"📊 *Performance*")
@@ -723,6 +737,7 @@ async def _render_executor_detail(
     # Created timestamp
     if created_at:
         from datetime import datetime, timezone
+
         try:
             dt = datetime.fromtimestamp(created_at, tz=timezone.utc)
             created_str = dt.strftime("%m/%d %H:%M UTC")
@@ -876,69 +891,56 @@ async def handle_confirm_stop_executor(
                     ):
                         full_id = ex_id
                         break
-        result = await stop_executor(client, full_id, keep_position=False)
+        try:
+            await stop_executor(client, full_id, keep_position=False)
+        finally:
+            # Either way the cached view is stale: a stop that failed to answer
+            # may still have gone through upstream.
+            # Invalidate selectively - preserve menu cache for better UX
+            invalidate_cache(context.user_data, "all")
+            context.user_data.pop("current_executor", None)
 
-        # Invalidate cache selectively - preserve menu cache for better UX
-        invalidate_cache(context.user_data, "all")
-        context.user_data.pop("current_executor", None)
-        # Only clear running_executors if successful stop
-        if (
-            result.get("status") in ("success", "stopping", "stopped")
-            or "stop" in str(result).lower()
-        ):
-            context.user_data.pop("running_executors", None)
+        # stop_executor raises on failure, so reaching here is a confirmed stop
+        # — it used to be inferred from "stop" appearing anywhere in the
+        # response, which the *error* text "may have already stopped" matched.
+        context.user_data.pop("running_executors", None)
 
-        if (
-            result.get("status") in ("success", "stopping", "stopped")
-            or "stop" in str(result).lower()
-        ):
-            keyboard = [
-                [
-                    InlineKeyboardButton(
-                        "📋 Back to List", callback_data="executors:menu"
-                    )
-                ]
-            ]
-            await query.message.edit_text(
-                f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
-        else:
-            error_msg = result.get("message", str(result))
-
-            # If executor not found, it might have already stopped - offer to refresh list
-            if "not found" in error_msg.lower():
-                keyboard = [
-                    [
-                        InlineKeyboardButton(
-                            "🔄 Refresh List", callback_data="executors:menu"
-                        ),
-                        InlineKeyboardButton(
-                            "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
-                        ),
-                    ]
-                ]
-            else:
-                keyboard = [
-                    [
-                        InlineKeyboardButton(
-                            "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
-                        )
-                    ]
-                ]
-
-            await query.message.edit_text(
-                f"❌ *Stop Failed*\n\n{escape_markdown_v2(error_msg[:200])}",
-                parse_mode="MarkdownV2",
-                reply_markup=InlineKeyboardMarkup(keyboard),
-            )
+        keyboard = [
+            [InlineKeyboardButton("📋 Back to List", callback_data="executors:menu")]
+        ]
+        await query.message.edit_text(
+            f"✅ *Executor Stopped*\n\n🆔 `{escape_markdown_v2(full_id[:30])}`",
+            parse_mode="MarkdownV2",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
 
     except Exception as e:
         logger.error(f"Error stopping executor: {e}", exc_info=True)
-        keyboard = [[InlineKeyboardButton("Back", callback_data="executors:menu")]]
+        status, error_msg = describe_executor_error(e)
+
+        # A 404 means it is already gone - offer the refresh that reconciles the list
+        if status == 404:
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "🔄 Refresh List", callback_data="executors:menu"
+                    ),
+                    InlineKeyboardButton(
+                        "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
+                    ),
+                ]
+            ]
+        else:
+            keyboard = [
+                [
+                    InlineKeyboardButton(
+                        "⬅️ Back", callback_data=f"executors:detail:{executor_id}"
+                    )
+                ]
+            ]
+
         await query.message.edit_text(
-            f"*Error*\n\n{escape_markdown_v2(str(e)[:200])}",
+            format_error_message(f"Stop failed: {error_msg[:200]}"),
             parse_mode="MarkdownV2",
             reply_markup=InlineKeyboardMarkup(keyboard),
         )

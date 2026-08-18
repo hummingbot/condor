@@ -10,31 +10,35 @@ from condor.memory import SkillStore
 from mcp_servers.condor.settings import settings
 
 
-def _resolve_agent_slug(strategy_id: str | None) -> tuple[str | None, bool]:
+def _resolve_agent_slug(target: str | None) -> tuple[str | None, bool]:
     """Resolve which assistant's skill library an action targets.
 
-    Mirrors routines' ``_get_agent_routines_dir``. ``strategy_id`` lets the chat
+    Mirrors routines' ``_get_agent_routines_dir``. ``target`` lets the chat
     condor author/inspect a *specific* agent's local skills (the chat MCP has no
-    ``agent_slug`` of its own): a composite key ``"agent_slug.strategy_slug"``
-    resolves to its owning agent, a bare agent slug resolves to that agent
-    directly (expert-first flow, before any strategy exists). Without
-    ``strategy_id`` the target is the current assistant — the launched agent
+    ``agent_slug`` of its own). A skill library is keyed by the **agent** alone,
+    so a bare agent slug is the canonical form; a composite strategy key
+    ``"agent_slug.strategy_slug"`` is still accepted and resolves to its *owning
+    agent* (the strategy half is discarded — there is no per-strategy library).
+    Without a ``target`` the current assistant is used — the launched agent
     (``settings.agent_slug``) or the chat condor (``None``).
 
-    Returns ``(agent_slug, ok)``; ``ok`` is False only when a ``strategy_id`` was
-    given but matched no strategy or agent, so the caller errors instead of
+    Returns ``(agent_slug, ok)``; ``ok`` is False only when a ``target`` was
+    given but matched no agent or strategy, so the caller errors instead of
     silently writing to the chat library.
     """
-    if strategy_id:
-        from condor.agents.strategy import StrategyStore
-
-        s = StrategyStore().get_by_key(strategy_id)
-        if s:
-            return s.agent_slug, True
+    if target:
         from condor.agents.agent import AgentStore
 
-        if AgentStore().get(strategy_id):
-            return strategy_id, True
+        if AgentStore().get(target):
+            return target, True
+
+        # Legacy/convenience form: a composite strategy key. Skills live one
+        # level up, so this only serves to name the owning agent.
+        from condor.agents.strategy import StrategyStore
+
+        s = StrategyStore().get_by_key(target)
+        if s:
+            return s.agent_slug, True
         return None, False
 
     return (settings.specialist_slug or None), True
@@ -49,14 +53,19 @@ async def manage_skill(
     references_routine: str | None = None,
     query: str | None = None,
     max_entries: int = 30,
+    agent: str | None = None,
     strategy_id: str | None = None,
     file: str | None = None,
     content: str | None = None,
     shared: bool | None = None,
 ) -> dict:
-    agent_slug, resolved = _resolve_agent_slug(strategy_id)
-    if strategy_id and not resolved:
-        return {"error": f"No strategy or agent found for strategy_id '{strategy_id}'"}
+    # ``strategy_id`` is the deprecated spelling of ``agent`` — a skill library
+    # is keyed by agent, never by strategy. Kept so existing MCP hosts and the
+    # playbooks that name it keep working.
+    target = agent or strategy_id
+    agent_slug, resolved = _resolve_agent_slug(target)
+    if target and not resolved:
+        return {"error": f"No agent or strategy found for '{target}'"}
     store = SkillStore(agent_slug)
     source = f"agent:{agent_slug}" if agent_slug else "chat"
 

@@ -12,7 +12,11 @@ from typing import Any
 from .agent import Agent
 from .strategy import Strategy
 
-BASE_PROMPT_LIVE = """\
+# Two live base prompts, one per execution surface. A session either spawns
+# standalone executors or steers a bot's controllers (see _build_controller_mode_section);
+# stating "trade ONLY via manage_executors" to a controller-mode agent contradicts the
+# [CONTROLLER MODE] block later in the same prompt, so the surface is chosen once here.
+BASE_PROMPT_LIVE_EXECUTORS = """\
 You are an autonomous trading agent running inside Condor.
 
 RULES:
@@ -26,6 +30,27 @@ ERROR RECOVERY:
 - If manage_executors(action="create") fails, call manage_executors(executor_type="<type>") \
 to fetch the full config schema, compare it against what you sent, fix the missing/wrong \
 fields, and retry ONCE. Journal the error and fix as a learning.
+"""
+
+BASE_PROMPT_LIVE_CONTROLLER = """\
+You are an autonomous trading agent running inside Condor.
+
+RULES:
+- You trade by steering the controllers of the bot you operate — see [CONTROLLER MODE]
+  below for which bot and the exact call sequence. NEVER use place_order.
+- manage_bots(action="deploy") MUST include max_global_drawdown_quote within your risk
+  limits — deploys without a declared loss cap are blocked by the risk engine.
+- Standalone executors (manage_executors(action="create")) are a fallback, used ONLY
+  when the strategy instructions explicitly ask for them.
+- Be conservative. When in doubt, hold and journal why.
+
+ERROR RECOVERY:
+- If a manage_controllers upsert or a manage_bots deploy/update_config fails, call \
+manage_controllers(action="describe", controller_name="<name>") to fetch the parameter \
+template, compare it against what you sent, fix the missing/wrong fields, and retry ONCE. \
+Journal the error and fix as a learning.
+- If you do fall back to manage_executors(action="create") and it fails, fetch its schema \
+with manage_executors(executor_type="<type>") and retry ONCE the same way.
 """
 
 BASE_PROMPT_DRY_RUN = """\
@@ -92,6 +117,20 @@ JOURNAL:
 - Keep learnings factual and short (1 line). No speculation.
 - Only write a learning if it's genuinely NEW. Duplicates are auto-filtered.
 - Do NOT call trading_agent_journal_read — context is already in this prompt.
+
+SESSION CANVAS — your running narrative, shown to the user in the session report:
+- Four sections, no others: "thesis" (what you believe the market is doing and
+  how you're playing it), "working" (what is and isn't paying off), "changed"
+  (what you adjusted and why), "questions" (what you still don't know).
+- Revise one with:
+  trading_agent_journal_write(entry_type="canvas", section="thesis|working|changed|questions", text="...")
+- Revise a section ONLY when it is now WRONG or genuinely out of date. A quiet
+  tick needs no canvas call at all — silence is the correct answer when nothing
+  has changed.
+- One section per call, at most one revision per section per tick.
+- Short prose, a few sentences. Anything past ~1200 characters is cut.
+- NEVER restate PnL, volume, or executor counts: the report already shows those
+  live and correct. Write what the numbers MEAN, not the numbers.
 """
 
 JOURNAL_SECTION_EXPERIMENT = """\
@@ -104,13 +143,24 @@ JOURNAL:
 """
 
 
-def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
+def _build_tool_preload(
+    *, is_dry_run: bool, is_experiment: bool, is_controller_mode: bool = False
+) -> str:
     """ToolSearch preload line for ACP sessions.
 
     Dry-run omits manage_executors (read-only). Experiment modes (dry_run /
     run_once) omit trading_agent_journal_write since they have no journal.
+    Controller mode preloads the bot/controller tools it actually trades with —
+    otherwise the agent burns a tick discovering them.
     """
     tools = ["mcp__mcp-hummingbot__get_market_data"]
+    if is_controller_mode:
+        # Read-only bot/controller queries stay available in dry-run; the
+        # permission layer, not the tool list, is what blocks mutation there.
+        tools += [
+            "mcp__mcp-hummingbot__manage_bots",
+            "mcp__mcp-hummingbot__manage_controllers",
+        ]
     if not is_dry_run:
         tools.append("mcp__mcp-hummingbot__manage_executors")
     tools += [
@@ -133,26 +183,28 @@ def _build_tool_preload(*, is_dry_run: bool, is_experiment: bool) -> str:
 
 
 def _build_routines_section(strategy: Strategy) -> str:
-    """Build an [AVAILABLE ROUTINES] section listing this agent's own routines.
+    """Build an [AVAILABLE ROUTINES] section: this agent's own routines + shared.
 
-    Domain experts/trading agents are isolated: they see only their own routines
-    (``agents/<slug>/routines``), never the chat's general library.
+    An agent sees its own library (``agents/<slug>/routines``) plus the shared
+    one every assistant reads (FEAT-038), its own shadowing a shared name.
+    Shared entries are marked so the agent knows it cannot edit them —
+    ``create_routine`` always writes locally, which is how it specializes one.
+    A routine it cannot see here it will never call, so this list has to be the
+    same one ``_resolve_routine`` resolves against.
     """
-    from routines.base import assistant_routines_dir, discover_routines_from_path
+    from routines.base import assistant_routines
 
     lines = ["ROUTINES — executable analysis scripts:"]
     lines.append(
-        f'Call via: manage_routines(action="run", name="<name>", strategy_id="{strategy.key}", config={{...}})'
+        f'Call via: manage_routines(action="run", name="<name>", agent="{strategy.agent_slug}", config={{...}})'
     )
     lines.append("")
 
-    # Agent-level routines (shared across this agent's strategies, isolated from
-    # the chat's general library).
-    routines_dir = assistant_routines_dir(strategy.agent_slug)
-    local = discover_routines_from_path(routines_dir) if routines_dir.exists() else {}
-    if local:
-        for name, r in sorted(local.items()):
-            lines.append(f"  - {name}: {r.description}")
+    available = assistant_routines(strategy.agent_slug)
+    if available:
+        for name, r in sorted(available.items()):
+            mark = "" if (r.source or "").startswith("agent:") else " (shared)"
+            lines.append(f"  - {name}: {r.description}{mark}")
     else:
         lines.append('  (none yet — create one with action="create_routine")')
 
@@ -234,6 +286,8 @@ def build_tick_prompt(
     user_memory: str = "",
     skills_index: str = "",
     ledger: Any | None = None,
+    canvas: str = "",
+    canvas_nudge: str = "",
 ) -> str:
     """Build the full prompt for one agent tick.
 
@@ -251,8 +305,23 @@ def build_tick_prompt(
     agent_key = config.get("agent_key") or strategy.agent_key or agent.agent_key
     use_pydantic_ai = is_pydantic_ai_model(agent_key)
 
+    # Controller mode: the agent steers a named bot's controllers instead of
+    # spawning standalone executors. Triggered solely by a non-empty bot_name
+    # (resolved by ownership.resolve_bot_name before the tick), and it decides
+    # both the base rules and the [CONTROLLER MODE] block appended below.
+    bot_name = config.get("bot_name", "")
+    is_controller_mode = bool(bot_name)
+
     # Select base prompt and journal protocol based on mode
-    base_prompt = BASE_PROMPT_DRY_RUN if is_dry_run else BASE_PROMPT_LIVE
+    base_prompt = (
+        BASE_PROMPT_DRY_RUN
+        if is_dry_run
+        else (
+            BASE_PROMPT_LIVE_CONTROLLER
+            if is_controller_mode
+            else BASE_PROMPT_LIVE_EXECUTORS
+        )
+    )
     journal_section = (
         JOURNAL_SECTION_EXPERIMENT if is_experiment else JOURNAL_SECTION_LIVE
     )
@@ -261,7 +330,11 @@ def build_tick_prompt(
     # Tool preload is ACP-specific (ToolSearch); pydantic-ai auto-discovers MCP tools
     if not use_pydantic_ai:
         sections.append(
-            _build_tool_preload(is_dry_run=is_dry_run, is_experiment=is_experiment)
+            _build_tool_preload(
+                is_dry_run=is_dry_run,
+                is_experiment=is_experiment,
+                is_controller_mode=is_controller_mode,
+            )
         )
     else:
         sections.append(
@@ -273,7 +346,7 @@ def build_tick_prompt(
     tick_info = f"[TICK INFO]\nThis is tick #{tick_number}. Use this number in journal entries and notifications."
     if agent_id:
         tick_info += f"\nAgent ID: {agent_id}"
-        if not is_dry_run:
+        if not is_dry_run and not is_controller_mode:
             tick_info += f'\nPass controller_id="{agent_id}" as a TOP-LEVEL arg to manage_executors (not inside executor_config).'
     sections.append(tick_info)
 
@@ -344,10 +417,9 @@ def build_tick_prompt(
         config_lines.append(f"{k}: {v}")
     sections.append("\n".join(config_lines))
 
-    # Controller mode: the agent steers a named bot's controllers instead of
-    # spawning standalone executors. Triggered solely by a non-empty bot_name.
-    bot_name = config.get("bot_name", "")
-    if bot_name:
+    # The bot the agent owns and the ownership rules enforced on it (mode was
+    # resolved at the top, where it also picked the base prompt).
+    if is_controller_mode:
         sections.append(_build_controller_mode_section(bot_name, ledger))
 
     # Risk state
@@ -388,5 +460,17 @@ def build_tick_prompt(
         sections.append(f"[CURRENT STATUS]\n{summary}")
     if recent_decisions:
         sections.append(f"[RECENT DECISIONS — last 3 snapshots]\n{recent_decisions}")
+
+    # Session canvas -- the agent's own narrative, echoed back so it can revise
+    # what is now wrong. Experiments keep no canvas (they keep no journal), so
+    # the engine passes nothing and the block is omitted entirely.
+    if not is_experiment:
+        canvas_lines = [
+            "[SESSION CANVAS — your running narrative, shown to the user in the session report]",
+            canvas.strip() or "(empty — write your opening thesis this tick)",
+        ]
+        if canvas_nudge:
+            canvas_lines.append(canvas_nudge)
+        sections.append("\n".join(canvas_lines))
 
     return "\n\n".join(sections)

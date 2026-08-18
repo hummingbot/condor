@@ -222,6 +222,66 @@ class ExecutorInfo(BaseModel):
     custom_info: dict[str, Any] = {}
     config: dict[str, Any] = {}
 
+    @classmethod
+    def from_raw(cls, ex: Any) -> Optional["ExecutorInfo"]:
+        """Build the wire model from one raw executor dict, or ``None``.
+
+        The transform itself lives in
+        :func:`condor.fetchers.executors.build_executor_row` -- shared with the
+        agents rollup so a row cannot mean two different things depending on
+        which layer built it. This method is only the renaming: the wire calls
+        the pair ``trading_pair`` and the fees ``cum_fees_quote``, spells
+        ``status``/``close_type`` lowercase, and reports ``type`` as the
+        normalized label (``position``, ``grid``) rather than the API's raw
+        class name.
+
+        Both REST responses and WS broadcasts go through here, so the executors
+        tab renders the same row however it arrived.
+        """
+        if not isinstance(ex, dict):
+            return None
+
+        from condor.fetchers.executors import build_executor_row, get_executor_type
+
+        row = build_executor_row(ex)
+        return cls(
+            id=row["id"],
+            type=get_executor_type(ex),
+            connector=row["connector"],
+            trading_pair=row["pair"],
+            side=row["side"],
+            status=row["status"].lower(),
+            close_type=row["close_type"].lower(),
+            pnl=row["pnl"],
+            volume=row["volume"],
+            timestamp=row["timestamp"],
+            controller_id=row["controller_id"],
+            cum_fees_quote=row["fees"],
+            net_pnl_pct=float(ex.get("net_pnl_pct") or 0),
+            entry_price=row["entry_price"],
+            current_price=row["current_price"],
+            close_timestamp=row["close_timestamp"],
+            custom_info=row["custom_info"],
+            config=row["config"],
+        )
+
+
+class ExecutorPeriodSummary(BaseModel):
+    """Executor totals over a time window, computed across the whole history.
+
+    ``pnl`` and ``volume`` are USD-denominated (the repo convention for anything
+    aggregated across trading pairs); the dashboard converts once into whatever
+    display currency the user picked. ``converted`` is False when at least one
+    quote asset in the window had no path to USD, so its rows are counted in
+    their own quote and the totals are approximate.
+    """
+
+    period: str
+    pnl: float = 0.0
+    volume: float = 0.0
+    count: int = 0
+    converted: bool = True
+
 
 # ── Market Data ──
 
@@ -436,7 +496,7 @@ class UpdateServerRequest(BaseModel):
 class GatewayStartRequest(BaseModel):
     # The Hummingbot API always runs the Gateway secured (TLS + mTLS) and manages the
     # certificates/passphrase itself (hummingbot-api SEC-048), so only image/port are sent.
-    image: str = "hummingbot/gateway:latest"
+    image: str = "hummingbot/gateway:development"
     port: int = 15888
 
 
@@ -446,7 +506,24 @@ class CredentialInfo(BaseModel):
 
 
 class GatewayPullRequest(BaseModel):
-    image: str = "hummingbot/gateway:latest"
+    image: str = "hummingbot/gateway:development"
+
+
+class GatewayNetworkUpdateRequest(BaseModel):
+    # Partial network config (snake_case keys, e.g. {"node_url": "https://..."}).
+    # The Gateway validates values against its own JSON schema.
+    config: dict[str, Any]
+
+
+class GatewayWalletAddRequest(BaseModel):
+    chain: str
+    private_key: str
+    set_default: bool = False
+
+
+class GatewayWalletDefaultRequest(BaseModel):
+    chain: str
+    address: str
 
 
 class AddCredentialRequest(BaseModel):

@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { api } from "@/lib/api";
 import { type DiscoveredWallet, connectWallet, discoverWallets } from "@/lib/wallet/evm";
 import {
+  AGENT_VALIDITY_DAYS,
   BUILDER_FEE_BPS,
   type ConnectStep,
   HYPERLIQUID_SIGNUP_URL,
@@ -26,6 +27,14 @@ type Phase =
   | "approve-builder"
   | "saving"
   | "done";
+
+/** "9 Feb 2027" — the day the agent wallet stops being able to trade. */
+const formatExpiry = (epochMs: number) =>
+  new Date(epochMs).toLocaleDateString(undefined, {
+    day: "numeric",
+    month: "short",
+    year: "numeric",
+  });
 
 const STEP_LABEL: Record<ConnectStep, string> = {
   "switch-chain": "Approve the switch to Arbitrum One in your wallet…",
@@ -138,7 +147,7 @@ export function ConnectHyperliquid({
         const reason = (failed[0].result as PromiseRejectedResult).reason as { message?: string };
         setPartial(
           `Connected, but ${failed.map((f) => f.name).join(", ")} could not be saved ` +
-            `(${reason?.message || "validation failed"}). Retry it from the API Keys list — no re-signing needed.`,
+            `(${reason?.message || "validation failed"}). Retry it from the Keys and Wallets list — no re-signing needed.`,
         );
       }
 
@@ -215,6 +224,10 @@ export function ConnectHyperliquid({
           placeholder={defaultAgentName()}
           className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5 font-mono text-sm text-[var(--color-text)] focus:border-[var(--color-primary)] focus:outline-none disabled:opacity-50"
         />
+        <p className="mt-1 text-xs text-[var(--color-text-muted)]">
+          Authorized for {AGENT_VALIDITY_DAYS} days (Hyperliquid's maximum) — reconnect before it
+          expires to keep trading.
+        </p>
       </div>
 
       {/* Done state */}
@@ -228,7 +241,17 @@ export function ConnectHyperliquid({
             }`}
           >
             <Check className="mt-0.5 h-4 w-4 shrink-0 text-[var(--color-primary)]" />
-            <span>{partial ?? "Hyperliquid connected."}</span>
+            <span>
+              {partial ?? "Hyperliquid connected."}
+              {conn && (
+                <>
+                  {" "}
+                  <span className="text-[var(--color-text-muted)]">
+                    Agent wallet valid until {formatExpiry(conn.validUntil)}.
+                  </span>
+                </>
+              )}
+            </span>
           </div>
 
           {/* Referral code — link the Hummingbot code for a fee discount (one-time). */}

@@ -112,9 +112,13 @@ def resolve(
     # and a specialist launched without it would read and write the CHAT's store.
     # What the slug must NOT decide down there is identity or routine scope —
     # see ``Settings.specialist_slug``.
+    # One derivation for both channels: these are the very ids sessions.py puts
+    # in CONDOR_USER_ID/CONDOR_CHAT_ID, and argv beats env in the subprocess, so
+    # a local fallback here would silently override the env one (SEC-180).
+    effective_user_id, effective_chat_id = spec.effective_ids()
     mcp_servers = build_mcp_servers_for_session(
-        spec.user_id or 0,
-        spec.chat_id or spec.user_id or 0,
+        effective_user_id,
+        effective_chat_id,
         user_data,
         server_name=effective_server if agent.server_required else None,
         agent_slug=agent.slug,
@@ -133,12 +137,61 @@ def resolve(
     )
 
 
+def remember_model_choice(user_id: int | None, agent_slug: str, agent_key: str) -> None:
+    """Persist a deliberate model pick where the *next* session will find it.
+
+    A specialist's model lives in its own AGENT.md, so picking one in the chat
+    moves the Agent itself — chat, consult, delegate and loop all read that
+    record. Condor's does not: ``DEFAULT_AGENT`` is read from condor/AGENT.md at
+    import and is everyone's default, so an unbound pick is the *user's*, and
+    goes to the same preference Telegram's Change LLM writes.
+
+    Silent no-op when the value already matches, when the key is a picker
+    sentinel, or when there is no user — callers pass whatever the wire said.
+
+    Called only from the web entry points that carry a user's pick. Consult,
+    delegate and loops pass concrete keys for their own plumbing reasons and
+    must not rewrite anything.
+    """
+    from handlers.agents._shared import AGENT_OPTIONS
+
+    if not agent_key or not user_id:
+        return
+    # Drill-downs, not startable models: an agent_key of "openrouter:" would
+    # fail at session start for everyone who inherited it.
+    if AGENT_OPTIONS.get(agent_key, {}).get("picker"):
+        return
+
+    try:
+        if agent_slug and agent_slug != CHAT_SLUG:
+            from condor.agents.agent import AgentStore
+
+            store = AgentStore()
+            agent = store.get(agent_slug)
+            if agent is None or agent.agent_key == agent_key:
+                return
+            agent.agent_key = agent_key
+            store.update(agent)
+            log.info("Agent %s now runs on %s", agent_slug, agent_key)
+        else:
+            from condor.preferences import load_user_data_for, set_active_agent_key
+
+            set_active_agent_key(load_user_data_for(user_id), agent_key)
+    except Exception:
+        # A chat must not fail because a preference could not be written.
+        log.warning(
+            "Could not remember model %r for %r", agent_key, agent_slug, exc_info=True
+        )
+
+
 def agent_identity_context(
     agent_slug: str, user_id: int, instructions: str, label: str = ""
 ) -> str:
     """Identity + domain memory/skills the bound Agent opens the chat with.
 
-    Mirrors ``build_agent_context`` (used by consult) minus the consult request,
+    Shares its domain memory/skills sections with ``build_agent_context`` (used
+    by consult) via :func:`~condor.memory.domain_context`, and differs from it
+    only by the identity header in front and the absent consult request behind —
     so a chatted Agent starts from the same self-knowledge a consulted one does.
 
     Leads with :func:`~condor.agents.agent.identity_header` — the same line the
@@ -146,37 +199,11 @@ def agent_identity_context(
     domain but never says which agent this is (FEAT-025).
     """
     from condor.agents.agent import identity_header
+    from condor.memory import domain_context
 
     sections: list[str] = [identity_header(agent_slug, label)]
     if instructions:
         sections.append(instructions)
-
-    try:
-        from condor.memory import MemoryStore
-
-        memory_index = MemoryStore(user_id, agent_slug).list_index()
-        if memory_index:
-            sections.append(
-                "[DOMAIN MEMORY — what you remember in this domain]\n"
-                'Read a full memory with manage_memory(action="read", name="..."). '
-                'Save new, stable domain facts with manage_memory(action="write", ...).\n\n'
-                f"{memory_index}"
-            )
-    except Exception:
-        log.debug("Could not load memory index for %s", agent_slug, exc_info=True)
-
-    try:
-        from condor.memory import SkillStore
-
-        skills_index = SkillStore(agent_slug).list_index()
-        if skills_index:
-            sections.append(
-                "[DOMAIN SKILLS — playbooks you can follow]\n"
-                "Read-only playbooks shipped with this Agent. Read one with "
-                'manage_skill(action="read", name="...") and follow its steps.\n\n'
-                f"{skills_index}"
-            )
-    except Exception:
-        log.debug("Could not load skill index for %s", agent_slug, exc_info=True)
+    sections.extend(domain_context(agent_slug, user_id))
 
     return "\n\n".join(s for s in sections if s)

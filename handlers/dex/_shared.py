@@ -11,15 +11,14 @@ Contains:
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from condor.cache import (
-    DEFAULT_CACHE_TTL,
-    clear_cache as _clear_cache,
-    get_cached as _get_cached,
-    invalidate_groups as _invalidate_groups,
-    invalidates as _invalidates,
-    set_cached as _set_cached,
-    cached_call as _cached_call,
-)
+from condor.cache import DEFAULT_CACHE_TTL
+from condor.cache import cached_call as _cached_call
+from condor.cache import clear_cache as _clear_cache
+from condor.cache import evict_expired as _evict_expired
+from condor.cache import get_cached as _get_cached
+from condor.cache import invalidate_groups as _invalidate_groups
+from condor.cache import invalidates as _invalidates
+from condor.cache import set_cached as _set_cached
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +30,18 @@ logger = logging.getLogger(__name__)
 _NS = "_cache"  # namespace for DEX cache
 
 
-def get_cached(user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL) -> Optional[Any]:
+def get_cached(
+    user_data: dict, key: str, ttl: int = DEFAULT_CACHE_TTL
+) -> Optional[Any]:
     return _get_cached(user_data, key, ttl, namespace=_NS)
 
 
 def set_cached(user_data: dict, key: str, value: Any) -> None:
     _set_cached(user_data, key, value, namespace=_NS)
+
+
+def evict_expired(user_data: dict) -> int:
+    return _evict_expired(user_data, namespace=_NS)
 
 
 def clear_cache(user_data: dict, key: Optional[str] = None) -> None:
@@ -51,7 +56,9 @@ async def cached_call(
     *args,
     **kwargs,
 ) -> Any:
-    return await _cached_call(user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs)
+    return await _cached_call(
+        user_data, key, fetch_func, ttl, *args, namespace=_NS, **kwargs
+    )
 
 
 # ============================================

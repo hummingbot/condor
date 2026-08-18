@@ -6,16 +6,24 @@ Provides unified portfolio overview by aggregating:
 - Perpetual positions from CEX
 - LP positions (CLMM) from blockchain DEXs
 """
+
 import asyncio
 import logging
 from typing import Any, Literal
 
 from mcp_servers.hummingbot_api.exceptions import ToolError
-from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
 from mcp_servers.hummingbot_api.formatters import format_portfolio_as_table
+from mcp_servers.hummingbot_api.hummingbot_client import HummingbotClient
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
 
 logger = logging.getLogger("hummingbot-mcp")
+
+# Upper bound on concurrent real-time CLMM pool reads through Gateway. These are
+# on-chain queries — the slowest calls in the overview — so they are fanned out
+# instead of walked one at a time, but bounded so an LP-heavy account never
+# bursts unlimited simultaneous Gateway/RPC requests (same bound the other
+# fan-outs in this repo use).
+MAX_CONCURRENT_POOL_FETCHES = 10
 
 
 async def get_portfolio_overview(
@@ -62,6 +70,7 @@ async def get_portfolio_overview(
 
         # Task 1: Get token balances
         if include_balances:
+
             async def get_balances():
                 try:
                     return await client.portfolio.get_state(
@@ -78,6 +87,7 @@ async def get_portfolio_overview(
 
         # Task 2: Get perpetual positions
         if include_perp_positions:
+
             async def get_perp_positions():
                 try:
                     return await trading_tools.get_positions(
@@ -95,6 +105,7 @@ async def get_portfolio_overview(
 
         # Task 3: Get LP positions (CLMM) - Real-time from blockchain
         if include_lp_positions:
+
             async def get_lp_positions():
                 try:
                     # Step 1: Get all unique pools from database (to know which pools to query)
@@ -121,26 +132,47 @@ async def get_portfolio_overview(
                         if connector and network and pool_address:
                             pools_map[(connector, network, pool_address)] = True
 
-                    # Step 3: Fetch real-time data for each pool
-                    real_time_positions = []
-                    for (connector, network, pool_address) in pools_map.keys():
-                        try:
-                            positions = await client.gateway_clmm.get_positions_owned(
-                                connector=connector,
-                                network=network,
-                                pool_address=pool_address,
-                                wallet_address=None  # Uses default wallet
-                            )
+                    # Step 3: Fetch real-time data for each pool, concurrently.
+                    # Total latency is one pool's round-trip (per semaphore slot)
+                    # instead of the sum over every pool. Each call keeps its own
+                    # try/except so one bad pool is logged and skipped exactly as
+                    # in the serial version, and results stay positionally aligned
+                    # with `pools` so every position is stamped with its own pool's
+                    # connector/network.
+                    pools = list(pools_map.keys())
+                    semaphore = asyncio.Semaphore(MAX_CONCURRENT_POOL_FETCHES)
 
-                            if positions and isinstance(positions, list):
-                                # Add connector and network info to each position
-                                for pos in positions:
-                                    pos["connector"] = connector
-                                    pos["network"] = network
-                                real_time_positions.extend(positions)
-                        except Exception as e:
-                            logger.warning(f"Failed to get positions for pool {pool_address}: {str(e)}")
+                    async def fetch_pool(connector, network, pool_address):
+                        async with semaphore:
+                            try:
+                                return await client.gateway_clmm.get_positions_owned(
+                                    connector=connector,
+                                    network=network,
+                                    pool_address=pool_address,
+                                    wallet_address=None,  # Uses default wallet
+                                )
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to get positions for pool {pool_address}: {str(e)}"
+                                )
+                                return None
+
+                    pool_results = await asyncio.gather(
+                        *(fetch_pool(*pool) for pool in pools), return_exceptions=True
+                    )
+
+                    real_time_positions = []
+                    for (connector, network, _pool_address), positions in zip(
+                        pools, pool_results
+                    ):
+                        if isinstance(positions, BaseException):
                             continue
+                        if positions and isinstance(positions, list):
+                            # Add connector and network info to each position
+                            for pos in positions:
+                                pos["connector"] = connector
+                                pos["network"] = network
+                            real_time_positions.extend(positions)
 
                     return real_time_positions
 
@@ -153,6 +185,7 @@ async def get_portfolio_overview(
 
         # Task 4: Get active orders
         if include_active_orders:
+
             async def get_active_orders():
                 try:
                     return await trading_tools.search_orders(
@@ -204,21 +237,29 @@ async def get_portfolio_overview(
             total_value += balance_value
 
             # Format balances as table
-            balances_table = format_portfolio_as_table(balances_data) if balances_data else "No balances found"
+            balances_table = (
+                format_portfolio_as_table(balances_data)
+                if balances_data
+                else "No balances found"
+            )
 
-            sections.append({
-                "title": "Token Balances",
-                "content": balances_table,
-                "total_value": balance_value,
-                "emoji": "💰"
-            })
+            sections.append(
+                {
+                    "title": "Token Balances",
+                    "content": balances_table,
+                    "total_value": balance_value,
+                    "emoji": "💰",
+                }
+            )
         elif include_balances and not data.get("balances"):
-            sections.append({
-                "title": "Token Balances",
-                "content": "Failed to fetch balances",
-                "total_value": 0.0,
-                "emoji": "⚠️"
-            })
+            sections.append(
+                {
+                    "title": "Token Balances",
+                    "content": "Failed to fetch balances",
+                    "total_value": 0.0,
+                    "emoji": "⚠️",
+                }
+            )
 
         # ============================================
         # SECTION 2: Perpetual Positions
@@ -234,26 +275,32 @@ async def get_portfolio_overview(
                 # Note: You'll need to parse the table or enhance trading_tools.get_positions
                 # to return structured data with PnL values
 
-                sections.append({
-                    "title": "Perpetual Positions",
-                    "content": perp_table,
-                    "total_positions": total_positions,
-                    "emoji": "📊"
-                })
+                sections.append(
+                    {
+                        "title": "Perpetual Positions",
+                        "content": perp_table,
+                        "total_positions": total_positions,
+                        "emoji": "📊",
+                    }
+                )
             else:
-                sections.append({
-                    "title": "Perpetual Positions",
-                    "content": "No perpetual positions found",
-                    "total_positions": 0,
-                    "emoji": "📊"
-                })
+                sections.append(
+                    {
+                        "title": "Perpetual Positions",
+                        "content": "No perpetual positions found",
+                        "total_positions": 0,
+                        "emoji": "📊",
+                    }
+                )
         elif include_perp_positions and not data.get("perp_positions"):
-            sections.append({
-                "title": "Perpetual Positions",
-                "content": "Failed to fetch perpetual positions",
-                "total_positions": 0,
-                "emoji": "⚠️"
-            })
+            sections.append(
+                {
+                    "title": "Perpetual Positions",
+                    "content": "Failed to fetch perpetual positions",
+                    "total_positions": 0,
+                    "emoji": "⚠️",
+                }
+            )
 
         # ============================================
         # SECTION 3: LP Positions (CLMM) - Real-time data
@@ -271,7 +318,9 @@ async def get_portfolio_overview(
                 # Format LP positions - show all open positions with real-time data
                 if open_positions:
                     lp_table_lines = ["Status: OPEN positions", ""]
-                    lp_table_lines.append("connector | trading_pair | lower_price | upper_price | position_address")
+                    lp_table_lines.append(
+                        "connector | trading_pair | lower_price | upper_price | position_address"
+                    )
                     lp_table_lines.append("-" * 100)
 
                     for pos in open_positions[:10]:  # Show up to 10 open positions
@@ -282,13 +331,17 @@ async def get_portfolio_overview(
                         position_address = pos.get("position_address", "N/A")
 
                         # Format prices
-                        if lower_price != "N/A" and isinstance(lower_price, (int, float, str)):
+                        if lower_price != "N/A" and isinstance(
+                            lower_price, (int, float, str)
+                        ):
                             try:
                                 lower_price = f"{float(lower_price):.4f}"
                             except:
                                 pass
 
-                        if upper_price != "N/A" and isinstance(upper_price, (int, float, str)):
+                        if upper_price != "N/A" and isinstance(
+                            upper_price, (int, float, str)
+                        ):
                             try:
                                 upper_price = f"{float(upper_price):.4f}"
                             except:
@@ -296,40 +349,50 @@ async def get_portfolio_overview(
 
                         # Truncate position address
                         if position_address != "N/A" and len(position_address) > 20:
-                            position_address = f"{position_address[:8]}...{position_address[-6:]}"
+                            position_address = (
+                                f"{position_address[:8]}...{position_address[-6:]}"
+                            )
 
                         lp_table_lines.append(
                             f"{connector[:10]:10} | {trading_pair[:15]:15} | {str(lower_price)[:11]:11} | {str(upper_price)[:11]:11} | {position_address}"
                         )
 
                     if len(open_positions) > 10:
-                        lp_table_lines.append(f"... and {len(open_positions) - 10} more open positions")
+                        lp_table_lines.append(
+                            f"... and {len(open_positions) - 10} more open positions"
+                        )
 
                     lp_table = "\n".join(lp_table_lines)
                 else:
                     lp_table = "No active LP positions found"
 
-                sections.append({
-                    "title": "LP Positions (CLMM)",
-                    "content": lp_table,
-                    "total_positions": total_lp_positions,
-                    "open_positions": len(open_positions),
-                    "emoji": "🏊"
-                })
+                sections.append(
+                    {
+                        "title": "LP Positions (CLMM)",
+                        "content": lp_table,
+                        "total_positions": total_lp_positions,
+                        "open_positions": len(open_positions),
+                        "emoji": "🏊",
+                    }
+                )
             else:
-                sections.append({
-                    "title": "LP Positions (CLMM)",
-                    "content": "No LP positions found",
-                    "total_positions": 0,
-                    "emoji": "🏊"
-                })
+                sections.append(
+                    {
+                        "title": "LP Positions (CLMM)",
+                        "content": "No LP positions found",
+                        "total_positions": 0,
+                        "emoji": "🏊",
+                    }
+                )
         elif include_lp_positions and not data.get("lp_positions"):
-            sections.append({
-                "title": "LP Positions (CLMM)",
-                "content": "Failed to fetch LP positions",
-                "total_positions": 0,
-                "emoji": "⚠️"
-            })
+            sections.append(
+                {
+                    "title": "LP Positions (CLMM)",
+                    "content": "Failed to fetch LP positions",
+                    "total_positions": 0,
+                    "emoji": "⚠️",
+                }
+            )
 
         # ============================================
         # SECTION 4: Active Orders
@@ -341,26 +404,32 @@ async def get_portfolio_overview(
                 orders_table = orders_data.get("orders_table", "No active orders found")
                 total_orders = orders_data.get("total_returned", 0)
 
-                sections.append({
-                    "title": "Active Orders",
-                    "content": orders_table,
-                    "total_orders": total_orders,
-                    "emoji": "📋"
-                })
+                sections.append(
+                    {
+                        "title": "Active Orders",
+                        "content": orders_table,
+                        "total_orders": total_orders,
+                        "emoji": "📋",
+                    }
+                )
             else:
-                sections.append({
-                    "title": "Active Orders",
-                    "content": "No active orders found",
-                    "total_orders": 0,
-                    "emoji": "📋"
-                })
+                sections.append(
+                    {
+                        "title": "Active Orders",
+                        "content": "No active orders found",
+                        "total_orders": 0,
+                        "emoji": "📋",
+                    }
+                )
         elif include_active_orders and not data.get("active_orders"):
-            sections.append({
-                "title": "Active Orders",
-                "content": "Failed to fetch active orders",
-                "total_orders": 0,
-                "emoji": "⚠️"
-            })
+            sections.append(
+                {
+                    "title": "Active Orders",
+                    "content": "Failed to fetch active orders",
+                    "total_orders": 0,
+                    "emoji": "⚠️",
+                }
+            )
 
         # ============================================
         # Build final formatted output
@@ -378,23 +447,35 @@ async def get_portfolio_overview(
         output_lines.append("-" * 80)
 
         if include_balances:
-            balance_section = next((s for s in sections if s["title"] == "Token Balances"), None)
+            balance_section = next(
+                (s for s in sections if s["title"] == "Token Balances"), None
+            )
             if balance_section and "total_value" in balance_section:
-                output_lines.append(f"Total Balance Value: ${balance_section['total_value']:.2f}")
+                output_lines.append(
+                    f"Total Balance Value: ${balance_section['total_value']:.2f}"
+                )
 
         if include_perp_positions:
-            perp_section = next((s for s in sections if s["title"] == "Perpetual Positions"), None)
+            perp_section = next(
+                (s for s in sections if s["title"] == "Perpetual Positions"), None
+            )
             if perp_section and "total_positions" in perp_section:
-                output_lines.append(f"Active Perpetual Positions: {perp_section['total_positions']}")
+                output_lines.append(
+                    f"Active Perpetual Positions: {perp_section['total_positions']}"
+                )
 
         if include_lp_positions:
-            lp_section = next((s for s in sections if s["title"] == "LP Positions (CLMM)"), None)
+            lp_section = next(
+                (s for s in sections if s["title"] == "LP Positions (CLMM)"), None
+            )
             if lp_section and "open_positions" in lp_section:
                 open_count = lp_section.get("open_positions", 0)
                 output_lines.append(f"Active LP Positions: {open_count}")
 
         if include_active_orders:
-            orders_section = next((s for s in sections if s["title"] == "Active Orders"), None)
+            orders_section = next(
+                (s for s in sections if s["title"] == "Active Orders"), None
+            )
             if orders_section and "total_orders" in orders_section:
                 output_lines.append(f"Active Orders: {orders_section['total_orders']}")
 
@@ -411,7 +492,7 @@ async def get_portfolio_overview(
                 "include_perp_positions": include_perp_positions,
                 "include_lp_positions": include_lp_positions,
                 "include_active_orders": include_active_orders,
-            }
+            },
         }
 
     except Exception as e:

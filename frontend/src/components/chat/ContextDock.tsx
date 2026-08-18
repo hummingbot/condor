@@ -2,7 +2,10 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronDown, ChevronRight, PanelRightClose, Radio, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { DockRoutines } from "@/components/chat/DockRoutines";
+import {
+  DockRoutines,
+  conversationInstances,
+} from "@/components/chat/DockRoutines";
 import { DockTasks } from "@/components/chat/DockTasks";
 import { api, type Delegation } from "@/lib/api";
 
@@ -27,24 +30,30 @@ function defaultOpen(): boolean {
  *
  * Below `xl` it stops being a column and overlays the transcript instead, the
  * mirror of what the rail does below `md`.
+ *
+ * The two sections are panes, not a stack: each scrolls inside itself, so an
+ * expanded Tasks can never push Routines off the bottom. Both headers stay on
+ * screen and one click away — which is the whole point of a dock you are meant
+ * to watch while you type. The column keeps a scrollbar of its own only as the
+ * escape hatch for a window too short to honour both panes' floors; clipping
+ * a header there would be the very failure the panes exist to prevent.
  */
 export function ContextDock({
   delegations,
   conversationId,
   agentSlug,
-  onOpenFleet,
 }: {
   /** The shared `["delegations"]` result — the dock adds no poll of its own. */
   delegations: Delegation[];
   conversationId: string;
   agentSlug: string;
-  onOpenFleet: () => void;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const [tasksOpen, setTasksOpen] = useState(true);
-  // Collapsed by default so the chat tab fetches routines only once someone
-  // asks for them — this page never polled that endpoint before.
-  const [routinesOpen, setRoutinesOpen] = useState(false);
+  // Expanded like Tasks: a collapsed section is a section nobody finds, and
+  // "where do I watch this?" was the question both of them exist to answer.
+  // The extra poll it costs is one endpoint on a page that is already open.
+  const [routinesOpen, setRoutinesOpen] = useState(true);
 
   useEffect(() => {
     localStorage.setItem(OPEN_KEY, String(open));
@@ -62,13 +71,21 @@ export function ContextDock({
   const { data: instances = [] } = useQuery({
     queryKey: ["routine-instances"],
     queryFn: api.getRoutineInstances,
-    enabled: open && routinesOpen,
+    // Polled whenever the dock is open, not only while the section is: a
+    // collapsed Routines still has to be able to say "one is running".
+    enabled: open,
     refetchInterval: 5000,
   });
 
   const mineRunning = delegations.filter(
     (d) => d.conversation_id === conversationId && d.status === "running",
   ).length;
+  // Counted the same way the list is built, so the badge and the rows agree.
+  const routinesRunning = conversationInstances(
+    instances,
+    agentSlug,
+    conversationId,
+  ).filter((i) => i.status === "running").length;
 
   if (!open) {
     return (
@@ -123,6 +140,7 @@ export function ContextDock({
           />
         }
         label="Tasks"
+        hint="Work handed to other agents from this conversation"
         count={mineRunning || undefined}
         open={tasksOpen}
         onToggle={() => setTasksOpen((v) => !v)}
@@ -130,25 +148,52 @@ export function ContextDock({
         <DockTasks
           delegations={delegations}
           conversationId={conversationId}
-          onOpenFleet={onOpenFleet}
+          agentSlug={agentSlug}
         />
       </DockSection>
 
       <DockSection
-        icon={<Zap className="h-3 w-3 shrink-0" />}
+        icon={
+          <Zap
+            className={`h-3 w-3 shrink-0 ${routinesRunning > 0 ? "text-emerald-400" : ""}`}
+          />
+        }
         label="Routines"
+        hint="Scripts this agent runs, on demand or on a schedule"
+        count={routinesRunning || undefined}
         open={routinesOpen}
         onToggle={() => setRoutinesOpen((v) => !v)}
       >
-        <DockRoutines instances={instances} agentSlug={agentSlug} />
+        <DockRoutines
+          instances={instances}
+          agentSlug={agentSlug}
+          conversationId={conversationId}
+        />
       </DockSection>
     </aside>
   );
 }
 
+/**
+ * One pane of the dock.
+ *
+ * Open, it takes a fixed share of the column — `flex-1 basis-0`, so two open
+ * panes are half and half no matter what is in them. Sizing from content
+ * instead (`flex-auto`) looks tidier on a quiet conversation and is unusable on
+ * a busy one: every task that starts or routine that finishes moves the divider,
+ * so the row you were reading slides out from under the cursor. A boundary that
+ * never moves is worth more than one that is always optimally placed.
+ *
+ * The body owns the scrollbar, so the header never leaves the viewport whatever
+ * the list does.
+ *
+ * Closed, it is just the header bar — the deliberate way to give the other pane
+ * the whole column.
+ */
 function DockSection({
   icon,
   label,
+  hint,
   count,
   open,
   onToggle,
@@ -156,16 +201,23 @@ function DockSection({
 }: {
   icon: React.ReactNode;
   label: string;
+  /** What this section is, for the reader who has to tell it from the other. */
+  hint: string;
   count?: number;
   open: boolean;
   onToggle: () => void;
   children: React.ReactNode;
 }) {
   return (
-    <div className="border-b border-[var(--color-border)]">
+    <div
+      className={`flex flex-col border-b border-[var(--color-border)] ${
+        open ? "min-h-[72px] flex-1 basis-0 overflow-hidden" : "shrink-0"
+      }`}
+    >
       <button
         onClick={onToggle}
-        className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
+        title={hint}
+        className="flex w-full shrink-0 items-center gap-1.5 px-3 py-1.5 text-left text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
       >
         {open ? (
           <ChevronDown className="h-3 w-3 shrink-0" />
@@ -178,7 +230,9 @@ function DockSection({
           <span className="shrink-0 text-emerald-400">{count}</span>
         )}
       </button>
-      {open && <div className="pb-1">{children}</div>}
+      {open && (
+        <div className="min-h-0 flex-1 overflow-y-auto pb-1">{children}</div>
+      )}
     </div>
   );
 }

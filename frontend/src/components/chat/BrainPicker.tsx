@@ -16,6 +16,10 @@ import {
  * Who is answering. The two fields are orthogonal — a bound Agent brings its
  * own model, and picking a model while one is bound overrides just the model —
  * so a selection names whichever one the user actually changed.
+ *
+ * `BrainPicker` only ever sets `agentKey`; `agentSlug` stays on the type
+ * because the switch endpoint takes both, and rebinding is still what the
+ * rail's rows do when they start a conversation.
  */
 export interface BrainSelection {
   /** Bind a domain Agent. `""` unbinds, back to the plain assistant. */
@@ -44,14 +48,32 @@ function modelLabel(
 }
 
 /**
- * "Who's answering" — one picker over two sections.
+ * Trim a model label down to what distinguishes it, for the button.
  *
- * **Agents** binds a domain Agent (its identity, tools, memory scope);
- * **Models** picks the LLM. They are deliberately one list rather than two
- * dropdowns, because the user is asking one question. Picker sentinels
- * ("openrouter:", "custom:") are drill-downs, never selectable keys — the
- * backend flags them, since the key's shape does not tell you ("ollama:" also
- * ends in a colon and is a real key meaning "that backend's default model").
+ * The catalogue names models "<provider> — <model>", and next to a bound
+ * Agent's name only the model half earns the width. "Ollama — Default Model"
+ * is the exception the split gets wrong: there the provider *is* the answer.
+ */
+function shortModelLabel(label: string): string {
+  const [provider, model] = label.split(" — ");
+  if (!model) return label;
+  return model.startsWith("Default") ? provider : model;
+}
+
+/**
+ * "What's answering" — the model, and only the model.
+ *
+ * This picks the LLM, which for a bound Agent *is* its `agent_key` in AGENT.md:
+ * the backend persists the pick there, so it reaches consult, delegate and its
+ * loops too. It does not bind or unbind an Agent — that is a different question
+ * with a different answer ("who am I talking to"), and it belongs to the rail,
+ * which can also switch conversations and start one. Offering it here as well
+ * gave two doors to one thing and neither of them the full gesture.
+ *
+ * Picker sentinels ("openrouter:", "custom:") are drill-downs, never selectable
+ * keys — the backend flags them, since the key's shape does not tell you
+ * ("ollama:" also ends in a colon and is a real key meaning "that backend's
+ * default model").
  */
 export function BrainPicker({
   agents,
@@ -86,10 +108,17 @@ export function BrainPicker({
   const directAgents = agents.filter((a) => !a.picker);
   const hasOpenRouter = agents.some((a) => a.key === "openrouter:" && a.picker);
   const boundAgent = agentBindings.find((a) => a.slug === selectedAgentSlug);
-  // A bound Agent *is* the answer to "who's answering"; the model it runs on is
-  // a detail, so it only names the button when nothing is bound.
-  const label = boundAgent?.name || modelLabel(selectedAgentKey, agents, models);
-  const activeCustom = parseCustomAgentKey(selectedAgentKey);
+  // An empty key means "whatever the bound Agent runs on", so the picker has to
+  // resolve it the same way the backend does — otherwise the button would name
+  // an Agent without saying what will actually answer.
+  const effectiveKey = selectedAgentKey || boundAgent?.agent_key || "";
+  const model = modelLabel(effectiveKey, agents, models);
+  // Who answers *and* on what: the Agent is the identity, the model is not a
+  // detail the user can be left guessing at, since picking one moves the Agent.
+  const label = boundAgent
+    ? `${boundAgent.name} · ${shortModelLabel(model)}`
+    : model;
+  const activeCustom = parseCustomAgentKey(effectiveKey);
 
   // Custom endpoint models, fetched per endpoint on open
   const customModels = useQuery({
@@ -137,9 +166,17 @@ export function BrainPicker({
   );
 
   const rowClass = (active: boolean) =>
-    `flex w-full items-center px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
+    `flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
       active ? "font-medium text-[var(--color-primary)]" : "text-[var(--color-text)]"
     }`;
+
+  /** Marks where the bound Agent sits, so "back to its default" is findable. */
+  const defaultTag = (key: string) =>
+    boundAgent && key && key === boundAgent.agent_key ? (
+      <span className="ml-auto shrink-0 rounded bg-[var(--color-surface-hover)] px-1 py-px text-[9px] font-normal uppercase tracking-wide text-[var(--color-text-muted)]">
+        default
+      </span>
+    ) : null;
 
   return (
     <div className="relative">
@@ -167,44 +204,22 @@ export function BrainPicker({
           >
             {submenu === null ? (
               <>
-                {agentBindings.length > 0 && (
-                  <>
-                    {sectionHeader("Agents", true)}
-                    <button
-                      onClick={() => pick({ agentSlug: "" })}
-                      className={rowClass(!selectedAgentSlug)}
-                    >
-                      Condor assistant
-                    </button>
-                    {agentBindings.map((a) => (
-                      <button
-                        key={a.slug}
-                        onClick={() => pick({ agentSlug: a.slug })}
-                        title={a.when_to_consult || a.description}
-                        className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                          a.slug === selectedAgentSlug
-                            ? "font-medium text-[var(--color-primary)]"
-                            : "text-[var(--color-text)]"
-                        }`}
-                      >
-                        <span className="w-full truncate">{a.name}</span>
-                        {(a.when_to_consult || a.description) && (
-                          <span className="w-full truncate text-[10px] font-normal text-[var(--color-text-muted)]">
-                            {a.when_to_consult || a.description}
-                          </span>
-                        )}
-                      </button>
-                    ))}
-                    {sectionHeader("Models")}
-                  </>
-                )}
+                {/* An Agent's model is global — it reaches consult, delegate
+                    and its loops — so the consequence of picking one here is
+                    stated, never a silent side effect. */}
+                {boundAgent &&
+                  sectionHeader(
+                    `Model — also becomes ${boundAgent.name}'s default`,
+                    true,
+                  )}
                 {directAgents.map((a) => (
                   <button
                     key={a.key}
                     onClick={() => pick({ agentKey: a.key })}
-                    className={rowClass(a.key === selectedAgentKey)}
+                    className={rowClass(a.key === effectiveKey)}
                   >
-                    {a.label}
+                    <span className="truncate">{a.label}</span>
+                    {defaultTag(a.key)}
                   </button>
                 ))}
                 {hasOpenRouter && (
@@ -214,7 +229,7 @@ export function BrainPicker({
                       loadModels();
                     }}
                     className={`flex w-full items-center justify-between px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      selectedAgentKey.startsWith("openrouter:")
+                      effectiveKey.startsWith("openrouter:")
                         ? "font-medium text-[var(--color-primary)]"
                         : "text-[var(--color-text)]"
                     }`}
@@ -272,9 +287,10 @@ export function BrainPicker({
                       key={model}
                       title={model}
                       onClick={() => pick({ agentKey: key })}
-                      className={rowClass(key === selectedAgentKey)}
+                      className={rowClass(key === effectiveKey)}
                     >
-                      <span className="w-full truncate">{model}</span>
+                      <span className="truncate">{model}</span>
+                      {defaultTag(key)}
                     </button>
                   );
                 })}
@@ -319,7 +335,7 @@ export function BrainPicker({
                     title={m.slug}
                     onClick={() => pick({ agentKey: `openrouter:${m.slug}` })}
                     className={`flex w-full flex-col items-start px-2.5 py-1.5 text-left text-xs hover:bg-[var(--color-surface-hover)] ${
-                      selectedAgentKey === `openrouter:${m.slug}`
+                      effectiveKey === `openrouter:${m.slug}`
                         ? "font-medium text-[var(--color-primary)]"
                         : "text-[var(--color-text)]"
                     }`}

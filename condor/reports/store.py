@@ -6,9 +6,10 @@ import asyncio
 import contextvars
 import json
 import os
-import tempfile
 from contextlib import contextmanager
 from pathlib import Path
+
+from condor.fsutil import atomic_write_json, atomic_write_text
 
 # reports/ is a repository-root output directory, not this source package.
 CHARTS_DIR = Path(__file__).resolve().parents[2] / "reports"
@@ -21,6 +22,9 @@ _last_report_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 )
 _report_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "report_agent", default=None
+)
+_report_source: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
+    "report_source", default=None
 )
 
 
@@ -58,6 +62,24 @@ def attribute_to(agent: str | None):
         _report_agent.reset(token)
 
 
+@contextmanager
+def default_source(source_type: str, source_name: str):
+    """Stamp reports saved in this block that never called ``ReportBuilder.source()``.
+
+    Without a source a report is invisible on the Routines page: the per-routine
+    list matches on ``source_name`` and ``list_reports_grouped`` skips entries
+    without one, so a routine that forgot the call showed "No reports yet" while
+    the report existed. The routine runner wraps every run with this so the
+    call is a nicety, not a requirement. An explicit ``source()`` always wins.
+    """
+    value = (source_type, source_name) if source_name else None
+    token = _report_source.set(value)
+    try:
+        yield
+    finally:
+        _report_source.reset(token)
+
+
 def get_report_raw_html(report_id: str) -> tuple[str, str] | None:
     """Return the report's raw HTML and filename exactly as saved on disk.
 
@@ -91,45 +113,12 @@ def _read_index() -> list[dict]:
 
 
 def _write_index(entries: list[dict]) -> None:
-    charts_dir = _charts_dir()
-    charts_dir.mkdir(exist_ok=True)
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w", encoding="utf-8", dir=str(charts_dir), suffix=".tmp", delete=False
-    )
-    try:
-        json.dump(entries, tmp, indent=2, ensure_ascii=False)
-        tmp.close()
-        os.replace(tmp.name, str(_index_file()))
-    except Exception:
-        tmp.close()
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
+    atomic_write_json(_index_file(), entries, indent=2, ensure_ascii=False)
 
 
 def _write_report_html(path: Path, content: str) -> None:
     """Atomically create or replace a report HTML file."""
-    tmp = tempfile.NamedTemporaryFile(
-        mode="w",
-        encoding="utf-8",
-        dir=str(path.parent),
-        prefix=f".{path.name}.",
-        suffix=".tmp",
-        delete=False,
-    )
-    try:
-        tmp.write(content)
-        tmp.close()
-        os.replace(tmp.name, path)
-    except Exception:
-        tmp.close()
-        try:
-            os.unlink(tmp.name)
-        except OSError:
-            pass
-        raise
+    atomic_write_text(path, content)
 
 
 def list_reports(

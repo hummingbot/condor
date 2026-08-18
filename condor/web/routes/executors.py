@@ -1,89 +1,45 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 logger = logging.getLogger(__name__)
 
 
-from config_manager import get_config_manager
-from condor.web.auth import get_current_user
-from condor.web.models import CreateExecutorRequest, ExecutorInfo, WebUser
-from condor.fetchers.executors import (
-    fetch_all_executors,
-    extract_executors_list as _extract_executors_list,
-    get_executor_pnl,
-    get_executor_volume,
-    get_executor_type,
-    get_executor_fees,
-    MAX_EXECUTORS_FETCH,
+from condor.fetchers.executors import EXECUTORS_POLL_MAX, MAX_EXECUTORS_FETCH
+from condor.fetchers.executors import extract_executors_list as _extract_executors_list
+from condor.fetchers.executors import fetch_all_executors, summarize_executors_by_quote
+from condor.web.auth import require_server_access
+from condor.web.models import (
+    CreateExecutorRequest,
+    ExecutorInfo,
+    ExecutorPeriodSummary,
+    WebUser,
 )
+from condor.web.routes._errors import upstream_error
+from config_manager import get_config_manager
 
 router = APIRouter(tags=["executors"])
 
 
-_SIDE_MAP = {"1": "BUY", "2": "SELL"}
+# Cursor scheme for pages served as an offset into the executor stream rather
+# than by an opaque API cursor.
+_SDS_OFFSET_PREFIX = "__sds_offset__"
 
 
-def _normalize_side(raw: str) -> str:
-    return _SIDE_MAP.get(raw, raw.upper() if raw else "")
+# Windows the dashboard's KPI strip offers, in seconds, with the TTL each
+# aggregate is cached for. A period total is not a live number -- the longer the
+# window, the less one new executor moves it, so the month total is allowed to
+# age far more than the day's. The floor matters because computing one of these
+# walks the whole executor history: without it, every browser tab polling the
+# strip would re-walk it.
+_PERIOD_SECONDS: dict[str, int] = {"1D": 86400, "1W": 7 * 86400, "1M": 30 * 86400}
+_PERIOD_TTLS: dict[str, int] = {"1D": 60, "1W": 300, "1M": 900}
 
-
-def _build_executor_info(ex: dict) -> ExecutorInfo | None:
-    """Convert a raw executor dict to an ExecutorInfo model.
-
-    Handles both REST API format (id, config.type, config.connector_name)
-    and WS format (executor_id, executor_type, connector_name at top level).
-    """
-    if not isinstance(ex, dict):
-        return None
-    config = ex.get("config", ex)
-    custom_info = ex.get("custom_info") or {}
-
-    # Entry price is display-only (PnL comes from get_executor_pnl(), independent of it).
-    # Only position executors carry a real entry_price (config > top-level > custom_info);
-    # grid/DCA executors expose break_even_price instead, so fall back to it for display.
-    _cfg_entry = float(config.get("entry_price") or 0)
-    _top_entry = float(ex.get("entry_price") or 0)
-    _ci_entry = float(custom_info.get("current_position_average_price") or 0)
-    _be_price = float(custom_info.get("break_even_price") or 0)
-    entry_price = _cfg_entry or _top_entry or _ci_entry or _be_price or 0.0
-
-    # Current/close price: top-level > custom_info.close_price > held_position_orders fill price
-    _top_cur = float(ex.get("current_price") or 0)
-    _ci_close = float(custom_info.get("close_price") or 0)
-    # Extract fill price from held_position_orders (order executors store fills there)
-    _held_price = 0.0
-    held_orders = custom_info.get("held_position_orders")
-    if isinstance(held_orders, list) and held_orders:
-        try:
-            _held_price = float(held_orders[-1].get("price") or 0)
-        except (TypeError, ValueError, AttributeError):
-            pass
-    current_price = _top_cur if _top_cur > 0 else (_ci_close if _ci_close > 0 else (_held_price if _held_price > 0 else 0.0))
-
-    return ExecutorInfo(
-        id=str(ex.get("id") or ex.get("executor_id") or ""),
-        type=get_executor_type(ex),
-        connector=config.get("connector_name") or ex.get("connector_name") or ex.get("connector") or "",
-        trading_pair=config.get("trading_pair") or ex.get("trading_pair") or "",
-        side=_normalize_side(str(custom_info.get("side") or config.get("side") or ex.get("side") or "")),
-        status=(ex.get("status") or "").lower(),
-        close_type=str(ex.get("close_type") or "").lower(),
-        pnl=get_executor_pnl(ex),
-        volume=get_executor_volume(ex),
-        timestamp=float(config.get("timestamp") or ex.get("timestamp") or 0),
-        controller_id=str(config.get("controller_id") or ex.get("controller_id") or ""),
-        cum_fees_quote=get_executor_fees(ex),
-        net_pnl_pct=float(ex.get("net_pnl_pct") or 0),
-        entry_price=entry_price,
-        current_price=current_price,
-        close_timestamp=float(ex.get("close_timestamp") or 0),
-        custom_info=custom_info,
-        config=ex.get("config", {}),
-    )
-
+# (server, period) -> (computed_at, summary). Bounded by servers x periods.
+_summary_cache: dict[tuple[str, str], tuple[float, ExecutorPeriodSummary]] = {}
 
 
 @router.get("/servers/{name}/executors", response_model=list[ExecutorInfo])
@@ -93,12 +49,15 @@ async def list_executors(
     trading_pair: str = Query(default="", description="Filter by trading pair"),
     status: str = Query(default="", description="Filter by status"),
     controller_id: str = Query(default="", description="Filter by controller id"),
-    limit: int = Query(default=0, ge=0, le=MAX_EXECUTORS_FETCH, description="Max executors to return (0 = default SDS cache)"),
-    user: WebUser = Depends(get_current_user),
+    limit: int = Query(
+        default=0,
+        ge=0,
+        le=MAX_EXECUTORS_FETCH,
+        description="Max executors to return (0 = default SDS cache)",
+    ),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     from condor.server_data_service import ServerDataType, get_server_data_service
 
@@ -123,12 +82,16 @@ async def list_executors(
             )
             result = executors_list
         except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
+            logger.exception("Failed to fetch executors for server %s", name)
+            raise upstream_error("Failed to fetch executors", e)
     else:
         try:
-            result = await get_server_data_service().get_or_fetch(name, ServerDataType.EXECUTORS)
+            result = await get_server_data_service().get_or_fetch(
+                name, ServerDataType.EXECUTORS
+            )
         except Exception as e:
-            raise HTTPException(status_code=502, detail=str(e))
+            logger.exception("Failed to fetch executors for server %s", name)
+            raise upstream_error("Failed to fetch executors", e)
         if result is None:
             raise HTTPException(status_code=502, detail="Failed to fetch executors")
 
@@ -136,10 +99,24 @@ async def list_executors(
 
     items: list[ExecutorInfo] = []
     for ex in executors_list:
-        info = _build_executor_info(ex)
+        info = ExecutorInfo.from_raw(ex)
         if info:
             items.append(info)
     return items
+
+
+def _offset_page(rows: list[dict], offset: int, limit: int) -> dict:
+    """Build a page response for the offset-cursor scheme over ``rows``."""
+    items: list[ExecutorInfo] = []
+    for ex in rows[offset : offset + limit]:
+        info = ExecutorInfo.from_raw(ex)
+        if info:
+            items.append(info)
+    has_more = len(rows) > offset + limit
+    return {
+        "executors": items,
+        "next_cursor": _SDS_OFFSET_PREFIX + str(offset + limit) if has_more else None,
+    }
 
 
 @router.get("/servers/{name}/executors/page")
@@ -151,7 +128,7 @@ async def list_executors_page(
     trading_pair: str = Query(default=""),
     status: str = Query(default=""),
     controller_id: str = Query(default=""),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     """Fetch a single page of executors with a next_cursor for progressive loading.
 
@@ -159,59 +136,51 @@ async def list_executors_page(
     and render them as they arrive instead of waiting for the full dataset.
 
     First page with no filters: served from SDS cache if available (instant).
+    Scrolling past the cached prefix keeps the same offset cursor and is served
+    from the API instead, so the stream continues past the poll's page budget.
     """
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     has_filters = bool(executor_type or trading_pair or status or controller_id)
 
-    # First page, no filters → try SDS cache for instant response
-    if not cursor and not has_filters:
+    # Offset paging over the SDS cache: the unfiltered first page, and any page
+    # whose cursor was handed out by a previous one.
+    offset: int | None = None
+    if not has_filters:
+        if not cursor:
+            offset = 0
+        elif cursor.startswith(_SDS_OFFSET_PREFIX):
+            offset = int(cursor[len(_SDS_OFFSET_PREFIX) :] or 0)
+
+    if offset is not None:
         from condor.server_data_service import ServerDataType, get_server_data_service
 
-        sds = get_server_data_service()
-        cached = sds.get(name, ServerDataType.EXECUTORS)
-        if cached is not None:
-            all_executors = _extract_executors_list(cached)
-            page = all_executors[:limit]
-            items: list[ExecutorInfo] = []
-            for ex in page:
-                info = _build_executor_info(ex)
-                if info:
-                    items.append(info)
-            has_more = len(all_executors) > limit
-            return {
-                "executors": items,
-                "next_cursor": "__sds_offset__" + str(limit) if has_more else None,
-            }
+        cached = get_server_data_service().get(name, ServerDataType.EXECUTORS)
+        cached_rows = _extract_executors_list(cached) if cached is not None else []
+        # The poll caps its walk at EXECUTORS_POLL_MAX, so a cache of exactly
+        # that length is only a prefix of the history: just a short cache proves
+        # there is nothing past it.
+        cache_is_whole = cached is not None and len(cached_rows) < EXECUTORS_POLL_MAX
+        if offset + limit < len(cached_rows) or cache_is_whole:
+            return _offset_page(cached_rows, offset, limit)
 
-    # Handle SDS-based pagination for subsequent pages
-    if cursor and cursor.startswith("__sds_offset__"):
-        from condor.server_data_service import ServerDataType, get_server_data_service
-
-        sds = get_server_data_service()
-        cached = sds.get(name, ServerDataType.EXECUTORS)
-        if cached is not None:
-            all_executors = _extract_executors_list(cached)
-            offset = int(cursor.replace("__sds_offset__", ""))
-            page = all_executors[offset : offset + limit]
-            items = []
-            for ex in page:
-                info = _build_executor_info(ex)
-                if info:
-                    items.append(info)
-            next_offset = offset + limit
-            has_more = next_offset < len(all_executors)
-            return {
-                "executors": items,
-                "next_cursor": "__sds_offset__" + str(next_offset) if has_more else None,
-            }
-        # Cache expired, fall through to API
+        if cursor:
+            # Scrolled past the cached prefix, or the cache expired mid-scroll.
+            # An offset cursor has no API equivalent, so keep the scheme going:
+            # walk far enough to fill this page and to tell if another follows.
+            client = await cm.get_client(name)
+            try:
+                rows = await fetch_all_executors(client, max_items=offset + limit + 1)
+            except Exception as e:
+                logger.exception("Failed to page executors for server %s", name)
+                raise upstream_error("Failed to fetch executors", e)
+            return _offset_page(rows, offset, limit)
+        # Cold cache on the first page: fall through to opaque API cursors,
+        # which page the rest of the scroll in one request each.
 
     client = await cm.get_client(name)
     kwargs: dict = {"limit": limit}
-    if cursor and not cursor.startswith("__sds_offset__"):
+    if cursor and not cursor.startswith(_SDS_OFFSET_PREFIX):
         kwargs["cursor"] = cursor
     if executor_type:
         kwargs["executor_types"] = [executor_type]
@@ -225,7 +194,8 @@ async def list_executors_page(
     try:
         result = await client.executors.search_executors(**kwargs)
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to page executors for server %s", name)
+        raise upstream_error("Failed to fetch executors", e)
 
     page = _extract_executors_list(result)
     next_cursor = None
@@ -240,32 +210,154 @@ async def list_executors_page(
 
     items = []
     for ex in page:
-        info = _build_executor_info(ex)
+        info = ExecutorInfo.from_raw(ex)
         if info:
             items.append(info)
     return {"executors": items, "next_cursor": next_cursor or None}
+
+
+async def _usd_summary(
+    server: str, period: str, by_quote: dict[str, dict[str, float]]
+) -> ExecutorPeriodSummary:
+    """Fold per-quote totals into one USD-denominated summary.
+
+    One rate lookup per quote asset, not per executor, and served from the cached
+    ticker pool. A quote with no path to USD is added at face value and flips
+    ``converted`` — the same fallback the strip's client-side ``convert()`` made,
+    but reported instead of silent.
+    """
+    from condor.market_rates import get_rates
+
+    rates: dict[str, float | None] = {}
+    if by_quote:
+        try:
+            rates = await get_rates(server, [f"{q}-USDT" for q in by_quote])
+        except Exception as e:
+            logger.warning(
+                "Rates unavailable while summarizing executors for %s: %s", server, e
+            )
+
+    pnl = 0.0
+    volume = 0.0
+    count = 0
+    converted = True
+    for quote, totals in by_quote.items():
+        rate = rates.get(f"{quote}-USDT")
+        if not rate or rate <= 0:
+            converted = False
+            rate = 1.0
+        pnl += totals["pnl"] * rate
+        volume += totals["volume"] * rate
+        count += int(totals["count"])
+
+    return ExecutorPeriodSummary(
+        period=period, pnl=pnl, volume=volume, count=count, converted=converted
+    )
+
+
+@router.get("/servers/{name}/executors/summary", response_model=ExecutorPeriodSummary)
+async def executors_summary(
+    name: str,
+    period: str = Query(default="1D", description="Window: 1D, 1W or 1M"),
+    user: WebUser = Depends(require_server_access),
+):
+    """PnL, volume and executor count over a period, across the whole history.
+
+    The dashboard's KPI strip used to compute this in the browser by summing the
+    executor list it already had. That list is the SDS cache, which the poll
+    bounds to a single page (``EXECUTORS_POLL_MAX``, PERF-117), so on a busy
+    server the 1W and 1M tiles silently reported the newest page instead of the
+    period — a wrong number with nothing to distinguish it from a right one.
+
+    A period total belongs here, over the full history: this walks it with
+    ``fetch_all_executors``, on demand and cached per period, leaving the 2s poll
+    at its one request per tick.
+    """
+    cm = get_config_manager()
+
+    period = period.upper()
+    window = _PERIOD_SECONDS.get(period)
+    if window is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown period '{period}': expected one of "
+            + ", ".join(_PERIOD_SECONDS),
+        )
+
+    now = time.time()
+    cached = _summary_cache.get((name, period))
+    if cached is not None and now - cached[0] < _PERIOD_TTLS[period]:
+        return cached[1]
+
+    client = await cm.get_client(name)
+    try:
+        executors = await fetch_all_executors(client)
+    except Exception as e:
+        logger.exception("Failed to summarize executors for server %s", name)
+        raise upstream_error("Failed to fetch executors", e)
+
+    summary = await _usd_summary(
+        name, period, summarize_executors_by_quote(executors, now - window)
+    )
+    _summary_cache[(name, period)] = (now, summary)
+    return summary
+
+
+async def _ensure_dex_tokens_listed(client, config: dict) -> None:
+    """Register a DEX executor's tokens with Gateway before it is created.
+
+    The pool workspace already does this when it opens, so for the web UI this is
+    a no-op resolved from an in-process memo. It exists for the callers that never
+    open one — agents, Telegram, MCP — because an unlisted mint reads as a zero
+    balance in Gateway, which is enough to have an order rejected for funds the
+    wallet is holding.
+
+    Best effort by design: a token that cannot be registered is not a reason to
+    refuse an order Gateway may well execute anyway.
+    """
+    connector = str(config.get("connector_name") or "")
+    if not connector:
+        return
+    try:
+        from condor.fetchers.gateway_tokens import (
+            ensure_tokens_listed,
+            token_addresses,
+        )
+        from condor.pool_data import GECKO_TO_GATEWAY_NETWORK, NETWORK_TO_GECKO
+
+        # A CEX connector ("binance") maps to no chain and drops out here; only a
+        # Gateway network id ("solana-mainnet-beta") reaches the token list.
+        network = GECKO_TO_GATEWAY_NETWORK.get(NETWORK_TO_GECKO.get(connector, ""))
+        if not network:
+            return
+        addresses = token_addresses(config.get("trading_pair"))
+        if addresses:
+            await ensure_tokens_listed(client, network, addresses)
+    except Exception as e:
+        logger.warning("could not ensure tokens for %s: %s", connector, e)
 
 
 @router.post("/servers/{name}/executors")
 async def create_executor_endpoint(
     name: str,
     body: CreateExecutorRequest,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
     # Inject executor type into config
     config = {**body.config, "type": body.executor_type}
 
+    await _ensure_dex_tokens_listed(client, config)
+
     from condor.fetchers.executors import create_executor
 
-    result = await create_executor(client, config, account_name=body.account_name)
-    if isinstance(result, dict) and result.get("status") == "error":
-        raise HTTPException(status_code=400, detail=result.get("message", "Failed to create executor"))
+    try:
+        result = await create_executor(client, config, account_name=body.account_name)
+    except Exception as e:
+        raise upstream_error("Failed to create executor", e)
     executor_id = ""
     if isinstance(result, dict):
         executor_id = str(result.get("executor_id") or result.get("id") or "")
@@ -277,36 +369,34 @@ async def stop_executor_endpoint(
     name: str,
     executor_id: str,
     keep_position: bool = Query(default=False),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
 
     from condor.fetchers.executors import stop_executor
 
-    result = await stop_executor(client, executor_id, keep_position=keep_position)
-    if isinstance(result, dict) and result.get("status") == "error":
-        raise HTTPException(status_code=400, detail=result.get("message", "Failed to stop executor"))
+    try:
+        result = await stop_executor(client, executor_id, keep_position=keep_position)
+    except Exception as e:
+        raise upstream_error("Failed to stop executor", e)
     return {"status": "ok", "result": result}
 
 
 @router.get("/servers/{name}/executors/positions")
 async def get_positions_held(
     name: str,
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
         result = await client.executors.get_positions_summary()
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to fetch held positions for server %s", name)
+        raise upstream_error("Failed to fetch positions", e)
 
     # Normalize: extract positions list from various shapes
     if isinstance(result, dict):
@@ -318,7 +408,10 @@ async def get_positions_held(
     else:
         positions = []
 
-    return {"positions": positions, "summary": result if isinstance(result, dict) else {}}
+    return {
+        "positions": positions,
+        "summary": result if isinstance(result, dict) else {},
+    }
 
 
 @router.delete("/servers/{name}/executors/positions/{connector}/{pair}")
@@ -327,11 +420,9 @@ async def clear_position_held(
     connector: str,
     pair: str,
     controller_id: str = Query(default=""),
-    user: WebUser = Depends(get_current_user),
+    user: WebUser = Depends(require_server_access),
 ):
     cm = get_config_manager()
-    if not cm.has_server_access(user.id, name):
-        raise HTTPException(status_code=403, detail="No access")
 
     client = await cm.get_client(name)
     try:
@@ -345,5 +436,6 @@ async def clear_position_held(
             **kwargs,
         )
     except Exception as e:
-        raise HTTPException(status_code=502, detail=str(e))
+        logger.exception("Failed to clear held position on server %s", name)
+        raise upstream_error("Failed to clear position", e)
     return {"status": "ok", "result": result}

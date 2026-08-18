@@ -1,46 +1,65 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { ArrowUpRight, Loader2, Square } from "lucide-react";
+import { Loader2, Square } from "lucide-react";
 import { useEffect, useState } from "react";
 
-import { DelegationDetail } from "@/components/agent/DelegationDetail";
-import { DelegationTranscript } from "@/components/agent/DelegationTranscript";
+import { DelegationHistory } from "@/components/agent/DelegationHistory";
+import { DelegationSheet } from "@/components/agent/DelegationSheet";
 import {
   DELEGATION_STATUS,
   formatDelegationTime,
 } from "@/components/agent/delegationStatus";
-import { WorkspaceSheet } from "@/components/chat/WorkspaceSheet";
 import { api, type Delegation } from "@/lib/api";
+
+/** How much of the delegation record the list is showing. */
+type Scope = "mine" | "all" | "history";
+
+const SCOPES: { id: Scope; label: string; hint: string }[] = [
+  { id: "mine", label: "This chat", hint: "Tasks started from this conversation" },
+  { id: "all", label: "All", hint: "Every background task running in this process" },
+  { id: "history", label: "History", hint: "Finished tasks, from the records on disk" },
+];
 
 /**
  * What this conversation handed off.
  *
  * Scoped by `conversation_id`, not by agent or user: two conversations with the
  * same agent are the case this exists for. Delegations with no conversation
- * behind them (Telegram-era, consult-started) are not claimed here — they are
- * counted in the footer and left to the fleet report.
+ * behind them (Telegram-era, consult-started) and the records that outlive the
+ * process are reached through the same scope switch rather than sent to another
+ * page — this dock is now the only place they are reachable from.
+ *
+ * One switch, not three nested disclosures: stacked expandables put "history"
+ * at the same visual weight as the section it belongs to, which read as a third
+ * category sitting beside Tasks and Routines. These are three views of one
+ * thing, so they are three positions of one control.
  */
 export function DockTasks({
   delegations,
   conversationId,
-  onOpenFleet,
+  agentSlug,
 }: {
   /** Every delegation in the process — the shared `["delegations"]` query. */
   delegations: Delegation[];
   /** The conversation this dock belongs to; "" before a session settles. */
   conversationId: string;
-  onOpenFleet: () => void;
+  /** Who this conversation talks to; scopes the history. "" before a slot settles. */
+  agentSlug: string;
 }) {
   const queryClient = useQueryClient();
   const [openId, setOpenId] = useState<string | null>(null);
-  const [view, setView] = useState<"transcript" | "result">("transcript");
   const [confirmStopId, setConfirmStopId] = useState<string | null>(null);
+  const [scope, setScope] = useState<Scope>("mine");
+  // The history follows the agent the rail has highlighted, because "what has
+  // this one been asked to do" is the question it is opened with. Fleet-wide is
+  // one click away and reachable nowhere else, so it does not simply vanish.
+  const [historyAll, setHistoryAll] = useState(false);
 
   const mine = conversationId
     ? delegations.filter((d) => d.conversation_id === conversationId)
     : [];
   // Newest first: the thing just started is the thing being watched.
-  const ordered = [...mine].sort((a, b) => b.started_at - a.started_at);
-  const others = delegations.length - mine.length;
+  const byNewest = (a: Delegation, b: Delegation) => b.started_at - a.started_at;
+  const ordered = [...(scope === "all" ? delegations : mine)].sort(byNewest);
   const anyRunning = mine.some((d) => d.status === "running");
 
   // The list already refreshes on the shared 5s poll; this only re-renders in
@@ -66,9 +85,51 @@ export function DockTasks({
 
   return (
     <>
-      {ordered.length === 0 ? (
+      {/* Sticky, because it is what tells you which list you are looking at —
+          scrolling away from that answer is how "all" gets mistaken for "mine". */}
+      <div className="sticky top-0 z-10 flex items-center gap-0.5 bg-[var(--color-bg)] px-2 pb-1 pt-0.5">
+        {SCOPES.map((s) => (
+          <button
+            key={s.id}
+            type="button"
+            onClick={() => setScope(s.id)}
+            title={s.hint}
+            className={`rounded px-1.5 py-0.5 text-[10px] transition-colors ${
+              scope === s.id
+                ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
+                : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+            }`}
+          >
+            {s.label}
+          </button>
+        ))}
+      </div>
+
+      {scope === "history" ? (
+        <div className="px-2">
+          {agentSlug && (
+            <div className="flex items-center gap-2 px-1 py-1 text-[10px] text-[var(--color-text-muted)]">
+              <span className="min-w-0 flex-1 truncate">
+                {historyAll ? "Every agent" : agentSlug}
+              </span>
+              <button
+                type="button"
+                onClick={() => setHistoryAll((v) => !v)}
+                className="shrink-0 rounded border border-[var(--color-border)] px-1.5 py-0.5 transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
+              >
+                {historyAll ? `Only ${agentSlug}` : "All agents"}
+              </button>
+            </div>
+          )}
+          <DelegationHistory
+            agent={historyAll ? undefined : agentSlug || undefined}
+          />
+        </div>
+      ) : ordered.length === 0 ? (
         <p className="px-3 py-2 text-[11px] text-[var(--color-text-muted)]">
-          Nothing delegated from this conversation yet.
+          {scope === "all"
+            ? "No background tasks running."
+            : "Nothing delegated from this conversation yet."}
         </p>
       ) : (
         <div className="space-y-px">
@@ -86,14 +147,7 @@ export function DockTasks({
                 />
                 <button
                   type="button"
-                  onClick={() => {
-                    setOpenId(d.task_id);
-                    // Follow the task: while it runs there is no result yet, so
-                    // the transcript *is* the view. Once it is finished the
-                    // answer is what the task was for, and the transcript is the
-                    // follow-up question.
-                    setView(d.status === "running" ? "transcript" : "result");
-                  }}
+                  onClick={() => setOpenId(d.task_id)}
                   className="min-w-0 flex-1 text-left"
                   title={d.task}
                 >
@@ -139,50 +193,8 @@ export function DockTasks({
         </div>
       )}
 
-      {/* Work that belongs to no conversation still exists — say so. */}
-      {others > 0 && (
-        <button
-          onClick={onOpenFleet}
-          className="flex w-full items-center gap-1 px-3 py-1.5 text-left text-[10px] text-[var(--color-text-muted)] transition-colors hover:text-[var(--color-text)]"
-        >
-          {others} other background task{others !== 1 ? "s" : ""}
-          <ArrowUpRight className="h-3 w-3 shrink-0" />
-        </button>
-      )}
-
       {open && (
-        <WorkspaceSheet
-          title={open.agent}
-          subtitle={`${DELEGATION_STATUS[open.status].label.toLowerCase()} · ${formatDelegationTime(open)}`}
-          onClose={() => setOpenId(null)}
-        >
-          {/* The ask belongs to both views, so it sits above the switch rather
-              than inside the one that happens to render it. */}
-          <p className="mb-3 whitespace-pre-wrap text-sm text-[var(--color-text)]">
-            {open.task}
-          </p>
-          <div className="mb-3 flex items-center gap-1 border-b border-[var(--color-border)]/50 pb-2">
-            {(["transcript", "result"] as const).map((id) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setView(id)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-all ${
-                  view === id
-                    ? "bg-[var(--color-primary)]/15 text-[var(--color-primary)]"
-                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-                }`}
-              >
-                {id}
-              </button>
-            ))}
-          </div>
-          {view === "transcript" ? (
-            <DelegationTranscript taskId={open.task_id} />
-          ) : (
-            <DelegationDetail delegation={open} clamped={false} />
-          )}
-        </WorkspaceSheet>
+        <DelegationSheet task={open} onClose={() => setOpenId(null)} />
       )}
     </>
   );

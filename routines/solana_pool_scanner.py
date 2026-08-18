@@ -6,13 +6,11 @@ import logging
 import re
 from typing import Optional
 
-import aiohttp
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
 logger = logging.getLogger(__name__)
 
-GECKO_BASE = "https://api.geckoterminal.com/api/v2"
 NETWORK = "solana"
 PAGES_PER_DEX = 3
 
@@ -50,30 +48,30 @@ class Config(BaseModel):
     )
 
 
-async def _fetch_pools_page(
-    session: aiohttp.ClientSession, dex_id: str, page: int
-) -> list[dict]:
-    url = f"{GECKO_BASE}/networks/{NETWORK}/dexes/{dex_id}/pools"
-    params = {"page": str(page)}
+async def _fetch_pools_page(dex_id: str, page: int) -> list[dict]:
+    """One page of a venue's pools, on the process-wide gecko budget.
+
+    ``dex_ids × pages`` requests fan out from here, so this is the caller most
+    able to exhaust the ~30/min the whole process shares — hence the shared gate
+    rather than a session of its own.
+    """
+    from condor.pool_data import gecko_request
+
     try:
-        async with session.get(
-            url, params=params, timeout=aiohttp.ClientTimeout(total=15)
-        ) as resp:
-            if resp.status != 200:
-                logger.warning(f"GeckoTerminal {dex_id} p{page}: HTTP {resp.status}")
-                return []
-            body = await resp.json()
-            return body.get("data", [])
+        body = await gecko_request(
+            "GET",
+            f"networks/{NETWORK}/dexes/{dex_id}/pools",
+            params={"page": str(page)},
+        )
+        return body.get("data", [])
     except Exception as e:
         logger.warning(f"GeckoTerminal {dex_id} p{page} failed: {e}")
         return []
 
 
-async def _fetch_all_pools(
-    session: aiohttp.ClientSession, dex_ids: list[str], pages: int
-) -> list[dict]:
+async def _fetch_all_pools(dex_ids: list[str], pages: int) -> list[dict]:
     tasks = [
-        _fetch_pools_page(session, dex_id, page)
+        _fetch_pools_page(dex_id, page)
         for dex_id in dex_ids
         for page in range(1, pages + 1)
     ]
@@ -308,8 +306,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     else:
         dex_ids = [did for ids in DEX_IDS.values() for did in ids]
 
-    async with aiohttp.ClientSession() as session:
-        raw_pools = await _fetch_all_pools(session, dex_ids, config.pages)
+    raw_pools = await _fetch_all_pools(dex_ids, config.pages)
 
     all_pools = [p for raw in raw_pools if (p := _parse_pool(raw))]
 
@@ -382,45 +379,42 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             logger.warning(f"Failed to send chart to Telegram: {e}")
 
     # Report: chart FIRST, then table
-    try:
-        from condor.reports import ReportBuilder
+    from condor.reports import ReportBuilder
 
-        builder = ReportBuilder("Solana Pool Scanner")
-        builder.source("routine", "solana_pool_scanner").tags(
-            ["solana", "dex", "pools", "yield"]
-        )
+    builder = ReportBuilder("Solana Pool Scanner")
+    builder.source("routine", "solana_pool_scanner").tags(
+        ["solana", "dex", "pools", "yield"]
+    )
 
-        builder.markdown(
-            f"Scanned {len(all_pools)} pools across Orca, Raydium, Meteora. "
-            f"{len(filtered)} passed filters (vol >= {_fmt_usd(config.min_volume_24h)}, "
-            f"tvl >= {_fmt_usd(config.min_tvl)}). Distribution: {dist_str}"
-        )
+    builder.markdown(
+        f"Scanned {len(all_pools)} pools across Orca, Raydium, Meteora. "
+        f"{len(filtered)} passed filters (vol >= {_fmt_usd(config.min_volume_24h)}, "
+        f"tvl >= {_fmt_usd(config.min_tvl)}). Distribution: {dist_str}"
+    )
 
-        if plotly_fig is not None:
-            builder.plotly(plotly_fig)
+    if plotly_fig is not None:
+        builder.plotly(plotly_fig)
 
-        builder.table(
-            [
-                {
-                    "#": i,
-                    "Pool": p["name"],
-                    "DEX": p["dex"],
-                    "Vol 24h": _fmt_usd(p["volume_24h"]),
-                    "TVL": _fmt_usd(p["tvl"]),
-                    "V/T": f"{p['vol_tvl_ratio']:.1f}x",
-                    "Fee": f"{p['fee_pct'] * 100:.2f}".rstrip("0").rstrip(".") + "%",
-                    "Fee APR": _fmt_pct(p["fee_tvl_ratio"]),
-                    "Price": f"${_fmt_price(p['base_price'])}",
-                    "24h": f"{p['pct_24h']:+.1f}%",
-                    "Link": f'<a href="{_pool_url(p["dex_id"], p["address"])}" target="_blank" title="Open on {p["dex_family"].capitalize()}">&#x1F517;</a>',
-                }
-                for i, p in enumerate(top, 1)
-            ]
-        )
+    builder.table(
+        [
+            {
+                "#": i,
+                "Pool": p["name"],
+                "DEX": p["dex"],
+                "Vol 24h": _fmt_usd(p["volume_24h"]),
+                "TVL": _fmt_usd(p["tvl"]),
+                "V/T": f"{p['vol_tvl_ratio']:.1f}x",
+                "Fee": f"{p['fee_pct'] * 100:.2f}".rstrip("0").rstrip(".") + "%",
+                "Fee APR": _fmt_pct(p["fee_tvl_ratio"]),
+                "Price": f"${_fmt_price(p['base_price'])}",
+                "24h": f"{p['pct_24h']:+.1f}%",
+                "Link": f'<a href="{_pool_url(p["dex_id"], p["address"])}" target="_blank" title="Open on {p["dex_family"].capitalize()}">&#x1F517;</a>',
+            }
+            for i, p in enumerate(top, 1)
+        ]
+    )
 
-        builder.manual_order()
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    builder.manual_order()
+    await builder.save()
 
     return RoutineResult(text=report_text, chart_image=chart_bytes)

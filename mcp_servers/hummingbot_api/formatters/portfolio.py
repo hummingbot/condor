@@ -3,6 +3,7 @@ Portfolio formatter for balance and holdings information.
 
 This module provides table formatters for portfolio balances and holdings.
 """
+
 from typing import Any
 
 from .base import format_number, format_table_separator, get_field
@@ -49,9 +50,17 @@ def format_portfolio_as_table(portfolio_data: dict[str, Any]) -> str:
             for balance in balances:
                 token = str(get_field(balance, "token", default="N/A"))[:8]
                 connector = connector_name[:17]
-                total = format_number(get_field(balance, "units", default=None), decimals=4, compact=True)
-                available = format_number(get_field(balance, "available_units", default=None), decimals=4, compact=True)
-                value_usd = format_number(get_field(balance, "value", default=None), decimals=2, compact=True)
+                total = format_number(
+                    get_field(balance, "units", default=None), decimals=4, compact=True
+                )
+                available = format_number(
+                    get_field(balance, "available_units", default=None),
+                    decimals=4,
+                    compact=True,
+                )
+                value_usd = format_number(
+                    get_field(balance, "value", default=None), decimals=2, compact=True
+                )
 
                 row = f"{token:8} | {connector:17} | {total:12} | {available:12} | {value_usd}"
                 rows.append(row)

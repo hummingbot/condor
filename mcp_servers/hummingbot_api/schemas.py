@@ -220,11 +220,11 @@ class GatewayContainerRequest(BaseModel):
         "The Hummingbot API runs Gateway secured (TLS + mTLS) and manages the "
         "certificates/passphrase itself using its own CONFIG_PASSWORD (hummingbot-api "
         "SEC-048), so no passphrase is needed here. "
-        "Fields: image (Docker image, default: hummingbot/gateway:latest), "
+        "Fields: image (Docker image, default: hummingbot/gateway:development), "
         "port (exposed port, default: 15888).",
         examples=[
             {
-                "image": "hummingbot/gateway:latest",
+                "image": "hummingbot/gateway:development",
                 "port": 15888,
             }
         ],
@@ -563,4 +563,114 @@ class GatewayCLMMRequest(BaseModel):
     detailed: bool = Field(
         default=False,
         description="Return detailed table with more columns (default: False)",
+    )
+
+
+# ==============================================================================
+# Gateway AMM Schemas (manage_amm)
+# ==============================================================================
+
+
+class AMMRequest(BaseModel):
+    """Request model for the direct, chain- & DEX-agnostic AMM tool (manage_amm).
+
+    Drives AMM operations and pool creation across Meteora DAMM v2 (Solana), Raydium CPMM (Solana),
+    and Uniswap V2 (EVM). Stateless — the caller/agent holds position state.
+
+    Progressive disclosure: action=None returns the AMM guide + per-connector matrix.
+
+    Meteora DAMM v2 positions are NFTs (a wallet may hold several per pool), so this tool is
+    position-addressed: remove_liquidity requires position_address, add_liquidity takes it
+    optionally (omit = open a new position), position_info returns a positions[] breakdown, and
+    positions_owned lists all of a wallet's positions. Fungible-LP AMMs ignore position_address.
+    """
+
+    action: (
+        Literal[
+            "pool_info",
+            "position_info",
+            "positions_owned",
+            "quote_swap",
+            "execute_swap",
+            "quote_liquidity",
+            "add_liquidity",
+            "remove_liquidity",
+            "create_pool",
+        ]
+        | None
+    ) = Field(
+        default=None,
+        description="AMM action. Leave empty to load the AMM guide + param matrix.",
+    )
+
+    connector: str | None = Field(
+        default=None,
+        description="AMM connector (required for any action): 'meteora' (Solana DAMM v2), 'raydium' (Solana CPMM), 'uniswap' (EVM V2)",
+    )
+    network: str | None = Field(
+        default=None,
+        description="Network ID in 'chain-network' format. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'base-mainnet'",
+    )
+    wallet_address: str | None = Field(
+        default=None,
+        description="Wallet address (optional, uses default if not provided)",
+    )
+    pool_address: str | None = Field(default=None, description="Pool contract address")
+    position_address: str | None = Field(
+        default=None,
+        description="Meteora NFT position: REQUIRED for remove_liquidity, optional for add_liquidity (omit = open a new position). Ignored by fungible-LP AMMs.",
+    )
+
+    # Swap params
+    base_token: str | None = Field(
+        default=None,
+        description="Base token symbol or address (swap direction / pool base)",
+    )
+    quote_token: str | None = Field(
+        default=None,
+        description="Quote token symbol or address (pool quote, for create_pool)",
+    )
+    amount: str | None = Field(
+        default=None, description="Swap amount (as string; parsed to Decimal)"
+    )
+    side: Literal["BUY", "SELL"] | None = Field(
+        default=None, description="Swap direction"
+    )
+    slippage_pct: str | None = Field(
+        default=None, description="Maximum slippage percentage (as string)"
+    )
+
+    # Liquidity params
+    base_token_amount: str | None = Field(
+        default=None,
+        description="Base token amount (add_liquidity / quote_liquidity / create_pool)",
+    )
+    quote_token_amount: str | None = Field(
+        default=None,
+        description="Quote token amount (add_liquidity / quote_liquidity / create_pool)",
+    )
+    percentage_to_remove: str | None = Field(
+        default=None,
+        description="Percentage of liquidity to remove, 0-100 (remove_liquidity)",
+    )
+
+    # create_pool params
+    initial_price: str | None = Field(
+        default=None,
+        description="Initial price as quote per base (create_pool; overrides quote_token_amount)",
+    )
+    config_address: str | None = Field(
+        default=None,
+        description="Meteora DAMM v2 config account address (required for meteora create_pool)",
+    )
+    fee_config_index: int | None = Field(
+        default=None,
+        description="Raydium CPMM fee config index (optional, create_pool)",
+    )
+    gas_price: str | None = Field(
+        default=None,
+        description="Uniswap (EVM) gas price in gwei (optional, create_pool)",
+    )
+    max_gas: int | None = Field(
+        default=None, description="Uniswap (EVM) max gas limit (optional, create_pool)"
     )

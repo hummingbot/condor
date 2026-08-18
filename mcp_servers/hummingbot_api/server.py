@@ -4,6 +4,7 @@ Main MCP server for Hummingbot API integration
 
 import asyncio
 import logging
+import os
 import sys
 from typing import Any, Literal
 
@@ -11,6 +12,7 @@ from mcp.server.fastmcp import FastMCP
 
 from mcp_servers.hummingbot_api.formatters import (
     format_active_bots_as_table,
+    format_amm_result,
     format_bot_logs_as_table,
     format_gateway_clmm_pool_result,
     format_gateway_config_result,
@@ -21,6 +23,7 @@ from mcp_servers.hummingbot_api.formatters import (
 from mcp_servers.hummingbot_api.hummingbot_client import hummingbot_client
 from mcp_servers.hummingbot_api.middleware import GATEWAY_LOG_HINT, handle_errors
 from mcp_servers.hummingbot_api.schemas import (
+    AMMRequest,
     GatewayCLMMRequest,
     GatewayConfigRequest,
     GatewayContainerRequest,
@@ -34,12 +37,6 @@ from mcp_servers.hummingbot_api.tools import history as history_tools
 from mcp_servers.hummingbot_api.tools import market_data as market_data_tools
 from mcp_servers.hummingbot_api.tools import portfolio as portfolio_tools
 from mcp_servers.hummingbot_api.tools import trading as trading_tools
-from mcp_servers.hummingbot_api.tools.backtesting import (
-    manage_backtest_tasks as manage_backtest_tasks_impl,
-)
-from mcp_servers.hummingbot_api.tools.backtesting import (
-    run_backtest as run_backtest_impl,
-)
 from mcp_servers.hummingbot_api.tools.executors import (
     manage_executors as manage_executors_impl,
 )
@@ -49,6 +46,7 @@ from mcp_servers.hummingbot_api.tools.gateway import (
 from mcp_servers.hummingbot_api.tools.gateway import (
     manage_gateway_container as manage_gateway_container_impl,
 )
+from mcp_servers.hummingbot_api.tools.gateway_amm import manage_amm_impl
 from mcp_servers.hummingbot_api.tools.gateway_clmm import (
     explore_gateway_clmm_pools as explore_gateway_clmm_pools_impl,
 )
@@ -241,7 +239,7 @@ async def set_account_position_mode_and_leverage(
         account_name: Account name (default: master_account)
         connector_name: Exchange connector name (e.g., 'binance_perpetual')
         trading_pair: Trading pair (e.g., ETH-USD) only required for setting leverage
-        position_mode: Position mode ('HEDGE' or 'ONE-WAY')
+        position_mode: Position mode ('HEDGE' or 'ONEWAY')
         leverage: Leverage to set (optional, required for HEDGE mode)
     """
     client = await hummingbot_client.get_client()
@@ -576,7 +574,11 @@ async def manage_bots(
     - status: Get status of all active bots (no additional params needed)
     - logs: Get detailed logs for a specific bot (requires bot_name)
     - stop_bot: Stop and archive a bot forever (requires bot_name)
-    - stop_controllers: Stop specific controllers in a bot (requires bot_name + controller_names)
+    - stop_controllers: Stop specific controllers in a bot (requires bot_name + controller_names).
+      Flips manual_kill_switch in the controller config and verifies the write; the bot picks it
+      up on its next config reload (~10s) and then closes that controller's executors. A stopped
+      controller keeps publishing performance, so confirm with the 'state' column of
+      action="status" (stopped/running), never by the controller still appearing in the table.
     - start_controllers: Start/resume specific controllers (requires bot_name + controller_names)
     - get_config: View current configs of a running bot (requires bot_name)
     - update_config: Modify config of a controller INSIDE a running bot in real-time (requires bot_name + config_name + config_data)
@@ -620,7 +622,9 @@ async def manage_bots(
         return (
             f"Active Bots Status Summary:\n"
             f"Total Active Bots: {result['total_bots']}\n\n"
-            f"{result['bots_table']}"
+            f"{result['bots_table']}\n\n"
+            f"controller state: running = active | stopped = kill switch on (no new entries) | "
+            f"error = performance report failed | unknown = controller config unreadable"
         )
 
     elif action == "logs":
@@ -853,6 +857,115 @@ async def explore_dex_pools(
     return format_gateway_clmm_pool_result(action, result)
 
 
+@mcp.tool()
+@handle_errors("manage AMM", GATEWAY_LOG_HINT)
+async def manage_amm(
+    action: (
+        Literal[
+            "pool_info",
+            "position_info",
+            "positions_owned",
+            "quote_swap",
+            "execute_swap",
+            "quote_liquidity",
+            "add_liquidity",
+            "remove_liquidity",
+            "create_pool",
+        ]
+        | None
+    ) = None,
+    connector: str | None = None,
+    network: str | None = None,
+    wallet_address: str | None = None,
+    pool_address: str | None = None,
+    position_address: str | None = None,
+    base_token: str | None = None,
+    quote_token: str | None = None,
+    amount: str | None = None,
+    side: Literal["BUY", "SELL"] | None = None,
+    slippage_pct: str | None = None,
+    base_token_amount: str | None = None,
+    quote_token_amount: str | None = None,
+    percentage_to_remove: str | None = None,
+    initial_price: str | None = None,
+    config_address: str | None = None,
+    fee_config_index: int | None = None,
+    gas_price: str | None = None,
+    max_gas: int | None = None,
+) -> str:
+    """Direct AMM pool operations + pool creation, chain- & DEX-agnostic (Meteora / Raydium / Uniswap).
+
+    Stateless — you hold position state in your journal. Progressive disclosure: call with NO
+    `action` to load the AMM guide, action list, per-connector param matrix, and network list.
+
+    Actions:
+    - pool_info / position_info → read pool reserves/price/fee; read your position (aggregate + positions[])
+    - positions_owned → list ALL your positions across pools (meteora only)
+    - quote_swap / execute_swap → quote/execute a swap AGAINST a specific AMM pool (pool-scoped, not router)
+    - quote_liquidity / add_liquidity / remove_liquidity → two-sided LP in/out
+    - create_pool → create + seed a new pool (market-price seeded by default; anti-snipe)
+
+    Connectors: meteora (Solana DAMM v2), raydium (Solana CPMM), uniswap (EVM V2).
+
+    Meteora DAMM v2 positions are NFTs, so this tool is position-addressed: remove_liquidity REQUIRES
+    position_address, add_liquidity takes it optionally (omit = open a new position), position_info
+    returns a positions[] breakdown, positions_owned lists all your positions. Fungible-LP AMMs
+    (raydium, uniswap) ignore position_address and have no enumerable positions.
+
+    create_pool extras by connector: meteora→config_address (required); raydium→fee_config_index
+    (optional); uniswap→gas_price/max_gas (optional, 0.30% fixed fee).
+
+    Scope: AMM only. Router/one-shot swaps → manage_executors(order_executor); CLMM LP →
+    manage_executors(lp_executor).
+
+    Args:
+        action: AMM action. Leave empty to load the AMM guide + param matrix.
+        connector: AMM connector (required for any action): meteora | raydium | uniswap.
+        network: Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta', 'ethereum-mainnet').
+        wallet_address: Wallet address (optional, uses default if not provided).
+        pool_address: Pool contract address.
+        position_address: Meteora NFT position — required for remove_liquidity, optional for add_liquidity (omit = new position).
+        base_token: Base token symbol or address (swap direction / pool base).
+        quote_token: Quote token symbol or address (pool quote, for create_pool).
+        amount: Swap amount (string).
+        side: Swap direction (BUY or SELL).
+        slippage_pct: Maximum slippage percentage (string).
+        base_token_amount: Base token amount (add_liquidity / quote_liquidity / create_pool).
+        quote_token_amount: Quote token amount (add_liquidity / quote_liquidity / create_pool).
+        percentage_to_remove: Percentage of liquidity to remove, 0-100 (remove_liquidity).
+        initial_price: Initial price as quote per base (create_pool; overrides quote_token_amount).
+        config_address: Meteora DAMM v2 config account address (required for meteora create_pool).
+        fee_config_index: Raydium CPMM fee config index (optional, create_pool).
+        gas_price: Uniswap (EVM) gas price in gwei (optional, create_pool).
+        max_gas: Uniswap (EVM) max gas limit (optional, create_pool).
+    """
+    request = AMMRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        wallet_address=wallet_address,
+        pool_address=pool_address,
+        position_address=position_address,
+        base_token=base_token,
+        quote_token=quote_token,
+        amount=amount,
+        side=side,
+        slippage_pct=slippage_pct,
+        base_token_amount=base_token_amount,
+        quote_token_amount=quote_token_amount,
+        percentage_to_remove=percentage_to_remove,
+        initial_price=initial_price,
+        config_address=config_address,
+        fee_config_index=fee_config_index,
+        gas_price=gas_price,
+        max_gas=max_gas,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_amm_impl(client, request)
+    return format_amm_result(action, result)
+
+
 # GeckoTerminal Tools
 
 
@@ -930,101 +1043,31 @@ async def explore_geckoterminal(
     return result.get("formatted_output", str(result))
 
 
-@mcp.tool()
-@handle_errors("run backtest")
-async def run_backtest(
-    config_name: str,
-    start_time: int,
-    end_time: int,
-    backtesting_resolution: str = "1m",
-    trade_cost: float = 0.0002,
-) -> str:
-    """Run a synchronous backtest on a saved controller config.
-
-    Resolves the config name to its full configuration, then runs a backtest
-    over the specified time range. Returns performance metrics immediately.
-
-    Args:
-        config_name: Name of a saved controller config (e.g., 'my_grid_config').
-            Use manage_controllers(action='list') to see available configs.
-        start_time: Start timestamp in seconds (Unix epoch)
-        end_time: End timestamp in seconds (Unix epoch)
-        backtesting_resolution: Candle resolution for the backtest. Options: '1m', '5m', '15m', '1h'. Default: '1m'.
-        trade_cost: Trading fee as decimal (default: 0.0002 = 0.06%)
-    """
-    client = await hummingbot_client.get_client()
-    result = await run_backtest_impl(
-        client=client,
-        config_name=config_name,
-        start_time=start_time,
-        end_time=end_time,
-        backtesting_resolution=backtesting_resolution,
-        trade_cost=trade_cost,
-    )
-    return result.get("formatted_output", str(result))
-
-
-@mcp.tool()
-@handle_errors("manage backtest tasks")
-async def manage_backtest_tasks(
-    action: Literal["submit", "list", "get", "delete"],
-    config_name: str | None = None,
-    task_id: str | None = None,
-    start_time: int | None = None,
-    end_time: int | None = None,
-    backtesting_resolution: str = "1m",
-    trade_cost: float = 0.0002,
-) -> str:
-    """Manage async backtesting tasks: submit background jobs, check status, get results, or delete.
-
-    Use this for long-running backtests that you don't want to wait for synchronously.
-
-    Actions:
-    - submit: Queue a new backtest task (requires config_name, start_time, end_time)
-    - list: List all backtest tasks with their status
-    - get: Get a specific task's status and results (requires task_id)
-    - delete: Cancel/delete a task (requires task_id)
-
-    Args:
-        action: Task action to perform
-        config_name: Controller config name (required for submit). Use manage_controllers(action='list') to see options.
-        task_id: Task ID returned from submit (required for get/delete)
-        start_time: Start timestamp in seconds (required for submit)
-        end_time: End timestamp in seconds (required for submit)
-        backtesting_resolution: Candle resolution. Options: '1m', '5m', '15m', '1h'. Default: '1m'.
-        trade_cost: Trading fee as decimal (default: 0.0002 = 0.06%)
-    """
-    client = await hummingbot_client.get_client()
-    result = await manage_backtest_tasks_impl(
-        client=client,
-        action=action,
-        config_name=config_name,
-        task_id=task_id,
-        start_time=start_time,
-        end_time=end_time,
-        backtesting_resolution=backtesting_resolution,
-        trade_cost=trade_cost,
-    )
-    return result.get("formatted_output", str(result))
-
-
 def _apply_cli_args():
-    """Parse CLI args and override settings if provided."""
+    """Override settings from the spawn: credentials via env, the rest via CLI.
+
+    The API username/password used to arrive as ``--username``/``--password``,
+    which put them in every local user's ``ps`` output (SEC-095). They now come
+    in on the environment, and they are applied HERE rather than in
+    ``_load_server_config`` on purpose: that loader prefers the cached
+    ``~/.hummingbot_mcp/server.yml`` and never reaches its own env fallbacks
+    once the file exists, so credentials injected for this spawn have to sit at
+    the same precedence layer the CLI args did — above the file.
+    """
     import argparse
+
+    if username := os.getenv("HUMMINGBOT_API_USERNAME"):
+        settings.api_username = username
+    if password := os.getenv("HUMMINGBOT_API_PASSWORD"):
+        settings.api_password = password
 
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--url")
-    parser.add_argument("--username")
-    parser.add_argument("--password")
     parser.add_argument("--server-name")
     args, _ = parser.parse_known_args()
 
     if args.url:
         settings.api_url = args.url
-    if args.username:
-        settings.api_username = args.username
-    if args.password:
-        settings.api_password = args.password
     if args.server_name:
         settings.server_name = args.server_name
 

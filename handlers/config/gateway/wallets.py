@@ -94,7 +94,9 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                 default_address = wallet_group.get("default_address", "")
                 for address in addresses:
                     is_default = address == default_address
-                    wallet_list.append({"chain": chain, "address": address, "is_default": is_default})
+                    wallet_list.append(
+                        {"chain": chain, "address": address, "is_default": is_default}
+                    )
 
             context.user_data["wallet_list"] = wallet_list
             total_wallets = len(wallet_list)
@@ -119,7 +121,9 @@ async def show_wallets_menu(query, context: ContextTypes.DEFAULT_TYPE) -> None:
                     "🟣" if chain == "solana" else "🔵"
                 )  # Solana purple, Ethereum blue
                 default_indicator = " ⭐️" if is_default else ""
-                button_text = f"{chain_icon} {chain.title()}: {display_addr}{default_indicator}"
+                button_text = (
+                    f"{chain_icon} {chain.title()}: {display_addr}{default_indicator}"
+                )
                 wallet_buttons.append(
                     [
                         InlineKeyboardButton(
@@ -232,7 +236,9 @@ async def handle_wallet_action(query, context: ContextTypes.DEFAULT_TYPE) -> Non
             wallet_list = context.user_data.get("wallet_list", [])
             if 0 <= idx < len(wallet_list):
                 wallet = wallet_list[idx]
-                await set_default_wallet(query, context, wallet["chain"], wallet["address"])
+                await set_default_wallet(
+                    query, context, wallet["chain"], wallet["address"]
+                )
             else:
                 await query.answer("❌ Wallet not found")
         except ValueError:
@@ -417,11 +423,7 @@ async def show_wallet_details(
             )
 
         keyboard.append(
-            [
-                InlineKeyboardButton(
-                    "« Back to Wallets", callback_data="gateway_wallets"
-                )
-            ]
+            [InlineKeyboardButton("« Back to Wallets", callback_data="gateway_wallets")]
         )
 
         reply_markup = InlineKeyboardMarkup(keyboard)

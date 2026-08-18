@@ -186,6 +186,17 @@ export interface ExecutorInfo {
   config: Record<string, unknown>;
 }
 
+/** Executor totals for a period, aggregated server-side over the full history.
+ *  `pnl` and `volume` are USD-denominated; `converted` is false when some quote
+ *  asset had no path to USD and its rows were counted in their own quote. */
+export interface ExecutorPeriodSummary {
+  period: string;
+  pnl: number;
+  volume: number;
+  count: number;
+  converted: boolean;
+}
+
 export interface PositionHeld {
   connector_name: string;
   trading_pair: string;
@@ -245,6 +256,166 @@ export interface MarketPrice {
   mid_price: number;
   best_bid: number;
   best_ask: number;
+}
+
+/**
+ * The pool a DEX pair trades in — the same one the chart's candles come from.
+ *
+ * `lp_supported` is false, with a null `lp_provider`, whenever the deepest pool is
+ * not one an `lp_executor` can add liquidity to (a router, a plain AMM, Uniswap
+ * v4). That is a normal answer, not an error: the LP panel responds by asking for
+ * a pool address by hand. `current_price` is the base priced in quote — the scale
+ * every LP bound is expressed in — and is null when GeckoTerminal reports no price.
+ */
+/** Wire shape of `GET /market/venues`; mapped to `VenueTraits` on the way in. */
+interface WireVenue {
+  name: string;
+  hummingbot_market_data: boolean;
+  clmm_lp: boolean;
+}
+
+/**
+ * One pool as the DEX browser and workspace see it: the market numbers from the
+ * upstream, plus the venue facts the server decides (`lp_supported`, `tradable`,
+ * `trading_pair`) because they depend on which connectors Condor drives, not on
+ * anything the browser can know.
+ */
+export interface PoolSummary {
+  address: string;
+  name: string;
+  source: "gecko" | "gateway";
+  dex_id: string;
+  /** Chain as the caller named it, and the Gateway network its rows link to. */
+  network: string;
+  gecko_network: string;
+  gateway_network: string;
+  base_symbol: string;
+  quote_symbol: string;
+  base_token_symbol: string;
+  quote_token_symbol: string;
+  base_token_address: string;
+  quote_token_address: string;
+  /** `<base_mint>-<quote_symbol>`, the form LP and DEX order executors carry. */
+  trading_pair: string;
+  /** An `lp_executor` provider (`meteora/clmm`), or null when the pool is not CLMM. */
+  lp_provider: string | null;
+  lp_supported: boolean;
+  /** False when GeckoTerminal indexes this chain but Gateway does not reach it. */
+  tradable: boolean;
+  has_bins: boolean;
+  reserve_usd: number | null;
+  volume_24h: number | null;
+  price_change_24h: number | null;
+  current_price?: number | null;
+  base_token_price_usd?: number | null;
+  quote_token_price_usd?: number | null;
+  /** Gateway CLMM only: Meteora reports `apr` as 24h fee/TVL, `apy` annualized. */
+  apr?: number | null;
+  apy?: number | null;
+  /** True when `apr`/`apy` were derived from volume x fee tier, not reported. */
+  apr_estimated?: boolean;
+  fees_24h?: number | null;
+  bin_step?: number | null;
+  base_fee_percentage?: number | null;
+  pool_created_at?: string | null;
+}
+
+/** One CLMM bin: the liquidity sitting at one price step of a pool. */
+export interface LiquidityBin {
+  price: number;
+  base_amount: number;
+  quote_amount: number;
+  /** Null when the pool's token prices are unknown; size bars by amount then. */
+  liquidity_usd: number | null;
+}
+
+export interface PoolBins {
+  bins: LiquidityBin[];
+  active_price: number | null;
+  bin_step: number | null;
+  /** False is a state to render (with `reason`), never an error to surface. */
+  available: boolean;
+  reason: string | null;
+}
+
+export interface PoolQuery {
+  source: "gecko" | "gateway" | "orca";
+  /** source=gecko: the chain, as a Gateway network id or a gecko chain id. */
+  network?: string;
+  /** source=gecko: trending | top | new | token. */
+  view?: string;
+  /** source=gateway: the CLMM connector. */
+  connector?: string;
+  /** source=gecko+view=token: a token address. source=gateway|orca: free text. */
+  query?: string;
+  /** source=gecko: GeckoTerminal dex ids to keep. Empty means every venue. */
+  dexes?: string[];
+  limit?: number;
+  /** 1-based. Every upstream pages; only orca knows whether a next page exists. */
+  page?: number;
+}
+
+/**
+ * How much of the shared GeckoTerminal budget is left, and whether it just ran out.
+ *
+ * Every DEX view reads the same per-IP budget, and every failure behind it
+ * degrades to an empty list — so without this a throttled fetch and a chain with
+ * no pools look identical in the table.
+ */
+export interface DexUpstream {
+  /** The breaker is open: gecko answered 429 and Condor has stopped calling. */
+  rate_limited: boolean;
+  /** *This* response was short because the request was refused. Can be true while
+   *  `rate_limited` is false: a spent per-minute budget refuses without tripping. */
+  throttled_request: boolean;
+  /** Seconds left on the cooldown, at the time the response was produced. */
+  retry_in: number;
+  requests_last_minute: number;
+  budget: number;
+  /** Monotonic counters, so a poller can spot a refusal it did not witness. */
+  throttled_calls: number;
+  count_429: number;
+  seconds_since_429: number | null;
+}
+
+/**
+ * What became of one token Condor tried to register with Gateway.
+ *
+ * `symbol_taken` is the one worth surfacing: another token on the list already
+ * holds this ticker, so Gateway refused to save this one and its balance will
+ * keep reading 0 until a human decides which token owns the symbol.
+ */
+export type DexTokenVerdict = "listed" | "added" | "symbol_taken" | "failed";
+
+/** A page of pools. `has_more`, not a count — no upstream reports a total. */
+export interface PoolPage {
+  pools: PoolSummary[];
+  has_more: boolean;
+  /** Absent on the Gateway/Orca tabs, which do not read GeckoTerminal. */
+  upstream?: DexUpstream;
+}
+
+/** One venue GeckoTerminal indexes on a chain, for the browser's dex filter. */
+export interface DexVenue {
+  id: string;
+  name: string;
+}
+
+/** A chain the pool browser can browse, as Gateway names it. */
+export interface DexChain {
+  network_id: string;
+  chain: string;
+  label: string;
+}
+
+export interface DexPoolInfo {
+  pool_address: string | null;
+  dex_id: string | null;
+  lp_provider: string | null;
+  lp_supported: boolean;
+  current_price: number | null;
+  base_symbol: string | null;
+  quote_symbol: string | null;
 }
 
 export interface OrderBookLevel {
@@ -340,11 +511,14 @@ export interface RunningInstance {
   fees: number;
   open_count: number;
   closed_count: number;
-  win_rate: number;
+  /** null = no closed executors to derive it from (bot-mode sessions), not 0%. */
+  win_rate: number | null;
   server_name: string;
   total_amount_quote: number;
   trading_context: string;
   frequency_sec: number;
+  /** Wall-clock budget for one tick's agent session, in seconds. */
+  tick_timeout_sec: number;
   execution_mode: "dry_run" | "run_once" | "loop";
   risk_limits: Record<string, unknown>;
 }
@@ -429,10 +603,60 @@ export interface AgentPerformance {
   volume: number;
   fees: number;
   trade_count: number;
-  win_rate: number;
+  /** null = no closed executors to derive it from (bot-mode sessions), not 0%. */
+  win_rate: number | null;
   open_count: number;
   closed_count: number;
   executors: AgentExecutorRow[];
+  // ── Bot-mode attribution ──
+  // A session trading through bots has no rows in the agent_id-keyed executor
+  // table: its executors live inside the bot instance's own database, and the
+  // only ones Condor can reconstruct are the positions open right now. These say
+  // what the session actually operated when `executors` is empty.
+  /** Instance names alive now, one per owned base. */
+  bot_names?: string[];
+  /** Every instance ever deployed under an owned base, oldest first — a name in
+   *  here but not in `bot_names` is one this session already stopped. */
+  bot_instances?: string[];
+  /** Owned bases with no live and no archived instance: their PnL is unknown,
+   *  not zero, so the totals are a floor. */
+  unresolved_bases?: string[];
+  controllers?: AgentControllerRow[];
+  /** Raw `CloseType.X -> n` across the operated bots. `trade_count` counts only
+   *  round-trip closes and reads a directional controller's risk stop as churn,
+   *  so this is what explains "0 trades" on non-zero volume. */
+  close_type_counts?: Record<string, number>;
+  /** False when `fees` is a floor: the backend reports no cumulative fee column,
+   *  so 0 means unknown rather than free. */
+  fees_known?: boolean;
+}
+
+/** One controller of one bot instance a session operated. */
+export interface AgentControllerRow {
+  /** The deploy this controller ran under. */
+  bot_name: string;
+  controller_id: string;
+  controller_name: string;
+  connector: string;
+  trading_pair: string;
+  /** From the performance snapshot, which reports "running" even for archived
+   *  instances — never render this as live truth. Derive liveness from whether
+   *  `bot_name` appears in `AgentPerformance.bot_names`. */
+  status: string;
+  realized_pnl_quote: number;
+  unrealized_pnl_quote: number;
+  volume_traded: number;
+  cum_fees_quote: number;
+  closed_trades: number;
+  close_type_counts: Record<string, number>;
+}
+
+export interface SessionCanvas {
+  sections: Record<string, string>;
+  section_titles: Record<string, string>;
+  section_order: string[];
+  last_revised_tick: number;
+  revisions: { tick: number; section: string; text: string }[];
 }
 
 export interface AgentPerformanceResponse {
@@ -470,8 +694,21 @@ export interface AgentDetail {
   strategies: StrategySummary[];
 }
 
+// How a delegation ended. `running`…`stopped` come from the live registry;
+// `interrupted` is a task whose process died mid-flight, and `unknown` a
+// transcript too old to say — both only ever arrive from history.
+export type DelegationStatus =
+  | "running"
+  | "done"
+  | "error"
+  | "stopped"
+  | "interrupted"
+  | "unknown";
+
 // Delegation = a fire-and-forget background task handed to a detached Agent
-// instance (DELEGATE mode). Ephemeral + in-process; status drives the UI.
+// instance (DELEGATE mode). The registry is in-process, but the record outlives
+// it on disk — so this shape also comes back from history (FEAT-035), where
+// `ended_at`/`tool_count` are known and the live registry has nothing to say.
 export interface Delegation {
   task_id: string;
   agent: string;
@@ -479,14 +716,19 @@ export interface Delegation {
   chat_id: number;
   server_name: string | null;
   task: string;
-  status: "running" | "done" | "error" | "stopped";
+  status: DelegationStatus;
   result: string;
   error: string;
   /** The conversation that started this task; "" when there was none. */
   conversation_id: string;
   /** Wall-clock start (epoch seconds) — drives the elapsed time. */
   started_at: number;
+  ended_at?: number;
+  tool_count?: number;
 }
+
+/** A history row: the record minus the bodies, which the sheet fetches on open. */
+export type DelegationSummary = Omit<Delegation, "result" | "error">;
 
 // One entry of a delegation's session transcript. Mirrors the three shapes the
 // runner's event sink folds into `DelegateTask.events`; tool entries are patched
@@ -557,6 +799,13 @@ export interface RoutineInstance {
   config: Record<string, unknown>;
   status: string;
   source: string;
+  /**
+   * The conversation that asked for this run, "" for the scheduler, the
+   * dashboard and Telegram. Set since ARCH-089, and what scopes a run to a
+   * chat — the routine's own name cannot, since an agent runs shared-library
+   * routines under their bare name.
+   */
+  conversation_id?: string;
   schedule?: Record<string, unknown>;
   created_at: number;
   last_run_at: number | null;
@@ -660,6 +909,23 @@ export interface GatewayStatus {
   container_status?: string;
 }
 
+export interface GatewayNetworkInfo {
+  network_id: string;
+  chain: string;
+  network: string;
+}
+
+export interface GatewayNetworkConfig {
+  network_id: string;
+  config: Record<string, unknown>;
+}
+
+export interface GatewayWalletGroup {
+  chain: string;
+  walletAddresses: string[];
+  default_address?: string;
+}
+
 export interface CredentialInfo {
   connector_name: string;
   connector_type: string;
@@ -731,6 +997,8 @@ export interface AgentBindingOption {
   name: string;
   description: string;
   when_to_consult: string;
+  /** The model it answers on unless the user overrides one — its own default. */
+  agent_key: string;
 }
 
 export interface SessionOptionsResponse extends ChatOptionsResponse {
@@ -837,6 +1105,15 @@ export function parseCustomAgentKey(
 
 // ── Backtesting ──
 
+export interface AppEnvResponse {
+  version: string;
+  branch: string;
+  python: string;
+  os: string;
+  arch: string;
+  in_docker: boolean;
+}
+
 export interface BacktestTask {
   task_id: string;
   status: "pending" | "running" | "completed" | "failed";
@@ -851,6 +1128,9 @@ export interface BacktestTask {
 
 export const api = {
   getServers: () => apiFetch<ServerInfo[]>("/api/v1/servers"),
+
+  /** Build identity — shown to the user when they file an issue. */
+  getEnv: () => apiFetch<AppEnvResponse>("/api/v1/meta/env"),
 
   getServerStatus: (name: string) =>
     apiFetch<{ online: boolean; error?: string }>(
@@ -1027,6 +1307,11 @@ export const api = {
     );
   },
 
+  getExecutorsSummary: (server: string, period: string) =>
+    apiFetch<ExecutorPeriodSummary>(
+      `/api/v1/servers/${encodeURIComponent(server)}/executors/summary?period=${encodeURIComponent(period)}`,
+    ),
+
   getExecutorsPage: (
     server: string,
     params: {
@@ -1085,6 +1370,122 @@ export const api = {
   getConnectedExchanges: (server: string) =>
     apiFetch<string[]>(`/api/v1/servers/${encodeURIComponent(server)}/market/connected-exchanges`),
 
+  /** Venues the trade panel can offer, with the traits each UI decision rests on. */
+  getVenues: (server: string) =>
+    apiFetch<{ venues: WireVenue[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/venues`,
+    ).then((r) =>
+      (r.venues ?? []).map((v) => ({
+        name: v.name,
+        hummingbotMarketData: !!v.hummingbot_market_data,
+        clmmLp: !!v.clmm_lp,
+      })),
+    ),
+
+  getDexPool: (server: string, connector: string, pair: string) =>
+    apiFetch<DexPoolInfo>(
+      `/api/v1/servers/${encodeURIComponent(server)}/market/dex-pool?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
+    ),
+
+  /** Pools to browse, from GeckoTerminal (by chain) or Gateway CLMM (by connector). */
+  getDexPools: (server: string, q: PoolQuery): Promise<PoolPage> => {
+    const params = new URLSearchParams({ source: q.source });
+    if (q.network) params.set("network", q.network);
+    if (q.view) params.set("view", q.view);
+    if (q.connector) params.set("connector", q.connector);
+    if (q.query) params.set("query", q.query);
+    if (q.dexes?.length) params.set("dexes", q.dexes.join(","));
+    params.set("limit", String(q.limit ?? 20));
+    params.set("page", String(q.page ?? 1));
+    return apiFetch<{
+      pools: PoolSummary[];
+      has_more?: boolean;
+      upstream?: DexUpstream;
+    }>(`/api/v1/servers/${encodeURIComponent(server)}/dex/pools?${params}`).then(
+      (r) => ({
+        pools: r.pools ?? [],
+        has_more: !!r.has_more,
+        upstream: r.upstream,
+      }),
+    );
+  },
+
+  /**
+   * The chains the pool browser can offer: the intersection of what this Gateway
+   * is configured for and what GeckoTerminal indexes. Asked of the server rather
+   * than hardcoded, so a chain the operator adds to Gateway shows up on its own.
+   */
+  getDexChains: (server: string) =>
+    apiFetch<{ chains: DexChain[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/chains`,
+    ).then((r) => r.chains ?? []),
+
+  /** The venues a chain has, so the dex filter offers what exists, not a guess. */
+  getDexVenues: (server: string, network: string) =>
+    apiFetch<{ dexes: DexVenue[] }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/dexes?network=${encodeURIComponent(network)}`,
+    ).then((r) => r.dexes ?? []),
+
+  /**
+   * Several pools by address, for the favourites view. A favourite is a saved
+   * address, so its TVL and volume are re-read rather than replayed from
+   * whenever it was starred.
+   */
+  getDexPoolsByAddress: (
+    server: string,
+    network: string,
+    addresses: string[],
+  ): Promise<PoolPage> =>
+    apiFetch<{ pools: PoolSummary[]; upstream?: DexUpstream }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools-by-address?network=${encodeURIComponent(network)}&addresses=${encodeURIComponent(addresses.join(","))}`,
+    ).then((r) => ({
+      pools: r.pools ?? [],
+      has_more: false,
+      upstream: r.upstream,
+    })),
+
+  /**
+   * Whether GeckoTerminal is currently throttling Condor.
+   *
+   * Reads process-local counters only, so polling it while a cooldown banner
+   * counts down costs nothing of the budget the banner is waiting on.
+   */
+  getDexUpstream: (server: string) =>
+    apiFetch<DexUpstream>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/upstream`,
+    ),
+
+  /**
+   * Make sure Gateway's token list holds a pool's two tokens.
+   *
+   * Gateway resolves a swap by mint address on its own, but not a *balance*: it
+   * skips token accounts whose mint is not on the list, so an unregistered token
+   * reads as 0 and the panel greys out its percentage presets. Called when a pool
+   * opens rather than when an order is sent, and idempotent server-side, so
+   * re-opening the same pool costs nothing.
+   */
+  ensureDexTokens: (server: string, network: string, addresses: string[]) =>
+    apiFetch<{ tokens: Record<string, DexTokenVerdict> }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/tokens`,
+      { method: "POST", body: JSON.stringify({ network, addresses }) },
+    ),
+
+  /** One pool by address, so /dex/{network}/{address} renders from the URL alone. */
+  getDexPoolByAddress: (server: string, address: string, network: string) =>
+    apiFetch<PoolSummary>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}?network=${encodeURIComponent(network)}`,
+    ),
+
+  /**
+   * A pool's liquidity bins, for the depth column beside its chart. Answers
+   * `available: false` with a reason rather than failing: a venue Condor cannot
+   * read bins from is something to say, not an error to raise.
+   */
+  getPoolBins: (server: string, address: string, network: string, connector: string) =>
+    apiFetch<PoolBins>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/pools/${encodeURIComponent(address)}/bins?network=${encodeURIComponent(network)}&connector=${encodeURIComponent(connector)}`,
+    ),
+
   getPrice: (server: string, connector: string, pair: string) =>
     apiFetch<MarketPrice>(
       `/api/v1/servers/${encodeURIComponent(server)}/market/prices?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}`,
@@ -1127,12 +1528,23 @@ export const api = {
     limit = 1000,
     startTime?: number,
     endTime?: number,
+    poolAddress?: string,
   ) => {
     let url = `/api/v1/servers/${encodeURIComponent(server)}/market/candles?connector=${encodeURIComponent(connector)}&trading_pair=${encodeURIComponent(pair)}&interval=${encodeURIComponent(interval)}&limit=${limit}`;
     if (startTime) url += `&start_time=${startTime}`;
     if (endTime) url += `&end_time=${endTime}`;
+    // DEX/LP executors: the pool address routes the backend to GeckoTerminal,
+    // since these connectors have no CEX candle feed.
+    if (poolAddress) url += `&pool_address=${encodeURIComponent(poolAddress)}`;
     return apiFetch<CandleData[]>(url);
   },
+
+  // Resolve a token address → ticker (GeckoTerminal). Not server-scoped; used to
+  // render LP/DEX pairs, which are stored as `<address>-<quote>`.
+  getTokenSymbol: (mint: string, network?: string) =>
+    apiFetch<{ mint: string; symbol: string }>(
+      `/api/v1/market/token-symbol?mint=${encodeURIComponent(mint)}${network ? `&network=${encodeURIComponent(network)}` : ""}`,
+    ),
 
   // ── Agents (identity + brain) ──
 
@@ -1162,16 +1574,22 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
-  /** Set or clear the Agent's server pin. An empty `server_name` clears it,
-   *  so the Agent follows whatever server the chat is pointed at. */
+  /** Set or clear the Agent's server pin and model. An empty `server_name`
+   *  clears the pin, so the Agent follows whatever server the chat is pointed
+   *  at; an empty `agent_key` clears the model, falling back to the chat's. */
   updateAgentConfig: (
     slug: string,
-    data: { server_name?: string; server_required?: boolean },
+    data: { server_name?: string; server_required?: boolean; agent_key?: string },
   ) =>
-    apiFetch<{ updated: boolean; server_name: string; server_required: boolean }>(
-      `/api/v1/agents/${encodeURIComponent(slug)}/config`,
-      { method: "PATCH", body: JSON.stringify(data) },
-    ),
+    apiFetch<{
+      updated: boolean;
+      server_name: string;
+      server_required: boolean;
+      agent_key: string;
+    }>(`/api/v1/agents/${encodeURIComponent(slug)}/config`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
 
   deleteAgent: (slug: string) =>
     apiFetch<{ deleted: boolean }>(`/api/v1/agents/${encodeURIComponent(slug)}`, {
@@ -1183,13 +1601,30 @@ export const api = {
   getDelegations: () =>
     apiFetch<{ delegations: Delegation[] }>("/api/v1/agents/delegations"),
 
+  /** Every delegation ever recorded, newest first — live ones included, and the
+   *  ones whose process is long gone. Optionally scoped to one agent. */
+  getDelegationHistory: (agent?: string, limit = 100) =>
+    apiFetch<{ delegations: DelegationSummary[] }>(
+      `/api/v1/agents/delegations/history?limit=${limit}` +
+        (agent ? `&agent=${encodeURIComponent(agent)}` : ""),
+    ),
+
+  /** One delegation's full record, from the registry or from disk. */
+  getDelegation: (taskId: string) =>
+    apiFetch<Delegation>(
+      `/api/v1/agents/delegations/${encodeURIComponent(taskId)}`,
+    ),
+
   /** The human-facing transcript. Separate from the (agent-facing) status route
-   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py. */
+   *  on purpose — see `get_delegation_events` in condor/web/routes/agents.py.
+   *  `markdown` is the fallback for records written before the events sidecar:
+   *  no structured events, just the transcript as it was rendered to disk. */
   getDelegationEvents: (taskId: string) =>
     apiFetch<{
       task_id: string;
-      status: Delegation["status"];
+      status: DelegationStatus;
       events: DelegationEvent[];
+      markdown: string;
     }>(`/api/v1/agents/delegations/${encodeURIComponent(taskId)}/events`),
 
   stopDelegation: (taskId: string) =>
@@ -1255,7 +1690,14 @@ export const api = {
     ),
 
   getStrategySessionExecutors: (slug: string, sslug: string, sessionNum: number) =>
-    apiFetch<{ executors: AgentExecutorRow[]; performance: AgentPerformance }>(
+    apiFetch<{
+      executors: AgentExecutorRow[];
+      performance: AgentPerformance;
+      // Realized-PnL curve sliced from the session's bot-ownership window. Derived
+      // from the bots' own history, not from the journal's per-tick snapshots,
+      // which only record what the aggregator believed at the time.
+      pnl_series?: { timestamp: string; pnl: number; volume: number }[];
+    }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/executors`,
     ),
 
@@ -1312,6 +1754,17 @@ export const api = {
   getSessionSnapshots: (slug: string, sslug: string, sessionNum: number) =>
     apiFetch<{ snapshots: SnapshotSummary[] }>(
       `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/snapshots`,
+    ),
+
+  getSessionCanvas: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<SessionCanvas>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/canvas`,
+    ),
+
+  // The live report this session keeps — `{report: null}` when it has none.
+  getSessionReport: (slug: string, sslug: string, sessionNum: number) =>
+    apiFetch<{ report: ReportSummary | null }>(
+      `/api/v1/agents/${encodeURIComponent(slug)}/strategies/${encodeURIComponent(sslug)}/sessions/${sessionNum}/report`,
     ),
 
   getSnapshot: (slug: string, sslug: string, sessionNum: number, tick: number) =>
@@ -1543,6 +1996,52 @@ export const api = {
 
   getGatewayLogs: (server: string) =>
     apiFetch<{ logs: string }>(`/api/v1/settings/gateway/logs?server=${encodeURIComponent(server)}`),
+
+  getGatewayNetworks: (server: string) =>
+    apiFetch<{ networks: GatewayNetworkInfo[] }>(
+      `/api/v1/settings/gateway/networks?server=${encodeURIComponent(server)}`,
+    ),
+
+  getGatewayNetworkConfig: (server: string, networkId: string) =>
+    apiFetch<GatewayNetworkConfig>(
+      `/api/v1/settings/gateway/networks/${encodeURIComponent(networkId)}?server=${encodeURIComponent(server)}`,
+    ),
+
+  updateGatewayNetworkConfig: (
+    server: string,
+    networkId: string,
+    config: Record<string, unknown>,
+  ) =>
+    apiFetch<{ updated: boolean; network_id: string }>(
+      `/api/v1/settings/gateway/networks/${encodeURIComponent(networkId)}?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify({ config }) },
+    ),
+
+  getGatewayWallets: (server: string) =>
+    apiFetch<{ wallets: GatewayWalletGroup[] }>(
+      `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
+    ),
+
+  addGatewayWallet: (
+    server: string,
+    data: { chain: string; private_key: string; set_default?: boolean },
+  ) =>
+    apiFetch<{ added: boolean; chain: string; address: string | null; is_default: boolean }>(
+      `/api/v1/settings/gateway/wallets?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  setDefaultGatewayWallet: (server: string, data: { chain: string; address: string }) =>
+    apiFetch<{ default: boolean }>(
+      `/api/v1/settings/gateway/wallets/default?server=${encodeURIComponent(server)}`,
+      { method: "POST", body: JSON.stringify(data) },
+    ),
+
+  removeGatewayWallet: (server: string, chain: string, address: string) =>
+    apiFetch<{ removed: boolean }>(
+      `/api/v1/settings/gateway/wallets/${encodeURIComponent(chain)}/${encodeURIComponent(address)}?server=${encodeURIComponent(server)}`,
+      { method: "DELETE" },
+    ),
 
   getCredentials: (server: string) =>
     apiFetch<{ credentials: (CredentialInfo | string)[] }>(`/api/v1/settings/credentials?server=${encodeURIComponent(server)}`),

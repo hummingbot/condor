@@ -13,7 +13,7 @@ Module Structure:
 - swap.py: Unified swap (quote, execute, history with filters/pagination)
 - liquidity.py: Unified liquidity pools (balances, positions, history with filters/pagination)
 - pools.py: Pool info, position management (add, close, collect fees)
-- pool_data.py: Pool data fetching utilities (OHLCV, liquidity bins)
+  (pool/OHLCV/liquidity-bin fetching itself lives in ``condor.pool_data``)
 - geckoterminal.py: GeckoTerminal pool explorer with charts
 - visualizations.py: Chart generation (liquidity distribution, OHLCV candlesticks)
 - lp_monitor_handlers.py: LP monitor alert handling (navigation, rebalance, fees)

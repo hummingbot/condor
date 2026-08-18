@@ -120,7 +120,8 @@ def test_mcp_runner_sends_bare_agent_slug_for_strategy(
     monkeypatch.setattr(mcp_routines.settings, "active_server", "srv")
     monkeypatch.setattr(mcp_routines, "_POLL_INTERVAL", 0)
 
-    asyncio.run(mcp_routines.run_routine("probe", {}, strategy_id=strategy.key))
+    # A composite strategy key is still accepted and resolves to its owning agent.
+    asyncio.run(mcp_routines.run_routine("probe", {}, target=strategy.key))
 
     # Attributed to the bare slug, not the composite key.
     assert posted["attribute_to"] == "market_making_expert"
@@ -170,6 +171,45 @@ def test_store_run_defaults_attribution_to_the_routines_source(reports_dir):
     """Web/Telegram callers omit ``agent`` and keep deriving it from the file."""
     _run_in_store(_report_writing_routine("agent:market_making_expert"))
     assert rep.list_reports()[0][0]["agent"] == "market_making_expert"
+
+
+def _sourceless_routine(name: str = "probe"):
+    """A routine that saves a report without ever calling ``.source()``."""
+    from types import SimpleNamespace
+
+    from pydantic import BaseModel
+
+    class Config(BaseModel):
+        pass
+
+    async def run(config, ctx):
+        b = rep.ReportBuilder("Sourceless report")
+        b.markdown("body")
+        await b.save()
+        return "done"
+
+    return SimpleNamespace(name=name, source="global", config_class=Config, run_fn=run)
+
+
+def test_store_run_stamps_the_source_when_the_routine_forgot_it(reports_dir):
+    """Without this the report is invisible on the Routines page: the per-routine
+    lookup matches on source_name and the grouped list skips empty ones."""
+    _run_in_store(_sourceless_routine())
+    entry = rep.list_reports()[0][0]
+    assert (entry["source_type"], entry["source_name"]) == ("routine", "probe")
+
+
+def test_store_run_uses_the_bare_name_for_an_agent_routine(reports_dir):
+    """Agent routines are discovered prefixed; reports keep the bare name."""
+    _run_in_store(_sourceless_routine("directional_trader/ema_research_charts"))
+    assert rep.list_reports()[0][0]["source_name"] == "ema_research_charts"
+
+
+def test_explicit_source_wins_over_the_default(reports_dir):
+    routine = _report_writing_routine("global")  # its report says source "probe"
+    routine.name = "renamed_file"
+    _run_in_store(routine)
+    assert rep.list_reports()[0][0]["source_name"] == "probe"
 
 
 def test_store_run_honors_an_explicit_agent(reports_dir):

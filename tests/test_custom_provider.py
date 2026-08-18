@@ -6,6 +6,7 @@ one of the user's saved records in condor/preferences.py. The unnamed
 """
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
@@ -29,6 +30,11 @@ from condor.preferences import (
     suggest_provider_name,
     unique_provider_name,
 )
+from handlers.agents import (
+    _handle_custom_delete,
+    _handle_custom_delete_confirm,
+    _handle_custom_rekey,
+)
 from handlers.agents.custom_models import (
     CustomProviderError,
     _extract_model_ids,
@@ -38,7 +44,11 @@ from handlers.agents.custom_models import (
     model_token,
     normalize_base_url,
 )
-
+from handlers.agents.menu import (
+    _custom_delete_keyboard,
+    _custom_endpoints_keyboard,
+    _custom_manage_keyboard,
+)
 
 # -- agent_key routing --
 
@@ -199,10 +209,16 @@ def test_active_agent_key_round_trips_through_preferences():
 def test_legacy_custom_llm_is_migrated():
     # The first iteration stored one endpoint in raw user_data, outside the
     # preference system. It should move across on first read, once.
-    user_data = {"custom_llm": {"base_url": "https://api.venice.ai/api/v1", "api_key": "sk-old"}}
+    user_data = {
+        "custom_llm": {"base_url": "https://api.venice.ai/api/v1", "api_key": "sk-old"}
+    }
     providers = get_custom_providers(user_data)
     assert providers == [
-        {"name": "Venice", "base_url": "https://api.venice.ai/api/v1", "api_key": "sk-old"}
+        {
+            "name": "Venice",
+            "base_url": "https://api.venice.ai/api/v1",
+            "api_key": "sk-old",
+        }
     ]
     assert "custom_llm" not in user_data
     assert get_custom_providers(user_data) == providers
@@ -217,8 +233,14 @@ def test_normalize_base_url_variants():
         == "https://api.venice.ai/api/v1"
     )
     assert normalize_base_url("api.venice.ai/api/v1/") == "https://api.venice.ai/api/v1"
-    assert normalize_base_url(" https://x.example/v1/chat/completions ") == "https://x.example/v1"
-    assert normalize_base_url("http://localhost:8000/v1/models") == "http://localhost:8000/v1"
+    assert (
+        normalize_base_url(" https://x.example/v1/chat/completions ")
+        == "https://x.example/v1"
+    )
+    assert (
+        normalize_base_url("http://localhost:8000/v1/models")
+        == "http://localhost:8000/v1"
+    )
 
 
 def test_normalize_base_url_rejects_garbage():
@@ -241,7 +263,9 @@ def test_normalize_base_url_blocks_metadata_endpoints():
 def test_normalize_base_url_allows_local_servers_by_default():
     # Local model servers are the most common use of this feature
     assert normalize_base_url("http://localhost:8000/v1") == "http://localhost:8000/v1"
-    assert normalize_base_url("http://192.168.1.5:1234/v1") == "http://192.168.1.5:1234/v1"
+    assert (
+        normalize_base_url("http://192.168.1.5:1234/v1") == "http://192.168.1.5:1234/v1"
+    )
 
 
 def test_normalize_base_url_strict_mode_blocks_private(monkeypatch):
@@ -324,6 +348,128 @@ def test_format_model_label_truncates_through_the_middle():
     assert label.startswith("meta-llama/")
     assert label.endswith("Free")
     assert format_model_label("qwen3-4b") == "qwen3-4b"
+
+
+# -- endpoint buttons address an endpoint by name, not by list position --
+# The saved list is shared with the web dashboard, so a position captured at
+# render time can point at a different endpoint by the time it's tapped.
+
+
+class _FakeMessage:
+    def __init__(self):
+        self.text = ""
+        self.keyboard = None
+
+    async def edit_text(self, text, reply_markup=None, **kwargs):
+        self.text = text
+        self.keyboard = reply_markup
+        return self
+
+
+class _FakeQuery:
+    def __init__(self, message):
+        self.message = message
+
+
+class _FakeUpdate:
+    def __init__(self, message):
+        self.callback_query = _FakeQuery(message)
+        self.effective_chat = SimpleNamespace(id=1)
+
+
+def _tap(callback_data: str):
+    """Split a rendered callback payload the way the agent router does."""
+    assert callback_data.startswith("agent:")
+    action = callback_data.split(":", 1)[1]
+    verb, _, arg = action.partition(":")
+    return verb, arg
+
+
+def _forget_payloads(providers):
+    """{name: (change-key payload, forget payload)} from the manage keyboard."""
+    rows = _custom_manage_keyboard(providers).inline_keyboard
+    out = {}
+    for i, provider in enumerate(providers):
+        rekey, forget = rows[i * 2 + 1]
+        out[provider["name"]] = (rekey.callback_data, forget.callback_data)
+    return out
+
+
+def _seed_three_endpoints():
+    user_data = {}
+    for name in ("alpha", "bravo", "charlie"):
+        save_custom_provider(
+            user_data, name, f"https://{name}.example/v1", f"sk-{name}"
+        )
+    return user_data
+
+
+def test_endpoint_callback_payloads_fit_telegram_limit():
+    # sanitize_provider_name caps names at 32 chars; the longest verb is cu_delok
+    long_name = sanitize_provider_name("x" * 60)
+    assert len(long_name) == 32
+    providers = [{"name": long_name, "base_url": "https://x.example/v1"}]
+    payloads = [
+        _custom_endpoints_keyboard(providers, "").inline_keyboard[0][0].callback_data,
+        *_forget_payloads(providers)[long_name],
+        _custom_delete_keyboard(long_name).inline_keyboard[0][0].callback_data,
+    ]
+    for payload in payloads:
+        assert len(payload.encode()) <= 64, payload
+
+
+def test_forget_removes_the_named_endpoint_after_the_list_shifted():
+    user_data = _seed_three_endpoints()
+    context = SimpleNamespace(user_data=user_data)
+    providers = get_custom_providers(user_data)
+    _, forget_bravo = _forget_payloads(providers)["bravo"]
+
+    # The dashboard drops "alpha" between render and tap: "bravo" is now at the
+    # index the button was rendered with for "charlie".
+    remove_custom_provider(user_data, "alpha")
+
+    verb, arg = _tap(forget_bravo)
+    assert verb == "cu_del"
+    message = _FakeMessage()
+    asyncio.run(_handle_custom_delete_confirm(_FakeUpdate(message), context, arg))
+    assert "bravo" in message.text
+
+    verb, arg = _tap(message.keyboard.inline_keyboard[0][0].callback_data)
+    assert verb == "cu_delok"
+    asyncio.run(_handle_custom_delete(_FakeUpdate(message), context, arg))
+
+    assert [p["name"] for p in get_custom_providers(user_data)] == ["charlie"]
+
+
+def test_change_api_key_targets_the_named_endpoint_after_the_list_shifted():
+    user_data = _seed_three_endpoints()
+    context = SimpleNamespace(user_data=user_data)
+    rekey_bravo, _ = _forget_payloads(get_custom_providers(user_data))["bravo"]
+
+    remove_custom_provider(user_data, "alpha")
+
+    verb, arg = _tap(rekey_bravo)
+    assert verb == "cu_key"
+    asyncio.run(_handle_custom_rekey(_FakeUpdate(_FakeMessage()), context, arg))
+
+    assert user_data["_custom_rekey_provider"] == "bravo"
+    assert user_data["_custom_pending_url"] == "https://bravo.example/v1"
+
+
+def test_forgetting_an_already_removed_endpoint_reports_it_gone():
+    user_data = _seed_three_endpoints()
+    context = SimpleNamespace(user_data=user_data)
+    _, forget_bravo = _forget_payloads(get_custom_providers(user_data))["bravo"]
+
+    remove_custom_provider(user_data, "bravo")
+
+    message = _FakeMessage()
+    asyncio.run(
+        _handle_custom_delete(_FakeUpdate(message), context, _tap(forget_bravo)[1])
+    )
+
+    assert "That endpoint is gone." in message.text
+    assert [p["name"] for p in get_custom_providers(user_data)] == ["alpha", "charlie"]
 
 
 # -- model building --
@@ -436,7 +582,12 @@ def test_fetch_models_unreachable():
 def test_fetch_models_reports_when_only_non_chat_models_exist():
     async def models_handler(request: web.Request) -> web.Response:
         return web.json_response(
-            {"data": [{"id": "bge-m3", "type": "embedding"}, {"id": "flux", "type": "image"}]}
+            {
+                "data": [
+                    {"id": "bge-m3", "type": "embedding"},
+                    {"id": "flux", "type": "image"},
+                ]
+            }
         )
 
     async def scenario():

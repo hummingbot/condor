@@ -2,11 +2,13 @@ import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 
+import { PairLabel } from "@/components/executor/PairLabel";
 import { api, type ExecutorInfo } from "@/lib/api";
 import {
   computeMultiOverlays,
   getExecutorColor,
   getOverlayTimeRange,
+  getPoolAddress,
   type ExecutorOverlay,
 } from "@/lib/executor-overlays";
 import { escapeHtml, formatCompactUsd, tsToSeconds } from "@/lib/formatters";
@@ -90,6 +92,10 @@ export function ExecutorChart({
   // Pad time range for candle fetch. The window is part of the cache key: the
   // same market charted over another range (another session) must not reuse it.
   const paddingSeconds = 1800;
+  // DEX/LP executors record the pool they traded in; passing it sends the backend
+  // to GeckoTerminal, since these connectors have no CEX candle feed (which is
+  // what surfaced as "Failed to load candles").
+  const poolAddress = useMemo(() => getPoolAddress(executors), [executors]);
   const { startTime, endTime, queryKey } = candlesQuery(
     server,
     connector,
@@ -97,11 +103,13 @@ export function ExecutorChart({
     interval,
     timeRange.start - paddingSeconds,
     timeRange.end + paddingSeconds,
+    poolAddress,
   );
 
   const { data: candles, isLoading, isError } = useQuery({
     queryKey,
-    queryFn: () => api.getCandles(server, connector, tradingPair, interval, 5000, startTime, endTime),
+    queryFn: () =>
+      api.getCandles(server, connector, tradingPair, interval, 5000, startTime, endTime, poolAddress),
     enabled: !!server && !!connector && !!tradingPair,
     retry: 1,
   });
@@ -651,7 +659,7 @@ export function ExecutorChart({
       {/* Header bar */}
       <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
         <p className="text-[10px] text-[var(--color-text-muted)]">
-          {tradingPair} &middot; {interval}
+          <PairLabel tradingPair={tradingPair} connector={connector} /> &middot; {interval}
           {hasActive && (
             <span className="ml-2 inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
           )}

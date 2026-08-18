@@ -39,6 +39,7 @@ class Config(BaseModel):
 # Step 1: Get top pairs by 24h volume from Binance directly
 # ---------------------------------------------------------------------------
 
+
 async def fetch_top_pairs(top_n: int, min_volume: float) -> list[dict]:
     """Fetch 24h tickers from Binance Futures and return top N by quote volume."""
     async with aiohttp.ClientSession() as session:
@@ -57,13 +58,15 @@ async def fetch_top_pairs(top_n: int, min_volume: float) -> list[dict]:
             continue
         # Convert symbol format: BTCUSDT -> BTC-USDT
         base = symbol.replace("USDT", "")
-        usdt_tickers.append({
-            "trading_pair": f"{base}-USDT",
-            "symbol": symbol,
-            "volume_24h_usd": quote_vol,
-            "price": float(t.get("lastPrice", 0)),
-            "price_change_pct": float(t.get("priceChangePercent", 0)),
-        })
+        usdt_tickers.append(
+            {
+                "trading_pair": f"{base}-USDT",
+                "symbol": symbol,
+                "volume_24h_usd": quote_vol,
+                "price": float(t.get("lastPrice", 0)),
+                "price_change_pct": float(t.get("priceChangePercent", 0)),
+            }
+        )
 
     usdt_tickers.sort(key=lambda x: x["volume_24h_usd"], reverse=True)
     return usdt_tickers[:top_n]
@@ -73,8 +76,13 @@ async def fetch_top_pairs(top_n: int, min_volume: float) -> list[dict]:
 # Step 2: Fetch 1m candles via hummingbot API client
 # ---------------------------------------------------------------------------
 
+
 async def fetch_candles_for_pair(
-    client, connector: str, trading_pair: str, max_records: int, semaphore: asyncio.Semaphore
+    client,
+    connector: str,
+    trading_pair: str,
+    max_records: int,
+    semaphore: asyncio.Semaphore,
 ) -> list[dict] | None:
     """Fetch 1m candles for a single pair with concurrency control."""
     async with semaphore:
@@ -118,6 +126,7 @@ async def fetch_all_candles(
 # Step 3: Analyze each pair
 # ---------------------------------------------------------------------------
 
+
 def analyze_pair(candles: list[dict], pair_info: dict) -> dict[str, Any] | None:
     """Analyze volume patterns and volatility for a single pair's candles."""
     if len(candles) < 30:
@@ -150,7 +159,9 @@ def analyze_pair(candles: list[dict], pair_info: dict) -> dict[str, Any] | None:
             for i in range(n_buckets)
         ]
         bucket_arr = np.array(bucket_sums)
-        bucket_cv = np.std(bucket_arr) / np.mean(bucket_arr) if np.mean(bucket_arr) > 0 else 0
+        bucket_cv = (
+            np.std(bucket_arr) / np.mean(bucket_arr) if np.mean(bucket_arr) > 0 else 0
+        )
     else:
         bucket_cv = volume_cv
 
@@ -207,6 +218,7 @@ def analyze_pair(candles: list[dict], pair_info: dict) -> dict[str, Any] | None:
 # ---------------------------------------------------------------------------
 # Step 4: Score and classify
 # ---------------------------------------------------------------------------
+
 
 def classify_markets(analyses: list[dict], mature_count: int, degen_count: int) -> dict:
     """Score and classify markets into mature and degen buckets."""
@@ -266,6 +278,7 @@ def classify_markets(analyses: list[dict], mature_count: int, degen_count: int) 
 # ---------------------------------------------------------------------------
 # Step 5: Format output
 # ---------------------------------------------------------------------------
+
 
 def format_volume(v: float) -> str:
     if v >= 1_000_000_000:
@@ -332,6 +345,7 @@ def format_results(result: dict, lookback_hours: int) -> str:
 # Main entry point
 # ---------------------------------------------------------------------------
 
+
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Scan top markets and classify by volume/volatility profile."""
     chat_id = context._chat_id if hasattr(context, "_chat_id") else None
@@ -351,7 +365,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         return "No pairs found matching volume criteria."
 
     # Step 2: Fetch 1m candles for all pairs
-    candles_map = await fetch_all_candles(client, config.connector, top_pairs, max_records)
+    candles_map = await fetch_all_candles(
+        client, config.connector, top_pairs, max_records
+    )
 
     if not candles_map:
         return "Failed to fetch candles for any pair."
@@ -373,39 +389,48 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     # Step 5: Format
     text = format_results(classified, config.lookback_hours)
 
-    try:
-        import plotly.graph_objects as go
-        from condor.reports import ReportBuilder
+    import plotly.graph_objects as go
 
-        def _to_table(items):
-            return [
-                {"Pair": m["trading_pair"], "Volume 24h": format_volume(m["volume_24h_usd"]),
-                 "24h Chg": f"{m['price_change_24h']:+.1f}%", "NATR": f"{m['natr_mean']:.3f}%",
-                 "NATR-CV": f"{m['natr_cv']:.2f}", "Vol-CV": f"{m['bucket_cv']:.2f}",
-                 "Range": f"{m['price_range_pct']:.1f}%"}
-                for m in items
-            ]
+    from condor.reports import ReportBuilder
 
-        # Scatter plot: NATR vs Volume, colored by classification
-        mature_set = {m["trading_pair"] for m in classified["mature"]}
-        degen_set = {m["trading_pair"] for m in classified["degen"]}
+    def _to_table(items):
+        return [
+            {
+                "Pair": m["trading_pair"],
+                "Volume 24h": format_volume(m["volume_24h_usd"]),
+                "24h Chg": f"{m['price_change_24h']:+.1f}%",
+                "NATR": f"{m['natr_mean']:.3f}%",
+                "NATR-CV": f"{m['natr_cv']:.2f}",
+                "Vol-CV": f"{m['bucket_cv']:.2f}",
+                "Range": f"{m['price_range_pct']:.1f}%",
+            }
+            for m in items
+        ]
 
-        fig = go.Figure()
-        for a in analyses:
-            pair = a["trading_pair"]
-            if pair in mature_set:
-                color, group, name = "#3fb950", "mature", "Mature"
-            elif pair in degen_set:
-                color, group, name = "#f85149", "degen", "Degen"
-            else:
-                color, group, name = "#8b949e", "other", "Other"
+    # Scatter plot: NATR vs Volume, colored by classification
+    mature_set = {m["trading_pair"] for m in classified["mature"]}
+    degen_set = {m["trading_pair"] for m in classified["degen"]}
 
-            fig.add_trace(go.Scatter(
+    fig = go.Figure()
+    for a in analyses:
+        pair = a["trading_pair"]
+        if pair in mature_set:
+            color, group, name = "#3fb950", "mature", "Mature"
+        elif pair in degen_set:
+            color, group, name = "#f85149", "degen", "Degen"
+        else:
+            color, group, name = "#8b949e", "other", "Other"
+
+        fig.add_trace(
+            go.Scatter(
                 x=[a["natr_mean"]],
                 y=[a["volume_24h_usd"]],
                 mode="markers+text",
-                marker=dict(color=color, size=max(6, 20 - a["bucket_cv"] * 10),
-                            line=dict(width=1, color="#0d1117")),
+                marker=dict(
+                    color=color,
+                    size=max(6, 20 - a["bucket_cv"] * 10),
+                    line=dict(width=1, color="#0d1117"),
+                ),
                 text=[pair.replace("-USDT", "")],
                 textposition="top center",
                 textfont=dict(size=8, color="#8b949e"),
@@ -413,35 +438,49 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 legendgroup=group,
                 showlegend=False,
                 hovertemplate=f"{pair}<br>NATR: {a['natr_mean']:.3f}%<br>Vol: {format_volume(a['volume_24h_usd'])}<extra></extra>",
-            ))
-
-        # Add invisible traces for legend
-        for label, color in [("Mature", "#3fb950"), ("Degen", "#f85149"), ("Other", "#8b949e")]:
-            fig.add_trace(go.Scatter(x=[None], y=[None], mode="markers",
-                                     marker=dict(color=color, size=10), name=label))
-
-        fig.update_layout(
-            title=f"Market Scanner — NATR vs Volume ({config.lookback_hours}h)",
-            xaxis_title="NATR Mean (%)", yaxis_title="24h Volume (USD)",
-            yaxis_type="log",
-            paper_bgcolor="#0d1117", plot_bgcolor="#161b22",
-            font=dict(color="#c9d1d9", size=10),
-            margin=dict(l=60, r=30, t=100, b=40),
-            legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
+            )
         )
-        fig.update_xaxes(gridcolor="#21262d")
-        fig.update_yaxes(gridcolor="#21262d")
 
-        builder = ReportBuilder(f"Market Scanner ({config.lookback_hours}h)")
-        builder.source("routine", "market_scanner").tags(["scanner", "volatility"])
-        builder.markdown(f"Analyzed {classified['total_analyzed']} pairs with {config.lookback_hours}h lookback on 1m candles")
-        builder.plotly(fig)
-        builder.markdown("### Mature Markets\nHigh volume, stable volatility")
-        builder.table(_to_table(classified["mature"]))
-        builder.markdown("### Degen Markets\nHigh volatility, spiky activity")
-        builder.table(_to_table(classified["degen"]))
-        await builder.save()
-    except Exception as e:
-        logger.warning(f"Report generation failed: {e}")
+    # Add invisible traces for legend
+    for label, color in [
+        ("Mature", "#3fb950"),
+        ("Degen", "#f85149"),
+        ("Other", "#8b949e"),
+    ]:
+        fig.add_trace(
+            go.Scatter(
+                x=[None],
+                y=[None],
+                mode="markers",
+                marker=dict(color=color, size=10),
+                name=label,
+            )
+        )
+
+    fig.update_layout(
+        title=f"Market Scanner — NATR vs Volume ({config.lookback_hours}h)",
+        xaxis_title="NATR Mean (%)",
+        yaxis_title="24h Volume (USD)",
+        yaxis_type="log",
+        paper_bgcolor="#0d1117",
+        plot_bgcolor="#161b22",
+        font=dict(color="#c9d1d9", size=10),
+        margin=dict(l=60, r=30, t=100, b=40),
+        legend=dict(orientation="h", yanchor="bottom", y=1.04, xanchor="right", x=1),
+    )
+    fig.update_xaxes(gridcolor="#21262d")
+    fig.update_yaxes(gridcolor="#21262d")
+
+    builder = ReportBuilder(f"Market Scanner ({config.lookback_hours}h)")
+    builder.source("routine", "market_scanner").tags(["scanner", "volatility"])
+    builder.markdown(
+        f"Analyzed {classified['total_analyzed']} pairs with {config.lookback_hours}h lookback on 1m candles"
+    )
+    builder.plotly(fig)
+    builder.markdown("### Mature Markets\nHigh volume, stable volatility")
+    builder.table(_to_table(classified["mature"]))
+    builder.markdown("### Degen Markets\nHigh volatility, spiky activity")
+    builder.table(_to_table(classified["degen"]))
+    await builder.save()
 
     return text

@@ -63,7 +63,7 @@ In short: executors give us the cleanest possible boundary between "what this ag
 | `engine.py` | `TickEngine` — one instance per running agent. Runs the tick loop, builds prompts, drives ACP sessions, captures tool calls, persists snapshots. |
 | `strategy.py` | `Strategy` + `StrategyStore`. Strategies live as `agent.md` files (YAML frontmatter + markdown body) under `agents/{slug}/`. |
 | `journal.py` | `JournalManager` — compact, human-readable per-session memory: summary, decisions, ticks, snapshots, executors. Also `learnings.md` cross-session. |
-| `prompts.py` | Builds the per-tick prompt: system prompt + strategy + provider summaries + journal context + risk state + user directives. |
+| `prompts.py` | Builds the per-tick prompt: system prompt + strategy + provider summaries + journal context + risk state. |
 | `risk.py` | `RiskEngine` + `RiskLimits`. Hard guardrails (max exposure, max drawdown, max open executors) and the permission callback that auto-approves tool calls only if they pass the risk check. |
 | `providers/` | Deterministic pre-tick data fetchers. Two core providers ship: `executors.py` (filtered by `controller_id`) and `positions.py` (positions summary, also filtered by `controller_id`). |
 | `config.py` | `AgentConfig` schema persisted per session. |
@@ -94,7 +94,7 @@ agents/
 2. **Run core providers** — currently `executors` and `positions`, both filtered by `controller_id == agent_id`. Their structured `data` is kept for tracking; their `summary` strings go into the prompt.
 3. **Read journal context** — `learnings.md`, `summary`, and the last 3 decisions.
 4. **Get risk state** from `RiskEngine` (exposure, drawdown, open count). If the agent is blocked, log it and return without invoking the LLM.
-5. **Build the prompt** via `build_tick_prompt(...)`, optionally appending any user directives queued via `inject_directive()`.
+5. **Build the prompt** via `build_tick_prompt(...)`.
 6. **Spawn an ACP session** for the strategy's `agent_key` (claude-code, gemini, copilot…) with MCP servers wired in (Hummingbot tools, market data, notifications, journal writes). Stream events, capture text and tool calls.
 7. **Persist** — for sessions, write `snapshot_N.md`, append a tick to the journal, and update the running summary. For dry-runs / run-once, write a flat `experiment_N.md`.
 
@@ -148,6 +148,7 @@ Controller mode is triggered by the effective **`bot_name`** being non-empty. `b
 The name is resolved once at engine start and written back into the session's `config.yml`, so per-session PnL attribution reads back the name the run actually used. When controller mode is on:
 
 - The tick prompt gains a `[CONTROLLER MODE]` block telling the agent which bots it owns and that it should steer them via `manage_controllers` (define/update controller configs) + `manage_bots` (`deploy` / `update_config` / `start_controllers` / `stop_controllers`), not standalone executors.
+- The **base rules at the top of the prompt switch with it** (`BASE_PROMPT_LIVE_CONTROLLER` vs `BASE_PROMPT_LIVE_EXECUTORS` in `condor/agents/prompts.py`): controller mode names controllers as the trading surface, demotes `manage_executors` to an opt-in fallback, preloads `manage_bots` + `manage_controllers` via ToolSearch, and drops the executor-only `controller_id` hint. A single shared base prompt used to open every tick with "Trade ONLY via `manage_executors`" and then contradict itself in the `[CONTROLLER MODE]` block.
 - The agent's reported PnL becomes `executor_pnl(controller_id == agent_id)` **+** `bot_pnl(bot_name == config.bot_name)`. The two sources are disjoint — bot controllers tag their executors with their own config ids, never the `agent_id` — so the merge is plain addition with no double counting (`condor/fetchers/bot_performance.py` aggregates the bot side; `condor/agents/performance.py` folds it in).
 
 **Ownership is a namespace, enforced at the tool call** (FEAT-017, `condor/agents/ownership.py`). Every bot a strategy may deploy or mutate lives under `{agent_slug}-{strategy_slug}` — the base itself, any tagged sibling (`…-btc`, `…-eth`), and their deployed instances (Hummingbot appends a `-YYYYMMDD-HHMMSS` timestamp). Slugs never contain `-` (`strategy._slugify` maps `[\s-]+ → _`), so the delimiter is unambiguous and two agents can never claim the same bot — uniqueness is structural, with no registry or lock.
@@ -256,14 +257,6 @@ In production, agents are normally started/stopped from the Telegram `/agent` fl
 - `agents/{slug}/sessions/session_N/snapshots/snapshot_K.md` — the *full* tick: system prompt, response text, every tool call with arguments and status, executor snapshot, risk state, duration.
 - `agents/{slug}/learnings.md` — lessons the agent has chosen to keep across sessions.
 - `agents/{slug}/dry_runs/experiment_N.md` — dry-run / run-once results.
-
-### 4.5 Injecting directives mid-flight
-
-```python
-engine.inject_directive("Reduce exposure, news event in 10 min.")
-```
-
-The next tick's prompt will include the directive verbatim under a `USER DIRECTIVES` section, then clear it.
 
 ---
 

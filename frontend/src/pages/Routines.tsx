@@ -28,6 +28,17 @@ type ViewMode = "grid" | "table";
 
 const VIEW_STORAGE_KEY = "routines_view_mode";
 
+/**
+ * How many run chips the strip shows before it folds.
+ *
+ * The strip keeps every run this process still holds, which is the right
+ * behaviour — a 30s one-shot that failed has to be findable — but on a busy
+ * day that is dozens of chips pushing the routines themselves off the screen.
+ * Anything still live is exempt from the cap: those are the only chips with a
+ * Stop button, so hiding one would hide the action.
+ */
+const RUNS_COLLAPSED_LIMIT = 8;
+
 export function Routines() {
   const { server } = useServer();
   const qc = useQueryClient();
@@ -120,10 +131,44 @@ export function Routines() {
     return result;
   }, [routines, sourceTypeFilter, search]);
 
-  const activeInstances = useMemo(
-    () => instances.filter((i) => i.status === "running" || i.status === "scheduled"),
+  // Every run this process still holds, newest first — not just the ones still
+  // going. A one-shot that takes 30s was only ever visible for those 30s: it
+  // left the strip the moment it finished, and a run that rendered no report
+  // (a failed one, most of all) then existed nowhere in the UI at all.
+  const recentInstances = useMemo(
+    () =>
+      [...instances].sort(
+        (a, b) =>
+          toMs(b.last_run_at ?? b.created_at) - toMs(a.last_run_at ?? a.created_at),
+      ),
     [instances],
   );
+
+  const isLive = (status: string) =>
+    status === "running" || status === "scheduled";
+
+  const [showAllRuns, setShowAllRuns] = useState(false);
+
+  // The chips actually on screen: every live run, then the newest finished ones
+  // up to the cap. Picked as a set and re-filtered through the sorted list so
+  // expanding does not reshuffle the chips already under the cursor.
+  const visibleInstances = useMemo(() => {
+    if (showAllRuns || recentInstances.length <= RUNS_COLLAPSED_LIMIT) {
+      return recentInstances;
+    }
+    const keep = new Set(
+      recentInstances
+        .filter((i) => i.status === "running" || i.status === "scheduled")
+        .map((i) => i.instance_id),
+    );
+    for (const i of recentInstances) {
+      if (keep.size >= RUNS_COLLAPSED_LIMIT) break;
+      keep.add(i.instance_id);
+    }
+    return recentInstances.filter((i) => keep.has(i.instance_id));
+  }, [recentInstances, showAllRuns]);
+
+  const hiddenRunCount = recentInstances.length - visibleInstances.length;
 
   // Latest execution time (epoch ms) per routine, from instance runs.
   const lastRunByRoutine = useMemo(() => {
@@ -294,14 +339,17 @@ export function Routines() {
           </button>
         </div>
 
-        {/* Active instances strip */}
-        {activeInstances.length > 0 && (
+        {/* Recent runs strip */}
+        {recentInstances.length > 0 && (
           <div>
             <h2 className="mb-2 text-[11px] font-bold uppercase tracking-wider text-[var(--color-text-muted)]">
-              Active
+              Runs
+              <span className="ml-1.5 font-medium opacity-60">
+                {recentInstances.length}
+              </span>
             </h2>
             <div className="flex flex-wrap gap-2">
-              {activeInstances.map((inst) => (
+              {visibleInstances.map((inst) => (
                 <div
                   key={inst.instance_id}
                   className="group flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2 transition-all hover:border-[var(--color-primary)]/30"
@@ -312,9 +360,13 @@ export function Routines() {
                   >
                     <span
                       className={`h-2 w-2 rounded-full shrink-0 ${
-                        inst.status === "running"
-                          ? "bg-emerald-400 animate-pulse"
-                          : "bg-amber-400"
+                        inst.error || inst.status === "failed"
+                          ? "bg-[var(--color-red)]"
+                          : inst.status === "running"
+                            ? "bg-emerald-400 animate-pulse"
+                            : inst.status === "scheduled"
+                              ? "bg-amber-400"
+                              : "bg-sky-400"
                       }`}
                     />
                     <div>
@@ -323,6 +375,9 @@ export function Routines() {
                       </span>
                       <div className="flex items-center gap-2 text-[9px] text-[var(--color-text-muted)]">
                         <span className="capitalize">{inst.status}</span>
+                        {!isLive(inst.status) && inst.last_run_at && (
+                          <span>{formatRelativeTime(inst.last_run_at, "")}</span>
+                        )}
                         {inst.schedule?.type === "interval" && (
                           <span className="flex items-center gap-0.5">
                             <Clock className="h-2 w-2" />
@@ -333,16 +388,36 @@ export function Routines() {
                       </div>
                     </div>
                   </button>
-                  <button
-                    onClick={() => stopMutation.mutate(inst.instance_id)}
-                    disabled={stopMutation.isPending}
-                    className="rounded p-1 text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)] transition-all"
-                    title="Stop"
-                  >
-                    <Square className="h-3 w-3" />
-                  </button>
+                  {/* Only something still going can be stopped. A finished run
+                      keeps its row — that is the point — but not the button. */}
+                  {isLive(inst.status) && (
+                    <button
+                      onClick={() => stopMutation.mutate(inst.instance_id)}
+                      disabled={stopMutation.isPending}
+                      className="rounded p-1 text-[var(--color-text-muted)] opacity-0 group-hover:opacity-100 hover:bg-[var(--color-red)]/10 hover:text-[var(--color-red)] transition-all"
+                      title="Stop"
+                    >
+                      <Square className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
               ))}
+              {hiddenRunCount > 0 && (
+                <button
+                  onClick={() => setShowAllRuns(true)}
+                  className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/30 hover:text-[var(--color-text)]"
+                >
+                  +{hiddenRunCount} more
+                </button>
+              )}
+              {showAllRuns && recentInstances.length > RUNS_COLLAPSED_LIMIT && (
+                <button
+                  onClick={() => setShowAllRuns(false)}
+                  className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-2 text-xs font-medium text-[var(--color-text-muted)] transition-colors hover:border-[var(--color-primary)]/30 hover:text-[var(--color-text)]"
+                >
+                  Show less
+                </button>
+              )}
             </div>
           </div>
         )}

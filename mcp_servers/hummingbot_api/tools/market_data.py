@@ -4,6 +4,7 @@ Market data operations business logic.
 This module provides the core business logic for market data operations including
 prices, candles, funding rates, and order books.
 """
+
 from datetime import datetime
 from typing import Any, Literal
 
@@ -230,7 +231,9 @@ async def get_order_book(
     else:
         # Handle query-based requests
         if query_value is None:
-            raise ValueError(f"query_value must be provided for query_type '{query_type}'")
+            raise ValueError(
+                f"query_value must be provided for query_type '{query_type}'"
+            )
 
         # Execute appropriate query
         if query_type == "volume_for_price":

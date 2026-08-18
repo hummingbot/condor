@@ -15,16 +15,20 @@ import pytest
 from condor.acp.client import PromptDone, TextChunk
 from condor.runtime import PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
+from condor.runtime import conversations
 from condor.runtime import sessions as session_module
 from condor.runtime.conversations import (
     REDACTED,
     REPLAY_HEADER,
+    REPLAY_MAX_CHARS,
     REPLAY_OMITTED,
     TOOL_INPUT_MAX_CHARS,
     TOOL_OUTPUT_MAX_CHARS,
     ConversationIdError,
     Recorder,
     TurnEntry,
+    _iter_lines_reverse,
+    _render_turn,
     _root,
     append_turn,
     delete_conversation,
@@ -962,3 +966,208 @@ def test_budget_still_refuses_when_every_session_is_busy(registry):
         return str(exc.value)
 
     assert "busy" in asyncio.run(scenario())
+
+
+# ── Bounded tail reads (PERF-138) ──
+
+
+def _replay_by_full_parse(user_id, conv_id, *, max_chars=None):
+    """The pre-PERF-138 replay: parse the whole file, then walk it backwards.
+
+    Kept verbatim as the oracle for the bounded reader — the point of the
+    change was cost, not output, so the two must agree line for line.
+    """
+    max_chars = REPLAY_MAX_CHARS if max_chars is None else max_chars
+    turns = read_transcript(user_id, conv_id, limit=0)
+    if not turns:
+        return ""
+    overhead = len(REPLAY_HEADER) + 1 + len(REPLAY_OMITTED) + 1
+    budget = max_chars - overhead
+    if budget <= 0:
+        return REPLAY_HEADER[:max_chars]
+
+    lines, used, omitted = [], 0, False
+    for turn in reversed(turns):
+        rendered = _render_turn(turn)
+        if not rendered:
+            continue
+        if used + len(rendered) + 1 > budget:
+            omitted = True
+            break
+        lines.append(rendered)
+        used += len(rendered) + 1
+
+    if not lines:
+        newest = next((r for r in (_render_turn(t) for t in reversed(turns)) if r), "")
+        if not newest:
+            return ""
+        lines = [newest[:budget]]
+        omitted = True
+
+    lines.reverse()
+    parts = [REPLAY_HEADER, *lines]
+    if omitted:
+        parts.append(REPLAY_OMITTED)
+    return "\n".join(parts)[:max_chars]
+
+
+def _write_raw_transcript(conv_root, conv_id, lines):
+    """Write transcript lines straight to disk, bypassing ``append_turn``."""
+    path = conv_root / str(USER) / conv_id / "transcript.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(lines), encoding="utf-8")
+    return path
+
+
+def _turn_line(**fields):
+    return json.dumps(TurnEntry(**fields).model_dump(mode="json")) + "\n"
+
+
+def test_reverse_line_reader_matches_a_forward_read(conv_root):
+    """Backwards blocks yield exactly the forward lines, reversed.
+
+    Tiny blocks on purpose: every line here straddles a block boundary, which
+    is the only way the reader can lose or splice one.
+    """
+    meta = new_conversation(USER, WEB)
+    raw = ["one\n", "two\n", "\n", "three " + "x" * 500 + "\n", "four"]
+    path = _write_raw_transcript(conv_root, meta.id, raw)
+
+    forward = [line.strip() for line in path.read_bytes().split(b"\n") if line.strip()]
+    for block in (1, 7, 64, 4096):
+        assert (
+            list(_iter_lines_reverse(path, block=block)) == forward[::-1]
+        ), f"block={block} changed the line sequence"
+
+
+def test_replay_matches_the_full_parse_on_every_transcript_shape(conv_root):
+    """Same records, same order, same truncation boundary as the old path."""
+    shapes = {
+        "empty file": [],
+        "one turn": [_turn_line(role="user", text="hi")],
+        "short": [
+            _turn_line(role="user", text="what is my pnl?"),
+            _turn_line(role="assistant", text="Up $120."),
+        ],
+        "empty renders interleaved": [
+            _turn_line(role="assistant", text="", tool_calls=[]),
+            _turn_line(role="user", text="hello"),
+            _turn_line(role="system", text=""),
+            _turn_line(role="assistant", text="", tool_calls=[]),
+        ],
+        "malformed lines inside the tail": [
+            _turn_line(role="user", text="kept"),
+            "{not json at all\n",
+            _turn_line(role="assistant", text="also kept"),
+            '{"role": 12345}\n',
+        ],
+        "no trailing newline": [_turn_line(role="user", text="torn").rstrip("\n")],
+        "torn last line": [
+            _turn_line(role="user", text="whole"),
+            '{"role": "assistant", "text": "half a li',
+        ],
+        "long": [
+            _turn_line(role="user", text=f"message number {i} " + "x" * 100)
+            for i in range(300)
+        ],
+        "long with tool calls": [
+            _turn_line(
+                role="assistant",
+                text=f"turn {i}",
+                tool_calls=[{"id": f"t{i}", "title": "get_market_data"}],
+            )
+            for i in range(300)
+        ],
+        "one turn far over the bound": [_turn_line(role="user", text="y" * 5000)],
+    }
+
+    for name, raw in shapes.items():
+        meta = new_conversation(USER, WEB)
+        _write_raw_transcript(conv_root, meta.id, raw)
+        for max_chars in (10, 40, 200, 1000, REPLAY_MAX_CHARS):
+            assert replay_context(USER, meta.id, max_chars=max_chars) == (
+                _replay_by_full_parse(USER, meta.id, max_chars=max_chars)
+            ), f"{name} diverged from the full parse at max_chars={max_chars}"
+
+
+def _count_parsed_turns(monkeypatch):
+    """Count every ``TurnEntry`` the store builds while reading."""
+    real = conversations.TurnEntry
+    counter = {"n": 0}
+
+    def counting(**fields):
+        counter["n"] += 1
+        return real(**fields)
+
+    monkeypatch.setattr(conversations, "TurnEntry", counting)
+    return counter
+
+
+def test_replay_parses_a_bounded_tail_not_the_whole_transcript(conv_root, monkeypatch):
+    """The complexity pin: replay cost follows its char budget, not the file.
+
+    10k turns, ~200 chars each — the old path built 10k ``TurnEntry`` objects
+    to render a 1000-char tail. The bound here is the budget itself: no more
+    turns can be parsed than can fit in it, plus the one that overruns it.
+    """
+    meta = new_conversation(USER, WEB)
+    _write_raw_transcript(
+        conv_root,
+        meta.id,
+        [
+            _turn_line(role="user", text=f"message number {i} " + "x" * 200)
+            for i in range(10_000)
+        ],
+    )
+
+    counter = _count_parsed_turns(monkeypatch)
+    replay = replay_context(USER, meta.id, max_chars=1000)
+
+    assert "message number 9999" in replay
+    assert REPLAY_OMITTED in replay
+    assert counter["n"] <= 1000 // 200 + 2, (
+        "replay parsed more turns than its char budget can hold: "
+        f"{counter['n']} for a 1000-char tail of a 10k-turn transcript"
+    )
+
+
+def test_read_transcript_tail_parses_only_the_tail(conv_root, monkeypatch):
+    """The web route's ``limit=200`` over 10k turns parses 200, not 10k."""
+    meta = new_conversation(USER, WEB)
+    _write_raw_transcript(
+        conv_root,
+        meta.id,
+        [_turn_line(role="user", text=f"m{i}") for i in range(10_000)],
+    )
+
+    counter = _count_parsed_turns(monkeypatch)
+    tail = read_transcript(USER, meta.id, limit=200)
+
+    assert [t.text for t in tail] == [f"m{i}" for i in range(9800, 10_000)]
+    assert counter["n"] == 200, "a bounded read must not touch the older turns"
+
+
+def test_read_transcript_tail_skips_malformed_lines_like_the_full_read(conv_root):
+    """Tolerance is unchanged: a bad line costs its own slot, not the read."""
+    meta = new_conversation(USER, WEB)
+    _write_raw_transcript(
+        conv_root,
+        meta.id,
+        [
+            _turn_line(role="user", text="oldest"),
+            "not json\n",
+            _turn_line(role="assistant", text="middle"),
+            '{"role": "user", "text": {"bad": "type"}}\n',
+            _turn_line(role="user", text="newest"),
+        ],
+    )
+
+    assert [t.text for t in read_transcript(USER, meta.id, limit=2)] == [
+        "middle",
+        "newest",
+    ]
+    assert [t.text for t in read_transcript(USER, meta.id, limit=0)] == [
+        "oldest",
+        "middle",
+        "newest",
+    ]

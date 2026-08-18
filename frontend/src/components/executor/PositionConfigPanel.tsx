@@ -11,10 +11,10 @@ import {
   SelectField,
   SideSelector,
   ValidationMessages,
-  ORDER_TYPE_OPTIONS,
   type FieldDispatch,
 } from "./fields";
-import type { ChartPriceMapping, ExecutorValidation, ExtraLine } from "./types";
+import { ORDER_TYPE_OPTIONS } from "./field-options";
+import type { ChartPriceMapping, ExecutorValidation, ExtraLine, PickSlot } from "./types";
 import { getThemeColors } from "@/lib/theme-colors";
 
 // ── State ──
@@ -202,7 +202,7 @@ export function usePositionConfig() {
 
   const save = () => saveDefaults(state);
 
-  const handleChartPriceSet = (field: "start" | "end" | "limit", price: number) => {
+  const handleChartPriceSet = (field: PickSlot, price: number) => {
     if (field === "start") {
       dispatch({ type: "SET_FIELD", field: "entry_price", value: price });
     }

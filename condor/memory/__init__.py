@@ -6,8 +6,15 @@ its own isolated store, co-located with its definition. See ``paths.store_root``
 and ``store.MemoryStore``.
 """
 
+from .context import domain_context
 from .paths import iter_user_stores, store_root
 from .skills import SkillStore
 from .store import MemoryStore
 
-__all__ = ["MemoryStore", "SkillStore", "store_root", "iter_user_stores"]
+__all__ = [
+    "MemoryStore",
+    "SkillStore",
+    "domain_context",
+    "store_root",
+    "iter_user_stores",
+]

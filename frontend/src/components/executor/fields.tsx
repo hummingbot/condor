@@ -9,6 +9,8 @@ import {
 
 // ── Generic dispatch type ──
 
+import { PERCENT_PRESETS, SIDE_OPTIONS } from "./field-options";
+
 export type FieldDispatch = (action: { type: "SET_FIELD"; field: string; value: unknown }) => void;
 
 // ── PriceField ──
@@ -21,6 +23,7 @@ export function PriceField({
   dispatch,
   valid,
   hint,
+  pickable = true,
 }: {
   label: string;
   value: number;
@@ -29,6 +32,12 @@ export function PriceField({
   dispatch: FieldDispatch;
   valid: boolean;
   hint?: string;
+  /**
+   * Whether this price can be picked off the chart. A panel that has run out of
+   * pick slots turns the crosshair off for the remaining prices rather than
+   * offering a button that does nothing.
+   */
+  pickable?: boolean;
 }) {
   const isActive = activePickField === field;
   const id = useId();
@@ -71,6 +80,7 @@ export function PriceField({
               : "border-[var(--color-border)] focus:border-[var(--color-primary)]"
           }`}
         />
+        {pickable && (
         <button
           onClick={() =>
             dispatch({
@@ -88,8 +98,63 @@ export function PriceField({
         >
           <Crosshair className="h-3.5 w-3.5" />
         </button>
+        )}
       </div>
       {hint && <p className="mt-0.5 text-[10px] text-[var(--color-text-muted)]">{hint}</p>}
+    </div>
+  );
+}
+
+// ── PercentPresets ──
+
+/** Fractions of the available balance the presets offer. */
+
+function formatAvailable(value: number): string {
+  if (value === 0) return "0";
+  if (value >= 1000) return value.toLocaleString(undefined, { maximumFractionDigits: 2 });
+  if (value >= 1) return String(Number(value.toFixed(4)));
+  return String(Number(value.toPrecision(4)));
+}
+
+/**
+ * Size a field off the wallet instead of by typing.
+ *
+ * `available === null` means the balance is unknown (not held, or the portfolio
+ * has not arrived): the buttons go inert rather than sizing an order off a zero
+ * that was never a real balance.
+ */
+export function PercentPresets({
+  available,
+  symbol,
+  onPick,
+  label,
+}: {
+  available: number | null;
+  symbol?: string;
+  onPick: (fraction: number) => void;
+  /** Overrides the "Avail" caption — e.g. naming the token being spent. */
+  label?: string;
+}) {
+  const usable = available !== null && available > 0;
+  return (
+    <div className="mt-1 flex items-center gap-1">
+      {PERCENT_PRESETS.map((pct) => (
+        <button
+          key={pct}
+          type="button"
+          disabled={!usable}
+          onClick={() => onPick(pct)}
+          className="flex-1 rounded border border-[var(--color-border)] bg-[var(--color-surface)] py-0.5 text-[10px] text-[var(--color-text-muted)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)] disabled:cursor-not-allowed disabled:opacity-30"
+        >
+          {pct * 100}%
+        </button>
+      ))}
+      <span
+        className="ml-1 shrink-0 font-mono text-[10px] text-[var(--color-text-muted)]"
+        title={label ?? "Available balance"}
+      >
+        {available === null ? "—" : formatAvailable(available)} {symbol ?? ""}
+      </span>
     </div>
   );
 }
@@ -339,6 +404,8 @@ export function AmountField({
   step = 0.001,
   min = 0,
   pair,
+  baseSymbol,
+  quoteSymbol,
 }: {
   value: number;
   field: string;
@@ -347,13 +414,20 @@ export function AmountField({
   step?: number;
   min?: number;
   pair?: string;
+  /**
+   * Token tickers, when the pair cannot supply them. A DEX `trading_pair` is
+   * `<base_mint>-<quote_symbol>`, so splitting it labels the field with a mint
+   * address.
+   */
+  baseSymbol?: string;
+  quoteSymbol?: string;
 }) {
   const [inQuote, setInQuote] = useState(false);
   const id = useId();
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const baseAsset = pair?.split("-")[0] ?? "base";
-  const quoteAsset = pair?.split("-")[1] ?? "quote";
+  const baseAsset = baseSymbol ?? pair?.split("-")[0] ?? "base";
+  const quoteAsset = quoteSymbol ?? pair?.split("-")[1] ?? "quote";
 
   // When inQuote mode, show quote value; dispatch always stores base amount
   const displayValue = inQuote && currentPrice && currentPrice > 0 ? value * currentPrice : value;
@@ -457,16 +531,7 @@ export function LeverageField({
 
 // ── Shared constants ──
 
-export const ORDER_TYPE_OPTIONS = [
-  { value: 1, label: "Market" },
-  { value: 2, label: "Limit" },
-  { value: 3, label: "Limit Maker" },
-];
 
-export const SIDE_OPTIONS = [
-  { value: 1, label: "LONG", color: "var(--color-green)" },
-  { value: 2, label: "SHORT", color: "var(--color-red)" },
-];
 
 export function SideSelector({ side, dispatch }: { side: 1 | 2; dispatch: FieldDispatch }) {
   return (
