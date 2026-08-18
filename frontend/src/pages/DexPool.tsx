@@ -14,7 +14,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { NoServerCard } from "@/components/NoServerCard";
 import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { LpPositionBar } from "@/components/dex/LpPositionBar";
-import { PoolStats } from "@/components/dex/PoolStats";
+import { PoolAddress, PoolStats } from "@/components/dex/PoolStats";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { useLpConfig } from "@/components/executor/lp-config";
@@ -31,9 +31,14 @@ import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
 import { api } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
-import { INTERVALS, LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
+import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
 
 type Tab = "order" | "lp";
+
+// Only the fine intervals: 1h/4h/1d candles read as duplicates of the 1h/1d
+// lookback buttons sitting next to them, and a 3-day window of 15m candles
+// already fits GeckoTerminal's 1000-candle cap.
+const DEX_INTERVALS = ["1m", "5m", "15m"];
 
 const DEPTH_KEY = "condor.dex.depth-collapsed";
 
@@ -361,10 +366,12 @@ export function DexPool() {
         </button>
         <div className="flex flex-col">
           <span className="text-sm font-semibold">{pairLabel}</span>
-          <span className="text-[10px] text-[var(--color-text-muted)]">{network}</span>
+          {/* The address identifies the pool the way the ticker never can, so it
+              sits with the name instead of hiding at the far right. */}
+          <PoolAddress pool={pool} />
         </div>
         <div className="min-w-0 flex-1">
-          <PoolStats pool={pool} />
+          <PoolStats pool={pool} network={network} />
         </div>
       </div>
 
@@ -372,7 +379,7 @@ export function DexPool() {
       <div className="flex shrink-0 items-center gap-4 border-b border-[var(--color-border)] px-3 py-1.5">
         <div className="flex items-center gap-1">
           <span className="text-[11px] text-[var(--color-text-muted)]">Interval</span>
-          {INTERVALS.map((iv) => (
+          {DEX_INTERVALS.map((iv) => (
             <button
               key={iv}
               onClick={() => setIntervalValue(iv)}
@@ -575,6 +582,12 @@ export function DexPool() {
                 pair={pairLabel}
                 pool={lpConfig.pool}
                 poolFetching={lpConfig.poolFetching}
+                // Gateway's number, from the bins call — the GeckoTerminal pool
+                // row does not carry one.
+                binStep={depth?.bin_step}
+                // The pool was chosen by opening this page, so the panel shows it
+                // instead of offering to resolve or re-enter it.
+                lockedPoolAddress={pool.address}
                 baseAvailable={balances.base}
                 quoteAvailable={balances.quote}
                 baseSymbol={baseSymbol}

@@ -309,8 +309,9 @@ export function Dex() {
           </button>
         )}
 
-        {/* The pasted-pool answer above already covers an empty search result —
-            showing "No pools found" under it would contradict what's right above it. */}
+        {/* A pasted address that resolved to a pool IS the result: an empty
+            token-search table saying "No pools found" under it would deny the
+            row right above. */}
         {!(pastedPool && !pools.length) && (
           <PoolBrowser
             pools={pools}

@@ -38,6 +38,9 @@ class ServerInfo(BaseModel):
     port: int
     online: bool = False
     permission: str = "trader"
+    # The server this user's commands land on when none is named — the same
+    # `chat_defaults` entry Telegram reads, so both surfaces agree on it.
+    is_default: bool = False
 
 
 # ── Portfolio ──

@@ -85,6 +85,11 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
 
     statuses = await asyncio.gather(*[_get_status(name) for name in accessible])
 
+    # Which one the star should be filled on. Read once: the config manager falls
+    # back to the global default and then to the first server, so this is the
+    # server that actually answers, not only an explicit `chat_defaults` entry.
+    default_server = cm.get_chat_default_server(user.id)
+
     results = []
     for (name, cfg), status in zip(accessible.items(), statuses):
         perm = cm.get_server_permission(user.id, name)
@@ -96,6 +101,7 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
                 port=cfg.get("port", 0),
                 online=online,
                 permission=perm.value if perm else "trader",
+                is_default=name == default_server,
             )
         )
 

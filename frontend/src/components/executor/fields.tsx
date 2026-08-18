@@ -227,12 +227,15 @@ export function SelectField({
   field,
   dispatch,
   options,
+  disabled = false,
 }: {
   label: string;
   value: number | string;
   field: string;
   dispatch: FieldDispatch;
   options: { value: number | string; label: string }[];
+  /** A select with nothing to select reads as broken unless it says so. */
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -265,13 +268,20 @@ export function SelectField({
         aria-label={label}
         aria-expanded={open}
         aria-haspopup="listbox"
+        disabled={disabled}
         onClick={() => setOpen(!open)}
-        className="flex w-full items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1.5 text-xs text-[var(--color-text)] transition-colors hover:bg-[var(--color-surface-hover)]"
+        className={`flex w-full items-center justify-between rounded-lg border border-[var(--color-border)] px-2.5 py-1.5 text-xs transition-colors ${
+          disabled
+            ? "bg-[var(--color-bg)] text-[var(--color-text-muted)] opacity-60"
+            : "bg-[var(--color-surface)] text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]"
+        }`}
       >
         <span>{selected?.label}</span>
-        <ChevronDown className={`h-3.5 w-3.5 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
+        {!disabled && (
+          <ChevronDown className={`h-3.5 w-3.5 text-[var(--color-text-muted)] transition-transform ${open ? "rotate-180" : ""}`} />
+        )}
       </button>
-      {open && (
+      {open && !disabled && (
         <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] shadow-lg">
           {options.map((opt) => {
             const isActive = opt.value === value;
@@ -533,7 +543,16 @@ export function LeverageField({
 
 
 
-export function SideSelector({ side, dispatch }: { side: 1 | 2; dispatch: FieldDispatch }) {
+export function SideSelector({
+  side,
+  dispatch,
+  isSpot = false,
+}: {
+  side: 1 | 2;
+  dispatch: FieldDispatch;
+  /** Spot has no position to be long or short of — the sides are Buy and Sell. */
+  isSpot?: boolean;
+}) {
   return (
     <div>
       <SectionHeader>Direction</SectionHeader>
@@ -549,7 +568,7 @@ export function SideSelector({ side, dispatch }: { side: 1 | 2; dispatch: FieldD
             }`}
             style={side === opt.value ? { backgroundColor: opt.color } : undefined}
           >
-            {opt.label}
+            {isSpot ? (opt.value === 1 ? "BUY" : "SELL") : opt.label}
           </button>
         ))}
       </div>

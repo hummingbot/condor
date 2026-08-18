@@ -22,6 +22,8 @@ export interface ServerInfo {
   port: number;
   online: boolean;
   permission: string;
+  /** The server commands fall back to when none is named — shared with Telegram. */
+  is_default: boolean;
 }
 
 export interface BalanceItem {
