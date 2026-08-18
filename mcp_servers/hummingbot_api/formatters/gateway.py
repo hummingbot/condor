@@ -227,17 +227,14 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
 
     if action == "position_info" and isinstance(payload, list):
         if not payload:
-            return (
-                f"{header}\nPool: {result.get('pool_address')}\n"
-                "No open positions for this wallet in this pool."
-            )
-        lines = [
-            f"{header}",
-            f"Pool: {result.get('pool_address')} — {len(payload)} position(s)",
-        ]
+            return f"{header}\nNo open positions for this wallet on this connector."
+        lines = [f"{header}", f"{len(payload)} position(s) owned by this wallet"]
         for p in payload:
             lines.append(
-                f"  • {p.get('position_address')} — Base: {p.get('base_token_amount')}  "
+                f"  • {p.get('position_address')} — Pool: {p.get('pool_address')}"
+            )
+            lines.append(
+                f"    Base: {p.get('base_token_amount')}  "
                 f"Quote: {p.get('quote_token_amount')}  "
                 f"Range: {p.get('lower_price')}–{p.get('upper_price')}  "
                 f"Price: {p.get('current_price')}"

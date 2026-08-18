@@ -80,10 +80,10 @@ def test_position_info_formats_the_apis_snake_case_fields():
             "action": "position_info",
             "connector": "meteora/clmm",
             "network": "solana-mainnet-beta",
-            "pool_address": "PoolAddr",
             "result": [
                 {
                     "position_address": "PosAddr123",
+                    "pool_address": "PoolAddr",
                     "base_token_amount": 1.5,
                     "quote_token_amount": 200.0,
                     "lower_price": 100.0,

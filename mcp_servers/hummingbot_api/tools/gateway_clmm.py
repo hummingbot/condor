@@ -273,11 +273,11 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
     gc = None if client is None else client.gateway_clmm
 
     if action == "position_info":
-        _require_clmm(request, "pool_address")
+        # No pool filter: Gateway's positions-owned lists every CLMM position the
+        # wallet owns on the connector, each row carrying its own pool_address.
         result = await gc.get_positions_owned(
             connector=connector,
             network=net,
-            pool_address=request.pool_address,
             wallet_address=request.wallet_address,
         )
 

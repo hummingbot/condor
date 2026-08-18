@@ -740,9 +740,10 @@ class CLMMRequest(BaseModel):
     )
     pool_address: str | None = Field(
         default=None,
-        description="Pool contract address. Required for open and position_info. Also required to close or "
+        description="Pool contract address. Required for open. Also required to close or "
         "collect fees on a position the API never recorded — every lp_executor position, since the "
-        "bot opens those straight against Gateway.",
+        "bot opens those straight against Gateway. Not used by position_info, which lists every "
+        "position the wallet owns.",
     )
     position_address: str | None = Field(
         default=None,

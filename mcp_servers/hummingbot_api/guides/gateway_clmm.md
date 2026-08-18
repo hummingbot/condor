@@ -30,7 +30,7 @@ passed straight through.
 
 | Action | Required | Notes |
 |---|---|---|
-| `position_info` | `pool_address` | Lists your positions in that pool with amounts, range, and uncollected fees |
+| `position_info` | — | Lists ALL the wallet's positions on the connector (each row names its pool) with amounts, range, and uncollected fees |
 | `open` | `pool_address`, `lower_price`, `upper_price`, and at least one amount | Creates a position no executor tracks |
 | `add_liquidity` | `position_address`, at least one amount | Keeps the existing range |
 | `remove_liquidity` | `position_address`, `percentage_to_remove` | Partial withdrawal; the position account survives even at 100 |
@@ -55,8 +55,9 @@ fees before the close so they can be reported.
 1. `manage_executors(action="orphaned")` — each entry carries `lp_provider`, `pool_address`,
    `position_address`, and `connector_name` (which for an LP executor holds the *network*, e.g.
    `solana-mainnet-beta`, not the DEX).
-2. Confirm it is really still on-chain:
-   `manage_clmm(action="position_info", connector=<lp_provider>, network=<connector_name>, pool_address=<pool_address>)`
+2. Confirm it is really still on-chain (lists every position the wallet owns; match by
+   `position_address` / `pool_address`):
+   `manage_clmm(action="position_info", connector=<lp_provider>, network=<connector_name>)`
 3. Close it:
    `manage_clmm(action="close", connector=<lp_provider>, network=<connector_name>, position_address=<position_address>, pool_address=<pool_address>)`
 4. `manage_executors(action="resolve_orphan", executor_id="...")` so it stops being reported.
