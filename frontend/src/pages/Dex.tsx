@@ -309,16 +309,20 @@ export function Dex() {
           </button>
         )}
 
-        <PoolBrowser
-          pools={pools}
-          isLoading={loading}
-          emptyMessage={emptyMessage}
-          showGatewayColumns={source.kind === "gateway"}
-          network={network}
-          page={isFavorites ? 1 : page}
-          hasMore={isFavorites ? false : !!pagedPools?.has_more}
-          onPageChange={setPage}
-        />
+        {/* The pasted-pool answer above already covers an empty search result —
+            showing "No pools found" under it would contradict what's right above it. */}
+        {!(pastedPool && !pools.length) && (
+          <PoolBrowser
+            pools={pools}
+            isLoading={loading}
+            emptyMessage={emptyMessage}
+            showGatewayColumns={source.kind === "gateway"}
+            network={network}
+            page={isFavorites ? 1 : page}
+            hasMore={isFavorites ? false : !!pagedPools?.has_more}
+            onPageChange={setPage}
+          />
+        )}
       </div>
     </div>
   );

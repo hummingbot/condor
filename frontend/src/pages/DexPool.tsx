@@ -371,6 +371,7 @@ export function DexPool() {
       {/* Interval / lookback */}
       <div className="flex shrink-0 items-center gap-4 border-b border-[var(--color-border)] px-3 py-1.5">
         <div className="flex items-center gap-1">
+          <span className="text-[11px] text-[var(--color-text-muted)]">Interval</span>
           {INTERVALS.map((iv) => (
             <button
               key={iv}
@@ -385,7 +386,9 @@ export function DexPool() {
             </button>
           ))}
         </div>
+        <div className="h-4 w-px bg-[var(--color-border)]" />
         <div className="flex items-center gap-1">
+          <span className="text-[11px] text-[var(--color-text-muted)]">Window</span>
           {LOOKBACK_OPTIONS.map((o) => (
             <button
               key={o.label}
