@@ -26,6 +26,7 @@ from utils.auth import restricted
 from utils.config import (
     LOCAL_MODE,
     TELEGRAM_TOKEN,
+    USE_TAILSCALE,
     WEB_HOST,
     WEB_PORT,
     WEB_URL,
@@ -951,8 +952,21 @@ async def _run_dual(application: Application) -> None:
         await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
         await application.start()
 
-    # Create and start the web server
+    # Create and start the web server. WEB_HOST (utils.config.resolve_web_host)
+    # already resolves to loopback for Tailscale same as it does for local mode
+    # -- here we only have to make sure `tailscale serve` is actually proxying
+    # the tailnet to that loopback bind, or it would be reachable nowhere at
+    # all.
     web_app = create_app()
+    if USE_TAILSCALE:
+        from utils.tailscale import ensure_serve
+
+        if not await ensure_serve(WEB_PORT):
+            logger.error(
+                "Dashboard bound to 127.0.0.1 only; tailnet forwarding could "
+                "not be confirmed, so it will NOT be reachable remotely "
+                "until `tailscale serve` is fixed (see error above)."
+            )
     server = uvicorn.Server(_web_server_config(web_app))
 
     # Start WebSocket manager

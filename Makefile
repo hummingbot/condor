@@ -2,7 +2,7 @@
 SHELL := /bin/bash
 export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 
-.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model
+.PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor
 
 # tmux session Condor runs in
 SESSION := condor
@@ -29,6 +29,7 @@ help:
 	@echo "  make stop        - Stop Condor"
 	@echo "  make restart     - Stop and start again"
 	@echo "  make status      - Is Condor running?"
+	@echo "  make doctor      - Verify dependencies, config, and Hummingbot API access"
 	@echo "  make test        - Run tests"
 	@echo "  make lint        - Run black + isort"
 
@@ -46,11 +47,15 @@ install: setup
 		cd frontend && npm install \
 	'
 	@$(MAKE) setup-chrome
+	@-$(MAKE) doctor
 
 setup-chrome:
 	@echo "Setting up Chrome for chart rendering..."
 	@uv run python -c "import kaleido; kaleido.get_chrome_sync()" 2>/dev/null || \
 		echo "Chrome setup skipped (not required for basic usage)"
+
+doctor:
+	@uv run python -m condor.doctor
 
 build-frontend:
 	@bash -c ' \

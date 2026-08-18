@@ -1,0 +1,288 @@
+"""Verify Condor's install and runtime state.
+
+``uv run python -m condor.doctor`` re-checks everything the install wizard
+only confirms once at setup time: required dependencies, `.env`/`config.yml`
+sanity, the AI model's actual readiness, whether the web dashboard is
+sitting on a public interface it shouldn't be, and whether every configured
+Hummingbot API server is actually reachable and authenticating.
+
+Read-only — nothing here mutates `.env`, `config.yml`, or any running
+process. Unlike :mod:`condor.setup_llm` (which always exits 0 because a
+model can be picked later), this exits non-zero when a check actually
+``fail``s, so `make install`/CI can act on the result.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import shutil
+import subprocess
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+from condor.setup_llm import ENV_PATH, base_of, current_default, read_env
+
+OK, WARN, FAIL = "ok", "warn", "fail"
+_BADGES = {OK: "✓", WARN: "!", FAIL: "✗"}
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass
+class Check:
+    name: str
+    state: str
+    detail: str
+
+    def render(self, width: int) -> str:
+        return f"  {_BADGES[self.state]} {self.name:<{width}} {self.detail}"
+
+
+def _section(title: str, checks: list[Check]) -> str:
+    width = max([28] + [len(c.name) for c in checks])
+    lines = [title]
+    lines.extend(c.render(width) for c in checks)
+    return "\n".join(lines)
+
+
+# ── Dependencies ─────────────────────────────────────────────────────────────
+
+# (label, command, severity if missing — uv is load-bearing, the rest only
+# matter for `make run`/frontend builds)
+_DEPS = [
+    ("uv", ["uv", "--version"], FAIL),
+    ("tmux", ["tmux", "-V"], WARN),
+    ("node", ["node", "--version"], WARN),
+    ("npm", ["npm", "--version"], WARN),
+    ("typescript (tsc)", ["tsc", "--version"], WARN),
+]
+
+
+def check_dependencies() -> list[Check]:
+    checks = []
+    for label, cmd, missing_severity in _DEPS:
+        if not shutil.which(cmd[0]):
+            checks.append(Check(label, missing_severity, "not found"))
+            continue
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            version = (proc.stdout or proc.stderr).strip().splitlines()
+            detail = version[0] if version else "installed"
+        except Exception:
+            detail = "installed"
+        checks.append(Check(label, OK, detail))
+    return checks
+
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+
+def check_config() -> list[Check]:
+    checks = []
+    env = read_env(ENV_PATH)
+
+    token = env.get("TELEGRAM_TOKEN", "").strip()
+    checks.append(
+        Check(
+            "TELEGRAM_TOKEN",
+            OK if token else FAIL,
+            "configured" if token else "missing — set in .env",
+        )
+    )
+
+    admin_id = env.get("ADMIN_USER_ID", "").strip()
+    checks.append(
+        Check(
+            "ADMIN_USER_ID",
+            OK if admin_id else FAIL,
+            admin_id or "missing — set in .env",
+        )
+    )
+
+    config_yml = REPO_ROOT / "config.yml"
+    if not config_yml.exists():
+        checks.append(Check("config.yml", FAIL, "not found — run `make setup`"))
+    else:
+        try:
+            import yaml
+
+            yaml.safe_load(config_yml.read_text(encoding="utf-8"))
+            checks.append(Check("config.yml", OK, "present and parses"))
+        except Exception as e:
+            checks.append(Check("config.yml", FAIL, f"failed to parse: {e}"))
+
+    # Same readiness check `condor/setup_llm.py --status` reports for the
+    # default agent — reused rather than reimplemented so the two can never
+    # disagree about whether the current default actually works.
+    from handlers.agents import readiness
+
+    agent_key = current_default(env)
+    try:
+        state = asyncio.run(readiness.probe(base_of(agent_key), env))
+        badge = {"ready": OK, "unverified": WARN, "missing": FAIL}.get(
+            state.state, WARN
+        )
+        checks.append(Check("AI model", badge, f"{agent_key} — {state.detail}"))
+    except Exception as e:
+        checks.append(Check("AI model", WARN, f"{agent_key} — could not check: {e}"))
+
+    return checks
+
+
+# ── Port exposure ────────────────────────────────────────────────────────────
+
+
+def _listening_binds(port: int) -> list[str]:
+    """Raw local bind addresses (e.g. ``0.0.0.0:8088``, ``127.0.0.1:8088``)
+    currently LISTEN-ing on ``port``. Empty if nothing is listening or
+    neither ``ss`` nor ``lsof`` is available."""
+    if shutil.which("ss"):
+        try:
+            proc = subprocess.run(
+                ["ss", "-H", "-ltn", f"( sport = :{port} )"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return [
+                cols[3]
+                for line in proc.stdout.splitlines()
+                if len(cols := line.split()) >= 4
+            ]
+        except Exception:
+            pass
+    if shutil.which("lsof"):
+        try:
+            proc = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            binds = []
+            for line in proc.stdout.splitlines()[1:]:  # skip header row
+                cols = line.split()
+                if cols:
+                    binds.append(cols[-1].split("(")[0])
+            return binds
+        except Exception:
+            pass
+    return []
+
+
+def _is_public_bind(addr: str) -> bool:
+    host = addr.rsplit(":", 1)[0] if re.search(r":\d+$", addr) else addr
+    return host in ("0.0.0.0", "*", "::", "[::]", "")
+
+
+def check_dashboard_port() -> list[Check]:
+    from utils.config import USE_TAILSCALE, WEB_PORT
+
+    binds = _listening_binds(WEB_PORT)
+    if not binds:
+        return [
+            Check(
+                "Dashboard port",
+                WARN,
+                f"nothing listening on {WEB_PORT} — is Condor running?",
+            )
+        ]
+
+    public = [b for b in binds if _is_public_bind(b)]
+    if USE_TAILSCALE:
+        if public:
+            return [
+                Check(
+                    "Dashboard port",
+                    FAIL,
+                    f"USE_TAILSCALE=true but {WEB_PORT} is bound to "
+                    f"{public[0]} (all interfaces) — should be 127.0.0.1-only",
+                )
+            ]
+        return [Check("Dashboard port", OK, f"127.0.0.1:{WEB_PORT} only (Tailscale)")]
+
+    if public:
+        return [
+            Check(
+                "Dashboard port",
+                WARN,
+                f"{WEB_PORT} is reachable on all interfaces — fine on a "
+                "trusted LAN, risky on a public VPS. Enable Tailscale "
+                "(`make setup`) or firewall it.",
+            )
+        ]
+    return [Check("Dashboard port", OK, f"127.0.0.1:{WEB_PORT} only")]
+
+
+# ── Hummingbot API connectivity ──────────────────────────────────────────────
+
+
+def _connection_hint(host: str, exc: Exception) -> str:
+    msg = str(exc).lower()
+    if "401" in msg or "unauthor" in msg or "auth" in msg:
+        return "check the username/password in /servers"
+    if host in ("localhost", "127.0.0.1"):
+        return "is it running? `cd ../hummingbot-api && docker compose ps`"
+    return "check the host is reachable — firewall, Tailscale status, or the server is down"
+
+
+def check_hummingbot_api() -> list[Check]:
+    from config_manager import get_config_manager
+
+    cm = get_config_manager()
+    servers = cm.list_servers()
+    if not servers:
+        return [
+            Check(
+                "Hummingbot API",
+                WARN,
+                "no servers configured — add one via /servers or `make setup`",
+            )
+        ]
+
+    checks = []
+    for name, server in servers.items():
+        host, port = server.get("host"), server.get("port")
+        label = f"API '{name}' ({host}:{port})"
+        try:
+            asyncio.run(cm.get_client(name))
+            checks.append(Check(label, OK, "reachable, authenticated"))
+        except Exception as e:
+            checks.append(Check(label, FAIL, f"{e} — {_connection_hint(host, e)}"))
+    return checks
+
+
+# ── Entry point ──────────────────────────────────────────────────────────────
+
+
+def main(argv: list[str] | None = None) -> int:
+    sections = [
+        ("Dependencies", check_dependencies()),
+        ("Configuration", check_config()),
+        ("Dashboard", check_dashboard_port()),
+        ("Hummingbot API", check_hummingbot_api()),
+    ]
+
+    print("\n  Condor Doctor\n")
+    all_checks: list[Check] = []
+    for title, checks in sections:
+        print(_section(f"{title}:", checks))
+        print("")
+        all_checks.extend(checks)
+
+    failed = [c for c in all_checks if c.state == FAIL]
+    warned = [c for c in all_checks if c.state == WARN]
+    if failed:
+        print(f"  {len(failed)} check(s) failed, {len(warned)} warning(s).")
+        return 1
+    if warned:
+        print(f"  All checks passed, {len(warned)} warning(s) to review.")
+        return 0
+    print("  All checks passed.")
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entry point
+    sys.exit(main())
