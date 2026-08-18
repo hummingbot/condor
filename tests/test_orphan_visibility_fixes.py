@@ -1,10 +1,7 @@
-"""Adversarial-review fixes: orphan visibility and recovery-path honesty.
+"""Adversarial-review fixes: orphan-recovery honesty and signal grading.
 
-Three ways an agent was blinded to (or misled about) stranded on-chain exposure:
+Two ways an agent was misled about what it was looking at:
 
-- A SYSTEM_CLEANUP lp_executor row (RUNNING when the API restarted, rewritten
-  with no final state) matched none of the tick-prompt orphan branches, so the
-  agent redeployed on funds that were still staked.
 - format_clmm_result's position_info branch read camelCase keys against the
   API's snake_case CLMMPositionInfo fields, so every field — including the
   position address — rendered as None and "the position is gone" was a
@@ -57,25 +54,6 @@ def _row(**overrides):
     return row
 
 
-def test_system_cleanup_lp_row_surfaces_as_possible_orphan():
-    """An API-restart row has no address — it must still warn, without one."""
-    result = _run_provider([_row(close_type="SYSTEM_CLEANUP")])
-    assert "POSSIBLE ORPHANED POSITION" in result.summary
-    assert "resolve_orphan" in result.summary
-    # No address is known, so no concrete close call may be suggested.
-    assert 'manage_clmm(action="close"' not in result.summary
-    assert result.data["orphaned_executors"]
-
-
-def test_system_cleanup_non_lp_row_stays_silent():
-    """Only lp_executors own on-chain positions — mirror the server's filter."""
-    result = _run_provider(
-        [_row(close_type="SYSTEM_CLEANUP", type="position_executor")]
-    )
-    assert "ORPHANED" not in result.summary
-    assert result.data["orphaned_executors"] == []
-
-
 def test_address_bearing_orphan_still_emits_the_close_call():
     result = _run_provider(
         [
@@ -90,13 +68,6 @@ def test_address_bearing_orphan_still_emits_the_close_call():
     )
     assert "🚨 ORPHANED POSITION" in result.summary
     assert 'manage_clmm(action="close"' in result.summary
-
-
-def test_resolved_system_cleanup_row_stays_silent():
-    result = _run_provider(
-        [_row(close_type="SYSTEM_CLEANUP", custom_info={"orphan_resolved": True})]
-    )
-    assert "ORPHANED" not in result.summary
 
 
 def test_position_info_formats_the_apis_snake_case_fields():

@@ -58,11 +58,6 @@ class ExecutorsProvider(BaseProvider):
         # (POSITION_HOLD with hold_reason set — an LP close that exhausted its
         # retries) or a legacy FAILED-with-position. It would otherwise vanish
         # from this RUNNING-only summary — surface it until it is recovered.
-        # SYSTEM_CLEANUP is the fourth class: an lp_executor that was RUNNING when
-        # the API restarted, rewritten with no final state. Its position address is
-        # unknown, not absent — the API's /positions/orphaned endpoint lists these
-        # as needs_onchain_reconciliation, and skipping them here is exactly how an
-        # agent ends up stacking a fresh position on funds that are still staked.
         orphaned = [
             e
             for e in perf.executors
@@ -77,10 +72,6 @@ class ExecutorsProvider(BaseProvider):
                 or (
                     str(e.get("close_type") or "").upper() == "FAILED"
                     and (e.get("custom_info") or {}).get("position_address")
-                )
-                or (
-                    str(e.get("close_type") or "").upper() == "SYSTEM_CLEANUP"
-                    and str(e.get("type") or "").lower() == "lp_executor"
                 )
             )
         ]
@@ -98,22 +89,6 @@ class ExecutorsProvider(BaseProvider):
             )
         for o in orphaned:
             pos = (o.get("custom_info") or {}).get("position_address")
-            if pos is None:
-                # A record with no persisted position address (SYSTEM_CLEANUP after
-                # an API restart) may or may not still be staked — say so, and do
-                # NOT suggest a close call that would have to invent an address.
-                lines.append(
-                    f"  🚨 POSSIBLE ORPHANED POSITION: executor {o['id']} ({o['pair']}) "
-                    "was terminated by an API restart and its on-chain position address "
-                    "was not persisted. Reconcile before deploying: list this wallet's "
-                    'positions with manage_clmm(action="position_info", ...) — '
-                    'manage_executors(action="orphaned") reports the dex, pool and '
-                    "network. If a position is still open, close it with manage_clmm; "
-                    "either way, then mark it handled with "
-                    f"manage_executors(action=\"resolve_orphan\", executor_id=\"{o['id']}\"). "
-                    "Do not open new positions on these funds first."
-                )
-                continue
             reason = (o.get("custom_info") or {}).get("hold_reason") or "close failed"
             lines.append(
                 f"  🚨 ORPHANED POSITION: executor {o['id']} ({o['pair']}) terminated "
