@@ -178,6 +178,28 @@ def _gex(opts: list[dict], spot: float) -> float:
     return total
 
 
+def _confidence(
+    composite: float, rr_score: float, oi_score: float, ts_score: float
+) -> str:
+    """How many of the 3 sub-signals agree with the EMITTED direction.
+
+    The reference must be sign(composite), not the dominant vote: with weighted
+    scores and the GEX amplifier, the composite can point LONG while two of
+    three raw votes point SHORT — grading agreement against the dominant vote
+    would then stamp MEDIUM on a signal the majority disagrees with.
+    """
+    votes = [
+        1 if rr_score >= 0.2 else (-1 if rr_score <= -0.2 else 0),
+        1 if oi_score >= 0.2 else (-1 if oi_score <= -0.2 else 0),
+        1 if ts_score >= 0.1 else (-1 if ts_score <= -0.1 else 0),
+    ]
+    emitted = 1 if composite > 0 else (-1 if composite < 0 else 0)
+    if not emitted:
+        return "LOW"
+    agree = sum(1 for v in votes if v == emitted)
+    return "HIGH" if agree == 3 else ("MEDIUM" if agree == 2 else "LOW")
+
+
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 
@@ -323,19 +345,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     else:
         direction, emoji = "HOLD", "🟡"
 
-    # Confidence: how many of the 3 sub-signals agree on direction
-    votes = [
-        1 if rr_score >= 0.2 else (-1 if rr_score <= -0.2 else 0),
-        1 if oi_score >= 0.2 else (-1 if oi_score <= -0.2 else 0),
-        1 if ts_score >= 0.1 else (-1 if ts_score <= -0.1 else 0),
-    ]
-    nonzero_votes = [v for v in votes if v != 0]
-    if nonzero_votes:
-        dominant = max(set(nonzero_votes), key=nonzero_votes.count)
-        agree = sum(1 for v in nonzero_votes if v == dominant)
-        confidence = "HIGH" if agree == 3 else ("MEDIUM" if agree == 2 else "LOW")
-    else:
-        confidence = "LOW"
+    confidence = _confidence(composite, rr_score, oi_score, ts_score)
 
     # ── Report ────────────────────────────────────────────────────────────────
     builder = ReportBuilder(f"Options Oracle — {config.currency}/USDC")

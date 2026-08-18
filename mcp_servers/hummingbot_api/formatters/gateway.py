@@ -237,12 +237,14 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
         ]
         for p in payload:
             lines.append(
-                f"  • {p.get('address')} — Base: {p.get('baseTokenAmount')}  "
-                f"Quote: {p.get('quoteTokenAmount')}  "
-                f"Range: {p.get('lowerPrice')}–{p.get('upperPrice')}  Price: {p.get('price')}"
+                f"  • {p.get('position_address')} — Base: {p.get('base_token_amount')}  "
+                f"Quote: {p.get('quote_token_amount')}  "
+                f"Range: {p.get('lower_price')}–{p.get('upper_price')}  "
+                f"Price: {p.get('current_price')}"
             )
             lines.append(
-                f"    Uncollected fees — base: {p.get('baseFeeAmount')}  quote: {p.get('quoteFeeAmount')}"
+                f"    Uncollected fees — base: {p.get('base_fee_amount')}  "
+                f"quote: {p.get('quote_fee_amount')}"
             )
         return "\n".join(lines)
 

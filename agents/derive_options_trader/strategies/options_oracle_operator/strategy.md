@@ -12,7 +12,7 @@ default_config:
   min_order_amount_quote: 10
   max_ticks: 0
   risk_limits:
-    max_total_exposure_quote: 50
+    max_position_size_quote: 50
     max_drawdown_pct: 8
     max_open_executors: 1
     max_leverage: 2
@@ -86,29 +86,33 @@ Position sizing:
 Convert to base units: `sol_amount = size_quote / sol_spot`, round down to nearest
 0.001 SOL, minimum 0.1 SOL. If `sol_amount < 0.1`, skip — journal "size too small".
 
-**PositionExecutor call shape (REQUIRED):**
+**PositionExecutor call shape (REQUIRED — every key INSIDE `executor_config`;
+the risk gate reads ONLY that dict, so a top-level `amount` records $0 exposure
+and bypasses the cap):**
 ```json
-{
+manage_executors(action="create", executor_config={
   "connector_name": "derive_perpetual",
   "trading_pair": "SOL-USDC",
   "side": 1,
   "amount": <sol_amount>,
+  "total_amount_quote": <size_quote>,
   "leverage": 2,
-  "executor_config": {
-    "controller_id": "<Agent ID from system prompt>",
-    "triple_barrier_config": {
-      "take_profit": 0.030,
-      "stop_loss": 0.025,
-      "trailing_stop": { "activation_price": 0.015, "trailing_delta": 0.020 },
-      "time_limit": 86400
-    }
+  "controller_id": "<Agent ID from system prompt>",
+  "triple_barrier_config": {
+    "take_profit": 0.030,
+    "stop_loss": 0.025,
+    "trailing_stop": { "activation_price": 0.015, "trailing_delta": 0.020 },
+    "time_limit": 86400
   }
-}
+})
 ```
 
 - `side: 1` = LONG, `side: 2` = SHORT.
+- `total_amount_quote` is the quote notional (`size_quote`). The gate does NOT
+  resolve live prices — it reads `total_amount_quote` (falling back to `amount`)
+  verbatim and compares it against the $50 cap. Give it the honest quote figure.
 - Raise leverage to 3 only if confidence=HIGH **and** |composite_score| ≥ 0.70.
-- The Risk Engine enforces `max_total_exposure_quote` (50) and `max_open_executors` (1)
+- The Risk Engine enforces `max_position_size_quote` (50) and `max_open_executors` (1)
   — do not try to open a second position if one is already open.
 
 ### Step 5 — Manage open positions

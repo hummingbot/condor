@@ -10,13 +10,12 @@ default_config:
   total_amount_quote: 50
   # Conservative default sizing (assumes a 50 USDC balance). Demo wallets may be
   # funded with more — size from the live portfolio balance
-  # (get_portfolio_overview) rather than assuming 50. No fixed per-position
-  # quote cap; the Risk Engine's default max_position_size_quote (500) is the
-  # enforced backstop.
+  # (get_portfolio_overview) rather than assuming 50. Per-position quote exposure
+  # is enforced by the Risk Engine's gate (max_position_size_quote).
   min_order_amount_quote: 10        # smallest order placed per attempt
   max_ticks: 0
   risk_limits:
-    max_total_exposure_quote: 50     # enforced by the Risk Engine; never exceed the funded wallet
+    max_position_size_quote: 50     # enforced by the Risk Engine; never exceed the funded wallet
     max_drawdown_pct: 8
     max_open_executors: 1           # one position at a time on a tiny wallet
     max_leverage: 2                  # conservative; notional scales with wallet
@@ -29,9 +28,9 @@ default_trading_context: |
   Derive the SOL-USDC minimum is 0.1 SOL, ~$16 at current prices); an order
   below the minimum fails immediately (executor `close_type: FAILED`, "Open order
   failed"), so always size above the minimum and within the risk limits. Size the
-  position from the live portfolio balance (`get_portfolio_overview`) — there is
-  no fixed per-position quote cap (the Risk Engine's default
-  `max_position_size_quote` of 500 is the enforced backstop). One-time setup: in the
+  position from the live portfolio balance (`get_portfolio_overview`); the Risk
+  Engine enforces `max_position_size_quote` (50) against quote exposure, so pass
+  `total_amount_quote` with the create (see call shape). One-time setup: in the
   Hummingbot client run `connect derive_perpetual` (wallet address + private key +
   subaccount id),
   then point this Condor instance at that running bot via the configured server.
@@ -103,7 +102,7 @@ In demo mode, take the largest |flow_score| asset if no asset clears ±0.05. SOL
      threshold, or a position is already open.
 4. **Confirm against options & size.** One position at a time
    (`max_open_executors: 1`), **2x leverage**, sized from the live portfolio
-   balance within `max_total_exposure_quote` (50). Options modulate size:
+   balance within `max_position_size_quote` (50). Options modulate size:
    - Options **agree** with the flow direction (same sign, any magnitude) → full
      computed size.
    - Options **strongly disagree** (|composite_score| >= 0.40 against the flow) →
@@ -114,16 +113,18 @@ In demo mode, take the largest |flow_score| asset if no asset clears ±0.05. SOL
    **Call shape (REQUIRED — matches the risk gate):**
    - Put `"controller_id": "<Agent ID from the system prompt>"` **INSIDE**
      `executor_config` (the gate accepts top-level too, but inside is canonical).
-   - Pass `amount` in **BASE units**: **0.1 SOL** (= Derive's min order, ~$16
-     notional at current price). The risk gate resolves the LIVE market price
-     itself and multiplies amount × live price to check quote exposure against
-     the $50 cap — do not pass a made-up `entry_price` to game the check; it is
-     ignored for risk purposes.
+   - Pass **`total_amount_quote`** (the quote notional, e.g. ~$16 for 0.1 SOL at
+     current price) **AND** `amount` in **BASE units**: **0.1 SOL** (= Derive's
+     min order). The gate does NOT resolve live prices — it reads
+     `total_amount_quote` (falling back to `amount`) verbatim from inside
+     `executor_config` and compares it against the $50 cap, so omitting
+     `total_amount_quote` makes the gate compare base units against quote
+     dollars and corrupts exposure accounting. Give it the honest quote figure.
    - Set `leverage: 2`, `side: 1` (LONG) / `2` (SHORT), `connector_name:
      "derive_perpetual"`, `trading_pair: "SOL-USDC"`, plus a
      `triple_barrier_config` (TP/trail/stop per step 5).
-   The Risk Engine auto-blocks anything over limit (exposure 50,
-   `max_position_size_quote` backstop: 500).
+   The Risk Engine auto-blocks anything over limit
+   (`max_position_size_quote`: 50).
 5. **Manage.** 50% take-profit at +2%, trail 2% after +1.5% in profit, hard stop
    −2.5%. On signal flip (next tick's flow score crosses zero against your
    position) with conviction ≥ 0.4, exit and optionally reverse — flip faster if
