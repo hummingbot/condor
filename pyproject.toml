@@ -33,6 +33,12 @@ dependencies = [
 # ``black --check`` with no black on PATH and failed to spawn it.
 dev = ["pytest", "pytest-asyncio", "black", "isort", "pre-commit"]
 
+[tool.uv.sources]
+# 1.5.8 is not on PyPI yet (hummingbot/hummingbot-api-client#25). Until that
+# releases, resolve the ==1.5.8 pin from the PR branch so ``uv sync`` works in
+# CI and locally. Drop this whole block and re-run ``uv lock`` once 1.5.8 ships.
+hummingbot-api-client = { git = "https://github.com/hummingbot/hummingbot-api-client.git", branch = "feat/clmm-bin-count" }
+
 [tool.isort]
 profile = "black"
 
