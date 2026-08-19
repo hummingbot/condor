@@ -30,11 +30,17 @@ _BADGES = {OK: "✓", WARN: "!", FAIL: "✗"}
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Matches setup-environment.sh's own banner width, so the wizard's closing
+# "Setup complete!" frame and this report's frame read as one design
+# language when `make install` runs them back to back.
+_FRAME_WIDTH = 46
+
 # Colored to match setup-environment.sh's msg_ok/msg_warn/msg_error palette.
 # Off for a non-tty (piped/redirected output, CI logs) or NO_COLOR -- see
 # https://no-color.org -- so scripts parsing this report never see escapes.
 _USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 _BOLD = "\033[1m" if _USE_COLOR else ""
+_DIM = "\033[2m" if _USE_COLOR else ""
 _RESET = "\033[0m" if _USE_COLOR else ""
 _COLORS = (
     {OK: "\033[0;32m", WARN: "\033[1;33m", FAIL: "\033[0;31m"}
@@ -52,13 +58,20 @@ class Check:
     def render(self, width: int) -> str:
         color = _COLORS[self.state]
         return (
-            f"  {color}{_BADGES[self.state]}{_RESET} {self.name:<{width}} {self.detail}"
+            f"    {color}{_BADGES[self.state]}{_RESET} {self.name:<{width}}  "
+            f"{_DIM}{self.detail}{_RESET}"
         )
+
+
+def _frame(char: str = "═", color: str = _BOLD) -> str:
+    return f"{color}{char * _FRAME_WIDTH}{_RESET}"
 
 
 def _section(title: str, checks: list[Check]) -> str:
     width = max([28] + [len(c.name) for c in checks])
-    lines = [f"{_BOLD}{title}{_RESET}"]
+    header = f"  {_BOLD}{title}{_RESET}"
+    rule = f"  {_DIM}{'─' * (_FRAME_WIDTH - 2)}{_RESET}"
+    lines = [header, rule]
     lines.extend(c.render(width) for c in checks)
     return "\n".join(lines)
 
@@ -287,6 +300,22 @@ def check_hummingbot_api() -> list[Check]:
 # ── Entry point ──────────────────────────────────────────────────────────────
 
 
+def _tally(all_checks: list[Check]) -> tuple[str, int]:
+    """The closing pass/warn/fail counts, and the process exit code they imply."""
+    failed = sum(1 for c in all_checks if c.state == FAIL)
+    warned = sum(1 for c in all_checks if c.state == WARN)
+    passed = len(all_checks) - failed - warned
+
+    line = "   ".join(
+        [
+            f"{_COLORS[OK]}{_BADGES[OK]} {passed} passed{_RESET}",
+            f"{_COLORS[WARN]}{_BADGES[WARN]} {warned} warning(s){_RESET}",
+            f"{_COLORS[FAIL]}{_BADGES[FAIL]} {failed} failed{_RESET}",
+        ]
+    )
+    return line, (1 if failed else 0)
+
+
 def main(argv: list[str] | None = None) -> int:
     sections = [
         ("Dependencies", check_dependencies()),
@@ -295,30 +324,31 @@ def main(argv: list[str] | None = None) -> int:
         ("Hummingbot API", check_hummingbot_api()),
     ]
 
-    print(f"\n  {_BOLD}Condor Doctor{_RESET}\n")
+    print()
+    print(_frame())
+    print(f"  {_BOLD}Condor Doctor{_RESET}")
+    print(_frame())
+    print()
+
     all_checks: list[Check] = []
     for title, checks in sections:
-        print(_section(f"{title}:", checks))
-        print("")
+        print(_section(title, checks))
+        print()
         all_checks.extend(checks)
 
-    failed = [c for c in all_checks if c.state == FAIL]
-    warned = [c for c in all_checks if c.state == WARN]
-    if failed:
-        color = _COLORS[FAIL]
-        print(
-            f"  {color}{len(failed)} check(s) failed{_RESET}, {len(warned)} warning(s)."
-        )
-        return 1
-    if warned:
-        color = _COLORS[WARN]
-        print(
-            f"  All checks passed, {color}{len(warned)} warning(s) to review{_RESET}."
-        )
-        return 0
-    color = _COLORS[OK]
-    print(f"  {color}All checks passed.{_RESET}")
-    return 0
+    summary, exit_code = _tally(all_checks)
+    if exit_code:
+        border_color = _COLORS[FAIL]
+    elif any(c.state == WARN for c in all_checks):
+        border_color = _COLORS[WARN]
+    else:
+        border_color = _COLORS[OK]
+
+    print(_frame(color=border_color))
+    print(f"  {summary}")
+    print(_frame(color=border_color))
+    print()
+    return exit_code
 
 
 if __name__ == "__main__":  # pragma: no cover - CLI entry point
