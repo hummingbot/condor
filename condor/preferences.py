@@ -14,8 +14,9 @@ Storage:
 - Primary: config.yml via ConfigManager (shared across TG + Web)
 - Fallback: context.user_data pickle (for session-level state)
 
-When a user_data dict contains '_user_id', changes are synced to ConfigManager
-so the web dashboard can also read them.
+When a user_data dict contains '_user_id', setters sync the whole affected
+preference section to ConfigManager (via _sync_section_to_cm) so the web
+dashboard can also read them.
 """
 
 import logging
@@ -35,20 +36,6 @@ logger = logging.getLogger(__name__)
 def _get_user_id(user_data: Dict) -> Optional[int]:
     """Extract user_id from user_data if present."""
     return user_data.get("_user_id")
-
-
-def _sync_to_cm(user_data: Dict, key: str, value) -> None:
-    """Persist a preference to ConfigManager (config.yml) if user_id is known."""
-    user_id = _get_user_id(user_data)
-    if user_id is None:
-        return
-    try:
-        from config_manager import get_config_manager
-
-        cm = get_config_manager()
-        cm.set_user_preference(user_id, key, value)
-    except Exception as e:
-        logger.debug("Failed to sync preference '%s' to config: %s", key, e)
 
 
 def _sync_section_to_cm(user_data: Dict, section: str) -> None:
@@ -187,16 +174,6 @@ class DEXPrefs(TypedDict, total=False):
 
 class GeneralPrefs(TypedDict, total=False):
     active_server: Optional[str]
-
-
-class WalletNetworkPrefs(TypedDict, total=False):
-    """Network preferences for a specific wallet.
-
-    Keys are wallet addresses, values are lists of enabled network IDs.
-    Example: {"0x1234...": ["ethereum-mainnet", "base", "arbitrum"]}
-    """
-
-    pass  # Dynamic keys based on wallet addresses
 
 
 class GatewayPrefs(TypedDict, total=False):
@@ -567,30 +544,12 @@ def get_general_prefs(user_data: Dict) -> GeneralPrefs:
 # ============================================
 
 
-def get_portfolio_days(user_data: Dict) -> int:
-    """Get portfolio graph days setting"""
-    return get_portfolio_prefs(user_data).get("days", DEFAULT_PORTFOLIO_DAYS)
-
-
-def get_portfolio_interval(user_data: Dict) -> str:
-    """Get portfolio graph interval setting"""
-    return get_portfolio_prefs(user_data).get("interval", DEFAULT_PORTFOLIO_INTERVAL)
-
-
 def set_portfolio_days(user_data: Dict, days: int) -> None:
     """Set portfolio graph days"""
     prefs = _ensure_preferences(user_data)
     prefs["portfolio"]["days"] = days
     _sync_section_to_cm(user_data, "portfolio")
     logger.info(f"Set portfolio days to {days}")
-
-
-def set_portfolio_interval(user_data: Dict, interval: str) -> None:
-    """Set portfolio graph interval"""
-    prefs = _ensure_preferences(user_data)
-    prefs["portfolio"]["interval"] = interval
-    _sync_section_to_cm(user_data, "portfolio")
-    logger.info(f"Set portfolio interval to {interval}")
 
 
 # ============================================
@@ -601,19 +560,6 @@ def set_portfolio_interval(user_data: Dict, interval: str) -> None:
 def get_clob_account(user_data: Dict) -> str:
     """Get CLOB trading account"""
     return get_clob_prefs(user_data).get("account", DEFAULT_CLOB_ACCOUNT)
-
-
-def set_clob_account(user_data: Dict, account: str) -> None:
-    """Set CLOB trading account"""
-    prefs = _ensure_preferences(user_data)
-    prefs["clob"]["account"] = account
-    _sync_section_to_cm(user_data, "clob")
-    logger.info(f"Set CLOB account to {account}")
-
-
-def get_clob_last_order(user_data: Dict) -> CLOBOrderParams:
-    """Get last CLOB order parameters"""
-    return deepcopy(get_clob_prefs(user_data).get("last_order", {}))
 
 
 def set_clob_last_order(user_data: Dict, params: CLOBOrderParams) -> None:
@@ -681,19 +627,6 @@ def get_dex_connector(user_data: Dict, network: Optional[str] = None) -> str:
 
     # Fall back to user preference or default
     return get_dex_prefs(user_data).get("default_connector", DEFAULT_DEX_CONNECTOR)
-
-
-def get_dex_slippage(user_data: Dict) -> str:
-    """Get default DEX slippage percentage"""
-    return get_dex_prefs(user_data).get("default_slippage", DEFAULT_DEX_SLIPPAGE)
-
-
-def set_dex_slippage(user_data: Dict, slippage: str) -> None:
-    """Set default DEX slippage percentage"""
-    prefs = _ensure_preferences(user_data)
-    prefs["dex"]["default_slippage"] = slippage
-    _sync_section_to_cm(user_data, "dex")
-    logger.info(f"Set DEX slippage to {slippage}%")
 
 
 def get_dex_last_swap(user_data: Dict) -> DEXSwapParams:
@@ -975,12 +908,6 @@ def get_executor_deployed_pairs(user_data: Dict) -> List[str]:
     return get_executor_prefs(user_data).get("deployed_pairs", [])
 
 
-def set_executor_deployed_pairs(user_data: Dict, pairs: List[str]) -> None:
-    """Set recently deployed trading pairs"""
-    prefs = _ensure_preferences(user_data)
-    prefs["executors"]["deployed_pairs"] = pairs[:8]
-
-
 def add_executor_deployed_pair(user_data: Dict, pair: str) -> None:
     """Add a trading pair to the front of the deployed pairs list"""
     prefs = _ensure_preferences(user_data)
@@ -1047,16 +974,6 @@ def get_agent_prefs(user_data: Dict) -> "AgentPrefs":
     )
 
 
-def set_default_agent(user_data: Dict, agent_key: str) -> None:
-    """Set default agent"""
-    prefs = _ensure_preferences(user_data)
-    if "agent" not in prefs:
-        prefs["agent"] = {}
-    prefs["agent"]["default_agent"] = agent_key
-    _sync_section_to_cm(user_data, "agent")
-    logger.info(f"Set default agent to {agent_key}")
-
-
 def get_chat_binding(user_data: Dict) -> "ChatBindingPrefs":
     """What this chat is bound to — see :class:`ChatBindingPrefs`.
 
@@ -1079,15 +996,6 @@ def set_chat_binding(user_data: Dict, binding: "ChatBindingPrefs") -> None:
     if merged == agent.get("chat_binding"):
         return
     agent["chat_binding"] = merged
-    _sync_section_to_cm(user_data, "agent")
-
-
-def clear_chat_binding(user_data: Dict) -> None:
-    """Forget the binding, so later respawns come back unbound (Condor)."""
-    prefs = _ensure_preferences(user_data)
-    agent = prefs.get("agent") or {}
-    if agent.pop("chat_binding", None) is None:
-        return
     _sync_section_to_cm(user_data, "agent")
 
 
@@ -1400,18 +1308,6 @@ def get_voice_prefs(user_data: Dict) -> "VoicePrefs":
     )
 
 
-def set_voice_prefs(user_data: Dict, **kwargs) -> None:
-    """Update voice preferences. Pass only the keys you want to change."""
-    prefs = _ensure_preferences(user_data)
-    if "voice" not in prefs:
-        prefs["voice"] = {"whisper_model": "small", "language": None, "auto_send": True}
-    for key in ("whisper_model", "language", "auto_send"):
-        if key in kwargs:
-            prefs["voice"][key] = kwargs[key]
-    _sync_section_to_cm(user_data, "voice")
-    logger.info("Updated voice preferences: %s", kwargs)
-
-
 # ============================================
 # PUBLIC API - NOTES (key-value memory for the AI agent)
 # ============================================
@@ -1438,17 +1334,6 @@ def set_note(user_data: Dict, key: str, value: str) -> None:
     logger.info(f"Set note '{key}'")
 
 
-def delete_note(user_data: Dict, key: str) -> bool:
-    """Delete a note by key. Returns True if it existed."""
-    prefs = _ensure_preferences(user_data)
-    notes = prefs.get("notes", {})
-    if key in notes:
-        del notes[key]
-        logger.info(f"Deleted note '{key}'")
-        return True
-    return False
-
-
 # ============================================
 # UTILITY FUNCTIONS
 # ============================================
@@ -1462,8 +1347,3 @@ def clear_preferences(user_data: Dict) -> None:
     user_data.pop(_MIGRATION_DONE_KEY, None)
     user_data.pop("_prefs_hydrated", None)
     logger.info("Cleared all user preferences")
-
-
-def export_preferences(user_data: Dict) -> Dict[str, Any]:
-    """Export all preferences as a dictionary (for debugging/backup)"""
-    return get_preferences(user_data)
