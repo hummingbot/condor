@@ -25,6 +25,7 @@ from condor.pool_data import (
     gecko_request,
     get_connector_for_dex,
 )
+from config_manager import get_client
 from utils.telegram_formatters import escape_markdown_v2
 
 from ._shared import cached_call
@@ -2303,9 +2304,7 @@ async def show_gecko_liquidity(
         bins, pool_info, error = await fetch_liquidity_bins(
             pool_address=address,
             connector=connector,
-            user_data=context.user_data,
-            chat_id=chat_id,
-            context=context,
+            client=await get_client(chat_id, context=context),
         )
 
         if error or not bins:
@@ -2454,9 +2453,7 @@ async def show_gecko_combined(
         bins, pool_info, _ = await fetch_liquidity_bins(
             pool_address=address,
             connector=connector,
-            user_data=context.user_data,
-            chat_id=chat_id,
-            context=context,
+            client=await get_client(chat_id, context=context),
         )
 
         if not ohlcv_data and not bins:

@@ -1,9 +1,9 @@
 """Liquidity bins for the depth column beside a pool's chart (FEAT-045).
 
-Two things are pinned here. First, that ``fetch_liquidity_bins`` can be handed a
-client — the web side holds a server *name*, not a chat id, and the
-``get_pool_info`` → ``get_pools`` fallback for pools outside Gateway's DLMM list
-must keep working through that door. Second, that the route degrades: an
+Two things are pinned here. First, that ``fetch_liquidity_bins`` works through an
+injected client — resolving one is the caller's job, and the ``get_pool_info`` →
+``get_pools`` fallback for pools outside Gateway's DLMM list must keep working
+through that door. Second, that the route degrades: an
 unsupported venue, an unreachable server and an upstream raise are all states the
 workspace renders, never a 502 the user cannot act on.
 """
@@ -117,14 +117,10 @@ def bins_url(connector="meteora", network="solana-mainnet-beta", pool=POOL):
     return f"/servers/srv/dex/pools/{pool}/bins?network={network}&connector={connector}"
 
 
-# ── fetch_liquidity_bins takes a client ──
+# ── fetch_liquidity_bins requires a client ──
 
 
-def test_an_injected_client_replaces_the_telegram_accessor(monkeypatch):
-    def boom(*a, **kw):
-        raise AssertionError("get_client must not be reached when a client is given")
-
-    monkeypatch.setattr(pool_data, "get_client", boom)
+def test_an_injected_client_reaches_gateway():
     clmm = FakeClmm(pool_info())
     bins, info, error = run(
         pool_data.fetch_liquidity_bins(POOL, "meteora", client=FakeClient(clmm))
@@ -135,34 +131,25 @@ def test_an_injected_client_replaces_the_telegram_accessor(monkeypatch):
     assert clmm.calls[0][0] == "info"
 
 
-def test_the_telegram_path_still_resolves_its_own_client(monkeypatch):
-    clmm = FakeClmm(pool_info())
-    seen = {}
+def test_a_missing_client_degrades_without_a_raise():
+    bins, info, error = run(pool_data.fetch_liquidity_bins(POOL, "meteora"))
+    assert (bins, info) == (None, None)
+    assert "client" in error.lower()
 
-    async def fake_get_client(chat_id, context=None):
-        seen["chat_id"] = chat_id
-        return FakeClient(clmm)
 
-    monkeypatch.setattr(pool_data, "get_client", fake_get_client)
-    user_data = {}
-    bins, _info, error = run(
-        pool_data.fetch_liquidity_bins(POOL, "meteora", user_data=user_data, chat_id=7)
+def test_two_viewers_share_one_gateway_call():
+    # Distinct clients — a chat's and a dashboard viewer's — because the cache is
+    # keyed by pool, never by who is asking: the second read costs no Gateway call.
+    first_clmm, second_clmm = FakeClmm(pool_info()), FakeClmm(pool_info())
+    first = run(
+        pool_data.fetch_liquidity_bins(POOL, "meteora", client=FakeClient(first_clmm))
     )
-    assert error is None and len(bins) == 3
-    assert seen["chat_id"] == 7
-    # Still cached in the caller's conversation, not in the process-wide dict.
-    assert pool_data._pool_bins_cache == {}
-    run(pool_data.fetch_liquidity_bins(POOL, "meteora", user_data=user_data, chat_id=7))
-    assert len(clmm.calls) == 1
-
-
-def test_two_clientless_viewers_share_one_gateway_call():
-    clmm = FakeClmm(pool_info())
-    client = FakeClient(clmm)
-    first = run(pool_data.fetch_liquidity_bins(POOL, "meteora", client=client))
-    second = run(pool_data.fetch_liquidity_bins(POOL, "meteora", client=client))
+    second = run(
+        pool_data.fetch_liquidity_bins(POOL, "meteora", client=FakeClient(second_clmm))
+    )
     assert first[0] == second[0]
-    assert len(clmm.calls) == 1
+    assert len(first_clmm.calls) == 1
+    assert second_clmm.calls == []
 
 
 def test_the_get_pools_fallback_survives_the_client_parameter():
