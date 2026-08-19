@@ -167,40 +167,35 @@ def _merge_bot_perf(
     the bot snapshot reports how many positions closed but not how each one ended,
     so a bot-mode agent has no per-trade outcome to derive one from.
     """
+    from condor.agents.attribution import fold_sliced_window, sliced_or_live_fees
     from condor.fetchers.bot_performance import bot_executor_rows
 
     rows = bot_executor_rows(bot)
     open_rows = [r for r in rows if r["status"] == "RUNNING"]
 
     if window is None:
-        closes = int(bot.get("closed_trades", 0) or 0)
-        volume_added = float(bot.get("volume_traded", 0) or 0)
-        fees_added = float(bot.get("cum_fees_quote", 0) or 0)
-        perf.realized_pnl += float(bot.get("realized_pnl_quote", 0) or 0)
-        perf.volume += volume_added
-        perf.fees += fees_added
+        # Lifetime aggregate, folded through the same shared rule as a window so
+        # the fees_known heuristic exists exactly once (condor.agents.attribution).
+        fold_sliced_window(
+            perf,
+            (
+                float(bot.get("realized_pnl_quote", 0) or 0),
+                float(bot.get("volume_traded", 0) or 0),
+                float(bot.get("closed_trades", 0) or 0),
+                float(bot.get("cum_fees_quote", 0) or 0),
+            ),
+        )
     else:
         realized, volume, trades, fees = window
-        closes = int(round(trades))
-        perf.realized_pnl += realized
-        perf.volume += volume
-        # A backend that reports no cumulative fee column slices to zero; the
-        # live open-position figure is then the only one there is.
-        fees_added = fees if fees else float(bot.get("cum_fees_quote", 0) or 0)
-        volume_added = volume
-        perf.fees += fees_added
-
-    # Traded but charged nothing: the fee column is missing, not the fees.
-    if volume_added > 0 and fees_added == 0.0:
-        perf.fees_known = False
+        fold_sliced_window(
+            perf, (realized, volume, trades, sliced_or_live_fees(fees, bot))
+        )
 
     for ct, n in (bot.get("close_type_counts") or {}).items():
         perf.close_type_counts[str(ct)] = perf.close_type_counts.get(str(ct), 0) + int(
             n or 0
         )
 
-    perf.trade_count += closes
-    perf.closed_count += closes
     perf.unrealized_pnl += float(bot.get("unrealized_pnl_quote", 0) or 0)
     perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
     perf.controllers = perf.controllers + list(bot.get("controllers", []))
@@ -297,16 +292,9 @@ def _merge_stopped_bot_perf(
     the normal way a session ends. Everything an open position would contribute
     (unrealized PnL, executor rows) is correctly absent.
     """
-    realized, volume, trades, fees = window
-    closes = int(round(trades))
-    perf.realized_pnl += realized
-    perf.volume += volume
-    perf.fees += fees
-    if volume > 0 and fees == 0.0:
-        perf.fees_known = False
-    perf.trade_count += closes
-    perf.closed_count += closes
-    perf.total_pnl = perf.realized_pnl + perf.unrealized_pnl
+    from condor.agents.attribution import fold_sliced_window
+
+    fold_sliced_window(perf, window)
 
 
 def _build_perf_from_rows(

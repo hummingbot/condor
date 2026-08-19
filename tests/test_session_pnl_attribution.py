@@ -12,12 +12,12 @@ from pathlib import Path
 
 import yaml
 
-from condor.web.routes.agents import (
-    AgentPerformanceModel,
-    _apply_bot_mode_pnl,
-    _current_owner_bases,
-    _session_ownership,
+from condor.agents.attribution import (
+    apply_bot_mode_pnl,
+    current_owner_bases,
+    session_ownership,
 )
+from condor.web.routes.agents import AgentPerformanceModel
 
 # ── Fixtures: on-disk sessions, with and without a ledger ──
 
@@ -152,7 +152,7 @@ def test_handover_splits_pnl_at_the_takeover_instant(tmp_path):
     )
 
     s1, s2 = _session(1), _session(2)
-    asyncio.run(_apply_bot_mode_pnl([s1, s2], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1, s2], tmp_path, None, client))
 
     assert s1.realized_pnl == 40.0
     assert s2.realized_pnl == 60.0
@@ -184,7 +184,7 @@ def test_live_unrealized_goes_to_the_last_owner_not_the_newest_session(tmp_path)
     )
 
     s1, s2 = _session(1), _session(2)
-    asyncio.run(_apply_bot_mode_pnl([s1, s2], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1, s2], tmp_path, None, client))
 
     assert s1.unrealized_pnl == 7.0
     assert s1.open_count == 1
@@ -211,7 +211,7 @@ def test_session_owning_two_bots_sums_them_without_parent_folding(tmp_path):
     )
 
     s1 = _session(1)
-    asyncio.run(_apply_bot_mode_pnl([s1], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, client))
     assert s1.realized_pnl == 35.0
 
 
@@ -231,7 +231,7 @@ def test_parent_base_does_not_swallow_its_tagged_sibling(tmp_path):
     )
 
     s1 = _session(1)
-    asyncio.run(_apply_bot_mode_pnl([s1], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, client))
     # 35, not 60: the child instance is attributed to `-btc` alone.
     assert s1.realized_pnl == 35.0
 
@@ -252,7 +252,7 @@ def test_multi_controller_bot_rolls_up_to_one_session_figure(tmp_path):
     )
 
     s1 = _session(1)
-    asyncio.run(_apply_bot_mode_pnl([s1], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, client))
     assert s1.realized_pnl == 15.0  # 3 controllers × 5
 
 
@@ -270,7 +270,7 @@ def test_instance_history_is_fetched_once_per_instance(tmp_path):
         history={parent: [_hist_row(T3, 1.0)], child: [_hist_row(T3, 1.0)]},
     )
 
-    asyncio.run(_apply_bot_mode_pnl([_session(1), _session(2)], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([_session(1), _session(2)], tmp_path, None, client))
     # Two instances, four (base, owner) windows → still exactly two fetches.
     assert sorted(client.history_calls) == sorted([parent, child])
 
@@ -405,8 +405,8 @@ def test_ledgerless_sessions_keep_session_start_tiling(tmp_path):
     _write_session(tmp_path, 1, {"bot_name": "dn-mm"})
     _write_session(tmp_path, 2, {"bot_name": "dn-mm"})
 
-    owned1 = _session_ownership(tmp_path, {"bot_name": "dn-mm"}, 1)
-    owned2 = _session_ownership(tmp_path, {"bot_name": "dn-mm"}, 2)
+    owned1 = session_ownership(tmp_path, {"bot_name": "dn-mm"}, 1)
+    owned2 = session_ownership(tmp_path, {"bot_name": "dn-mm"}, 2)
     assert [o.base for o in owned1] == ["dn-mm"]
     assert [o.origin for o in owned1] == ["legacy"]
     # Windows come from session start times, and session 2 started after 1.
@@ -418,7 +418,7 @@ def test_ledgerless_sessions_keep_session_start_tiling(tmp_path):
         history={inst: [_hist_row(T0, 0.0), _hist_row(T3, 50.0)]},
     )
     s1, s2 = _session(1), _session(2)
-    asyncio.run(_apply_bot_mode_pnl([s1, s2], tmp_path, {"bot_name": "dn-mm"}, client))
+    asyncio.run(apply_bot_mode_pnl([s1, s2], tmp_path, {"bot_name": "dn-mm"}, client))
     # Both sessions started after T3 (they were written now), so the whole history
     # predates session 1's window and neither is credited — exactly what the
     # session-start tiling did before the ledger existed. What matters is the
@@ -429,27 +429,27 @@ def test_ledgerless_sessions_keep_session_start_tiling(tmp_path):
 def test_ledger_wins_over_the_legacy_config_name(tmp_path):
     sd = _write_session(tmp_path, 1, {"bot_name": "dn-mm"})
     _write_ledger(sd, {"ns-other": 123.0})
-    owned = _session_ownership(tmp_path, {"bot_name": "dn-mm"}, 1)
+    owned = session_ownership(tmp_path, {"bot_name": "dn-mm"}, 1)
     assert [(o.base, o.since) for o in owned] == [("ns-other", 123.0)]
 
 
 def test_direct_executor_strategy_owns_nothing(tmp_path):
     _write_session(tmp_path, 1, {"bot_name": ""})
-    assert _session_ownership(tmp_path, {}, 1) == []
+    assert session_ownership(tmp_path, {}, 1) == []
 
 
 # ── Current-owner lookup (per-session executors view) ──
 
 
-def test_current_owner_bases_follows_the_ledger_not_the_session_number(tmp_path):
+def testcurrent_owner_bases_follows_the_ledger_not_the_session_number(tmp_path):
     sd1 = _write_session(tmp_path, 1)
     sd2 = _write_session(tmp_path, 2)
     _write_ledger(sd1, {"ns-a": 100.0, "ns-b": 100.0})
     _write_ledger(sd2, {"ns-a": 200.0})  # session 2 adopted only ns-a
 
     nums = [1, 2]
-    assert _current_owner_bases(tmp_path, None, nums, 1) == ["ns-b"]
-    assert _current_owner_bases(tmp_path, None, nums, 2) == ["ns-a"]
+    assert current_owner_bases(tmp_path, None, nums, 1) == ["ns-b"]
+    assert current_owner_bases(tmp_path, None, nums, 2) == ["ns-a"]
 
 
 # ── Whole-server snapshot is fetched once per rollup, not once per strategy ──
@@ -458,7 +458,7 @@ def test_current_owner_bases_follows_the_ledger_not_the_session_number(tmp_path)
 def test_rollup_fans_out_one_snapshot_call_for_all_strategies(tmp_path):
     """N strategies on one server share a single whole-server snapshot fetch.
 
-    ``list_agents`` gathers every strategy's ``_apply_bot_mode_pnl`` at once, and
+    ``list_agents`` gathers every strategy's ``apply_bot_mode_pnl`` at once, and
     ``get_latest_controller_performance()`` returns the same whole-server payload
     to each of them — so the fan-out must collapse to one round-trip.
     """
@@ -492,7 +492,7 @@ def test_rollup_fans_out_one_snapshot_call_for_all_strategies(tmp_path):
     async def _go():
         await asyncio.gather(
             *[
-                _apply_bot_mode_pnl(sessions, sdir, None, client)
+                apply_bot_mode_pnl(sessions, sdir, None, client)
                 for sdir, sessions in strategies
             ]
         )
@@ -538,7 +538,7 @@ def test_long_lived_bot_does_not_dump_old_pnl_on_one_session(tmp_path):
     )
 
     s1, s2, s3 = _session(1), _session(2), _session(3)
-    asyncio.run(_apply_bot_mode_pnl([s1, s2, s3], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1, s2, s3], tmp_path, None, client))
 
     # Each session keeps only what it earned; none is starved and none inherits.
     assert s1.realized_pnl == 40.0  # days 0–4
@@ -574,7 +574,7 @@ def test_fees_are_sliced_per_session_not_dumped_on_the_last_owner(tmp_path):
     )
 
     s1, s2 = _session(1), _session(2)
-    asyncio.run(_apply_bot_mode_pnl([s1, s2], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1, s2], tmp_path, None, client))
 
     assert s1.fees == 4.0
     assert s2.fees == 5.0
@@ -600,7 +600,7 @@ def test_fees_fall_back_to_live_figure_when_history_has_no_fee_column(tmp_path):
     )
 
     s1 = _session(1)
-    asyncio.run(_apply_bot_mode_pnl([s1], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, client))
 
     assert s1.fees == 3.5
 
@@ -628,7 +628,7 @@ def test_released_session_stops_accruing_a_surviving_bot(tmp_path):
     )
 
     s1 = _session(1)
-    asyncio.run(_apply_bot_mode_pnl([s1], tmp_path, None, client))
+    asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, client))
 
     assert s1.realized_pnl == 40.0  # only up to the release
     assert s1.unrealized_pnl == 0.0  # an ended session holds no open book
@@ -636,11 +636,11 @@ def test_released_session_stops_accruing_a_surviving_bot(tmp_path):
 
 
 def test_released_session_is_not_the_current_owner(tmp_path):
-    """_current_owner_bases and the slicing agree that a released bot is unowned."""
+    """current_owner_bases and the slicing agree that a released bot is unowned."""
     sd1 = _write_session(tmp_path, 1)
     _write_ledger(sd1, {"ns-bot": _epoch(T0)}, until={"ns-bot": _epoch(T2)})
 
-    assert _current_owner_bases(tmp_path, None, [1], 1) == []
+    assert current_owner_bases(tmp_path, None, [1], 1) == []
 
 
 def test_release_is_idempotent_and_reopens_on_further_use(tmp_path):
@@ -688,3 +688,65 @@ def test_release_preserves_namespace_for_a_ledger_opened_without_one(tmp_path):
     assert reopened.namespace == "ns"  # not blanked by the release write
     assert reopened.declared == ["legacy-bot"]
     assert read_owned(sd)[0].until == 200.0
+
+
+# ── One engine, two surfaces (ARCH-191) ──
+
+
+def test_rollup_and_agent_view_agree_on_an_adopted_bot():
+    """The dashboard rollup and the agent's own fetch share one attribution engine.
+
+    A session that adopts a long-running bot must be credited the same
+    realized / volume / trades / fees on both surfaces: the web strategy rollup
+    (``apply_bot_mode_pnl``) and the agent's own ``fetch_agent_performance``.
+    Both now fold through ``condor.agents.attribution``, so agreement is
+    structural — this test pins the contract over a synthetic history.
+    """
+    import tempfile
+    from types import SimpleNamespace
+
+    from condor.agents.performance import fetch_agent_performance
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp_path = Path(td)
+        sd1 = _write_session(tmp_path, 1)
+        # The bot ran since T0; this session only took it over at T2.
+        _write_ledger(sd1, {"ns-bot": _epoch(T2)})
+
+        inst = "ns-bot-20260701-000000"
+        closes = {"CloseType.TAKE_PROFIT": 3}
+        history = {
+            inst: [
+                _hist_row(T0, 0.0, cum_volume=0.0, cum_fees=0.0),
+                _hist_row(T2, 40.0, cum_volume=4000.0, cum_fees=4.0),
+                _hist_row(T3, 100.0, cum_volume=9000.0, cum_fees=9.0, closes=closes),
+            ]
+        }
+        snapshots = [_snap(inst, T3, realized=100.0, unrealized=7.0)]
+
+        # Web rollup surface.
+        rollup_client = _FakeClient(snapshots=snapshots, history=history)
+        s1 = _session(1)
+        asyncio.run(apply_bot_mode_pnl([s1], tmp_path, None, rollup_client))
+
+        # Agent's own surface, over the same ownership window.
+        async def _no_executors(**_kw):
+            return []
+
+        agent_client = _FakeClient(snapshots=snapshots, history=history)
+        agent_client.executors = SimpleNamespace(search_executors=_no_executors)
+        owned = session_ownership(tmp_path, None, 1)
+        since = min(b.since for b in owned)
+        detail = asyncio.run(
+            fetch_agent_performance(
+                agent_client, "a_1", bot_names=[b.base for b in owned], since=since
+            )
+        )
+
+        # Post-takeover only — the inherited 40/4000/4.0 belongs to nobody here.
+        assert s1.realized_pnl == detail.realized_pnl == 60.0
+        assert s1.volume == detail.volume == 5000.0
+        assert s1.fees == detail.fees == 5.0
+        assert s1.trade_count == detail.trade_count == 3
+        assert s1.unrealized_pnl == detail.unrealized_pnl == 7.0
+        assert s1.fees_known and detail.fees_known
