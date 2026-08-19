@@ -121,9 +121,9 @@ async def get_backtest_task(
     except Exception:
         pass
 
-    # Fallback to saved
+    # Fallback to saved (only if the result belongs to this server)
     saved = store.get_result(task_id)
-    if saved:
+    if saved and saved.get("server") == name:
         return normalize_backtest_task({**saved, "saved": True})
 
     raise HTTPException(status_code=404, detail="Task not found")
@@ -138,6 +138,10 @@ async def delete_backtest_task(
     cm = get_config_manager()
 
     store = get_backtest_store()
+    saved = store.get_result(task_id)
+    if saved is not None and saved.get("server") != name:
+        # Result belongs to another server; don't let this server delete it
+        raise HTTPException(status_code=404, detail="Task not found")
     store.delete_result(task_id)
 
     # Also try to delete from live
@@ -169,7 +173,8 @@ async def delete_saved_result(
 ):
 
     store = get_backtest_store()
-    deleted = store.delete_result(task_id)
-    if not deleted:
+    saved = store.get_result(task_id)
+    if saved is None or saved.get("server") != name:
         raise HTTPException(status_code=404, detail="Saved result not found")
+    store.delete_result(task_id)
     return {"deleted": True}
