@@ -51,7 +51,9 @@ class Check:
 
     def render(self, width: int) -> str:
         color = _COLORS[self.state]
-        return f"  {color}{_BADGES[self.state]}{_RESET} {self.name:<{width}} {self.detail}"
+        return (
+            f"  {color}{_BADGES[self.state]}{_RESET} {self.name:<{width}} {self.detail}"
+        )
 
 
 def _section(title: str, checks: list[Check]) -> str:
@@ -304,11 +306,15 @@ def main(argv: list[str] | None = None) -> int:
     warned = [c for c in all_checks if c.state == WARN]
     if failed:
         color = _COLORS[FAIL]
-        print(f"  {color}{len(failed)} check(s) failed{_RESET}, {len(warned)} warning(s).")
+        print(
+            f"  {color}{len(failed)} check(s) failed{_RESET}, {len(warned)} warning(s)."
+        )
         return 1
     if warned:
         color = _COLORS[WARN]
-        print(f"  All checks passed, {color}{len(warned)} warning(s) to review{_RESET}.")
+        print(
+            f"  All checks passed, {color}{len(warned)} warning(s) to review{_RESET}."
+        )
         return 0
     color = _COLORS[OK]
     print(f"  {color}All checks passed.{_RESET}")
