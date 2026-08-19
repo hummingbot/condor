@@ -23,9 +23,9 @@ type SortKey =
   | "apy";
 type SortDir = "asc" | "desc";
 
-/** Sorting compares numbers, and a missing figure sorts last in either direction. */
-function sortValue(p: PoolSummary, key: SortKey): number {
-  return num(p[key as keyof PoolSummary]) ?? -Infinity;
+/** Null-preserving so the comparator can push missing figures last either way. */
+function sortValue(p: PoolSummary, key: SortKey): number | null {
+  return num(p[key as keyof PoolSummary]);
 }
 
 /** Orca's Gateway listing carries no yield at all; the backend derives one. */
@@ -132,7 +132,17 @@ export function PoolBrowser({
       let cmp: number;
       if (sortKey === "name") cmp = pairLabel(a).localeCompare(pairLabel(b));
       else if (sortKey === "dex_id") cmp = a.dex_id.localeCompare(b.dex_id);
-      else cmp = sortValue(a, sortKey) - sortValue(b, sortKey);
+      else {
+        const av = sortValue(a, sortKey);
+        const bv = sortValue(b, sortKey);
+        // A missing figure sorts last in either direction, so it sits outside
+        // the direction flip below.
+        if (av === null || bv === null) {
+          if (av === bv) return 0;
+          return av === null ? 1 : -1;
+        }
+        cmp = av - bv;
+      }
       return sortDir === "asc" ? cmp : -cmp;
     });
     return rows;
