@@ -461,6 +461,9 @@ class ReportSummary(BaseModel):
     source_name: str = ""
     tags: list[str] = []
     agent: str = ""  # producing assistant/expert (e.g. "condor", "executor_manager")
+    # Authenticated owner stamped at save time (SEC-196); None = legacy/ownerless,
+    # visible to admins only.
+    user_id: int | None = None
 
 
 class ReportsListResponse(BaseModel):

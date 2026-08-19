@@ -460,6 +460,11 @@ class ReportBuilder:
                 "source_name": source_name,
                 "tags": self._tags,
                 "agent": store._report_agent.get() or "condor",
+                # The authenticated principal the run executes for (SEC-196):
+                # every runner wraps execution in store.attribute_owner, and the
+                # web routes authorize reads/deletes against this id. None (no
+                # wrapper, e.g. a bare script) makes the report admin-only.
+                "user_id": store._report_owner.get(),
             }
             entries = store._read_index()
             entries.append(entry)

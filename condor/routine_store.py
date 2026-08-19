@@ -552,9 +552,12 @@ class RoutineStore:
             # The bare name (not "agent_slug/name") is what both report lookups
             # match on, and what routines that do call .source() already use.
             base_name = (routine.name or "").split("/")[-1]
-            with reports.attribute_to(agent or _agent_of(routine)):
-                with reports.default_source("routine", base_name):
-                    raw = await routine.run_fn(cfg, ctx)
+            # attribute_owner records who this run executes for, so its reports
+            # are readable by (and only by) that user on the web (SEC-196).
+            with reports.attribute_owner(user_id):
+                with reports.attribute_to(agent or _agent_of(routine)):
+                    with reports.default_source("routine", base_name):
+                        raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
             result = RoutineResult(text="Stopped by user")

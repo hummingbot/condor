@@ -204,6 +204,7 @@ class TickEngine:
                 self.strategy.slug,
                 self.session_num,
                 frequency_sec=self.config.get("frequency_sec", 60),
+                owner_id=self.user_id,
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))

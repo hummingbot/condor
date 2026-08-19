@@ -320,7 +320,13 @@ async def _execute_routine(
 
     try:
         config = routine.config_class(**config_dict)
-        raw_result = await routine.run_fn(config, context)
+        # Reports belong to the user whose user_data the run executes against
+        # (the starter), falling back to the chat — the same identity the hooks
+        # record (SEC-152) — so the web can authorize reads by it (SEC-196).
+        with condor.reports.attribute_owner(
+            owner_id if owner_id is not None else chat_id
+        ):
+            raw_result = await routine.run_fn(config, context)
         rich_result = normalize_result(raw_result)
         result_text = rich_result.text[:500] if rich_result.text else "Completed"
     except Exception as e:
@@ -420,7 +426,10 @@ async def _run_continuous_routine(
     try:
         config = routine.config_class(**config_dict)
         logger.info(f"Starting continuous routine {routine_name}[{instance_id}]")
-        result = await routine.run_fn(config, context)
+        # Same owner stamping as one-shot runs (SEC-196): reports this loop
+        # saves belong to the user the instance runs for.
+        with condor.reports.attribute_owner(owner_key):
+            result = await routine.run_fn(config, context)
         logger.info(f"Continuous routine {routine_name}[{instance_id}] ended: {result}")
     except asyncio.CancelledError:
         logger.info(f"Continuous routine {routine_name}[{instance_id}] cancelled")
