@@ -31,6 +31,7 @@ import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
 
@@ -652,7 +653,7 @@ export function DexPool() {
               <div className="flex items-center gap-1.5">
                 <span className="font-mono">{successId.slice(0, 12)}…</span>
                 <button
-                  onClick={() => navigator.clipboard.writeText(successId)}
+                  onClick={() => void copyText(successId)}
                   className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                   title="Copy full ID"
                 >

@@ -2,6 +2,7 @@ import { Check, Copy, ExternalLink } from "lucide-react";
 import { useState } from "react";
 
 import type { PoolSummary } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 
 /** GeckoTerminal chain ids → the slugs the DEX web apps route on. */
 const UNISWAP_CHAINS: Record<string, string> = {
@@ -67,8 +68,8 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: str
 export function PoolAddress({ pool }: { pool: PoolSummary }) {
   const [copied, setCopied] = useState(false);
 
-  const copy = () => {
-    navigator.clipboard.writeText(pool.address);
+  const copy = async () => {
+    if (!(await copyText(pool.address))) return;
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
   };

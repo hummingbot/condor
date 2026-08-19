@@ -41,6 +41,7 @@ import { useRates } from "@/hooks/useRates";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { api } from "@/lib/api";
 import { candleStore } from "@/lib/candle-store";
+import { copyText } from "@/lib/clipboard";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
 import type { ExecutorType, PickSlot } from "@/components/executor/types";
 import {
@@ -786,7 +787,7 @@ export function CreateExecutor() {
                 <div className="flex items-center gap-1.5">
                   <span className="font-mono text-[var(--color-text)]">{successInfo.id.slice(0, 12)}…</span>
                   <button
-                    onClick={() => navigator.clipboard.writeText(successInfo.id)}
+                    onClick={() => void copyText(successInfo.id)}
                     className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
                     title="Copy full ID"
                   >
