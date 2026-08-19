@@ -374,7 +374,7 @@ async def ensure_dex_tokens(
 @router.get("/servers/{name}/dex/pools-by-address")
 async def list_pools_by_address(
     name: str,
-    addresses: str = Query(description="Comma-separated pool addresses (max 30)"),
+    addresses: str = Query(description="Comma-separated pool addresses"),
     network: str = Query(default="solana-mainnet-beta"),
     user: WebUser = Depends(require_server_access),
 ):
@@ -385,13 +385,17 @@ async def list_pools_by_address(
     whenever it was starred. An address that no longer resolves is absent from the
     answer instead of failing the whole view — a de-indexed pool is not an error.
 
+    No cap here: ``fetch_pools_by_addresses`` already splits the list per
+    GeckoTerminal's 30-address maximum and caches per batch, so truncating would
+    only drop favourites silently — the 31st star would never render anywhere.
+
     Declared above ``/dex/pools/{pool_address}`` deliberately: a path segment would
     otherwise be read as an address.
     """
 
     from condor.pool_data import fetch_pools_by_addresses
 
-    wanted = [a.strip() for a in (addresses or "").split(",") if a.strip()][:30]
+    wanted = [a.strip() for a in (addresses or "").split(",") if a.strip()]
     if not wanted:
         return {"pools": [], "upstream": _upstream_state()}
     before = _throttle_counter()

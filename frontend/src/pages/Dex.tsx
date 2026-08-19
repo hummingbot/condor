@@ -19,6 +19,9 @@ const POOL_STALE_MS = 30_000;
 const SEARCH_DEBOUNCE_MS = 400;
 const PAGE_SIZE = 20;
 
+/** GeckoTerminal's multi-pool endpoint takes at most 30 addresses per request. */
+const FAVORITES_BATCH_SIZE = 30;
+
 /**
  * The chain the browser opens on.
  *
@@ -212,8 +215,34 @@ export function Dex() {
     dataUpdatedAt: favoritesUpdatedAt,
   } = useQuery({
     queryKey: ["dex-favorites", server, network, favoriteAddresses.join(",")],
-    queryFn: () =>
-      api.getDexPoolsByAddress(server!, network, favoriteAddresses),
+    queryFn: async () => {
+      // The endpoint takes at most 30 addresses per request, so favorites
+      // beyond that are fetched in extra batches instead of silently dropped.
+      const batches: string[][] = [];
+      for (
+        let start = 0;
+        start < favoriteAddresses.length;
+        start += FAVORITES_BATCH_SIZE
+      ) {
+        batches.push(
+          favoriteAddresses.slice(start, start + FAVORITES_BATCH_SIZE),
+        );
+      }
+      const pages = await Promise.all(
+        batches.map((batch) =>
+          api.getDexPoolsByAddress(server!, network, batch),
+        ),
+      );
+      return {
+        pools: pages.flatMap((page) => page.pools),
+        has_more: false,
+        // A throttled batch wins the merge: it is the one whose missing rows
+        // the empty-state message has to explain, whichever order it landed in.
+        upstream:
+          pages.find((page) => page.upstream?.throttled_request)?.upstream ??
+          pages.at(-1)?.upstream,
+      };
+    },
     enabled:
       !!server && source.kind === "favorites" && !!favoriteAddresses.length,
     staleTime: POOL_STALE_MS,
