@@ -31,7 +31,7 @@ import { usePairBalances } from "@/hooks/usePairBalances";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
-import { api } from "@/lib/api";
+import { api, type DexTokenConflict } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
 
@@ -151,14 +151,56 @@ export function DexPool() {
 
   // Reported rather than swallowed: Gateway refuses to list a token whose ticker
   // another token already holds, and the only visible symptom is a balance that
-  // stays 0 for a wallet that is not empty.
+  // stays 0 for a wallet that is not empty. Each entry keeps its ticker so the
+  // add button can say what it adds — and so the server can name a collision.
   const unlistedTokens = useMemo(
     () =>
       Object.entries(tokenVerdicts ?? {})
         .filter(([, verdict]) => verdict === "symbol_taken" || verdict === "failed")
-        .map(([address]) => address),
-    [tokenVerdicts],
+        .map(([tokenAddress]) => {
+          const ticker =
+            tokenAddress === pool?.base_token_address
+              ? pool?.base_symbol
+              : tokenAddress === pool?.quote_token_address
+                ? pool?.quote_symbol
+                : undefined;
+          return {
+            address: tokenAddress,
+            symbol: ticker && ticker !== "???" ? ticker : undefined,
+          };
+        }),
+    [tokenVerdicts, pool],
   );
+
+  // The collision the last add ran into: who holds the ticker, so the banner
+  // can ask "replace it?" instead of failing with the same verdict again.
+  const [tokenConflict, setTokenConflict] = useState<{
+    address: string;
+    symbol?: string;
+    holder: DexTokenConflict;
+  } | null>(null);
+
+  const addTokenMutation = useMutation({
+    mutationFn: (vars: { address: string; symbol?: string; replace?: boolean }) =>
+      api.addDexToken(server!, network, vars.address, vars.symbol, vars.replace),
+    onSuccess: (data, vars) => {
+      if (data.verdict === "added" || data.verdict === "listed") {
+        setTokenConflict(null);
+        // Re-runs the ensure (its verdicts now read `listed`, dropping the
+        // banner) and refetches the portfolio the balance panels read from.
+        queryClient.invalidateQueries({
+          queryKey: ["dex-ensure-tokens", server, network, pool?.address],
+        });
+        queryClient.invalidateQueries({ queryKey: ["portfolio", server] });
+      } else if (data.verdict === "symbol_taken" && data.conflict) {
+        setTokenConflict({
+          address: vars.address,
+          symbol: vars.symbol,
+          holder: data.conflict,
+        });
+      }
+    },
+  });
 
   const { data: venues = [] } = useQuery({
     queryKey: ["venues", server],
@@ -347,7 +389,8 @@ export function DexPool() {
 
       {/* Gateway lists a token by ticker, so a pool whose token shares a ticker
           with one already on the list cannot be registered — and the only symptom
-          is a balance that reads 0 for a wallet that is not empty. */}
+          is a balance that reads 0 for a wallet that is not empty. The button is
+          the fix in place: retry a failed save, or replace the ticker's holder. */}
       {unlistedTokens.length > 0 && (
         <div
           role="status"
@@ -359,10 +402,62 @@ export function DexPool() {
             Gateway&apos;s token list
           </span>
           <span className="text-[var(--color-text-muted)]">
-            Balances for {unlistedTokens.map((a) => `${a.slice(0, 6)}…`).join(", ")}{" "}
-            will read 0 — add {unlistedTokens.length === 1 ? "it" : "them"} under
-            Gateway tokens to size orders from this wallet.
+            Balances for{" "}
+            {unlistedTokens
+              .map((t) => t.symbol ?? `${t.address.slice(0, 6)}…`)
+              .join(", ")}{" "}
+            will read 0 until {unlistedTokens.length === 1 ? "it is" : "they are"}{" "}
+            added.
           </span>
+          {unlistedTokens.map((t) => (
+            <button
+              key={t.address}
+              onClick={() =>
+                addTokenMutation.mutate({ address: t.address, symbol: t.symbol })
+              }
+              disabled={addTokenMutation.isPending}
+              className="rounded border border-amber-500/40 px-2 py-0.5 font-medium text-[var(--color-yellow)] hover:bg-amber-500/20 disabled:opacity-50"
+            >
+              {addTokenMutation.isPending
+                ? "Adding…"
+                : `Add ${t.symbol ?? `${t.address.slice(0, 6)}…`}`}
+            </button>
+          ))}
+          {tokenConflict && (
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[var(--color-text-muted)]">
+              {tokenConflict.holder.symbol} already names{" "}
+              {tokenConflict.holder.address.slice(0, 6)}… on the list — replace
+              it with this pool&apos;s token?
+              <button
+                onClick={() =>
+                  addTokenMutation.mutate({
+                    address: tokenConflict.address,
+                    symbol: tokenConflict.symbol,
+                    replace: true,
+                  })
+                }
+                disabled={addTokenMutation.isPending}
+                className="rounded border border-amber-500/40 px-2 py-0.5 font-medium text-[var(--color-yellow)] hover:bg-amber-500/20 disabled:opacity-50"
+              >
+                Replace
+              </button>
+            </span>
+          )}
+          {!tokenConflict &&
+            addTokenMutation.data?.verdict === "symbol_taken" &&
+            !addTokenMutation.data.conflict && (
+              <span className="text-[var(--color-text-muted)]">
+                Its ticker is already used by another token on the list — resolve
+                it under Gateway tokens.
+              </span>
+            )}
+          {addTokenMutation.isError && (
+            <span className="text-[var(--color-red)]">
+              {addTokenMutation.error instanceof Error
+                ? addTokenMutation.error.message
+                : "Add failed"}
+            </span>
+          )}
         </div>
       )}
 

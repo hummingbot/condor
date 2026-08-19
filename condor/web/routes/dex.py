@@ -371,6 +371,96 @@ async def ensure_dex_tokens(
     return {"tokens": verdicts}
 
 
+class AddTokenRequest(BaseModel):
+    """One token the user explicitly asked to put on Gateway's list."""
+
+    network: str = Field(description="Gateway network id, e.g. solana-mainnet-beta")
+    address: str = Field(description="Token mint/contract to register")
+    symbol: str | None = Field(
+        default=None,
+        description="Ticker the pool shows for it, used to name a conflicting holder",
+    )
+    replace: bool = Field(
+        default=False,
+        description="Delete the token currently holding the ticker before adding",
+    )
+
+
+@router.post("/servers/{name}/dex/tokens/add")
+async def add_dex_token(
+    name: str,
+    body: AddTokenRequest,
+    user: WebUser = Depends(require_server_access),
+):
+    """Register one token because the user clicked a button asking for it.
+
+    The automatic path (``/dex/tokens``, above) reports rather than forces: a
+    ``failed`` verdict is a Gateway hiccup, and ``symbol_taken`` means another
+    token already owns the ticker — a conflict only a human should resolve,
+    because deleting the holder changes what that ticker means everywhere.
+    This route is that human's answer. Without ``replace`` it retries the
+    registration and, on a collision, names the holder so the browser can ask;
+    with ``replace`` it deletes the holder first and registers the new token in
+    its place.
+
+    Unlike the ensure route, an upstream error here is raised, not folded into
+    a verdict: the user pressed a button and deserves the actual reason.
+    """
+    from condor.fetchers.gateway_tokens import (
+        ensure_tokens_listed,
+        find_symbol_holder,
+        forget_listed,
+        token_addresses,
+    )
+    from condor.pool_data import GECKO_TO_GATEWAY_NETWORK, NETWORK_TO_GECKO
+
+    gateway_network = GECKO_TO_GATEWAY_NETWORK.get(
+        NETWORK_TO_GECKO.get(body.network, "")
+    )
+    if not gateway_network:
+        raise HTTPException(status_code=400, detail="Unknown network")
+
+    addresses = token_addresses(body.address)
+    if not addresses:
+        raise HTTPException(status_code=400, detail="Not a token address")
+    address = addresses[0]
+
+    cm = get_config_manager()
+    client = await cm.get_client(name)
+    try:
+        if body.replace and body.symbol:
+            holder = await find_symbol_holder(
+                client, gateway_network, body.symbol, exclude=address
+            )
+            if holder:
+                await client.gateway.delete_token(gateway_network, holder["address"])
+                forget_listed(gateway_network, holder["address"])
+
+        verdicts = await ensure_tokens_listed(client, gateway_network, [address])
+        verdict = verdicts.get(address, "failed")
+
+        # The collision's other half: who holds the ticker. Looked up only when
+        # the answer is needed, and only nameable when the pool knows its own
+        # ticker — a `???` pool gets the verdict without the culprit.
+        conflict = None
+        if verdict == "symbol_taken" and body.symbol:
+            conflict = await find_symbol_holder(
+                client, gateway_network, body.symbol, exclude=address
+            )
+    except Exception as e:
+        logger.warning("add token %s on %s failed: %s", address, gateway_network, e)
+        raise HTTPException(status_code=502, detail=f"Gateway refused: {e}") from e
+
+    # `ensure_tokens_listed` folds its own upstream errors into this verdict so
+    # the automatic path stays quiet; a clicked button must not.
+    if verdict == "failed":
+        raise HTTPException(
+            status_code=502,
+            detail="Gateway could not register the token — is it running?",
+        )
+    return {"verdict": verdict, "conflict": conflict}
+
+
 @router.get("/servers/{name}/dex/pools-by-address")
 async def list_pools_by_address(
     name: str,

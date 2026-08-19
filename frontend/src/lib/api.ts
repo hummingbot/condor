@@ -389,6 +389,13 @@ export interface DexUpstream {
  */
 export type DexTokenVerdict = "listed" | "added" | "symbol_taken" | "failed";
 
+/** The token that already holds a ticker a new token wanted. */
+export interface DexTokenConflict {
+  symbol: string;
+  address: string;
+  name?: string | null;
+}
+
 /** A page of pools. `has_more`, not a count — no upstream reports a total. */
 export interface PoolPage {
   pools: PoolSummary[];
@@ -1472,6 +1479,27 @@ export const api = {
     apiFetch<{ tokens: Record<string, DexTokenVerdict> }>(
       `/api/v1/servers/${encodeURIComponent(server)}/dex/tokens`,
       { method: "POST", body: JSON.stringify({ network, addresses }) },
+    ),
+
+  /**
+   * Register one token because the user asked to, where the automatic ensure
+   * only reported. Retries a `failed` verdict outright; on `symbol_taken` the
+   * answer names the ticker's current holder, and a second call with
+   * `replace: true` deletes that holder and registers this token in its place.
+   */
+  addDexToken: (
+    server: string,
+    network: string,
+    address: string,
+    symbol?: string,
+    replace?: boolean,
+  ) =>
+    apiFetch<{ verdict: DexTokenVerdict; conflict: DexTokenConflict | null }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/tokens/add`,
+      {
+        method: "POST",
+        body: JSON.stringify({ network, address, symbol, replace }),
+      },
     ),
 
   /** One pool by address, so /dex/{network}/{address} renders from the URL alone. */

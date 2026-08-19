@@ -43,6 +43,16 @@ def reset_listed_memo() -> None:
     _listed.clear()
 
 
+def forget_listed(network_id: str, address: str) -> None:
+    """Drop one confirmed listing, after its token is deleted from the list.
+
+    Without this, replacing a ticker's holder would leave the deleted address
+    memoized as listed — and every pool that uses it would trust a balance
+    Gateway can no longer read.
+    """
+    _listed.discard(_memo_key(network_id, address))
+
+
 def _memo_key(network_id: str, address: str) -> tuple[str, str]:
     return (network_id, address.lower())
 
@@ -90,6 +100,36 @@ async def _is_listed(client: Any, network_id: str, address: str) -> bool:
         str((token or {}).get("address") or "").lower() == wanted
         for token in (tokens or [])
     )
+
+
+async def find_symbol_holder(
+    client: Any, network_id: str, symbol: str, exclude: str | None = None
+) -> dict[str, Any] | None:
+    """The token on ``network_id``'s list that holds ``symbol``, if any.
+
+    This is the other half of a ``symbol_taken`` verdict: the verdict says the
+    ticker is in use, this says by *whom* — which is what the user needs to
+    decide whether the holder should be replaced. ``exclude`` skips the token
+    being registered itself, so a half-written state cannot name it as its own
+    conflict.
+    """
+    response = await client.gateway.get_network_tokens(network_id, search=symbol)
+    tokens = response.get("tokens", []) if isinstance(response, dict) else response
+    wanted = symbol.lower()
+    excluded = (exclude or "").lower()
+    for token in tokens or []:
+        entry = token or {}
+        if str(entry.get("symbol") or "").lower() != wanted:
+            continue
+        address = str(entry.get("address") or "")
+        if address.lower() == excluded:
+            continue
+        return {
+            "symbol": entry.get("symbol"),
+            "address": address,
+            "name": entry.get("name"),
+        }
+    return None
 
 
 async def ensure_tokens_listed(
