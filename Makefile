@@ -55,7 +55,11 @@ setup-chrome:
 		echo "Chrome setup skipped (not required for basic usage)"
 
 doctor:
-	@uv run python -m condor.doctor
+	@bash -c ' \
+		export NVM_DIR="$$HOME/.nvm"; \
+		[ -s "$$NVM_DIR/nvm.sh" ] && . "$$NVM_DIR/nvm.sh"; \
+		uv run python -m condor.doctor \
+	'
 
 build-frontend:
 	@bash -c ' \
