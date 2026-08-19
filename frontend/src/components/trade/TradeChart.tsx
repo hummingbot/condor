@@ -621,7 +621,7 @@ export function TradeChart({
     seriesRef.current.applyOptions({
       priceFormat: { type: "price" as const, precision: pricePrecision, minMove: 1 / 10 ** pricePrecision },
     });
-  }, [pricePrecision]);
+  }, [pricePrecision, chartReady]);
 
   // ── Price lines (start/end/limit/grid levels/extras) ──
   useEffect(() => {
