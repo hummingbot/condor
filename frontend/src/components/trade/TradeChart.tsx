@@ -3,7 +3,7 @@ import { createPortal } from "react-dom";
 
 import { useCandleStore } from "@/hooks/useCandleStore";
 import { api, type ConsolidatedPosition } from "@/lib/api";
-import { candleStore } from "@/lib/candle-store";
+import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ExtraLine, PickSlot } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
@@ -547,7 +547,7 @@ export function TradeChart({
   useEffect(() => {
     if (!chartReady || !seriesRef.current || !candles.length) return;
 
-    const key = `${server}:${connector}:${pair}:${interval}`;
+    const key = candleChannelKey(server, connector, pair, interval, poolAddress);
     const first = candles[0].timestamp;
     const prevSig = lastSetDataSigRef.current;
     const [prevKey, prevFirstStr, prevLenStr] = prevSig.split("|");
@@ -586,12 +586,12 @@ export function TradeChart({
       chartRef.current?.timeScale().fitContent();
       initializedRef.current = true;
     }
-  }, [candles, chartReady, server, connector, pair, interval]);
+  }, [candles, chartReady, server, connector, pair, interval, poolAddress]);
 
   // ── Real-time last candle update via candle store listener ──
   useEffect(() => {
     if (!chartReady || !seriesRef.current) return;
-    const key = `candles:${server}:${connector}:${pair}:${interval}`;
+    const key = candleChannelKey(server, connector, pair, interval, poolAddress);
 
     const removeListener = candleStore.onUpdate(key, (updated) => {
       if (!seriesRef.current || !updated.length) return;
@@ -606,7 +606,7 @@ export function TradeChart({
     });
 
     return removeListener;
-  }, [chartReady, server, connector, pair, interval]);
+  }, [chartReady, server, connector, pair, interval, poolAddress]);
 
   // ── Reset auto-fit on pair/interval/range change ──
   useEffect(() => {
