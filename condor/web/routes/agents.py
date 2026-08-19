@@ -21,6 +21,7 @@ import asyncio
 import logging
 import os
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
@@ -53,7 +54,28 @@ _PERF_TTL = 30.0  # seconds
 # Only ids that are inactive (no registered engine, not the newest session),
 # fetched successfully, with open_count == 0, and not in controller mode land
 # here; everything else keeps flowing through the 30s TTL path above.
-_CLOSED_PERF_CACHE: dict[str, Any] = {}
+# Bounded LRU (same idiom as condor.web.routes.archived): each entry holds the
+# full executor rows, so an unbounded dict would grow with every session ever
+# run for the life of the process. Eviction is always safe — a miss just flows
+# through the normal fetch path and re-freezes.
+_CLOSED_PERF_CACHE_MAX = 256
+_CLOSED_PERF_CACHE: OrderedDict[str, Any] = OrderedDict()
+
+
+def _closed_perf_get(agent_id: str) -> Any | None:
+    """Return the frozen entry, marking it most-recently-used."""
+    perf = _CLOSED_PERF_CACHE.get(agent_id)
+    if perf is not None:
+        _CLOSED_PERF_CACHE.move_to_end(agent_id)
+    return perf
+
+
+def _closed_perf_put(agent_id: str, perf: Any) -> None:
+    """Store a frozen entry, evicting the least-recently-used past the cap."""
+    _CLOSED_PERF_CACHE[agent_id] = perf
+    _CLOSED_PERF_CACHE.move_to_end(agent_id)
+    while len(_CLOSED_PERF_CACHE) > _CLOSED_PERF_CACHE_MAX:
+        _CLOSED_PERF_CACHE.popitem(last=False)
 
 
 def _cache_get(key: str) -> Any | None:
@@ -678,11 +700,17 @@ async def _compute_strategy_performance(
         for aid in active_ids:
             _CLOSED_PERF_CACHE.pop(aid, None)
 
-        fetch_ids = [
-            aid
-            for aid, _, _ in ids
-            if aid in active_ids or aid not in _CLOSED_PERF_CACHE
-        ]
+        # Snapshot the frozen entries up front (marking them recently-used) so
+        # an LRU eviction during the await below can't drop a session from
+        # this render.
+        frozen: dict[str, Any] = {}
+        for aid, _, _ in ids:
+            if aid not in active_ids:
+                perf = _closed_perf_get(aid)
+                if perf is not None:
+                    frozen[aid] = perf
+
+        fetch_ids = [aid for aid, _, _ in ids if aid in active_ids or aid not in frozen]
 
         perf_map: dict[str, Any] = {}
         failed_ids: set[str] = set()
@@ -699,7 +727,7 @@ async def _compute_strategy_performance(
         for agent_id, num, kind in ids:
             perf = perf_map.get(agent_id)
             if perf is None:
-                perf = _CLOSED_PERF_CACHE.get(agent_id)
+                perf = frozen.get(agent_id)
             if perf is None:
                 continue
             # Freeze immutable results: fetched fine, no engine, not the newest
@@ -712,7 +740,7 @@ async def _compute_strategy_performance(
                 and agent_id not in failed_ids
                 and perf.open_count == 0
             ):
-                _CLOSED_PERF_CACHE[agent_id] = perf
+                _closed_perf_put(agent_id, perf)
             if kind == "experiment" and perf.trade_count == 0:
                 continue
             sessions.append(
