@@ -304,6 +304,9 @@ export function TradeBottomPane({
         return next;
       });
       setConfirmStopId(null);
+      // Prefix match covers ["executors", server, "main", pair] and the altPair variant
+      queryClient.invalidateQueries({ queryKey: ["executors", server] });
+      queryClient.invalidateQueries({ queryKey: ["dex-lp-executors", server] });
       queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
     },
   });
@@ -327,7 +330,6 @@ export function TradeBottomPane({
         return next;
       });
       setConfirmClearPos(null);
-      queryClient.invalidateQueries({ queryKey: ["positions", server] });
       queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
     },
   });
