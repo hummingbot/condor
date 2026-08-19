@@ -8,6 +8,7 @@ from typing import Any
 import yaml
 from fastapi import APIRouter, Depends, HTTPException
 
+from condor.controller_configs import clean_config_for_save
 from condor.fetchers.bots import build_bots_page, extract_bots_list
 from condor.web.auth import require_server_access
 from condor.web.models import (
@@ -24,7 +25,6 @@ from condor.web.models import (
 )
 from condor.web.routes._errors import upstream_error
 from config_manager import get_config_manager
-from handlers.bots._shared import clean_config_for_save
 
 logger = logging.getLogger(__name__)
 

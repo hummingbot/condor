@@ -13,6 +13,8 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
+from condor.llm.openrouter_models import fetch_models
+from condor.llm.options import DEFAULT_AGENT
 from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import conversations
@@ -27,8 +29,6 @@ from condor.runtime.timeouts import TIMEOUTS
 from condor.runtime.wake import register_note_sink, register_sink_factory
 from condor.web.auth import decode_jwt, extract_ws_token, get_current_user
 from condor.web.models import WebUser
-from handlers.agents._shared import DEFAULT_AGENT
-from handlers.agents.openrouter_models import fetch_models
 
 log = logging.getLogger(__name__)
 

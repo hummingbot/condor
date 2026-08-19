@@ -90,7 +90,7 @@ def ws_env(tmp_path, monkeypatch):
     monkeypatch.setattr("condor.acp.client.ACPClient", _GatedClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     monkeypatch.setattr("condor.preferences.load_user_data_for", lambda *a, **k: {})
     monkeypatch.setattr(chat_ws, "_active_prompt_tasks", {})

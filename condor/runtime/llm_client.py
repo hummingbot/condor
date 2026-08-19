@@ -27,6 +27,7 @@ from typing import Any
 from condor.acp import client as acp_client
 from condor.acp import pydantic_ai_client as pydantic_ai
 from condor.preferences import resolve_custom_endpoint
+from condor.runtime.toolsets import get_project_dir
 
 
 def build_llm_client(
@@ -89,10 +90,7 @@ def build_llm_client(
     # ACP subprocess models: claude-code, gemini, codex. A Claude model can be
     # pinned via a suffix ("claude-acp:opus"); ACPClient selects it over the
     # protocol (session/set_model) after handshake — the bridge ignores
-    # ANTHROPIC_MODEL. Lazy import: handlers/ must not load at runtime-import
-    # time (reload_handlers would re-execute into this graph).
-    from handlers.agents._shared import get_project_dir
-
+    # ANTHROPIC_MODEL.
     command, model_env, model_pref = acp_client.resolve_acp(agent_key)
     merged_env = {**(extra_env or {}), **model_env}
     return acp_client.ACPClient(

@@ -800,16 +800,16 @@ async def add_custom_provider(
     the key is accepted, and the response is OpenAI-shaped — all in one round
     trip — and returns the model list the caller needs anyway.
     """
+    from condor.llm.custom_models import (
+        CustomProviderError,
+        fetch_models,
+        normalize_base_url,
+    )
     from condor.preferences import (
         load_user_data_for,
         save_custom_provider,
         suggest_provider_name,
         unique_provider_name,
-    )
-    from handlers.agents.custom_models import (
-        CustomProviderError,
-        fetch_models,
-        normalize_base_url,
     )
 
     raw_url = (body.get("base_url") or "").strip()
@@ -847,8 +847,8 @@ async def get_custom_provider_models(
     user: WebUser = Depends(get_current_user),
 ):
     """Fetch the current chat model list for a saved endpoint."""
+    from condor.llm.custom_models import CustomProviderError, fetch_models
     from condor.preferences import find_custom_provider, load_user_data_for
-    from handlers.agents.custom_models import CustomProviderError, fetch_models
 
     provider = find_custom_provider(load_user_data_for(user.id), name)
     if provider is None:

@@ -677,7 +677,7 @@ def registry(monkeypatch, conv_root):
     monkeypatch.setattr("condor.acp.client.ACPClient", _ScriptedClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     _ScriptedClient.script = [
         TextChunk(text="the answer"),

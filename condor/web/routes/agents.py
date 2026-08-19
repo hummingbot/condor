@@ -1189,8 +1189,8 @@ async def update_agent_config(
     write the MCP ``manage_trading_agent`` tool already performs — the web layer
     simply had no door to it, which is why the UI could only offer a text editor.
     """
+    from condor.llm.options import AGENT_OPTIONS
     from config_manager import get_config_manager
-    from handlers.agents._shared import AGENT_OPTIONS
 
     agent = _get_agent(slug)
 

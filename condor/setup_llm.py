@@ -8,7 +8,7 @@ every entry point. ``--status`` (and any run without a TTY: CI, ``curl | bash``)
 prints the same report and changes nothing.
 
 The wizard owns none of the detection: it renders
-:mod:`handlers.agents.readiness` over :data:`handlers.agents._shared.AGENT_OPTIONS`,
+:mod:`condor.llm.readiness` over :data:`condor.llm.options.AGENT_OPTIONS`,
 so a provider added to either shows up here for free and can never disagree with
 what the ``get_available_models`` MCP tool reports.
 
@@ -29,14 +29,14 @@ from pathlib import Path
 import httpx
 
 from condor.acp.pydantic_ai_client import DEFAULT_BASE_URLS
-from handlers.agents import readiness
-from handlers.agents._shared import (
+from condor.llm import readiness
+from condor.llm.openrouter_models import fetch_models
+from condor.llm.options import (
     AGENT_OPTIONS,
     RECOMMENDED_AGENT,
     selectable_agent_options,
 )
-from handlers.agents.openrouter_models import fetch_models
-from handlers.agents.readiness import MISSING, READY, UNVERIFIED, Readiness
+from condor.llm.readiness import MISSING, READY, UNVERIFIED, Readiness
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO_ROOT / ".env"

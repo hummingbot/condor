@@ -104,7 +104,7 @@ def registry(tmp_path, monkeypatch):
     monkeypatch.setattr("condor.acp.client.ACPClient", _EchoClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     # Sink factories and the in-flight counts are process-global, exactly like the
     # confirmation registry: reset both so tests cannot leak into each other.

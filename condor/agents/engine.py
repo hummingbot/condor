@@ -26,6 +26,7 @@ from condor.acp.client import (
     fold_tool_call_event,
 )
 from condor.acp.pydantic_ai_client import PydanticAIClient
+from condor.runtime import toolsets
 from condor.runtime.registry_file import LoopState
 from condor.runtime.timeouts import resolve_tick_timeout
 from condor.telemetry import taps as telemetry_taps
@@ -865,12 +866,10 @@ class TickEngine:
         (it only feeds the auto-approve callback and cannot change between the
         two points), avoiding a redundant per-tick journal re-parse.
         """
-        from handlers.agents._shared import build_mcp_servers_for_session
-
         mode = self.config.get("execution_mode", "loop")
 
         # A configured server pins the toolset; None falls back to the chat's.
-        mcp_servers = build_mcp_servers_for_session(
+        mcp_servers = toolsets.build_mcp_servers_for_session(
             self.user_id,
             self.chat_id,
             server_name=self.config.get("server_name"),

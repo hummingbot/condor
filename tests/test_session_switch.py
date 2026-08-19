@@ -72,7 +72,7 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(routes, "get_config_manager", lambda: FakeConfigManager())
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     monkeypatch.setattr("condor.preferences.load_user_data_for", lambda *a, **k: {})
 

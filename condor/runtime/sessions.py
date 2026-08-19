@@ -22,10 +22,10 @@ from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
 from condor.runtime.confirmations import get_registry as get_confirmation_registry
+from condor.runtime.context import build_initial_context, platform_formatting
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
-from handlers.agents._shared import build_initial_context, platform_formatting
 
 log = logging.getLogger(__name__)
 

@@ -76,7 +76,7 @@ def runtime_env(tmp_path, monkeypatch):
     monkeypatch.setattr(chat_ws, "_pending_spawns", {})
     monkeypatch.setattr(chat_ws, "_active_prompt_tasks", {})
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     monkeypatch.setattr("condor.preferences.load_user_data_for", lambda *a, **k: {})
     return tmp_path
