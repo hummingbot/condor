@@ -129,6 +129,47 @@ ETHEREUM_EXPLORERS = {
 }
 
 
+async def resolve_network_id(client, user_input: str) -> str:
+    """Resolve a user-typed network name to Gateway's '{chain}-{network}' id.
+
+    Gateway builds its network ids from the yml basenames under
+    conf/chains/<chain>/, so 'base' is 'ethereum-base' and 'bsc' is
+    'ethereum-bsc' — nothing a static table can be trusted to keep in sync.
+    The API is the source of truth: GET /gateway/networks returns every
+    network id together with its chain and bare network name.
+
+    Accepts either the full id ('ethereum-base') or the bare network name
+    ('base'). Raises ValueError for unknown or ambiguous input, listing what
+    Gateway actually offers.
+    """
+    text = user_input.strip().lower()
+    result = await client.gateway.list_networks()
+    networks = (result or {}).get("networks") or []
+    if not networks:
+        raise ValueError("Gateway returned no networks")
+
+    for entry in networks:
+        if str(entry.get("network_id", "")).lower() == text:
+            return entry["network_id"]
+
+    matches = [
+        entry["network_id"]
+        for entry in networks
+        if str(entry.get("network", "")).lower() == text
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Ambiguous network '{user_input}'. Use one of: {', '.join(sorted(matches))}"
+        )
+
+    available = sorted(str(entry.get("network_id")) for entry in networks)
+    raise ValueError(
+        f"Unknown network '{user_input}'. Available: {', '.join(available)}"
+    )
+
+
 def get_explorer_url(tx_hash: str, network: str) -> Optional[str]:
     """Generate explorer URL for a transaction
 
@@ -485,7 +526,10 @@ class HistoryFilters:
     network: Optional[str] = None  # None = All
     offset: int = 0
     limit: int = DEFAULT_PAGE_SIZE
-    total_count: int = 0
+    # The API reports total_count only on the LAST page; while more rows remain
+    # it sends null and only has_more is meaningful.
+    total_count: Optional[int] = None
+    has_more: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -497,6 +541,7 @@ class HistoryFilters:
             "offset": self.offset,
             "limit": self.limit,
             "total_count": self.total_count,
+            "has_more": self.has_more,
         }
 
     @classmethod
@@ -509,7 +554,8 @@ class HistoryFilters:
             network=data.get("network"),
             offset=data.get("offset", 0),
             limit=data.get("limit", DEFAULT_PAGE_SIZE),
-            total_count=data.get("total_count", 0),
+            total_count=data.get("total_count"),
+            has_more=data.get("has_more", False),
         )
 
     def reset_pagination(self) -> None:
@@ -522,13 +568,16 @@ class HistoryFilters:
 
     @property
     def total_pages(self) -> int:
+        if self.total_count is None:
+            # Unknown total: at least this page, plus one more if there is one.
+            return self.current_page + (1 if self.has_more else 0)
         if self.total_count == 0:
             return 1
         return (self.total_count + self.limit - 1) // self.limit
 
     @property
     def has_next(self) -> bool:
-        return self.offset + self.limit < self.total_count
+        return self.has_more
 
     @property
     def has_prev(self) -> bool:
@@ -618,8 +667,11 @@ def build_pagination_buttons(
     else:
         buttons.append(InlineKeyboardButton(" ", callback_data="dex:noop"))
 
-    # Page indicator
-    page_text = f"{filters.current_page}/{filters.total_pages}"
+    # Page indicator — the total is unknown until the last page
+    if filters.total_count is None:
+        page_text = f"Page {filters.current_page}"
+    else:
+        page_text = f"{filters.current_page}/{filters.total_pages}"
     buttons.append(InlineKeyboardButton(page_text, callback_data="dex:noop"))
 
     # Next button

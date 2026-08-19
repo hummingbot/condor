@@ -1017,20 +1017,21 @@ async def manage_clmm(
     recover an orphan, use `close`.
 
     Positions opened by an lp_executor are not in the API database (the bot opens them straight
-    against Gateway), so close/collect_fees on those REQUIRE `pool_address` — the orphan listing
-    reports it. Without it the call fails with a 400 saying so.
+    against Gateway), and they close fine anyway: the API never reads `pool_address` on
+    close/collect_fees.
 
     Pool discovery lives in `explore_dex_pools`.
 
     Args:
         action: CLMM action. Leave empty to load the CLMM guide.
-        connector: CLMM connector: meteora | raydium | orca (Solana), uniswap | pancakeswap (EVM).
-            A '<name>/clmm' form is accepted, so an orphan's lp_provider passes through unchanged.
+        connector: CLMM connector: meteora | raydium | orca | pancakeswap-sol (Solana),
+            uniswap | pancakeswap (EVM). A '<name>/clmm' form is accepted, so an orphan's
+            lp_provider passes through unchanged.
         network: Network ID in 'chain-network' format (e.g. 'solana-mainnet-beta', 'ethereum-mainnet').
             For an orphan record this is the `connector_name` field.
         wallet_address: Wallet address (optional, uses default if not provided).
-        pool_address: Pool contract address. Required for open and position_info, and for
-            close/collect_fees on a position the API never recorded.
+        pool_address: Pool contract address. Required for open; informational elsewhere —
+            position_info takes no pool filter and close/collect_fees never read it.
         position_address: Position NFT address (add_liquidity, remove_liquidity, close, collect_fees).
         lower_price: Lower price bound of the range (open).
         upper_price: Upper price bound of the range (open).

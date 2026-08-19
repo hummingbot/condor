@@ -204,7 +204,10 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
         "remove_liquidity",
         "create_pool",
     ) and isinstance(payload, dict):
-        tx = payload.get("transaction_hash")
+        # AMM write responses are chain-neutral: the tx identifier is
+        # `signature` (AMMTransactionResponse / AMMCreatePoolResponse), not
+        # `transaction_hash` as on the CLMM surface.
+        tx = payload.get("signature")
         extra = ""
         if action == "create_pool":
             extra = f"\nPool: {payload.get('pool_address')}  Seed price: {payload.get('price')}"
@@ -245,9 +248,15 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     if action == "open" and isinstance(payload, dict):
+        # A submitted-not-confirmed open has position_address=None: the address
+        # is unknowable until the tx lands, so say that instead of "None".
+        position = (
+            payload.get("position_address")
+            or "pending — known once the transaction confirms"
+        )
         return (
             f"{header}\n"
-            f"Position: {payload.get('position_address')}\n"
+            f"Position: {position}\n"
             f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}\n"
             f"Range: {payload.get('lower_price')}–{payload.get('upper_price')}\n"
             "This position is NOT tracked by any executor — it will not be range-monitored, "

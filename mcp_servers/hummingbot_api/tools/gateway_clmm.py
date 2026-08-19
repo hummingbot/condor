@@ -67,42 +67,32 @@ def format_pools_as_table(pools: list[dict[str, Any]]) -> str:
 
 def format_pools_as_detailed_table(pools: list[dict[str, Any]]) -> str:
     """
-    Format pool data as a detailed table string with exploded volume and fee_tvl_ratio fields.
+    Format pool data as a detailed table string.
 
-    Columns: address | trading_pair | mint_x | mint_y | bin_step | current_price | liquidity |
-             base_fee_percentage | max_fee_percentage | protocol_fee_percentage | apr | apy |
-             volume_hour_1 | volume_hour_12 | volume_hour_24 |
-             fee_tvl_ratio_hour_1 | fee_tvl_ratio_hour_12 | fee_tvl_ratio_hour_24
+    Every column here is a field of hapi's CLMMPoolListItem. The old exploded
+    volume / fee_tvl_ratio columns, plus max_fee_percentage and
+    protocol_fee_percentage, were dropped: the API never sends them, so they
+    rendered as a permanent wall of N/A.
+
+    Columns: address | name | trading_pair | mint_x | mint_y | bin_step | current_price |
+             liquidity | base_fee_percentage | apr | apy | volume_24h | fees_24h
     """
     if not pools:
         return "No pools found."
 
     # Header - detailed columns
     header = (
-        "address | trading_pair | mint_x | mint_y | bin_step | current_price | liquidity | "
-        "base_fee_percentage | max_fee_percentage | protocol_fee_percentage | apr | apy | "
-        "volume_hour_1 | volume_hour_12 | volume_hour_24 | "
-        "fee_tvl_ratio_hour_1 | fee_tvl_ratio_hour_12 | fee_tvl_ratio_hour_24"
+        "address | name | trading_pair | mint_x | mint_y | bin_step | current_price | "
+        "liquidity | base_fee_percentage | apr | apy | volume_24h | fees_24h"
     )
     separator = "-" * 300
 
     # Format each pool as a row
     rows = []
     for pool in pools:
-        # Extract nested volume fields
-        volume = pool.get("volume", {})
-        volume_hour_1 = volume.get("hour_1", "N/A")
-        volume_hour_12 = volume.get("hour_12", "N/A")
-        volume_hour_24 = volume.get("hour_24", "N/A")
-
-        # Extract nested fee_tvl_ratio fields
-        fee_tvl_ratio = pool.get("fee_tvl_ratio", {})
-        fee_tvl_ratio_hour_1 = fee_tvl_ratio.get("hour_1", "N/A")
-        fee_tvl_ratio_hour_12 = fee_tvl_ratio.get("hour_12", "N/A")
-        fee_tvl_ratio_hour_24 = fee_tvl_ratio.get("hour_24", "N/A")
-
         row = (
             f"{get_field(pool, 'address', default='N/A')} | "
+            f"{get_field(pool, 'name', default='N/A')} | "
             f"{get_field(pool, 'trading_pair', default='N/A')} | "
             f"{get_field(pool, 'mint_x', default='N/A')} | "
             f"{get_field(pool, 'mint_y', default='N/A')} | "
@@ -110,16 +100,10 @@ def format_pools_as_detailed_table(pools: list[dict[str, Any]]) -> str:
             f"{format_number(get_field(pool, 'current_price', default=None))} | "
             f"{format_number(get_field(pool, 'liquidity', default=None))} | "
             f"{format_number(get_field(pool, 'base_fee_percentage', default=None))} | "
-            f"{format_number(get_field(pool, 'max_fee_percentage', default=None))} | "
-            f"{format_number(get_field(pool, 'protocol_fee_percentage', default=None))} | "
             f"{format_number(get_field(pool, 'apr', default=None))} | "
             f"{format_number(get_field(pool, 'apy', default=None))} | "
-            f"{format_number(volume_hour_1)} | "
-            f"{format_number(volume_hour_12)} | "
-            f"{format_number(volume_hour_24)} | "
-            f"{format_number(fee_tvl_ratio_hour_1)} | "
-            f"{format_number(fee_tvl_ratio_hour_12)} | "
-            f"{format_number(fee_tvl_ratio_hour_24)}"
+            f"{format_number(get_field(pool, 'volume_24h', default=None))} | "
+            f"{format_number(get_field(pool, 'fees_24h', default=None))}"
         )
         rows.append(row)
 
@@ -142,6 +126,7 @@ async def explore_gateway_clmm_pools(
     - orca (Solana): Whirlpools
     - uniswap (Ethereum/EVM): V3 pools
     - pancakeswap (BSC/EVM): V3 pools
+    - pancakeswap-sol (Solana): CLMM pools
     """
     # ============================================
     # LIST POOLS - Browse available pools
@@ -258,7 +243,8 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
 
     if not request.connector:
         raise ToolError(
-            "connector is required (meteora | raydium | orca | uniswap | pancakeswap). "
+            "connector is required (meteora | raydium | orca | pancakeswap-sol | uniswap | "
+            "pancakeswap). "
             "Call manage_clmm with no action to load the guide."
         )
     connector = _normalize_connector(request.connector)

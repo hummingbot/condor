@@ -20,6 +20,7 @@ no executor to do that for you:
 | `meteora` | Solana | DLMM |
 | `raydium` | Solana | CLMM |
 | `orca` | Solana | Whirlpools |
+| `pancakeswap-sol` | Solana | CLMM |
 | `uniswap` | EVM | V3 |
 | `pancakeswap` | EVM | V3 |
 
@@ -55,13 +56,10 @@ Example: `manage_clmm(action="create_pool", connector="meteora", network="solana
 
 ## pool_address on close and collect_fees
 
-The API reads a position's pool from its own database. Positions opened by an `lp_executor` are
-never in it — the bot opens those straight against Gateway — so for those you must pass
-`pool_address` explicitly or the call fails with a 400 naming exactly this. The orphan listing
-reports the pool for each orphan, so pass it through.
-
-Gateway itself needs only `position_address` to close; `pool_address` is used to snapshot pending
-fees before the close so they can be reported.
+`pool_address` is optional and informational on both. Gateway needs only `position_address` to
+close or collect, and the API's pre-close fee snapshot (positions-owned, which takes no pool
+filter) does not use it either — so a position the API never recorded, such as every
+`lp_executor` position, closes fine without one.
 
 ## Recovering an orphaned position
 
@@ -72,7 +70,7 @@ fees before the close so they can be reported.
    `position_address` / `pool_address`):
    `manage_clmm(action="position_info", connector=<lp_provider>, network=<connector_name>)`
 3. Close it:
-   `manage_clmm(action="close", connector=<lp_provider>, network=<connector_name>, position_address=<position_address>, pool_address=<pool_address>)`
+   `manage_clmm(action="close", connector=<lp_provider>, network=<connector_name>, position_address=<position_address>)`
 4. `manage_executors(action="resolve_orphan", executor_id="...")` so it stops being reported.
 
 If an entry has `needs_onchain_reconciliation: true` its position address was never persisted (an

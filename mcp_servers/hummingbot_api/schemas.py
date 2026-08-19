@@ -635,7 +635,8 @@ class AMMRequest(BaseModel):
     )
     network: str | None = Field(
         default=None,
-        description="Network ID in 'chain-network' format. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'base-mainnet'",
+        description="Network ID in 'chain-network' format, built from Gateway's chain/network "
+        "config names. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'ethereum-base'",
     )
     wallet_address: str | None = Field(
         default=None,
@@ -718,13 +719,16 @@ class CLMMRequest(BaseModel):
 
     connector: str | None = Field(
         default=None,
-        description="CLMM connector (required for any action): 'meteora', 'raydium', 'orca' (Solana), "
-        "'uniswap', 'pancakeswap' (EVM). A '<name>/clmm' form is accepted, so an orphan record's "
-        "lp_provider (e.g. 'orca/clmm') can be passed through unchanged.",
+        description="CLMM connector (required for any action): 'meteora', 'raydium', 'orca', "
+        "'pancakeswap-sol' (Solana), 'uniswap', 'pancakeswap' (EVM). A '<name>/clmm' form is "
+        "accepted, so an orphan record's lp_provider (e.g. 'orca/clmm') can be passed through "
+        "unchanged.",
     )
     network: str | None = Field(
         default=None,
-        description="Network ID in 'chain-network' format. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'bsc-mainnet'",
+        description="Network ID in 'chain-network' format, built from Gateway's chain/network "
+        "config names. Examples: 'solana-mainnet-beta', 'ethereum-mainnet', 'ethereum-base', "
+        "'ethereum-bsc'",
     )
     wallet_address: str | None = Field(
         default=None,
@@ -732,10 +736,10 @@ class CLMMRequest(BaseModel):
     )
     pool_address: str | None = Field(
         default=None,
-        description="Pool contract address. Required for open. Also required to close or "
-        "collect fees on a position the API never recorded — every lp_executor position, since the "
-        "bot opens those straight against Gateway. Not used by position_info, which lists every "
-        "position the wallet owns.",
+        description="Pool contract address. Required for open. Optional and informational "
+        "everywhere else: the API never reads it on close or collect_fees (Gateway needs only "
+        "position_address, and the pre-close fee snapshot does not use it), and position_info "
+        "lists every position the wallet owns without a pool filter.",
     )
     position_address: str | None = Field(
         default=None,

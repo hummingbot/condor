@@ -1437,10 +1437,13 @@ async def handle_swap_history(
         result = await client.gateway_swap.search_swaps(**search_params)
         swaps = result.get("data", [])
         pagination = result.get("pagination", {})
-        total_count = pagination.get("total_count", len(swaps))
+        # total_count is null while more rows remain; has_more is what tells us
+        # whether there is a next page.
+        total_count = pagination.get("total_count")
 
-        # Update filters with total count
+        # Update filters with pagination state
         filters.total_count = total_count
+        filters.has_more = bool(pagination.get("has_more"))
         set_history_filters(context.user_data, filters)
 
         if not swaps and filters.offset == 0:
@@ -1484,7 +1487,10 @@ async def handle_swap_history(
             filter_summary = ""
 
         message = rf"🔍 *Swap History*{filter_summary}" + "\n"
-        message += rf"_Showing {len(swaps)} of {total_count}_" + "\n\n"
+        if total_count is None:
+            message += rf"_Showing {len(swaps)}, more available_" + "\n\n"
+        else:
+            message += rf"_Showing {len(swaps)} of {total_count}_" + "\n\n"
 
         for swap in swaps:
             line = _format_detailed_swap_line(swap)
@@ -1507,7 +1513,7 @@ async def handle_swap_history(
         keyboard = build_filter_buttons(filters, "dex:swap_hist")
 
         # Pagination row
-        if total_count > filters.limit:
+        if filters.has_next or filters.has_prev:
             keyboard.append(build_pagination_buttons(filters, "dex:swap_hist"))
 
         # Action buttons - use swap_refresh to ensure fresh data when going back
