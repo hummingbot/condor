@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -50,6 +50,7 @@ const ADDRESS_RE = /^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/;
 export function Dex() {
   const { server } = useServer();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { favorites } = useDexFavorites();
   // Everything on this page comes from one shared GeckoTerminal budget; when it
   // is spent the tables empty out, so the reason is shown above them.
@@ -221,7 +222,12 @@ export function Dex() {
     isFetching: favoritesFetching,
     dataUpdatedAt: favoritesUpdatedAt,
   } = useQuery({
-    queryKey: ["dex-favorites", server, network, favoriteAddresses.join(",")],
+    // The address list is deliberately NOT part of the key: un-starring must
+    // remove a row the client already has without spending the shared
+    // GeckoTerminal budget on a refetch. The queryFn reads the current list
+    // from its closure, un-starred rows are filtered out client-side below,
+    // and only a *new* address (absent from the cached page) invalidates.
+    queryKey: ["dex-favorites", server, network],
     queryFn: async () => {
       // The endpoint takes at most 30 addresses per request, so favorites
       // beyond that are fetched in extra batches instead of silently dropped.
@@ -254,7 +260,34 @@ export function Dex() {
       !!server && source.kind === "favorites" && !!favoriteAddresses.length,
     staleTime: POOL_STALE_MS,
   });
-  const favoritePools = favoritePage?.pools ?? [];
+  // Un-starring shrinks this list without touching the query, so the row
+  // disappears with zero network requests.
+  const favoritePools = useMemo(
+    () =>
+      (favoritePage?.pools ?? []).filter((p) =>
+        favoriteAddresses.includes(p.address),
+      ),
+    [favoritePage, favoriteAddresses],
+  );
+
+  // Starring a pool the cached page has never seen is the one favorites change
+  // that genuinely needs upstream data. Reading the cache directly (rather
+  // than depending on `favoritePage`) keeps a throttled batch that dropped a
+  // row from re-triggering this on every response.
+  useEffect(() => {
+    const cached = queryClient.getQueryData<{ pools: PoolSummary[] }>([
+      "dex-favorites",
+      server,
+      network,
+    ]);
+    if (!cached) return; // first fetch happens on its own
+    const known = new Set(cached.pools.map((p) => p.address));
+    if (favoriteAddresses.some((a) => !known.has(a))) {
+      queryClient.invalidateQueries({
+        queryKey: ["dex-favorites", server, network],
+      });
+    }
+  }, [favoriteAddresses, server, network, queryClient]);
 
   // A response knows it was throttled before the next poll of /dex/upstream does,
   // and it is the response whose empty table the user is looking at.
