@@ -17,23 +17,15 @@ from datetime import datetime, timezone
 
 from telegram import Bot
 
-from condor.acp import ACPClient, PermissionCallback, PromptDone, resolve_acp
-from condor.acp.pydantic_ai_client import (
-    PydanticAIClient,
-    is_pydantic_ai_model,
-    model_prefix,
-)
+from condor.acp import ACPClient, PermissionCallback, PromptDone
+from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
 from condor.runtime.confirmations import get_registry as get_confirmation_registry
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
-from handlers.agents._shared import (
-    build_initial_context,
-    get_project_dir,
-    platform_formatting,
-)
+from handlers.agents._shared import build_initial_context, platform_formatting
 
 log = logging.getLogger(__name__)
 
@@ -511,80 +503,40 @@ async def _spawn_session(
     mcp_servers = bound.mcp_servers
     agent_key = bound.agent_key or spec.agent_key
 
-    # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
-    use_pydantic_ai = is_pydantic_ai_model(agent_key)
+    # One factory decides PydanticAI vs ACP for every surface (ARCH-192).
+    # Chat-session specifics: the CONDOR_* env pair, the bound-Agent identity
+    # header (system level — the opening context below is a user turn and loses
+    # to the host's own system prompt, FEAT-025), the saved LM Studio pref as
+    # the *default* base URL (a named custom endpoint still wins), and
+    # strict_custom_endpoint=True so a key naming an unsaved endpoint fails
+    # loudly with the guided RuntimeError instead of dying deep in httpx.
+    import os
 
-    if use_pydantic_ai:
-        # For Pydantic AI models: auto-detect or use configured filter mode
-        import os
+    from condor.preferences import get_agent_prefs
+    from condor.runtime.llm_client import build_llm_client
 
-        from condor.preferences import get_agent_prefs
-
-        # Priority: user preference > env variable > auto-detect (None)
-        agent_prefs = get_agent_prefs(user_data) if user_data else {}
-        tool_filter_mode = (
-            agent_prefs.get("tool_filter_mode")
-            or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
-            or None  # None triggers auto-detection based on model size
-        )
-
-        base_url = (
+    agent_prefs = get_agent_prefs(user_data) if user_data else {}
+    client = build_llm_client(
+        agent_key,
+        mcp_servers=mcp_servers,
+        permission_callback=permission_callback,
+        # A bound Agent's allowlist is enforced here exactly as it is on
+        # consult and loop, so an Agent has the same reach in every mode.
+        allowed_tools=bound.tools or None,
+        extra_env=extra_env,
+        system_prompt=(
+            agent_identity_header(bound.agent_slug, bound.label)
+            if bound.is_agent
+            else ""
+        ),
+        user_data=user_data,
+        user_id=spec.user_id,
+        default_base_url=(
             agent_prefs.get("base_url") or os.environ.get("LMSTUDIO_BASE_URL") or None
-        )
-
-        api_key = None
-        if model_prefix(agent_key) == "custom":
-            # Custom OpenAI-compatible provider. The agent key names one of the
-            # user's saved endpoints ("custom@venice:..."); those live in the
-            # shared preference store so Telegram and the web dashboard resolve
-            # them identically. CUSTOM_LLM_* env vars cover headless deploys.
-            # strict=True keeps the actionable RuntimeError for a missing named
-            # endpoint; user_id lets a session without user_data still resolve
-            # saved endpoints (parity with consult/engine).
-            from condor.preferences import resolve_custom_endpoint
-
-            base_url, api_key = resolve_custom_endpoint(
-                agent_key,
-                user_data=user_data,
-                user_id=spec.user_id,
-                strict=True,
-            )
-
-        client = PydanticAIClient(
-            model=agent_key,
-            mcp_servers=mcp_servers,
-            permission_callback=permission_callback,
-            extra_env=extra_env,
-            tool_filter_mode=tool_filter_mode,  # Auto-detects if None
-            base_url=base_url,
-            api_key=api_key,
-            # A bound Agent's allowlist is enforced here exactly as it is on
-            # consult and loop, so an Agent has the same reach in every mode.
-            allowed_tools=bound.tools or None,
-        )
-    else:
-        # For ACP subprocess models: claude-code, gemini, codex.
-        # A Claude model can be pinned via a suffix, e.g. "claude-acp:opus" /
-        # "claude-acp:sonnet"; ACPClient selects it via session/set_model after
-        # handshake (the bridge ignores ANTHROPIC_MODEL). Bare key = agent default.
-        command, model_env, model_pref = resolve_acp(agent_key)
-        client = ACPClient(
-            command=command,
-            working_dir=get_project_dir(),
-            mcp_servers=mcp_servers,
-            permission_callback=permission_callback,
-            extra_env={**extra_env, **model_env},
-            model=model_pref,
-            # Who this brain IS, at system level. The opening context below is a
-            # user turn: it is read once and then loses to the host's own system
-            # prompt, which is why a bound Agent kept answering as Condor
-            # (FEAT-025). This is the one channel that outranks it.
-            system_prompt=(
-                agent_identity_header(bound.agent_slug, bound.label)
-                if bound.is_agent
-                else ""
-            ),
-        )
+        ),
+        tool_filter_mode=agent_prefs.get("tool_filter_mode"),
+        strict_custom_endpoint=True,
+    )
 
     await client.start()
 

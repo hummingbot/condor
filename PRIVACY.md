@@ -8,9 +8,9 @@ optional exception does.
 **Short version:** a fresh install sends nothing. It has no telemetry consent
 recorded, which resolves to level `off`, at which the emitter returns before it
 has looked at its arguments — no buffer, no file, no directory. Nothing changes
-until an admin taps "yes" on a prompt. Even then, this repository has no
-collector address compiled into it: with `CONDOR_TELEMETRY_URL` unset, the send
-path is inert and events can only ever reach a capped local file.
+until an admin taps "yes" on a prompt. If one does, batches go to the project's
+collector at `https://telemetry.hummingbot.org/v1/events`, which is fixed in the
+source and cannot be pointed elsewhere; consent is the only switch.
 
 The whole mechanism is about 900 lines in [`condor/telemetry/`](condor/telemetry/).
 It is meant to be read, not trusted.
@@ -94,13 +94,20 @@ per-install, the same person on two installs produces two unrelated hashes.
 
 ## Where it goes
 
-Nowhere, unless you configure a destination.
+Nowhere, unless you opt in.
 
-No collector URL is compiled into this repository. Events are buffered in memory
-and, when a batch cannot be delivered, appended to
+If you do, batches are POSTed to `https://telemetry.hummingbot.org/v1/events`.
+That address is compiled into
+[`condor/telemetry/outbox.py`](condor/telemetry/outbox.py) as `COLLECTOR_URL`
+and is not configurable — there is no environment variable or config key that
+redirects it, so the only way to change where your data goes is to edit that
+line in your own checkout. The collector itself is open source
+(`condor-telemetry-server`).
+
+Events are buffered in memory and, when a batch cannot be delivered, appended to
 `condor/.runtime/telemetry/outbox.jsonl`, which is capped at 5,000 events and 7
-days — oldest dropped. With `CONDOR_TELEMETRY_URL` unset, that is the entire
-life cycle: a local file, capped, that you can delete.
+days — oldest dropped. At level `off` no event is ever created, so nothing is
+buffered, nothing is written, and nothing is sent.
 
 You can read exactly what would be sent:
 
@@ -121,8 +128,7 @@ Three ways to control it, in order of precedence:
 
 1. **Environment** — `CONDOR_TELEMETRY=off` in your `.env`. This overrides
    everything, in both directions, and is the right answer for a headless or
-   containerized install. `CONDOR_TELEMETRY_URL` is what enables sending at all;
-   leave it unset and nothing can be transmitted.
+   containerized install.
 2. **The dashboard API** — `PUT /api/v1/settings/telemetry?level=off` (admin
    only). `GET` the same path to see the current state.
 3. **`config.yml`** — edit the `telemetry` section directly:

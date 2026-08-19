@@ -220,8 +220,8 @@ class _FakeClient:
 @pytest.fixture
 def registry(monkeypatch):
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _FakeClient)
-    monkeypatch.setattr(session_module, "PydanticAIClient", _FakeClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _FakeClient)
+    monkeypatch.setattr("condor.acp.pydantic_ai_client.PydanticAIClient", _FakeClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
         "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []

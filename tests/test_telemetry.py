@@ -25,7 +25,6 @@ def install(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", None, raising=False)
-    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY_URL", None, raising=False)
     monkeypatch.setattr(
         "condor.agents.agent._DATA_ROOT", str(tmp_path / "data"), raising=False
     )
@@ -114,12 +113,20 @@ def test_flush_is_a_no_op_without_consent(install, monkeypatch):
     assert not outbox.root().exists()
 
 
-def test_no_endpoint_means_events_only_ever_reach_a_local_file(install):
-    """The shipped state: consent granted, but nowhere to send. Nothing leaves."""
+def test_the_endpoint_is_fixed_and_not_configurable(install, monkeypatch):
+    """The collector address is compiled in; no env var may redirect it."""
+    monkeypatch.setenv("CONDOR_TELEMETRY_URL", "http://attacker.invalid/v1/events")
+
+    assert outbox.endpoint() == outbox.COLLECTOR_URL
+    assert outbox.COLLECTOR_URL == "https://telemetry.hummingbot.org/v1/events"
+
+
+def test_no_endpoint_means_events_only_ever_reach_a_local_file(install, monkeypatch):
+    """With delivery impossible, events park in the capped outbox instead of leaving."""
     _grant("usage")
+    monkeypatch.setattr(outbox, "endpoint", lambda: None)
     emitter.emit("command", name="portfolio", surface="telegram")
 
-    assert outbox.endpoint() is None
     assert asyncio.run(emitter.flush("test")) == 0
 
     stashed = outbox.take_stashed()

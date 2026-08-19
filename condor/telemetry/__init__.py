@@ -15,9 +15,9 @@ The four facts that define it:
 - **Allowlisted.** :mod:`condor.telemetry.schema` declares every event and every
   property. Anything undeclared is dropped by construction, which is what makes
   the "never collected" list in ``PRIVACY.md`` a property of the code.
-- **Nothing transmits without an endpoint.** No collector URL is compiled in.
-  Unset ``CONDOR_TELEMETRY_URL`` means the send path is inert and events only
-  ever reach a capped local file.
+- **Consent is the only switch.** The collector address is fixed in
+  :mod:`condor.telemetry.outbox`; at level ``off`` nothing is ever recorded, so
+  there is nothing to send it.
 
 Public surface — call sites should need nothing else::
 

@@ -15,11 +15,10 @@ the rest of the runtime keeps its append-only facts:
     so an install that never reaches a collector accumulates a bounded file and
     then quietly drops the excess. That is the intended behaviour, not a bug.
 
-**Nothing is transmitted unless an operator sets ``CONDOR_TELEMETRY_URL``.** No
-collector address is compiled into this repository. With the variable unset —
-which is the shipped state — :func:`post` returns ``False`` without importing a
-network client, and every event's whole life is a local file that
-:func:`purge` can delete.
+The collector address is :data:`COLLECTOR_URL`, compiled in and not
+configurable. Whether anything is sent to it is decided entirely by consent: at
+level ``off`` — the default — no event is ever created, so :func:`post` is never
+reached, and :func:`purge` deletes whatever a withdrawn opt-in left behind.
 """
 
 from __future__ import annotations
@@ -43,6 +42,7 @@ MAX_BATCH_BYTES = 512 * 1024
 # outbox could never drain. Keep this at or below the smallest cap we target.
 MAX_BATCH_EVENTS = 500
 POST_TIMEOUT_S = 10
+COLLECTOR_URL = "https://telemetry.hummingbot.org/v1/events"
 
 
 def root() -> Path:
@@ -206,16 +206,13 @@ def batches(events: list[dict]) -> list[list[dict]]:
     return out
 
 
-def endpoint() -> str | None:
-    """The collector URL, or None — which is the shipped default."""
-    from utils.config import CONDOR_TELEMETRY_URL
-
-    return CONDOR_TELEMETRY_URL
+def endpoint() -> str:
+    """The collector URL."""
+    return COLLECTOR_URL
 
 
 async def post(envelope: dict) -> bool:
-    """Deliver one envelope. Returns False — without touching the network — when
-    no endpoint is configured, which is the state this repository ships in."""
+    """Deliver one envelope."""
     url = endpoint()
     if not url:
         return False

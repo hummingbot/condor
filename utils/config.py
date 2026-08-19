@@ -41,8 +41,3 @@ else:
 #   ping  - install / heartbeat / version_change / shutdown only.
 #   usage - the full allowlisted taxonomy in condor/telemetry/schema.py.
 CONDOR_TELEMETRY = os.environ.get("CONDOR_TELEMETRY", "").strip().lower() or None
-
-# Where a batch would be POSTed. Deliberately unset by default and NOT baked
-# into the source: with no URL the send path is inert, and events can only ever
-# accumulate in the local capped outbox. See PRIVACY.md.
-CONDOR_TELEMETRY_URL = os.environ.get("CONDOR_TELEMETRY_URL", "").strip() or None

@@ -159,8 +159,6 @@ async def flush(reason: str = "job") -> int:
             return 0
 
         if not outbox.endpoint():
-            # Nowhere to go yet (the collector is FEAT-024). Park them; the cap
-            # in outbox.py is what keeps this honest on a long-running install.
             outbox.stash(events)
             return 0
 

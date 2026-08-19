@@ -832,10 +832,9 @@ async def delete_custom_provider(
 async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
     """What this install has agreed to, and whether it could send anything.
 
-    ``endpoint_configured`` is the honest answer to "is this thing on": with no
-    ``CONDOR_TELEMETRY_URL`` set — the shipped state — nothing can be
-    transmitted no matter what the consent says, and events only accumulate in
-    a capped local file.
+    The collector address is fixed in the source, so consent is the only thing
+    that decides whether anything is transmitted: at level ``off`` no event is
+    recorded in the first place.
     """
     from condor.telemetry import consent, emitter, outbox
 
