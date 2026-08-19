@@ -2,11 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowLeft,
-  CheckCircle,
   ChevronLeft,
   ChevronRight,
-  Copy,
-  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -16,6 +13,10 @@ import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { LpPositionBar } from "@/components/dex/LpPositionBar";
 import { PoolAddress, PoolStats } from "@/components/dex/PoolStats";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
+import {
+  ErrorToast,
+  ExecutorSuccessModal,
+} from "@/components/executor/ExecutorSuccessModal";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { useLpConfig } from "@/components/executor/lp-config";
 import {
@@ -31,7 +32,6 @@ import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
 import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api } from "@/lib/api";
-import { copyText } from "@/lib/clipboard";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
 
@@ -629,52 +629,16 @@ export function DexPool() {
       </div>
 
       {successId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="relative w-[360px] rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] p-6 shadow-2xl shadow-black/40">
-            <button
-              onClick={() => setSuccessId(null)}
-              className="absolute right-3 top-3 rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            >
-              <X className="h-4 w-4" />
-            </button>
-            <div className="mb-4 flex justify-center">
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-green)]/15">
-                <CheckCircle className="h-6 w-6 text-[var(--color-green)]" />
-              </div>
-            </div>
-            <h3 className="mb-1 text-center text-sm font-semibold">
-              {tab === "lp" ? "LP Position" : "Order"} Created
-            </h3>
-            <p className="mb-4 text-center text-[11px] text-[var(--color-text-muted)]">
-              In {pairLabel} on {pool.dex_id}
-            </p>
-            <div className="mb-4 flex items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-[11px]">
-              <span className="text-[var(--color-text-muted)]">Executor ID</span>
-              <div className="flex items-center gap-1.5">
-                <span className="font-mono">{successId.slice(0, 12)}…</span>
-                <button
-                  onClick={() => void copyText(successId)}
-                  className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                  title="Copy full ID"
-                >
-                  <Copy className="h-3 w-3" />
-                </button>
-              </div>
-            </div>
-            <button
-              onClick={() => setSuccessId(null)}
-              className="w-full rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110"
-            >
-              Continue
-            </button>
-          </div>
-        </div>
+        <ExecutorSuccessModal
+          executorId={successId}
+          title={`${tab === "lp" ? "LP Position" : "Order"} Created`}
+          subtitle={`In ${pairLabel} on ${pool.dex_id}`}
+          onClose={() => setSuccessId(null)}
+        />
       )}
 
       {createMutation.isError && (
-        <div className="absolute bottom-16 right-4 rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-4 py-2 text-sm text-[var(--color-red)]">
-          {(createMutation.error as Error).message}
-        </div>
+        <ErrorToast message={(createMutation.error as Error).message} />
       )}
     </div>
   );

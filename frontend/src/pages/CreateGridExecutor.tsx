@@ -1,9 +1,13 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useReducer, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, CheckCircle, Loader2, Rocket } from "lucide-react";
+import { ArrowLeft, Loader2, Rocket } from "lucide-react";
 
 import { NoServerCard } from "@/components/NoServerCard";
+import {
+  ErrorToast,
+  ExecutorSuccessModal,
+} from "@/components/executor/ExecutorSuccessModal";
 import { ExchangeSelector } from "@/components/market/ExchangeSelector";
 import { PairSelector, useTradingRules } from "@/components/market/PairSelector";
 import { PriceTicker } from "@/components/market/PriceTicker";
@@ -314,29 +318,19 @@ export function CreateGridExecutor() {
 
       {/* Success modal */}
       {successId && (
-        <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/60">
-          <div className="flex flex-col items-center gap-3 rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] px-8 py-6 shadow-2xl shadow-black/40">
-            <CheckCircle className="h-10 w-10 text-[var(--color-green)]" />
-            <div className="text-center">
-              <p className="text-sm font-semibold text-[var(--color-text)]">Grid Executor Created</p>
-              <p className="mt-1 font-mono text-xs text-[var(--color-text-muted)]">{successId}</p>
-            </div>
-            <p className="text-[10px] text-[var(--color-text-muted)]">Redirecting to executors...</p>
-            <button
-              onClick={() => navigate("/executors")}
-              className="mt-1 rounded-lg bg-[var(--color-primary)] px-4 py-1.5 text-xs font-medium text-white hover:brightness-110"
-            >
-              Go now
-            </button>
-          </div>
-        </div>
+        <ExecutorSuccessModal
+          executorId={successId}
+          title="Grid Executor Created"
+          subtitle="Redirecting to executors..."
+          primaryLabel="Go now"
+          onPrimary={() => navigate("/executors")}
+          onClose={() => setSuccessId(null)}
+        />
       )}
 
       {/* Error toast */}
       {createMutation.isError && (
-        <div className="absolute bottom-16 right-4 rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-4 py-2 text-sm text-[var(--color-red)]">
-          {(createMutation.error as Error).message}
-        </div>
+        <ErrorToast message={(createMutation.error as Error).message} />
       )}
     </div>
   );
