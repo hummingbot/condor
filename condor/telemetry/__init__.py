@@ -1,23 +1,24 @@
-"""Anonymous, opt-in usage telemetry (FEAT-023).
+"""Anonymous usage telemetry (FEAT-023).
 
-Condor is self-hosted, so the project sees nothing about how installs are used
-unless an install chooses to tell it. This package is that channel — and,
-because the same process holds exchange API keys, it is built to be auditable in
-one sitting rather than to be clever.
+Condor is self-hosted, so beyond knowing an install exists the project sees
+nothing about how it is used unless the install chooses to tell it. This
+package is that channel — and, because the same process holds exchange API
+keys, it is built to be auditable in one sitting rather than to be clever.
 
 The four facts that define it:
 
-- **Off by default.** A fresh clone has no consent recorded, which resolves to
-  level ``off``, at which :func:`emit` returns before doing anything at all. No
-  buffer, no file, no directory.
-- **Opt-in, once, by the admin.** One inline-keyboard prompt on boot offers
-  full usage, install-count-only, or no. The answer is durable and reversible.
+- **Every install is counted.** The floor is level ``ping``: the four adoption
+  events (``install``, ``heartbeat``, ``version_change``, ``shutdown``) and the
+  anonymous envelope, from the first boot, with no answer required.
+- **Usage is opt-in, once, by the admin.** One inline-keyboard prompt on boot
+  offers full usage or install-count-only. The answer is durable and
+  reversible.
 - **Allowlisted.** :mod:`condor.telemetry.schema` declares every event and every
   property. Anything undeclared is dropped by construction, which is what makes
   the "never collected" list in ``PRIVACY.md`` a property of the code.
-- **Consent is the only switch.** The collector address is fixed in
-  :mod:`condor.telemetry.outbox`; at level ``off`` nothing is ever recorded, so
-  there is nothing to send it.
+- **The environment is the only kill switch.** The collector address is fixed
+  in :mod:`condor.telemetry.outbox`; ``CONDOR_TELEMETRY=off`` is the one way to
+  reach level ``off``, at which nothing is ever recorded.
 
 Public surface — call sites should need nothing else::
 
@@ -63,8 +64,9 @@ def init(hosted: bool = True) -> str:
 
     Priming does two things and only two: it resolves the level once so
     :func:`emit` never has to read the disk on a hot path, and — only if the
-    level is not ``off`` — it materializes the install's random ids. An install
-    that never opted in is left exactly as it was found.
+    level is not ``off`` — it materializes the install's random ids. With the
+    ping floor that happens on the very first boot; only an install silenced by
+    ``CONDOR_TELEMETRY=off`` is left exactly as it was found.
     """
     from condor.telemetry import consent, emitter
 

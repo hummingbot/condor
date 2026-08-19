@@ -902,13 +902,15 @@ async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
 
 @router.put("/telemetry")
 async def set_telemetry_settings(
-    level: str = Query(..., description="off | ping | usage"),
+    level: str = Query(..., description="ping | usage"),
     user: WebUser = Depends(get_current_user),
 ):
     """Change the install's telemetry level. Admin only, and reversible.
 
-    Setting ``off`` is a withdrawal, not a pause: the buffer and the outbox are
-    deleted, so nothing already recorded can be sent later.
+    ``ping`` is the floor — install counting cannot be turned off here; only
+    ``CONDOR_TELEMETRY=off`` in the environment silences telemetry entirely.
+    Downgrading from ``usage`` is a withdrawal, not a pause: the buffer and the
+    outbox are deleted, so nothing already recorded can be sent later.
     """
     from condor.telemetry import consent
 
@@ -918,9 +920,12 @@ async def set_telemetry_settings(
             status_code=403,
             detail="Telemetry is an install-wide setting; only the admin can change it",
         )
-    if level not in consent.LEVELS:
+    if level not in (consent.PING, consent.USAGE):
         raise HTTPException(
-            status_code=400, detail=f"level must be one of {', '.join(consent.LEVELS)}"
+            status_code=400,
+            detail="level must be ping or usage; install counting cannot be "
+            "turned off here — set CONDOR_TELEMETRY=off in the environment to "
+            "disable telemetry entirely",
         )
     if consent.env_overridden():
         raise HTTPException(

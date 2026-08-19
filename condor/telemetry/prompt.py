@@ -1,10 +1,10 @@
 """The one-tap consent prompt, and the callback that answers it.
 
-Opt-in only works if asking is cheap, so this is a single message with three
+Opt-in only works if asking is cheap, so this is a single message with two
 buttons next to the "Condor is online" notification the admin already gets. It
 is sent at most once per version, the intent is written to disk *before* the
 message goes out (a crash loop must not re-ask forever), and until it is
-answered the install emits nothing at all.
+answered the install stays at the ``ping`` floor — counted, nothing more.
 """
 
 from __future__ import annotations
@@ -17,14 +17,17 @@ CALLBACK_PREFIX = "telemetry"
 
 _TEXT = (
     "Help improve Condor?\n\n"
-    "Condor can send an anonymous, allowlisted usage summary to the project: "
-    "which commands and screens get used, what breaks, and which models agents "
-    "run. It is off right now and stays off unless you say yes.\n\n"
+    "Condor counts installs so the project knows it is used: a random id, the "
+    "version, and an uptime ping — nothing about you or your trading. That is "
+    "always on.\n\n"
+    "It can also send an anonymous, allowlisted usage summary: which commands "
+    "and screens get used, what breaks, and which models agents run. That part "
+    "is up to you.\n\n"
     "Never included: API keys, wallet addresses, server names or URLs, "
     "trading pairs, amounts, balances, positions, prompts or agent replies, "
     "and no Telegram id or username.\n\n"
     "Full details in PRIVACY.md at the root of the repo, which also says how "
-    "to change or withdraw this answer at any time."
+    "to change this answer at any time."
 )
 
 
@@ -35,7 +38,8 @@ def keyboard():
         [
             [
                 InlineKeyboardButton(
-                    "Yes, help improve Condor", callback_data=f"{CALLBACK_PREFIX}:usage"
+                    "Yes, share usage summaries",
+                    callback_data=f"{CALLBACK_PREFIX}:usage",
                 )
             ],
             [
@@ -43,7 +47,6 @@ def keyboard():
                     "Only count my install", callback_data=f"{CALLBACK_PREFIX}:ping"
                 )
             ],
-            [InlineKeyboardButton("No thanks", callback_data=f"{CALLBACK_PREFIX}:off")],
         ]
     )
 
@@ -98,14 +101,8 @@ async def callback_handler(update, context) -> None:
         answer = (
             (query.data or "").split(":", 1)[1] if ":" in (query.data or "") else ""
         )
-        if answer == "off":
-            consent.deny()
-            await query.edit_message_text(
-                "Telemetry stays off. Nothing was collected, and the local "
-                "buffer has been deleted."
-            )
-            return
-
+        # An "off" tap can only come from a prompt sent by an older version;
+        # grant() lands anything unrecognized on ping, the floor.
         chosen = consent.grant(answer)
         from condor.telemetry import emitter
 
@@ -113,8 +110,7 @@ async def callback_handler(update, context) -> None:
         if chosen == consent.PING:
             await query.edit_message_text(
                 "Thanks. Condor will only report that this install exists and "
-                "which version it runs. PRIVACY.md says how to change or "
-                "withdraw this."
+                "which version it runs. PRIVACY.md says how to change this."
             )
         else:
             await query.edit_message_text(

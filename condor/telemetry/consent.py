@@ -1,26 +1,25 @@
-"""Consent: the three-state machine that decides whether anything happens at all.
+"""Consent: the machine that decides how much an install says.
 
 The install — not the individual user — is the unit of consent, because the
 admin owns the install. The states are ``unknown`` (the default on a fresh
-clone), ``granted`` and ``denied``, stored in ``config.yml`` under ``telemetry``
-alongside the install's identity.
+clone), ``granted`` and ``denied`` (legacy — older installs could refuse from
+the prompt), stored in ``config.yml`` under ``telemetry`` alongside the
+install's identity.
 
 Two rules matter more than the rest:
 
-**Unknown means off.** Not "buffered until someone decides" — off. An install
-whose admin has never answered the prompt collects nothing, holds nothing in
-memory, and writes no spool file. The original design buffered pre-consent
-events and simply refused to send them; recording data before permission is a
-worse default than losing it, so this narrows that decision. Nothing is lost
-that we had any right to.
+**The floor is ``ping``.** Every install is counted. An install whose admin has
+never answered the prompt emits the four adoption events (``install``,
+``heartbeat``, ``version_change``, ``shutdown``) and nothing else; the prompt
+decides one thing only — whether the ``usage`` events are added on top. There
+is no "off" answer on the form.
 
 **The environment wins.** ``CONDOR_TELEMETRY`` in ``utils/config.py`` overrides
-the stored answer in both directions, so a headless or containerized install is
-never blocked on a Telegram prompt, and an operator can force ``off`` no matter
-what is on disk.
+the stored answer in both directions, and it is the only way to reach level
+``off`` — the operator's kill switch for a headless or containerized install.
 
-Reads never create ``config.yml``. On an install that has not been configured at
-all, :func:`state` answers ``unknown`` from nothing.
+Reads never create ``config.yml``; the identity ids are materialized by
+:func:`condor.telemetry.init` on the first boot that can actually emit.
 """
 
 from __future__ import annotations
@@ -41,8 +40,10 @@ UNKNOWN = "unknown"
 GRANTED = "granted"
 DENIED = "denied"
 
-# Answer -> level, the three buttons of the admin prompt.
-ANSWER_LEVELS = {"usage": USAGE, "ping": PING, "off": OFF}
+# Answer -> level, the two buttons of the admin prompt. "off" is deliberately
+# not an answer: install counting is the floor, and only the environment can
+# silence it entirely.
+ANSWER_LEVELS = {"usage": USAGE, "ping": PING}
 
 _cached_level: str | None = None
 
@@ -113,10 +114,12 @@ def _compute_level() -> str:
     env = _env_level()
     if env is not None:
         return env
-    if state() != GRANTED:
-        return OFF
-    stored = _section().get("level")
-    return stored if stored in LEVELS else USAGE
+    if state() == GRANTED:
+        stored = _section().get("level")
+        return stored if stored in (PING, USAGE) else USAGE
+    # Unanswered — and legacy denied — installs are still counted: ping is the
+    # floor, and only the environment can force `off`.
+    return PING
 
 
 def refresh() -> str:
@@ -172,10 +175,13 @@ def install_secret() -> str:
 
 
 def grant(answer: str) -> str:
-    """Record a positive answer. ``answer`` is one of :data:`ANSWER_LEVELS`."""
-    chosen = ANSWER_LEVELS.get(answer, USAGE)
-    if chosen == OFF:
-        return deny()
+    """Record the admin's answer. ``answer`` is one of :data:`ANSWER_LEVELS`.
+
+    Anything unrecognized — including an "off" tap on a prompt left over from
+    an older version — lands on ``ping``, the floor, never silently on
+    ``usage``.
+    """
+    chosen = ANSWER_LEVELS.get(answer, PING)
     _update(
         consent=GRANTED,
         level=chosen,
@@ -185,32 +191,29 @@ def grant(answer: str) -> str:
     return chosen
 
 
-def deny() -> str:
-    """Record a refusal and destroy whatever was already on disk.
+def _purge_collected() -> None:
+    """Destroy everything recorded but not yet sent.
 
-    Denial deletes the spool and the outbox rather than merely ignoring them:
-    an answer of "no" should leave nothing behind to be sent by a later bug.
+    Withdrawing usage consent deletes the spool and the outbox rather than
+    merely ignoring them: a downgrade should leave nothing behind to be sent
+    by a later bug.
     """
-    _update(
-        consent=DENIED,
-        level=OFF,
-        decided_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    )
     from condor.telemetry import emitter, outbox
 
     emitter.discard_buffer()
     outbox.purge()
-    return OFF
 
 
 def set_level(new_level: str) -> str:
-    """Change the level of an install that has already consented."""
-    if new_level not in LEVELS:
+    """Change the level of an install. ``off`` is not accepted here: the floor
+    is ``ping``, and only ``CONDOR_TELEMETRY=off`` reaches ``off``."""
+    if new_level not in (PING, USAGE):
         return level()
-    if new_level == OFF:
-        return deny()
+    downgrading = new_level == PING and level() == USAGE
     _update(consent=GRANTED, level=new_level)
     ensure_identity()
+    if downgrading:
+        _purge_collected()
     return new_level
 
 
@@ -220,8 +223,8 @@ def set_level(new_level: str) -> str:
 def mark_feature_seen(feature: str) -> bool:
     """True the first time this install ever uses ``feature``, False after.
 
-    Backs the ``feature_first_use`` activation funnel. Only called when
-    telemetry is on, so an opted-out install never accumulates the list.
+    Backs the ``feature_first_use`` activation funnel. Only called at level
+    ``usage``, so an install that has not opted in never accumulates the list.
     """
     section = _section()
     seen = list(section.get("features_seen") or [])

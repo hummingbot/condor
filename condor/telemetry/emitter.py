@@ -8,9 +8,11 @@ contract is what makes that acceptable:
    the fallback is silence.
 2. **It never blocks and never does I/O** in the host process. It appends to a
    bounded ``deque``; the network is somebody else's job, 15 minutes later.
-3. **It is off unless someone said yes.** The first gate is a cached level read,
-   and on an install that has not opted in that read returns ``off`` and the
-   function returns before it has looked at its own arguments.
+3. **It says no more than the level allows.** The first gate is a cached level
+   read: ``CONDOR_TELEMETRY=off`` makes it return before it has looked at its
+   own arguments, and at the default ``ping`` floor only the four adoption
+   events pass the schema gate — everything else needs an explicit ``usage``
+   opt-in.
 4. **It cannot emit what the schema does not declare.** Properties are
    allowlisted, type-checked and truncated by :mod:`condor.telemetry.schema`.
 
@@ -123,7 +125,8 @@ def drain() -> tuple[list[dict], int]:
 
 
 def discard_buffer() -> None:
-    """Throw the ring away without sending it. Used when consent is denied."""
+    """Throw the ring away without sending it. Used when usage consent is
+    withdrawn."""
     global _dropped
     _buffer.clear()
     _dropped = 0
@@ -133,14 +136,16 @@ def discard_buffer() -> None:
 async def flush(reason: str = "job") -> int:
     """Try to deliver everything pending. Returns the number of events sent.
 
-    Returns 0 without reading a file when consent is not granted, and 0 without
-    touching the network when no endpoint is configured — the shipped state, in
-    which events simply accumulate in the capped outbox.
+    Returns 0 without reading a file when the operator has forced ``off``, and
+    0 without touching the network when no endpoint is configured — the shipped
+    state, in which events simply accumulate in the capped outbox. An
+    unanswered install flushes too: the ping floor is only worth anything if
+    the adoption events actually leave.
     """
     try:
         from condor.telemetry import consent, context, outbox
 
-        if consent.state() != consent.GRANTED or consent.level() == consent.OFF:
+        if consent.level() == consent.OFF:
             return 0
 
         events, dropped_count = drain()

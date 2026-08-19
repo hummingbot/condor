@@ -12,10 +12,11 @@ A Telegram bot for monitoring and trading with Hummingbot via the **Hummingbot A
 >
 > Full walkthrough: [Securing Condor and Hummingbot API with Tailscale](https://hummingbot.org/blog/posts/securing-condor-and-hummingbot-api-with-tailscale/) · [Hummingbot API Tailscale guide](https://hummingbot.org/hummingbot-api/tailscale/)
 
-> **Privacy:** Condor collects nothing by default. It ships with usage telemetry
-> **off**, and it stays that way unless an admin explicitly opts in from the one
-> prompt it sends on first boot. What that option would and would not collect —
-> where it goes, and how to verify it is off — is spelled out in
+> **Privacy:** Condor counts installs anonymously — a random id, the version,
+> and a heartbeat; nothing about you or your trading. Everything beyond that is
+> **opt-in** from the one prompt it sends on first boot, and
+> `CONDOR_TELEMETRY=off` silences telemetry entirely. What each level does and
+> does not collect, where it goes, and how to verify it, is spelled out in
 > [PRIVACY.md](PRIVACY.md).
 
 ## Features
