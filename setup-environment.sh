@@ -697,23 +697,27 @@ echo ""
 echo -e "${BOLD}Step 2: AI Model (LLM)${RESET}"
 echo ""
 
-# The wizard renders the same readiness probes the bot uses, so it has to run in
-# the project's Python env -- which means `uv run` syncs it here, a minute before
-# `make install` would have. Gated behind its own Y/n so a straight "skip" never
-# pays that cost at all -- only answering Y triggers the (first-run) sync. Never
-# fatal: a model can be picked later with `make pick-model`, and setup has more
-# to do.
+# The wizard (condor.setup_llm) renders the same readiness probes the bot
+# uses, so it has to run in the project's Python env. Sync it FIRST, before
+# asking anything below -- otherwise `uv run`'s own venv-creation/install
+# output shows up sandwiched between "Pick an AI model now?" and the actual
+# model menu, which reads as the prompt getting interrupted mid-conversation
+# rather than as one continuous step. Unconditional (not gated behind the
+# Y/n) since both branches below need it: picking a model runs the wizard
+# directly, and skipping still needs it synced for `--status`/no-tty.
+msg_info "Setting up Condor's Python environment (~250MB first run, 1-3 min)..."
+uv run python -c "pass"
+echo ""
+
 if (: </dev/tty) 2>/dev/null; then
     prompt_visible "Pick an AI model now? [Y/n]" "Y" "pick_model_now"
     if [[ "${pick_model_now:-Y}" =~ ^[Nn]$ ]]; then
         msg_ok "Skipped -- run 'make pick-model' any time"
     else
-        # condor.setup_llm does everything for this step in one process: syncs
-        # the Python env, shows the menu, and -- if the model picked (or kept)
-        # needs a CLI bridge that isn't installed yet, e.g. `npm install -g
-        # @google/gemini-cli` -- installs and confirms it right here, so there
-        # is no separate install pass bolted on after this script moves on.
-        msg_info "Setting up Condor's Python environment (~250MB first run, 1-3 min)..."
+        # The venv is already warm above, so this goes straight to the model
+        # menu -- and if the model picked (or kept) needs a CLI bridge that
+        # isn't installed yet (e.g. `npm install -g @google/gemini-cli`),
+        # installs and confirms it right here, no separate pass afterward.
         uv run python -m condor.setup_llm < /dev/tty || \
             msg_warn "Model selection did not complete -- run 'make pick-model' later"
     fi
