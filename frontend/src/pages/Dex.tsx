@@ -128,6 +128,13 @@ export function Dex() {
 
   const isSearch = source.kind === "gecko" && source.view === "token";
   const isAddress = ADDRESS_RE.test(debouncedQuery);
+  // The query text only reaches the request for gateway sources and the token
+  // search view; keying other views on it would refetch a byte-identical
+  // listing (and spend GeckoTerminal budget) when leftover text sits in the
+  // box. Same for network/dexes, which gateway requests never send.
+  const effectiveQuery =
+    source.kind === "gateway" || isSearch ? debouncedQuery : "";
+  const isGateway = source.kind === "gateway";
   const enabled =
     !!server &&
     source.kind !== "favorites" &&
@@ -147,9 +154,9 @@ export function Dex() {
         : source.kind === "gateway"
           ? source.connector
           : "favorites",
-      network,
-      debouncedQuery,
-      dexes.join(","),
+      isGateway ? "" : network,
+      effectiveQuery,
+      isGateway ? "" : dexes.join(","),
       page,
     ],
     queryFn: () =>
@@ -162,7 +169,7 @@ export function Dex() {
               // Same tab, same columns — filled in rather than em-dashed.
               source: source.connector === "orca" ? "orca" : "gateway",
               connector: source.connector,
-              query: debouncedQuery || undefined,
+              query: effectiveQuery || undefined,
               limit: PAGE_SIZE,
               page,
             }
@@ -170,7 +177,7 @@ export function Dex() {
               source: "gecko",
               network,
               view: source.kind === "gecko" ? source.view : "trending",
-              query: isSearch ? debouncedQuery : undefined,
+              query: effectiveQuery || undefined,
               dexes,
               limit: PAGE_SIZE,
               page,
