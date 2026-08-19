@@ -84,20 +84,38 @@ def format_tool_summary(tool_call: dict[str, Any]) -> str:
         amount = input_data.get("amount", "?")
         return f"Swap {side} {amount} {pair}"
 
-    if tool_name == "manage_gateway_clmm":
+    if tool_name in ("manage_clmm", "manage_amm"):
         action = input_data.get("action", "?")
-        if action == "open_position":
-            return "Open LP position"
-        if action == "close_position":
-            return "Close LP position"
-        return f"CLMM: {action}"
+        kind = "CLMM" if tool_name == "manage_clmm" else "AMM"
+        connector = input_data.get("connector", "?")
+        pool = (
+            input_data.get("pool_address") or input_data.get("position_address") or "?"
+        )
+        if action == "open":
+            lower = input_data.get("lower_price", "?")
+            upper = input_data.get("upper_price", "?")
+            return (
+                f"Open {kind} position on {connector} pool {pool} over {lower}-{upper}"
+            )
+        if action == "close":
+            return f"Close {kind} position {pool} on {connector}"
+        if action == "add_liquidity":
+            base = input_data.get("base_token_amount", "?")
+            quote = input_data.get("quote_token_amount", "?")
+            return f"Add {base} base / {quote} quote to {kind} {pool} on {connector}"
+        if action == "remove_liquidity":
+            pct = input_data.get("percentage_to_remove", "?")
+            return f"Remove {pct}% from {kind} position {pool} on {connector}"
+        if action == "collect_fees":
+            return f"Collect fees from {kind} position {pool} on {connector}"
+        if action == "create_pool":
+            base = input_data.get("base_token", "?")
+            quote = input_data.get("quote_token", "?")
+            return f"Create {kind} pool {base}-{quote} on {connector}"
+        return f"{kind}: {action}"
 
     # Generic fallback
     return tool_name
-
-
-# Backwards-compatible alias for the pre-registry name.
-_format_tool_summary = format_tool_summary
 
 
 class TelegramChannel:

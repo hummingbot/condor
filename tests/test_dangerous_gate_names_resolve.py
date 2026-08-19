@@ -52,9 +52,9 @@ def _action_literals(tool_name: str) -> set[str]:
 
 def test_every_gated_tool_name_is_registered():
     for tool_name in DANGEROUS_TOOLS - _FOREIGN_TOOLS:
-        assert tool_name in _registered_tools(), (
-            f"{tool_name} is gated but not registered — the gate matches nothing"
-        )
+        assert (
+            tool_name in _registered_tools()
+        ), f"{tool_name} is gated but not registered — the gate matches nothing"
 
 
 def test_gated_actions_exist_on_their_tools():
@@ -79,9 +79,9 @@ def test_every_liquidity_moving_action_is_gated():
         ("manage_amm", DANGEROUS_AMM_ACTIONS),
     ):
         writes = _action_literals(tool_name) - read_only
-        assert writes <= gated, (
-            f"{tool_name} write action(s) ungated: {sorted(writes - gated)}"
-        )
+        assert (
+            writes <= gated
+        ), f"{tool_name} write action(s) ungated: {sorted(writes - gated)}"
 
 
 def test_lp_writes_require_confirmation():
@@ -104,3 +104,27 @@ def test_lp_reads_do_not_require_confirmation():
     ):
         call = {"tool": tool_name, "input": {"action": action}}
         assert not is_dangerous_tool_call(call), f"{tool_name}({action}) gated a read"
+
+
+def test_gated_calls_render_a_specific_confirmation_summary():
+    """A gated call must describe itself in the approval prompt.
+
+    The summary renderer branched on ``manage_gateway_clmm`` too, so once the
+    gate started matching, the prompt fell through to the generic branch and
+    asked the user to approve the bare string "manage_clmm" — a confirmation
+    that shows nothing to confirm.
+    """
+    from handlers.agents.confirmation import format_tool_summary
+
+    for tool_name, action, expected in (
+        ("manage_clmm", "open", "Open CLMM position"),
+        ("manage_clmm", "close", "Close CLMM position"),
+        ("manage_clmm", "remove_liquidity", "Remove"),
+        ("manage_amm", "add_liquidity", "Add"),
+        ("manage_amm", "create_pool", "Create AMM pool"),
+    ):
+        summary = format_tool_summary(
+            {"tool": tool_name, "input": {"action": action, "connector": "meteora"}}
+        )
+        assert expected in summary, f"{tool_name}({action}) rendered {summary!r}"
+        assert summary != tool_name
