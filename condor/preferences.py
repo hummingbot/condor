@@ -1145,6 +1145,7 @@ def resolve_custom_endpoint(
     agent_key: str,
     user_data: Optional[Dict] = None,
     user_id: Optional[int] = None,
+    strict: bool = False,
 ) -> tuple[Optional[str], Optional[str]]:
     """Resolve ``(base_url, api_key)`` for a ``custom@<endpoint>:<model>`` key.
 
@@ -1158,6 +1159,12 @@ def resolve_custom_endpoint(
 
     Pass ``user_data`` when you have it (Telegram handlers) or ``user_id`` when
     you don't (MCP subprocess, web, background agent runs).
+
+    ``strict=True`` raises a :class:`RuntimeError` with an actionable message
+    when the key *names* an endpoint that isn't saved, instead of logging a
+    warning and falling back to the ``CUSTOM_LLM_*`` env vars. Interactive
+    surfaces (chat sessions) want the loud failure; background surfaces
+    (consult, engine) keep the lenient default.
     """
     provider_name, model_id = parse_custom_agent_key(agent_key)
     if not model_id:
@@ -1171,6 +1178,12 @@ def resolve_custom_endpoint(
 
     provider = find_custom_provider(user_data, provider_name) if user_data else None
     if provider is None and provider_name:
+        if strict:
+            raise RuntimeError(
+                f"No saved endpoint named '{provider_name}'. Add it via "
+                "/agent → Change LLM → Custom endpoint, or Settings → "
+                "AI Providers on the web dashboard."
+            )
         logger.warning(
             "Agent key '%s' names endpoint '%s', which is not saved for this user",
             agent_key,

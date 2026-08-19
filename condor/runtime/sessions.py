@@ -440,21 +440,17 @@ async def get_or_create_session(
             # user's saved endpoints ("custom@venice:..."); those live in the
             # shared preference store so Telegram and the web dashboard resolve
             # them identically. CUSTOM_LLM_* env vars cover headless deploys.
-            from condor.preferences import find_custom_provider, parse_custom_agent_key
+            # strict=True keeps the actionable RuntimeError for a missing named
+            # endpoint; user_id lets a session without user_data still resolve
+            # saved endpoints (parity with consult/engine).
+            from condor.preferences import resolve_custom_endpoint
 
-            provider_name, _ = parse_custom_agent_key(agent_key)
-            provider = (
-                find_custom_provider(user_data, provider_name) if user_data else None
+            base_url, api_key = resolve_custom_endpoint(
+                agent_key,
+                user_data=user_data,
+                user_id=spec.user_id,
+                strict=True,
             )
-            if provider is None and provider_name:
-                raise RuntimeError(
-                    f"No saved endpoint named '{provider_name}'. Add it via "
-                    "/agent → Change LLM → Custom endpoint, or Settings → "
-                    "AI Providers on the web dashboard."
-                )
-            provider = provider or {}
-            base_url = provider.get("base_url") or os.environ.get("CUSTOM_LLM_BASE_URL")
-            api_key = provider.get("api_key") or os.environ.get("CUSTOM_LLM_API_KEY")
 
         client = PydanticAIClient(
             model=agent_key,
