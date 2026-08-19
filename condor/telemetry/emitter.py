@@ -31,7 +31,6 @@ log = logging.getLogger(__name__)
 
 RING_MAX = 2000
 RATE_PER_MIN = 60
-FLUSH_THRESHOLD = 200
 
 _buffer: deque[dict] = deque(maxlen=RING_MAX)
 _dropped = 0
@@ -46,10 +45,6 @@ _hosted = False
 def set_hosted(value: bool) -> None:
     global _hosted
     _hosted = value
-
-
-def is_hosted() -> bool:
-    return _hosted
 
 
 def _take_token(name: str) -> bool:
@@ -116,10 +111,6 @@ def buffered() -> int:
 
 def dropped() -> int:
     return _dropped
-
-
-def should_flush() -> bool:
-    return len(_buffer) >= FLUSH_THRESHOLD
 
 
 def drain() -> tuple[list[dict], int]:

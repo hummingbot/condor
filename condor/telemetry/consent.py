@@ -47,13 +47,6 @@ ANSWER_LEVELS = {"usage": USAGE, "ping": PING, "off": OFF}
 _cached_level: str | None = None
 
 
-def _config_path() -> Path:
-    from config_manager import ConfigManager
-
-    existing = ConfigManager._instance
-    return Path(existing.config_path if existing else "config.yml")
-
-
 def _cm():
     """The ConfigManager, but only if reading it cannot create a config file."""
     from config_manager import ConfigManager

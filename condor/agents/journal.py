@@ -166,15 +166,6 @@ Duration: {duration:.1f}s
 """
 
 
-def get_session_dir(run_key: str, session_number: int) -> Path:
-    """Build the path for a specific session directory.
-
-    ``run_key`` is the ``"{agent_slug}.{strategy_slug}"`` prefix (legacy flat
-    slugs without a dot still resolve to ``agents/{slug}/``).
-    """
-    return _strategy_base_dir(run_key) / "sessions" / f"session_{session_number}"
-
-
 def next_session_number(agent_dir: Path) -> int:
     """Determine the next session number by scanning existing session_* dirs."""
     # Check new location first
