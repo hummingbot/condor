@@ -296,7 +296,8 @@ def _build_system_prompt(platform: str = "telegram") -> str:
 DANGEROUS_TOOLS = {
     "place_order",
     "manage_gateway_swaps",  # execute action
-    "manage_gateway_clmm",  # open/close position
+    "manage_clmm",  # every action that moves liquidity
+    "manage_amm",  # every action that moves liquidity
 }
 
 # Tools that are always blocked (RBAC bypass prevention)
@@ -320,8 +321,20 @@ DANGEROUS_BOT_ACTIONS = {
 # Actions within manage_gateway_swaps that require confirmation
 DANGEROUS_SWAP_ACTIONS = {"execute"}
 
-# Actions within manage_gateway_clmm that require confirmation
-DANGEROUS_CLMM_ACTIONS = {"open_position", "close_position"}
+# Actions within manage_clmm that require confirmation. These are the tool's
+# own action literals — a name that does not match one lets the call through
+# ungated, so they are asserted against the registered tool in the tests.
+DANGEROUS_CLMM_ACTIONS = {
+    "open",
+    "close",
+    "add_liquidity",
+    "remove_liquidity",
+    "collect_fees",
+    "create_pool",
+}
+
+# Actions within manage_amm that require confirmation
+DANGEROUS_AMM_ACTIONS = {"add_liquidity", "remove_liquidity", "create_pool"}
 
 
 def tool_call_name(tool_call: dict[str, Any]) -> str:
@@ -389,9 +402,12 @@ def is_dangerous_tool_call(tool_call: dict[str, Any]) -> bool:
         if tool_name == "manage_gateway_swaps":
             return _has_dangerous_action(tool_call, DANGEROUS_SWAP_ACTIONS)
 
-        # For manage_gateway_clmm, only open/close are dangerous
-        if tool_name == "manage_gateway_clmm":
+        # For the LP tools, only the actions that move liquidity are dangerous
+        if tool_name == "manage_clmm":
             return _has_dangerous_action(tool_call, DANGEROUS_CLMM_ACTIONS)
+
+        if tool_name == "manage_amm":
+            return _has_dangerous_action(tool_call, DANGEROUS_AMM_ACTIONS)
 
         return True
 

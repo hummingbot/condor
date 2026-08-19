@@ -124,7 +124,8 @@ DEFAULT_CLOB_AMOUNT = "$10"
 DEFAULT_DEX_NETWORK = "solana-mainnet-beta"
 DEFAULT_DEX_CONNECTOR = "jupiter"
 DEFAULT_DEX_PAIR = "SOL-USDC"
-DEFAULT_DEX_SLIPPAGE = "1.0"
+# No slippage default on purpose: an unset slippage is OMITTED from the Gateway request so the
+# connector's own configured slippage applies. An explicit value (including "0") is a real value.
 DEFAULT_DEX_SIDE = "BUY"
 DEFAULT_DEX_AMOUNT = "1.0"
 
@@ -359,7 +360,6 @@ def _get_default_preferences() -> UserPreferences:
         "dex": {
             "default_network": DEFAULT_DEX_NETWORK,
             "default_connector": DEFAULT_DEX_CONNECTOR,
-            "default_slippage": DEFAULT_DEX_SLIPPAGE,
             "last_swap": {},
             "last_pool": {},
         },
@@ -683,9 +683,9 @@ def get_dex_connector(user_data: Dict, network: Optional[str] = None) -> str:
     return get_dex_prefs(user_data).get("default_connector", DEFAULT_DEX_CONNECTOR)
 
 
-def get_dex_slippage(user_data: Dict) -> str:
-    """Get default DEX slippage percentage"""
-    return get_dex_prefs(user_data).get("default_slippage", DEFAULT_DEX_SLIPPAGE)
+def get_dex_slippage(user_data: Dict) -> Optional[str]:
+    """Get the user's DEX slippage override, or None to use the connector's own setting"""
+    return get_dex_prefs(user_data).get("default_slippage")
 
 
 def set_dex_slippage(user_data: Dict, slippage: str) -> None:
@@ -728,6 +728,9 @@ def get_dex_swap_defaults(user_data: Dict) -> DEXSwapParams:
     1. System defaults
     2. User's configured defaults
     3. Last swap params (highest priority)
+
+    "slippage" is present ONLY when the user set one. Absent means "omit slippage_pct from the
+    Gateway request" so the connector's configured slippage applies.
     """
     prefs = get_dex_prefs(user_data)
     last_swap = prefs.get("last_swap", {})
@@ -736,16 +739,19 @@ def get_dex_swap_defaults(user_data: Dict) -> DEXSwapParams:
         "network", prefs.get("default_network", DEFAULT_DEX_NETWORK)
     )
 
-    return {
+    defaults: DEXSwapParams = {
         "connector": last_swap.get("connector", get_dex_connector(user_data, network)),
         "network": network,
         "trading_pair": last_swap.get("trading_pair", DEFAULT_DEX_PAIR),
         "side": DEFAULT_DEX_SIDE,
         "amount": DEFAULT_DEX_AMOUNT,
-        "slippage": last_swap.get(
-            "slippage", prefs.get("default_slippage", DEFAULT_DEX_SLIPPAGE)
-        ),
     }
+
+    slippage = last_swap.get("slippage", prefs.get("default_slippage"))
+    if slippage is not None:
+        defaults["slippage"] = slippage
+
+    return defaults
 
 
 # ============================================

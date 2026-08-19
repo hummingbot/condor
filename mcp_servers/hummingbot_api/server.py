@@ -1071,6 +1071,110 @@ async def manage_clmm(
     return format_clmm_result(action, result)
 
 
+@mcp.tool()
+@handle_errors("manage Gateway swaps", GATEWAY_LOG_HINT)
+async def manage_gateway_swaps(
+    action: Literal["quote", "execute", "search", "get_status"],
+    connector: str | None = None,
+    network: str | None = None,
+    trading_pair: str | None = None,
+    side: Literal["BUY", "SELL"] | None = None,
+    amount: str | None = None,
+    slippage_pct: str | None = None,
+    wallet_address: str | None = None,
+    transaction_hash: str | None = None,
+    extra_params: dict[str, Any] | None = None,
+    search_connector: str | None = None,
+    search_network: str | None = None,
+    search_wallet_address: str | None = None,
+    search_trading_pair: str | None = None,
+    status: Literal["SUBMITTED", "CONFIRMED", "FAILED"] | None = None,
+    start_time: int | None = None,
+    end_time: int | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> str:
+    """One-shot DEX swaps through Gateway's unified swap route — quote, execute, and track.
+
+    This is the ONLY swap surface. Router aggregators (jupiter, 0x) and pool-scoped AMM/CLMM
+    swaps all go through it; the pool-scoped `/trading/amm/*-swap` routes no longer exist.
+
+    Actions:
+    - quote → price, expected output, and price impact BEFORE committing (free, always do this first)
+    - execute → submit the swap on-chain; returns a transaction hash
+    - get_status → resolve a submitted swap by transaction_hash
+    - search → query swap history with filters
+
+    CONNECTOR FORMAT. `connector` is "name/type":
+    - "jupiter/router", "0x/router" — aggregator routing across every pool it knows
+    - "meteora/amm", "raydium/amm", "uniswap/amm" — swap against an AMM pool
+    - "meteora/clmm", "raydium/clmm", "uniswap/clmm" — swap against a CLMM pool
+
+    POOL RESOLUTION (read this before trusting a failure). For the pool-scoped forms
+    (`/amm`, `/clmm`) Gateway resolves the pool itself from ITS OWN CONFIGURED POOL LIST,
+    matched BY TOKEN SYMBOL from `trading_pair` — you cannot pass a pool address here. A token
+    Gateway does not know (a fresh launch mint, a pool created moments ago via
+    `manage_amm(create_pool)`) will NOT resolve, and creating a pool does not register it. Such a
+    call fails with "No pool found", which means UNKNOWN, not "bad token" — do not read it as a
+    honeypot or a failed safety check. Route those through an aggregator ("jupiter/router"),
+    which quotes off live on-chain routes rather than a config file.
+
+    LP work is elsewhere: `manage_amm` (AMM pools), `manage_clmm` (CLMM positions),
+    `manage_executors(lp_executor)` (managed LP).
+
+    Args:
+        action: Swap action to perform.
+        connector: Connector in "name/type" form (required for quote/execute), e.g.
+            'jupiter/router', 'meteora/amm', 'raydium/clmm'.
+        network: Network ID in 'chain-network' format (required for quote/execute), e.g.
+            'solana-mainnet-beta', 'ethereum-mainnet'.
+        trading_pair: Trading pair as 'BASE-QUOTE' (required for quote/execute). Symbols or
+            token addresses. Pool-scoped connectors match Gateway's pool list by SYMBOL.
+        side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote). Required for quote/execute.
+        amount: Base token amount to buy or sell (required for quote/execute).
+        slippage_pct: Maximum slippage percentage. OMIT to use the connector's configured
+            slippage; '0' is a real value, not "use the default".
+        wallet_address: Wallet for execute (optional, uses the default wallet).
+        transaction_hash: Transaction hash (required for get_status).
+        extra_params: Connector-specific params under Gateway's own names. Supported:
+            'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers).
+        search_connector: Filter history by connector (search).
+        search_network: Filter history by network (search).
+        search_wallet_address: Filter history by wallet address (search).
+        search_trading_pair: Filter history by trading pair (search).
+        status: Filter history by status: SUBMITTED | CONFIRMED | FAILED (search).
+        start_time: Start timestamp in unix seconds (search).
+        end_time: End timestamp in unix seconds (search).
+        limit: Max results for search (default 50, max 1000).
+        offset: Pagination offset for search (default 0).
+    """
+    request = GatewaySwapRequest(
+        action=action,
+        connector=connector,
+        network=network,
+        trading_pair=trading_pair,
+        side=side,
+        amount=amount,
+        slippage_pct=slippage_pct,
+        wallet_address=wallet_address,
+        transaction_hash=transaction_hash,
+        extra_params=extra_params,
+        search_connector=search_connector,
+        search_network=search_network,
+        search_wallet_address=search_wallet_address,
+        search_trading_pair=search_trading_pair,
+        status=status,
+        start_time=start_time,
+        end_time=end_time,
+        limit=limit,
+        offset=offset,
+    )
+
+    client = await hummingbot_client.get_client()
+    result = await manage_gateway_swaps_impl(client, request)
+    return format_gateway_swap_result(action, result)
+
+
 # GeckoTerminal Tools
 
 

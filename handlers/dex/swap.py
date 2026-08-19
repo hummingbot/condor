@@ -11,6 +11,7 @@ import asyncio
 import logging
 from decimal import Decimal
 
+import aiohttp
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
@@ -52,18 +53,114 @@ logger = logging.getLogger(__name__)
 # HELPER FUNCTIONS
 # ============================================
 
+# Shown on the slippage button when the user has not set one: the request omits
+# slippage_pct entirely and the connector's own configured slippage applies.
+SLIPPAGE_DEFAULT_LABEL = "default"
+
+
+def describe_api_error(exc: Exception) -> str:
+    """Human-readable cause of an SDK failure.
+
+    The SDK raises aiohttp.ClientResponseError carrying the HTTP status and the API's own
+    detail message, which is what separates a 404 "No pool found" from a 400 "Unsupported
+    swap provider" from a genuine no-route. Anything else renders as its type + message.
+    """
+    if isinstance(exc, aiohttp.ClientResponseError):
+        return f"HTTP {exc.status}: {exc.message}"
+    detail = str(exc).strip()
+    return detail or type(exc).__name__
+
+
+def get_slippage_pct(params: dict) -> Decimal | None:
+    """The user's slippage override as a Decimal, or None to use the connector's setting.
+
+    None makes the SDK omit slippage_pct from the request. An explicit "0" is a real 0.
+    """
+    slippage = params.get("slippage")
+    if slippage is None:
+        return None
+    return Decimal(str(slippage).rstrip("%").strip())
+
+
+def _slippage_button_label(params: dict) -> str:
+    """Slippage button text — the connector's own setting until the user overrides it."""
+    slippage = params.get("slippage")
+    if slippage is None:
+        return f"📊 Slippage: {SLIPPAGE_DEFAULT_LABEL}"
+    return f"📊 {slippage}%"
+
+
+def _last_swap_params(
+    connector: str, network: str, trading_pair: str, side: str, params: dict
+) -> dict:
+    """Params to remember for next time — slippage only when the user actually set one."""
+    remembered = {
+        "connector": connector,
+        "network": network,
+        "trading_pair": trading_pair,
+        "side": side,
+    }
+    if params.get("slippage") is not None:
+        remembered["slippage"] = params["slippage"]
+    return remembered
+
+
+def _quote_errors(buy_result, sell_result) -> list[str]:
+    """One 'SIDE: cause' line for each of the two gathered quotes that raised."""
+    return [
+        f"{side}: {describe_api_error(result)}"
+        for side, result in (("BUY", buy_result), ("SELL", sell_result))
+        if isinstance(result, BaseException)
+    ]
+
+
+async def resolve_quote_denominated_amount(
+    client,
+    amount: Decimal,
+    connector: str,
+    network: str,
+    trading_pair: str,
+    slippage_pct: Decimal | None,
+) -> Decimal:
+    """Convert a quote-denominated ($) amount into base token units.
+
+    Prices off a 1-unit BUY quote. Raises with the real cause rather than falling back to the
+    raw number — treating "$100" as 100 base tokens would size the trade catastrophically wrong.
+    """
+    try:
+        price_quote = await client.gateway_swap.get_swap_quote(
+            connector=connector,
+            network=network,
+            trading_pair=trading_pair,
+            side="BUY",
+            amount=Decimal("1"),
+            slippage_pct=slippage_pct,
+        )
+    except Exception as e:
+        raise ValueError(
+            f"Cannot price {trading_pair} on {connector} to convert the $ amount "
+            f"({describe_api_error(e)})"
+        ) from e
+
+    if not isinstance(price_quote, dict) or not price_quote.get("price"):
+        raise ValueError(f"Quote for {trading_pair} on {connector} carried no price")
+
+    price = Decimal(str(price_quote["price"]))
+    if price <= 0:
+        raise ValueError(
+            f"Quote for {trading_pair} on {connector} priced it at {price}"
+        )
+
+    return amount / price
+
 
 async def _fetch_recent_swaps(client, limit: int = 5) -> list:
     """Fetch recent swaps for display"""
-    try:
-        if not hasattr(client, "gateway_swap"):
-            return []
+    if not hasattr(client, "gateway_swap"):
+        raise ValueError("Gateway swap not available on this server")
 
-        result = await client.gateway_swap.search_swaps(limit=limit)
-        return result.get("data", [])
-    except Exception as e:
-        logger.warning(f"Error fetching recent swaps: {e}")
-        return []
+    result = await client.gateway_swap.search_swaps(limit=limit)
+    return result.get("data", [])
 
 
 def _format_compact_swap_line(swap: dict) -> str:
@@ -218,7 +315,7 @@ async def _fetch_quotes_background(
         network = params.get("network")
         trading_pair = params.get("trading_pair")
         amount = params.get("amount")
-        slippage = params.get("slippage", "1.0")
+        slippage_pct = get_slippage_pct(params)
 
         if not all([connector, network, trading_pair, amount]):
             return
@@ -240,50 +337,41 @@ async def _fetch_quotes_background(
 
         # Handle $ prefix (quote-denominated amount)
         amount_str = str(amount)
-        is_quote_amount = amount_str.startswith("$")
         numeric_amount = Decimal(amount_str.lstrip("$").strip())
+        if amount_str.startswith("$"):
+            numeric_amount = await resolve_quote_denominated_amount(
+                client,
+                numeric_amount,
+                connector,
+                network,
+                trading_pair,
+                slippage_pct,
+            )
 
-        # If quote-denominated, first get price to convert
-        if is_quote_amount:
-            try:
-                # Get a quote for 1 unit to determine price
-                price_quote = await client.gateway_swap.get_swap_quote(
-                    connector=connector,
-                    network=network,
-                    trading_pair=trading_pair,
-                    side="BUY",
-                    amount=Decimal("1"),
-                    slippage_pct=Decimal(slippage),
-                )
-                if price_quote and isinstance(price_quote, dict):
-                    # Price is quote per base (e.g., USDC per SOL)
-                    price = Decimal(str(price_quote.get("price", 1)))
-                    if price > 0:
-                        numeric_amount = numeric_amount / price
-            except Exception as e:
-                logger.warning(f"Could not get price for $ conversion: {e}")
-                # Fall back to using numeric value as-is
+        async def get_quote(side: str):
+            return await client.gateway_swap.get_swap_quote(
+                connector=connector,
+                network=network,
+                trading_pair=trading_pair,
+                side=side,
+                amount=numeric_amount,
+                slippage_pct=slippage_pct,
+            )
 
-        async def get_quote_safe(side: str):
-            try:
-                return await client.gateway_swap.get_swap_quote(
-                    connector=connector,
-                    network=network,
-                    trading_pair=trading_pair,
-                    side=side,
-                    amount=numeric_amount,
-                    slippage_pct=Decimal(slippage),
-                )
-            except Exception as e:
-                logger.warning(f"Background quote failed for {side}: {e}")
-                return None
-
-        # Fetch quotes and balances in parallel
+        # Fetch quotes and balances in parallel. return_exceptions keeps one side's failure
+        # from cancelling the other, and preserves the real cause for the caller.
         buy_result, sell_result, _ = await asyncio.gather(
-            get_quote_safe("BUY"), get_quote_safe("SELL"), fetch_balances_safe()
+            get_quote("BUY"),
+            get_quote("SELL"),
+            fetch_balances_safe(),
+            return_exceptions=True,
         )
 
-        if buy_result is None and sell_result is None:
+        errors = _quote_errors(buy_result, sell_result)
+        for line in errors:
+            logger.warning(f"Background quote failed — {line}")
+
+        if len(errors) == 2:
             return
 
         quote_data = {
@@ -291,6 +379,7 @@ async def _fetch_quotes_background(
             "amount": amount,
             "buy": buy_result if isinstance(buy_result, dict) else None,
             "sell": sell_result if isinstance(sell_result, dict) else None,
+            "errors": errors,
         }
 
         # Store quote in cache for display
@@ -345,7 +434,7 @@ def _build_swap_keyboard(params: dict) -> list:
                 f"💰 {params.get('amount', '1.0')}", callback_data="dex:swap_set_amount"
             ),
             InlineKeyboardButton(
-                f"📊 {params.get('slippage', '1.0')}%",
+                _slippage_button_label(params),
                 callback_data="dex:swap_set_slippage",
             ),
             InlineKeyboardButton(
@@ -455,6 +544,10 @@ def _build_swap_menu_text(
             spread_str = f"{spread_pct:.2f}%"
             help_text += f"📊 Spread: `{escape_markdown_v2(spread_str)}`\n"
 
+        # A side that failed says why, instead of silently missing from the quote
+        for line in quote_result.get("errors") or []:
+            help_text += "⚠️ " + escape_markdown_v2(line) + "\n"
+
         help_text += "\n"
 
     # Type directly hint
@@ -465,16 +558,15 @@ def _build_swap_menu_text(
     example_amount = escape_markdown_v2(str(params.get("amount", "1.0")))
     help_text += f"*Ex:* `{example_pair} {example_side} {example_amount}`\n\n"
 
-    # Fetch and show recent swaps (compact format)
-    try:
-        swaps = get_cached(user_data, "recent_swaps", ttl=60)
-        if swaps:
-            help_text += r"━━━ Recent ━━━" + "\n"
-            for swap in swaps[:5]:
-                line = _format_compact_swap_line(swap)
-                help_text += line + "\n"
-    except Exception as e:
-        logger.warning(f"Could not get cached swaps: {e}")
+    # Show recent swaps (compact format), or why they could not be loaded
+    swaps = get_cached(user_data, "recent_swaps", ttl=60)
+    if swaps:
+        help_text += r"━━━ Recent ━━━" + "\n"
+        for swap in swaps[:5]:
+            help_text += _format_compact_swap_line(swap) + "\n"
+    elif user_data.get("recent_swaps_error"):
+        help_text += r"━━━ Recent ━━━" + "\n"
+        help_text += "⚠️ " + escape_markdown_v2(user_data["recent_swaps_error"]) + "\n"
 
     return help_text
 
@@ -505,8 +597,11 @@ async def show_swap_menu(
             client = await get_client(chat_id, context=context)
             swaps = await _fetch_recent_swaps(client, limit=5)
             set_cached(context.user_data, "recent_swaps", swaps)
+            context.user_data.pop("recent_swaps_error", None)
         except Exception as e:
-            logger.warning(f"Could not fetch recent swaps: {e}")
+            cause = describe_api_error(e)
+            logger.warning(f"Could not fetch recent swaps: {cause}")
+            context.user_data["recent_swaps_error"] = cause
 
     # Use cached quote if available and no explicit quote_result provided
     if quote_result is None:
@@ -921,7 +1016,8 @@ async def handle_swap_set_slippage(
         r"Enter slippage %:" + "\n\n"
         r"*Examples:*" + "\n"
         r"`1\.0` \- 1%" + "\n"
-        r"`2\.5` \- 2\.5%"
+        r"`2\.5` \- 2\.5%" + "\n"
+        r"`default` \- use the connector's own setting"
     )
 
     keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:swap")]]
@@ -952,7 +1048,7 @@ async def handle_swap_get_quote(
         network = params.get("network")
         trading_pair = params.get("trading_pair")
         amount = params.get("amount")
-        slippage = params.get("slippage", "1.0")
+        slippage_pct = get_slippage_pct(params)
 
         if not all([connector, network, trading_pair, amount]):
             raise ValueError("Missing required parameters")
@@ -974,50 +1070,45 @@ async def handle_swap_get_quote(
 
         # Handle $ prefix (quote-denominated amount)
         amount_str = str(amount)
-        is_quote_amount = amount_str.startswith("$")
         numeric_amount = Decimal(amount_str.lstrip("$").strip())
-
-        # If quote-denominated, first get price to convert
-        if is_quote_amount:
-            try:
-                # Get a quote for 1 unit to determine price
-                price_quote = await client.gateway_swap.get_swap_quote(
-                    connector=connector,
-                    network=network,
-                    trading_pair=trading_pair,
-                    side="BUY",
-                    amount=Decimal("1"),
-                    slippage_pct=Decimal(slippage),
-                )
-                if price_quote and isinstance(price_quote, dict):
-                    price = Decimal(str(price_quote.get("price", 1)))
-                    if price > 0:
-                        numeric_amount = numeric_amount / price
-            except Exception as e:
-                logger.warning(f"Could not get price for $ conversion: {e}")
+        if amount_str.startswith("$"):
+            numeric_amount = await resolve_quote_denominated_amount(
+                client,
+                numeric_amount,
+                connector,
+                network,
+                trading_pair,
+                slippage_pct,
+            )
 
         # Fetch BUY and SELL quotes in parallel
-        async def get_quote_safe(side: str):
-            try:
-                return await client.gateway_swap.get_swap_quote(
-                    connector=connector,
-                    network=network,
-                    trading_pair=trading_pair,
-                    side=side,
-                    amount=numeric_amount,
-                    slippage_pct=Decimal(slippage),
-                )
-            except Exception as e:
-                logger.warning(f"Quote failed for {side}: {e}")
-                return None
+        async def get_quote(side: str):
+            return await client.gateway_swap.get_swap_quote(
+                connector=connector,
+                network=network,
+                trading_pair=trading_pair,
+                side=side,
+                amount=numeric_amount,
+                slippage_pct=slippage_pct,
+            )
 
-        # Fetch quotes and balances in parallel
+        # Fetch quotes and balances in parallel. return_exceptions keeps one side's failure
+        # from cancelling the other, and preserves the real cause for the caller.
         buy_result, sell_result, _ = await asyncio.gather(
-            get_quote_safe("BUY"), get_quote_safe("SELL"), fetch_balances_safe()
+            get_quote("BUY"),
+            get_quote("SELL"),
+            fetch_balances_safe(),
+            return_exceptions=True,
         )
 
-        if buy_result is None and sell_result is None:
-            raise ValueError("No quotes available for this pair")
+        errors = _quote_errors(buy_result, sell_result)
+        if len(errors) == 2:
+            # Both sides failed — report what Gateway actually said, not "no quotes"
+            raise ValueError(
+                f"No quote for {trading_pair} on {connector} — " + "; ".join(errors)
+            )
+        for line in errors:
+            logger.warning(f"Quote failed — {line}")
 
         # Build combined quote result
         quote_data = {
@@ -1025,6 +1116,7 @@ async def handle_swap_get_quote(
             "amount": amount,
             "buy": buy_result if isinstance(buy_result, dict) else None,
             "sell": sell_result if isinstance(sell_result, dict) else None,
+            "errors": errors,
         }
 
         # Cache the quote
@@ -1033,13 +1125,9 @@ async def handle_swap_get_quote(
         # Save params
         set_dex_last_swap(
             context.user_data,
-            {
-                "connector": connector,
-                "network": network,
-                "trading_pair": trading_pair,
-                "side": params.get("side", "BUY"),
-                "slippage": slippage,
-            },
+            _last_swap_params(
+                connector, network, trading_pair, params.get("side", "BUY"), params
+            ),
         )
 
         # Show menu with quote result inline (disable auto_quote since we already have it)
@@ -1047,7 +1135,7 @@ async def handle_swap_get_quote(
 
     except Exception as e:
         logger.error(f"Error getting quote: {e}", exc_info=True)
-        error_message = format_error_message(f"Quote failed: {str(e)}")
+        error_message = format_error_message(f"Quote failed: {describe_api_error(e)}")
         await update.callback_query.message.edit_text(
             error_message, parse_mode="MarkdownV2"
         )
@@ -1065,7 +1153,7 @@ async def handle_swap_execute_confirm(
         trading_pair = params.get("trading_pair")
         side = params.get("side")
         amount = params.get("amount")
-        slippage = params.get("slippage", "1.0")
+        slippage_pct = get_slippage_pct(params)
 
         if not all([connector, network, trading_pair, side, amount]):
             raise ValueError("Missing required parameters")
@@ -1079,11 +1167,14 @@ async def handle_swap_execute_confirm(
         if numeric_amount <= 0:
             raise ValueError("Amount must be greater than 0")
 
-        # Validate slippage > 0
-        slippage_str = str(slippage).rstrip("%").strip()
-        slippage_val = Decimal(slippage_str)
-        if slippage_val <= 0:
-            raise ValueError("Slippage must be greater than 0%")
+        # An unset slippage is legitimate (the connector's own setting applies); an explicit
+        # 0 is a real 0. Only a negative value is nonsense.
+        if slippage_pct is not None and slippage_pct < 0:
+            raise ValueError("Slippage cannot be negative")
+
+        slippage_display = (
+            SLIPPAGE_DEFAULT_LABEL if slippage_pct is None else f"{slippage_pct}%"
+        )
 
         # Show loading state immediately to prevent duplicate actions
         loading_text = escape_markdown_v2(
@@ -1091,7 +1182,7 @@ async def handle_swap_execute_confirm(
             f"Pair: {trading_pair}\n"
             f"Side: {side}\n"
             f"Amount: {amount}\n"
-            f"Slippage: {slippage}%\n\n"
+            f"Slippage: {slippage_display}\n\n"
             f"Please wait..."
         )
         await update.callback_query.message.edit_text(
@@ -1106,31 +1197,28 @@ async def handle_swap_execute_confirm(
 
         # If quote-denominated, convert to base amount
         if is_quote_amount:
-            try:
-                # Get a quote for 1 unit to determine price
-                price_quote = await client.gateway_swap.get_swap_quote(
-                    connector=connector,
-                    network=network,
-                    trading_pair=trading_pair,
-                    side="BUY",
-                    amount=Decimal("1"),
-                    slippage_pct=Decimal(slippage_str),
-                )
-                if price_quote and isinstance(price_quote, dict):
-                    price = Decimal(str(price_quote.get("price", 1)))
-                    if price > 0:
-                        numeric_amount = numeric_amount / price
-            except Exception as e:
-                logger.warning(f"Could not get price for $ conversion: {e}")
+            numeric_amount = await resolve_quote_denominated_amount(
+                client,
+                numeric_amount,
+                connector,
+                network,
+                trading_pair,
+                slippage_pct,
+            )
 
-        result = await client.gateway_swap.execute_swap(
-            connector=connector,
-            network=network,
-            trading_pair=trading_pair,
-            side=side,
-            amount=numeric_amount,
-            slippage_pct=Decimal(slippage_str),
-        )
+        try:
+            result = await client.gateway_swap.execute_swap(
+                connector=connector,
+                network=network,
+                trading_pair=trading_pair,
+                side=side,
+                amount=numeric_amount,
+                slippage_pct=slippage_pct,
+            )
+        except Exception as e:
+            raise ValueError(
+                f"{side} {trading_pair} on {connector} rejected — {describe_api_error(e)}"
+            ) from e
 
         if result is None:
             raise ValueError("Swap execution failed")
@@ -1144,13 +1232,7 @@ async def handle_swap_execute_confirm(
         # Save params
         set_dex_last_swap(
             context.user_data,
-            {
-                "connector": connector,
-                "network": network,
-                "trading_pair": trading_pair,
-                "side": side,
-                "slippage": slippage,
-            },
+            _last_swap_params(connector, network, trading_pair, side, params),
         )
 
         # Build success message
@@ -1160,7 +1242,7 @@ async def handle_swap_execute_confirm(
             f"Pair: {trading_pair}\n"
             f"Side: {side}\n"
             f"Amount: {display_amount}\n"
-            f"Slippage: {slippage}%"
+            f"Slippage: {slippage_display}"
         )
 
         if isinstance(result, dict):
@@ -1179,7 +1261,7 @@ async def handle_swap_execute_confirm(
 
     except Exception as e:
         logger.error(f"Error executing swap: {e}", exc_info=True)
-        error_message = format_error_message(f"Swap failed: {str(e)}")
+        error_message = format_error_message(f"Swap failed: {describe_api_error(e)}")
         keyboard = [[InlineKeyboardButton("« Back to Swap", callback_data="dex:swap")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.callback_query.message.edit_text(
@@ -1241,7 +1323,9 @@ async def process_swap_status(
 
     except Exception as e:
         logger.error(f"Error getting status: {e}", exc_info=True)
-        error_message = format_error_message(f"Failed to get status: {str(e)}")
+        error_message = format_error_message(
+            f"Failed to get status: {describe_api_error(e)}"
+        )
         await update.message.reply_text(error_message, parse_mode="MarkdownV2")
 
 
@@ -1447,7 +1531,9 @@ async def handle_swap_history(
 
     except Exception as e:
         logger.error(f"Error fetching history: {e}", exc_info=True)
-        error_message = format_error_message(f"Failed to fetch history: {str(e)}")
+        error_message = format_error_message(
+            f"Failed to fetch history: {describe_api_error(e)}"
+        )
         await update.callback_query.message.edit_text(
             error_message, parse_mode="MarkdownV2"
         )
@@ -1574,21 +1660,22 @@ async def process_swap(
         trading_pair = parts[0]
         side = parts[1].upper()
         amount = parts[2]
-        slippage = parts[3] if len(parts) > 3 else "1.0"
 
         # Get connector/network from defaults
         network = DEFAULT_DEX_NETWORK
         connector = get_dex_connector(context.user_data, network)
 
-        # Update params
-        context.user_data["swap_params"] = {
+        # Update params. Slippage stays unset unless typed — the connector's setting applies.
+        swap_params = {
             "connector": connector,
             "network": network,
             "trading_pair": trading_pair,
             "side": side,
             "amount": amount,
-            "slippage": slippage,
         }
+        if len(parts) > 3:
+            swap_params["slippage"] = parts[3].rstrip("%").strip()
+        context.user_data["swap_params"] = swap_params
 
         context.user_data["dex_state"] = "swap"
 
@@ -1655,17 +1742,18 @@ async def process_swap_set_amount(
 async def process_swap_set_slippage(
     update: Update, context: ContextTypes.DEFAULT_TYPE, user_input: str
 ) -> None:
-    """Process slippage input"""
+    """Process slippage input. `default` clears the override so the connector's setting applies."""
     try:
+        params = context.user_data.get("swap_params", {})
         slippage_str = user_input.strip().rstrip("%").strip()
 
-        # Validate
-        slippage_val = Decimal(slippage_str)
-        if slippage_val <= 0:
-            raise ValueError("Slippage must be > 0%")
-
-        params = context.user_data.get("swap_params", {})
-        params["slippage"] = slippage_str
+        if slippage_str.lower() == SLIPPAGE_DEFAULT_LABEL:
+            params.pop("slippage", None)
+        else:
+            # An explicit 0 is a real 0 (no tolerance), not "use the default"
+            if Decimal(slippage_str) < 0:
+                raise ValueError("Slippage cannot be negative")
+            params["slippage"] = slippage_str
 
         context.user_data["dex_state"] = "swap"
 

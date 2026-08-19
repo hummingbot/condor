@@ -241,7 +241,9 @@ def auto_approve_with_risk_check(
     chat, tests) keeps the presence-only check.
     """
     from handlers.agents._shared import (
+        DANGEROUS_AMM_ACTIONS,
         DANGEROUS_BOT_ACTIONS,
+        DANGEROUS_CLMM_ACTIONS,
         is_dangerous_tool_call,
         tool_call_input,
         tool_call_name,
@@ -271,11 +273,17 @@ def auto_approve_with_risk_check(
                     if action in DANGEROUS_BOT_ACTIONS:
                         log.info("Dry-run mode: blocked manage_bots(%s)", action)
                         return {"outcome": {"outcome": "cancelled"}}
-                elif tool_name in (
-                    "place_order",
-                    "manage_gateway_swaps",
-                    "manage_gateway_clmm",
-                ):
+                elif tool_name == "manage_clmm":
+                    action = input_data.get("action", "")
+                    if action in DANGEROUS_CLMM_ACTIONS:
+                        log.info("Dry-run mode: blocked manage_clmm(%s)", action)
+                        return {"outcome": {"outcome": "cancelled"}}
+                elif tool_name == "manage_amm":
+                    action = input_data.get("action", "")
+                    if action in DANGEROUS_AMM_ACTIONS:
+                        log.info("Dry-run mode: blocked manage_amm(%s)", action)
+                        return {"outcome": {"outcome": "cancelled"}}
+                elif tool_name in ("place_order", "manage_gateway_swaps"):
                     log.info("Dry-run mode: blocked %s", tool_name)
                     return {"outcome": {"outcome": "cancelled"}}
 

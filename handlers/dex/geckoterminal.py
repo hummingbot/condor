@@ -3347,7 +3347,7 @@ async def handle_gecko_swap(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         "trading_pair": trading_pair,
         "side": "BUY",
         "amount": "1.0",
-        "slippage": "1.0",
+        # No slippage: the connector's configured slippage applies until the user overrides it
     }
 
     context.user_data["dex_state"] = "swap"
