@@ -184,11 +184,21 @@ export function Dex() {
   const { data: pastedPool } = useQuery({
     queryKey: ["dex-pool-by-address", server, network, debouncedQuery],
     queryFn: () =>
-      api
-        .getDexPoolByAddress(server!, debouncedQuery, network)
-        .catch(() => null as PoolSummary | null),
+      api.getDexPoolByAddress(server!, debouncedQuery, network).catch((e: Error) => {
+        // A pasted *token* address 404s here by design — the token search
+        // running alongside is the lookup that resolves it — so not-found is a
+        // soft null, not an error. Everything else (throttle 503, network)
+        // must stay an error: this cache key is shared with DexPool, and a
+        // null recorded as success renders its "No pool at …" dead-end there
+        // with the Retry button hidden.
+        if (/pool not found|request failed: 404/i.test(e.message)) {
+          return null as PoolSummary | null;
+        }
+        throw e;
+      }),
     enabled: !!server && isSearch && isAddress,
     staleTime: POOL_STALE_MS,
+    retry: false,
   });
 
   const favoriteAddresses = useMemo(
