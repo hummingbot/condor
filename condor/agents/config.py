@@ -12,6 +12,8 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field
 
+from condor.fsutil import atomic_write_text
+
 
 class RiskLimitsConfig(BaseModel):
     max_position_size_quote: float = Field(
@@ -124,8 +126,9 @@ def save_agent_config(agent_dir: Path, config: AgentConfig) -> None:
     """Save config to config.yml in the agent directory."""
     config_path = agent_dir / "config.yml"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(
-        yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False)
+    atomic_write_text(
+        config_path,
+        yaml.dump(config.model_dump(), default_flow_style=False, sort_keys=False),
     )
 
 
@@ -160,4 +163,6 @@ def save_full_config(agent_dir: Path, config: dict[str, Any]) -> None:
     """Save a raw config dict as YAML (no filtering through AgentConfig)."""
     config_path = agent_dir / "config.yml"
     agent_dir.mkdir(parents=True, exist_ok=True)
-    config_path.write_text(yaml.dump(config, default_flow_style=False, sort_keys=False))
+    atomic_write_text(
+        config_path, yaml.dump(config, default_flow_style=False, sort_keys=False)
+    )

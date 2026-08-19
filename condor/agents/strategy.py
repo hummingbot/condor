@@ -36,6 +36,8 @@ from typing import Any
 
 import yaml
 
+from condor.fsutil import atomic_write_text
+
 log = logging.getLogger(__name__)
 
 _DATA_ROOT = Path(__file__).parent.parent.parent / "agents"
@@ -324,6 +326,7 @@ class StrategyStore:
             "created_at": strategy.created_at,
         }
         strategy.dir.mkdir(parents=True, exist_ok=True)
-        self._strategy_md_path(strategy).write_text(
-            _render_frontmatter(meta, strategy.instructions)
+        atomic_write_text(
+            self._strategy_md_path(strategy),
+            _render_frontmatter(meta, strategy.instructions),
         )

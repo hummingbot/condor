@@ -39,6 +39,7 @@ from condor.agents.sessions_index import (
     list_session_snapshots,
     list_sessions,
 )
+from condor.fsutil import atomic_write_text
 from condor.web.auth import check_server_access, get_current_user
 from condor.web.models import ReportSummary, WebUser
 
@@ -1146,7 +1147,7 @@ async def update_agent_md(
 ):
     """Update AGENT.md content."""
     agent = _get_agent(slug)
-    (agent.agent_dir / "AGENT.md").write_text(req.content)
+    atomic_write_text(agent.agent_dir / "AGENT.md", req.content)
     return {"updated": True}
 
 
@@ -1441,8 +1442,9 @@ async def create_strategy(
 
     learnings_path = strategy.dir / "learnings.md"
     if not learnings_path.exists():
-        learnings_path.write_text(
-            "# Learnings\n\n## Active Insights\n\n## Retired Insights\n"
+        atomic_write_text(
+            learnings_path,
+            "# Learnings\n\n## Active Insights\n\n## Retired Insights\n",
         )
 
     return StrategySummary(
@@ -1541,7 +1543,7 @@ async def update_strategy_md(
 ):
     """Update strategy.md content."""
     strategy = _get_strategy(slug, sslug)
-    (strategy.dir / "strategy.md").write_text(req.content)
+    atomic_write_text(strategy.dir / "strategy.md", req.content)
     return {"updated": True}
 
 
@@ -1912,7 +1914,7 @@ async def update_learnings(
 ):
     """Update a strategy's learnings.md."""
     strategy = _get_strategy(slug, sslug)
-    (strategy.dir / "learnings.md").write_text(req.content)
+    atomic_write_text(strategy.dir / "learnings.md", req.content)
     return {"updated": True}
 
 

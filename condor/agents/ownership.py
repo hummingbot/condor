@@ -28,6 +28,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+from condor.fsutil import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 LEDGER_FILENAME = "owned_bots.json"
@@ -347,9 +349,6 @@ class BotLedger:
         if not path:
             return  # experiments: in-memory only
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(self.to_dict(), indent=2))
-            tmp.replace(path)
+            atomic_write_json(path, self.to_dict(), indent=2)
         except Exception:
             log.warning("BotLedger: could not write %s", path, exc_info=True)

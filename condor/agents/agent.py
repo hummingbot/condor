@@ -46,6 +46,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from condor.fsutil import atomic_write_text
 from condor.memory.paths import CHAT_SLUG
 from condor.memory.store import _parse_frontmatter
 
@@ -316,8 +317,9 @@ class AgentStore:
             "created_at": agent.created_at,
         }
         agent.agent_dir.mkdir(parents=True, exist_ok=True)
-        (agent.agent_dir / "AGENT.md").write_text(
-            _render_frontmatter(meta, agent.instructions)
+        atomic_write_text(
+            agent.agent_dir / "AGENT.md",
+            _render_frontmatter(meta, agent.instructions),
         )
 
     def _iter_agent_dirs(self):
