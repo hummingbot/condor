@@ -876,8 +876,6 @@ async def manage_amm(
             "pool_info",
             "position_info",
             "positions_owned",
-            "quote_swap",
-            "execute_swap",
             "quote_liquidity",
             "add_liquidity",
             "remove_liquidity",
@@ -892,17 +890,12 @@ async def manage_amm(
     position_address: str | None = None,
     base_token: str | None = None,
     quote_token: str | None = None,
-    amount: str | None = None,
-    side: Literal["BUY", "SELL"] | None = None,
     slippage_pct: str | None = None,
     base_token_amount: str | None = None,
     quote_token_amount: str | None = None,
     percentage_to_remove: str | None = None,
     initial_price: str | None = None,
-    config_address: str | None = None,
-    fee_config_index: int | None = None,
-    gas_price: str | None = None,
-    max_gas: int | None = None,
+    extra_params: dict[str, Any] | None = None,
 ) -> str:
     """Direct AMM pool operations + pool creation, chain- & DEX-agnostic (Meteora / Raydium / Uniswap).
 
@@ -912,7 +905,6 @@ async def manage_amm(
     Actions:
     - pool_info / position_info → read pool reserves/price/fee; read your position (aggregate + positions[])
     - positions_owned → list ALL your positions across pools (meteora only)
-    - quote_swap / execute_swap → quote/execute a swap AGAINST a specific AMM pool (pool-scoped, not router)
     - quote_liquidity / add_liquidity / remove_liquidity → two-sided LP in/out
     - create_pool → create + seed a new pool (market-price seeded by default; anti-snipe)
 
@@ -923,8 +915,9 @@ async def manage_amm(
     returns a positions[] breakdown, positions_owned lists all your positions. Fungible-LP AMMs
     (raydium, uniswap) ignore position_address and have no enumerable positions.
 
-    create_pool extras by connector: meteora→config_address (required); raydium→fee_config_index
-    (optional); uniswap→gas_price/max_gas (optional, 0.30% fixed fee).
+    create_pool extras ride extra_params under Gateway's own names: meteora→configAddress
+    (required); raydium→ammConfigIndex (optional); uniswap/pancakeswap (EVM)→none
+    (0.30% fixed fee). Unknown keys are rejected with a 400.
 
     Scope: AMM only. Router/one-shot swaps → manage_executors(order_executor); CLMM LP →
     manage_executors(lp_executor).
@@ -936,19 +929,16 @@ async def manage_amm(
         wallet_address: Wallet address (optional, uses default if not provided).
         pool_address: Pool contract address.
         position_address: Meteora NFT position — required for remove_liquidity, optional for add_liquidity (omit = new position).
-        base_token: Base token symbol or address (swap direction / pool base).
+        base_token: Base token symbol or address (create_pool).
         quote_token: Quote token symbol or address (pool quote, for create_pool).
-        amount: Swap amount (string).
-        side: Swap direction (BUY or SELL).
         slippage_pct: Maximum slippage percentage (string).
         base_token_amount: Base token amount (add_liquidity / quote_liquidity / create_pool).
         quote_token_amount: Quote token amount (add_liquidity / quote_liquidity / create_pool).
         percentage_to_remove: Percentage of liquidity to remove, 0-100 (remove_liquidity).
         initial_price: Initial price as quote per base (create_pool; overrides quote_token_amount).
-        config_address: Meteora DAMM v2 config account address (required for meteora create_pool).
-        fee_config_index: Raydium CPMM fee config index (optional, create_pool).
-        gas_price: Uniswap (EVM) gas price in gwei (optional, create_pool).
-        max_gas: Uniswap (EVM) max gas limit (optional, create_pool).
+        extra_params: Connector-specific create_pool params under Gateway's own names:
+            configAddress (meteora, required), ammConfigIndex (raydium). Unknown keys
+            are rejected with a 400.
     """
     request = AMMRequest(
         action=action,
@@ -959,17 +949,12 @@ async def manage_amm(
         position_address=position_address,
         base_token=base_token,
         quote_token=quote_token,
-        amount=amount,
-        side=side,
         slippage_pct=slippage_pct,
         base_token_amount=base_token_amount,
         quote_token_amount=quote_token_amount,
         percentage_to_remove=percentage_to_remove,
         initial_price=initial_price,
-        config_address=config_address,
-        fee_config_index=fee_config_index,
-        gas_price=gas_price,
-        max_gas=max_gas,
+        extra_params=extra_params,
     )
 
     client = await hummingbot_client.get_client()
@@ -988,6 +973,7 @@ async def manage_clmm(
             "remove_liquidity",
             "close",
             "collect_fees",
+            "create_pool",
         ]
         | None
     ) = None,
@@ -1002,6 +988,9 @@ async def manage_clmm(
     quote_token_amount: str | None = None,
     percentage_to_remove: str | None = None,
     slippage_pct: str | None = None,
+    base_token: str | None = None,
+    quote_token: str | None = None,
+    initial_price: str | None = None,
     extra_params: dict | None = None,
 ) -> str:
     """Direct CLMM position operations, chain- & DEX-agnostic (Meteora / Raydium / Orca / Uniswap / PancakeSwap).
@@ -1022,6 +1011,7 @@ async def manage_clmm(
     - add_liquidity / remove_liquidity → resize an existing position, keeping its range
     - close → withdraw everything, collect fees, close the account
     - collect_fees → fees only, position untouched
+    - create_pool → create a new (empty) CLMM pool; liquidity is added by opening positions
 
     remove_liquidity at 100% leaves an EMPTY POSITION OPEN; only `close` closes the account. To
     recover an orphan, use `close`.
@@ -1048,7 +1038,14 @@ async def manage_clmm(
         quote_token_amount: Quote token amount (open / add_liquidity).
         percentage_to_remove: Percentage of liquidity to remove, 0-100 (remove_liquidity).
         slippage_pct: Maximum slippage percentage.
-        extra_params: Connector-specific params for open (e.g. {"strategyType": 0} for Meteora DLMM).
+        base_token: Base token symbol or address (create_pool).
+        quote_token: Quote token symbol or address (create_pool).
+        initial_price: Initial pool price as quote per base (create_pool, optional —
+            the API fetches the market price when omitted).
+        extra_params: Connector-specific params under Gateway's own names.
+            open/add_liquidity: strategyType (meteora DLMM, e.g. {"strategyType": 0}).
+            create_pool: binStep (meteora/orca), feeBps (meteora/uniswap/pancakeswap),
+            ammConfigIndex (raydium/pancakeswap-sol). Unknown keys are rejected with a 400.
     """
     request = CLMMRequest(
         action=action,
@@ -1063,6 +1060,9 @@ async def manage_clmm(
         quote_token_amount=quote_token_amount,
         percentage_to_remove=percentage_to_remove,
         slippage_pct=slippage_pct,
+        base_token=base_token,
+        quote_token=quote_token,
+        initial_price=initial_price,
         extra_params=extra_params,
     )
 

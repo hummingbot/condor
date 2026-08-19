@@ -101,31 +101,6 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
             connector=connector, network=net, wallet_address=request.wallet_address
         )
 
-    elif action == "quote_swap":
-        _require(request, "pool_address", "base_token", "side", "amount")
-        result = await ga.get_swap_quote(
-            connector=connector,
-            network=net,
-            pool_address=request.pool_address,
-            base_token=request.base_token,
-            side=request.side,
-            amount=_dec(request.amount, "amount"),
-            slippage_pct=_opt_dec(request.slippage_pct),
-        )
-
-    elif action == "execute_swap":
-        _require(request, "pool_address", "base_token", "side", "amount")
-        result = await ga.execute_swap(
-            connector=connector,
-            network=net,
-            pool_address=request.pool_address,
-            base_token=request.base_token,
-            side=request.side,
-            amount=_dec(request.amount, "amount"),
-            slippage_pct=_opt_dec(request.slippage_pct),
-            wallet_address=request.wallet_address,
-        )
-
     elif action == "quote_liquidity":
         _require(request, "pool_address", "base_token_amount", "quote_token_amount")
         result = await ga.get_liquidity_quote(
@@ -173,11 +148,13 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
 
     elif action == "create_pool":
         _require(request, "base_token", "quote_token", "base_token_amount")
-        if connector == "meteora" and not request.config_address:
+        if connector == "meteora" and not (request.extra_params or {}).get(
+            "configAddress"
+        ):
             raise ToolError(
-                "config_address is required for meteora create_pool (DAMM v2 pools are created against a "
-                "config account that fixes the fee schedule). Discover configs via the Meteora app/SDK; "
-                "avoid token-launch configs whose base fee starts near 99%."
+                'extra_params={"configAddress": ...} is required for meteora create_pool (DAMM v2 pools '
+                "are created against a config account that fixes the fee schedule). Discover configs via "
+                "the Meteora app/SDK; avoid token-launch configs whose base fee starts near 99%."
             )
         result = await ga.create_pool(
             connector=connector,
@@ -187,11 +164,8 @@ async def manage_amm_impl(client: Any, request: AMMRequest) -> dict[str, Any]:
             base_token_amount=_dec(request.base_token_amount, "base_token_amount"),
             quote_token_amount=_opt_dec(request.quote_token_amount),
             initial_price=_opt_dec(request.initial_price),
-            config_address=request.config_address,
-            fee_config_index=request.fee_config_index,
-            gas_price=_opt_dec(request.gas_price),
-            max_gas=request.max_gas,
             wallet_address=request.wallet_address,
+            extra_params=request.extra_params,
         )
 
     else:

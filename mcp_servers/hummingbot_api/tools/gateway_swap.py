@@ -60,7 +60,13 @@ async def manage_gateway_swaps(
             trading_pair=request.trading_pair,
             side=request.side,
             amount=Decimal(request.amount),
-            slippage_pct=Decimal(request.slippage_pct or "1.0"),
+            # None -> SDK omits it and the connector's configured slippage applies
+            slippage_pct=(
+                Decimal(request.slippage_pct)
+                if request.slippage_pct is not None
+                else None
+            ),
+            extra_params=request.extra_params,
         )
 
         return {
@@ -99,8 +105,14 @@ async def manage_gateway_swaps(
             trading_pair=request.trading_pair,
             side=request.side,
             amount=Decimal(request.amount),
-            slippage_pct=Decimal(request.slippage_pct or "1.0"),
+            # None -> SDK omits it and the connector's configured slippage applies
+            slippage_pct=(
+                Decimal(request.slippage_pct)
+                if request.slippage_pct is not None
+                else None
+            ),
             wallet_address=request.wallet_address,
+            extra_params=request.extra_params,
         )
 
         return {

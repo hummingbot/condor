@@ -3,7 +3,7 @@ Gateway CLMM tools for Hummingbot MCP Server
 
 Two tools live here:
 - explore_gateway_clmm_pools: read-only pool discovery (list pools, get pool info)
-- manage_clmm: direct position operations (open, add, remove, close, collect fees)
+- manage_clmm: direct position operations (open, add, remove, close, collect fees, create pool)
 
 The managed path for normal LP work is `manage_executors` with `lp_executor`, which owns range
 monitoring, rebalancing and close retries. manage_clmm is the direct path, and the only way to
@@ -314,6 +314,7 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
             quote_token_amount=_opt_dec(request.quote_token_amount),
             slippage_pct=_opt_dec(request.slippage_pct),
             wallet_address=request.wallet_address,
+            extra_params=request.extra_params,
         )
 
     elif action == "remove_liquidity":
@@ -322,7 +323,10 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
             connector=connector,
             network=net,
             position_address=request.position_address,
-            percentage=_dec(request.percentage_to_remove, "percentage_to_remove"),
+            percentage_to_remove=_dec(
+                request.percentage_to_remove, "percentage_to_remove"
+            ),
+            slippage_pct=_opt_dec(request.slippage_pct),
             wallet_address=request.wallet_address,
         )
 
@@ -344,6 +348,19 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
             position_address=request.position_address,
             pool_address=request.pool_address,
             wallet_address=request.wallet_address,
+        )
+
+    elif action == "create_pool":
+        _require_clmm(request, "base_token", "quote_token")
+        result = await gc.create_pool(
+            connector=connector,
+            network=net,
+            base_token=request.base_token,
+            quote_token=request.quote_token,
+            # None -> hapi/gateway fetch the market price
+            initial_price=_opt_dec(request.initial_price),
+            wallet_address=request.wallet_address,
+            extra_params=request.extra_params,
         )
 
     else:

@@ -72,7 +72,8 @@ def _format_compact_swap_line(swap: dict) -> str:
     Returns: "✅ SOL-USDC BUY @126.00 1.26 USDC  1d jup 🔗"
     """
     pair = swap.get("trading_pair", "N/A")
-    side = swap.get("side", "?")
+    # Legacy rows written before hapi normalized casing may hold "buy"/"sell"
+    side = str(swap.get("side", "?")).upper()
     status = swap.get("status", "UNKNOWN")
     network = swap.get("network", "")
     tx_hash = swap.get("transaction_hash", "")
@@ -85,16 +86,10 @@ def _format_compact_swap_line(swap: dict) -> str:
     price = swap.get("price")
     quote_token = swap.get("quote_token", "")
 
-    # Calculate display price (price of base in terms of quote)
-    # BUY: input=quote, output=base, price=base/quote -> display = 1/price
-    # SELL: input=base, output=quote, price=quote/base -> display = price
+    # Display price: hapi records price as quote-per-base for both sides
     price_display = "—"
-    if price is not None and price > 0:
-        if side == "BUY":
-            display_price = 1 / price
-        else:
-            display_price = price
-        price_display = f"@{format_compact_number(display_price)}"
+    if price is not None:
+        price_display = f"@{format_compact_number(price)}"
 
     # Quote amount (what was spent/received in quote token)
     # BUY: quote amount = input_amount (what we paid)
@@ -108,9 +103,12 @@ def _format_compact_swap_line(swap: dict) -> str:
     # Relative time
     age = format_relative_time(timestamp)
 
-    # Status emoji (compact)
+    # Status emoji (compact) - hapi stores SUBMITTED for in-flight swaps
+    status_upper = str(status).upper()
     status_char = (
-        "✅" if status == "CONFIRMED" else "⏳" if status == "PENDING" else "❌"
+        "✅"
+        if status_upper == "CONFIRMED"
+        else "⏳" if status_upper == "SUBMITTED" else "❌"
     )
 
     # Build line: "✅ SOL-USDC BUY @126.00 1.26 USDC  1d jup 🔗"
@@ -1166,8 +1164,8 @@ async def handle_swap_execute_confirm(
         )
 
         if isinstance(result, dict):
-            if "tx_hash" in result:
-                tx_short = result["tx_hash"][:16] + "..."
+            if result.get("transaction_hash"):
+                tx_short = result["transaction_hash"][:16] + "..."
                 swap_info += escape_markdown_v2(f"\nTx: {tx_short}")
             if "status" in result:
                 swap_info += escape_markdown_v2(f"\nStatus: {result['status']}")
@@ -1260,16 +1258,20 @@ def _format_detailed_swap_line(swap: dict) -> str:
     Returns formatted line (not escaped)
     """
     pair = swap.get("trading_pair", "N/A")
-    side = swap.get("side", "?")
+    # Legacy rows written before hapi normalized casing may hold "buy"/"sell"
+    side = str(swap.get("side", "?")).upper()
     status = swap.get("status", "UNKNOWN")
     network = swap.get("network", "")
     tx_hash = swap.get("transaction_hash", "")
     connector = swap.get("connector", "")
     timestamp = swap.get("timestamp", "")
 
-    # Status emoji
+    # Status emoji - hapi stores SUBMITTED for in-flight swaps
+    status_upper = str(status).upper()
     status_emoji = (
-        "✅" if status == "CONFIRMED" else "⏳" if status == "PENDING" else "❌"
+        "✅"
+        if status_upper == "CONFIRMED"
+        else "⏳" if status_upper == "SUBMITTED" else "❌"
     )
 
     # Get amounts and tokens
@@ -1296,14 +1298,10 @@ def _format_detailed_swap_line(swap: dict) -> str:
                 f"   Out: {format_compact_number(output_amount)} {quote_token}"
             )
 
-    # Price
-    if price is not None and price > 0:
-        if side == "BUY":
-            display_price = 1 / price
-        else:
-            display_price = price
+    # Price: hapi records price as quote-per-base for both sides
+    if price is not None:
         lines.append(
-            f"   Price: {format_compact_number(display_price, 4)} {quote_token}/{base_token}"
+            f"   Price: {format_compact_number(price, 4)} {quote_token}/{base_token}"
         )
 
     # Metadata

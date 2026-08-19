@@ -3238,11 +3238,7 @@ async def handle_pos_collect_fees(
         if result:
             success_msg = f"✅ *Fees collected from {escape_markdown_v2(pair)}\\!*"
             if isinstance(result, dict):
-                tx_hash = (
-                    result.get("tx_hash")
-                    or result.get("txHash")
-                    or result.get("signature")
-                )
+                tx_hash = result.get("transaction_hash")
                 if tx_hash:
                     success_msg += f"\n\nTx: `{tx_hash[:30]}...`"
 
@@ -3423,10 +3419,8 @@ async def handle_pos_close_execute(
             pair = pos.get("trading_pair", "Unknown")
             success_msg = escape_markdown_v2(f"✅ Position closed: {pair}")
 
-            if isinstance(result, dict) and result.get("tx_hash"):
-                success_msg += (
-                    f"\n\nTx: `{escape_markdown_v2(result['tx_hash'][:20])}...`"
-                )
+            if isinstance(result, dict) and result.get("transaction_hash"):
+                success_msg += f"\n\nTx: `{escape_markdown_v2(result['transaction_hash'][:20])}...`"
 
             keyboard = [[InlineKeyboardButton("« Back", callback_data="dex:liquidity")]]
             reply_markup = InlineKeyboardMarkup(keyboard)
@@ -4984,8 +4978,8 @@ async def handle_pos_add_confirm(
                 "Both amounts are 0. Need at least one token to add liquidity."
             )
 
-        # Build extra_params for strategy type
-        extra_params = {"strategyType": strategy_type}
+        # strategyType is Meteora-only; hapi rejects it for other connectors
+        extra_params = {"strategyType": strategy_type} if connector == "meteora" else None
 
         result = await client.gateway_clmm.open_position(
             connector=connector,
@@ -5029,11 +5023,20 @@ async def handle_pos_add_confirm(
             pos_info += escape_markdown_v2(f"Quote: {float(amount_quote):.6f}\n")
 
         if isinstance(result, dict):
-            if "tx_hash" in result:
-                pos_info += escape_markdown_v2(f"\nTx: {result['tx_hash'][:16]}...")
-            if "position_address" in result:
+            # transaction_hash is None while the open tx is still pending
+            if result.get("transaction_hash"):
+                pos_info += escape_markdown_v2(
+                    f"\nTx: {result['transaction_hash'][:16]}..."
+                )
+            # position_address is null when the tx was submitted but not yet
+            # confirmed — hapi's poller records the position once it lands
+            if result.get("position_address"):
                 pos_info += escape_markdown_v2(
                     f"\nPosition: {result['position_address'][:16]}..."
+                )
+            elif result.get("status") == "submitted":
+                pos_info += escape_markdown_v2(
+                    "\nPosition: pending confirmation (address known once the tx lands)"
                 )
 
         keyboard = [
@@ -5316,8 +5319,10 @@ async def process_add_position(
             f"Quote: {params['amount_quote']}\n"
         )
 
-        if isinstance(result, dict) and "tx_hash" in result:
-            pos_info += escape_markdown_v2(f"\nTx: {result['tx_hash'][:16]}...")
+        if isinstance(result, dict) and result.get("transaction_hash"):
+            pos_info += escape_markdown_v2(
+                f"\nTx: {result['transaction_hash'][:16]}..."
+            )
 
         keyboard = [
             [InlineKeyboardButton("« Back to Liquidity", callback_data="dex:liquidity")]

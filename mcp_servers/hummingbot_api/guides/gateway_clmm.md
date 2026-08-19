@@ -36,9 +36,22 @@ passed straight through.
 | `remove_liquidity` | `position_address`, `percentage_to_remove` | Partial withdrawal; the position account survives even at 100 |
 | `close` | `position_address` | Withdraws everything, collects fees, closes the account |
 | `collect_fees` | `position_address` | Fees only; position untouched |
+| `create_pool` | `base_token`, `quote_token` | Creates a new EMPTY pool; `initial_price` optional (market price fetched when omitted) |
 
 `remove_liquidity` at 100% and `close` are not the same thing: the former leaves an empty position
 open, the latter closes the account. To recover an orphan, use `close`.
+
+## create_pool
+
+Creates a new (empty) CLMM pool — liquidity is added afterwards by opening positions. `initial_price`
+is quote per base and optional: when omitted, the API fetches the live market price. Connector-specific
+params ride `extra_params` under Gateway's own names (unknown keys are rejected with a 400):
+
+- **meteora / orca**: `binStep`
+- **meteora / uniswap / pancakeswap**: `feeBps`
+- **raydium / pancakeswap-sol**: `ammConfigIndex`
+
+Example: `manage_clmm(action="create_pool", connector="meteora", network="solana-mainnet-beta", base_token="SOL", quote_token="USDC", extra_params={"binStep": 20, "feeBps": 20})`
 
 ## pool_address on close and collect_fees
 

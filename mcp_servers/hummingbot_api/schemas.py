@@ -441,9 +441,17 @@ class GatewaySwapRequest(BaseModel):
     )
 
     slippage_pct: str | None = Field(
-        default="1.0",
-        description="Maximum slippage percentage (optional, default: 1.0). "
-        "Example: '1.5' for 1.5% slippage tolerance",
+        default=None,
+        description="Maximum slippage percentage (optional). "
+        "Omit to use the connector's configured slippage. "
+        "Example: '1.5' for 1.5% slippage tolerance ('0' is a real value, not 'use default')",
+    )
+
+    extra_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Connector-specific parameters for quote/execute (optional). "
+        "Supported key: 'approximateIfNoExactOut' (bool, jupiter/dflow/okx/titan routers only) - "
+        "allow an approximate quote when no exact-out route exists",
     )
 
     # Execute-specific parameter
@@ -610,8 +618,6 @@ class AMMRequest(BaseModel):
             "pool_info",
             "position_info",
             "positions_owned",
-            "quote_swap",
-            "execute_swap",
             "quote_liquidity",
             "add_liquidity",
             "remove_liquidity",
@@ -641,20 +647,13 @@ class AMMRequest(BaseModel):
         description="Meteora NFT position: REQUIRED for remove_liquidity, optional for add_liquidity (omit = open a new position). Ignored by fungible-LP AMMs.",
     )
 
-    # Swap params
+    # Token params
     base_token: str | None = Field(
-        default=None,
-        description="Base token symbol or address (swap direction / pool base)",
+        default=None, description="Base token symbol or address (create_pool)"
     )
     quote_token: str | None = Field(
         default=None,
         description="Quote token symbol or address (pool quote, for create_pool)",
-    )
-    amount: str | None = Field(
-        default=None, description="Swap amount (as string; parsed to Decimal)"
-    )
-    side: Literal["BUY", "SELL"] | None = Field(
-        default=None, description="Swap direction"
     )
     slippage_pct: str | None = Field(
         default=None, description="Maximum slippage percentage (as string)"
@@ -679,20 +678,12 @@ class AMMRequest(BaseModel):
         default=None,
         description="Initial price as quote per base (create_pool; overrides quote_token_amount)",
     )
-    config_address: str | None = Field(
+    extra_params: dict[str, Any] | None = Field(
         default=None,
-        description="Meteora DAMM v2 config account address (required for meteora create_pool)",
-    )
-    fee_config_index: int | None = Field(
-        default=None,
-        description="Raydium CPMM fee config index (optional, create_pool)",
-    )
-    gas_price: str | None = Field(
-        default=None,
-        description="Uniswap (EVM) gas price in gwei (optional, create_pool)",
-    )
-    max_gas: int | None = Field(
-        default=None, description="Uniswap (EVM) max gas limit (optional, create_pool)"
+        description="Connector-specific create_pool params under Gateway's own names: "
+        "configAddress (meteora DAMM v2, required there), ammConfigIndex (raydium CPMM). "
+        "uniswap/pancakeswap (EVM) AMM take no extra params. Unknown keys are "
+        "rejected by the API with a 400.",
     )
 
 
@@ -718,6 +709,7 @@ class CLMMRequest(BaseModel):
             "remove_liquidity",
             "close",
             "collect_fees",
+            "create_pool",
         ]
         | None
     ) = Field(
@@ -773,7 +765,23 @@ class CLMMRequest(BaseModel):
     slippage_pct: str | None = Field(
         default=None, description="Maximum slippage percentage (as string)"
     )
+
+    # create_pool params
+    base_token: str | None = Field(
+        default=None, description="Base token symbol or address (create_pool)"
+    )
+    quote_token: str | None = Field(
+        default=None, description="Quote token symbol or address (create_pool)"
+    )
+    initial_price: str | None = Field(
+        default=None,
+        description="Initial pool price as quote per base (create_pool, optional — "
+        "the API fetches the market price when omitted)",
+    )
     extra_params: dict[str, Any] | None = Field(
         default=None,
-        description="Connector-specific parameters for open (e.g. {'strategyType': 0} for Meteora DLMM)",
+        description="Connector-specific parameters under Gateway's own names. "
+        "open/add_liquidity: strategyType (meteora DLMM, e.g. {'strategyType': 0}). "
+        "create_pool: binStep (meteora/orca), feeBps (meteora/uniswap/pancakeswap), "
+        "ammConfigIndex (raydium/pancakeswap-sol). Unknown keys are rejected by the API with a 400.",
     )

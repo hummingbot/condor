@@ -216,4 +216,4 @@ def test_remove_liquidity_passes_percentage_as_decimal():
     )
 
     _, kwargs = client.gateway_clmm.calls[0]
-    assert kwargs["percentage"] == Decimal("50")
+    assert kwargs["percentage_to_remove"] == Decimal("50")

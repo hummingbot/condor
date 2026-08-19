@@ -196,20 +196,19 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
                 )
         return "\n".join(lines)
 
-    if action in ("quote_swap", "quote_liquidity") and isinstance(payload, dict):
+    if action == "quote_liquidity" and isinstance(payload, dict):
         return f"{header}\n{payload}"
 
     if action in (
-        "execute_swap",
         "add_liquidity",
         "remove_liquidity",
         "create_pool",
     ) and isinstance(payload, dict):
-        sig = payload.get("signature")
+        tx = payload.get("transaction_hash")
         extra = ""
         if action == "create_pool":
             extra = f"\nPool: {payload.get('pool_address')}  Seed price: {payload.get('price')}"
-        return f"{header}\nSignature/Tx: {sig}  Status: {payload.get('status')}{extra}"
+        return f"{header}\nTx: {tx}  Status: {payload.get('status')}{extra}"
 
     return f"{header}\n{payload}"
 
@@ -265,11 +264,20 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
         )
 
     if action in ("add_liquidity", "remove_liquidity") and isinstance(payload, dict):
-        tx = payload.get("transaction_hash") or payload.get("signature")
+        tx = payload.get("transaction_hash")
         return (
             f"{header}\n"
             f"Position: {result.get('position_address')}\n"
             f"Tx: {tx}  Status: {payload.get('status')}"
+        )
+
+    if action == "create_pool" and isinstance(payload, dict):
+        return (
+            f"{header}\n"
+            f"Pool: {payload.get('pool_address')}\n"
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}\n"
+            "The pool is created empty — add liquidity by opening a position "
+            "(action='open' or manage_executors lp_executor)."
         )
 
     return f"{header}\n{payload}"

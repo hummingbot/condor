@@ -313,14 +313,14 @@ def get_status_emoji(status: str) -> str:
     """Get emoji for swap status
 
     Args:
-        status: Status string (CONFIRMED, PENDING, FAILED, etc.)
+        status: Status string (CONFIRMED, SUBMITTED, FAILED, etc.)
 
     Returns:
         Emoji character
     """
     status_emojis = {
         "CONFIRMED": "✅",
-        "PENDING": "⏳",
+        "SUBMITTED": "⏳",
         "FAILED": "❌",
         "REJECTED": "🚫",
         "UNKNOWN": "❓",
@@ -462,7 +462,7 @@ HISTORY_FILTERS = {
     "swap": {
         "trading_pair": ["All", "SOL-USDC", "SOL-ORE", "ORE-USDC", "ETH-USDC"],
         "connector": ["All", "jupiter", "uniswap"],
-        "status": ["All", "CONFIRMED", "PENDING", "FAILED"],
+        "status": ["All", "CONFIRMED", "SUBMITTED", "FAILED"],
     },
     "position": {
         "trading_pair": ["All", "SOL-USDC", "ORE-SOL", "METv-SOL"],

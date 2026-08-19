@@ -484,7 +484,7 @@ async def handle_lpm_collect_fees(
         )
 
         if result:
-            tx_hash = (result.get("tx_hash", "") or "N/A")[:16]
+            tx_hash = (result.get("transaction_hash", "") or "N/A")[:16]
             await query.message.reply_text(
                 f"✅ *Fees collected*\nTx: `{escape_markdown_v2(tx_hash)}...`",
                 parse_mode="MarkdownV2",
@@ -609,15 +609,10 @@ async def handle_lpm_rebalance_execute(
 
         logger.info(f"Close position result: {close_result}")
 
-        # Extract tx hash from various possible field names
+        # hapi returns transaction_hash (None while pending)
         close_tx = None
         if isinstance(close_result, dict):
-            close_tx = (
-                close_result.get("tx_hash")
-                or close_result.get("txHash")
-                or close_result.get("signature")
-                or close_result.get("txSignature")
-            )
+            close_tx = close_result.get("transaction_hash")
         close_tx_display = (
             f"`{escape_markdown_v2(close_tx[:20])}...`" if close_tx else "_pending_"
         )
@@ -654,8 +649,9 @@ async def handle_lpm_rebalance_execute(
             parse_mode="MarkdownV2",
         )
 
-        # Step 3: Open new position with same range using bid-ask strategy (type 2)
-        extra_params = {"strategyType": 2}  # Bid-Ask strategy
+        # Step 3: Open new position with same range using bid-ask strategy (type 2).
+        # strategyType is Meteora-only; hapi rejects it for other connectors.
+        extra_params = {"strategyType": 2} if connector == "meteora" else None
 
         open_result = await client.gateway_clmm.open_position(
             connector=connector,
@@ -680,15 +676,10 @@ async def handle_lpm_rebalance_execute(
 
         logger.info(f"Open position result: {open_result}")
 
-        # Extract tx hash
+        # hapi returns transaction_hash (None while pending)
         open_tx = None
         if isinstance(open_result, dict):
-            open_tx = (
-                open_result.get("tx_hash")
-                or open_result.get("txHash")
-                or open_result.get("signature")
-                or open_result.get("txSignature")
-            )
+            open_tx = open_result.get("transaction_hash")
         open_tx_display = (
             f"`{escape_markdown_v2(open_tx[:20])}...`" if open_tx else "_pending_"
         )

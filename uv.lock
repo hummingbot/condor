@@ -1496,7 +1496,7 @@ wheels = [
 [[package]]
 name = "hummingbot-api-client"
 version = "1.5.8"
-source = { git = "https://github.com/hummingbot/hummingbot-api-client.git?branch=feat%2Fclmm-bin-count#43a867dfa9cc2f797d6a98d9491761375a0d8bb7" }
+source = { git = "https://github.com/hummingbot/hummingbot-api-client.git?branch=feat%2Fclmm-bin-count#4cea3f4927b530fca073c2f2d8f444f3d8d9388b" }
 dependencies = [
     { name = "aiohttp" },
 ]
