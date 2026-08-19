@@ -7,7 +7,7 @@ import { candleChannelKey, candleStore } from "@/lib/candle-store";
 import type { ExtraLine, PickSlot } from "@/components/executor/types";
 import { getExecutorColor, type ExecutorOverlay } from "@/lib/executor-overlays";
 import { getThemeColors, pnlHexColor, sideColor } from "@/lib/theme-colors";
-import { escapeHtml, formatCompactUsd } from "@/lib/formatters";
+import { escapeHtml, formatCompactUsd, formatPriceSig } from "@/lib/formatters";
 
 type PickField = PickSlot | null;
 
@@ -391,12 +391,6 @@ export function TradeChart({
         })();
 
         let detailRows = "";
-        const fmtPrice = (p: number) => {
-          if (p === 0) return "—";
-          if (Math.abs(p) >= 1000) return p.toFixed(2);
-          if (Math.abs(p) >= 1) return p.toFixed(4);
-          return p.toPrecision(6);
-        };
         const addRow = (label: string, value: string, color?: string) => {
           detailRows += `<div style="display:flex;justify-content:space-between;gap:12px"><span style="color:#6b7994">${escapeHtml(label)}</span><span style="font-family:monospace;${color ? `color:${color}` : ""}">${escapeHtml(value)}</span></div>`;
         };
@@ -406,18 +400,18 @@ export function TradeChart({
         if (o.gridBox) {
           if (o.type === "lp") {
             // startPrice is the box's upper edge (see computeLpOverlay).
-            addRow("Upper Price", fmtPrice(o.gridBox.startPrice));
-            addRow("Lower Price", fmtPrice(o.gridBox.endPrice));
+            addRow("Upper Price", formatPriceSig(o.gridBox.startPrice));
+            addRow("Lower Price", formatPriceSig(o.gridBox.endPrice));
             if (cfg.lp_provider != null) addRow("Provider", String(cfg.lp_provider));
           } else {
-            addRow("Start Price", fmtPrice(o.gridBox.startPrice));
-            addRow("End Price", fmtPrice(o.gridBox.endPrice));
-            if (o.gridBox.limitPrice) addRow("Limit Price", fmtPrice(o.gridBox.limitPrice));
+            addRow("Start Price", formatPriceSig(o.gridBox.startPrice));
+            addRow("End Price", formatPriceSig(o.gridBox.endPrice));
+            if (o.gridBox.limitPrice) addRow("Limit Price", formatPriceSig(o.gridBox.limitPrice));
           }
         } else if (o.entryPrice && o.entryPrice > 0) {
-          addRow("Entry", fmtPrice(o.entryPrice));
+          addRow("Entry", formatPriceSig(o.entryPrice));
           if (o.exitPrice && o.exitPrice > 0 && o.exitPrice !== o.entryPrice) {
-            addRow(o.status?.toLowerCase() === "running" ? "Current" : "Close", fmtPrice(o.exitPrice));
+            addRow(o.status?.toLowerCase() === "running" ? "Current" : "Close", formatPriceSig(o.exitPrice));
           }
         }
 

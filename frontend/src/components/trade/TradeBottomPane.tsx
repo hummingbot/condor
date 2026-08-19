@@ -9,6 +9,7 @@ import { useRates } from "@/hooks/useRates";
 import {
   formatPct,
   formatAge,
+  formatPriceSig,
   formatUsd,
   pnlColor,
   isExecutorActive,
@@ -34,13 +35,6 @@ interface TradeBottomPaneProps {
 }
 
 const STORAGE_KEY = "condor_trade_bottom_pane";
-
-function formatPrice(price: number): string {
-  if (price === 0) return "—";
-  if (Math.abs(price) >= 1000) return price.toFixed(2);
-  if (Math.abs(price) >= 1) return price.toFixed(4);
-  return price.toPrecision(6);
-}
 
 const STRATEGY_LABELS: Record<string, string> = {
   LIMIT: "Limit",
@@ -136,14 +130,14 @@ function ExecutorTooltip({
           <div className="flex items-center gap-2 mb-1.5 text-[var(--color-text-muted)]">
             {entry > 0 && (
               <span>
-                Entry: <span className="text-[var(--color-text)] font-mono">{formatPrice(entry)}</span>
+                Entry: <span className="text-[var(--color-text)] font-mono">{formatPriceSig(entry)}</span>
               </span>
             )}
             {entry > 0 && exit > 0 && exit !== entry && <span>→</span>}
             {exit > 0 && exit !== entry && (
               <span>
                 {active ? "Now" : "Close"}:{" "}
-                <span className="text-[var(--color-text)] font-mono">{formatPrice(exit)}</span>
+                <span className="text-[var(--color-text)] font-mono">{formatPriceSig(exit)}</span>
               </span>
             )}
           </div>
@@ -179,7 +173,7 @@ function ExecutorTooltip({
             <div className="col-span-2">
               <span className="text-[var(--color-text-muted)]">Range: </span>
               <span className="font-mono">
-                {formatPrice(Number(config.start_price as number))} – {formatPrice(Number(config.end_price as number))}
+                {formatPriceSig(Number(config.start_price as number))} – {formatPriceSig(Number(config.end_price as number))}
               </span>
             </div>
           )}
@@ -569,10 +563,10 @@ export function TradeBottomPane({
                             )}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
-                            {entry > 0 ? formatPrice(entry) : "—"}
+                            {entry > 0 ? formatPriceSig(entry) : "—"}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
-                            {exit > 0 && exit !== entry ? formatPrice(exit) : "—"}
+                            {exit > 0 && exit !== entry ? formatPriceSig(exit) : "—"}
                           </td>
                           <td
                             className="px-3 py-1.5 text-right font-mono font-medium tabular-nums"
@@ -653,13 +647,13 @@ export function TradeBottomPane({
                               <span className="ml-1 text-[var(--color-text-muted)]">
                                 (${(pos.notional_value ?? Math.abs(pos.amount) * pos.entry_price).toFixed(2)})
                               </span>
-                              <span className="ml-1.5 text-[var(--color-text-muted)]">@ {formatPrice(pos.entry_price)}</span>
+                              <span className="ml-1.5 text-[var(--color-text-muted)]">@ {formatPriceSig(pos.entry_price)}</span>
                             </div>
                           </div>
                           <div className="flex items-center gap-3 text-[11px]">
                             {!isFlat && (
                               <span className="text-[var(--color-text-muted)]">
-                                Now: {formatPrice(pos.current_price)}
+                                Now: {formatPriceSig(pos.current_price)}
                               </span>
                             )}
                             {pos.leverage > 1 && (
