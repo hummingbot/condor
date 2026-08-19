@@ -142,18 +142,20 @@ export function TradeChart({
   );
 
   // ── Filter executor overlays to those within candle time range ──
+  // Depend on the earliest candle timestamp (not the candles array, whose reference
+  // changes on every WS tick) so filteredOverlays keeps a stable identity across
+  // live ticks and the overlay rebuild effect below doesn't churn per tick.
+  const minCandleTime = candles.length ? candles[0].timestamp : 0;
   const filteredOverlays = useMemo(() => {
     if (!executorOverlays?.length) return executorOverlays;
-    if (!candles.length) return executorOverlays; // no candles yet → show all
-    const minTime = candles[0].timestamp;
     return executorOverlays.filter((o) => {
       const s = o.status?.toLowerCase();
       if (s === "running" || s === "active") return true;
       if (selectedExecutorId && o.executorId === selectedExecutorId) return true;
       const end = o.timeRange.end > 1e12 ? o.timeRange.end / 1000 : o.timeRange.end;
-      return end >= minTime;
+      return end >= minCandleTime; // minCandleTime === 0 (no candles) → show all
     });
-  }, [executorOverlays, candles, selectedExecutorId]);
+  }, [executorOverlays, minCandleTime, selectedExecutorId]);
 
   // ── REST backfill on pair/interval/lookback change ──
   const backfillKeyRef = useRef("");
