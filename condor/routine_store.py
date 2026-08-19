@@ -94,6 +94,15 @@ class _HttpBot:
         data = {k: v for k, v in kw.items() if v is not None}
         return await self._post("editMessageText", data)
 
+    async def get_chat_member(self, *a, **kw):
+        """Raw ``getChatMember`` envelope — the web routes' chat-ownership check
+        (SEC-198) reads ``result.status`` out of it when no live bot is around."""
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        user_id = kw.get("user_id") or (a[1] if len(a) > 1 else None)
+        return await self._post(
+            "getChatMember", {"chat_id": chat_id, "user_id": user_id}
+        )
+
 
 _http_bot = _HttpBot()
 

@@ -1211,6 +1211,57 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
     return {"deleted": True}
 
 
+def _chat_member_status(member: Any) -> str | None:
+    """Normalize the two shapes ``get_chat_member`` can answer with.
+
+    A live python-telegram-bot returns a ``ChatMember`` with a ``status``
+    attribute; ``_HttpBot`` hands back Telegram's raw envelope (or ``None``
+    when it has no token). ``None`` means "could not verify".
+    """
+    if member is None:
+        return None
+    if isinstance(member, dict):
+        if not member.get("ok"):
+            return None
+        return (member.get("result") or {}).get("status")
+    return getattr(member, "status", None)
+
+
+async def _check_chat_access(user_id: int, chat_id: int) -> None:
+    """403 unless ``chat_id`` is a chat the caller actually belongs to (SEC-198).
+
+    The routes below forward a body-supplied ``chat_id`` to outbound Telegram
+    sends, so an unchecked value lets any authenticated session speak with the
+    bot's identity into anyone's chat. A private chat's id *is* the Telegram
+    user id, so the common case (and the MCP crossback for private sessions)
+    costs nothing; any other id must be a group the caller is a member of,
+    verified against Telegram itself through the same bot ladder that would
+    deliver the message. Verification failure fails closed: an unverifiable
+    target is a refused target. Admins are exempt, mirroring the delegation
+    ownership gate (SEC-081).
+    """
+    if not chat_id or chat_id == user_id:
+        return
+    from config_manager import get_config_manager
+
+    if get_config_manager().is_admin(user_id):
+        return
+    from condor.agents.delegate import resolve_bot
+
+    status = None
+    try:
+        member = await resolve_bot().get_chat_member(chat_id=chat_id, user_id=user_id)
+        status = _chat_member_status(member)
+    except Exception:
+        log.warning(
+            "Could not verify membership of user %s in chat %s", user_id, chat_id
+        )
+    if status is None or status in ("left", "kicked", "banned"):
+        raise HTTPException(
+            status_code=403, detail="chat_id is not a chat you belong to"
+        )
+
+
 @router.post("/{slug}/consult")
 async def consult_agent(
     slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
@@ -1229,6 +1280,10 @@ async def consult_agent(
     # serverless consults need no server scope.
     if req.server_name:
         check_server_access(user.id, req.server_name)
+
+    # The chat is where the consult's notifications land — same ownership rule
+    # as the push target on /notify (SEC-198).
+    await _check_chat_access(user.id, req.chat_id)
 
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
@@ -1287,6 +1342,11 @@ async def delegate_agent(
     # to ``server_name``'s live credentials, so refuse a server the caller can't access.
     if req.server_name:
         check_server_access(user.id, req.server_name)
+
+    # ``chat_id`` is where ``_notify_done`` will push the completion text, so a
+    # foreign chat here would let the delegation's summary (driven by the
+    # caller's task text) land in someone else's chat (SEC-198).
+    await _check_chat_access(user.id, req.chat_id)
 
     conversation_id = await _conversation_for_session(req.session_key)
 
@@ -1379,6 +1439,11 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
     """
     if not req.text:
         raise HTTPException(status_code=400, detail="text is required")
+
+    # The push target must belong to the caller — mirror the ``req.user_id``
+    # rule below for the outbound address, and refuse before any side effect
+    # (SEC-198).
+    await _check_chat_access(user.id, req.chat_id)
 
     # The caller is the JWT, never ``req.user_id``: mirror consult/delegate so an
     # authenticated session cannot write into another user's transcript.
@@ -1740,6 +1805,10 @@ async def _start(agent, strategy, req: StartStrategyRequest, user_id: int) -> di
     config_dict = load_full_config(strategy.dir, strategy.default_config)
     if req.config:
         config_dict.update(req.config)
+
+    # The engine notifies ``chat_id`` on every tick, so the same ownership rule
+    # as /notify applies to it (SEC-198).
+    await _check_chat_access(user_id, req.chat_id)
 
     # ``TickEngine._resolve_server`` trades on ``config["server_name"]`` and the
     # request body is a free-form dict, so without this gate any authenticated
