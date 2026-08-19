@@ -708,6 +708,11 @@ if (: </dev/tty) 2>/dev/null; then
     if [[ "${pick_model_now:-Y}" =~ ^[Nn]$ ]]; then
         msg_ok "Skipped -- run 'make pick-model' any time"
     else
+        # condor.setup_llm does everything for this step in one process: syncs
+        # the Python env, shows the menu, and -- if the model picked (or kept)
+        # needs a CLI bridge that isn't installed yet, e.g. `npm install -g
+        # @google/gemini-cli` -- installs and confirms it right here, so there
+        # is no separate install pass bolted on after this script moves on.
         msg_info "Setting up Condor's Python environment (~250MB first run, 1-3 min)..."
         uv run python -m condor.setup_llm < /dev/tty || \
             msg_warn "Model selection did not complete -- run 'make pick-model' later"
@@ -715,41 +720,6 @@ if (: </dev/tty) 2>/dev/null; then
 else
     msg_info "No terminal available -- skipping model selection"
     uv run python -m condor.setup_llm --status || true
-fi
-
-echo ""
-
-# ── Install Claude ACP (only if the chosen model needs it) ──────────
-
-# Reuses the same agent_key -> ACP bridge mapping the bot resolves at
-# runtime (condor.setup_llm's current_default/base_of + condor.acp.client's
-# ACP_COMMANDS) so this can never disagree with what Step 2 actually picked
-# -- or, if Step 2 was skipped, with what `_default_agent()` falls back to.
-refresh_path
-hash -r
-
-if uv run python -c "
-from condor.setup_llm import ENV_PATH, read_env, current_default, base_of
-from condor.acp.client import ACP_COMMANDS
-env = read_env(ENV_PATH)
-raise SystemExit(0 if ACP_COMMANDS.get(base_of(current_default(env))) == 'claude-agent-acp' else 1)
-" </dev/null >/dev/null 2>&1; then
-    if ! npm list -g @agentclientprotocol/claude-agent-acp >/dev/null 2>&1; then
-        msg_info "Installing @agentclientprotocol/claude-agent-acp globally..."
-        if npm install -g @agentclientprotocol/claude-agent-acp; then
-            msg_ok "@agentclientprotocol/claude-agent-acp installed successfully"
-            NEEDS_RESTART=true
-            refresh_path
-        else
-            msg_error "Failed to install @agentclientprotocol/claude-agent-acp globally."
-            msg_info "You can install it later with: npm install -g @agentclientprotocol/claude-agent-acp"
-            # Don't exit - this dependency is optional for core setup flow
-        fi
-    else
-        msg_ok "@agentclientprotocol/claude-agent-acp is already installed"
-    fi
-else
-    msg_ok "Skipping @agentclientprotocol/claude-agent-acp -- chosen AI model doesn't use it"
 fi
 
 echo ""
