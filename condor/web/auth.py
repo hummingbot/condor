@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import os
 import secrets
@@ -14,13 +12,11 @@ from jose import JWTError, jwt
 
 from condor.web.models import WebUser
 from config_manager import UserRole, get_config_manager
-from utils.config import TELEGRAM_TOKEN
 
 logger = logging.getLogger(__name__)
 
 _ALGORITHM = "HS256"
 _TOKEN_EXPIRE_SECONDS = 86400  # 24 hours
-_AUTH_WINDOW_SECONDS = 86400  # accept auth_date within 24 hours
 _LOGIN_TOKEN_TTL = 300  # one-time login tokens valid for 5 minutes
 
 _bearer_scheme = HTTPBearer()
@@ -44,28 +40,6 @@ def _jwt_secret() -> str:
     if web_secret:
         return web_secret
     return get_config_manager().get_or_create_web_jwt_secret()
-
-
-# ── Telegram Login Widget verification ──
-
-
-def verify_telegram_login(data: dict) -> bool:
-    """Verify data from the Telegram Login Widget using HMAC-SHA256."""
-    check_hash = data.get("hash", "")
-    auth_date = data.get("auth_date", 0)
-
-    # Check auth_date freshness
-    if abs(time.time() - int(auth_date)) > _AUTH_WINDOW_SECONDS:
-        return False
-
-    # Build check string (alphabetically sorted key=value, excluding hash)
-    filtered = {k: v for k, v in data.items() if k != "hash"}
-    check_string = "\n".join(f"{k}={v}" for k, v in sorted(filtered.items()))
-
-    secret_key = hashlib.sha256(TELEGRAM_TOKEN.encode()).digest()
-    computed = hmac.new(secret_key, check_string.encode(), hashlib.sha256).hexdigest()
-
-    return hmac.compare_digest(computed, check_hash)
 
 
 # ── JWT helpers ──

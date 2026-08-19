@@ -7,16 +7,6 @@ from pydantic import BaseModel
 # ── Auth ──
 
 
-class LoginRequest(BaseModel):
-    id: int
-    first_name: str
-    last_name: str = ""
-    username: str = ""
-    photo_url: str = ""
-    auth_date: int
-    hash: str
-
-
 class LoginResponse(BaseModel):
     token: str
     user: WebUser
