@@ -29,6 +29,7 @@ import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
 import { api } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
 import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
@@ -226,6 +227,15 @@ export function DexPool() {
   // answer to the pool actually on screen.
   const symbolPair =
     baseSymbol && quoteSymbol ? `${baseSymbol}-${quoteSymbol}` : "";
+
+  // WS for executor data, same subscription CreateExecutor holds: without it
+  // the shared-socket bridge has no executors frames to fan out here, and the
+  // pair queries below (staleTime 30s, no polling) never see a stop or a fill.
+  const wsChannels = useMemo(
+    () => (server ? [`executors:${server}`] : []),
+    [server],
+  );
+  useCondorWebSocket(wsChannels, server ?? null);
 
   const { executors, overlays, positions, isLoadingPositions } =
     useMainControllerData(server ?? null, network, pair, {

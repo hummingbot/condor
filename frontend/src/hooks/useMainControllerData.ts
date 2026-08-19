@@ -106,21 +106,27 @@ export function useMainControllerData(
   // compared six fields, which made it both redundant here and a staleness
   // trap -- a change to any seventh field kept serving the old rows.
   const executors = useMemo(() => {
-    const seen = new Set<string>();
-    const rows: ExecutorInfo[] = [];
     // The by-pool rows are the whole server's LP history, so they are admitted
     // only on an exact pool match -- unlike the pair rows, which were already
     // scoped by the query that fetched them.
     const inThisPool = poolAddress
       ? (poolLpExecutors ?? []).filter((ex) => executorPool(ex) === poolAddress)
       : [];
+    // Upsert by id, by-pool rows last: they refresh on their own 20s poll,
+    // while the pair queries sit still between WS pushes -- so when both hold
+    // the same executor, the by-pool copy replaces the pair copy instead of
+    // being shadowed by it. Map keeps first-insertion order, so row order is
+    // unchanged from the dedup this replaces.
+    const byId = new Map<string, ExecutorInfo>();
     for (const ex of [
       ...(cachedExecutors ?? []),
       ...(wantsAlt ? (altExecutors ?? []) : []),
       ...inThisPool,
     ]) {
-      if (seen.has(ex.id)) continue;
-      seen.add(ex.id);
+      byId.set(ex.id, ex);
+    }
+    const rows: ExecutorInfo[] = [];
+    for (const ex of byId.values()) {
       if (ex.connector !== connector) continue;
       if (poolAddress && ex.type?.toLowerCase() === "lp") {
         const pool = executorPool(ex);
