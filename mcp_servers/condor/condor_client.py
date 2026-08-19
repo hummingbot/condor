@@ -1,8 +1,8 @@
 """HTTP client for calling the Condor main-process web API."""
 
 import re
-
 import aiohttp
+import ipaddress
 
 from mcp_servers.condor.exceptions import APIError
 from mcp_servers.condor.settings import settings
@@ -24,11 +24,25 @@ async def call_main_api(
     """
     from condor.runtime.timeouts import TIMEOUTS
     from condor.web.auth import create_jwt
-    from utils.config import WEB_PORT
+    from utils.config import BIND_HOST, BIND_PORT 
 
     if timeout is None:
         timeout = TIMEOUTS.mcp_call
-    url = f"http://127.0.0.1:{WEB_PORT}/api/v1{path}"
+
+    host = BIND_HOST
+
+    try:
+        ip = ipaddress.ip_address(host)
+
+        if ip.is_unspecified:
+            host = "::1" if ip.version == 6 else "127.0.0.1"
+
+        if ip.version == 6:
+            host = f"[{host}]"
+    except ValueError:
+        pass
+
+    url = f"http://{host}:{BIND_PORT}/api/v1{path}"
     token = create_jwt(settings.user_id, role="user")
     headers = {"Authorization": f"Bearer {token}"}
 
