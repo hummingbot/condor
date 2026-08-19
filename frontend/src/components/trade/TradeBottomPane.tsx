@@ -1,10 +1,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
+import { usePairBalances } from "@/hooks/usePairBalances";
 import { useRates } from "@/hooks/useRates";
 import {
   formatPct,
@@ -260,31 +261,14 @@ export function TradeBottomPane({
     try { localStorage.setItem(STORAGE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
   }, [expanded]);
 
-  // Fetch balances for the active connector
-  const { data: portfolio } = useQuery({
-    queryKey: ["portfolio", server],
-    queryFn: () => api.getPortfolio(server!),
-    enabled: !!server,
-    refetchInterval: 30_000,
-  });
-
   // Extract base/quote tokens from pair (e.g. "BTC-USDT" -> ["BTC", "USDT"]),
   // unless the caller knows better — see baseSymbol/quoteSymbol.
   const [pairBase, pairQuote] = pair.split("-");
   const baseToken = baseSymbol || pairBase;
   const quoteToken = quoteSymbol || pairQuote;
 
-  // Find balances for the active connector
-  const connectorBalances = portfolio?.connectors?.find(
-    (c) => c.connector === connector,
-  )?.balances;
-
-  const baseBalance = connectorBalances?.find(
-    (b) => b.token.toUpperCase() === (baseToken ?? "").toUpperCase(),
-  );
-  const quoteBalance = connectorBalances?.find(
-    (b) => b.token.toUpperCase() === (quoteToken ?? "").toUpperCase(),
-  );
+  // Balances for the active connector (shared ["portfolio", server] query)
+  const balances = usePairBalances(server, connector, baseToken, quoteToken);
 
   const stopMutation = useMutation({
     mutationFn: (id: string) => {
@@ -432,17 +416,17 @@ export function TradeBottomPane({
           {/* Balance indicators */}
           <div className="flex items-center gap-2">
             <Wallet className="h-3 w-3 text-[var(--color-text-muted)]" />
-            {isSpot && baseBalance && (
+            {isSpot && balances.base !== null && (
               <span className="font-mono">
-                {formatBalance(baseBalance.available)} <span className="text-[var(--color-text-muted)]">{baseToken}</span>
+                {formatBalance(balances.base)} <span className="text-[var(--color-text-muted)]">{baseToken}</span>
               </span>
             )}
-            {quoteBalance && (
+            {balances.quote !== null && (
               <span className="font-mono">
-                {formatBalance(quoteBalance.available)} <span className="text-[var(--color-text-muted)]">{quoteToken}</span>
+                {formatBalance(balances.quote)} <span className="text-[var(--color-text-muted)]">{quoteToken}</span>
               </span>
             )}
-            {!baseBalance && !quoteBalance && (
+            {balances.base === null && balances.quote === null && (
               <span className="text-[var(--color-text-muted)]">—</span>
             )}
           </div>
