@@ -3,7 +3,7 @@
 An agent running in controller mode owns the bots it deploys, and the **name is
 the proof**: every bot a given ``(agent, strategy)`` may touch lives under the
 namespace ``{agent_slug}-{strategy_slug}``. Slugs never contain ``-``
-(``strategy._slugify`` maps ``[\\s-]+ → _``), so ``-`` delimits the namespace
+(``condor.frontmatter.slugify`` maps ``[\\s-]+ → _``), so ``-`` delimits the namespace
 unambiguously and two different agents can never claim the same bot — uniqueness
 is structural, with no registry, lock or lookup.
 

@@ -23,7 +23,7 @@ from condor.agents.risk import (
     RiskState,
     auto_approve_with_risk_check,
 )
-from condor.agents.strategy import _slugify
+from condor.frontmatter import slugify
 
 _OPTIONS = [{"kind": "allow_once", "optionId": "allow"}]
 NS = "brigado-ema_trend"
@@ -50,9 +50,9 @@ def _drive(callback, call) -> str:
 
 
 def test_slugs_never_contain_the_delimiter():
-    """The whole scheme rests on '-' being unambiguous: _slugify maps it to '_'."""
+    """The whole scheme rests on '-' being unambiguous: slugify maps it to '_'."""
     for name in ("RIVER Scalper v2", "ema-trend", "  spot - perp  ", "BTC/USD mm"):
-        assert "-" not in _slugify(name)
+        assert "-" not in slugify(name)
 
 
 def test_namespace_matches_base_tag_and_deployed_instance():

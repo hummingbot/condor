@@ -586,7 +586,7 @@ def test_concurrent_writers_never_leave_a_torn_file(project_root):
     # always parse cleanly, never a torn/interleaved one.
     import threading
 
-    from condor.memory.store import _parse_frontmatter
+    from condor.frontmatter import parse_frontmatter
 
     s = SkillStore()
     target = s.skills_dir / "shared" / "SKILL.md"
@@ -608,7 +608,7 @@ def test_concurrent_writers_never_leave_a_torn_file(project_root):
     for t in threads:
         t.join()
 
-    meta, body = _parse_frontmatter(target.read_text())
+    meta, body = parse_frontmatter(target.read_text())
     assert meta.get("name") == "shared"
     assert body == "x" * 5000
     assert list(target.parent.glob("*.tmp")) == []
