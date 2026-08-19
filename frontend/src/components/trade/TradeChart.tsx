@@ -65,8 +65,6 @@ interface TradeChartProps {
   /** Convert a value from the pair's quote currency to display currency */
   convertValue?: (val: number) => string;
   convertPnl?: (val: number) => string;
-  /** Callback when user clicks an executor in the list that's outside candle range */
-  onRequestCandleRange?: (startTime: number) => void;
   /** Callback when user clicks chart background to deselect executor */
   onExecutorDeselect?: () => void;
   /** Called once the series exists, with the chart's price mapping. */
