@@ -238,7 +238,7 @@ async def fetch_agent_pnl_series(
         fetch_all_bot_performance,
         fetch_archived_instances,
         fetch_base_histories,
-        slice_history,
+        slice_history_series,
     )
 
     bases = [b for b in (bot_names or []) if b]
@@ -267,10 +267,13 @@ async def fetch_agent_pnl_series(
     # One point per instant any instance was sampled. Each is the whole session's
     # cumulative at that moment, so the curve is continuous across a redeploy
     # rather than restarting at zero with each new bot.
+    # Single merge pass over all instances instead of a slice_history rescan
+    # per stamp — same values, O(stamps + rows) instead of O(stamps × rows).
     stamps = sorted({t for h in instances for t, *_ in h if since <= t <= end})
     series: list[dict[str, Any]] = []
-    for t in stamps:
-        realized, volume, _trades, _fees = slice_history(instances, since, t)
+    for t, realized, volume, _trades, _fees in slice_history_series(
+        instances, since, stamps
+    ):
         series.append(
             {
                 "timestamp": datetime.fromtimestamp(t, tz=timezone.utc).isoformat(),

@@ -637,6 +637,64 @@ def test_slice_history_sums_multiple_instances():
     assert slice_history([h1, h2], 0, 12) == (2.0, 20.0, 1.0, 0.2)
 
 
+def test_slice_history_series_matches_per_stamp_slices():
+    """The merge-pass series is byte-identical to per-stamp slice_history."""
+    from condor.fetchers.bot_performance import slice_history, slice_history_series
+
+    # Single instance.
+    h1 = [
+        (10.0, 1.0, 100.0, 1.0, 0.1),
+        (20.0, 3.0, 300.0, 4.0, 0.3),
+        (30.0, 5.0, 500.0, 9.0, 0.5),
+    ]
+    # Second instance with disjoint sample epochs, including rows earlier
+    # than the window's `since` (they fold into the baseline, not the curve).
+    h2 = [
+        (5.0, 0.5, 50.0, 1.0, 0.05),
+        (12.0, 2.5, 250.0, 2.0, 0.25),
+        (27.0, 4.5, 450.0, 3.0, 0.45),
+        (44.0, 6.5, 650.0, 4.0, 0.65),
+    ]
+
+    for histories, since, until in (
+        ([h1], 0.0, 100.0),  # single instance
+        ([h1, h2], 0.0, 100.0),  # disjoint epochs merged
+        ([h1, h2], 11.0, 100.0),  # rows earlier than since → nonzero baseline
+        ([h1, h2], 0.0, 28.0),  # until cutoff drops later stamps
+    ):
+        stamps = sorted({t for h in histories for t, *_ in h if since <= t <= until})
+        expected = [(t, *slice_history(histories, since, t)) for t in stamps]
+        assert slice_history_series(histories, since, stamps) == expected
+
+    # Empty stamps and empty histories degrade cleanly.
+    assert slice_history_series([h1], 0.0, []) == []
+    assert slice_history_series([], 0.0, [10.0]) == [(10.0, 0.0, 0.0, 0.0, 0.0)]
+
+
+def test_slice_history_series_is_linear_not_quadratic():
+    """3 instances × 5000 rows: one merge pass stays well under 100ms."""
+    import time
+
+    from condor.fetchers.bot_performance import slice_history_series
+
+    histories = []
+    for k in range(3):
+        histories.append(
+            [
+                (float(k + i * 3), float(i), float(i * 10), float(i), float(i) / 10)
+                for i in range(5000)
+            ]
+        )
+    stamps = sorted({t for h in histories for t, *_ in h})
+
+    t0 = time.perf_counter()
+    out = slice_history_series(histories, 0.0, stamps)
+    elapsed = time.perf_counter() - t0
+
+    assert len(out) == len(stamps)
+    assert elapsed < 0.1, f"series build took {elapsed:.3f}s"
+
+
 def test_fetch_instance_history_sums_controllers_and_filters_trades():
     from condor.fetchers.bot_performance import fetch_instance_history
 

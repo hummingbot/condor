@@ -645,6 +645,52 @@ def slice_history(
     return realized, volume, trades, fees
 
 
+def slice_history_series(
+    histories: list[list[tuple[float, float, float, float, float]]],
+    start: float,
+    stamps: list[float],
+) -> list[tuple[float, float, float, float, float]]:
+    """:func:`slice_history` evaluated at every instant of ascending ``stamps``.
+
+    Identical output to ``[slice_history(histories, start, t) for t in stamps]``
+    — same per-instance differencing in the same order — but computed in one
+    merge pass: the ``cum_at(start)`` baseline is constant across stamps so it
+    is taken once per instance, and each instance's cursor only ever advances
+    as the stamps increase (the same carry idiom
+    :func:`fetch_instance_history` uses internally). That turns the naive
+    O(stamps × rows) rescan into O(stamps + rows) per instance, which matters
+    on the per-tick and per-request paths that rebuild whole-session curves
+    from near-cap histories.
+
+    Returns ``[(t, realized, volume, trades, fees), …]``, one row per stamp.
+    """
+    bases = [_cum_at(h, start) for h in histories]
+    cursors = [-1] * len(histories)
+    carried: list[tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0)] * len(
+        histories
+    )
+
+    out: list[tuple[float, float, float, float, float]] = []
+    for t in stamps:
+        realized = volume = trades = fees = 0.0
+        for i, h in enumerate(histories):
+            j = cursors[i]
+            while j + 1 < len(h) and h[j + 1][0] <= t:
+                j += 1
+            if j != cursors[i]:
+                cursors[i] = j
+                row = h[j]
+                carried[i] = (row[1], row[2], row[3], row[4])
+            r_e, v_e, t_e, f_e = carried[i]
+            r_s, v_s, t_s, f_s = bases[i]
+            realized += r_e - r_s
+            volume += v_e - v_s
+            trades += t_e - t_s
+            fees += f_e - f_s
+        out.append((t, realized, volume, trades, fees))
+    return out
+
+
 # One shared fetch of every owned base's instance histories, at a resolution that
 # actually spans the ownership timeline. Both attribution callers go through this
 # so the dashboard's per-session slice and the live agent's own view of its PnL
