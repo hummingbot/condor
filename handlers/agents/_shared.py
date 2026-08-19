@@ -519,6 +519,60 @@ def _hummingbot_mcp_args(server: dict[str, Any], server_name: str) -> list[str]:
     ] + _bot_id_args()
 
 
+def _registered_addon_mcp_servers() -> list[dict[str, Any]]:
+    """Load additive MCP registrations from ``mcp_addons/*.json``.
+
+    Add-ons use the same ``mcpServers`` mapping as ``.mcp.json``. The loader
+    converts environment mappings to ACP's name/value list and rejects malformed
+    registrations rather than starting a session with a silently incomplete
+    tool plane.
+    """
+    registry = Path(get_project_dir()) / "mcp_addons"
+    if not registry.is_dir():
+        return []
+
+    servers: list[dict[str, Any]] = []
+    for path in sorted(registry.glob("*.json")):
+        document = json.loads(path.read_text(encoding="utf-8"))
+        configured = document.get("mcpServers")
+        if not isinstance(configured, dict):
+            raise ValueError(f"{path} must contain an mcpServers mapping")
+        for name, raw in sorted(configured.items()):
+            if not isinstance(name, str) or not name or not isinstance(raw, dict):
+                raise ValueError(f"{path} contains an invalid MCP server entry")
+            command = raw.get("command")
+            args = raw.get("args", [])
+            environment = raw.get("env", {})
+            if not isinstance(command, str) or not command:
+                raise ValueError(f"{path} MCP server {name!r} needs a command")
+            if not isinstance(args, list) or not all(
+                isinstance(arg, str) for arg in args
+            ):
+                raise ValueError(f"{path} MCP server {name!r} args must be strings")
+            if not isinstance(environment, dict):
+                raise ValueError(f"{path} MCP server {name!r} env must be a mapping")
+            servers.append(
+                {
+                    "name": name,
+                    "command": command,
+                    "args": args,
+                    "env": _env_entries(**environment),
+                }
+            )
+    return servers
+
+
+def _with_registered_addons(core: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    combined = [*core, *_registered_addon_mcp_servers()]
+    seen: set[str] = set()
+    for server in combined:
+        name = server["name"]
+        if name in seen:
+            raise ValueError(f"add-on duplicates MCP server name {name!r}")
+        seen.add(name)
+    return combined
+
+
 def build_mcp_servers_for_session(
     user_id: int,
     chat_id: int | str,
@@ -599,7 +653,7 @@ def build_mcp_servers_for_session(
             user_id,
             chat_id,
         )
-        return [condor]
+        return _with_registered_addons([condor])
 
     server = cm.get_server(server_name)
     if not server:
@@ -609,7 +663,7 @@ def build_mcp_servers_for_session(
             server_name,
             user_id,
         )
-        return [condor]
+        return _with_registered_addons([condor])
 
     # Credentials go in env, not argv: the API username/password used to sit on
     # the command line, where any local `ps` recovered them (SEC-095). The
@@ -625,7 +679,7 @@ def build_mcp_servers_for_session(
         ),
     }
 
-    return [mcp_hummingbot, condor]
+    return _with_registered_addons([mcp_hummingbot, condor])
 
 
 def build_initial_context(
@@ -638,11 +692,7 @@ def build_initial_context(
 ) -> str:
     """Build an initial context prompt telling the agent about server, permissions, and formatting rules."""
     from condor.acp.pydantic_ai_client import is_pydantic_ai_model
-    from config_manager import (
-        ServerPermission,
-        get_config_manager,
-        get_effective_server,
-    )
+    from config_manager import get_config_manager, get_effective_server
 
     cm = get_config_manager()
 
