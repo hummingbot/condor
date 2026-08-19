@@ -11,6 +11,7 @@ through ``condor.runtime.client`` instead.
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -50,6 +51,44 @@ MAX_SESSIONS_PER_USER = 5
 # Module-level session storage keyed by str(SessionKey).
 # Not persisted -- subprocesses can't survive restarts.
 _sessions: dict[str, "AgentSession"] = {}
+
+# Creation serialization (CORR-187). get_or_create_session is a check-then-
+# create that spans many awaits (subprocess spawn, eager context prompt), so
+# without a lock two concurrent calls for the same key both spawn a full
+# client and the second registration overwrites the first, whose process tree
+# is never stopped -- teardown only walks the registry. Locks are per session
+# key (creations under different keys stay concurrent) and refcounted so the
+# dict does not grow with every key ever seen.
+_creation_locks: dict[str, asyncio.Lock] = {}
+_creation_lock_refs: dict[str, int] = {}
+
+# Session keys currently being created, per user. A creation in flight is not
+# in ``_sessions`` yet but will register one session, so the budget check has
+# to count it or N concurrent creates of distinct keys all pass the cap.
+_pending_creates: dict[int, set[str]] = {}
+
+
+@asynccontextmanager
+async def _creation_lock(name: str):
+    """Hold the named creation lock; drop it when the last holder leaves.
+
+    Refcounted rather than popped on release: popping while another task still
+    waits on the lock object would hand a *fresh* lock to the next caller and
+    reopen the race between the waiter and the newcomer.
+    """
+    lock = _creation_locks.setdefault(name, asyncio.Lock())
+    _creation_lock_refs[name] = _creation_lock_refs.get(name, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = _creation_lock_refs[name] - 1
+        if remaining:
+            _creation_lock_refs[name] = remaining
+        else:
+            del _creation_lock_refs[name]
+            _creation_locks.pop(name, None)
+
 
 # Health monitor state
 _health_task: asyncio.Task | None = None
@@ -244,7 +283,11 @@ async def _enforce_session_budget(user_id: int) -> None:
 
     while True:
         mine = [s for s in _sessions.values() if s.user_id == user_id]
-        if len(mine) < MAX_SESSIONS_PER_USER:
+        # Creations in flight for this user (reserved under the per-user
+        # creation lock, registered only later) hold budget too, or N
+        # concurrent creates of distinct keys would all pass the count.
+        in_flight = len(_pending_creates.get(user_id, set()) - set(_sessions))
+        if len(mine) + in_flight < MAX_SESSIONS_PER_USER:
             return
 
         idle = [s for s in mine if not s.is_busy]
@@ -357,6 +400,25 @@ async def get_or_create_session(
     """
     key = SessionKey.parse(spec.key)
     raw_key = str(key)
+
+    # One creation at a time per key (CORR-187): the second concurrent caller
+    # waits here and then finds the first caller's session in the registry
+    # instead of spawning a duplicate whose twin would leak until shutdown.
+    # Locks are per key, so creations under different keys stay concurrent.
+    async with _creation_lock(raw_key):
+        return await _get_or_create_session_locked(
+            spec, key, raw_key, permission_callback, user_data
+        )
+
+
+async def _get_or_create_session_locked(
+    spec: SessionSpec,
+    key: SessionKey,
+    raw_key: str,
+    permission_callback: PermissionCallback | None,
+    user_data: dict | None,
+) -> AgentSession:
+    """Body of :func:`get_or_create_session`; runs under the per-key lock."""
     session = _sessions.get(raw_key)
 
     # Reuse existing session only if the same brain is still on the other end:
@@ -384,11 +446,47 @@ async def get_or_create_session(
     # Destroy old session if exists
     if session:
         await _destroy_session_internal(key)
-    elif spec.user_id:
-        # Only a genuinely new key counts against the budget — replacing the
-        # session behind an existing key is a swap, not an extra subprocess.
-        await _enforce_session_budget(spec.user_id)
 
+    if spec.user_id:
+        if session is None:
+            # Only a genuinely new key counts against the budget — replacing
+            # the session behind an existing key is a swap, not an extra
+            # subprocess.
+            await _enforce_session_budget(spec.user_id)
+        # Reserve this key's budget slot for the whole spawn. The reservation
+        # must follow the check with no await in between — the event loop
+        # makes the pair atomic, so two creates can never both pass the count
+        # before either reserves (and _enforce_session_budget recounts after
+        # every await it does make). The swap path reserves too: its old
+        # session is already out of the registry, so a concurrent create
+        # would otherwise undercount during the respawn window.
+        _pending_creates.setdefault(spec.user_id, set()).add(raw_key)
+        try:
+            return await _spawn_session(
+                spec, key, raw_key, permission_callback, user_data
+            )
+        finally:
+            reserved = _pending_creates.get(spec.user_id)
+            if reserved is not None:
+                reserved.discard(raw_key)
+                if not reserved:
+                    del _pending_creates[spec.user_id]
+
+    return await _spawn_session(spec, key, raw_key, permission_callback, user_data)
+
+
+async def _spawn_session(
+    spec: SessionSpec,
+    key: SessionKey,
+    raw_key: str,
+    permission_callback: PermissionCallback | None,
+    user_data: dict | None,
+) -> AgentSession:
+    """Spawn, contextualize, and register a new session for ``raw_key``.
+
+    Runs under the per-key creation lock, with the key's budget slot already
+    reserved when the spec names a user.
+    """
     # MCP subprocess env expects a numeric chat id; surfaces without a chat
     # (web, mcp) fall back to the user id. The same pair goes down on argv via
     # binding.resolve, which is what the subprocess actually reads first — so
