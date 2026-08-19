@@ -99,6 +99,32 @@ function NetworkConfigEditor({ server, networkId }: { server: string; networkId:
     ([key, value]) => value !== String(config[key] ?? ""),
   );
 
+  // Non-owners get server-side masked values (SEC-197) and their saves are
+  // refused anyway (SEC-166), so render a read-only view instead of a form
+  // that could only fail — or worse, round-trip a masked value into a save.
+  const readOnly = !isOwner || data.redacted === true;
+
+  if (readOnly) {
+    return (
+      <div className="space-y-2 p-3">
+        {editableEntries.map(([key, value]) => (
+          <div key={key} className="flex items-center gap-2">
+            <label
+              className="w-44 shrink-0 truncate font-mono text-xs text-[var(--color-text-muted)]"
+              title={key}
+            >
+              {key}
+            </label>
+            <span className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--color-text)]">
+              {String(value ?? "")}
+            </span>
+          </div>
+        ))}
+        <p className="pt-1 text-xs text-[var(--color-text-muted)]">{OWNER_ONLY_HINT}</p>
+      </div>
+    );
+  }
+
   const save = () => {
     const updates: Record<string, unknown> = {};
     for (const [key, value] of changed) {

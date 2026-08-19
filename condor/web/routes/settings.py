@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -306,6 +308,46 @@ async def gateway_logs(
 
 # ── Gateway Networks (RPC) ──
 
+_URL_VALUE = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
+
+
+def _redact_url(value: str) -> str:
+    """Collapse a URL to scheme://host, hiding every part that can carry a secret.
+
+    Paid RPC providers embed the API key either in the query string
+    (Helius: ``?api-key=<secret>``) or in the path (Infura ``/v3/<key>``,
+    Alchemy ``/v2/<key>``), and a URL can also carry userinfo. Rather than
+    pattern-match key shapes, keep only the parts that cannot hold a
+    credential — scheme, host, port — and mask everything else whenever any of
+    it is present. A bare endpoint stays readable so a trader can still tell
+    which node they are trading against.
+    """
+    parts = urlsplit(value)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    has_secret_bearing_part = (
+        parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+        or parts.path not in ("", "/")
+    )
+    if has_secret_bearing_part:
+        return f"{parts.scheme}://{host}/…"
+    return value
+
+
+def _redact_network_config(value):
+    """Recursively mask URL-shaped strings in a network config (SEC-197)."""
+    if isinstance(value, dict):
+        return {k: _redact_network_config(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_network_config(v) for v in value]
+    if isinstance(value, str) and _URL_VALUE.match(value):
+        return _redact_url(value)
+    return value
+
 
 @router.get("/gateway/networks")
 async def gateway_networks(
@@ -332,10 +374,20 @@ async def gateway_network_config(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # Reading gateway state stays at TRADER (see _require_owner's docstring),
+    # but the RPC URL in a network config embeds the owner's paid provider API
+    # key. Redact it server-side for anyone below the OWNER line — same admin
+    # bypass as _require_owner — instead of shipping the secret and hiding it
+    # in the UI (SEC-197). Redaction cannot corrupt a save: the POST below is
+    # owner-gated, and owners always receive the full values.
+    perm = cm.get_server_permission(user.id, server)
+    is_owner = perm == ServerPermission.OWNER or cm.is_admin(user.id)
     client = await _get_client(cm, server)
     try:
         config = await client.gateway.get_network_config(network_id)
-        return {"network_id": network_id, "config": config}
+        if not is_owner:
+            config = _redact_network_config(config)
+        return {"network_id": network_id, "config": config, "redacted": not is_owner}
     except Exception as e:
         logger.exception(
             "Failed to fetch gateway network config '%s' from '%s'", network_id, server

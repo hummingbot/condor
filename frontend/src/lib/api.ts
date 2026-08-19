@@ -920,6 +920,8 @@ export interface GatewayNetworkInfo {
 export interface GatewayNetworkConfig {
   network_id: string;
   config: Record<string, unknown>;
+  /** True when the server masked credential-bearing URL values (non-owner read, SEC-197). */
+  redacted?: boolean;
 }
 
 export interface GatewayWalletGroup {
