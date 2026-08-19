@@ -2,6 +2,10 @@
 SHELL := /bin/bash
 export PATH := $(HOME)/.local/bin:$(HOME)/.cargo/bin:$(PATH)
 
+# Recursive $(MAKE) calls (e.g. `install` -> doctor) otherwise print a
+# "Entering/Leaving directory" line around every sub-invocation.
+MAKEFLAGS += --no-print-directory
+
 .PHONY: help setup install run run-fg stop restart logs status check-stopped test lint build-frontend setup-chrome pick-model doctor
 
 # tmux session Condor runs in

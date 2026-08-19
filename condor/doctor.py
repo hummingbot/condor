@@ -15,6 +15,7 @@ model can be picked later), this exits non-zero when a check actually
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import shutil
 import subprocess
@@ -29,6 +30,18 @@ _BADGES = {OK: "✓", WARN: "!", FAIL: "✗"}
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# Colored to match setup-environment.sh's msg_ok/msg_warn/msg_error palette.
+# Off for a non-tty (piped/redirected output, CI logs) or NO_COLOR -- see
+# https://no-color.org -- so scripts parsing this report never see escapes.
+_USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+_BOLD = "\033[1m" if _USE_COLOR else ""
+_RESET = "\033[0m" if _USE_COLOR else ""
+_COLORS = (
+    {OK: "\033[0;32m", WARN: "\033[1;33m", FAIL: "\033[0;31m"}
+    if _USE_COLOR
+    else {OK: "", WARN: "", FAIL: ""}
+)
+
 
 @dataclass
 class Check:
@@ -37,12 +50,13 @@ class Check:
     detail: str
 
     def render(self, width: int) -> str:
-        return f"  {_BADGES[self.state]} {self.name:<{width}} {self.detail}"
+        color = _COLORS[self.state]
+        return f"  {color}{_BADGES[self.state]}{_RESET} {self.name:<{width}} {self.detail}"
 
 
 def _section(title: str, checks: list[Check]) -> str:
     width = max([28] + [len(c.name) for c in checks])
-    lines = [title]
+    lines = [f"{_BOLD}{title}{_RESET}"]
     lines.extend(c.render(width) for c in checks)
     return "\n".join(lines)
 
@@ -228,6 +242,20 @@ def _connection_hint(host: str, exc: Exception) -> str:
     return "check the host is reachable — firewall, Tailscale status, or the server is down"
 
 
+async def _probe_and_close(cm, name: str) -> None:
+    """Confirm ``name`` connects, then close the client's session immediately.
+
+    ``get_client()`` is written for the long-running bot process, which keeps
+    the client (and its aiohttp session) cached for reuse across requests.
+    Doctor is a one-shot script that exits right after this check, so nothing
+    would otherwise ever close that session -- aiohttp then complains about an
+    "Unclosed client session" during interpreter shutdown. Safe to close here:
+    this check's :class:`ConfigManager` instance lives only for this process.
+    """
+    client = await cm.get_client(name)
+    await client.close()
+
+
 def check_hummingbot_api() -> list[Check]:
     from config_manager import get_config_manager
 
@@ -247,7 +275,7 @@ def check_hummingbot_api() -> list[Check]:
         host, port = server.get("host"), server.get("port")
         label = f"API '{name}' ({host}:{port})"
         try:
-            asyncio.run(cm.get_client(name))
+            asyncio.run(_probe_and_close(cm, name))
             checks.append(Check(label, OK, "reachable, authenticated"))
         except Exception as e:
             checks.append(Check(label, FAIL, f"{e} — {_connection_hint(host, e)}"))
@@ -265,7 +293,7 @@ def main(argv: list[str] | None = None) -> int:
         ("Hummingbot API", check_hummingbot_api()),
     ]
 
-    print("\n  Condor Doctor\n")
+    print(f"\n  {_BOLD}Condor Doctor{_RESET}\n")
     all_checks: list[Check] = []
     for title, checks in sections:
         print(_section(f"{title}:", checks))
@@ -275,12 +303,15 @@ def main(argv: list[str] | None = None) -> int:
     failed = [c for c in all_checks if c.state == FAIL]
     warned = [c for c in all_checks if c.state == WARN]
     if failed:
-        print(f"  {len(failed)} check(s) failed, {len(warned)} warning(s).")
+        color = _COLORS[FAIL]
+        print(f"  {color}{len(failed)} check(s) failed{_RESET}, {len(warned)} warning(s).")
         return 1
     if warned:
-        print(f"  All checks passed, {len(warned)} warning(s) to review.")
+        color = _COLORS[WARN]
+        print(f"  All checks passed, {color}{len(warned)} warning(s) to review{_RESET}.")
         return 0
-    print("  All checks passed.")
+    color = _COLORS[OK]
+    print(f"  {color}All checks passed.{_RESET}")
     return 0
 
 
