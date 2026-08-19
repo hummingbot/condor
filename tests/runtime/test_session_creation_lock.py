@@ -62,7 +62,7 @@ def registry(monkeypatch):
     monkeypatch.setattr(session_module, "_pending_creates", {})
     monkeypatch.setattr(session_module, "_creation_locks", {})
     monkeypatch.setattr(session_module, "_creation_lock_refs", {})
-    monkeypatch.setattr(session_module, "ACPClient", _SlowClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _SlowClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
         "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []

@@ -52,7 +52,7 @@ class _ScriptedClient:
 @pytest.fixture
 def registry(monkeypatch):
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _ScriptedClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _ScriptedClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     # Lives in condor.runtime.binding now; patch it at the source so both the
     # bound and unbound resolution paths see the stub.
