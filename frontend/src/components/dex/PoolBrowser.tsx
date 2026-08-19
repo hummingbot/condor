@@ -11,6 +11,8 @@ import { useNavigate } from "react-router-dom";
 import type { PoolSummary } from "@/lib/api";
 import { useDexFavorites } from "@/lib/dexFavorites";
 
+import { num, pct, usdCompact } from "./format";
+
 type SortKey =
   | "name"
   | "dex_id"
@@ -20,34 +22,6 @@ type SortKey =
   | "apr"
   | "apy";
 type SortDir = "asc" | "desc";
-
-/**
- * Both upstreams answer numbers as strings (and GeckoTerminal answers pandas NaN
- * for a missing figure). The backend settles that before it serializes, so this
- * is the second line of defence rather than the first — but it is the one that
- * decides whether a stray string blanks one cell or takes down the whole page.
- */
-function num(v: unknown): number | null {
-  if (v === null || v === undefined || v === "") return null;
-  const n = typeof v === "number" ? v : parseFloat(String(v));
-  return Number.isFinite(n) ? n : null;
-}
-
-function usd(v: unknown): string {
-  const n = num(v);
-  if (!n) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
-  if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
-  return `$${n.toFixed(2)}`;
-}
-
-function pct(v: unknown): string {
-  const n = num(v);
-  if (n === null) return "—";
-  if (Math.abs(n) >= 10_000) return `${(n / 1000).toFixed(0)}K%`;
-  return `${n.toFixed(2)}%`;
-}
 
 /** Sorting compares numbers, and a missing figure sorts last in either direction. */
 function sortValue(p: PoolSummary, key: SortKey): number {
@@ -345,10 +319,10 @@ export function PoolBrowser({
                     {p.dex_id}
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">
-                    {usd(p.reserve_usd)}
+                    {usdCompact(p.reserve_usd)}
                   </td>
                   <td className="px-4 py-2.5 text-right tabular-nums">
-                    {usd(p.volume_24h)}
+                    {usdCompact(p.volume_24h)}
                   </td>
                   <td
                     className={`px-4 py-2.5 text-right tabular-nums ${

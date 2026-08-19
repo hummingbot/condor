@@ -4,6 +4,8 @@ import { useState } from "react";
 import type { PoolSummary } from "@/lib/api";
 import { copyText } from "@/lib/clipboard";
 
+import { num, pct, usdCompact } from "./format";
+
 /** GeckoTerminal chain ids → the slugs the DEX web apps route on. */
 const UNISWAP_CHAINS: Record<string, string> = {
   eth: "ethereum",
@@ -35,20 +37,6 @@ function poolUrl(pool: PoolSummary): string {
   }
   // GeckoTerminal indexes every pool it listed, so it is the universal fallback.
   return `https://www.geckoterminal.com/${pool.gecko_network}/pools/${addr}`;
-}
-
-function num(v: unknown): number {
-  const n = typeof v === "string" ? parseFloat(v) : (v as number);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function usd(v: unknown): string {
-  const n = num(v);
-  if (!n) return "—";
-  if (n >= 1e9) return `$${(n / 1e9).toFixed(2)}B`;
-  if (n >= 1e6) return `$${(n / 1e6).toFixed(2)}M`;
-  if (n >= 1e3) return `$${(n / 1e3).toFixed(1)}K`;
-  return `$${n.toFixed(2)}`;
 }
 
 function Stat({ label, value, tone }: { label: string; value: string; tone?: string }) {
@@ -101,19 +89,19 @@ export function PoolAddress({ pool }: { pool: PoolSummary }) {
 
 /** The pool's identity and market numbers, above the chart. */
 export function PoolStats({ pool, network }: { pool: PoolSummary; network?: string }) {
-  const change = pool.price_change_24h;
+  const change = num(pool.price_change_24h);
 
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
       {network && <Stat label="Network" value={network} />}
       <Stat label="DEX" value={pool.dex_id} />
-      <Stat label="TVL" value={usd(pool.reserve_usd)} />
-      <Stat label="Vol 24h" value={usd(pool.volume_24h)} />
+      <Stat label="TVL" value={usdCompact(pool.reserve_usd)} />
+      <Stat label="Vol 24h" value={usdCompact(pool.volume_24h)} />
       <Stat
         label="24h"
-        value={change === null || change === undefined ? "—" : `${change.toFixed(2)}%`}
+        value={pct(pool.price_change_24h)}
         tone={
-          change === null || change === undefined
+          change === null
             ? undefined
             : change >= 0
               ? "text-[var(--color-green)]"
@@ -121,7 +109,7 @@ export function PoolStats({ pool, network }: { pool: PoolSummary; network?: stri
         }
       />
       {pool.apr !== null && pool.apr !== undefined && (
-        <Stat label="APR" value={`${pool.apr.toFixed(2)}%`} />
+        <Stat label="APR" value={pct(pool.apr)} />
       )}
       {pool.bin_step !== null && pool.bin_step !== undefined && (
         <Stat label="Bin step" value={String(pool.bin_step)} />
