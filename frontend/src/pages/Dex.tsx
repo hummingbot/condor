@@ -8,7 +8,7 @@ import { LpPositions } from "@/components/dex/LpPositions";
 import { PoolBrowser } from "@/components/dex/PoolBrowser";
 import { PoolSourceTabs } from "@/components/dex/PoolSourceTabs";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
-import type { PoolSource } from "@/components/dex/pool-source";
+import { GATEWAY_TAB_CHAIN, type PoolSource } from "@/components/dex/pool-source";
 import { useDexUpstream } from "@/hooks/useDexUpstream";
 import { useServer } from "@/hooks/useServer";
 import { api, type PoolSummary } from "@/lib/api";
@@ -104,7 +104,7 @@ export function Dex() {
     setDexes([]);
     // Meteora and Orca are Solana connectors; their tabs disappear off Solana, and
     // a selection left pointing at a hidden tab shows a table with no active tab.
-    if (!next.startsWith("solana")) {
+    if (!next.startsWith(GATEWAY_TAB_CHAIN)) {
       setSource((s) => (s.kind === "gateway" ? { kind: "gecko", view: "trending" } : s));
     }
   };
