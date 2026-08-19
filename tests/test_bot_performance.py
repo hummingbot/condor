@@ -19,6 +19,7 @@ from condor.agents.performance import (
 from condor.fetchers.bot_performance import (
     _aggregate_by_bot,
     bot_executor_rows,
+    clear_history_cache,
     clear_snapshot_cache,
     extract_snapshots,
     fetch_all_bot_performance,
@@ -27,10 +28,12 @@ from condor.fetchers.bot_performance import (
 
 @pytest.fixture(autouse=True)
 def _no_snapshot_cache_bleed():
-    """Isolate the per-server snapshot cache between tests."""
+    """Isolate the per-server snapshot and history caches between tests."""
     clear_snapshot_cache()
+    clear_history_cache()
     yield
     clear_snapshot_cache()
+    clear_history_cache()
 
 
 # ── Sample payloads ──
@@ -1032,6 +1035,159 @@ def test_history_forward_carry_survives_a_controller_that_stops_reporting():
 
     assert [round(r[1], 4) for r in hist] == [-0.50, -0.50, -0.50]
     assert [round(r[2], 4) for r in hist] == [100.0, 100.0, 100.0]
+
+
+# ── PERF-184: instance-history cursor walks are cached + coalesced ──
+#
+# One session-detail request walks the same instance's history twice
+# back-to-back (performance rollup, then PnL series), and the tick engine
+# repeats the walk every tick while the dashboard polls the same strategy. The
+# cache collapses those to one walk per (server, instance, interval) per TTL.
+
+
+class _CountingHistory:
+    def __init__(self, rows, delay=0.0, fail_first=False):
+        self.rows = rows
+        self.delay = delay
+        self.fail_first = fail_first
+        self.calls = 0
+
+    async def get_controller_performance_history(self, **_kw):
+        self.calls += 1
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.fail_first and self.calls == 1:
+            raise RuntimeError("api down")
+        return {"data": self.rows}
+
+
+def _history_server_client(base_url, rows, **kw):
+    return SimpleNamespace(
+        base_url=base_url, bot_orchestration=_CountingHistory(rows, **kw)
+    )
+
+
+_HIST_ROWS = [
+    _hist_row("2026-08-06T22:00:00+00:00", "btc", 1.0, 10.0),
+    _hist_row("2026-08-06T22:15:00+00:00", "btc", 2.0, 20.0),
+]
+
+
+def test_repeated_history_reads_within_ttl_share_one_walk():
+    """The two walks inside one session-detail request collapse to one."""
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _history_server_client("http://hist-a:8000", _HIST_ROWS)
+
+    async def _go():
+        first = await fetch_instance_history(client, "bot-1")
+        second = await fetch_instance_history(client, "bot-1")
+        return first, second
+
+    first, second = asyncio.run(_go())
+    assert client.bot_orchestration.calls == 1
+    assert first == second
+    assert [r[1] for r in first] == [1.0, 2.0]
+
+
+def test_concurrent_history_callers_share_one_inflight_walk():
+    """Engine tick + dashboard poll arriving together join one cursor walk."""
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _history_server_client("http://hist-a:8000", _HIST_ROWS, delay=0.02)
+
+    async def _go():
+        return await asyncio.gather(
+            *[fetch_instance_history(client, "bot-1") for _ in range(5)]
+        )
+
+    results = asyncio.run(_go())
+    assert client.bot_orchestration.calls == 1
+    assert all(len(r) == 2 for r in results)
+
+
+def test_distinct_instances_and_intervals_never_share_a_walk():
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _history_server_client("http://hist-a:8000", _HIST_ROWS)
+
+    async def _go():
+        await fetch_instance_history(client, "bot-1", interval="5m")
+        await fetch_instance_history(client, "bot-2", interval="5m")
+        await fetch_instance_history(client, "bot-1", interval="15m")
+
+    asyncio.run(_go())
+    assert client.bot_orchestration.calls == 3
+
+
+def test_failed_history_walk_is_not_cached():
+    """The [] degrade on API error stays retryable — waiters share the failure."""
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _history_server_client(
+        "http://flaky-hist:8000", _HIST_ROWS, delay=0.02, fail_first=True
+    )
+
+    async def _go():
+        # Both waiters join the failing walk and both degrade to [].
+        failed = await asyncio.gather(
+            *[fetch_instance_history(client, "bot-1") for _ in range(2)]
+        )
+        # Nothing was cached, so the next call really re-walks and succeeds.
+        recovered = await fetch_instance_history(client, "bot-1")
+        return failed, recovered
+
+    failed, recovered = asyncio.run(_go())
+    assert failed == [[], []]
+    assert client.bot_orchestration.calls == 2
+    assert [r[1] for r in recovered] == [1.0, 2.0]
+
+
+def test_history_client_without_base_url_bypasses_the_cache():
+    from condor.fetchers.bot_performance import fetch_instance_history
+
+    client = _history_server_client("", _HIST_ROWS)
+
+    async def _go():
+        await fetch_instance_history(client, "bot-1")
+        await fetch_instance_history(client, "bot-1")
+
+    asyncio.run(_go())
+    assert client.bot_orchestration.calls == 2
+
+
+def test_history_cache_is_bounded_lru(monkeypatch):
+    """Stopped instances must not pin their pages forever."""
+    import condor.fetchers.bot_performance as bp
+
+    monkeypatch.setattr(bp, "_HISTORY_CACHE_MAX", 2)
+    client = _history_server_client("http://hist-a:8000", _HIST_ROWS)
+
+    async def _go():
+        await bp.fetch_instance_history(client, "bot-1")
+        await bp.fetch_instance_history(client, "bot-2")
+        await bp.fetch_instance_history(client, "bot-3")  # evicts bot-1
+        assert len(bp._history_cache) == 2
+        await bp.fetch_instance_history(client, "bot-1")  # miss: re-walks
+
+    asyncio.run(_go())
+    assert client.bot_orchestration.calls == 4
+
+
+def test_history_inflight_from_another_loop_is_not_awaited():
+    """A task created on one event loop is never awaited from another."""
+    import condor.fetchers.bot_performance as bp
+
+    client = _history_server_client("http://hist-a:8000", _HIST_ROWS)
+    key = ("http://hist-a:8000", "bot-1", "5m", 500, 5000)
+    # A stale in-flight entry left by a different loop: the guard must ignore it
+    # (awaiting a foreign loop's task raises) and start its own walk.
+    foreign = SimpleNamespace()  # never awaited — would blow up if it were
+    bp._history_inflight[key] = (object(), foreign)
+
+    hist = asyncio.run(bp.fetch_instance_history(client, "bot-1"))
+    assert client.bot_orchestration.calls == 1
+    assert [r[1] for r in hist] == [1.0, 2.0]
 
 
 def test_partition_includes_archived_instances():

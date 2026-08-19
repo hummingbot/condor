@@ -462,7 +462,10 @@ def test_rollup_fans_out_one_snapshot_call_for_all_strategies(tmp_path):
     ``get_latest_controller_performance()`` returns the same whole-server payload
     to each of them — so the fan-out must collapse to one round-trip.
     """
-    from condor.fetchers.bot_performance import clear_snapshot_cache
+    from condor.fetchers.bot_performance import (
+        clear_history_cache,
+        clear_snapshot_cache,
+    )
 
     class _CountingClient(_FakeClient):
         def __init__(self, *args, **kwargs):
@@ -495,10 +498,12 @@ def test_rollup_fans_out_one_snapshot_call_for_all_strategies(tmp_path):
         )
 
     clear_snapshot_cache()
+    clear_history_cache()
     try:
         asyncio.run(_go())
     finally:
         clear_snapshot_cache()
+        clear_history_cache()
 
     assert client.snapshot_calls == 1
     # Every strategy still gets its attribution from that one snapshot.
