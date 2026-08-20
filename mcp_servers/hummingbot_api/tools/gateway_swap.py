@@ -32,6 +32,13 @@ async def manage_gateway_swaps(
     Supported DEX Connectors:
     - jupiter (Solana): Router for Solana swaps
     - 0x (Ethereum): Aggregator for EVM chains
+
+    A quote carrying `approximation: true` reports an ESTIMATED amount_out rather than
+    the exact-out amount asked for. A BUY is an ExactOut order, and a thin token with no
+    ExactOut route is quoted by pricing the sell leg and quoting that input forward,
+    which costs roughly 2.5%. Nobody is overcharged — the order is silently resized — so
+    say so whenever the quantity is what the user cares about, and pass
+    extra_params={'approximateIfNoExactOut': False} to require an exact route instead.
     """
     # ============================================
     # QUOTE - Get swap price quote
