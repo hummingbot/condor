@@ -26,8 +26,9 @@ changed every path these issues live on.
 | GW-15 | Response component names were never unified | **open** |
 | GW-16 | Leftovers the unification did not sweep | **open** |
 | GW-17 | `baseTokenAmountAdded` is signed on some connectors, a magnitude on others | **open** |
+| GW-18 | pancakeswap-sol's close reports fees and rent as a hardcoded 0 | **open** |
 
-GW-1 through GW-11 are code-complete and green: 1126 tests, 138 suites, clean typecheck,
+GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
 lint 0 errors, and `openapi.json` regenerates identical to the committed copy.
 
 Mainnet verification began 2026-08-19 against a container built from `c0bb10253`: the
@@ -615,6 +616,45 @@ wrong at the source, so this belongs in Gateway rather than in a consumer-side s
 the fix both rows carry positive amounts and the net is `remove - add`. The two rows
 already in the table were written under the old behavior and keep their signs, so a
 migration — or a documented cutover timestamp — is part of the fix, not separate from it.
+
+---
+
+## GW-18 — pancakeswap-sol's close reports fees and rent as a hardcoded 0
+**Status: open.** One connector, one route. Found 2026-08-19 while confirming that a
+`collect_fees` result of 0/0 was a real zero rather than a missing field.
+
+`pancakeswap-sol/clmm-routes/closePosition.ts:127`:
+
+```ts
+baseTokenAmountRemoved: Math.abs(baseTokenChange),   // the whole wallet delta
+quoteTokenAmountRemoved: Math.abs(quoteTokenChange),
+baseFeeAmountCollected: 0,   // Included in balance changes
+quoteFeeAmountCollected: 0,  // Included in balance changes
+positionRentRefunded: 0,     // Position rent refund (simplified)
+```
+
+The comment is accurate about the mechanism and that is the problem: the fees really are
+inside the balance change, so closing a position with pending fees reports fees of 0 and a
+principal inflated by exactly those fees, plus rent of 0. Every other connector separates
+them:
+
+| Connector | fees on close | rent on close |
+|---|---|---|
+| meteora, orca, raydium | real amounts | real amount |
+| uniswap, pancakeswap | real amounts | n/a (no rent on EVM) |
+| **pancakeswap-sol** | **always 0** | **always 0** |
+
+hummingbot-api stores the two fields separately in its CLOSE event and position
+accounting, so on this connector fee income is recorded as zero forever and principal
+returned reads high — with no error anywhere.
+
+**Fix:** extract the fee transfers from the balance changes the way `orca/closePosition.ts`
+does (it groups the transfers and takes principal from the first group, fees from the
+second), and report the real rent instead of 0.
+
+**Not yet observed live** — the test wallet holds no pancakeswap-sol positions, so this is
+read from the source rather than from a response. The related `collect_fees` route on the
+same connector does report real amounts; it is only `closePosition` that flattens them.
 
 ---
 
