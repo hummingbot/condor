@@ -29,6 +29,7 @@ changed every path these issues live on.
 | GW-18 | pancakeswap-sol's close reports fees and rent as a hardcoded 0 | **open** |
 | GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | **open** |
 | GW-20 | A DAMM v2 open records the position rent as deposited liquidity | **open** |
+| GW-21 | Nothing downstream can close an AMM position, so rent is stranded | **open** |
 
 GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
 lint 0 errors, and `openapi.json` regenerates identical to the committed copy.
@@ -767,6 +768,47 @@ does, so the value is recoverable for rows already written.
 **GW-4 is related but not the same.** That one was gas inflating native amounts, and it is
 fixed — gas is correctly excluded here, which is why the recorded figure matches the
 delta-minus-fee exactly. Rent was never part of it.
+
+---
+
+## GW-21 — nothing downstream can close an AMM position, so the rent is stranded
+**Status: open. The gap is in hummingbot-api and condor; Gateway has the route.**
+Found 2026-08-19 while deciding whether `/trading/amm/{open,close}` duplicate
+`/trading/amm/{add,remove}`.
+
+They are not symmetric, and only half the question has an easy answer.
+
+**`open` is duplicative.** `add` declares `positionAddress` as "Omit to open a new
+position", and Meteora's `addLiquidity` delegates to `openPosition` when it is absent.
+`AmmOpenPositionResponseData` and `AmmAddLiquidityResponseData` have identical property
+sets. `open.ts` only re-frames the fungible-LP case so it answers `positionRent: 0` with
+no address, for a caller that does not want to know which kind of AMM it is on. Removing
+it costs that normalization and nothing else.
+
+**`close` is not.** From `meteora/amm-routes/closePosition.ts:17`:
+
+> This is why close is not the same call as remove at 100%: removing all the liquidity
+> leaves an empty position NFT behind, still holding its rent. The SDK's
+> `removeAllLiquidityAndClosePosition` does both in one transaction.
+
+The schemas carry the same distinction: `AmmClosePositionResponseData` has
+`positionRentRefunded`; `AmmRemoveLiquidityResponseData` has no rent field at all.
+
+**The gap.** `services/gateway_client.py` implements `amm_add_liquidity` and
+`amm_remove_liquidity` and neither of the other two. So hummingbot-api opens through
+`add` — which does return `positionRent`, and which it discards (GW-20) — and has no way
+to close at all. condor's `manage_amm` inherits the gap: its actions are `add_liquidity`
+and `remove_liquidity`, so the closest thing to a close is remove at 100%, which strands
+the rent. On the position opened for GW-20 that is 0.0099 SOL, against 0.0053 of
+liquidity.
+
+Nothing errors. The position drains to zero, reads as empty, and quietly keeps the rent.
+
+**Fix:** add `amm_close_position` to `services/gateway_client.py` against
+`/trading/amm/close`, give `manage_amm` a `close` action, and record
+`positionRentRefunded` the way the CLMM close path already does. Whether `open` also
+gets wired is the cosmetic half — `add` without a position address already covers it.
+
 
 ---
 

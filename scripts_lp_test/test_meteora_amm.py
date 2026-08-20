@@ -182,7 +182,14 @@ def steps(arg):
         "remove": lambda: manage_amm(
             action="remove_liquidity", connector="meteora", network=NET,
             pool_address=POOL, position_address=arg, percentage_to_remove="50"),
-        "close": lambda: manage_amm(
+        # NOT a close, despite the name being the obvious one to reach for. Gateway
+        # distinguishes the two: remove at 100% withdraws the liquidity and leaves the
+        # empty position NFT behind still holding its rent, while /trading/amm/close
+        # withdraws and closes the account in one transaction, refunding it. condor and
+        # hummingbot-api reach only remove — there is no amm_close_position in
+        # services/gateway_client.py — so running this strands the rent (~0.0099 SOL on
+        # the position this script opens). See GATEWAY_ISSUES.md GW-21.
+        "drain": lambda: manage_amm(
             action="remove_liquidity", connector="meteora", network=NET,
             pool_address=POOL, position_address=arg, percentage_to_remove="100"),
 
@@ -193,7 +200,7 @@ def steps(arg):
     }
 
 
-NEEDS_POSITION = ("add-more", "remove", "close")
+NEEDS_POSITION = ("add-more", "remove", "drain")
 
 
 async def main():
