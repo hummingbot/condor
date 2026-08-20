@@ -402,9 +402,11 @@ class GatewaySwapRequest(BaseModel):
     4. action="search" + filters -> Query swap history
     """
 
-    action: Literal["quote", "execute", "search", "get_status"] = Field(
-        description="Action to perform: 'quote' (get price), 'execute' (perform swap), "
-        "'search' (query history), 'get_status' (check tx status)"
+    action: Literal["quote", "execute", "execute_quote", "search", "get_status"] = Field(
+        description="Action to perform: 'quote' (get price), 'execute' (perform swap at the "
+        "price found at execution), 'execute_quote' (execute a quote you already have, by its "
+        "quote_id — the price you were shown is the price you get), 'search' (query history), "
+        "'get_status' (check tx status)"
     )
 
     # Common swap parameters (required for quote/execute)
@@ -458,6 +460,14 @@ class GatewaySwapRequest(BaseModel):
     wallet_address: str | None = Field(
         default=None,
         description="Wallet address for execute action (optional, uses default wallet if not provided)",
+    )
+
+    # Execute-quote parameter
+    quote_id: str | None = Field(
+        default=None,
+        description="quote_id from a prior quote action (required for execute_quote). Only the "
+        "router connectors return one — jupiter, dflow, okx, titan, 0x — because only they hold "
+        "a price; a pool-scoped connector prices against the pool at execution and has none.",
     )
 
     # Get status parameter
