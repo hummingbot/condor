@@ -24,6 +24,7 @@ import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
 import { CurrencySelector } from "./CurrencySelector";
+import { NotificationBell } from "./NotificationBell";
 import { ServerSelector } from "./ServerSelector";
 
 const NAV_ITEMS = [
@@ -128,6 +129,12 @@ function AppShellBody() {
           <CurrencySelector />
 
           <div className="flex items-center gap-1">
+            {/* Inside the ChatProvider on purpose: the bell reads the same
+                react-query cache the chat socket pushes live notifications
+                into, and that socket is what makes it update without a
+                reload (FEAT-048). */}
+            <NotificationBell />
+
             <button
               onClick={() => setReportOpen(true)}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"

@@ -14,6 +14,25 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/** A finished background task, addressed to the user rather than to a chat. */
+export interface AppNotification {
+  id: string;
+  user_id: number;
+  ts: number;
+  /** "delegation" | "routine" | "agent" | "system" */
+  kind: string;
+  text: string;
+  title?: string | null;
+  /** A dashboard route to open, e.g. "/routines?tab=reports". */
+  link?: string | null;
+  read: boolean;
+}
+
+export interface NotificationsResponse {
+  items: AppNotification[];
+  unread: number;
+}
+
 // ── Types ──
 
 export interface ServerInfo {
@@ -2213,4 +2232,17 @@ export const api = {
       `/api/v1/settings/custom-providers/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),
+
+  // ── Notifications (FEAT-048) ──
+
+  /** The bell's history. Scoped to the JWT server-side — there is no user param. */
+  getNotifications: (limit = 50) =>
+    apiFetch<NotificationsResponse>(`/api/v1/notifications?limit=${limit}`),
+
+  /** Mark some notifications read, or all of them when `ids` is omitted. */
+  markNotificationsRead: (ids?: string[]) =>
+    apiFetch<{ unread: number }>("/api/v1/notifications/read", {
+      method: "POST",
+      body: JSON.stringify({ ids: ids ?? null }),
+    }),
 };
