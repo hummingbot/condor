@@ -534,10 +534,22 @@ async def _notify_interrupted_runs(bot, report) -> None:
         for run in runs:
             suffix = " — restarted" if run.restarted else ""
             lines.append(f"• {run.label} (last tick {run.last_tick}){suffix}")
+        text = "\n".join(lines)
         try:
-            await bot.send_message(chat_id=chat_id, text="\n".join(lines))
+            await bot.send_message(chat_id=chat_id, text=text)
         except Exception:
             logger.warning("Could not notify chat %s about interrupted runs", chat_id)
+        # And on the bell (FEAT-048). A private chat id is the owner's user id;
+        # ``record`` ignores anything that is not one, so a group summary is
+        # simply not filed anywhere.
+        try:
+            from condor.notifications import record, user_for_chat
+
+            owner = user_for_chat(chat_id)
+            if owner:
+                await record(owner, text, kind="system")
+        except Exception:
+            logger.debug("Could not record interrupted-run notice", exc_info=True)
 
 
 async def startup(application: Application) -> None:
@@ -882,10 +894,16 @@ async def _run_dual(application: Application) -> None:
                 get_current_branch(), get_local_commit()
             )
             version = f" ({branch} @ {commit})" if commit else ""
+            boot_text = f"Condor is online and ready.{version}"
             await application.bot.send_message(
                 chat_id=int(ADMIN_USER_ID),
-                text=f"Condor is online and ready.{version}",
+                text=boot_text,
             )
+            # The same notice on the dashboard bell (FEAT-048), so an admin who
+            # only has the browser open still sees which commit came up.
+            from condor.notifications import record
+
+            await record(int(ADMIN_USER_ID), boot_text, kind="system")
         except Exception as e:
             logger.warning(f"Failed to send startup notification to admin: {e}")
 

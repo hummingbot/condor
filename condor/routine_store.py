@@ -94,6 +94,14 @@ class _HttpBot:
         data = {k: v for k, v in kw.items() if v is not None}
         return await self._post("editMessageText", data)
 
+    def has_token(self) -> bool:
+        """Can this actually deliver? Without a token every send is a no-op.
+
+        Read by ``delegate.resolve_bot`` so the ladder can fall through to the
+        dashboard bell rather than to a sender that silently drops the message.
+        """
+        return bool(self._token)
+
     async def get_chat_member(self, *a, **kw):
         """Raw ``getChatMember`` envelope — the web routes' chat-ownership check
         (SEC-198) reads ``result.status`` out of it when no live bot is around."""
@@ -441,17 +449,35 @@ class RoutineStore:
         worth showing, not worth a model turn to announce it.
 
         A run with no conversation behind it — the scheduler, the dashboard, the
-        Telegram menu, an instance restored on boot — is a no-op: ``record_system``
-        ignores an empty id and a run with no session key reaches no surface.
-        Neither delivery is allowed to raise: a missing note must not cost the
-        user the run's own result or its hooks.
+        Telegram menu, an instance restored on boot — still lights the owner's
+        bell (FEAT-048) and is otherwise a no-op: ``record_system`` ignores an
+        empty id and a run with no session key reaches no surface. No delivery
+        is allowed to raise: a missing note must not cost the user the run's own
+        result or its hooks.
         """
         meta = self._instances.get(instance_id) or {}
+        text = _run_outcome_text(meta.get("routine_name") or "", summary, error)
+
+        # The bell is addressed to the *owner*, not to a conversation, so it is
+        # the one surface a scheduled or dashboard-started run can reach.
+        try:
+            from condor.notifications import record
+
+            await record(
+                meta.get("user_id"),
+                text,
+                kind="routine",
+                link="/routines?tab=reports",
+            )
+        except Exception:
+            logger.debug(
+                f"Could not notify owner about run {instance_id}", exc_info=True
+            )
+
         conversation_id = meta.get("conversation_id") or ""
         if not conversation_id:
             return
 
-        text = _run_outcome_text(meta.get("routine_name") or "", summary, error)
         try:
             from condor.runtime.conversations import record_system
 

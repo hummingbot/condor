@@ -124,7 +124,10 @@ def test_a_dead_session_key_still_pushes_and_notes_nothing(monkeypatch, bot, not
         notify_user(NotifyRequest(text="ping", chat_id=1, session_key=""), user=CALLER)
     )
 
-    assert result == {"sent": True, "recorded": False}
+    # No conversation to write into, so no transcript note -- but the dashboard
+    # bell is addressed to the user, not to a conversation, so it still records
+    # and the call still counts as delivered (FEAT-048).
+    assert result == {"sent": True, "recorded": True}
     assert notes == []
     assert len(bot.calls) == 1
 
@@ -146,7 +149,9 @@ def test_an_unwritable_transcript_does_not_cost_the_user_the_push(
         )
     )
 
-    assert result == {"sent": True, "recorded": False}
+    # ``recorded`` is now true on the bell alone (FEAT-048): the transcript
+    # write failed, and that must not cost the user either delivery.
+    assert result == {"sent": True, "recorded": True}
     assert len(bot.calls) == 1
 
 

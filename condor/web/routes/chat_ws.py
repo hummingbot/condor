@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Query, WebSocket, WebSocketDisconnect
 
 from condor.llm.openrouter_models import fetch_models
 from condor.llm.options import DEFAULT_AGENT
+from condor.notifications import Notification, register_push_sink
 from condor.runtime import WEB, EventType, PromptRequest, SessionKey, SessionSpec
 from condor.runtime import client as runtime
 from condor.runtime import conversations
@@ -295,10 +296,37 @@ async def _deliver_note(
         await _send(ws, message)
 
 
+async def _push_notification(notification: Notification) -> None:
+    """Light this user's bell in every tab they have open (FEAT-048).
+
+    A third out-of-band push on this socket, next to ``permission_request`` and
+    ``system_note``. Unlike those two it is addressed to the *user*, not to a
+    conversation — a finished background task has no slot — so the frame
+    carries no ``slot_id`` and the store, not this push, is what guarantees the
+    notice is seen: a user with no tab open simply has no entry here, and the
+    bell picks it up from ``GET /notifications`` on the next load.
+    """
+    for ws in list(_attached_sockets.get(notification.user_id, ())):
+        await _send(
+            ws,
+            {
+                "event": "notification",
+                "id": notification.id,
+                "kind": notification.kind,
+                "title": notification.title,
+                "text": notification.text,
+                "link": notification.link,
+                "ts": notification.ts,
+            },
+        )
+
+
 # Registered here rather than imported by the runtime: ``condor.runtime`` must
-# not depend on web or handler code (see ``client._local()``).
+# not depend on web or handler code (see ``client._local()``). ``condor.notifications``
+# is registered the same way and for the same reason.
 register_sink_factory(WEB, _wake_sink)
 register_note_sink(WEB, _deliver_note)
+register_push_sink(_push_notification)
 
 
 @router.websocket("/ws/chat")

@@ -1275,6 +1275,19 @@ async def notify_user(req: NotifyRequest, user: WebUser = Depends(get_current_us
                 exc_info=True,
             )
 
+    # The dashboard bell (FEAT-048), addressed to the caller themselves — never
+    # to ``req.chat_id``, which may legitimately be a group they belong to but
+    # which has no dashboard owner. This is what makes ``send_notification``
+    # succeed on an install with no Telegram: the tool already counts
+    # ``recorded`` as delivered.
+    try:
+        from condor.notifications import record
+
+        if await record(user.id, req.text, kind="agent"):
+            recorded = True
+    except Exception:
+        log.debug("Could not record a notification for user %s", user.id, exc_info=True)
+
     sent = False
     if req.chat_id:
         sent = await _push_to_telegram(req.chat_id, req.text, req.parse_mode)
