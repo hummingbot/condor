@@ -29,7 +29,7 @@ changed every path these issues live on.
 | GW-18 | pancakeswap-sol's close reports fees and rent as a hardcoded 0 | **open** |
 | GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | **open** |
 | GW-20 | A DAMM v2 open records the position rent as deposited liquidity | **open** |
-| GW-21 | Nothing downstream can close an AMM position, so rent is stranded | **open** |
+| GW-21 | Nothing downstream can close an AMM position, so rent is stranded | fixed (routes collapsed) |
 
 GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
 lint 0 errors, and `openapi.json` regenerates identical to the committed copy.
@@ -772,8 +772,8 @@ delta-minus-fee exactly. Rent was never part of it.
 ---
 
 ## GW-21 — nothing downstream can close an AMM position, so the rent is stranded
-**Status: open. The gap is in hummingbot-api and condor; Gateway has the route.**
-Found 2026-08-19 while deciding whether `/trading/amm/{open,close}` duplicate
+**Status: fixed, by removing the choice rather than wiring the second route.** Found
+2026-08-19 while deciding whether `/trading/amm/{open,close}` duplicate
 `/trading/amm/{add,remove}`.
 
 They are not symmetric, and only half the question has an easy answer.
@@ -804,10 +804,25 @@ liquidity.
 
 Nothing errors. The position drains to zero, reads as empty, and quietly keeps the rent.
 
-**Fix:** add `amm_close_position` to `services/gateway_client.py` against
-`/trading/amm/close`, give `manage_amm` a `close` action, and record
-`positionRentRefunded` the way the CLMM close path already does. Whether `open` also
-gets wired is the cosmetic half — `add` without a position address already covers it.
+**Fixed** in gateway `74a1ee512` and hummingbot-api `6529688`, by collapsing the four
+routes to two rather than teaching two more callers about the other pair:
+
+- `meteora/amm-routes/removeLiquidity.ts` delegates to `closePosition` at 100%, so a full
+  removal closes the account and the rent comes back without the caller knowing to ask.
+- `/trading/amm/open` and `/trading/amm/close` are gone. `app.integration.test.ts` asserts
+  they are *not* registered, so re-adding one is a decision rather than a drift back.
+- `positionRentRefunded` joins the remove response as optional — present when the removal
+  closed the account, absent on a partial removal and on fungible-LP AMMs, rather than a 0
+  that would read as "closed, refunded nothing".
+- hummingbot-api's `close_position` records it, as the CLMM path already did.
+
+condor needs no change: `manage_amm(remove_liquidity, percentage_to_remove=100)` is now
+the close, which is what it was already calling.
+
+**Verify:** the position opened for GW-20, `F1YcTMd6…`, is still open and still holds its
+rent. Removing 100% of it against a container built from `74a1ee512` should refund
+~0.0099 SOL and record it — a check GW-20's own fix does not cover, since that one is
+about the open side.
 
 
 ---
