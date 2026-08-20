@@ -28,7 +28,7 @@ changed every path these issues live on.
 | GW-17 | `baseTokenAmountAdded` is signed on some connectors, a magnitude on others | **open** |
 | GW-18 | pancakeswap-sol's close reports fees and rent as a hardcoded 0 | **open** |
 | GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | **open** |
-| GW-20 | A DAMM v2 open records the position rent as deposited liquidity | **open** |
+| GW-20 | A DAMM v2 open records the position rent as deposited liquidity | fixed |
 | GW-21 | Nothing downstream can close an AMM position, so rent is stranded | fixed (routes collapsed) |
 
 GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
@@ -708,8 +708,9 @@ which is what makes it a trap rather than merely a limitation.
 ---
 
 ## GW-20 — a DAMM v2 open records the position rent as deposited liquidity
-**Status: open.** Found live 2026-08-19 on the first Meteora AMM add. Worse than GW-17:
-that is a sign, this is a magnitude, and here it was wrong by 2.86×.
+**Status: fixed** in gateway `e3eb7b14f` and hummingbot-api `ad7c516`. Found live
+2026-08-19 on the first Meteora AMM add. Worse than GW-17: that is a sign, this is a
+magnitude, and here it was wrong by 2.86×.
 
 Opened a DAMM v2 position with 3000 base and the quote side the pool asked for. What the
 chain did, what the position holds, and what was recorded:
@@ -760,10 +761,23 @@ the 0.0053 that was really in the pool. Against an open of 0.0152, that is a fab
 loss of ~0.0099 SOL on a position that never held more than 0.0053 — a ~186% loss on a
 round trip whose real cost is the 4% pool fee.
 
-**Fix, two halves:** subtract `positionRent` from the native-token side in
-`meteora/amm-routes/openPosition.ts`, exactly as `closePosition.ts` already does; and have
-`_book_position_add` in `routers/gateway_amm.py` store `positionRent` the way the CLMM path
-does, so the value is recoverable for rows already written.
+**Fixed, in both halves.** `openPosition` now backs the rent out of the native side, and
+both directions share one helper — `liquidityWithoutRent` in `chains/solana/solana.utils.ts`
+— rather than holding a copy each of the same subtraction. Two supporting renames, both
+because the units are what made this silent: `accountLamports` returns SOL (it divides the
+raw balances), so it is now `accountBalanceSol` and says so in its docblock; the magic
+native-mint string is now `NATIVE_MINT` from `@solana/spl-token`.
+
+hummingbot-api records `positionRent` on the open, exposes it and the refund through
+`position_to_dict` — which returned neither — and reads the position address out of the
+response instead of the GW-6 diff, now deleted.
+
+Mutation-checked: dropping the subtraction, dropping the clamp, inverting which side it
+applies to, and returning lamports instead of SOL each fail the tests.
+
+**Rows already written keep the inflated figures.** `F1YcTMd6…` is booked at
+`0.015220830` against `0.005323709` held. Nothing migrates them, so a reader spanning the
+fix needs `created_at` to tell which convention a row follows.
 
 **GW-4 is related but not the same.** That one was gas inflating native amounts, and it is
 fixed — gas is correctly excluded here, which is why the recorded figure matches the
