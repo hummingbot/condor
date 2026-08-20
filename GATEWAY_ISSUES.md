@@ -33,6 +33,7 @@ changed every path these issues live on.
 | GW-22 | `position_info` ignored the position it was given (condor) | fixed |
 | GW-23 | Money is typed as JSON `number`, so exact decimals do not survive | **open** |
 | GW-24 | The committed spec carried a real wallet address and a local port | fixed |
+| GW-25 | A narrow in-range CLMM close fails on slippage, and no layer widens it | **open** |
 
 Seven are open and are written out in full below; the eighteen that are fixed are
 summarised under **Fixed — the record**, with the verification each still needs collected
@@ -278,6 +279,141 @@ unified API and one that mostly looks unified.
 - **`/trading/router/execute-quote` has no caller.** `RouterExecuteQuoteRequest` is the one
   generated request model hummingbot-api never constructs, so the quote-then-execute flow
   that `quoteId` exists for is unused and every execute re-quotes.
+
+---
+
+## GW-25 — a narrow in-range CLMM close fails on slippage, and no retry layer widens it
+**Status: open.** Found live 2026-08-20 closing Orca positions. The mechanism is
+established; the **cause is not confirmed** — see "What is not proven" below before acting
+on it.
+
+### The case
+
+Three Orca SOL-USDC positions, opened minutes apart in the same pool, differing only in
+where the range sat relative to spot. Closing them:
+
+| position | range vs spot | in range at close | slippage | result |
+|---|---|---|---|---|
+| `CzUtGJG8…` | below | no | 1% (default) | closed |
+| `sWXmj6vg…` | above | no | 1% (default) | closed |
+| `2PWGc9j7…` attempt 1 | across | **yes** | 1% | **failed in simulation** |
+| `2PWGc9j7…` attempt 2 | across | **yes** | 1% | **landed on-chain, reverted** |
+| `2PWGc9j7…` attempt 3 | across | no (drifted out) | 5% | closed |
+
+The failing position was 1% wide (85.6850–86.5808) and sitting 0.13% below its upper bound
+when the closes were attempted. The error both times:
+
+```
+custom program error: 0x1782        // 6018 TokenMinSubceeded
+Did not meet the minimum token amount for the liquidity withdrawal.
+```
+
+Gateway recognises it — `solana-error-parser.ts:97` is where that message comes from.
+
+### Two failure stages, one of which costs money
+
+The two attempts failed at **different points**, which matters more than the failure itself:
+
+```
+attempt 1   Transaction simulation failed          — never submitted, no gas
+attempt 2   landed on-chain but failed             — slot 440494812, fee 0.000011772 SOL
+            InstructionError [1, {Custom: 6018}]
+```
+
+A close that clears simulation can still revert by the time it lands. So **retrying is not
+free**: every attempt that gets past simulation before the price moves again pays a
+transaction fee for a reverted transaction.
+
+### Why an in-range narrow position is the sensitive case
+
+A CLMM position's composition is fixed while it is out of range — it holds one token and
+price movement cannot change the amount. The withdrawal minimums are then exact and cannot
+be subceeded, which is why both one-sided closes above succeeded first time at the default
+tolerance.
+
+In range, composition varies continuously with price, and the closer spot is to a bound the
+faster it varies. This position went from `0.009533 SOL / 0.903469 USDC` at open to
+`0.002486 / 1.511704` in nine minutes — the pool selling its base as spot rose through a
+range only 1% wide. Between computing the withdrawal minimums and the transaction landing,
+the amounts had moved past a 1% tolerance.
+
+### What is not proven
+
+**The tolerance hypothesis is untested.** Attempt 3 used 5% *and* the position had drifted
+out of range by then, so its success has two candidate explanations and the experiment
+cannot separate them. Every close that has ever succeeded here was out of range; both
+failures were in range. Tolerance was never isolated.
+
+The discriminating experiment is a **narrow, in-range** position closed at a high
+tolerance, which needs a fresh position and has to run before the position drifts out:
+
+```
+test_orca_clmm.py open-across          # 1% wide, straddling spot
+# then immediately, with slippage_pct=5, while `info` still reports [in range]
+```
+
+If that closes, tolerance is the cause and the recommendation below applies. If it fails
+at 5% too, the cause is elsewhere and the retry logic should not be changed on this
+evidence.
+
+### The retry layers, and what they do about it
+
+§3.1 of `docs/retry-architecture.md` specifies retry in two places. One exists:
+
+- **Connector fast path — not implemented.** `closePosition.ts` has no re-quote-and-resubmit;
+  its only retry is the confirmation re-fetch at line 54. The route returns a 400. Retry
+  logic exists in the router connectors (jupiter, okx, dflow) but not on the LP close path.
+  For a caller that is not an executor — `manage_clmm`, the orphan-recovery path — this
+  means the caller retries by hand. A convenience gap rather than a dead end: calling again
+  is what a human does, and it is what produced attempts 2 and 3 above.
+
+- **Executor paced re-entry — implemented, and correct for the failure mode it was built
+  for.** `lp_executor.py` counts attempts, arms an exponential backoff capped at 30s,
+  stays in `CLOSING`, and rebuilds with fresh state each time (`:194`, `:804`, `:808`).
+  `max_retries` defaults to 10, after which `_max_retries_reached` requires intervention.
+
+**The gap is that neither layer widens the tolerance.** `lp_executor.py:938` is explicit:
+
+```python
+# No slippage_pct: omitted, the connector-configured slippagePct applies
+```
+
+Every one of the ten attempts re-quotes at the same tolerance. That is the right design for
+a *stale quote* — get a fresh one and the problem is gone. It does nothing for a tolerance
+that is too tight for the position's sensitivity: the fresh quote is just as tight as the
+last one. If the hypothesis above holds, an executor-managed position in this state burns
+its whole retry budget failing identically, pays a fee on each attempt that clears
+simulation, and lands in "requires intervention" for a position one wider close would have
+shut.
+
+### Recommendation for lp_executor
+
+Widen progressively across the existing retry budget rather than repeating the same
+request. The backoff loop is already the right place; only the request changes.
+
+- **Pass `slippage_pct` explicitly on close, escalating with the attempt count** — the
+  connector-configured value on attempt 0, then a bounded ramp (e.g. ×1.5 per attempt,
+  capped at something the operator sets). The parameter already exists on the request and
+  is currently omitted, so this is a value to supply rather than a mechanism to build.
+- **Cap it, and make the cap configuration rather than a constant.** Tolerance on a close
+  is not the same risk as on a swap: the intent is "remove whatever is in this position",
+  and the position is being exited regardless, so the exposure is to the withdrawal split
+  rather than to a price. It still bounds how much the closer will accept losing, so it
+  belongs in the executor config beside `max_retries`.
+- **Distinguish the two failure stages in the retry accounting.** A simulation failure
+  costs nothing and can be retried freely; a landed-and-reverted one costs a fee. Counting
+  them the same way either spends the budget too fast on free failures or pays too many
+  fees on expensive ones. `throwIfLandedWithError` already separates them at the connector.
+- **Consider out-of-range as a terminal-ish state for close purposes.** A position that has
+  drifted out of range will close at any tolerance, because its composition is frozen. If
+  the retry loop knows the position is out of range it can stop widening — and conversely,
+  a position still in range after several failures is the case that needs the widest
+  attempt.
+
+Whether the connector fast path is also worth adding is a separate question. It would save
+the executor a tick, but the executor loop already covers the managed path and a widening
+ramp there addresses the same failure with one implementation instead of two.
+
 
 ---
 
