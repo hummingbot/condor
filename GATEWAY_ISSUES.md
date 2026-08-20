@@ -28,6 +28,7 @@ changed every path these issues live on.
 | GW-17 | `baseTokenAmountAdded` is signed on some connectors, a magnitude on others | **open** |
 | GW-18 | pancakeswap-sol's close reports fees and rent as a hardcoded 0 | **open** |
 | GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | **open** |
+| GW-20 | A DAMM v2 open records the position rent as deposited liquidity | **open** |
 
 GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
 lint 0 errors, and `openapi.json` regenerates identical to the committed copy.
@@ -705,14 +706,80 @@ which is what makes it a trap rather than merely a limitation.
 
 ---
 
+## GW-20 — a DAMM v2 open records the position rent as deposited liquidity
+**Status: open.** Found live 2026-08-19 on the first Meteora AMM add. Worse than GW-17:
+that is a sign, this is a magnitude, and here it was wrong by 2.86×.
+
+Opened a DAMM v2 position with 3000 base and the quote side the pool asked for. What the
+chain did, what the position holds, and what was recorded:
+
+```
+wallet SOL delta                 -0.015241081
+  less gas                       -0.015220830   <- recorded as quoteTokenAmountAdded
+liquidity actually in the pool     0.005323709   <- what positions_owned reports
+unaccounted                        0.009897121   <- rent for the position NFT accounts
+```
+
+Rent is **locked, not spent** — the chain returns it when the position account is closed.
+Recording it as deposited liquidity overstates the position by the rent, and since the
+rent here is nearly twice the liquidity, the stored position is 2.86× its real size.
+
+The same connector already gets this right on the way out.
+`meteora/amm-routes/closePosition.ts:116`:
+
+```ts
+const adjust = (change, mint) =>
+  mint.toBase58() === nativeMint ? Math.max(0, Math.abs(change) - positionRentRefunded)
+                                 : Math.abs(change);
+quoteTokenAmountRemoved: adjust(balanceChanges[1], poolState.tokenBMint),
+```
+
+`openPosition.ts:86` computes the same quantity, returns it, and does not apply it:
+
+```ts
+positionRent,                                       // computed at :73, returned, unused
+quoteTokenAmountAdded: Math.abs(balanceChanges[1]), // still carries the rent
+```
+
+**Why it compounds.** hummingbot-api stores `positionRent` on the position row and
+populates it for CLMM (`routers/gateway_clmm.py:455,539`) — but the AMM path never reads
+it. `grep position_rent routers/gateway_amm.py` returns nothing. So the inflated figure is
+booked with nothing recorded alongside that would let a reader back it out:
+
+```json
+"initial_quote_token_amount": 0.015220830000000001,
+"quote_token_amount":         0.015220830000000001,
+"lp_token_amount":            null
+```
+
+against a position `positions_owned` reports as holding `0.005323709`.
+
+**The P&L this produces.** The close nets the rent refund out, so it will record roughly
+the 0.0053 that was really in the pool. Against an open of 0.0152, that is a fabricated
+loss of ~0.0099 SOL on a position that never held more than 0.0053 — a ~186% loss on a
+round trip whose real cost is the 4% pool fee.
+
+**Fix, two halves:** subtract `positionRent` from the native-token side in
+`meteora/amm-routes/openPosition.ts`, exactly as `closePosition.ts` already does; and have
+`_book_position_add` in `routers/gateway_amm.py` store `positionRent` the way the CLMM path
+does, so the value is recoverable for rows already written.
+
+**GW-4 is related but not the same.** That one was gas inflating native amounts, and it is
+fixed — gas is correctly excluded here, which is why the recorded figure matches the
+delta-minus-fee exactly. Rent was never part of it.
+
+---
+
 ## What is not done
 
 - **GW-3's credentials** — the only item needing a decision.
 - **Mainnet coverage as of 2026-08-19.** Run and confirmed: all three swap types
-  (router/clmm/amm), the full CLMM lifecycle on Meteora (open → add → remove → close), and
-  the Raydium AMM round trip (add → remove), which is what surfaced GW-17. Still unrun:
-  fee collection, pool creation, and `manage_amm(create_pool)`, which no test step
-  exercises at all. The "verify" notes on the fixed issues above remain outstanding except
+  (router/clmm/amm), the full CLMM lifecycle on Meteora (open → add → remove → close), the
+  Raydium AMM round trip (add → remove) which surfaced GW-17, and a Meteora DAMM v2 open
+  which surfaced GW-20. Orca CLMM and the rest of the DAMM v2 lifecycle have scripts
+  (`condor/scripts_lp_test/test_orca_clmm.py`, `test_meteora_amm.py`) but are unrun. Also
+  unrun: fee collection against a position that has any, pool creation, and
+  `manage_amm(create_pool)`, which no test step exercises at all. The "verify" notes on the fixed issues above remain outstanding except
   where a section says otherwise.
 - **GW-12 through GW-16**, none of which is a wrong answer — they are ways a wrong
   request is accepted quietly, or a right one is described badly. **GW-17 is not in that
