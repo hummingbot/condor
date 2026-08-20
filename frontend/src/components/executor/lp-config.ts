@@ -313,6 +313,15 @@ const SLOT_FIELD: Record<PickSlot, keyof LPState> = {
   limit2: "lower_limit_price",
 };
 
+// The slots are named for the grid executor; on an LP range they are prices,
+// not a direction of travel, so the chart is told what they mean here.
+const LP_LINE_LABELS: Partial<Record<PickSlot, string>> = {
+  start: "Upper",
+  end: "Lower",
+  limit: "Upper limit",
+  limit2: "Lower limit",
+};
+
 export function isMeteoraProvider(provider: string): boolean {
   return provider.toLowerCase().startsWith("meteora/");
 }
@@ -349,6 +358,7 @@ export function useLpConfig(
       side: state.side === LP_SIDE_SELL ? 2 : 1,
       minSpread: 0,
       activePickField: PICK_SLOT[state.activePickField ?? ""] ?? null,
+      lineLabels: LP_LINE_LABELS,
       extraLines:
         state.lower_limit_price > 0
           ? [

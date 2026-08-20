@@ -582,6 +582,7 @@ export function CreateExecutor() {
               side={chartProps.side}
               minSpread={chartProps.minSpread}
               activePickField={chartProps.activePickField}
+              lineLabels={chartProps.lineLabels}
               onPriceSet={handlePriceSet}
               pricePrecision={pricePrecision}
               extraLines={chartProps.extraLines}

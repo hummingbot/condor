@@ -546,6 +546,7 @@ export function DexPool() {
               side={active.chartProps.side}
               minSpread={0}
               activePickField={active.chartProps.activePickField}
+              lineLabels={active.chartProps.lineLabels}
               onPriceSet={active.handleChartPriceSet}
               extraLines={active.chartProps.extraLines}
               executorOverlays={overlays}

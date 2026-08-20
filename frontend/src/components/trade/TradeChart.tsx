@@ -56,6 +56,8 @@ interface TradeChartProps {
   totalAmountQuote?: number;
   minOrderAmountQuote?: number;
   activePickField: PickField;
+  /** Per-slot overrides for the line titles and pick hints (see ChartPriceMapping). */
+  lineLabels?: Partial<Record<PickSlot, string>>;
   onPriceSet: (field: PickSlot, price: number) => void;
   pricePrecision?: number;
   extraLines?: ExtraLine[];
@@ -86,6 +88,7 @@ export function TradeChart({
   totalAmountQuote,
   minOrderAmountQuote,
   activePickField,
+  lineLabels,
   onPriceSet,
   pricePrecision,
   extraLines,
@@ -637,7 +640,7 @@ export function TradeChart({
         lineWidth: 2,
         lineStyle: mod.LineStyle.Solid,
         axisLabelVisible: true,
-        title: "Start",
+        title: lineLabels?.start ?? "Start",
       });
     }
 
@@ -648,7 +651,7 @@ export function TradeChart({
         lineWidth: 2,
         lineStyle: mod.LineStyle.Dashed,
         axisLabelVisible: true,
-        title: "End",
+        title: lineLabels?.end ?? "End",
       });
     }
 
@@ -660,7 +663,7 @@ export function TradeChart({
         lineWidth: 2,
         lineStyle: mod.LineStyle.Dotted,
         axisLabelVisible: true,
-        title: "Limit",
+        title: lineLabels?.limit ?? "Limit",
       });
     }
 
@@ -718,7 +721,7 @@ export function TradeChart({
         extraLinesRef.current.push(pl);
       }
     }
-  }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines, chartReady]);
+  }, [startPrice, endPrice, limitPrice, side, minSpread, totalAmountQuote, minOrderAmountQuote, activePickField, extraLines, lineLabels, chartReady]);
 
   // ── Executor overlays ──
   // `chartReady` is a dependency, not a guard for its own sake: lightweight-charts
@@ -1003,10 +1006,13 @@ export function TradeChart({
       {activePickField && (
         <div className="flex items-center justify-between border-b border-[var(--color-border)] bg-[var(--color-bg)] px-3 py-1.5">
           <p className="text-[10px] text-[var(--color-text-muted)]">
-            Click on chart to set {PICK_LABELS[activePickField]} price
+            Click on chart to set{" "}
+            {(lineLabels?.[activePickField] ?? PICK_LABELS[activePickField]).toLowerCase()}{" "}
+            price
           </p>
           <span className="animate-pulse rounded bg-[var(--color-primary)]/20 px-2 py-0.5 text-xs text-[var(--color-primary)]">
-            Pick mode: {PICK_LABELS[activePickField]}
+            Pick mode:{" "}
+            {(lineLabels?.[activePickField] ?? PICK_LABELS[activePickField]).toLowerCase()}
           </span>
         </div>
       )}
