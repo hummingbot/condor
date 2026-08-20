@@ -68,6 +68,33 @@ escape_env_value() {
     echo "$value"
 }
 
+# Set (or replace) KEY=VALUE in .env, creating the file if it does not exist.
+set_env_var() {
+    local key="$1"
+    local value
+    value="$(escape_env_value "$2")"
+    [ -f "$ENV_FILE" ] || touch "$ENV_FILE"
+    if grep -q "^${key}=" "$ENV_FILE"; then
+        sed -i.bak "s|^${key}=.*|${key}=${value}|" "$ENV_FILE"
+        rm -f "$ENV_FILE.bak"
+    else
+        echo "${key}=${value}" >> "$ENV_FILE"
+    fi
+}
+
+# What local mode costs, said out loud. It is a dashboard with no login at all,
+# so the only thing standing between it and the network is the loopback bind.
+local_mode_warning() {
+    echo ""
+    msg_warn "Local mode has NO login — whoever reaches the dashboard controls your funds"
+    echo -e "    • It binds ${BOLD}127.0.0.1${RESET} only: reachable from this machine, nowhere else."
+    echo -e "    • Exposing it takes an explicit ${BOLD}WEB_HOST=0.0.0.0${RESET} in .env, which puts full"
+    echo -e "      trading control in reach of anyone who can hit the port. Only do that behind"
+    echo -e "      something that authenticates (Tailscale, an SSH tunnel, a reverse proxy)."
+    echo -e "    • Dashboard: ${BOLD}http://localhost:8088${RESET}"
+    echo ""
+}
+
 # OSC 8 clickable hyperlink (falls back to plain URL)
 make_link() {
     local url="$1"
@@ -456,9 +483,9 @@ fi
 
 echo ""
 
-# ── Step 1: Telegram Configuration ──────────────────
+# ── Step 1: Run mode (Telegram or local) ────────────
 
-echo -e "${BOLD}Step 1: Telegram Configuration${RESET}"
+echo -e "${BOLD}Step 1: How will you use Condor?${RESET}"
 echo ""
 
 telegram_configured=false
@@ -470,11 +497,49 @@ if [ -f "$ENV_FILE" ]; then
     set +a
 fi
 
-if [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${ADMIN_USER_ID:-}" ]; then
+# An install from before local mode existed has a token but no CONDOR_MODE.
+# That is telegram — recorded now, so the mode is always explicit on disk and
+# is never inferred later from whether a token happens to be there.
+if [ -z "${CONDOR_MODE:-}" ] && [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${ADMIN_USER_ID:-}" ]; then
+    CONDOR_MODE="telegram"
+    set_env_var CONDOR_MODE "telegram"
+fi
+
+if [ "${CONDOR_MODE:-}" = "local" ]; then
+    msg_ok "Local mode already configured (no Telegram)"
+    local_mode_warning
+elif [ -n "${TELEGRAM_TOKEN:-}" ] && [ -n "${ADMIN_USER_ID:-}" ]; then
     msg_ok "Telegram already configured"
     telegram_configured=true
     load_tailscale_choice
 else
+    echo -e "    ${BOLD}1) Telegram${RESET}  — control Condor from a Telegram bot (recommended)"
+    echo -e "    ${BOLD}2) Local${RESET}     — no Telegram; the dashboard runs on this machine, no login"
+    echo ""
+    while true; do
+        prompt_visible "Choose [1/2]" "1" "condor_mode_choice"
+        case "${condor_mode_choice:-}" in
+            1|2) break ;;
+            *) msg_warn "Enter 1 (Telegram) or 2 (Local)" ;;
+        esac
+    done
+    echo ""
+fi
+
+if [ "${condor_mode_choice:-}" = "2" ]; then
+    # Local mode: nothing to ask. No bot, no token, no admin id to look up —
+    # ADMIN_USER_ID=1 is the local user every keyed thing (config.yml, chat
+    # defaults, preferences, memory, session keys) already understands.
+    CONDOR_MODE="local"
+    ADMIN_USER_ID="1"
+    USE_TAILSCALE=false
+    set_env_var CONDOR_MODE "local"
+    set_env_var ADMIN_USER_ID "1"
+    set_env_var WEB_URL "http://localhost:8088"
+    set_env_var USE_TAILSCALE "false"
+    msg_ok ".env configured for local mode"
+    local_mode_warning
+elif [ "${condor_mode_choice:-}" = "1" ]; then
     msg_info "Create a bot: $(make_link 'https://t.me/BotFather')"
     msg_info "Get your ID: $(make_link 'https://t.me/userinfobot')"
     echo ""
@@ -570,6 +635,11 @@ else
             fi
         } > "$ENV_FILE"
     fi
+
+    # The mode is written explicitly even for the default, so nothing downstream
+    # has to guess it from the presence of a token.
+    CONDOR_MODE="telegram"
+    set_env_var CONDOR_MODE "telegram"
 
     msg_ok ".env created"
     if [ -n "$SERVER_IP" ]; then
@@ -1080,12 +1150,18 @@ echo -e "    • npm:        $(command_exists npm && npm --version 2>/dev/null |
 echo -e "    • typescript: $(command_exists tsc && tsc --version 2>/dev/null || echo 'not installed')"
 echo ""
 echo -e "  ${BOLD}Configuration:${RESET}"
+echo -e "    • Mode:       ${CONDOR_MODE:-telegram}$([ "${CONDOR_MODE:-telegram}" = "local" ] && echo ' (no Telegram, dashboard only)')"
 echo -e "    • Telegram:   $([ -n "${TELEGRAM_TOKEN:-}" ] && echo 'configured' || echo 'not set')"
 echo -e "    • AI model:   ${CONDOR_DEFAULT_AGENT:-from agents/condor/AGENT.md}"
 echo ""
 echo -e "  ${BOLD}Next steps:${RESET}"
 echo -e "  ${BOLD}make install${RESET}      Install Python dependencies"
 echo -e "  ${BOLD}make run${RESET}          Run Condor locally (dev)"
+if [ "${CONDOR_MODE:-telegram}" = "local" ]; then
+echo ""
+echo -e "  Then open ${BOLD}http://localhost:8088${RESET} — you are logged in already."
+echo -e "  ${DIM}No login, loopback only. See 'Local mode' in the README before exposing it.${RESET}"
+fi
 if [ "${hb_api_deployed:-}" = true ]; then
 echo ""
 echo -e "  Hummingbot API is running — config at ${BOLD}../hummingbot-api/.env${RESET}"
