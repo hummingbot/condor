@@ -21,7 +21,7 @@ changed every path these issues live on.
 | GW-10 | The reads published a stale shape under the right name | fixed |
 | GW-11 | The chain half of `chainNetwork` was decorative on the liquidity routes | fixed |
 | GW-12 | Three ways a caller's intent is dropped without an error | **open** |
-| GW-13 | The spec guard passes on regressions it claims to catch | **open** |
+| GW-13 | The spec guard passes on regressions it claims to catch | fixed |
 | GW-14 | No `operationId` and no error responses in the spec | **open** |
 | GW-15 | Response component names were never unified | **open** |
 | GW-16 | Leftovers the unification did not sweep | **open** |
@@ -32,6 +32,7 @@ changed every path these issues live on.
 | GW-21 | Nothing downstream can close an AMM position, so rent is stranded | fixed (routes collapsed) |
 | GW-22 | `position_info` ignored the position it was given (condor) | fixed |
 | GW-23 | Money is typed as JSON `number`, so exact decimals do not survive | **open** |
+| GW-24 | The committed spec carried a real wallet address and a local port | fixed |
 
 GW-1 through GW-11, GW-17 and GW-19 are code-complete and green: 1153 tests, 143 suites,
 clean typecheck,
@@ -468,7 +469,8 @@ prefill, which is what it was for.
 ---
 
 ## GW-13 — the spec guard passes on regressions it claims to catch
-**Status: open.** Both of these were demonstrated by mutation, not inferred.
+**Status: fixed.** Both of these were demonstrated by mutation, not inferred, and both
+mutations now fail.
 
 `test/spec/request-components.test.ts` identifies a GET's component by *shape* — the set of
 its property names — because a GET has no `$ref` to follow. Three pairs share a shape
@@ -485,9 +487,20 @@ spec that was not regenerated after a route changed." **They do not.** Adding a 
 committed spec catches nothing about drift; only regenerating and comparing does, and no
 CI job does that — `.github/workflows/` never runs the generator.
 
-**Fix:** a CI step that regenerates and fails on a diff is the whole of the second half,
-and it subsumes the first — a twin that lost its `$id` is a diff. Without it every other
-open item here can regress green.
+**Fixed in both halves.** CI gained a `Check openapi.json is regenerated` step that runs
+the generator and fails on a diff, which is the only thing that can catch drift; the test
+file's comment now says what reading the committed spec does and does not cover, instead
+of claiming the opposite.
+
+The twin blind spot is closed independently rather than left to the CI step, because the
+two answer different questions — CI catches "the file is stale", the test catches "the
+component a client imports is missing". Each `/trading` GET is now pinned to the component
+name derived from its own path (`/trading/amm/quote-swap` → `AmmQuoteSwapRequest`) and
+*then* to its shape. A name is unique where a shape is not. Re-running the mutation that
+used to pass silently — dropping `AmmQuoteSwapRequest`'s `$id` — now fails.
+
+Adding the CI step surfaced GW-24 below: it could not have worked at all beforehand,
+because the spec was not reproducible off the machine that generated it.
 
 ---
 
@@ -963,6 +976,41 @@ both sides; hummingbot-api already parses these into `Decimal`, which would then
 faithful rather than approximate. Keeping `number` and rounding at the edges is the
 cheaper option, but it puts the correctness in every consumer instead of in the wire.
 
+
+---
+
+## GW-24 — the committed spec carried a real wallet address and a local port
+**Status: fixed.** Found while adding GW-13's CI step, which could not have worked without
+this: the spec was not reproducible off the machine that generated it.
+
+`openapi.json` is generated from the live route table, and two of its values came from
+whoever ran the generator rather than from Gateway:
+
+| Field | Committed value | What it should be |
+|---|---|---|
+| `walletAddress` default, ×21 | `82Sgg…yHx5`, `0xDA50…6684` | `<solana-wallet-address>` |
+| `servers[0].url` | `http://localhost:15889` | the template's `15888` |
+
+The wallet default is right at runtime — a caller who omits `walletAddress` means "the
+wallet I configured" — and wrong in a checked-in artifact. `src/templates/chains/*.yml`
+already ship the placeholders, so the artifact simply disagreed with them.
+
+Two consequences. The developer's real trading wallet was committed to a repo with a
+GitHub remote, and vendored onward into hummingbot-api's `gateway-openapi.json` and its
+generated `models/gateway_generated.py`. It is a public address rather than a secret, but
+it links an identity to on-chain activity, which is not something a spec should publish.
+And the file could never match what another machine produced, so no CI check could compare
+against it — which is why GW-13's drift gate had to wait on this.
+
+**Fix:** the generator substitutes the configured wallets with the template placeholders
+and pins `servers[0].url` to the template port. Verified by generating against a
+templates-only `conf/` — the way CI builds it — and getting a byte-identical file. Both
+downstream copies were refreshed; the models changed in exactly the two lines that held
+the address.
+
+**Worth knowing:** this is a property of anything read from config at import time. The
+`connector` and `chainNetwork` enums are read the same way; they happen to be identical
+between a normal `conf/` and the templates today, which is why only these two showed up.
 
 ---
 
