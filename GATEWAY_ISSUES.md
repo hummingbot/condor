@@ -31,6 +31,7 @@ changed every path these issues live on.
 | GW-20 | A DAMM v2 open records the position rent as deposited liquidity | fixed |
 | GW-21 | Nothing downstream can close an AMM position, so rent is stranded | fixed (routes collapsed) |
 | GW-22 | `position_info` ignored the position it was given (condor) | fixed |
+| GW-23 | Money is typed as JSON `number`, so exact decimals do not survive | **open** |
 
 GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
 lint 0 errors, and `openapi.json` regenerates identical to the committed copy.
@@ -875,6 +876,54 @@ which without the flag reads as two positions behaving inconsistently.
 
 Mutation-checked: reverting to `positions_owned`, and returning the single position
 unwrapped, each fail the three new tests in `tests/test_manage_clmm.py`.
+
+
+---
+
+## GW-23 — money is typed as JSON `number`, so exact decimals do not survive the wire
+**Status: open.** Seen repeatedly across 2026-08-19/20 mainnet runs. Cosmetic at the
+amounts tested; the reason to fix it is that the failure grows with the number, and one
+instance of it was a real bug already.
+
+Every monetary field is `Type.Number({ format: 'decimal' })` — **181 of them across
+`src/`** — which the spec emits as `"type": "number"`. That is an IEEE 754 double, so a
+value that is an exact decimal on-chain (an atomic integer over `10^decimals`) arrives as
+the nearest representable double instead:
+
+```
+collect fees   base: 4.2900000000000047E-7      (4.29e-7)
+               quote: 0.00003700000000250725    (0.000037)
+swap record    input_amount: 0.010000000000000002   (0.01)
+```
+
+The `format: 'decimal'` annotation is a hint no JSON parser acts on — it does not change
+what is on the wire.
+
+**It defeats the consumer's Decimal.** hummingbot-api models these as `Decimal`, which
+would be exact, but the value has already lost precision before pydantic sees it:
+
+```python
+Decimal(str(0.00003700000000250725))  # 0.00003700000000250725  — noise preserved
+Decimal('0.000037')                   # 0.000037                — if it were a string
+```
+
+**One instance of this was not cosmetic.** `page=2` came back from a numeric field as the
+float `2.0` and went out on a query string as `"2.0"`, which is a different request from
+`"2"`. Fixed in the clients with `_wire_str`, but that is a workaround at the edge — the
+values were already floats by then.
+
+**Why it will not stay cosmetic.** Error is relative, so it scales with magnitude. At
+0.01 SOL it is 1e-17 and invisible. On a token with 18 decimals, or a position worth
+millions of base units, doubles run out of integer precision at 2^53 — a wei-denominated
+amount above ~9e15 cannot round-trip at all. Fee and rent figures also get summed across
+events, and the noise accumulates in whichever direction the rounding fell.
+
+**Fix:** carry money as strings — `Type.String({ format: 'decimal' })` — so the exact
+decimal survives and every consumer's Decimal is exact. That is a breaking spec change
+across 181 fields, so it wants doing in one pass with the generated models regenerated on
+both sides; hummingbot-api already parses these into `Decimal`, which would then be
+faithful rather than approximate. Keeping `number` and rounding at the edges is the
+cheaper option, but it puts the correctness in every consumer instead of in the wire.
 
 
 ---

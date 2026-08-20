@@ -272,13 +272,26 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
         )
 
     if action in ("close", "collect_fees") and isinstance(payload, dict):
-        return (
-            f"{header}\n"
-            f"Position: {payload.get('position_address')}\n"
-            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}\n"
+        lines = [
+            header,
+            f"Position: {payload.get('position_address')}",
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}",
             f"Fees collected — base: {payload.get('base_fee_collected')}  "
-            f"quote: {payload.get('quote_fee_collected')}"
-        )
+            f"quote: {payload.get('quote_fee_collected')}",
+        ]
+        # A close returns the liquidity and the account's rent as well as the fees, and
+        # the three are different kinds of money: fees are income, the removed amounts
+        # are principal coming back, and the rent was never either — it was locked at
+        # open and is returned when the account closes. Showing only the fees made a
+        # close look like it recovered almost nothing.
+        removed_base = payload.get("base_token_amount_removed")
+        removed_quote = payload.get("quote_token_amount_removed")
+        if removed_base is not None or removed_quote is not None:
+            lines.append(f"Liquidity withdrawn — base: {removed_base}  quote: {removed_quote}")
+        rent = payload.get("position_rent_refunded")
+        if rent is not None:
+            lines.append(f"Position rent refunded: {rent}")
+        return "\n".join(lines)
 
     if action in ("add_liquidity", "remove_liquidity") and isinstance(payload, dict):
         tx = payload.get("transaction_hash")
