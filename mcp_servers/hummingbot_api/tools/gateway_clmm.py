@@ -259,13 +259,24 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
     gc = None if client is None else client.gateway_clmm
 
     if action == "position_info":
-        # No pool filter: Gateway's positions-owned lists every CLMM position the
-        # wallet owns on the connector, each row carrying its own pool_address.
-        result = await gc.get_positions_owned(
-            connector=connector,
-            network=net,
-            wallet_address=request.wallet_address,
-        )
+        if request.position_address:
+            # Asked about one position, so read that one. positions_owned would answer
+            # with every position the wallet holds on this connector — not wrong data,
+            # but not the question, and it silently grows into a list once a wallet
+            # holds more than one.
+            result = [await gc.get_position_info(
+                connector=connector,
+                network=net,
+                position_address=request.position_address,
+            )]
+        else:
+            # No pool filter: Gateway's positions-owned lists every CLMM position the
+            # wallet owns on the connector, each row carrying its own pool_address.
+            result = await gc.get_positions_owned(
+                connector=connector,
+                network=net,
+                wallet_address=request.wallet_address,
+            )
 
     elif action == "open":
         _require_clmm(request, "pool_address", "lower_price", "upper_price")

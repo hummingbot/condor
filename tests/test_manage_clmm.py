@@ -217,3 +217,45 @@ def test_remove_liquidity_passes_percentage_as_decimal():
 
     _, kwargs = client.gateway_clmm.calls[0]
     assert kwargs["percentage_to_remove"] == Decimal("50")
+
+
+# --- position_info: one position, or the wallet's -----------------------------
+# position_address is declared on the request, so pydantic accepts it. It used to be
+# dropped: the action always called positions_owned, which answers with every position
+# the wallet holds on the connector. That reads as correct while a wallet holds one
+# position and silently becomes the wrong answer the moment it holds two.
+
+
+def test_position_info_with_an_address_reads_that_position():
+    client = _Client()
+    _run(CLMMRequest(action="position_info", connector="orca",
+                     network="solana-mainnet-beta",
+                     position_address="POS1"), client)
+
+    names = [name for name, _ in client.gateway_clmm.calls]
+    assert names == ["get_position_info"], (
+        f"asked about one position, called {names} — positions_owned answers with every "
+        "position the wallet holds, which is a different question"
+    )
+    assert client.gateway_clmm.calls[0][1]["position_address"] == "POS1"
+
+
+def test_position_info_without_an_address_lists_the_wallet():
+    client = _Client()
+    _run(CLMMRequest(action="position_info", connector="orca",
+                     network="solana-mainnet-beta",
+                     wallet_address="WALLET"), client)
+
+    names = [name for name, _ in client.gateway_clmm.calls]
+    assert names == ["get_positions_owned"]
+    assert client.gateway_clmm.calls[0][1]["wallet_address"] == "WALLET"
+
+
+def test_a_single_position_is_returned_as_a_list():
+    """The formatter renders position_info as rows either way, so the shapes must agree."""
+    client = _Client()
+    result = _run(CLMMRequest(action="position_info", connector="orca",
+                              network="solana-mainnet-beta",
+                              position_address="POS1"), client)
+
+    assert isinstance(result["result"], list) and len(result["result"]) == 1

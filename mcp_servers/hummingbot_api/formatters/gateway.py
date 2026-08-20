@@ -230,16 +230,24 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
     if action == "position_info" and isinstance(payload, list):
         if not payload:
             return f"{header}\nNo open positions for this wallet on this connector."
-        lines = [f"{header}", f"{len(payload)} position(s) owned by this wallet"]
+        # Say which question was answered: one named position, or the whole wallet.
+        asked_for_one = bool(result.get("position_address"))
+        lines = [f"{header}",
+                 "1 position" if asked_for_one
+                 else f"{len(payload)} position(s) owned by this wallet"]
         for p in payload:
             lines.append(
                 f"  • {p.get('position_address')} — Pool: {p.get('pool_address')}"
             )
+            # in_range is why a position earns or does not: outside its range it holds
+            # one token and accrues nothing, which is what the fees below will show.
+            in_range = p.get("in_range")
             lines.append(
                 f"    Base: {p.get('base_token_amount')}  "
                 f"Quote: {p.get('quote_token_amount')}  "
                 f"Range: {p.get('lower_price')}–{p.get('upper_price')}  "
                 f"Price: {p.get('current_price')}"
+                + ("" if in_range is None else f"  [{'in range' if in_range else 'OUT OF RANGE'}]")
             )
             lines.append(
                 f"    Uncollected fees — base: {p.get('base_fee_amount')}  "
