@@ -22,9 +22,9 @@ changed every path these issues live on.
 | GW-11 | The chain half of `chainNetwork` was decorative on the liquidity routes | fixed |
 | GW-12 | Three ways a caller's intent is dropped without an error | **open** |
 | GW-13 | The spec guard passes on regressions it claims to catch | fixed |
-| GW-14 | No `operationId` and no error responses in the spec | **open** |
-| GW-15 | Response component names were never unified | **open** |
-| GW-16 | Leftovers the unification did not sweep | **open** |
+| GW-14 | No `operationId` and no error responses in the spec | fixed |
+| GW-15 | Response component names were never unified | fixed |
+| GW-16 | Leftovers the unification did not sweep | fixed (partly) |
 | GW-17 | `baseTokenAmountAdded` is signed on some connectors, a magnitude on others | fixed |
 | GW-18 | pancakeswap-sol's close reports fees and rent as a hardcoded 0 | **open** |
 | GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | fixed |
@@ -34,8 +34,11 @@ changed every path these issues live on.
 | GW-23 | Money is typed as JSON `number`, so exact decimals do not survive | **open** |
 | GW-24 | The committed spec carried a real wallet address and a local port | fixed |
 | GW-25 | A narrow in-range CLMM close fails on slippage, and no layer widens it | **open** |
+| GW-26 | A transaction that lands and reverts is never recorded, though it costs gas | **open** |
+| GW-27 | `/trading/router/execute-quote` is reachable from nothing | **open** |
+| GW-28 | pancakeswap-sol's open spends the slippage bound, then fails by one unit | **open** |
 
-Seven are open and are written out in full below; the eighteen that are fixed are
+Ten are open and are written out in full below; the eighteen that are fixed are
 summarised under **Fixed — the record**, with the verification each still needs collected
 under **Outstanding verification**.
 
@@ -84,13 +87,217 @@ Everything here needs a container built from current `main`.
 - **GW-22** — the position opened for GW-20, `F1YcTMd6…`, is still open and still holds its
   rent; `position_info` on it should answer about it alone.
 
+**Blocked until the hummingbot-api container is rebuilt.** As of 2026-08-20 the running
+container predates `55cf09e`, so the live `gateway_amm_positions` table has neither rent
+column and `POST /gateway/amm/positions/search` answers 500 with
+`'GatewayAMMPosition' object has no attribute 'position_rent'`. This is a stale image, not
+a defect: the model carries both columns and `database/connection.py` carries the ALTER for
+both tables in its migration list. Nothing on the AMM side can be verified until the
+container is built from current `main`. An earlier note in this file called it a live bug —
+it is not.
+
 ---
 
 ## Still open
 
-In full, worst first. Only GW-18 is a wrong number; the rest are ways a wrong request is
-accepted quietly or a right one is described badly, and GW-3 is a decision rather than a
-fix. GW-12 is being fixed in a parallel session.
+In full, worst first. GW-18 is a wrong number and GW-26 is a missing row; the rest are ways
+a wrong request is accepted quietly, or a right one is described badly, and GW-3 is a
+decision rather than a fix. GW-12 is being fixed in a parallel session.
+
+---
+
+## GW-28 — pancakeswap-sol's open spends the slippage bound, then fails by one unit
+**Status: open.** One connector, one route. Found 2026-08-20 on the first attempt to open a
+pancakeswap-sol position, which was being opened to unblock GW-18. It failed at simulation,
+so it cost nothing — the wallet was unchanged at 2.573201337 SOL afterwards.
+
+### What happened
+
+```
+Quote: baseLimited=false, base=0.009856058065771249, quote=0.8742539984898908
+Quote Max: base=0.010053179227086673, quote=0.8917390784596887
+Amounts with slippage (2%):
+  amount0Max: 10053179 (SOL)
+  amount1Max: 891739 (USDC)
+Base Flag: false (amount1 is base)
+```
+
+and on chain:
+
+```
+AnchorError thrown in programs/amm/src/instructions/open_position.rs:575.
+Error Code: PriceSlippageCheck. Error Number: 6021.
+Left: 891739
+Right: 891740
+```
+
+One unit of USDC — 0.000001 — against a 2% tolerance that should have allowed 17,000 of
+them.
+
+### Why the tolerance did not absorb it
+
+`baseLimited=false` sets `base_flag=false`, which tells the program to derive the
+position's liquidity **from `amount1Max`**. That is the slippage-inflated *maximum*, and
+using it as the defining amount is what breaks the check:
+
+1. `amount1Max` = 891739 is handed in as the amount to size liquidity from.
+2. The program computes liquidity `L` from 891739.
+3. It then computes the deposit `L` actually requires, rounding **up** in the pool's
+   favour, and gets 891740.
+4. It asserts `required <= max` — 891740 <= 891739 — and fails.
+
+The maximum and the amount are the same number, so the comparison has no headroom by
+construction. Any upward rounding in that round trip fails it. This is GW-24's defect on a
+second connector: the bound is spent as the deposit rather than reserved above it, so the
+2% buys nothing. **Raising `slippagePct` does not help** — a larger bound is simply a larger
+deposit, and step 4 still compares a number against itself.
+
+### Why it is intermittent
+
+Which way it lands is decided by a float:
+
+```ts
+const amount1Max = new BN((quote.quoteTokenAmountMax * 10 ** quoteToken.decimals).toFixed(0));
+```
+
+`0.8917390784596887 × 1e6` is 891739.078…, and `.toFixed(0)` rounds it **down** to 891739,
+discarding the 0.078 that would have covered the program's round-up. Had the fraction been
+≥ 0.5 it would have rounded up, left a spare unit, and the open would have succeeded. So
+the connector fails or succeeds on the fractional part of a float — roughly a coin flip per
+attempt, which is why it has appeared to work before.
+
+That makes this the concrete consequence of GW-23. GW-23 is filed as a fidelity problem —
+exact decimals not surviving the wire — and this is what it costs when the number reaching
+the chain is one unit short of a strict inequality.
+
+### The fix
+
+Size liquidity from the *requested* amount and pass the inflated figure only as the
+maximum, which is what a maximum is for: derive `L` from `quote.quoteTokenAmount`
+(0.874254) and send `amount1Max` = 891739. The program's round-up then lands well inside
+the bound instead of one unit outside it. Rounding the max **up** rather than to nearest
+would stop this particular failure, but it treats the symptom — the tolerance would still
+be fully consumed, and the position would still deposit the maximum every time.
+
+### Consequence for GW-18
+
+GW-18 is still blocked and now blocked on this: no pancakeswap-sol position can be opened
+reliably, so its close cannot be observed. Retrying with slightly different amounts re-rolls
+the rounding and should eventually land one.
+
+---
+
+## GW-26 — a transaction that lands and reverts is never recorded, though it costs gas
+**Status: open.** hummingbot-api, both position routers. Found 2026-08-20 by counting rows
+rather than by hitting an error: the database says every operation ever attempted
+succeeded, and that is not what happened.
+
+### What the tables say
+
+Every row in both event tables is `CONFIRMED`, and `error_message` is NULL in all of them:
+
+```
+gateway_clmm_events   25 rows   25 CONFIRMED   0 with error_message
+gateway_amm_events     3 rows    3 CONFIRMED   0 with error_message
+```
+
+GW-25 documents two close failures against position `2PWGc9j7…` on 2026-08-20. Neither
+appears. The second is the one that matters: it was not rejected at simulation, it **landed
+on-chain at slot 440494812 and reverted**, paying 0.000011772 SOL for the privilege. It has
+a signature. It cost money. There is no row for it.
+
+### Why the FAILED branch does not catch it
+
+The recording code is present and looks complete. `routers/gateway_clmm.py` writes the
+status it was handed rather than assuming success, and a comment there explains the care
+taken over exactly this case:
+
+```python
+"status": tx_status
+...
+# Position bookkeeping happens exactly once, when the tx is known
+# good: CONFIRMED here (the event is created CONFIRMED, so the
+# poller never touches it), or in the poller's confirm path for
+# SUBMITTED events. A FAILED tx mutates nothing — the old
+# unconditional booking permanently inflated *_fee_collected on
+# failed closes.
+```
+
+That branch is only reachable when Gateway **returns** — when there is a response object
+with a `tx_status` in it. A landed-and-reverted transaction does not return. Gateway's
+`throwIfLandedWithError` raises, the client turns it into a `GatewayError`, and control
+skips the whole recording block to land here:
+
+```python
+except GatewayError as e:
+    raise HTTPException(status_code=e.status, detail=f"Gateway error closing CLMM position: {e}")
+```
+
+which persists nothing. So the FAILED path covers the case where Gateway reports a failure,
+and misses the case where Gateway raises one. The signature is in the error string, on its
+way to a log line and nowhere else.
+
+The same shape is in the AMM router and in the other CLMM routes: every one of them ends in
+the same four handlers, and none writes a row before re-raising.
+
+### Why it matters more than one missing row
+
+The cost is real and it compounds. `lp_executor` retries a failed close up to
+`max_retries=10`, and GW-25 recommends widening slippage across those attempts — which
+raises the share of attempts that reach the chain before failing. Ten paid reverts is a
+plausible outcome of one stuck position, and the database would show an unchanged open
+position and no explanation. Anything reading these tables for PnL understates gas by
+whatever the failures cost, and the position history cannot answer "why is this still
+open?" — the evidence is only in the logs, correlated by hand.
+
+It also removes the data GW-25's fourth recommendation needs. Counting simulation failures
+separately from paid reverts requires both to be recorded; right now neither is.
+
+### The fix
+
+Write the event before re-raising, in the `except GatewayError` handler, with the signature
+parsed out of the error and `status="FAILED"`. The columns already exist and
+`error_message` is already in `event_to_dict`. The distinction worth preserving is the one
+GW-25 draws: a simulation failure never got a signature and cost nothing, a landed revert
+has both, and a row that records the signature and the fee is what tells them apart later.
+
+---
+
+## GW-27 — `/trading/router/execute-quote` is reachable from nothing
+**Status: open.** Gateway route, no caller. Found 2026-08-20 while mapping which routes the
+test scripts reach.
+
+Gateway registers three router routes (`trading.routes.ts:37-39`):
+
+```
+quoteSwapRoute        /trading/router/quote-swap
+executeQuoteRoute     /trading/router/execute-quote
+executeSwapRoute      /trading/router/execute-swap
+```
+
+The middle one takes a `quoteId` from the first and is deliberately router-only — its own
+comment explains that a quote id refers to cached route calldata, which pool-scoped amm and
+clmm swaps have no equivalent of because they price against a pool at execution time.
+
+Nothing downstream exposes it:
+
+| layer | what exists |
+|---|---|
+| hummingbot-api | `POST /swap/quote`, `POST /swap/execute` — no execute-quote |
+| hummingbot-api-client | no method |
+| condor `manage_gateway_swaps` | `quote`, `execute`, `get_status`, `search` |
+
+So the two-step flow — get a firm quote, decide, then execute *that* quote — cannot be run
+end to end, and cannot be tested. Every swap on record went through the one-step
+`execute-swap`, which re-prices at execution and discards the quote the caller saw.
+
+This matters most for the connectors the route exists for. dflow, titan and 0x return
+signed or firm quotes whose value is that the price is held; routing them through
+`execute-swap` throws that away and quotes again. It also matters for any strategy that
+wants to quote several venues and commit to one, which is the case the route was built for.
+
+Whether to fix it is a decision, not a defect: either add the pass-through and gain a
+testable route, or delete the route and stop implying a flow the stack does not have.
 
 ---
 
@@ -216,69 +423,6 @@ the point, but any caller sending an extra key starts failing. Enforcing `x-conn
 contained: one check against the field's own extension in `resolveChainNetwork`'s
 neighbourhood. Dropping the `connector` default from the write routes costs the Swagger
 prefill, which is what it was for.
-
----
-
-## GW-14 — the spec names its types but not its operations or its errors
-**Status: open.** The half of the generated-client contract GW-8/9/10 did not reach.
-
-**No operation has an `operationId`** — 0 of 58. That is the method name in a generated
-client, so every generator synthesizes one from path and method, and every path change
-renames the method. It is the same instability GW-9 fixed for models, still live for calls.
-
-**Three of 58 operations declare any non-2xx response** (`POST /pools/`,
-`DELETE /pools/{address}`, `GET /pools/{tradingPair}`). A generated client therefore has no
-error model at all, though `{statusCode, error, message, code?}` is the envelope every
-route actually returns and the `code` is what callers branch on.
-
-Also undocumented: `GET /` and `POST /restart` are registered routes that `hideUntagged`
-keeps out of the spec, and the ethereum-only routes are tagged `/chain/ethereum` where
-everything else is `/chains`, which puts them in a separate class in a generated client.
-
----
-
-## GW-15 — response component names were never unified
-**Status: open.**
-
-The request side got `Amm`/`Clmm` prefixes uniformly. The response side did not, so the
-unprefixed name is the CLMM one and a reader has to know that:
-
-| CLMM route answers with | its AMM twin answers with |
-|---|---|
-| `PoolInfo` | `AmmPoolInfo` |
-| `PositionInfo` | `AmmPositionInfo` |
-| `AddLiquidityResponse` | `AmmAddLiquidityResponse` |
-| `OpenPositionResponse` | `AmmOpenPositionResponse` |
-| `QuotePositionResponse` | `QuoteLiquidityResponse` |
-
-The last row is also a stale name: the route was renamed `quote-position` → `quote-liquidity`
-in the refactor and its response component kept the old word. `/chains/ethereum/allowances`
-and `/approve` answer with inline objects where every other chain route has a component.
-
----
-
-## GW-16 — leftovers the unification did not sweep
-**Status: open.** Cosmetic individually; together they are the difference between a
-unified API and one that mostly looks unified.
-
-- **36 dead schema exports** survive the deleted per-connector routes —
-  `MeteoraClmmQuoteSwapRequest`, `PancakeswapSolClmm*` (11 of them), the jupiter/okx/dflow/
-  titan request trio each. None is referenced by any route. `24795ffbb` swept some of these;
-  these are what it missed. **30 tests across four files assert their shape**, which is a
-  contract test for an API that no longer exists.
-- **Three addressing conventions**, two of them inside one router: `/pools/` takes
-  `chain`+`network`, `/pools/find` takes `chainNetwork`, `/chains/{chain}/*` takes a path
-  `chain` plus a query `network`. Trading is uniformly `chainNetwork`.
-- **Three `parseChainNetwork` implementations** with three validation levels: the one in
-  `src/trading/common.ts` rejects a value with no hyphen, `ConfigManagerV2`'s accepts
-  anything, and `src/pools/routes/findPools.ts:110` hand-rolls the split inline.
-- **The registry covers swaps only.** Its header says a connector is one entry and the
-  routes are pure dispatch; that holds for `quoteSwap`/`executeSwap`/`fetchPools`, while 20
-  route files still carry their own `switch (connector)` for every liquidity operation.
-  Adding a connector means editing all of them.
-- **`/trading/router/execute-quote` has no caller.** `RouterExecuteQuoteRequest` is the one
-  generated request model hummingbot-api never constructs, so the quote-then-execute flow
-  that `quoteId` exists for is unused and every execute re-quotes.
 
 ---
 
@@ -511,6 +655,27 @@ was, what closed it, and where.
   could not tell twins apart, and reading the committed spec never caught drift despite
   saying so. CI regenerates and diffs; each `/trading` GET is pinned by component name and
   then by shape. gateway `db6da4d75`
+- **GW-14 — the spec named its types but not its operations or its errors.** No operation
+  carried an `operationId`, so every generator invented one from the path and a caller's
+  method was renamed by any path change; and three of 56 declared any non-2xx response, so
+  a client had no error model while `code` is the field it should branch on. Names are now
+  chosen in `operation-ids.ts` rather than derived, and one published `ErrorResponse` is
+  attached to every operation. Three pool routes had hand-written `{message}` error shapes,
+  which is not what Gateway sends. gateway `a40e654e2`
+- **GW-15 — response component names were never unified.** Requests were prefixed and
+  responses were not, so the unprefixed name was the CLMM one: `PoolInfo` against
+  `AmmPoolInfo`. `QuotePositionResponse` was doubly stale — its route had been renamed to
+  quote-liquidity. Only the `$id`s moved; the component namespace is global and the
+  TypeScript one is not. gateway `a40e654e2`
+- **GW-16 — leftovers the unification did not sweep**, in its concrete half. 36 dead schema
+  exports (~1300 lines, three files exporting nothing at all) and the 22 tests that asserted
+  they were supersets of a base — a contract test for an API that no longer exists. The
+  three disagreeing `parseChainNetwork` implementations became one, with trading adding
+  only the 400. **Not done, and deliberately:** the three addressing conventions
+  (`/pools/` takes chain+network, `/pools/find` takes chainNetwork) and the 20 route files
+  that still carry their own `switch (connector)` for every liquidity operation. Both are
+  refactors of live trading paths rather than cleanups, and want their own change.
+  gateway `a40e654e2`
 - **GW-17 — `baseTokenAmountAdded` was a signed wallet delta on three Raydium sites.** A
   deposit was recorded negative, so summing the event table netted a round trip on one
   connector and double-counted it on every other. The CLMM open also counted position rent
@@ -542,19 +707,31 @@ was, what closed it, and where.
 ## What is not done
 
 - **GW-3's credentials** — the only item needing a decision.
-- **Mainnet coverage as of 2026-08-19.** Run and confirmed: all three swap types
+- **Mainnet coverage as of 2026-08-20.** Run and confirmed: all three swap types
   (router/clmm/amm), the full CLMM lifecycle on Meteora (open → add → remove → close), the
-  Raydium AMM round trip (add → remove) which surfaced GW-17, and a Meteora DAMM v2 open
-  which surfaced GW-20. Orca CLMM and the rest of the DAMM v2 lifecycle have scripts
-  (`condor/scripts_lp_test/test_orca_clmm.py`, `test_meteora_amm.py`) but are unrun. Also
-  unrun: fee collection against a position that has any, pool creation, and
-  `manage_amm(create_pool)`, which no test step exercises at all. The "verify" notes on the fixed issues above remain outstanding except
-  where a section says otherwise.
+  Raydium AMM round trip (add → remove) which surfaced GW-17, a Meteora DAMM v2 open which
+  surfaced GW-20, and the Orca CLMM lifecycle across all three range shapes — above spot,
+  below spot and straddling — which surfaced GW-25. Fee collection against a position that
+  had fees is also covered: event `42VzMyKR…` collected 0.000195752 base and 0.016661
+  quote on Orca. Still unrun: the rest of the DAMM v2 lifecycle
+  (`condor/scripts_lp_test/test_meteora_amm.py` steps `close`, `add-more`, `swap-out`),
+  blocked on the container above; pool creation on either type, including
+  `manage_amm(create_pool)`, which no test step exercises at all; and every connector
+  outside meteora/orca/raydium/jupiter — 0x, dflow, okx, titan, uniswap, pancakeswap and
+  pancakeswap-sol have never been called. The "verify" notes on the fixed issues above
+  remain outstanding except where a section says otherwise.
+- **Only one side of the book has been swapped.** Nine of the ten recorded swaps are SELL;
+  the single BUY is the DOGE-1 purchase that funded the GW-20 position. BUY inverts which
+  side of the pair the amount refers to, which is where a GW-4-style amount confusion would
+  hide, and no BUY has been run against SOL-USDC on any connector.
+- **No failure path has ever been exercised deliberately**, and per GW-26 the two that did
+  occur were not recorded.
 - **The seven open issues.** Six of them — GW-12, GW-14, GW-15, GW-16, GW-23 and GW-3 —
   are not wrong answers: they are ways a wrong request is accepted quietly, or a right one
   is described badly, or a decision nobody has taken. **GW-18 is the exception** and the one
   to take first: it is a stored number that is wrong, in the same category as GW-17 and
-  GW-20, and it is blocked only on having a pancakeswap-sol position to close.
+  GW-20. It is blocked on having a pancakeswap-sol position to close, and as of 2026-08-20
+  that is blocked in turn by GW-28, which makes opening one a coin flip.
 - **Connector-specific response fields are gone from HTTP** — orca's `sqrtPrice`/`tvlUsdc`,
   0x's `gasEstimate`, jupiter's `quoteResponse`. Deleting `/connectors/*` removed the only
   surface that exposed them. If any are wanted back, the fix is extending the unified
