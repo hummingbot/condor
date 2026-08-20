@@ -195,3 +195,9 @@ agents/**/learnings.md
 agents/**/sessions/
 agents/**/dry_runs/
 agents/**/delegations/
+
+# Working notes on Gateway defects, edited by more than one session at a time.
+# Tracking it made every `git add -A` sweep whichever session was mid-edit into the other
+# one's commit — which is how 1529d04 came to carry a message describing work it does not
+# contain. Kept on disk, out of the index.
+GATEWAY_ISSUES.md
