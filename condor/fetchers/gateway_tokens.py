@@ -85,20 +85,39 @@ def token_addresses(*values: str | None) -> list[str]:
     return addresses
 
 
+async def _network_tokens(client: Any, network_id: str) -> list[dict]:
+    """Gateway's whole token list for ``network_id``.
+
+    Read whole rather than filtered because Gateway's ``search`` only looks at
+    symbol and name — a mint address matches nothing, and a ticker matches by
+    rules this module should not have to guess at. The list is a curated file
+    per network, so the whole of it is a small response.
+    """
+    response = await client.gateway.get_network_tokens(network_id)
+    tokens = response.get("tokens", []) if isinstance(response, dict) else response
+    return [token for token in (tokens or []) if isinstance(token, dict)]
+
+
 async def _is_listed(client: Any, network_id: str, address: str) -> bool:
     """Whether Gateway's token list for ``network_id`` already holds ``address``.
 
-    Searched rather than listed in full: Gateway matches ``search`` against symbol,
-    name *and* address, so this is one small response instead of the whole list.
-    An API that narrowed the search to symbols would only cost a redundant save,
-    which is itself a no-op — so a false negative here is safe.
+    The whole list is read, not ``search=<address>``: Gateway matches ``search``
+    against symbol and name only, so asking for a mint always answered zero
+    tokens. Every token then looked unlisted, the save that followed was refused
+    with "already exists" (a *symbol* check, which the listed token's own ticker
+    trips), and the re-read said unlisted again — so a correctly listed token
+    like Solana USDC reported ``symbol_taken`` forever, the pool banner asked the
+    user to add a token that was already there, and the conflict lookup could
+    name no holder but the token itself.
+
+    A network's list is Gateway's curated file — tens of entries, not the whole
+    chain — so reading it whole is one small response, and confirmed hits are
+    memoized by the caller anyway.
     """
-    response = await client.gateway.get_network_tokens(network_id, search=address)
-    tokens = response.get("tokens", []) if isinstance(response, dict) else response
     wanted = address.lower()
     return any(
         str((token or {}).get("address") or "").lower() == wanted
-        for token in (tokens or [])
+        for token in await _network_tokens(client, network_id)
     )
 
 
@@ -113,12 +132,9 @@ async def find_symbol_holder(
     being registered itself, so a half-written state cannot name it as its own
     conflict.
     """
-    response = await client.gateway.get_network_tokens(network_id, search=symbol)
-    tokens = response.get("tokens", []) if isinstance(response, dict) else response
     wanted = symbol.lower()
     excluded = (exclude or "").lower()
-    for token in tokens or []:
-        entry = token or {}
+    for entry in await _network_tokens(client, network_id):
         if str(entry.get("symbol") or "").lower() != wanted:
             continue
         address = str(entry.get("address") or "")

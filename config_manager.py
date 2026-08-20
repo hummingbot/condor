@@ -1081,9 +1081,19 @@ def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
     """Get the effective default server for a chat, checking both user_data and config.yml.
 
     Priority:
-    1. user_data active_server (from pickle, fast in-memory)
-    2. chat_defaults from config.yml (persistent across hard kills)
+    1. chat_defaults from config.yml — the one place *every* surface writes when
+       the user picks a default (Telegram's /servers, the web dashboard, admin
+       assignment), so it is the only entry that can be current.
+    2. user_data active_server (from pickle, per-user, covers chats that never
+       had a default of their own)
     3. None if nothing configured
+
+    The order used to be the other way round, and that made the web dashboard's
+    "set default" invisible to a live Telegram session: the web writes
+    config.yml, while the pickle in the running bot's ``user_data`` kept the
+    server chosen before it and won every lookup until the process restarted.
+    The pickle is a cache of the choice, not the choice — so it is read second
+    and re-synced from config.yml whenever the two disagree.
 
     Args:
         chat_id: The chat ID
@@ -1092,24 +1102,35 @@ def get_effective_server(chat_id: int, user_data: dict = None) -> str | None:
     Returns:
         Server name or None
     """
+    from condor.preferences import SERVER_PIN_KEY
     from handlers.config.user_preferences import get_active_server
 
-    # First check user_data (pickle - might be lost on hard kill)
-    if user_data:
-        active = get_active_server(user_data)
-        if active:
-            return active
+    # A context built for one server — a routine or an agent run launched
+    # against it — carries its own answer and is never re-resolved from a chat's
+    # ambient default. Everything else reaching this point holds a preference,
+    # which is a cache of a choice config.yml records authoritatively.
+    if user_data and user_data.get(SERVER_PIN_KEY):
+        pinned = get_active_server(user_data)
+        if pinned:
+            return pinned
 
-    # Fall back to chat_defaults in config.yml (always persisted)
     cm = get_config_manager()
     chat_default = cm._data.get("chat_defaults", {}).get(chat_id)
     if chat_default and chat_default in cm._data.get("servers", {}):
-        # Also sync back to user_data for fast future access
-        if user_data is not None:
+        # Keep the pickle in step, but only on an actual change: the setter
+        # persists the whole preference section to config.yml, and this runs on
+        # every server lookup.
+        if user_data is not None and get_active_server(user_data) != chat_default:
             from handlers.config.user_preferences import set_active_server
 
             set_active_server(user_data, chat_default)
         return chat_default
+
+    # No default recorded for this chat — fall back to the user's own last pick.
+    if user_data:
+        active = get_active_server(user_data)
+        if active:
+            return active
 
     return None
 

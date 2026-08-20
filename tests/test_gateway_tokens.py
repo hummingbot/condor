@@ -44,15 +44,17 @@ class FakeGateway:
         if self.fail_search:
             raise RuntimeError("gateway down")
         self.searches.append(search)
-        # Gateway matches search against symbol, name and address alike.
+        # Gateway's `search` matches symbol and name only — never an address.
+        # Modelling it any other way is what hid the bug this fake now pins:
+        # a listed token searched for by mint came back empty and read unlisted.
         needle = (search or "").lower()
         return {
             "tokens": [
                 t
                 for t in self.tokens
                 if not needle
-                or needle in str(t["address"]).lower()
                 or needle in str(t.get("symbol") or "").lower()
+                or needle in str(t.get("name") or "").lower()
             ]
         }
 
@@ -105,7 +107,27 @@ def test_a_known_token_is_never_saved_twice():
     assert second == {MINT: "listed"}
     # One save, and no second lookup: the memo answers the repeat visit outright.
     assert gw.saves == [MINT]
-    assert gw.searches.count(MINT) == 2  # the pre-check and the verification
+    # The pre-check and the post-save verification, both reading the list whole
+    # (`search=None`) because Gateway cannot look a mint up by address.
+    assert gw.searches == [None, None]
+
+
+def test_a_listed_token_is_not_asked_to_be_added_again():
+    """The bug the pool banner showed: Solana USDC, listed, reported unlisted.
+
+    Gateway's token search ignores addresses, so a lookup by mint answers
+    nothing. Reading that as "not listed" made the save that followed collide
+    with the token's *own* ticker ("already exists"), the verdict come back
+    `symbol_taken`, and the banner ask the user to add a token that was already
+    on the list — with no holder to name and no Replace that could help.
+    """
+    gw = FakeGateway()
+    gw.tokens = [{"address": USDC, "symbol": "USDC", "name": "USDC"}]
+
+    verdicts = asyncio.run(ensure_tokens_listed(FakeClient(gw), NETWORK, [USDC]))
+
+    assert verdicts == {USDC: "listed"}
+    assert gw.saves == []
 
 
 def test_a_save_that_wrote_nothing_is_reported_not_assumed():

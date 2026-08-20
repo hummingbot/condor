@@ -149,6 +149,26 @@ export function useMainControllerData(
     placeholderData: keepPreviousData, // keep showing old data during refetch/refresh
   });
 
+  /**
+   * Executor id -> the pool it traded in, for every row we hold.
+   *
+   * Built from the *unfiltered* queries on purpose: the pool filter above drops
+   * a foreign pool's LP executor, and that row is exactly the evidence needed to
+   * recognise a held position as belonging somewhere else.
+   */
+  const executorPools = useMemo(() => {
+    const byId = new Map<string, string>();
+    for (const ex of [
+      ...(cachedExecutors ?? []),
+      ...(altExecutors ?? []),
+      ...(poolLpExecutors ?? []),
+    ]) {
+      const pool = executorPool(ex);
+      if (pool) byId.set(ex.id, pool);
+    }
+    return byId;
+  }, [cachedExecutors, altExecutors, poolLpExecutors]);
+
   const positions = useMemo(() => {
     if (!positionsData) return [];
     const all = [
@@ -163,14 +183,41 @@ export function useMainControllerData(
       ...(wantsAlt ? [altPair] : []),
       ...executors.map((ex) => ex.trading_pair).filter(Boolean),
     ]);
-    return all.filter(
-      (p) =>
-        // Show positions from main controller or untagged (executor-level positions)
-        (!p.controller_id || p.controller_id === "main") &&
-        p.connector_name === connector &&
-        pairs.has(p.trading_pair),
-    );
-  }, [positionsData, connector, pair, altPair, wantsAlt, executors]);
+    return all
+      .filter(
+        (p) =>
+          // Show positions from main controller or untagged (executor-level positions)
+          (!p.controller_id || p.controller_id === "main") &&
+          p.connector_name === connector &&
+          pairs.has(p.trading_pair),
+      )
+      .map((p) => {
+        // On a DEX pool page the connector is the *network*, so connector+pair
+        // alone puts one SOL-USDC hold on every Solana SOL-USDC pool -- Orca's
+        // and Meteora's alike -- and each page reads as if the position were
+        // its own. The executors behind the row are the only attribution there
+        // is: an LP executor names its pool, and a swap names none because the
+        // aggregator picked the route.
+        if (!poolAddress) return p;
+        const pools = (p.executor_ids ?? [])
+          .map((id) => executorPools.get(id))
+          .filter((pool): pool is string => !!pool);
+        if (!pools.length) return { ...p, pool_scoped: false };
+        return pools.includes(poolAddress)
+          ? { ...p, pool_scoped: true }
+          : null;
+      })
+      .filter((p): p is NonNullable<typeof p> => p !== null);
+  }, [
+    positionsData,
+    connector,
+    pair,
+    altPair,
+    wantsAlt,
+    executors,
+    poolAddress,
+    executorPools,
+  ]);
 
   return { executors, overlays, positions, isLoadingPositions };
 }

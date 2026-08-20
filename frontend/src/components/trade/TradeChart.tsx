@@ -949,7 +949,11 @@ export function TradeChart({
       const pnlStr = _cvtPnl2 ? _cvtPnl2(pnl) : (Math.abs(pnl) >= 1000 ? `${pnl >= 0 ? "+" : ""}$${(pnl / 1000).toFixed(1)}K` : `${pnl >= 0 ? "+" : ""}$${pnl.toFixed(2)}`);
       const amt = Math.abs(pos.amount);
       const color = pnlHexColor(pnl);
-      const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}`;
+      // A hold nothing ties to this pool still belongs on the chart -- the price
+      // is the same market -- but it must not read as this pool's position, so
+      // it says whose it is: the pair's, across whatever pool the router used.
+      const scope = pos.pool_scoped === false ? " · any pool" : "";
+      const label = `${isLong ? "LONG" : "SHORT"} ${amt.toFixed(4)} · ${pnlStr}${scope}`;
       const pl = series.createPriceLine({
         price: pos.entry_price,
         color,

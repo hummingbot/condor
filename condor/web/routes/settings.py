@@ -166,6 +166,13 @@ async def set_default_server(name: str, user: WebUser = Depends(get_current_user
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=404, detail="Server not found")
     cm.set_chat_default_server(user.id, name)
+    # Both records Telegram's own "set default" writes, or the two disagree:
+    # `chat_defaults` is what `get_effective_server` resolves, while the general
+    # preference is what a routine, an agent or MCP reads as the active server.
+    # Writing only the first left those surfaces pinned to the previous choice.
+    from condor.preferences import load_user_data_for, set_active_server
+
+    set_active_server(load_user_data_for(user.id), name)
     return {"default": True, "name": name}
 
 

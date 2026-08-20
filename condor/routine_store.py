@@ -134,7 +134,7 @@ class WebRoutineContext:
     """Lightweight context so routines can run without Telegram."""
 
     def __init__(self, server_name: str, bot=None, chat_id: int = 0):
-        from condor.preferences import USER_PREFERENCES_KEY
+        from condor.preferences import SERVER_PIN_KEY, USER_PREFERENCES_KEY
 
         self._chat_id = chat_id
         # The server this run was launched against, readable by name — for a routine
@@ -146,8 +146,12 @@ class WebRoutineContext:
         # "preferences" while the preference API reads USER_PREFERENCES_KEY
         # ("user_preferences"), so the server a web or agent run was launched with
         # never reached its client — every such run silently picked the chat default.
+        # Pinned, not preferred: this run was launched against `server_name`, so
+        # the chat's own default must not override it — the chat may well be a
+        # chat whose default is a different server (see `get_effective_server`).
         self._user_data: dict[str, Any] = {
             USER_PREFERENCES_KEY: {"general": {"active_server": server_name}},
+            SERVER_PIN_KEY: True,
         }
 
     @property

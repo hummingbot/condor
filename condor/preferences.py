@@ -92,6 +92,12 @@ def _load_from_cm(user_data: Dict) -> None:
 USER_PREFERENCES_KEY = "user_preferences"
 _MIGRATION_DONE_KEY = "_prefs_migration_done"
 
+# Marks a ``user_data`` built *for* one server — a routine or agent run launched
+# against it — rather than a chat's own preferences. ``get_effective_server``
+# honours a pinned server outright; without the mark it treats ``active_server``
+# as a cache of the chat default and lets config.yml correct it.
+SERVER_PIN_KEY = "_server_pinned"
+
 # Portfolio defaults
 DEFAULT_PORTFOLIO_DAYS = 3
 DEFAULT_PORTFOLIO_INTERVAL = "1h"

@@ -232,10 +232,21 @@ export interface ConsolidatedPosition {
   realized_pnl: number;
   cum_fees: number;
   executor_count: number;
+  /** The executors this row aggregates — how a hold is traced back to a pool. */
+  executor_ids?: string[];
   leverage: number;
   controller_id: string;
   source: "executor" | "bot";
   source_name: string;
+  /**
+   * Set only on a pool workspace: whether this hold is known to be *this* pool's.
+   *
+   * `true` when a contributing LP executor records the pool on screen, `false`
+   * when nothing ties it to any pool — a swap is routed by the aggregator, so
+   * the position it leaves behind is a fact about the pair, not about a pool.
+   * Undefined off a pool page, where the question does not arise.
+   */
+  pool_scoped?: boolean;
 }
 
 export interface ConsolidatedPositionsResponse {

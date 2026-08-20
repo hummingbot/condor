@@ -626,6 +626,14 @@ export function TradeBottomPane({
                             }`}>
                               {pos.position_side?.toUpperCase() ?? "—"}
                             </span>
+                            {pos.pool_scoped === false && (
+                              <span
+                                className="rounded border border-[var(--color-border)] px-1 py-0.5 text-[9px] text-[var(--color-text-muted)]"
+                                title="Held from a swap, which the aggregator routed itself — this is a position in the pair, not in this pool."
+                              >
+                                any pool
+                              </span>
+                            )}
                             <div className="text-[11px]">
                               <span className="text-[var(--color-text)]">{Math.abs(pos.amount).toFixed(4)}</span>
                               <span className="ml-1 text-[var(--color-text-muted)]">
