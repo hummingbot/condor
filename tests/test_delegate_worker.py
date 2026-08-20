@@ -305,10 +305,10 @@ def _delegated_worker_kwarg(monkeypatch, tmp_path, slug: str) -> bool:
             return "done"
 
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", fake_build
+        "condor.runtime.toolsets.build_mcp_servers_for_session", fake_build
     )
     monkeypatch.setattr(
-        "handlers.agents._shared.build_agent_context", lambda *a, **k: "prompt"
+        "condor.runtime.context.build_agent_context", lambda *a, **k: "prompt"
     )
     monkeypatch.setattr(acp_client_module, "ACPClient", _FakeClient)
 

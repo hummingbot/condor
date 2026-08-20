@@ -183,7 +183,7 @@ def test_blocked_tool_refused(registry, monkeypatch):
     the gate still fires the moment something is added to that set.
     """
     monkeypatch.setattr(
-        "handlers.agents._shared.BLOCKED_TOOLS", {"place_order"}, raising=False
+        "condor.runtime.danger.BLOCKED_TOOLS", {"place_order"}, raising=False
     )
     channel = _RecordingChannel()
     cb = build_permission_callback("tg:1", 1, [channel])

@@ -85,12 +85,12 @@ async def session_options(user: WebUser = Depends(get_current_user)):
     is a real key.
     """
     from condor.agents.agent import AgentStore
+    from condor.llm.options import AGENT_OPTIONS, DEFAULT_AGENT
     from condor.preferences import (
         get_active_agent_key,
         get_custom_providers,
         load_user_data_for,
     )
-    from handlers.agents._shared import AGENT_OPTIONS, DEFAULT_AGENT
 
     cm = get_config_manager()
     providers = get_custom_providers(load_user_data_for(user.id))

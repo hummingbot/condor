@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from collections import OrderedDict
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -23,10 +24,36 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["archived"])
 
-# Module-level cache for archived data (immutable, no TTL needed)
-# Key: (server_name, db_path) -> cached result
-_performance_cache: dict[tuple[str, str], ArchivedBotPerformance] = {}
-_executors_cache: dict[tuple[str, str], list[NormalizedExecutor]] = {}
+# Module-level LRU cache for archived data (immutable per db_path, so no TTL —
+# but bounded, since each entry holds up to ~5000 PnL points plus the full
+# executor list and a long-lived process would otherwise grow without ceiling).
+# Key: (server_name, db_path) -> cached result. Executors live only inside the
+# performance entry; the executors route pages out of it.
+_PERFORMANCE_CACHE_MAX = 32
+_performance_cache: OrderedDict[tuple[str, str], ArchivedBotPerformance] = OrderedDict()
+
+# In-flight fetches keyed like the cache, so concurrent cold-cache requests for
+# the same archived bot share one backend walk (same idiom as
+# condor.pool_data._single_flight).
+_performance_inflight: dict[tuple[str, str], "asyncio.Task[ArchivedBotPerformance]"] = (
+    {}
+)
+
+
+def _cache_get(cache_key: tuple[str, str]) -> ArchivedBotPerformance | None:
+    """Return the cached entry, marking it most-recently-used."""
+    perf = _performance_cache.get(cache_key)
+    if perf is not None:
+        _performance_cache.move_to_end(cache_key)
+    return perf
+
+
+def _cache_put(cache_key: tuple[str, str], perf: ArchivedBotPerformance) -> None:
+    """Store an entry, evicting the least-recently-used past the cap."""
+    _performance_cache[cache_key] = perf
+    _performance_cache.move_to_end(cache_key)
+    while len(_performance_cache) > _PERFORMANCE_CACHE_MAX:
+        _performance_cache.popitem(last=False)
 
 
 def _extract_bot_name(db_path: str) -> str:
@@ -182,12 +209,36 @@ def _derive_primary_pair(
 async def _fetch_and_cache_performance(
     client: Any, name: str, db_path: str
 ) -> ArchivedBotPerformance:
-    """Fetch full performance data and cache it."""
+    """Return cached performance data, coalescing concurrent cold-cache fetches.
+
+    The fetch runs as a detached task and awaiters ``shield`` it, so one caller
+    navigating away and cancelling their request cannot also cancel the fetch
+    the remaining callers are waiting on.
+    """
     cache_key = (name, db_path)
 
-    # Check cache first
-    if cache_key in _performance_cache:
-        return _performance_cache[cache_key]
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    task = _performance_inflight.get(cache_key)
+    if task is None or task.done():
+        task = asyncio.ensure_future(_fetch_performance(client, name, db_path))
+        _performance_inflight[cache_key] = task
+
+        def _clear(finished: "asyncio.Task", _key: tuple[str, str] = cache_key) -> None:
+            if _performance_inflight.get(_key) is finished:
+                _performance_inflight.pop(_key, None)
+
+        task.add_done_callback(_clear)
+    return await asyncio.shield(task)
+
+
+async def _fetch_performance(
+    client: Any, name: str, db_path: str
+) -> ArchivedBotPerformance:
+    """Fetch full performance data from the backend and cache it."""
+    cache_key = (name, db_path)
 
     # Fetch summary
     try:
@@ -236,9 +287,6 @@ async def _fetch_and_cache_performance(
 
     # Normalize executors to consistent field names
     executors = _normalize_executors(raw_executors)
-
-    # Cache executors separately for pagination
-    _executors_cache[cache_key] = executors
 
     # Derive primary connector and trading pair
     primary_connector, primary_trading_pair = _derive_primary_pair(
@@ -303,8 +351,8 @@ async def _fetch_and_cache_performance(
         executor_count=len(executors),
     )
 
-    # Cache full result
-    _performance_cache[cache_key] = result
+    # Cache full result (executors included — the executors route pages out of it)
+    _cache_put(cache_key, result)
     return result
 
 
@@ -382,12 +430,14 @@ async def get_archived_executors(
 
     cache_key = (name, db_path)
 
-    # If executors not cached yet, trigger a full fetch
-    if cache_key not in _executors_cache:
+    # Page out of the cached performance entry; on a miss, trigger the full
+    # (single-flight) fetch.
+    perf = _cache_get(cache_key)
+    if perf is None:
         client = await cm.get_client(name)
-        await _fetch_and_cache_performance(client, name, db_path)
+        perf = await _fetch_and_cache_performance(client, name, db_path)
 
-    executors = _executors_cache.get(cache_key, [])
+    executors = perf.executors
     page = executors[offset : offset + limit]
 
     return PaginatedExecutors(

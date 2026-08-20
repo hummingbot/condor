@@ -43,3 +43,17 @@ def _reset_gecko_throttle():
 
     reset_gecko_throttle()
     yield
+
+
+@pytest.fixture(autouse=True)
+def _isolated_notification_store(tmp_path, monkeypatch):
+    """Keep the bell's store out of the developer's ``data/`` directory.
+
+    ``condor.notifications.record`` is now reached from several producers
+    (FEAT-048), so without this any test that finishes a delegation, a routine
+    or a ``notify`` call appends to the real ``data/notifications.json`` — and a
+    test run would show up in the running install's notification bell.
+    """
+    from condor import notifications
+
+    monkeypatch.setattr(notifications, "_FILE", tmp_path / "notifications.json")

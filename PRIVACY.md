@@ -1,31 +1,33 @@
 # Privacy
 
 Condor is self-hosted. It runs on your machine, holds your exchange API keys,
-and places your orders. So the default for anything that could leave that
-machine is **off**, and this document is the complete statement of what the one
-optional exception does.
+and places your orders. So what leaves that machine by default is the absolute
+minimum — an anonymous "this install exists" — and everything beyond that is
+opt-in. This document is the complete statement of both.
 
-**Short version:** a fresh install sends nothing. It has no telemetry consent
-recorded, which resolves to level `off`, at which the emitter returns before it
-has looked at its arguments — no buffer, no file, no directory. Nothing changes
-until an admin taps "yes" on a prompt. Even then, this repository has no
-collector address compiled into it: with `CONDOR_TELEMETRY_URL` unset, the send
-path is inert and events can only ever reach a capped local file.
+**Short version:** a fresh install counts itself and nothing more. With no
+consent recorded it runs at level `ping`: a random install id, the version, and
+a periodic heartbeat — nothing about you, your users, or your trading. None of
+the usage events are sent until an admin taps "yes" on a prompt. Batches go to
+the project's collector at `https://telemetry.hummingbot.org/v1/events`, which
+is fixed in the source and cannot be pointed elsewhere. The one full kill
+switch is `CONDOR_TELEMETRY=off` in the environment.
 
 The whole mechanism is about 900 lines in [`condor/telemetry/`](condor/telemetry/).
 It is meant to be read, not trusted.
 
 ---
 
-## What is collected, if you opt in
+## What is collected
 
-There are three levels. You choose one; you can change it later.
+There are three levels. The consent prompt chooses between `ping` and `usage`;
+`off` exists only as an environment override. You can change the answer later.
 
 | Level | What it sends |
 |---|---|
-| `off` | Nothing, ever. The emitter is a no-op. **This is the default.** |
-| `ping` | Only that this install exists: `install`, `heartbeat`, `version_change`, `shutdown`. |
-| `usage` | The above plus the feature, reliability and agent events below. |
+| `ping` | Only that this install exists: `install`, `heartbeat`, `version_change`, `shutdown`. **This is the default, and the floor** — the prompt has no "off" option. |
+| `usage` | The above plus the feature, reliability and agent events below. Opt-in only. |
+| `off` | Nothing, ever. The emitter is a no-op. Reachable only via `CONDOR_TELEMETRY=off` in the environment. |
 
 Every batch carries one context block describing the *deployment*, not you:
 
@@ -94,13 +96,21 @@ per-install, the same person on two installs produces two unrelated hashes.
 
 ## Where it goes
 
-Nowhere, unless you configure a destination.
+At the default `ping` level, only the four adoption events and the envelope
+above. Everything else needs an explicit opt-in.
 
-No collector URL is compiled into this repository. Events are buffered in memory
-and, when a batch cannot be delivered, appended to
+Batches are POSTed to `https://telemetry.hummingbot.org/v1/events`.
+That address is compiled into
+[`condor/telemetry/outbox.py`](condor/telemetry/outbox.py) as `COLLECTOR_URL`
+and is not configurable — there is no environment variable or config key that
+redirects it, so the only way to change where your data goes is to edit that
+line in your own checkout. The collector itself is open source
+(`condor-telemetry-server`).
+
+Events are buffered in memory and, when a batch cannot be delivered, appended to
 `condor/.runtime/telemetry/outbox.jsonl`, which is capped at 5,000 events and 7
-days — oldest dropped. With `CONDOR_TELEMETRY_URL` unset, that is the entire
-life cycle: a local file, capped, that you can delete.
+days — oldest dropped. At level `off` no event is ever created, so nothing is
+buffered, nothing is written, and nothing is sent.
 
 You can read exactly what would be sent:
 
@@ -108,33 +118,38 @@ You can read exactly what would be sent:
 cat condor/.runtime/telemetry/outbox.jsonl | jq .
 ```
 
-## How to turn it off — or check it is off
+## How to change it — or turn it off entirely
 
-It is already off unless you turned it on. To be certain:
+Install counting (`ping`) is the floor: it is not an option on the consent
+prompt and cannot be disabled from the dashboard, because the project needs an
+honest count of installs to know what to support. To check what your install is
+doing:
 
 ```bash
-# The authoritative answer. Prints "off" on a default install.
+# The authoritative answer. Prints "ping" on a default install,
+# "off" only when CONDOR_TELEMETRY=off is set.
 uv run python -c "from condor.telemetry import consent; print(consent.level())"
 ```
 
 Three ways to control it, in order of precedence:
 
-1. **Environment** — `CONDOR_TELEMETRY=off` in your `.env`. This overrides
-   everything, in both directions, and is the right answer for a headless or
-   containerized install. `CONDOR_TELEMETRY_URL` is what enables sending at all;
-   leave it unset and nothing can be transmitted.
-2. **The dashboard API** — `PUT /api/v1/settings/telemetry?level=off` (admin
-   only). `GET` the same path to see the current state.
+1. **Environment** — `CONDOR_TELEMETRY=off` in your `.env`. The one full kill
+   switch: it overrides everything, suppresses the prompt, and is the right
+   answer for an install that must send nothing at all.
+2. **The dashboard API** — `PUT /api/v1/settings/telemetry?level=ping|usage`
+   (admin only; `off` is rejected here). `GET` the same path to see the
+   current state.
 3. **`config.yml`** — edit the `telemetry` section directly:
 
    ```yaml
    telemetry:
-     consent: denied
-     level: off
+     consent: granted
+     level: ping
    ```
 
-Turning it off is a **withdrawal, not a pause**: the in-memory buffer and the
-outbox file are deleted, so nothing already recorded can be sent afterwards.
+Downgrading from `usage` to `ping` is a **withdrawal, not a pause**: the
+in-memory buffer and the outbox file are deleted, so nothing already recorded
+can be sent afterwards.
 
 ## Changes to this document
 

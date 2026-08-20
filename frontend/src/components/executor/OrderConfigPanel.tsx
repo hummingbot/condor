@@ -251,8 +251,9 @@ export function OrderConfigPanel({
 
   return (
     <div className="flex flex-col gap-4 overflow-y-auto p-3">
-      {/* Direction */}
-      <SideSelector side={state.side} dispatch={d} />
+      {/* Direction — Buy/Sell on spot: Long/Short would suggest a perp, and a
+          "short" without tokens to sell is not a thing a swap can do. */}
+      <SideSelector side={state.side} dispatch={d} isSpot={isSpot} />
 
       {/* Order Config */}
       <div className="space-y-2.5">
@@ -280,6 +281,8 @@ export function OrderConfigPanel({
           field="execution_strategy"
           dispatch={d}
           options={options}
+          // A DEX only swaps at market; a one-option dropdown reads as broken.
+          disabled={options.length <= 1}
         />
         <LeverageField value={state.leverage} field="leverage" dispatch={d} isSpot={isSpot} />
         {!isSpot && (

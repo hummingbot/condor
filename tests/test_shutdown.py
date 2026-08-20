@@ -307,8 +307,12 @@ def journal_writes(monkeypatch) -> list[str]:
     return recorded
 
 
-def _with_real_journal(engine, tmp_path) -> JournalManager:
+def _with_real_journal(engine, tmp_path, journal_writes=None) -> JournalManager:
     engine.journal = JournalManager(engine.agent_id, session_dir=tmp_path)
+    # Creating the journal writes the template (atomically, CORR-193); that
+    # bootstrap write is not part of the winddown behavior under test.
+    if journal_writes is not None:
+        journal_writes.clear()
     return engine.journal
 
 
@@ -318,7 +322,7 @@ def test_winddown_rewrites_the_journal_once_at_the_end(
     """The terminal pair (append_action + record_tick) wrote the file twice."""
     running = [{"id": "e_perp", "connector": "binance_perpetual"}]
     engine, _client, _notes = _fake_engine(running, [[]], monkeypatch, tmp_path)
-    _with_real_journal(engine, tmp_path)
+    _with_real_journal(engine, tmp_path, journal_writes)
 
     asyncio.run(run_shutdown(engine, "breach"))
 
@@ -333,7 +337,7 @@ def test_winddown_without_client_rewrites_the_journal_once(
     tmp_path, monkeypatch, journal_writes
 ):
     engine, _client, _notes = _fake_engine([], [[]], monkeypatch, tmp_path)
-    _with_real_journal(engine, tmp_path)
+    _with_real_journal(engine, tmp_path, journal_writes)
 
     async def _no_client():
         return None

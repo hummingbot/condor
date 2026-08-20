@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, type ConversationTurn } from "@/lib/api";
+import { useQueryClient } from "@tanstack/react-query";
+import {
+  api,
+  type AppNotification,
+  type ConversationTurn,
+  type NotificationsResponse,
+} from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { toolCallState } from "@/lib/formatters";
 import { getViewContext } from "@/lib/viewContext";
@@ -224,8 +230,19 @@ function turnsToMessages(turns: ConversationTurn[]): ChatMessage[] {
  */
 const FLUSH_INTERVAL_MS = 50;
 
+/**
+ * The bell's cache key (FEAT-048).
+ *
+ * Lives here because this is where the live `notification` event is written
+ * into it; `NotificationBell` reads the same key, so a pushed notice and a
+ * fetched one are one list. Not server-scoped: notifications belong to the
+ * user, not to whichever trading server is selected.
+ */
+export const NOTIFICATIONS_KEY = ["notifications"] as const;
+
 export function useChatSocket() {
   const { token, user } = useAuth();
+  const queryClient = useQueryClient();
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout>>(undefined);
   // Whether this hook still wants a socket. `close()` is asynchronous, so the
@@ -959,6 +976,37 @@ export function useChatSocket() {
           break;
         }
 
+        case "notification": {
+          // A background task finished (FEAT-048). Addressed to the *user*, not
+          // to a conversation, so it carries no slot and goes nowhere near the
+          // transcript — it lands in the bell's react-query cache, which is the
+          // same place `GET /notifications` fills on mount. Writing into the
+          // cache rather than into local state is what lets the bell be a leaf
+          // component with no wiring back up to here.
+          const incoming: AppNotification = {
+            id: (data.id as string) || "",
+            user_id: 0,
+            ts: (data.ts as number) || Date.now() / 1000,
+            kind: (data.kind as string) || "system",
+            text: (data.text as string) || "",
+            title: (data.title as string) || null,
+            link: (data.link as string) || null,
+            read: false,
+          };
+          if (!incoming.id) break;
+          queryClient.setQueryData<NotificationsResponse>(
+            NOTIFICATIONS_KEY,
+            (prev) => {
+              // A reconnect can replay one we already hold; keyed by id so it
+              // is never listed twice.
+              const rest = (prev?.items ?? []).filter((n) => n.id !== incoming.id);
+              const items = [incoming, ...rest].slice(0, 50);
+              return { items, unread: items.filter((n) => !n.read).length };
+            },
+          );
+          break;
+        }
+
         case "heartbeat":
           break;
       }
@@ -969,6 +1017,7 @@ export function useChatSocket() {
       flushChunks,
       hydrateSlot,
       prewarmLatest,
+      queryClient,
       send,
       stopStreaming,
     ],

@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
 
+from condor.runtime import danger
 from condor.runtime.timeouts import TIMEOUTS
 from condor.telemetry import taps as telemetry_taps
 
@@ -352,21 +353,19 @@ def build_permission_callback(
     async def permission_callback(
         tool_call: dict[str, Any], options: list[dict[str, Any]]
     ) -> dict[str, Any]:
-        from handlers.agents._shared import BLOCKED_TOOLS, is_dangerous_tool_call
-        from handlers.agents.confirmation import format_tool_summary
-
         tool_name = tool_call.get("tool", "") or tool_call.get("title", "")
-        if tool_name in BLOCKED_TOOLS:
+        # Read through the module so a monkeypatched BLOCKED_TOOLS is honored.
+        if tool_name in danger.BLOCKED_TOOLS:
             log.warning("Blocked tool %s for session %s", tool_name, session_key)
             return CANCELLED
 
-        if not is_dangerous_tool_call(tool_call):
+        if not danger.is_dangerous_tool_call(tool_call):
             return _select_allow(options)
 
         pending = _registry.register(
             session_key=session_key,
             user_id=user_id,
-            summary=format_tool_summary(tool_call),
+            summary=danger.format_tool_summary(tool_call),
             origin=describe_origin(session_key),
             tool_call=tool_call,
             options=options,

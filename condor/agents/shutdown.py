@@ -20,9 +20,10 @@ import asyncio
 import logging
 from typing import Any
 
+from condor.frontmatter import parse_frontmatter
 from condor.runtime.timeouts import resolve_tick_timeout
 
-from .strategy import Strategy, _parse_frontmatter
+from .strategy import Strategy
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +94,7 @@ def load_shutdown_policy(strategy: Strategy) -> tuple[ShutdownPolicy, str]:
         if not path.exists():
             continue
         try:
-            meta, body = _parse_frontmatter(path.read_text())
+            meta, body = parse_frontmatter(path.read_text())
             return ShutdownPolicy.from_dict(meta), body.strip()
         except Exception:
             log.exception("Failed to parse shutdown.md at %s", path)

@@ -1,14 +1,16 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import { createPortal } from "react-dom";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { ChevronUp, ChevronDown, Loader2, Square, Trash2, Wallet, Clock, ArrowUpDown, ArrowUp, ArrowDown } from "lucide-react";
 
 import { api, type ExecutorInfo, type ConsolidatedPosition } from "@/lib/api";
 import { useServer } from "@/hooks/useServer";
+import { usePairBalances } from "@/hooks/usePairBalances";
 import { useRates } from "@/hooks/useRates";
 import {
   formatPct,
   formatAge,
+  formatPriceSig,
   formatUsd,
   pnlColor,
   isExecutorActive,
@@ -34,13 +36,6 @@ interface TradeBottomPaneProps {
 }
 
 const STORAGE_KEY = "condor_trade_bottom_pane";
-
-function formatPrice(price: number): string {
-  if (price === 0) return "—";
-  if (Math.abs(price) >= 1000) return price.toFixed(2);
-  if (Math.abs(price) >= 1) return price.toFixed(4);
-  return price.toPrecision(6);
-}
 
 const STRATEGY_LABELS: Record<string, string> = {
   LIMIT: "Limit",
@@ -136,14 +131,14 @@ function ExecutorTooltip({
           <div className="flex items-center gap-2 mb-1.5 text-[var(--color-text-muted)]">
             {entry > 0 && (
               <span>
-                Entry: <span className="text-[var(--color-text)] font-mono">{formatPrice(entry)}</span>
+                Entry: <span className="text-[var(--color-text)] font-mono">{formatPriceSig(entry)}</span>
               </span>
             )}
             {entry > 0 && exit > 0 && exit !== entry && <span>→</span>}
             {exit > 0 && exit !== entry && (
               <span>
                 {active ? "Now" : "Close"}:{" "}
-                <span className="text-[var(--color-text)] font-mono">{formatPrice(exit)}</span>
+                <span className="text-[var(--color-text)] font-mono">{formatPriceSig(exit)}</span>
               </span>
             )}
           </div>
@@ -179,7 +174,7 @@ function ExecutorTooltip({
             <div className="col-span-2">
               <span className="text-[var(--color-text-muted)]">Range: </span>
               <span className="font-mono">
-                {formatPrice(Number(config.start_price as number))} – {formatPrice(Number(config.end_price as number))}
+                {formatPriceSig(Number(config.start_price as number))} – {formatPriceSig(Number(config.end_price as number))}
               </span>
             </div>
           )}
@@ -266,31 +261,14 @@ export function TradeBottomPane({
     try { localStorage.setItem(STORAGE_KEY, expanded ? "1" : "0"); } catch { /* ok */ }
   }, [expanded]);
 
-  // Fetch balances for the active connector
-  const { data: portfolio } = useQuery({
-    queryKey: ["portfolio", server],
-    queryFn: () => api.getPortfolio(server!),
-    enabled: !!server,
-    refetchInterval: 30_000,
-  });
-
   // Extract base/quote tokens from pair (e.g. "BTC-USDT" -> ["BTC", "USDT"]),
   // unless the caller knows better — see baseSymbol/quoteSymbol.
   const [pairBase, pairQuote] = pair.split("-");
   const baseToken = baseSymbol || pairBase;
   const quoteToken = quoteSymbol || pairQuote;
 
-  // Find balances for the active connector
-  const connectorBalances = portfolio?.connectors?.find(
-    (c) => c.connector === connector,
-  )?.balances;
-
-  const baseBalance = connectorBalances?.find(
-    (b) => b.token.toUpperCase() === (baseToken ?? "").toUpperCase(),
-  );
-  const quoteBalance = connectorBalances?.find(
-    (b) => b.token.toUpperCase() === (quoteToken ?? "").toUpperCase(),
-  );
+  // Balances for the active connector (shared ["portfolio", server] query)
+  const balances = usePairBalances(server, connector, baseToken, quoteToken);
 
   const stopMutation = useMutation({
     mutationFn: (id: string) => {
@@ -304,6 +282,9 @@ export function TradeBottomPane({
         return next;
       });
       setConfirmStopId(null);
+      // Prefix match covers ["executors", server, "main", pair] and the altPair variant
+      queryClient.invalidateQueries({ queryKey: ["executors", server] });
+      queryClient.invalidateQueries({ queryKey: ["dex-lp-executors", server] });
       queryClient.invalidateQueries({ queryKey: ["executors-infinite", server] });
     },
   });
@@ -327,7 +308,6 @@ export function TradeBottomPane({
         return next;
       });
       setConfirmClearPos(null);
-      queryClient.invalidateQueries({ queryKey: ["positions", server] });
       queryClient.invalidateQueries({ queryKey: ["consolidated-positions", server] });
     },
   });
@@ -436,17 +416,17 @@ export function TradeBottomPane({
           {/* Balance indicators */}
           <div className="flex items-center gap-2">
             <Wallet className="h-3 w-3 text-[var(--color-text-muted)]" />
-            {isSpot && baseBalance && (
+            {isSpot && balances.base !== null && (
               <span className="font-mono">
-                {formatBalance(baseBalance.available)} <span className="text-[var(--color-text-muted)]">{baseToken}</span>
+                {formatBalance(balances.base)} <span className="text-[var(--color-text-muted)]">{baseToken}</span>
               </span>
             )}
-            {quoteBalance && (
+            {balances.quote !== null && (
               <span className="font-mono">
-                {formatBalance(quoteBalance.available)} <span className="text-[var(--color-text-muted)]">{quoteToken}</span>
+                {formatBalance(balances.quote)} <span className="text-[var(--color-text-muted)]">{quoteToken}</span>
               </span>
             )}
-            {!baseBalance && !quoteBalance && (
+            {balances.base === null && balances.quote === null && (
               <span className="text-[var(--color-text-muted)]">—</span>
             )}
           </div>
@@ -567,10 +547,10 @@ export function TradeBottomPane({
                             )}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
-                            {entry > 0 ? formatPrice(entry) : "—"}
+                            {entry > 0 ? formatPriceSig(entry) : "—"}
                           </td>
                           <td className="px-3 py-1.5 text-right font-mono tabular-nums text-[var(--color-text-muted)]">
-                            {exit > 0 && exit !== entry ? formatPrice(exit) : "—"}
+                            {exit > 0 && exit !== entry ? formatPriceSig(exit) : "—"}
                           </td>
                           <td
                             className="px-3 py-1.5 text-right font-mono font-medium tabular-nums"
@@ -646,18 +626,26 @@ export function TradeBottomPane({
                             }`}>
                               {pos.position_side?.toUpperCase() ?? "—"}
                             </span>
+                            {pos.pool_scoped === false && (
+                              <span
+                                className="rounded border border-[var(--color-border)] px-1 py-0.5 text-[9px] text-[var(--color-text-muted)]"
+                                title="Held from a swap, which the aggregator routed itself — this is a position in the pair, not in this pool."
+                              >
+                                any pool
+                              </span>
+                            )}
                             <div className="text-[11px]">
                               <span className="text-[var(--color-text)]">{Math.abs(pos.amount).toFixed(4)}</span>
                               <span className="ml-1 text-[var(--color-text-muted)]">
                                 (${(pos.notional_value ?? Math.abs(pos.amount) * pos.entry_price).toFixed(2)})
                               </span>
-                              <span className="ml-1.5 text-[var(--color-text-muted)]">@ {formatPrice(pos.entry_price)}</span>
+                              <span className="ml-1.5 text-[var(--color-text-muted)]">@ {formatPriceSig(pos.entry_price)}</span>
                             </div>
                           </div>
                           <div className="flex items-center gap-3 text-[11px]">
                             {!isFlat && (
                               <span className="text-[var(--color-text-muted)]">
-                                Now: {formatPrice(pos.current_price)}
+                                Now: {formatPriceSig(pos.current_price)}
                               </span>
                             )}
                             {pos.leverage > 1 && (

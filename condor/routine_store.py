@@ -94,6 +94,23 @@ class _HttpBot:
         data = {k: v for k, v in kw.items() if v is not None}
         return await self._post("editMessageText", data)
 
+    def has_token(self) -> bool:
+        """Can this actually deliver? Without a token every send is a no-op.
+
+        Read by ``delegate.resolve_bot`` so the ladder can fall through to the
+        dashboard bell rather than to a sender that silently drops the message.
+        """
+        return bool(self._token)
+
+    async def get_chat_member(self, *a, **kw):
+        """Raw ``getChatMember`` envelope — the web routes' chat-ownership check
+        (SEC-198) reads ``result.status`` out of it when no live bot is around."""
+        chat_id = kw.get("chat_id") or (a[0] if a else None)
+        user_id = kw.get("user_id") or (a[1] if len(a) > 1 else None)
+        return await self._post(
+            "getChatMember", {"chat_id": chat_id, "user_id": user_id}
+        )
+
 
 _http_bot = _HttpBot()
 
@@ -125,7 +142,7 @@ class WebRoutineContext:
     """Lightweight context so routines can run without Telegram."""
 
     def __init__(self, server_name: str, bot=None, chat_id: int = 0):
-        from condor.preferences import USER_PREFERENCES_KEY
+        from condor.preferences import SERVER_PIN_KEY, USER_PREFERENCES_KEY
 
         self._chat_id = chat_id
         # The server this run was launched against, readable by name — for a routine
@@ -137,8 +154,12 @@ class WebRoutineContext:
         # "preferences" while the preference API reads USER_PREFERENCES_KEY
         # ("user_preferences"), so the server a web or agent run was launched with
         # never reached its client — every such run silently picked the chat default.
+        # Pinned, not preferred: this run was launched against `server_name`, so
+        # the chat's own default must not override it — the chat may well be a
+        # chat whose default is a different server (see `get_effective_server`).
         self._user_data: dict[str, Any] = {
             USER_PREFERENCES_KEY: {"general": {"active_server": server_name}},
+            SERVER_PIN_KEY: True,
         }
 
     @property
@@ -428,17 +449,35 @@ class RoutineStore:
         worth showing, not worth a model turn to announce it.
 
         A run with no conversation behind it — the scheduler, the dashboard, the
-        Telegram menu, an instance restored on boot — is a no-op: ``record_system``
-        ignores an empty id and a run with no session key reaches no surface.
-        Neither delivery is allowed to raise: a missing note must not cost the
-        user the run's own result or its hooks.
+        Telegram menu, an instance restored on boot — still lights the owner's
+        bell (FEAT-048) and is otherwise a no-op: ``record_system`` ignores an
+        empty id and a run with no session key reaches no surface. No delivery
+        is allowed to raise: a missing note must not cost the user the run's own
+        result or its hooks.
         """
         meta = self._instances.get(instance_id) or {}
+        text = _run_outcome_text(meta.get("routine_name") or "", summary, error)
+
+        # The bell is addressed to the *owner*, not to a conversation, so it is
+        # the one surface a scheduled or dashboard-started run can reach.
+        try:
+            from condor.notifications import record
+
+            await record(
+                meta.get("user_id"),
+                text,
+                kind="routine",
+                link="/routines?tab=reports",
+            )
+        except Exception:
+            logger.debug(
+                f"Could not notify owner about run {instance_id}", exc_info=True
+            )
+
         conversation_id = meta.get("conversation_id") or ""
         if not conversation_id:
             return
 
-        text = _run_outcome_text(meta.get("routine_name") or "", summary, error)
         try:
             from condor.runtime.conversations import record_system
 
@@ -543,9 +582,12 @@ class RoutineStore:
             # The bare name (not "agent_slug/name") is what both report lookups
             # match on, and what routines that do call .source() already use.
             base_name = (routine.name or "").split("/")[-1]
-            with reports.attribute_to(agent or _agent_of(routine)):
-                with reports.default_source("routine", base_name):
-                    raw = await routine.run_fn(cfg, ctx)
+            # attribute_owner records who this run executes for, so its reports
+            # are readable by (and only by) that user on the web (SEC-196).
+            with reports.attribute_owner(user_id):
+                with reports.attribute_to(agent or _agent_of(routine)):
+                    with reports.default_source("routine", base_name):
+                        raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
             result = RoutineResult(text="Stopped by user")

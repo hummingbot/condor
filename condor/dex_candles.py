@@ -32,10 +32,6 @@ logger = logging.getLogger(__name__)
 # apart from a plain ticker like "BTC".
 ADDRESS_RE = re.compile(r"^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$")
 
-# GeckoTerminal answers are shared across users, so one process-wide dict backs the
-# OHLCV cache for every dashboard viewer.
-_ohlcv_cache: dict = {}
-
 
 def uses_gecko_candles(connector: str) -> bool:
     """Whether this connector's candles come from GeckoTerminal, not the API."""
@@ -72,9 +68,10 @@ async def _pool_ohlcv(
             # Prices in the quote token, matching the scale of the entry and range
             # prices the executor overlays draw on the same chart.
             currency="token",
-            # A live poll wants the newest candle, and the shared cache holds a
-            # pool for five minutes — long enough to freeze a streaming chart.
-            user_data=_ohlcv_cache if use_cache else None,
+            # A live poll wants the newest candle, and pool_data's shared cache
+            # holds a pool for five minutes — long enough to freeze a streaming
+            # chart — so use_cache=False bypasses the cached copy.
+            use_cache=use_cache,
             limit=limit,
             before_timestamp=before_timestamp,
             token=token,

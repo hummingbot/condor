@@ -11,28 +11,21 @@ through ``condor.runtime.client`` instead.
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from telegram import Bot
 
-from condor.acp import ACPClient, PermissionCallback, PromptDone, resolve_acp
-from condor.acp.pydantic_ai_client import (
-    PydanticAIClient,
-    is_pydantic_ai_model,
-    model_prefix,
-)
+from condor.acp import ACPClient, PermissionCallback, PromptDone
+from condor.acp.pydantic_ai_client import PydanticAIClient
 from condor.agents.agent import identity_header as agent_identity_header
 from condor.runtime import binding, conversations
 from condor.runtime.confirmations import get_registry as get_confirmation_registry
+from condor.runtime.context import build_initial_context, platform_formatting
 from condor.runtime.keys import SessionKey
 from condor.runtime.models import SessionInfo, SessionSpec
 from condor.runtime.timeouts import TIMEOUTS
-from handlers.agents._shared import (
-    build_initial_context,
-    get_project_dir,
-    platform_formatting,
-)
 
 log = logging.getLogger(__name__)
 
@@ -50,6 +43,44 @@ MAX_SESSIONS_PER_USER = 5
 # Module-level session storage keyed by str(SessionKey).
 # Not persisted -- subprocesses can't survive restarts.
 _sessions: dict[str, "AgentSession"] = {}
+
+# Creation serialization (CORR-187). get_or_create_session is a check-then-
+# create that spans many awaits (subprocess spawn, eager context prompt), so
+# without a lock two concurrent calls for the same key both spawn a full
+# client and the second registration overwrites the first, whose process tree
+# is never stopped -- teardown only walks the registry. Locks are per session
+# key (creations under different keys stay concurrent) and refcounted so the
+# dict does not grow with every key ever seen.
+_creation_locks: dict[str, asyncio.Lock] = {}
+_creation_lock_refs: dict[str, int] = {}
+
+# Session keys currently being created, per user. A creation in flight is not
+# in ``_sessions`` yet but will register one session, so the budget check has
+# to count it or N concurrent creates of distinct keys all pass the cap.
+_pending_creates: dict[int, set[str]] = {}
+
+
+@asynccontextmanager
+async def _creation_lock(name: str):
+    """Hold the named creation lock; drop it when the last holder leaves.
+
+    Refcounted rather than popped on release: popping while another task still
+    waits on the lock object would hand a *fresh* lock to the next caller and
+    reopen the race between the waiter and the newcomer.
+    """
+    lock = _creation_locks.setdefault(name, asyncio.Lock())
+    _creation_lock_refs[name] = _creation_lock_refs.get(name, 0) + 1
+    try:
+        async with lock:
+            yield
+    finally:
+        remaining = _creation_lock_refs[name] - 1
+        if remaining:
+            _creation_lock_refs[name] = remaining
+        else:
+            del _creation_lock_refs[name]
+            _creation_locks.pop(name, None)
+
 
 # Health monitor state
 _health_task: asyncio.Task | None = None
@@ -244,7 +275,11 @@ async def _enforce_session_budget(user_id: int) -> None:
 
     while True:
         mine = [s for s in _sessions.values() if s.user_id == user_id]
-        if len(mine) < MAX_SESSIONS_PER_USER:
+        # Creations in flight for this user (reserved under the per-user
+        # creation lock, registered only later) hold budget too, or N
+        # concurrent creates of distinct keys would all pass the count.
+        in_flight = len(_pending_creates.get(user_id, set()) - set(_sessions))
+        if len(mine) + in_flight < MAX_SESSIONS_PER_USER:
             return
 
         idle = [s for s in mine if not s.is_busy]
@@ -357,6 +392,25 @@ async def get_or_create_session(
     """
     key = SessionKey.parse(spec.key)
     raw_key = str(key)
+
+    # One creation at a time per key (CORR-187): the second concurrent caller
+    # waits here and then finds the first caller's session in the registry
+    # instead of spawning a duplicate whose twin would leak until shutdown.
+    # Locks are per key, so creations under different keys stay concurrent.
+    async with _creation_lock(raw_key):
+        return await _get_or_create_session_locked(
+            spec, key, raw_key, permission_callback, user_data
+        )
+
+
+async def _get_or_create_session_locked(
+    spec: SessionSpec,
+    key: SessionKey,
+    raw_key: str,
+    permission_callback: PermissionCallback | None,
+    user_data: dict | None,
+) -> AgentSession:
+    """Body of :func:`get_or_create_session`; runs under the per-key lock."""
     session = _sessions.get(raw_key)
 
     # Reuse existing session only if the same brain is still on the other end:
@@ -384,11 +438,47 @@ async def get_or_create_session(
     # Destroy old session if exists
     if session:
         await _destroy_session_internal(key)
-    elif spec.user_id:
-        # Only a genuinely new key counts against the budget — replacing the
-        # session behind an existing key is a swap, not an extra subprocess.
-        await _enforce_session_budget(spec.user_id)
 
+    if spec.user_id:
+        if session is None:
+            # Only a genuinely new key counts against the budget — replacing
+            # the session behind an existing key is a swap, not an extra
+            # subprocess.
+            await _enforce_session_budget(spec.user_id)
+        # Reserve this key's budget slot for the whole spawn. The reservation
+        # must follow the check with no await in between — the event loop
+        # makes the pair atomic, so two creates can never both pass the count
+        # before either reserves (and _enforce_session_budget recounts after
+        # every await it does make). The swap path reserves too: its old
+        # session is already out of the registry, so a concurrent create
+        # would otherwise undercount during the respawn window.
+        _pending_creates.setdefault(spec.user_id, set()).add(raw_key)
+        try:
+            return await _spawn_session(
+                spec, key, raw_key, permission_callback, user_data
+            )
+        finally:
+            reserved = _pending_creates.get(spec.user_id)
+            if reserved is not None:
+                reserved.discard(raw_key)
+                if not reserved:
+                    del _pending_creates[spec.user_id]
+
+    return await _spawn_session(spec, key, raw_key, permission_callback, user_data)
+
+
+async def _spawn_session(
+    spec: SessionSpec,
+    key: SessionKey,
+    raw_key: str,
+    permission_callback: PermissionCallback | None,
+    user_data: dict | None,
+) -> AgentSession:
+    """Spawn, contextualize, and register a new session for ``raw_key``.
+
+    Runs under the per-key creation lock, with the key's budget slot already
+    reserved when the spec names a user.
+    """
     # MCP subprocess env expects a numeric chat id; surfaces without a chat
     # (web, mcp) fall back to the user id. The same pair goes down on argv via
     # binding.resolve, which is what the subprocess actually reads first — so
@@ -413,84 +503,40 @@ async def get_or_create_session(
     mcp_servers = bound.mcp_servers
     agent_key = bound.agent_key or spec.agent_key
 
-    # Check if agent_key requires PydanticAI client (ollama, lmstudio, openai, etc.)
-    use_pydantic_ai = is_pydantic_ai_model(agent_key)
+    # One factory decides PydanticAI vs ACP for every surface (ARCH-192).
+    # Chat-session specifics: the CONDOR_* env pair, the bound-Agent identity
+    # header (system level — the opening context below is a user turn and loses
+    # to the host's own system prompt, FEAT-025), the saved LM Studio pref as
+    # the *default* base URL (a named custom endpoint still wins), and
+    # strict_custom_endpoint=True so a key naming an unsaved endpoint fails
+    # loudly with the guided RuntimeError instead of dying deep in httpx.
+    import os
 
-    if use_pydantic_ai:
-        # For Pydantic AI models: auto-detect or use configured filter mode
-        import os
+    from condor.preferences import get_agent_prefs
+    from condor.runtime.llm_client import build_llm_client
 
-        from condor.preferences import get_agent_prefs
-
-        # Priority: user preference > env variable > auto-detect (None)
-        agent_prefs = get_agent_prefs(user_data) if user_data else {}
-        tool_filter_mode = (
-            agent_prefs.get("tool_filter_mode")
-            or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
-            or None  # None triggers auto-detection based on model size
-        )
-
-        base_url = (
+    agent_prefs = get_agent_prefs(user_data) if user_data else {}
+    client = build_llm_client(
+        agent_key,
+        mcp_servers=mcp_servers,
+        permission_callback=permission_callback,
+        # A bound Agent's allowlist is enforced here exactly as it is on
+        # consult and loop, so an Agent has the same reach in every mode.
+        allowed_tools=bound.tools or None,
+        extra_env=extra_env,
+        system_prompt=(
+            agent_identity_header(bound.agent_slug, bound.label)
+            if bound.is_agent
+            else ""
+        ),
+        user_data=user_data,
+        user_id=spec.user_id,
+        default_base_url=(
             agent_prefs.get("base_url") or os.environ.get("LMSTUDIO_BASE_URL") or None
-        )
-
-        api_key = None
-        if model_prefix(agent_key) == "custom":
-            # Custom OpenAI-compatible provider. The agent key names one of the
-            # user's saved endpoints ("custom@venice:..."); those live in the
-            # shared preference store so Telegram and the web dashboard resolve
-            # them identically. CUSTOM_LLM_* env vars cover headless deploys.
-            from condor.preferences import find_custom_provider, parse_custom_agent_key
-
-            provider_name, _ = parse_custom_agent_key(agent_key)
-            provider = (
-                find_custom_provider(user_data, provider_name) if user_data else None
-            )
-            if provider is None and provider_name:
-                raise RuntimeError(
-                    f"No saved endpoint named '{provider_name}'. Add it via "
-                    "/agent → Change LLM → Custom endpoint, or Settings → "
-                    "AI Providers on the web dashboard."
-                )
-            provider = provider or {}
-            base_url = provider.get("base_url") or os.environ.get("CUSTOM_LLM_BASE_URL")
-            api_key = provider.get("api_key") or os.environ.get("CUSTOM_LLM_API_KEY")
-
-        client = PydanticAIClient(
-            model=agent_key,
-            mcp_servers=mcp_servers,
-            permission_callback=permission_callback,
-            extra_env=extra_env,
-            tool_filter_mode=tool_filter_mode,  # Auto-detects if None
-            base_url=base_url,
-            api_key=api_key,
-            # A bound Agent's allowlist is enforced here exactly as it is on
-            # consult and loop, so an Agent has the same reach in every mode.
-            allowed_tools=bound.tools or None,
-        )
-    else:
-        # For ACP subprocess models: claude-code, gemini, codex.
-        # A Claude model can be pinned via a suffix, e.g. "claude-acp:opus" /
-        # "claude-acp:sonnet"; ACPClient selects it via session/set_model after
-        # handshake (the bridge ignores ANTHROPIC_MODEL). Bare key = agent default.
-        command, model_env, model_pref = resolve_acp(agent_key)
-        client = ACPClient(
-            command=command,
-            working_dir=get_project_dir(),
-            mcp_servers=mcp_servers,
-            permission_callback=permission_callback,
-            extra_env={**extra_env, **model_env},
-            model=model_pref,
-            # Who this brain IS, at system level. The opening context below is a
-            # user turn: it is read once and then loses to the host's own system
-            # prompt, which is why a bound Agent kept answering as Condor
-            # (FEAT-025). This is the one channel that outranks it.
-            system_prompt=(
-                agent_identity_header(bound.agent_slug, bound.label)
-                if bound.is_agent
-                else ""
-            ),
-        )
+        ),
+        tool_filter_mode=agent_prefs.get("tool_filter_mode"),
+        strict_custom_endpoint=True,
+    )
 
     await client.start()
 

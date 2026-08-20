@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
@@ -85,6 +87,11 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
 
     statuses = await asyncio.gather(*[_get_status(name) for name in accessible])
 
+    # Which one the star should be filled on. Read once: the config manager falls
+    # back to the global default and then to the first server, so this is the
+    # server that actually answers, not only an explicit `chat_defaults` entry.
+    default_server = cm.get_chat_default_server(user.id)
+
     results = []
     for (name, cfg), status in zip(accessible.items(), statuses):
         perm = cm.get_server_permission(user.id, name)
@@ -96,6 +103,7 @@ async def list_settings_servers(user: WebUser = Depends(get_current_user)):
                 port=cfg.get("port", 0),
                 online=online,
                 permission=perm.value if perm else "trader",
+                is_default=name == default_server,
             )
         )
 
@@ -158,6 +166,13 @@ async def set_default_server(name: str, user: WebUser = Depends(get_current_user
     if not cm.has_server_access(user.id, name):
         raise HTTPException(status_code=404, detail="Server not found")
     cm.set_chat_default_server(user.id, name)
+    # Both records Telegram's own "set default" writes, or the two disagree:
+    # `chat_defaults` is what `get_effective_server` resolves, while the general
+    # preference is what a routine, an agent or MCP reads as the active server.
+    # Writing only the first left those surfaces pinned to the previous choice.
+    from condor.preferences import load_user_data_for, set_active_server
+
+    set_active_server(load_user_data_for(user.id), name)
     return {"default": True, "name": name}
 
 
@@ -300,6 +315,46 @@ async def gateway_logs(
 
 # ── Gateway Networks (RPC) ──
 
+_URL_VALUE = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
+
+
+def _redact_url(value: str) -> str:
+    """Collapse a URL to scheme://host, hiding every part that can carry a secret.
+
+    Paid RPC providers embed the API key either in the query string
+    (Helius: ``?api-key=<secret>``) or in the path (Infura ``/v3/<key>``,
+    Alchemy ``/v2/<key>``), and a URL can also carry userinfo. Rather than
+    pattern-match key shapes, keep only the parts that cannot hold a
+    credential — scheme, host, port — and mask everything else whenever any of
+    it is present. A bare endpoint stays readable so a trader can still tell
+    which node they are trading against.
+    """
+    parts = urlsplit(value)
+    host = parts.hostname or ""
+    if parts.port:
+        host = f"{host}:{parts.port}"
+    has_secret_bearing_part = (
+        parts.username
+        or parts.password
+        or parts.query
+        or parts.fragment
+        or parts.path not in ("", "/")
+    )
+    if has_secret_bearing_part:
+        return f"{parts.scheme}://{host}/…"
+    return value
+
+
+def _redact_network_config(value):
+    """Recursively mask URL-shaped strings in a network config (SEC-197)."""
+    if isinstance(value, dict):
+        return {k: _redact_network_config(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_network_config(v) for v in value]
+    if isinstance(value, str) and _URL_VALUE.match(value):
+        return _redact_url(value)
+    return value
+
 
 @router.get("/gateway/networks")
 async def gateway_networks(
@@ -326,10 +381,20 @@ async def gateway_network_config(
     user: WebUser = Depends(require_server_access_query),
 ):
     cm = get_config_manager()
+    # Reading gateway state stays at TRADER (see _require_owner's docstring),
+    # but the RPC URL in a network config embeds the owner's paid provider API
+    # key. Redact it server-side for anyone below the OWNER line — same admin
+    # bypass as _require_owner — instead of shipping the secret and hiding it
+    # in the UI (SEC-197). Redaction cannot corrupt a save: the POST below is
+    # owner-gated, and owners always receive the full values.
+    perm = cm.get_server_permission(user.id, server)
+    is_owner = perm == ServerPermission.OWNER or cm.is_admin(user.id)
     client = await _get_client(cm, server)
     try:
         config = await client.gateway.get_network_config(network_id)
-        return {"network_id": network_id, "config": config}
+        if not is_owner:
+            config = _redact_network_config(config)
+        return {"network_id": network_id, "config": config, "redacted": not is_owner}
     except Exception as e:
         logger.exception(
             "Failed to fetch gateway network config '%s' from '%s'", network_id, server
@@ -742,16 +807,16 @@ async def add_custom_provider(
     the key is accepted, and the response is OpenAI-shaped — all in one round
     trip — and returns the model list the caller needs anyway.
     """
+    from condor.llm.custom_models import (
+        CustomProviderError,
+        fetch_models,
+        normalize_base_url,
+    )
     from condor.preferences import (
         load_user_data_for,
         save_custom_provider,
         suggest_provider_name,
         unique_provider_name,
-    )
-    from handlers.agents.custom_models import (
-        CustomProviderError,
-        fetch_models,
-        normalize_base_url,
     )
 
     raw_url = (body.get("base_url") or "").strip()
@@ -789,8 +854,8 @@ async def get_custom_provider_models(
     user: WebUser = Depends(get_current_user),
 ):
     """Fetch the current chat model list for a saved endpoint."""
+    from condor.llm.custom_models import CustomProviderError, fetch_models
     from condor.preferences import find_custom_provider, load_user_data_for
-    from handlers.agents.custom_models import CustomProviderError, fetch_models
 
     provider = find_custom_provider(load_user_data_for(user.id), name)
     if provider is None:
@@ -826,10 +891,9 @@ async def delete_custom_provider(
 async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
     """What this install has agreed to, and whether it could send anything.
 
-    ``endpoint_configured`` is the honest answer to "is this thing on": with no
-    ``CONDOR_TELEMETRY_URL`` set — the shipped state — nothing can be
-    transmitted no matter what the consent says, and events only accumulate in
-    a capped local file.
+    The collector address is fixed in the source, so consent is the only thing
+    that decides whether anything is transmitted: at level ``off`` no event is
+    recorded in the first place.
     """
     from condor.telemetry import consent, emitter, outbox
 
@@ -845,13 +909,15 @@ async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
 
 @router.put("/telemetry")
 async def set_telemetry_settings(
-    level: str = Query(..., description="off | ping | usage"),
+    level: str = Query(..., description="ping | usage"),
     user: WebUser = Depends(get_current_user),
 ):
     """Change the install's telemetry level. Admin only, and reversible.
 
-    Setting ``off`` is a withdrawal, not a pause: the buffer and the outbox are
-    deleted, so nothing already recorded can be sent later.
+    ``ping`` is the floor — install counting cannot be turned off here; only
+    ``CONDOR_TELEMETRY=off`` in the environment silences telemetry entirely.
+    Downgrading from ``usage`` is a withdrawal, not a pause: the buffer and the
+    outbox are deleted, so nothing already recorded can be sent later.
     """
     from condor.telemetry import consent
 
@@ -861,9 +927,12 @@ async def set_telemetry_settings(
             status_code=403,
             detail="Telemetry is an install-wide setting; only the admin can change it",
         )
-    if level not in consent.LEVELS:
+    if level not in (consent.PING, consent.USAGE):
         raise HTTPException(
-            status_code=400, detail=f"level must be one of {', '.join(consent.LEVELS)}"
+            status_code=400,
+            detail="level must be ping or usage; install counting cannot be "
+            "turned off here — set CONDOR_TELEMETRY=off in the environment to "
+            "disable telemetry entirely",
         )
     if consent.env_overridden():
         raise HTTPException(

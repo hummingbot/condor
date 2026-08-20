@@ -188,6 +188,24 @@ def test_resolve_custom_endpoint_passes_through_other_keys():
     assert resolve_custom_endpoint("custom@Missing:m", user_data={}) == (None, None)
 
 
+def test_resolve_custom_endpoint_strict_raises_for_missing_named_endpoint():
+    # The chat-session path (sessions.py) wants a loud, actionable failure
+    # instead of the lenient warn-and-env-fallback default.
+    with pytest.raises(RuntimeError, match="No saved endpoint named"):
+        resolve_custom_endpoint("custom@Missing:m", user_data={}, strict=True)
+
+
+def test_resolve_custom_endpoint_strict_resolves_saved_endpoint():
+    # strict only changes the missing-endpoint case; a saved one still resolves
+    user_data = {}
+    save_custom_provider(user_data, "Venice", "https://x.example/v1", "sk-1")
+    key = build_custom_agent_key("Venice", "claude-sonnet-4-6")
+    assert resolve_custom_endpoint(key, user_data=user_data, strict=True) == (
+        "https://x.example/v1",
+        "sk-1",
+    )
+
+
 def test_resolve_custom_endpoint_env_fallback(monkeypatch):
     monkeypatch.setenv("CUSTOM_LLM_BASE_URL", "https://env.example/v1")
     monkeypatch.setenv("CUSTOM_LLM_API_KEY", "sk-env")

@@ -20,7 +20,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections import Counter
+from collections import Counter, OrderedDict
 from functools import partial
 from typing import Any, Iterable
 
@@ -475,6 +475,32 @@ MAX_HISTORY_ROWS = 5000
 HISTORY_PAGE_SIZE = 500
 
 
+# ── Per-instance history cache ──
+# The cursor walk is the expensive end of the pipeline — up to 10 sequential
+# 500-row pages per instance, fanned out over up to MAX_HISTORY_INSTANCES
+# instances — and every consumer walks the same rows: one session-detail request
+# triggers it twice back-to-back (performance rollup, then PnL series), and the
+# tick engine repeats it every tick while the dashboard polls the same strategy.
+# The rows are identical across those call sites because the fetch takes no
+# since/until — window slicing happens downstream — so a short TTL plus in-flight
+# coalescing (the _snapshot_cache idiom above) collapses the redundancy while
+# staying fresher than the 30s route-level cache layered on top. Bounded as an
+# LRU: keys accumulate one entry per (server, instance, interval) and stopped
+# instances would otherwise pin their pages forever.
+_HISTORY_TTL = 20.0
+_HISTORY_CACHE_MAX = 256
+_history_cache: OrderedDict[
+    tuple, tuple[float, list[tuple[float, float, float, float, float]]]
+] = OrderedDict()
+_history_inflight: dict[tuple, tuple[Any, asyncio.Task]] = {}
+
+
+def clear_history_cache() -> None:
+    """Drop every cached instance history (tests, server reconfiguration)."""
+    _history_cache.clear()
+    _history_inflight.clear()
+
+
 async def fetch_instance_history(
     client: Any,
     instance_name: str,
@@ -521,7 +547,64 @@ async def fetch_instance_history(
     error, including one raised part-way through the walk — a partial timeline is
     the same silent misattribution as a truncated one, so the caller degrades to
     "no history" instead of to "wrong history".
+
+    Cached per ``(server, instance, interval, limit, max_rows)`` for
+    ``_HISTORY_TTL`` seconds and coalesced while in flight, so concurrent callers
+    share one cursor walk. A walk that raises is never cached — every waiter gets
+    the ``[]`` degrade and the next call retries — and an unidentifiable client
+    (no ``base_url``) bypasses the cache entirely, like the snapshot cache above.
+    The returned rows are shared between callers and must be treated as
+    read-only.
     """
+    server = _server_key(client)
+    if not server:
+        try:
+            return await _walk_instance_history(
+                client, instance_name, interval, limit, max_rows
+            )
+        except Exception as e:
+            logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
+            return []
+
+    key = (server, instance_name, interval, limit, max_rows)
+    entry = _history_cache.get(key)
+    if entry is not None and time.monotonic() - entry[0] <= _HISTORY_TTL:
+        _history_cache.move_to_end(key)
+        return entry[1]
+
+    # Reuse an in-flight walk only from the loop that created it: a task is
+    # bound to its loop and awaiting it from another one raises.
+    loop = asyncio.get_running_loop()
+    inflight = _history_inflight.get(key)
+    task = inflight[1] if inflight is not None and inflight[0] is loop else None
+    if task is None:
+        task = asyncio.ensure_future(
+            _walk_instance_history(client, instance_name, interval, limit, max_rows)
+        )
+        _history_inflight[key] = (loop, task)
+        task.add_done_callback(lambda _t, k=key: _history_inflight.pop(k, None))
+
+    try:
+        rows = await task
+    except Exception as e:
+        logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
+        return []
+
+    _history_cache[key] = (time.monotonic(), rows)
+    _history_cache.move_to_end(key)
+    while len(_history_cache) > _HISTORY_CACHE_MAX:
+        _history_cache.popitem(last=False)
+    return rows
+
+
+async def _walk_instance_history(
+    client: Any,
+    instance_name: str,
+    interval: str,
+    limit: int,
+    max_rows: int,
+) -> list[tuple[float, float, float, float, float]]:
+    """One uncached cursor walk + forward-carry merge. Raises on API error."""
 
     def _warn_truncated() -> None:
         # Older buckets were dropped, and everything before the oldest retained
@@ -535,21 +618,17 @@ async def fetch_instance_history(
             interval,
         )
 
-    try:
-        rows: list[dict] = await collect_pages(
-            partial(
-                client.bot_orchestration.get_controller_performance_history,
-                bot_name=instance_name,
-                interval=interval,
-            ),
-            extract_history_rows,
-            page_size=limit,
-            max_items=max_rows,
-            on_truncated=_warn_truncated,
-        )
-    except Exception as e:
-        logger.debug("fetch_instance_history(%s) failed: %s", instance_name, e)
-        return []
+    rows: list[dict] = await collect_pages(
+        partial(
+            client.bot_orchestration.get_controller_performance_history,
+            bot_name=instance_name,
+            interval=interval,
+        ),
+        extract_history_rows,
+        page_size=limit,
+        max_items=max_rows,
+        on_truncated=_warn_truncated,
+    )
 
     # One cumulative series per controller. A repeated (controller, timestamp)
     # keeps the last value read, which is what the endpoint means by re-reporting
@@ -643,6 +722,52 @@ def slice_history(
         trades += t_e - t_s
         fees += f_e - f_s
     return realized, volume, trades, fees
+
+
+def slice_history_series(
+    histories: list[list[tuple[float, float, float, float, float]]],
+    start: float,
+    stamps: list[float],
+) -> list[tuple[float, float, float, float, float]]:
+    """:func:`slice_history` evaluated at every instant of ascending ``stamps``.
+
+    Identical output to ``[slice_history(histories, start, t) for t in stamps]``
+    — same per-instance differencing in the same order — but computed in one
+    merge pass: the ``cum_at(start)`` baseline is constant across stamps so it
+    is taken once per instance, and each instance's cursor only ever advances
+    as the stamps increase (the same carry idiom
+    :func:`fetch_instance_history` uses internally). That turns the naive
+    O(stamps × rows) rescan into O(stamps + rows) per instance, which matters
+    on the per-tick and per-request paths that rebuild whole-session curves
+    from near-cap histories.
+
+    Returns ``[(t, realized, volume, trades, fees), …]``, one row per stamp.
+    """
+    bases = [_cum_at(h, start) for h in histories]
+    cursors = [-1] * len(histories)
+    carried: list[tuple[float, float, float, float]] = [(0.0, 0.0, 0.0, 0.0)] * len(
+        histories
+    )
+
+    out: list[tuple[float, float, float, float, float]] = []
+    for t in stamps:
+        realized = volume = trades = fees = 0.0
+        for i, h in enumerate(histories):
+            j = cursors[i]
+            while j + 1 < len(h) and h[j + 1][0] <= t:
+                j += 1
+            if j != cursors[i]:
+                cursors[i] = j
+                row = h[j]
+                carried[i] = (row[1], row[2], row[3], row[4])
+            r_e, v_e, t_e, f_e = carried[i]
+            r_s, v_s, t_s, f_s = bases[i]
+            realized += r_e - r_s
+            volume += v_e - v_s
+            trades += t_e - t_s
+            fees += f_e - f_s
+        out.append((t, realized, volume, trades, fees))
+    return out
 
 
 # One shared fetch of every owned base's instance histories, at a resolution that

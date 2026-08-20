@@ -9,15 +9,27 @@ logger = logging.getLogger(__name__)
 
 
 async def fetch_current_price(
-    client, connector_name: str = "", trading_pair: str = "", **_kw
+    client,
+    connector_name: str = "",
+    trading_pair: str = "",
+    strict: bool = False,
+    **_kw,
 ) -> Optional[float]:
-    """Fetch current price for a trading pair."""
+    """Fetch current price for a trading pair.
+
+    Args:
+        strict: Re-raise a failed request instead of degrading to None. The SDS
+            registration wants the raise so a transient failure keeps the last
+            good cached price instead of caching (and broadcasting) None.
+    """
     try:
         prices = await client.market_data.get_prices(
             connector_name=connector_name, trading_pairs=trading_pair
         )
         return prices.get("prices", {}).get(trading_pair)
     except Exception as e:
+        if strict:
+            raise
         logger.warning("Error fetching price for %s: %s", trading_pair, e)
         return None
 
@@ -325,7 +337,7 @@ def _normalize_tickers(
     return tickers, latest_ts
 
 
-async def fetch_ticker_pool(client, **_kw) -> Dict[str, Any]:
+async def fetch_ticker_pool(client, strict: bool = False, **_kw) -> Dict[str, Any]:
     """Fetch the API's whole ticker pool in a single call.
 
     Without a `connectors` filter the endpoint is a plain read of the pool the API
@@ -333,6 +345,12 @@ async def fetch_ticker_pool(client, **_kw) -> Dict[str, Any]:
     cheap enough to poll. Condor caches the result (see `ServerDataType.TICKER_POOL`)
     and serves both per-connector tickers and currency conversion from it, instead of
     hitting `/market-data/tickers` and `/market-data/rates` per request.
+
+    Args:
+        strict: Re-raise a failed request instead of degrading to the empty pool,
+            so the SDS keeps the last good pool and backs off. A 404 ("server has
+            no tickers endpoint") stays an empty pool even in strict mode — that
+            is a real answer, not a failure (mirrors `fetch_rates`).
 
     Returns:
         {
@@ -348,8 +366,10 @@ async def fetch_ticker_pool(client, **_kw) -> Dict[str, Any]:
         error_str = str(e)
         if "404" in error_str or "not found" in error_str.lower():
             logger.debug("Server has no /market-data/tickers endpoint: %s", e)
-        else:
-            logger.warning("Error fetching ticker pool: %s", e)
+            return empty
+        if strict:
+            raise
+        logger.warning("Error fetching ticker pool: %s", e)
         return empty
 
     raw_by_connector = (result or {}).get("tickers") or {}
@@ -379,12 +399,20 @@ async def fetch_ticker_pool(client, **_kw) -> Dict[str, Any]:
     return {"connectors": connectors, "prices": prices, "updated_at": updated_at}
 
 
-async def fetch_tickers(client, connector_name: str = "", **_kw) -> Dict[str, Any]:
+async def fetch_tickers(
+    client, connector_name: str = "", strict: bool = False, **_kw
+) -> Dict[str, Any]:
     """Fetch 24h tickers (price + volumes) for a single connector.
 
     Fallback for connectors that aren't in the cached pool yet: naming the connector
     makes the API fetch it on demand and enroll it in its background refresh cycle,
     so subsequent pool reads include it. Prefer `fetch_ticker_pool` where possible.
+
+    Args:
+        strict: Re-raise a failed request instead of degrading to empty tickers,
+            so the SDS keeps the last good value and backs off. A 404 ("server
+            has no tickers endpoint") stays a real empty answer even in strict
+            mode (mirrors `fetch_ticker_pool`).
 
     Returns:
         {"tickers": {pair: {price, base_volume, quote_volume, usd_volume}}, "updated_at": float|None}
@@ -402,8 +430,10 @@ async def fetch_tickers(client, connector_name: str = "", **_kw) -> Dict[str, An
                 connector_name,
                 e,
             )
-        else:
-            logger.warning("Error fetching tickers for %s: %s", connector_name, e)
+            return {"tickers": {}, "updated_at": None}
+        if strict:
+            raise
+        logger.warning("Error fetching tickers for %s: %s", connector_name, e)
         return {"tickers": {}, "updated_at": None}
 
     raw = ((result or {}).get("tickers") or {}).get(connector_name) or {}

@@ -1083,7 +1083,6 @@ async def _show_pool_detail(
                 network=gecko_network,
                 timeframe=timeframe,
                 currency="token",
-                user_data=context.user_data,
             )
             if error:
                 logger.warning(f"Failed to fetch OHLCV: {error}")
@@ -1950,7 +1949,6 @@ async def handle_pool_ohlcv(
             network=network,
             timeframe=timeframe,
             currency="token",
-            user_data=context.user_data,
         )
 
         if error or not ohlcv_data:
@@ -2162,7 +2160,6 @@ async def handle_pool_combined_chart(
             network=network,
             timeframe=timeframe,
             currency="token",
-            user_data=context.user_data,
         )
 
         # Get bins from cached pool_info or fetch
@@ -2172,9 +2169,7 @@ async def handle_pool_combined_chart(
             bins, _, _ = await fetch_liquidity_bins(
                 pool_address=pool_address,
                 connector=connector,
-                user_data=context.user_data,
-                chat_id=chat_id,
-                context=context,
+                client=await get_client(chat_id, context=context),
             )
 
         if not ohlcv_data and not bins:
@@ -2851,7 +2846,6 @@ async def handle_pos_view(
                     network=gecko_network,
                     timeframe=timeframe,
                     currency="token",
-                    user_data=context.user_data,
                 )
                 return data or []
             except Exception as e:
@@ -4281,7 +4275,6 @@ async def show_add_position_menu(
                     network=gecko_network,
                     timeframe=timeframe,
                     currency="token",
-                    user_data=context.user_data,
                 )
                 if ohlcv_error:
                     logger.warning(f"OHLCV fetch error: {ohlcv_error}")

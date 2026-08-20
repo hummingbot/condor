@@ -47,6 +47,10 @@ async def list_servers(user: WebUser = Depends(get_current_user)):
     names = list(accessible)
     flags = await asyncio.gather(*(_resolve_online(sds, name) for name in names))
 
+    # The selector seeds itself from this on a browser that has not picked a
+    # server yet, so a default set in Telegram is the one the dashboard opens on.
+    default_server = cm.get_chat_default_server(user.id)
+
     results = []
     for name, online in zip(names, flags):
         cfg = accessible[name]
@@ -58,6 +62,7 @@ async def list_servers(user: WebUser = Depends(get_current_user)):
                 port=cfg.get("port", 0),
                 online=online,
                 permission=perm.value if perm else "trader",
+                is_default=name == default_server,
             )
         )
 

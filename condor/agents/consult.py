@@ -21,12 +21,14 @@ import logging
 import os
 
 from condor.acp.pydantic_ai_client import (
-    PydanticAIClient,
     healthcheck_local_backend,
     is_pydantic_ai_model,
 )
 from condor.agents.agent import AgentStore
 from condor.preferences import resolve_custom_endpoint
+from condor.runtime import context as runtime_context
+from condor.runtime import toolsets
+from condor.runtime.channels import TelegramChannel
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +45,6 @@ def _build_consult_permission_cb(slug: str, user_id: int, chat_id: int):
     try:
         from condor.routine_store import get_routine_store
         from condor.runtime.confirmations import build_permission_callback
-        from handlers.agents.confirmation import TelegramChannel
 
         bot = get_routine_store().get_bot()
         if bot is not None:
@@ -150,9 +151,6 @@ async def _run_agent_to_completion(
                     fallback,
                 )
                 model_key = fallback
-                # The fallback is a different model — re-resolve, or a custom
-                # endpoint's credentials would leak into an unrelated backend.
-                base_url, api_key = resolve_custom_endpoint(model_key, user_id=user_id)
                 fallback_note = (
                     f"_(note: {agent.name}'s configured model was unavailable — "
                     f"{backend_err} Answered with fallback `{fallback}`.)_\n\n"
@@ -166,12 +164,6 @@ async def _run_agent_to_completion(
 
     # Build the Agent's MCP toolset in the main process (ConfigManager is here).
     # agent_slug scopes the condor MCP tools' memory/skills to this Agent (its brain).
-    from handlers.agents._shared import (
-        build_agent_context,
-        build_mcp_servers_for_session,
-        get_project_dir,
-    )
-
     # A server pinned on the Agent itself wins over the ambient chat server; when
     # the agent isn't pinned, fall back to the caller's (chat's) resolved server.
     # Passing server_name=None lets the builder resolve the chat's server.
@@ -179,7 +171,7 @@ async def _run_agent_to_completion(
     # agent_slug the condor MCP tools would target the CHAT's stores.
     effective_server = agent.server_name or server_name
 
-    mcp_servers = build_mcp_servers_for_session(
+    mcp_servers = toolsets.build_mcp_servers_for_session(
         user_id,
         chat_id,
         server_name=effective_server if agent.server_required else None,
@@ -192,33 +184,24 @@ async def _run_agent_to_completion(
     # agent auto-approves (unattended).
     permission_cb = permission_callback
 
-    # Build the client for the (possibly fallback) model. A pydantic-ai model gets
-    # the agent's tool allowlist enforced; an ACP fallback (claude-code) cannot
-    # enforce an allowlist, so it runs the consult unrestricted — acceptable since
-    # it is the trusted coordinator model and mutations are still confirmation-gated.
-    if is_pydantic_ai_model(model_key):
-        client = PydanticAIClient(
-            model=model_key,
-            mcp_servers=mcp_servers,
-            permission_callback=permission_cb,
-            allowed_tools=agent.tools or None,
-            base_url=base_url,
-            api_key=api_key,
-        )
-    else:
-        from condor.acp.client import ACPClient, resolve_acp
+    # Build the client for the (possibly fallback) model through the shared
+    # factory (ARCH-192). A pydantic-ai model gets the agent's tool allowlist
+    # enforced; an ACP fallback (claude-code) cannot enforce an allowlist, so it
+    # runs the consult unrestricted — acceptable since it is the trusted
+    # coordinator model and mutations are still confirmation-gated. The factory
+    # re-resolves the custom endpoint (same lenient inputs as the healthcheck
+    # above), so a fallback model never inherits the original's credentials.
+    from condor.runtime.llm_client import build_llm_client
 
-        agent_cmd, model_env, model_pref = resolve_acp(model_key)
-        client = ACPClient(
-            command=agent_cmd,
-            working_dir=get_project_dir(),
-            mcp_servers=mcp_servers,
-            permission_callback=permission_cb,
-            extra_env=model_env or None,
-            model=model_pref or None,
-        )
+    client = build_llm_client(
+        model_key,
+        mcp_servers=mcp_servers,
+        permission_callback=permission_cb,
+        allowed_tools=agent.tools or None,
+        user_id=user_id,
+    )
 
-    prompt = build_agent_context(agent, user_id, task, context)
+    prompt = runtime_context.build_agent_context(agent, user_id, task, context)
 
     await client.start()
     try:

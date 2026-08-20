@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowRight } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -8,7 +8,7 @@ import { LpPositions } from "@/components/dex/LpPositions";
 import { PoolBrowser } from "@/components/dex/PoolBrowser";
 import { PoolSourceTabs } from "@/components/dex/PoolSourceTabs";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
-import type { PoolSource } from "@/components/dex/pool-source";
+import { GATEWAY_TAB_CHAIN, type PoolSource } from "@/components/dex/pool-source";
 import { useDexUpstream } from "@/hooks/useDexUpstream";
 import { useServer } from "@/hooks/useServer";
 import { api, type PoolSummary } from "@/lib/api";
@@ -18,6 +18,9 @@ import { useDexFavorites } from "@/lib/dexFavorites";
 const POOL_STALE_MS = 30_000;
 const SEARCH_DEBOUNCE_MS = 400;
 const PAGE_SIZE = 20;
+
+/** GeckoTerminal's multi-pool endpoint takes at most 30 addresses per request. */
+const FAVORITES_BATCH_SIZE = 30;
 
 /**
  * The chain the browser opens on.
@@ -47,6 +50,7 @@ const ADDRESS_RE = /^(0x[0-9a-fA-F]{40}|[1-9A-HJ-NP-Za-km-z]{32,44})$/;
 export function Dex() {
   const { server } = useServer();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { favorites } = useDexFavorites();
   // Everything on this page comes from one shared GeckoTerminal budget; when it
   // is spent the tables empty out, so the reason is shown above them.
@@ -100,7 +104,7 @@ export function Dex() {
     setDexes([]);
     // Meteora and Orca are Solana connectors; their tabs disappear off Solana, and
     // a selection left pointing at a hidden tab shows a table with no active tab.
-    if (!next.startsWith("solana")) {
+    if (!next.startsWith(GATEWAY_TAB_CHAIN)) {
       setSource((s) => (s.kind === "gateway" ? { kind: "gecko", view: "trending" } : s));
     }
   };
@@ -125,6 +129,13 @@ export function Dex() {
 
   const isSearch = source.kind === "gecko" && source.view === "token";
   const isAddress = ADDRESS_RE.test(debouncedQuery);
+  // The query text only reaches the request for gateway sources and the token
+  // search view; keying other views on it would refetch a byte-identical
+  // listing (and spend GeckoTerminal budget) when leftover text sits in the
+  // box. Same for network/dexes, which gateway requests never send.
+  const effectiveQuery =
+    source.kind === "gateway" || isSearch ? debouncedQuery : "";
+  const isGateway = source.kind === "gateway";
   const enabled =
     !!server &&
     source.kind !== "favorites" &&
@@ -144,9 +155,9 @@ export function Dex() {
         : source.kind === "gateway"
           ? source.connector
           : "favorites",
-      network,
-      debouncedQuery,
-      dexes.join(","),
+      isGateway ? "" : network,
+      effectiveQuery,
+      isGateway ? "" : dexes.join(","),
       page,
     ],
     queryFn: () =>
@@ -159,7 +170,7 @@ export function Dex() {
               // Same tab, same columns — filled in rather than em-dashed.
               source: source.connector === "orca" ? "orca" : "gateway",
               connector: source.connector,
-              query: debouncedQuery || undefined,
+              query: effectiveQuery || undefined,
               limit: PAGE_SIZE,
               page,
             }
@@ -167,7 +178,7 @@ export function Dex() {
               source: "gecko",
               network,
               view: source.kind === "gecko" ? source.view : "trending",
-              query: isSearch ? debouncedQuery : undefined,
+              query: effectiveQuery || undefined,
               dexes,
               limit: PAGE_SIZE,
               page,
@@ -184,11 +195,21 @@ export function Dex() {
   const { data: pastedPool } = useQuery({
     queryKey: ["dex-pool-by-address", server, network, debouncedQuery],
     queryFn: () =>
-      api
-        .getDexPoolByAddress(server!, debouncedQuery, network)
-        .catch(() => null as PoolSummary | null),
+      api.getDexPoolByAddress(server!, debouncedQuery, network).catch((e: Error) => {
+        // A pasted *token* address 404s here by design — the token search
+        // running alongside is the lookup that resolves it — so not-found is a
+        // soft null, not an error. Everything else (throttle 503, network)
+        // must stay an error: this cache key is shared with DexPool, and a
+        // null recorded as success renders its "No pool at …" dead-end there
+        // with the Retry button hidden.
+        if (/pool not found|request failed: 404/i.test(e.message)) {
+          return null as PoolSummary | null;
+        }
+        throw e;
+      }),
     enabled: !!server && isSearch && isAddress,
     staleTime: POOL_STALE_MS,
+    retry: false,
   });
 
   const favoriteAddresses = useMemo(
@@ -201,14 +222,72 @@ export function Dex() {
     isFetching: favoritesFetching,
     dataUpdatedAt: favoritesUpdatedAt,
   } = useQuery({
-    queryKey: ["dex-favorites", server, network, favoriteAddresses.join(",")],
-    queryFn: () =>
-      api.getDexPoolsByAddress(server!, network, favoriteAddresses),
+    // The address list is deliberately NOT part of the key: un-starring must
+    // remove a row the client already has without spending the shared
+    // GeckoTerminal budget on a refetch. The queryFn reads the current list
+    // from its closure, un-starred rows are filtered out client-side below,
+    // and only a *new* address (absent from the cached page) invalidates.
+    queryKey: ["dex-favorites", server, network],
+    queryFn: async () => {
+      // The endpoint takes at most 30 addresses per request, so favorites
+      // beyond that are fetched in extra batches instead of silently dropped.
+      const batches: string[][] = [];
+      for (
+        let start = 0;
+        start < favoriteAddresses.length;
+        start += FAVORITES_BATCH_SIZE
+      ) {
+        batches.push(
+          favoriteAddresses.slice(start, start + FAVORITES_BATCH_SIZE),
+        );
+      }
+      const pages = await Promise.all(
+        batches.map((batch) =>
+          api.getDexPoolsByAddress(server!, network, batch),
+        ),
+      );
+      return {
+        pools: pages.flatMap((page) => page.pools),
+        has_more: false,
+        // A throttled batch wins the merge: it is the one whose missing rows
+        // the empty-state message has to explain, whichever order it landed in.
+        upstream:
+          pages.find((page) => page.upstream?.throttled_request)?.upstream ??
+          pages.at(-1)?.upstream,
+      };
+    },
     enabled:
       !!server && source.kind === "favorites" && !!favoriteAddresses.length,
     staleTime: POOL_STALE_MS,
   });
-  const favoritePools = favoritePage?.pools ?? [];
+  // Un-starring shrinks this list without touching the query, so the row
+  // disappears with zero network requests.
+  const favoritePools = useMemo(
+    () =>
+      (favoritePage?.pools ?? []).filter((p) =>
+        favoriteAddresses.includes(p.address),
+      ),
+    [favoritePage, favoriteAddresses],
+  );
+
+  // Starring a pool the cached page has never seen is the one favorites change
+  // that genuinely needs upstream data. Reading the cache directly (rather
+  // than depending on `favoritePage`) keeps a throttled batch that dropped a
+  // row from re-triggering this on every response.
+  useEffect(() => {
+    const cached = queryClient.getQueryData<{ pools: PoolSummary[] }>([
+      "dex-favorites",
+      server,
+      network,
+    ]);
+    if (!cached) return; // first fetch happens on its own
+    const known = new Set(cached.pools.map((p) => p.address));
+    if (favoriteAddresses.some((a) => !known.has(a))) {
+      queryClient.invalidateQueries({
+        queryKey: ["dex-favorites", server, network],
+      });
+    }
+  }, [favoriteAddresses, server, network, queryClient]);
 
   // A response knows it was throttled before the next poll of /dex/upstream does,
   // and it is the response whose empty table the user is looking at.
@@ -309,8 +388,9 @@ export function Dex() {
           </button>
         )}
 
-        {/* The pasted-pool answer above already covers an empty search result —
-            showing "No pools found" under it would contradict what's right above it. */}
+        {/* A pasted address that resolved to a pool IS the result: an empty
+            token-search table saying "No pools found" under it would deny the
+            row right above. */}
         {!(pastedPool && !pools.length) && (
           <PoolBrowser
             pools={pools}

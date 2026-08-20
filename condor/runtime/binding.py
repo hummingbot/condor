@@ -17,7 +17,9 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from condor.llm import options as llm_options
 from condor.memory.paths import CHAT_SLUG
+from condor.runtime import toolsets
 from condor.runtime.models import SessionSpec
 
 log = logging.getLogger(__name__)
@@ -86,7 +88,6 @@ def resolve(
     Callers get a fully resolved toolset and identity and never re-derive either.
     """
     from condor.agents.agent import Agent, AgentStore
-    from handlers.agents._shared import build_mcp_servers_for_session
 
     slug = spec.agent_slug or CHAT_SLUG
     agent = AgentStore().get(slug)
@@ -116,7 +117,7 @@ def resolve(
     # in CONDOR_USER_ID/CONDOR_CHAT_ID, and argv beats env in the subprocess, so
     # a local fallback here would silently override the env one (SEC-180).
     effective_user_id, effective_chat_id = spec.effective_ids()
-    mcp_servers = build_mcp_servers_for_session(
+    mcp_servers = toolsets.build_mcp_servers_for_session(
         effective_user_id,
         effective_chat_id,
         user_data,
@@ -153,13 +154,11 @@ def remember_model_choice(user_id: int | None, agent_slug: str, agent_key: str) 
     delegate and loops pass concrete keys for their own plumbing reasons and
     must not rewrite anything.
     """
-    from handlers.agents._shared import AGENT_OPTIONS
-
     if not agent_key or not user_id:
         return
     # Drill-downs, not startable models: an agent_key of "openrouter:" would
     # fail at session start for everyone who inherited it.
-    if AGENT_OPTIONS.get(agent_key, {}).get("picker"):
+    if llm_options.AGENT_OPTIONS.get(agent_key, {}).get("picker"):
         return
 
     try:

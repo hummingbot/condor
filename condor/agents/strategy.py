@@ -27,14 +27,14 @@ strategies and its consults — they live one level up, at
 from __future__ import annotations
 
 import logging
-import re
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import yaml
+from condor.frontmatter import parse_frontmatter, render_frontmatter, slugify
+from condor.fsutil import atomic_write_text
 
 log = logging.getLogger(__name__)
 
@@ -62,47 +62,6 @@ specific loop, write a dedicated strategy under this agent and run that instead.
 """
 
 
-def _slugify(name: str) -> str:
-    """Convert a name to a filesystem-safe slug.
-
-    Example: "RIVER Scalper v2" -> "river_scalper_v2"
-    """
-    s = name.lower().strip()
-    s = re.sub(r"[^\w\s-]", "", s)
-    s = re.sub(r"[\s-]+", "_", s)
-    return s.strip("_") or "unnamed"
-
-
-def _parse_frontmatter(text: str) -> tuple[dict, str]:
-    """Parse YAML frontmatter and markdown body from a file."""
-    text = text.strip()
-    if not text.startswith("---"):
-        return {}, text
-
-    end = text.find("---", 3)
-    if end == -1:
-        return {}, text
-
-    frontmatter_str = text[3:end].strip()
-    body = text[end + 3 :].strip()
-
-    try:
-        meta = yaml.safe_load(frontmatter_str) or {}
-    except yaml.YAMLError:
-        log.warning("Failed to parse YAML frontmatter")
-        meta = {}
-
-    return meta, body
-
-
-def _render_frontmatter(meta: dict, body: str) -> str:
-    """Render YAML frontmatter + markdown body."""
-    frontmatter = yaml.dump(
-        meta, default_flow_style=False, allow_unicode=True, sort_keys=False
-    ).strip()
-    return f"---\n{frontmatter}\n---\n\n{body}\n"
-
-
 @dataclass
 class Strategy:
     agent_slug: str  # the owning Agent's slug
@@ -123,7 +82,7 @@ class Strategy:
     @property
     def slug(self) -> str:
         """Filesystem-safe slug derived from the strategy name (unique per agent)."""
-        return _slugify(self.name)
+        return slugify(self.name)
 
     @property
     def key(self) -> str:
@@ -139,7 +98,7 @@ class Strategy:
 def split_key(key: str) -> tuple[str, str] | None:
     """Split an opaque strategy key ``"{agent_slug}.{slug}"`` into its parts.
 
-    Slugs never contain ``.`` (``_slugify`` strips it), so the first dot is the
+    Slugs never contain ``.`` (:func:`condor.frontmatter.slugify` strips it), so the first dot is the
     boundary. Returns None when the key has no dot.
     """
     if "." not in key:
@@ -151,7 +110,7 @@ def split_key(key: str) -> tuple[str, str] | None:
 def _load_strategy_from_file(path: Path, agent_slug: str) -> Strategy | None:
     """Load a Strategy from a ``strategy.md`` file under an agent."""
     try:
-        meta, body = _parse_frontmatter(path.read_text())
+        meta, body = parse_frontmatter(path.read_text())
         return Strategy(
             agent_slug=agent_slug,
             name=meta.get("name", path.parent.name),
@@ -324,6 +283,7 @@ class StrategyStore:
             "created_at": strategy.created_at,
         }
         strategy.dir.mkdir(parents=True, exist_ok=True)
-        self._strategy_md_path(strategy).write_text(
-            _render_frontmatter(meta, strategy.instructions)
+        atomic_write_text(
+            self._strategy_md_path(strategy),
+            render_frontmatter(meta, strategy.instructions),
         )

@@ -33,6 +33,13 @@ export interface ChartPriceMapping {
   minSpread: number;
   activePickField: PickSlot | null;
   extraLines?: ExtraLine[];
+  /**
+   * What the chart calls each slot's line and pick hint. The slots are named
+   * for the grid executor ("Start", "End", "Limit"); a panel that rides them
+   * with different semantics — LP's upper/lower bounds — relabels them here
+   * rather than letting the chart mislabel its prices.
+   */
+  lineLabels?: Partial<Record<PickSlot, string>>;
 }
 
 export interface ExecutorValidation {

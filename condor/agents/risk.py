@@ -11,6 +11,15 @@ import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from condor.runtime.danger import (
+    DANGEROUS_AMM_ACTIONS,
+    DANGEROUS_BOT_ACTIONS,
+    DANGEROUS_CLMM_ACTIONS,
+    is_dangerous_tool_call,
+    tool_call_input,
+    tool_call_name,
+)
+
 if TYPE_CHECKING:
     from .ownership import BotLedger
 
@@ -136,8 +145,6 @@ class RiskEngine:
 
         Returns (allowed, reason).
         """
-        from handlers.agents._shared import tool_call_input
-
         input_data = tool_call_input(tool_call)
         if input_data is None:
             return False, "Tool arguments could not be read"
@@ -186,8 +193,6 @@ class RiskEngine:
 
         Returns (allowed, reason).
         """
-        from handlers.agents._shared import tool_call_input
-
         input_data = tool_call_input(tool_call)
         if input_data is None:
             return False, "Tool arguments could not be read"
@@ -240,14 +245,6 @@ def auto_approve_with_risk_check(
     mistyped one open a live position no session can ever claim. Empty (consults,
     chat, tests) keeps the presence-only check.
     """
-    from handlers.agents._shared import (
-        DANGEROUS_AMM_ACTIONS,
-        DANGEROUS_BOT_ACTIONS,
-        DANGEROUS_CLMM_ACTIONS,
-        is_dangerous_tool_call,
-        tool_call_input,
-        tool_call_name,
-    )
 
     async def callback(tool_call: dict, options: list[dict]) -> dict:
         if is_dangerous_tool_call(tool_call):

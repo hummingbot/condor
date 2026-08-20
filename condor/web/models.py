@@ -7,16 +7,6 @@ from pydantic import BaseModel
 # ── Auth ──
 
 
-class LoginRequest(BaseModel):
-    id: int
-    first_name: str
-    last_name: str = ""
-    username: str = ""
-    photo_url: str = ""
-    auth_date: int
-    hash: str
-
-
 class LoginResponse(BaseModel):
     token: str
     user: WebUser
@@ -38,6 +28,9 @@ class ServerInfo(BaseModel):
     port: int
     online: bool = False
     permission: str = "trader"
+    # The server this user's commands land on when none is named — the same
+    # `chat_defaults` entry Telegram reads, so both surfaces agree on it.
+    is_default: bool = False
 
 
 # ── Portfolio ──
@@ -468,6 +461,9 @@ class ReportSummary(BaseModel):
     source_name: str = ""
     tags: list[str] = []
     agent: str = ""  # producing assistant/expert (e.g. "condor", "executor_manager")
+    # Authenticated owner stamped at save time (SEC-196); None = legacy/ownerless,
+    # visible to admins only.
+    user_id: int | None = None
 
 
 class ReportsListResponse(BaseModel):

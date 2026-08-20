@@ -124,18 +124,31 @@ def _render_result(namespace: dict) -> str:
 
 
 async def _run_in_task(
-    compiled, namespace: dict, buffer, agent: str, source: str, out: dict
+    compiled,
+    namespace: dict,
+    buffer,
+    agent: str,
+    source: str,
+    out: dict,
+    owner_id: int = 0,
 ):
     """The snippet itself, in its own task context.
 
     Setting the capture ContextVar *here* (not in the caller) is what keeps the
     buffer private to this run, and the report id is read in a ``finally`` so a
     snippet that saved a report and then raised still reports it.
+    ``owner_id`` is the authenticated caller (``chat_id`` in ``execute_code``);
+    it stamps any report the snippet saves so the web routes can authorize
+    reads/deletes against it (SEC-196).
     """
     _CAPTURE.set(buffer)
     reports.reset_last_report_id()
     try:
-        with reports.attribute_to(agent), reports.default_source("code", source):
+        with (
+            reports.attribute_owner(owner_id),
+            reports.attribute_to(agent),
+            reports.default_source("code", source),
+        ):
             outcome = eval(compiled, namespace)  # noqa: S307 - this IS the feature
             if inspect.isawaitable(outcome):
                 await outcome
@@ -207,7 +220,15 @@ async def execute_code(
     _install_stdout_proxy()
     out: dict = {"report_id": ""}
     task = asyncio.create_task(
-        _run_in_task(compiled, namespace, buffer, agent, label or run_id, out)
+        _run_in_task(
+            compiled,
+            namespace,
+            buffer,
+            agent,
+            label or run_id,
+            out,
+            owner_id=chat_id,
+        )
     )
     try:
         await asyncio.wait_for(task, timeout=timeout)

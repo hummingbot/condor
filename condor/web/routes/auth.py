@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from condor.web.auth import create_jwt, get_current_user, redeem_login_token
 from condor.web.models import LoginResponse, WebUser
 from config_manager import UserRole, get_config_manager
+from utils import config as app_config
 
 router = APIRouter(tags=["auth"])
 
@@ -53,6 +54,62 @@ async def token_login(req: TokenLoginRequest, response: Response):
         role=role.value,
     )
     return LoginResponse(token=jwt_token, user=user)
+
+
+@router.get("/auth/mode")
+async def auth_mode() -> dict:
+    """How this install logs in. Unauthenticated on purpose.
+
+    The Login page has to know *how* to log in before it can, and the answer is
+    a property of the install, not of any user: either "run /web in Telegram" or
+    "you are already home". It leaks nothing a visitor could not learn by trying
+    :func:`local_login` and reading the status code.
+    """
+    return {"mode": app_config.CONDOR_MODE}
+
+
+@router.post("/auth/local-login", response_model=LoginResponse)
+async def local_login(response: Response):
+    """Mint a session for the local admin. Local mode only (FEAT-049).
+
+    Deliberately the *only* mode-aware place in the auth path. Once this returns,
+    the JWT, the WS handshake, ``check_server_access``, roles and all 200-odd
+    guarded endpoints behave identically to Telegram mode, because they are
+    identical — ``get_current_user`` never learns which mode it is in. Outside
+    local mode this endpoint does not exist: 404, not 403, because "there is a
+    passwordless login here, you just may not use it" is not a thing worth
+    telling anyone.
+
+    The control that keeps this safe is not this check alone — local mode also
+    binds loopback only (``utils.config.resolve_web_host``).
+    """
+    if not app_config.LOCAL_MODE:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+
+    # Same headers as token_login: never leak the issued JWT via Referer, and
+    # never let a proxy or the browser cache a session response.
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+
+    user_id = app_config.LOCAL_USER_ID
+    role = get_config_manager().get_user_role(user_id)
+    if role not in (UserRole.USER, UserRole.ADMIN):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=(
+                f"Local mode user {user_id} is not configured in config.yml — "
+                "re-run `make setup`."
+            ),
+        )
+
+    user = WebUser(id=user_id, username="local", first_name="Local", role=role.value)
+    token = create_jwt(
+        user_id=user_id,
+        username=user.username,
+        first_name=user.first_name,
+        role=role.value,
+    )
+    return LoginResponse(token=token, user=user)
 
 
 @router.get("/auth/me", response_model=WebUser)

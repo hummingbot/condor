@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { ChevronDown, Circle, Server } from "lucide-react";
+import { ChevronDown, Circle, Server, Star } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { useServer } from "@/hooks/useServer";
@@ -27,12 +27,22 @@ export function ServerSelector() {
     [JSON.stringify(onlineServers.map((s) => s.name))],
   );
 
-  // Auto-select first online server only when no server is saved yet
+  // The server the backend calls this user's default — the same `chat_defaults`
+  // entry Telegram sets. A browser with nothing saved opens on it, so setting a
+  // default in either surface is honoured by the other.
+  const defaultOnlineName = useMemo(
+    () => onlineServers.find((s) => s.is_default)?.name ?? null,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [JSON.stringify(onlineServers.map((s) => [s.name, s.is_default]))],
+  );
+
+  // Auto-select only when no server is saved yet: the user's default if it is
+  // up, otherwise the first server that is.
   useEffect(() => {
     if (!server && onlineServerNames.length > 0) {
-      setServer(onlineServerNames[0]);
+      setServer(defaultOnlineName ?? onlineServerNames[0]);
     }
-  }, [server, onlineServerNames, setServer]);
+  }, [server, onlineServerNames, defaultOnlineName, setServer]);
 
   // Close on outside click or Escape
   useEffect(() => {
@@ -90,6 +100,12 @@ export function ServerSelector() {
             >
               <Circle className="h-2 w-2 shrink-0 fill-current text-[var(--color-green)]" />
               <span className="truncate">{s.name}</span>
+              {s.is_default && (
+                <Star
+                  className="h-2.5 w-2.5 shrink-0 fill-current text-amber-400"
+                  aria-label="Default server"
+                />
+              )}
               {s.name === server && (
                 <span className="ml-auto text-[10px] font-medium uppercase text-[var(--color-primary)]">Active</span>
               )}

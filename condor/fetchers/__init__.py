@@ -21,7 +21,7 @@ Rules:
       above ``_SNAPSHOT_TTL``). The aggregate ``fetch_all_bot_performance``
       returns is therefore shared between callers and must be treated as
       read-only.
-    - No imports from handlers/ or condor.web/ (prevents circular deps).
+    - No handlers/ or condor.web imports (prevents circular deps).
     - Keep thin: call client method, light transform, return.
 
 Importing:

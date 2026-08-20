@@ -20,6 +20,8 @@ from condor.web.routes import agents as agents_routes
 from condor.web.routes.agents import NotifyRequest, notify_user
 from mcp_servers.condor.tools import notification as notification_tool
 
+# The pushes below target chat 1 — the caller's own private chat. A foreign
+# chat id is refused since SEC-198 (see test_agents_chat_id_ownership.py).
 CALLER = WebUser(id=1, role="user")
 
 
@@ -86,7 +88,7 @@ def test_a_live_session_gets_both_a_transcript_note_and_the_telegram_push(
         notify_user(
             NotifyRequest(
                 text="LP position closed",
-                chat_id=42,
+                chat_id=1,
                 session_key="web:1:slot-1",
             ),
             user=CALLER,
@@ -96,7 +98,7 @@ def test_a_live_session_gets_both_a_transcript_note_and_the_telegram_push(
     assert result == {"sent": True, "recorded": True}
     assert notes == [(1, "conv-1", "LP position closed", "notification")]
     assert len(bot.calls) == 1
-    assert bot.calls[0]["chat_id"] == 42
+    assert bot.calls[0]["chat_id"] == 1
 
 
 def test_the_note_is_scoped_to_the_jwt_caller_not_the_posted_user_id(
@@ -107,7 +109,7 @@ def test_the_note_is_scoped_to_the_jwt_caller_not_the_posted_user_id(
 
     asyncio.run(
         notify_user(
-            NotifyRequest(text="hi", chat_id=42, user_id=999, session_key="web:1:s"),
+            NotifyRequest(text="hi", chat_id=1, user_id=999, session_key="web:1:s"),
             user=CALLER,
         )
     )
@@ -119,10 +121,13 @@ def test_a_dead_session_key_still_pushes_and_notes_nothing(monkeypatch, bot, not
     _resolves_to(monkeypatch, "")
 
     result = asyncio.run(
-        notify_user(NotifyRequest(text="ping", chat_id=42, session_key=""), user=CALLER)
+        notify_user(NotifyRequest(text="ping", chat_id=1, session_key=""), user=CALLER)
     )
 
-    assert result == {"sent": True, "recorded": False}
+    # No conversation to write into, so no transcript note -- but the dashboard
+    # bell is addressed to the user, not to a conversation, so it still records
+    # and the call still counts as delivered (FEAT-048).
+    assert result == {"sent": True, "recorded": True}
     assert notes == []
     assert len(bot.calls) == 1
 
@@ -140,11 +145,13 @@ def test_an_unwritable_transcript_does_not_cost_the_user_the_push(
 
     result = asyncio.run(
         notify_user(
-            NotifyRequest(text="ping", chat_id=42, session_key="web:1:s"), user=CALLER
+            NotifyRequest(text="ping", chat_id=1, session_key="web:1:s"), user=CALLER
         )
     )
 
-    assert result == {"sent": True, "recorded": False}
+    # ``recorded`` is now true on the bell alone (FEAT-048): the transcript
+    # write failed, and that must not cost the user either delivery.
+    assert result == {"sent": True, "recorded": True}
     assert len(bot.calls) == 1
 
 
@@ -156,7 +163,7 @@ def test_bad_markdown_is_retried_as_plain_text(monkeypatch, notes):
     monkeypatch.setattr(delegate_module, "resolve_bot", lambda b=None: fake)
 
     result = asyncio.run(
-        notify_user(NotifyRequest(text="a_b_c", chat_id=42), user=CALLER)
+        notify_user(NotifyRequest(text="a_b_c", chat_id=1), user=CALLER)
     )
 
     assert result["sent"] is True
@@ -181,7 +188,7 @@ def test_empty_text_is_rejected(monkeypatch, bot, notes):
     _resolves_to(monkeypatch, "conv-1")
 
     with pytest.raises(HTTPException) as exc:
-        asyncio.run(notify_user(NotifyRequest(text="", chat_id=42), user=CALLER))
+        asyncio.run(notify_user(NotifyRequest(text="", chat_id=1), user=CALLER))
 
     assert exc.value.status_code == 400
 

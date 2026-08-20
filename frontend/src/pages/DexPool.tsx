@@ -2,11 +2,8 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   AlertTriangle,
   ArrowLeft,
-  CheckCircle,
   ChevronLeft,
   ChevronRight,
-  Copy,
-  X,
 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -14,8 +11,12 @@ import { useNavigate, useParams } from "react-router-dom";
 import { NoServerCard } from "@/components/NoServerCard";
 import { LiquidityDepthColumn } from "@/components/dex/LiquidityDepthColumn";
 import { LpPositionBar } from "@/components/dex/LpPositionBar";
-import { PoolStats } from "@/components/dex/PoolStats";
+import { PoolAddress, PoolStats } from "@/components/dex/PoolStats";
 import { UpstreamNotice } from "@/components/dex/UpstreamNotice";
+import {
+  ErrorToast,
+  ExecutorSuccessModal,
+} from "@/components/executor/ExecutorSuccessModal";
 import { LPConfigPanel } from "@/components/executor/LPConfigPanel";
 import { useLpConfig } from "@/components/executor/lp-config";
 import {
@@ -29,11 +30,17 @@ import { useMainControllerData } from "@/hooks/useMainControllerData";
 import { usePairBalances } from "@/hooks/usePairBalances";
 import { useResizeDrag } from "@/hooks/useResizeDrag";
 import { useServer } from "@/hooks/useServer";
-import { api } from "@/lib/api";
+import { useCondorWebSocket } from "@/hooks/useWebSocket";
+import { api, type DexTokenConflict } from "@/lib/api";
 import { connectorCapabilities } from "@/lib/connector-capabilities";
-import { INTERVALS, LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
+import { LOOKBACK_OPTIONS } from "@/lib/gridExecutor";
 
 type Tab = "order" | "lp";
+
+// Only the fine intervals: 1h/4h/1d candles read as duplicates of the 1h/1d
+// lookback buttons sitting next to them, and a 3-day window of 15m candles
+// already fits GeckoTerminal's 1000-candle cap.
+const DEX_INTERVALS = ["1m", "5m", "15m"];
 
 const DEPTH_KEY = "condor.dex.depth-collapsed";
 
@@ -144,14 +151,56 @@ export function DexPool() {
 
   // Reported rather than swallowed: Gateway refuses to list a token whose ticker
   // another token already holds, and the only visible symptom is a balance that
-  // stays 0 for a wallet that is not empty.
+  // stays 0 for a wallet that is not empty. Each entry keeps its ticker so the
+  // add button can say what it adds — and so the server can name a collision.
   const unlistedTokens = useMemo(
     () =>
       Object.entries(tokenVerdicts ?? {})
         .filter(([, verdict]) => verdict === "symbol_taken" || verdict === "failed")
-        .map(([address]) => address),
-    [tokenVerdicts],
+        .map(([tokenAddress]) => {
+          const ticker =
+            tokenAddress === pool?.base_token_address
+              ? pool?.base_symbol
+              : tokenAddress === pool?.quote_token_address
+                ? pool?.quote_symbol
+                : undefined;
+          return {
+            address: tokenAddress,
+            symbol: ticker && ticker !== "???" ? ticker : undefined,
+          };
+        }),
+    [tokenVerdicts, pool],
   );
+
+  // The collision the last add ran into: who holds the ticker, so the banner
+  // can ask "replace it?" instead of failing with the same verdict again.
+  const [tokenConflict, setTokenConflict] = useState<{
+    address: string;
+    symbol?: string;
+    holder: DexTokenConflict;
+  } | null>(null);
+
+  const addTokenMutation = useMutation({
+    mutationFn: (vars: { address: string; symbol?: string; replace?: boolean }) =>
+      api.addDexToken(server!, network, vars.address, vars.symbol, vars.replace),
+    onSuccess: (data, vars) => {
+      if (data.verdict === "added" || data.verdict === "listed") {
+        setTokenConflict(null);
+        // Re-runs the ensure (its verdicts now read `listed`, dropping the
+        // banner) and refetches the portfolio the balance panels read from.
+        queryClient.invalidateQueries({
+          queryKey: ["dex-ensure-tokens", server, network, pool?.address],
+        });
+        queryClient.invalidateQueries({ queryKey: ["portfolio", server] });
+      } else if (data.verdict === "symbol_taken" && data.conflict) {
+        setTokenConflict({
+          address: vars.address,
+          symbol: vars.symbol,
+          holder: data.conflict,
+        });
+      }
+    },
+  });
 
   const { data: venues = [] } = useQuery({
     queryKey: ["venues", server],
@@ -221,6 +270,15 @@ export function DexPool() {
   // answer to the pool actually on screen.
   const symbolPair =
     baseSymbol && quoteSymbol ? `${baseSymbol}-${quoteSymbol}` : "";
+
+  // WS for executor data, same subscription CreateExecutor holds: without it
+  // the shared-socket bridge has no executors frames to fan out here, and the
+  // pair queries below (staleTime 30s, no polling) never see a stop or a fill.
+  const wsChannels = useMemo(
+    () => (server ? [`executors:${server}`] : []),
+    [server],
+  );
+  useCondorWebSocket(wsChannels, server ?? null);
 
   const { executors, overlays, positions, isLoadingPositions } =
     useMainControllerData(server ?? null, network, pair, {
@@ -331,7 +389,8 @@ export function DexPool() {
 
       {/* Gateway lists a token by ticker, so a pool whose token shares a ticker
           with one already on the list cannot be registered — and the only symptom
-          is a balance that reads 0 for a wallet that is not empty. */}
+          is a balance that reads 0 for a wallet that is not empty. The button is
+          the fix in place: retry a failed save, or replace the ticker's holder. */}
       {unlistedTokens.length > 0 && (
         <div
           role="status"
@@ -343,10 +402,62 @@ export function DexPool() {
             Gateway&apos;s token list
           </span>
           <span className="text-[var(--color-text-muted)]">
-            Balances for {unlistedTokens.map((a) => `${a.slice(0, 6)}…`).join(", ")}{" "}
-            will read 0 — add {unlistedTokens.length === 1 ? "it" : "them"} under
-            Gateway tokens to size orders from this wallet.
+            Balances for{" "}
+            {unlistedTokens
+              .map((t) => t.symbol ?? `${t.address.slice(0, 6)}…`)
+              .join(", ")}{" "}
+            will read 0 until {unlistedTokens.length === 1 ? "it is" : "they are"}{" "}
+            added.
           </span>
+          {unlistedTokens.map((t) => (
+            <button
+              key={t.address}
+              onClick={() =>
+                addTokenMutation.mutate({ address: t.address, symbol: t.symbol })
+              }
+              disabled={addTokenMutation.isPending}
+              className="rounded border border-amber-500/40 px-2 py-0.5 font-medium text-[var(--color-yellow)] hover:bg-amber-500/20 disabled:opacity-50"
+            >
+              {addTokenMutation.isPending
+                ? "Adding…"
+                : `Add ${t.symbol ?? `${t.address.slice(0, 6)}…`}`}
+            </button>
+          ))}
+          {tokenConflict && (
+            <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[var(--color-text-muted)]">
+              {tokenConflict.holder.symbol} already names{" "}
+              {tokenConflict.holder.address.slice(0, 6)}… on the list — replace
+              it with this pool&apos;s token?
+              <button
+                onClick={() =>
+                  addTokenMutation.mutate({
+                    address: tokenConflict.address,
+                    symbol: tokenConflict.symbol,
+                    replace: true,
+                  })
+                }
+                disabled={addTokenMutation.isPending}
+                className="rounded border border-amber-500/40 px-2 py-0.5 font-medium text-[var(--color-yellow)] hover:bg-amber-500/20 disabled:opacity-50"
+              >
+                Replace
+              </button>
+            </span>
+          )}
+          {!tokenConflict &&
+            addTokenMutation.data?.verdict === "symbol_taken" &&
+            !addTokenMutation.data.conflict && (
+              <span className="text-[var(--color-text-muted)]">
+                Its ticker is already used by another token on the list — resolve
+                it under Gateway tokens.
+              </span>
+            )}
+          {addTokenMutation.isError && (
+            <span className="text-[var(--color-red)]">
+              {addTokenMutation.error instanceof Error
+                ? addTokenMutation.error.message
+                : "Add failed"}
+            </span>
+          )}
         </div>
       )}
 
@@ -361,10 +472,12 @@ export function DexPool() {
         </button>
         <div className="flex flex-col">
           <span className="text-sm font-semibold">{pairLabel}</span>
-          <span className="text-[10px] text-[var(--color-text-muted)]">{network}</span>
+          {/* The address identifies the pool the way the ticker never can, so it
+              sits with the name instead of hiding at the far right. */}
+          <PoolAddress pool={pool} />
         </div>
         <div className="min-w-0 flex-1">
-          <PoolStats pool={pool} />
+          <PoolStats pool={pool} network={network} />
         </div>
       </div>
 
@@ -372,7 +485,7 @@ export function DexPool() {
       <div className="flex shrink-0 items-center gap-4 border-b border-[var(--color-border)] px-3 py-1.5">
         <div className="flex items-center gap-1">
           <span className="text-[11px] text-[var(--color-text-muted)]">Interval</span>
-          {INTERVALS.map((iv) => (
+          {DEX_INTERVALS.map((iv) => (
             <button
               key={iv}
               onClick={() => setIntervalValue(iv)}
@@ -433,6 +546,7 @@ export function DexPool() {
               side={active.chartProps.side}
               minSpread={0}
               activePickField={active.chartProps.activePickField}
+              lineLabels={active.chartProps.lineLabels}
               onPriceSet={active.handleChartPriceSet}
               extraLines={active.chartProps.extraLines}
               executorOverlays={overlays}
@@ -575,6 +689,12 @@ export function DexPool() {
                 pair={pairLabel}
                 pool={lpConfig.pool}
                 poolFetching={lpConfig.poolFetching}
+                // Gateway's number, from the bins call — the GeckoTerminal pool
+                // row does not carry one.
+                binStep={depth?.bin_step}
+                // The pool was chosen by opening this page, so the panel shows it
+                // instead of offering to resolve or re-enter it.
+                lockedPoolAddress={pool.address}
                 baseAvailable={balances.base}
                 quoteAvailable={balances.quote}
                 baseSymbol={baseSymbol}
@@ -605,52 +725,16 @@ export function DexPool() {
       </div>
 
       {successId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="relative w-[360px] rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] p-6 shadow-2xl shadow-black/40">
-            <button
-              onClick={() => setSuccessId(null)}
-              className="absolute right-3 top-3 rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            >
-              <X className="h-4 w-4" />
-            </button>
-            <div className="mb-4 flex justify-center">
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-green)]/15">
-                <CheckCircle className="h-6 w-6 text-[var(--color-green)]" />
-              </div>
-            </div>
-            <h3 className="mb-1 text-center text-sm font-semibold">
-              {tab === "lp" ? "LP Position" : "Order"} Created
-            </h3>
-            <p className="mb-4 text-center text-[11px] text-[var(--color-text-muted)]">
-              In {pairLabel} on {pool.dex_id}
-            </p>
-            <div className="mb-4 flex items-center justify-between rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3 text-[11px]">
-              <span className="text-[var(--color-text-muted)]">Executor ID</span>
-              <div className="flex items-center gap-1.5">
-                <span className="font-mono">{successId.slice(0, 12)}…</span>
-                <button
-                  onClick={() => navigator.clipboard.writeText(successId)}
-                  className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                  title="Copy full ID"
-                >
-                  <Copy className="h-3 w-3" />
-                </button>
-              </div>
-            </div>
-            <button
-              onClick={() => setSuccessId(null)}
-              className="w-full rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110"
-            >
-              Continue
-            </button>
-          </div>
-        </div>
+        <ExecutorSuccessModal
+          executorId={successId}
+          title={`${tab === "lp" ? "LP Position" : "Order"} Created`}
+          subtitle={`In ${pairLabel} on ${pool.dex_id}`}
+          onClose={() => setSuccessId(null)}
+        />
       )}
 
       {createMutation.isError && (
-        <div className="absolute bottom-16 right-4 rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-4 py-2 text-sm text-[var(--color-red)]">
-          {(createMutation.error as Error).message}
-        </div>
+        <ErrorToast message={(createMutation.error as Error).message} />
       )}
     </div>
   );
