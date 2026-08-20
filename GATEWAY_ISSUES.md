@@ -586,20 +586,35 @@ The removed side has no such split: all nine sites normalize, either through `Ma
 or — in `meteora/amm/closePosition.ts:116` — an `adjust()` that takes the absolute value
 and then nets off the position rent refund.
 
-**Why it matters.** `/gateway/amm/events/search` is the AMM history, and summing
-`base_token_amount` over it is the obvious way to derive a net position. With adds
-negative and removes positive on Raydium, that sum has one leg backwards; and because the
-convention varies by connector, the same arithmetic is right for a Meteora pool and wrong
-for a Raydium one. Nothing raises — the number is simply the wrong sign.
+**The round trip, run live.** `amm-add` then `amm-remove` on the same Raydium pool:
+
+```
+event_type                  base            quote     status
+REMOVE_LIQUIDITY     +0.009985521   +0.850208000   CONFIRMED
+ADD_LIQUIDITY        -0.010000000   -0.848971000   CONFIRMED
+```
+
+**Why it matters.** Raydium's `Math.abs` on the remove is ambiguous — for an inflow the
+magnitude and the signed delta are the same number — so Raydium ends up coherent end to
+end under one convention (**signed wallet deltas**, net = `add + remove`) while every
+other connector is coherent under the other (**magnitudes**, net = `remove - add`). Both
+are defensible alone. What is broken is that no single arithmetic is right for both, and
+nothing in a stored row says which convention produced it.
+
+`/gateway/amm/events/search` is the AMM history, so summing `base_token_amount` over it is
+the obvious way to derive a net position. On the rows above that sum is meaningful —
+`-0.0000145` SOL and `+0.001237` USDC, the real result of four minutes in the pool. Run
+the identical arithmetic over Meteora rows and it adds two positives, double-counting the
+round trip instead of netting it. Nothing raises either way.
 
 **Fix:** `Math.abs()` on the three raydium sites, matching what every other connector and
 the entire removed side already do. A field named `…Added` reporting a negative value is
 wrong at the source, so this belongs in Gateway rather than in a consumer-side sign flip.
 
-**Verify:** `amm-add` then `amm-remove` on `58oQ…LYQo2` via
-`condor/scripts_lp_test/test_lp_write.py`, then read
-`POST /gateway/amm/events/search`. Both rows should carry positive amounts. The rows
-already in the table were written under the old behavior and keep their signs.
+**Verify:** repeat the round trip above and read `POST /gateway/amm/events/search`. After
+the fix both rows carry positive amounts and the net is `remove - add`. The two rows
+already in the table were written under the old behavior and keep their signs, so a
+migration — or a documented cutover timestamp — is part of the fix, not separate from it.
 
 ---
 
@@ -608,7 +623,7 @@ already in the table were written under the old behavior and keep their signs.
 - **GW-3's credentials** — the only item needing a decision.
 - **Mainnet coverage as of 2026-08-19.** Run and confirmed: all three swap types
   (router/clmm/amm), the full CLMM lifecycle on Meteora (open → add → remove → close), and
-  the Raydium AMM add. That last one is what surfaced GW-17. Still unrun: AMM remove,
+  the Raydium AMM round trip (add → remove), which is what surfaced GW-17. Still unrun:
   fee collection, pool creation, and `manage_amm(create_pool)`, which no test step
   exercises at all. The "verify" notes on the fixed issues above remain outstanding except
   where a section says otherwise.
