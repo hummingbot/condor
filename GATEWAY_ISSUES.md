@@ -25,15 +25,16 @@ changed every path these issues live on.
 | GW-14 | No `operationId` and no error responses in the spec | **open** |
 | GW-15 | Response component names were never unified | **open** |
 | GW-16 | Leftovers the unification did not sweep | **open** |
-| GW-17 | `baseTokenAmountAdded` is signed on some connectors, a magnitude on others | **open** |
+| GW-17 | `baseTokenAmountAdded` is signed on some connectors, a magnitude on others | fixed |
 | GW-18 | pancakeswap-sol's close reports fees and rent as a hardcoded 0 | **open** |
-| GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | **open** |
+| GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | fixed |
 | GW-20 | A DAMM v2 open records the position rent as deposited liquidity | fixed |
 | GW-21 | Nothing downstream can close an AMM position, so rent is stranded | fixed (routes collapsed) |
 | GW-22 | `position_info` ignored the position it was given (condor) | fixed |
 | GW-23 | Money is typed as JSON `number`, so exact decimals do not survive | **open** |
 
-GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
+GW-1 through GW-11, GW-17 and GW-19 are code-complete and green: 1153 tests, 143 suites,
+clean typecheck,
 lint 0 errors, and `openapi.json` regenerates identical to the committed copy.
 
 Mainnet verification began 2026-08-19 against a container built from `c0bb10253`: the
@@ -554,8 +555,8 @@ unified API and one that mostly looks unified.
 ---
 
 ## GW-17 — `baseTokenAmountAdded` is a signed wallet delta on some connectors, a magnitude on others
-**Status: open.** Found live 2026-08-19, the first time anything wrote to the AMM event
-table.
+**Status: fixed** in gateway `<pending>`. Found live 2026-08-19, the first time anything
+wrote to the AMM event table.
 
 `amm-add` on Raydium's CPMM deposited 0.01 SOL and 0.849 USDC. hummingbot-api recorded it as:
 
@@ -613,9 +614,27 @@ the obvious way to derive a net position. On the rows above that sum is meaningf
 the identical arithmetic over Meteora rows and it adds two positives, double-counting the
 round trip instead of netting it. Nothing raises either way.
 
-**Fix:** `Math.abs()` on the three raydium sites, matching what every other connector and
-the entire removed side already do. A field named `…Added` reporting a negative value is
-wrong at the source, so this belongs in Gateway rather than in a consumer-side sign flip.
+**Fixed** on all three raydium sites, matching what every other connector and the entire
+removed side already do. A field named `…Added` reporting a negative value is wrong at the
+source, so this belongs in Gateway rather than in a consumer-side sign flip.
+
+The two adds take `Math.abs()`. The third, `clmm/openPosition.ts`, turned out to carry
+**two** defects rather than one: opening a position locks rent in the position account,
+and when a side is SOL that outflow sits inside the same balance change — so the raw
+delta was both negative and larger than the deposit. That is GW-20 on a second connector,
+unfixed there because `e3eb7b14f` reached only the DAMM v2 open. It now uses the same
+`liquidityWithoutRent` helper, which takes the magnitude and backs the rent off the native
+side only.
+
+Two tests asserted `toHaveProperty('baseTokenAmountAdded')` — the key, not the value — so
+they passed on every negative that reached the event table. Both now assert amounts, and
+`clmm/addLiquidity.ts` gained the first test it has ever had. Mutation-checked: reverting
+the sign fails them, and on the open, reverting the sign and reverting the rent each fail
+independently.
+
+**Still open in the same family:** `pancakeswap-sol/clmm-routes/openPosition.ts` reports
+`positionRent: 0` beside `Math.abs(change)`, so its rent is counted as deposited liquidity
+and reported as zero — the same shape as GW-18 below, on the same connector.
 
 **Verify:** repeat the round trip above and read `POST /gateway/amm/events/search`. After
 the fix both rows carry positive amounts and the net is `remove - add`. The two rows
@@ -664,7 +683,7 @@ same connector does report real amounts; it is only `closePosition` that flatten
 ---
 
 ## GW-19 — a token whose symbol contains a hyphen makes its pair unquotable
-**Status: open. Lives in hummingbot-api, not Gateway** — but Gateway's chain-learning
+**Status: fixed** in hummingbot-api `<pending>`. **Lives in hummingbot-api, not Gateway** — but Gateway's chain-learning
 feature is what makes it reachable, so it belongs with that work. Found live 2026-08-19,
 minutes after that feature first recorded a token.
 
@@ -697,10 +716,29 @@ hummingbot-api cannot parse back into two tokens. Gateway is right; the pair *is
 "DpBzjtgG…vfhm-SOL"  (the mint, spelled out)     → quotes fine
 ```
 
-**Fix:** `rsplit("-", 1)` at both sites, and raise something that names the pair. The same
-bare unpack appears at `routers/market_data.py:382,406` and
-`services/orders_recorder.py:226,238`; `routers/executors.py:438,517` and two more in
-`services/` take `parts = ...split("-")` and index, which mangles rather than raises.
+**Fixed** with one helper rather than a `rsplit` at each site: `utils/trading_pair.py`
+splits from the right and raises `InvalidTradingPair` — a `ValueError`, which the routers
+already map to a 400 — with a message naming the pair. Splitting from the right is correct
+rather than merely forgiving: the quote asset is the last segment, so `DOGE-1-SOL` reads
+as `DOGE-1` over `SOL`, which is what it means.
+
+Wired into all eight sites: `gateway_swap.py` ×2 (the ones that returned the 400),
+`market_data.py` ×2, `orders_recorder.py` ×2 — where a broad `except` had been turning
+this into a silently missing fee rather than an error — and the `len(parts) == 2` guards
+in `executors.py` ×2, `executor_ws_manager.py` and `executor_service.py`, which had been
+skipping unrealized PnL without saying so. Those four keep their tolerance, since one
+unreadable pair should not fail a whole listing; it now applies only to pairs that really
+are unreadable.
+
+A structural test asserts no bare `split("-")` on a trading pair survives under `routers/`,
+`services/`, `utils/` or `models/`. It found `executor_service.py:1072`, which none of the
+reading above had listed. `bots/controllers/` is deliberately out of scope — those are
+strategy templates, edited and shipped separately.
+
+**Verified by test, not re-observed live.** The hyphenated token is no longer in the local
+token list, and none of the 42 highest-TVL mints across Orca and Meteora has a hyphen in
+its symbol, so the original 400 could not be reproduced; the tests assert against the exact
+recorded string instead.
 
 **Related, smaller:** `GET /gateway/networks/{id}/tokens?search=` filters on symbol and
 name only, so searching a freshly-learned token by its address returns `{"tokens":[]}`
@@ -939,9 +977,10 @@ cheaper option, but it puts the correctness in every consumer instead of in the 
   unrun: fee collection against a position that has any, pool creation, and
   `manage_amm(create_pool)`, which no test step exercises at all. The "verify" notes on the fixed issues above remain outstanding except
   where a section says otherwise.
-- **GW-12 through GW-16**, none of which is a wrong answer — they are ways a wrong
-  request is accepted quietly, or a right one is described badly. **GW-17 is not in that
-  category**: it is a stored number with the wrong sign.
+- **GW-12 through GW-16 and GW-18**, none of which is a wrong answer — they are ways a
+  wrong request is accepted quietly, or a right one is described badly. GW-17 *was* in a
+  different category — a stored number with the wrong sign — and is now fixed, along with
+  GW-19.
 - **Connector-specific response fields are gone from HTTP** — orca's `sqrtPrice`/`tvlUsdc`,
   0x's `gasEstimate`, jupiter's `quoteResponse`. Deleting `/connectors/*` removed the only
   surface that exposed them. If any are wanted back, the fix is extending the unified
