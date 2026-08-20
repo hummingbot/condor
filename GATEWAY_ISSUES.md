@@ -30,6 +30,7 @@ changed every path these issues live on.
 | GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | **open** |
 | GW-20 | A DAMM v2 open records the position rent as deposited liquidity | fixed |
 | GW-21 | Nothing downstream can close an AMM position, so rent is stranded | fixed (routes collapsed) |
+| GW-22 | `position_info` ignored the position it was given (condor) | fixed |
 
 GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
 lint 0 errors, and `openapi.json` regenerates identical to the committed copy.
@@ -837,6 +838,43 @@ the close, which is what it was already calling.
 rent. Removing 100% of it against a container built from `74a1ee512` should refund
 ~0.0099 SOL and record it — a check GW-20's own fix does not cover, since that one is
 about the open side.
+
+
+---
+
+## GW-22 — `position_info` answered about every position but the one it was given
+**Status: fixed** in condor `51300d7`. **Lives in condor, not Gateway or hummingbot-api** —
+nothing to do on either of those, noted here only because it is the same failure mode as
+GW-12 and turned up during the same mainnet run.
+
+`manage_clmm(action="position_info")` always called `get_positions_owned`, which answers
+with every CLMM position the wallet holds on the connector. `position_address` is declared
+on `CLMMRequest`, so pydantic accepted it and the handler dropped it — no error, just a
+different question answered:
+
+```python
+if action == "position_info":
+    result = await gc.get_positions_owned(          # position_address never read
+        connector=connector, network=net,
+        wallet_address=request.wallet_address,
+    )
+```
+
+It read as correct for the whole life of the tool because the test wallet held exactly one
+orca position, so "that position" and "every position" were the same list. Opening a second
+made it visible: asking about the new one returned both.
+
+Nothing was missing underneath — `hummingbot_api_client.gateway_clmm.get_position_info`
+existed, and hummingbot-api already served `GET /gateway/clmm/position-info` behind it.
+Only the branch that chooses between them was absent.
+
+**Also added:** `in_range` on each rendered row. It is the reason a position earns or does
+not, and it explains the fee column beside it — during this run the in-range position
+accrued from `1.3E-8` to `1.93E-7` base while the out-of-range one stayed at exactly zero,
+which without the flag reads as two positions behaving inconsistently.
+
+Mutation-checked: reverting to `positions_owned`, and returning the single position
+unwrapped, each fail the three new tests in `tests/test_manage_clmm.py`.
 
 
 ---
