@@ -27,6 +27,7 @@ changed every path these issues live on.
 | GW-16 | Leftovers the unification did not sweep | **open** |
 | GW-17 | `baseTokenAmountAdded` is signed on some connectors, a magnitude on others | **open** |
 | GW-18 | pancakeswap-sol's close reports fees and rent as a hardcoded 0 | **open** |
+| GW-19 | A hyphen in a token symbol makes its pair unquotable (hummingbot-api) | **open** |
 
 GW-1 through GW-11 are code-complete and green: 1144 tests, 141 suites, clean typecheck,
 lint 0 errors, and `openapi.json` regenerates identical to the committed copy.
@@ -655,6 +656,52 @@ second), and report the real rent instead of 0.
 **Not yet observed live** — the test wallet holds no pancakeswap-sol positions, so this is
 read from the source rather than from a response. The related `collect_fees` route on the
 same connector does report real amounts; it is only `closePosition` that flattens them.
+
+---
+
+## GW-19 — a token whose symbol contains a hyphen makes its pair unquotable
+**Status: open. Lives in hummingbot-api, not Gateway** — but Gateway's chain-learning
+feature is what makes it reachable, so it belongs with that work. Found live 2026-08-19,
+minutes after that feature first recorded a token.
+
+`routers/gateway_swap.py:62` and `:148`:
+
+```python
+base, quote = request.trading_pair.split("-")
+```
+
+No `maxsplit`, no guard. Any symbol containing a hyphen raises `ValueError`, which escapes
+as the HTTP message:
+
+```
+400  'too many values to unpack (expected 2)'
+```
+
+Two things are wrong there. The pair is unquotable at all, and the caller is handed a
+Python internal instead of an explanation — there is no way to read that message and learn
+that the symbol is the problem.
+
+**Why it is newly reachable.** Gateway now reads a token's name, symbol and decimals off
+the chain the first time it is used. Symbols are then whatever the mint says, not what a
+curated list allows. The first pool this was exercised against recorded its base token as
+`DOGE-1`, so Gateway filed the pool under `trading_pair: "DOGE-1-SOL"` — a string
+hummingbot-api cannot parse back into two tokens. Gateway is right; the pair *is*
+`DOGE-1` over `SOL`. The consumer's split is what assumes a symbol has no hyphen.
+
+```
+"DOGE-1-SOL"                                     → 400, cannot quote
+"DpBzjtgG…vfhm-SOL"  (the mint, spelled out)     → quotes fine
+```
+
+**Fix:** `rsplit("-", 1)` at both sites, and raise something that names the pair. The same
+bare unpack appears at `routers/market_data.py:382,406` and
+`services/orders_recorder.py:226,238`; `routers/executors.py:438,517` and two more in
+`services/` take `parts = ...split("-")` and index, which mangles rather than raises.
+
+**Related, smaller:** `GET /gateway/networks/{id}/tokens?search=` filters on symbol and
+name only, so searching a freshly-learned token by its address returns `{"tokens":[]}`
+while the token is in the list. The pool search on the same router *does* match an address,
+which is what makes it a trap rather than merely a limitation.
 
 ---
 
