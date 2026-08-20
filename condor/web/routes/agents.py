@@ -18,14 +18,21 @@ stays shared at ``agents/{slug}/``.
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import hashlib
+import hmac
 import logging
 import os
+import re
 import time
+from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from PIL import Image, UnidentifiedImageError
+from pydantic import BaseModel, Field, field_validator
 
 from condor.agents.ownership import OwnedBot
 from condor.agents.sessions_index import (
@@ -304,12 +311,69 @@ class SetStateRequest(BaseModel):
     clear: bool = False
 
 
+MAX_CONSULT_IMAGE_BYTES = 4 * 1024 * 1024
+MAX_CONSULT_IMAGE_BASE64_CHARS = 4 * ((MAX_CONSULT_IMAGE_BYTES + 2) // 3)
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class ConsultImage(BaseModel):
+    media_type: Literal["image/png"]
+    data_base64: str = Field(max_length=MAX_CONSULT_IMAGE_BASE64_CHARS)
+    sha256: str
+
+    @field_validator("sha256")
+    @classmethod
+    def validate_sha256(cls, value: str) -> str:
+        if not _SHA256_RE.fullmatch(value):
+            raise ValueError("sha256 must be 64 lowercase hexadecimal characters")
+        return value
+
+
 class ConsultRequest(BaseModel):
     task: str
     context: str = ""
     chat_id: int = 0
     user_id: int | None = None
     server_name: str | None = None
+    image: ConsultImage | None = None
+
+
+class ConsultResponse(BaseModel):
+    agent: str
+    answer: str
+
+
+def _decode_consult_image(image: ConsultImage) -> bytes:
+    try:
+        data = base64.b64decode(image.data_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid consult image encoding") from exc
+    if not data:
+        raise HTTPException(status_code=422, detail="Consult image must not be empty")
+    if len(data) > MAX_CONSULT_IMAGE_BYTES:
+        raise HTTPException(status_code=413, detail="Consult image exceeds size limit")
+    if not data.startswith(_PNG_SIGNATURE):
+        raise HTTPException(status_code=422, detail="Consult image is not a PNG")
+    try:
+        with Image.open(BytesIO(data)) as parsed_image:
+            if parsed_image.format != "PNG":
+                raise HTTPException(status_code=422, detail="Consult image is not a PNG")
+            parsed_image.verify()
+    except HTTPException:
+        raise
+    except (
+        Image.DecompressionBombError,
+        UnidentifiedImageError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(status_code=422, detail="Consult image is invalid") from exc
+    digest = hashlib.sha256(data).hexdigest()
+    if not hmac.compare_digest(digest, image.sha256):
+        raise HTTPException(status_code=422, detail="Consult image digest mismatch")
+    return data
 
 
 class StartStrategyRequest(BaseModel):
@@ -1210,13 +1274,14 @@ async def delete_agent(slug: str, user: WebUser = Depends(get_current_user)):
     return {"deleted": True}
 
 
-@router.post("/{slug}/consult")
+@router.post("/{slug}/consult", response_model=ConsultResponse)
 async def consult_agent(
     slug: str, req: ConsultRequest, user: WebUser = Depends(get_current_user)
 ):
     """Run an Agent consult (its brain to completion) and return the answer."""
-    from condor.agents.consult import run_consult
     from config_manager import get_config_manager
+
+    from condor.agents.consult import UnsupportedConsultImageError, run_consult
 
     if not req.task:
         raise HTTPException(status_code=400, detail="task is required")
@@ -1232,14 +1297,19 @@ async def consult_agent(
     # Web callers always act as themselves; the ``user_id`` override is reserved
     # for trusted internal/MCP callers and must not let a session impersonate
     # another user's memory/skill scope.
-    answer = await run_consult(
-        slug=slug,
-        user_id=user.id,
-        chat_id=req.chat_id,
-        server_name=req.server_name,
-        task=req.task,
-        context=req.context,
-    )
+    image_data = _decode_consult_image(req.image) if req.image is not None else None
+    try:
+        answer = await run_consult(
+            slug=slug,
+            user_id=user.id,
+            chat_id=req.chat_id,
+            server_name=req.server_name,
+            task=req.task,
+            context=req.context,
+            image_data=image_data,
+        )
+    except UnsupportedConsultImageError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"agent": slug, "answer": answer}
 
 

@@ -509,6 +509,7 @@ def _hummingbot_mcp_args(server: dict[str, Any], server_name: str) -> list[str]:
     api_url = f"http://{server['host']}:{server['port']}"
     return [
         "run",
+        "--no-sync",
         "python",
         "-m",
         "mcp_servers.hummingbot_api",
@@ -581,7 +582,7 @@ def build_mcp_servers_for_session(
     condor = {
         "name": "condor",
         "command": "uv",
-        "args": ["run", "python", "-m", "mcp_servers.condor"]
+        "args": ["run", "--no-sync", "python", "-m", "mcp_servers.condor"]
         + _condor_mcp_args(
             chat_id,
             user_id,

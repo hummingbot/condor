@@ -31,6 +31,33 @@ from condor.preferences import resolve_custom_endpoint
 log = logging.getLogger(__name__)
 
 
+class UnsupportedConsultImageError(ValueError):
+    """The selected consultation client cannot accept native image content."""
+
+
+# Fail closed: provider families do not imply that every model accepts images.
+# Add only exact model keys whose native image-input contract has been verified.
+IMAGE_INPUT_MODEL_KEYS = frozenset(
+    {
+        "openai:gpt-5-mini",
+        "openrouter:openai/gpt-5-mini",
+    }
+)
+
+
+def supports_consult_image(model_key: str) -> bool:
+    """Return whether an exact configured model key accepts native PNG input."""
+    return model_key in IMAGE_INPUT_MODEL_KEYS
+
+
+def _build_consult_prompt_input(prompt: str, image_data: bytes | None):
+    if image_data is None:
+        return prompt
+    from pydantic_ai.messages import BinaryContent
+
+    return [prompt, BinaryContent(data=image_data, media_type="image/png")]
+
+
 def _build_consult_permission_cb(slug: str, user_id: int, chat_id: int):
     """Build the human-confirm callback for a consult.
 
@@ -41,9 +68,10 @@ def _build_consult_permission_cb(slug: str, user_id: int, chat_id: int):
     than being silently auto-approved.
     """
     try:
+        from handlers.agents.confirmation import TelegramChannel
+
         from condor.routine_store import get_routine_store
         from condor.runtime.confirmations import build_permission_callback
-        from handlers.agents.confirmation import TelegramChannel
 
         bot = get_routine_store().get_bot()
         if bot is not None:
@@ -66,6 +94,7 @@ async def run_consult(
     server_name: str | None,
     task: str,
     context: str = "",
+    image_data: bytes | None = None,
 ) -> str:
     """Consult the Agent ``slug`` with ``task`` and return its answer.
 
@@ -82,6 +111,7 @@ async def run_consult(
         server_name=server_name,
         task=task,
         context=context,
+        image_data=image_data,
         permission_callback=permission_cb,
     )
 
@@ -93,6 +123,7 @@ async def _run_agent_to_completion(
     server_name: str | None,
     task: str,
     context: str = "",
+    image_data: bytes | None = None,
     permission_callback=None,
     event_sink=None,
     delegate_worker: bool = False,
@@ -124,8 +155,8 @@ async def _run_agent_to_completion(
         index = store.list_index()
         available = f"\n\nAvailable agents:\n{index}" if index else ""
         return f"No agent named '{slug}' is available.{available}"
-    # Every Agent is consultable — there is no separate "expert" kind and no
-    # capability gate. Only a pydantic-ai key has a local backend to preflight, so
+    # Every Agent is consultable — there is no separate "expert" kind. Only a
+    # pydantic-ai key has a local backend to preflight, so
     # a stopped Ollama/LM Studio fails fast with a clear reason (and falls back to
     # claude-code) instead of a deep httpx error mid-run. ACP keys (claude-code/
     # gemini/copilot) need no backend and route straight to the ACP client below.
@@ -163,6 +194,11 @@ async def _run_agent_to_completion(
                     "Start the model backend, or set CONSULT_FALLBACK_MODEL to a "
                     "reachable model to auto-fall-back."
                 )
+
+    if image_data is not None and not supports_consult_image(model_key):
+        raise UnsupportedConsultImageError(
+            "The selected consultation model does not support image input"
+        )
 
     # Build the Agent's MCP toolset in the main process (ConfigManager is here).
     # agent_slug scopes the condor MCP tools' memory/skills to this Agent (its brain).
@@ -219,16 +255,17 @@ async def _run_agent_to_completion(
         )
 
     prompt = build_agent_context(agent, user_id, task, context)
+    prompt_input = _build_consult_prompt_input(prompt, image_data)
 
     await client.start()
     try:
         if event_sink is None:
-            answer = await client.prompt(prompt)
+            answer = await client.prompt(prompt_input)
         else:
             from condor.acp.client import TextChunk
 
             chunks: list[str] = []
-            async for event in client.prompt_stream(prompt):
+            async for event in client.prompt_stream(prompt_input):
                 event_sink(event)
                 if isinstance(event, TextChunk):
                     chunks.append(event.text)
