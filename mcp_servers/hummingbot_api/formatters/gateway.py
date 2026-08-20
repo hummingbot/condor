@@ -207,11 +207,37 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
         # AMM write responses are chain-neutral: the tx identifier is
         # `signature` (AMMTransactionResponse / AMMCreatePoolResponse), not
         # `transaction_hash` as on the CLMM surface.
-        tx = payload.get("signature")
-        extra = ""
+        lines = [header, f"Tx: {payload.get('signature')}  Status: {payload.get('status')}"]
         if action == "create_pool":
-            extra = f"\nPool: {payload.get('pool_address')}  Seed price: {payload.get('price')}"
-        return f"{header}\nTx: {tx}  Status: {payload.get('status')}{extra}"
+            lines.append(f"Pool: {payload.get('pool_address')}  Seed price: {payload.get('price')}")
+            return "\n".join(lines)
+
+        # What the transaction actually moved. hummingbot-api passes Gateway's `data`
+        # through untyped on this surface, so these keys are camelCase — the CLMM
+        # branches read snake_case because those responses are typed models. Printing
+        # neither, which is what this did, told the caller a transaction confirmed and
+        # nothing about the money: a close moving 3188 base and 0.0219 quote reported
+        # both as nothing.
+        added = action == "add_liquidity"
+        data = payload.get("data") or {}
+        # Only when there is one: a fungible-LP pool has no position address, and
+        # "Position: None" reads as a missing value rather than an absent concept.
+        if result.get("position_address"):
+            lines.insert(1, f"Position: {result['position_address']}")
+        base = data.get("baseTokenAmountAdded" if added else "baseTokenAmountRemoved")
+        quote = data.get("quoteTokenAmountAdded" if added else "quoteTokenAmountRemoved")
+        if base is not None or quote is not None:
+            lines.append(f"Liquidity {'deposited' if added else 'withdrawn'} — base: {base}  quote: {quote}")
+        # Rent is a third kind of money, as on the CLMM close: locked when the position
+        # account is created, returned when it closes, never income and never principal.
+        # A partial removal closes nothing, so its absence there is a fact, not a gap.
+        rent = data.get("positionRent" if added else "positionRentRefunded")
+        if rent is not None:
+            lines.append(f"Position rent {'locked' if added else 'refunded'}: {rent}")
+        fee = data.get("fee")
+        if fee is not None:
+            lines.append(f"Gas: {fee}")
+        return "\n".join(lines)
 
     return f"{header}\n{payload}"
 
@@ -294,12 +320,24 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
         return "\n".join(lines)
 
     if action in ("add_liquidity", "remove_liquidity") and isinstance(payload, dict):
-        tx = payload.get("transaction_hash")
-        return (
-            f"{header}\n"
-            f"Position: {result.get('position_address')}\n"
-            f"Tx: {tx}  Status: {payload.get('status')}"
-        )
+        added = action == "add_liquidity"
+        lines = [header]
+        if payload.get("position_address"):
+            lines.append(f"Position: {payload['position_address']}")
+        lines.append(f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}")
+        # The amounts are the point of the call and were never printed: a removal that
+        # moved thousands of base tokens reported only that a transaction confirmed.
+        # These are flat and snake_case here — /clmm/add and /clmm/remove return a plain
+        # dict, unlike the AMM writes above, which pass Gateway's camelCase `data`
+        # through untouched.
+        base = payload.get("base_token_amount_added" if added else "base_token_amount_removed")
+        quote = payload.get("quote_token_amount_added" if added else "quote_token_amount_removed")
+        if base is not None or quote is not None:
+            lines.append(f"Liquidity {'deposited' if added else 'withdrawn'} — base: {base}  quote: {quote}")
+        gas = payload.get("gas_fee")
+        if gas is not None:
+            lines.append(f"Gas: {gas}")
+        return "\n".join(lines)
 
     if action == "create_pool" and isinstance(payload, dict):
         return (
