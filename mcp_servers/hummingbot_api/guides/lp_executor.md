@@ -82,6 +82,16 @@ Any state may transition to `FAILED` if max retries are exhausted with nothing l
 - `extra_params`: Connector-specific params, e.g., `{"strategyType": 0}` for Meteora
 - `keep_position`: Default `True` — keep the net token change as a held spot position when closed. Set `False` to swap back to the original quote asset on close.
 
+**Slippage (a ramp, not a single value):**
+- `slippage_pct`: What the *first* attempt asks for. Default `0.05` — deliberately tight, so a position that can be opened or closed at near-spot is.
+- `slippage_multiplier`: How much wider each retry goes. Default `5`.
+- `max_slippage_pct`: The ceiling. Default `5`.
+- Together the defaults give the ramp **0.05 → 0.25 → 1.25 → 5**. It widens **only** on a failure Gateway attributed to slippage (`SLIPPAGE_EXCEEDED`); a wrong tick, an insufficient balance or a transport error retries at the same tolerance, because loosening one that was never too tight just pays more for the same trade.
+- The ramp resets at each phase boundary — open, close, close-out swap — so a close starts tight again rather than inheriting however wide the open had to go.
+- At the ceiling an **exit keeps trying** (the position is real and has to come out) and an **entry stops** (nothing is stranded by abandoning it).
+- Enforcement is per connector on the close: orca, uniswap and pancakeswap apply a minimum-amount check; meteora, raydium and pancakeswap-sol currently close without one, so the ramp changes nothing there.
+- `current_retries` and the live `slippage_pct` are both in the executor's `custom_info`, so a position that took several widenings says so.
+
 **Limit Prices (auto-close triggers, grid-executor style):**
 - `upper_limit_price`: Close when current price ≥ this value (default `None` = no upper limit)
 - `lower_limit_price`: Close when current price ≤ this value (default `None` = no lower limit)
