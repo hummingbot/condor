@@ -6,6 +6,7 @@ import numpy as np
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
 
+from condor.fetchers.executors import extract_executors_list
 from condor.reports import LiveReport
 from config_manager import get_client
 
@@ -153,12 +154,50 @@ def _grid_config(direction, price, grid_D, config):
 # ── Executor helpers ──────────────────────────────────────────────────────────
 
 
-async def _teardown(client, executor_id, log, ts):
+async def _active_executors(client):
+    """Active executors as a list.
+
+    ``search_executors`` returns hapi's ``{"data": [...], "pagination": {...}}``
+    envelope, not a bare list — iterating the response directly walks its string
+    keys, so ``e.get(...)`` raises AttributeError. Every other consumer in the
+    repo goes through this same helper.
+    """
+    result = await client.executors.search_executors(
+        controller_ids=[], status="active", limit=50
+    )
+    return extract_executors_list(result)
+
+
+async def _teardown(client, executor_id, log, ts) -> bool:
+    """Stop a grid and confirm it is really gone. True only if it is.
+
+    The caller clears its executor id and deploys a replacement on the strength
+    of this return, so a stop that failed — or that the venue did not honour —
+    must not read as success. Both would otherwise leave the original leveraged
+    grid trading, untracked, while a second full-budget grid runs beside it.
+    """
     try:
         await client.executors.stop_executor(executor_id)
-        log.append(f"{ts} TEARDOWN {executor_id[:8]} OK")
     except Exception as e:
-        log.append(f"{ts} WARN stop failed: {e}")
+        log.append(f"{ts} WARN stop failed: {e} — keeping grid, no redeploy")
+        return False
+
+    try:
+        still_active = any(
+            str(e.get("id") or e.get("executor_id", "")) == executor_id
+            for e in await _active_executors(client)
+        )
+    except Exception as e:
+        # Cannot prove it stopped; treat as still running rather than stack grids.
+        log.append(f"{ts} WARN stop unverified: {e} — keeping grid, no redeploy")
+        return False
+
+    if still_active:
+        log.append(f"{ts} WARN {executor_id[:8]} still active after stop")
+        return False
+
+    log.append(f"{ts} TEARDOWN {executor_id[:8]} OK")
+    return True
 
 
 async def _deploy(client, direction, price, grid_D, config, log, ts):
@@ -200,6 +239,10 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         tags=["trading", "kalman", "adaptive-grid-trader", "live"],
         auto_refresh_seconds=60,
     )
+
+    # Bound before the loop: the CancelledError handler below stops the live
+    # grid, and cancellation can arrive before the first tick ever assigns it.
+    client = None
 
     try:
         while True:
@@ -252,9 +295,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 new_direction = direction
 
                 if executor_id is not None:
-                    execs = await client.executors.search_executors(
-                        controller_ids=[], status="active", limit=50
-                    )
+                    execs = await _active_executors(client)
                     our_exec = next(
                         (
                             e
@@ -348,16 +389,22 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
                 # ── 3. Execute ────────────────────────────────────────────
                 if action in ("retune", "flip"):
-                    await _teardown(client, executor_id, log, ts)
-                    executor_id = grid_D_deployed = deployed_at = None
-                    pnl = fills = 0.0
-                    pnl_history.clear()
-                    fills_history.clear()
-                    direction = new_direction
-                    if direction in ("LONG", "SHORT"):
-                        action = "deploy"
+                    if await _teardown(client, executor_id, log, ts):
+                        executor_id = grid_D_deployed = deployed_at = None
+                        pnl = fills = 0.0
+                        pnl_history.clear()
+                        fills_history.clear()
+                        direction = new_direction
+                        if direction in ("LONG", "SHORT"):
+                            action = "deploy"
+                        else:
+                            action = "hold"
                     else:
+                        # Old grid may still be live. Keep tracking it and retry
+                        # next tick rather than deploying a second full-budget
+                        # grid on top of exposure we failed to close.
                         action = "hold"
+                        action_reason = "teardown failed — retry next tick"
 
                 if action == "deploy" and new_direction in ("LONG", "SHORT"):
                     direction = new_direction
@@ -427,13 +474,29 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             await asyncio.sleep(config.interval_sec)
 
     except asyncio.CancelledError:
+        # Stopping the operator must stop what it is operating. Without this the
+        # grid keeps trading for the rest of its configured lifetime with nobody
+        # left to monitor, retune or exit it.
+        stop_note = "FLAT"
+        if executor_id and client:
+            try:
+                await client.executors.stop_executor(executor_id)
+                stop_note = f"{executor_id[:8]} stopped"
+            except Exception as e:
+                # Say so loudly: the grid is still live and now unmanaged.
+                logger.error(
+                    f"Kalman Grid Operator cancelled but grid {executor_id} "
+                    f"could not be stopped — it is still trading: {e}"
+                )
+                stop_note = f"{executor_id[:8]} STILL LIVE — stop it manually"
+
         if report.report_id is not None:
             report.clear()
             report.builder.auto_refresh(None)
             report.builder.section("STOPPED", f"Final snapshot — {tick_count} ticks")
             report.builder.kpi("Total Ticks", str(tick_count))
             report.builder.kpi("Direction", direction or "—")
-            report.builder.kpi("Grid", executor_id[:8] if executor_id else "FLAT")
+            report.builder.kpi("Grid", stop_note)
             report.builder.markdown("\n".join(f"`{l}`" for l in log[-20:]))
             await report.update()
         return f"Kalman Grid Operator stopped after {tick_count} ticks"
