@@ -87,10 +87,7 @@ percentage_to_remove=100)`** if ANY fires:
   can still get, immediately.
 
 After removing, the base token you get back is dust exposure — swap it to SOL with
-`manage_gateway_swaps(action="execute", connector="meteora/amm", network="solana-mainnet-beta",
-trading_pair="<BASE>-SOL", side="SELL", amount=<received base>)`. If that returns "No pool found"
-(Gateway doesn't know this token — see §"Swaps" in AGENT.md), retry with
-`connector="jupiter/router"`. Omit `slippage_pct` so the connector's own setting applies. Journal
+`manage_amm(action="execute_swap", side="SELL", base_token=<mint>, amount=<received base>)`. Journal
 the exit (pool, reason, realized pnl_pct, fees, duration) as a `learning` if the reason is new.
 
 ### 3. Detect — ONE routine call (only if free > 0)
@@ -106,12 +103,7 @@ Drop any pool you already hold. Take the top candidate whose `Age(h) ≥ entry.m
 
 ### 4. Gate the candidate (skill: launch_safety_check)
 Run the full gate — reject on ANY failure, then try the next candidate (max 2 candidates/tick):
-1. **Sellability:** `manage_gateway_swaps(action="quote", connector="meteora/amm",
-   network="solana-mainnet-beta", trading_pair="<BASE>-SOL", side="SELL", amount=<small>)` AND
-   `side="BUY"` both return sane quotes. **"No pool found" ≠ honeypot** — Gateway matches its
-   configured pool list by token SYMBOL and won't know a fresh mint; retry both through
-   `connector="jupiter/router"`, and if neither venue quotes at all treat the gate as
-   **inconclusive** and skip the candidate (do not journal it as a honeypot).
+1. **Sellability:** `manage_amm(quote_swap, side="SELL", …)` AND `side="BUY"` both return sane quotes.
 2. **Safety routine:** `manage_routines(action="run", name="launch_safety_check", config={"pool_address":<p>,
    "rpc_url":<rpc_url>, "require_mint_renounced":true, "require_freeze_disabled":true,
    "max_top10_holder_pct":<entry.max_top10_holder_pct>, "require_verified":<entry.require_verified>})`
@@ -121,9 +113,7 @@ Run the full gate — reject on ANY failure, then try the next candidate (max 2 
 ### 5. Open ONE position (small, capped)
 Early LP is **directional-long the token** — size at `min(capital_per_position, max_quote_per_position)`.
 - Acquire the token side: swap `capital × base_pct/100` SOL → base token via
-  `manage_gateway_swaps(action="execute", connector="meteora/amm", network="solana-mainnet-beta",
-  trading_pair="<BASE>-SOL", side="BUY", amount=<token units ≈ capital×base_pct/100/price>)`
-  (fall back to `connector="jupiter/router"` on "No pool found"; omit `slippage_pct`).
+  `manage_amm(action="execute_swap", side="BUY", base_token=<mint>, amount=<token units ≈ capital×base_pct/100/price>)`.
   **Haircut the received amount ×0.995** (the swap fills slightly under the quote; opening with the
   quoted figure asks for tokens you don't have and the add fails on-chain). Prefer reading the actual
   post-swap wallet balance.

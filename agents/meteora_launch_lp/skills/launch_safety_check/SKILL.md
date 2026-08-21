@@ -19,24 +19,13 @@ always another graduation.
 ## Gate order (cheapest / most-disqualifying first)
 
 ### 1. Sellability (honeypot) — do this FIRST, it's the killer
-A token you can buy but can't sell is a total loss. Round-trip a quote through
-**`manage_gateway_swaps`** (`manage_amm` has no swap actions — it is LP-only):
-- `manage_gateway_swaps(action="quote", connector="meteora/amm", network="solana-mainnet-beta", trading_pair="<BASE>-SOL", side="SELL", amount=<small>)`
+A token you can buy but can't sell is a total loss. Round-trip a quote through the pool:
+- `manage_amm(action="quote_swap", connector="meteora", network="solana-mainnet-beta", pool_address=<pool>, base_token=<base_mint>, side="SELL", amount=<small>)`
 - and `... side="BUY", amount=<small>`
 
-Both must return a sane quote. If the **SELL** quote returns ~0 out or an absurd price impact →
-**honeypot, reject.** (A transfer-fee/tax token shows as a large one-directional impact — treat
+Both must return a sane quote. If the **SELL** quote errors, reverts, or returns ~0 out / absurd price
+impact → **honeypot, reject.** (A transfer-fee/tax token shows as a large one-directional impact — treat
 high asymmetric impact as a red flag too.)
-
-**"No pool found" is NOT a honeypot verdict.** With `"meteora/amm"` Gateway resolves the pool from
-**its own configured pool list, by token SYMBOL** — you cannot pass a `pool_address`, and a
-freshly-graduated token's mint is usually not in that list (creating a pool does not register it).
-On a fresh launch that error means **unknown to Gateway**, not "unsellable". Re-run both quotes
-through **`connector="jupiter/router"`**, which prices off live on-chain routes. Only treat the gate
-as FAILED when a quote actually returns and looks wrong, or when the router itself finds no route
-for the SELL direction while the BUY direction routes fine — *that* asymmetry is the honeypot
-signature. If neither venue can quote at all, the gate is **INCONCLUSIVE**: journal it and skip the
-candidate rather than recording a honeypot.
 
 ### 2. Objective on-chain + static gates — one routine call
 ```
