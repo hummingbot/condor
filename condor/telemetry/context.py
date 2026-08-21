@@ -95,9 +95,25 @@ def _llm_providers() -> list[str]:
     return found
 
 
+def _mode() -> str:
+    """``telegram`` | ``local``. Which surface this install actually runs.
+
+    One of two fixed names, never a token, a chat id or a host — it answers
+    "how many installs run Condor without Telegram at all?", which is the whole
+    point of local mode and was previously invisible.
+    """
+    try:
+        from utils.config import CONDOR_MODE
+
+        return CONDOR_MODE
+    except Exception:
+        return "unknown"
+
+
 def config_shape() -> dict:
     """Counts and capability flags. Every field is a bool, an int, or a fixed name."""
     shape: dict = {
+        "mode": _mode(),
         "has_web": True,
         "has_gateway": False,
         "has_hb_api": False,

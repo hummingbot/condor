@@ -1000,6 +1000,43 @@ export interface VoiceSettingsResponse {
   available_languages: Record<string, string>;
 }
 
+// ── Telemetry (FEAT-023) ──
+
+/** The only two answers. `off` is reachable only from the environment. */
+export type TelemetryLevel = "ping" | "usage";
+
+export interface TelemetryOption {
+  level: TelemetryLevel;
+  label: string;
+}
+
+/**
+ * What the install is told before it answers, served by the backend so this
+ * copy and the Telegram prompt's cannot drift (`condor/telemetry/prompt.py`).
+ */
+export interface TelemetryDisclosure {
+  headline: string;
+  always_on: string;
+  optional: string;
+  never: string[];
+  doc: string;
+  options: TelemetryOption[];
+}
+
+export interface TelemetrySettingsResponse {
+  /** `unknown` until someone answers — that is what the consent card asks. */
+  consent: "unknown" | "granted" | "denied";
+  level: "off" | TelemetryLevel;
+  /** `CONDOR_TELEMETRY` is pinned in the environment; nothing here can change it. */
+  env_overridden: boolean;
+  endpoint_configured: boolean;
+  pending_events: number;
+  privacy_doc: string;
+  /** Consent is install-wide, so only the admin may answer. */
+  can_change: boolean;
+  disclosure: TelemetryDisclosure;
+}
+
 // ── Chat ──
 
 export interface ChatAgentOption {
@@ -2141,6 +2178,18 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+
+  // ── Telemetry (FEAT-023) ──
+
+  getTelemetrySettings: () =>
+    apiFetch<TelemetrySettingsResponse>("/api/v1/settings/telemetry"),
+
+  /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned. */
+  setTelemetryLevel: (level: TelemetryLevel) =>
+    apiFetch<{ level: TelemetryLevel; consent: string }>(
+      `/api/v1/settings/telemetry?level=${level}`,
+      { method: "PUT" },
+    ),
 
   // ── Chat ──
 

@@ -13,6 +13,12 @@ mode, the JWT it mints is an ordinary one (``get_current_user`` never learns
 which mode it is in), the identity ``make setup`` writes actually resolves, and
 PTB still runs a job queue on an Application that was never initialized.
 
+The identity tests carry a second lesson. Local mode logs in as
+``ADMIN_USER_ID`` and nothing else: a dedicated ``CONDOR_LOCAL_USER_ID`` was a
+second knob for one identity, and the two disagreed the moment a Telegram
+install flipped ``CONDOR_MODE=local``. Whether that identity resolves is now
+settled at boot, where the .env is, rather than by a 500 from the browser.
+
 Sync tests driving coroutines with ``asyncio.run``: ``pytest-asyncio`` is a dev
 dependency but is not installed in this venv (same convention as
 ``tests/test_notifications.py``).
@@ -29,7 +35,9 @@ from config_manager import ConfigManager, ServerPermission, UserRole
 from utils import config as app_config
 from utils.config import (
     ConfigError,
+    check_local_user,
     check_startup_config,
+    resolve_admin_id,
     resolve_local_user_id,
     resolve_mode,
     resolve_web_host,
@@ -155,17 +163,104 @@ def test_uvicorn_binds_the_resolved_host(monkeypatch):
     "env, expected",
     [
         ({}, 1),
-        ({"CONDOR_LOCAL_USER_ID": ""}, 1),
-        ({"CONDOR_LOCAL_USER_ID": "42"}, 42),
+        ({"ADMIN_USER_ID": ""}, 1),
+        ({"ADMIN_USER_ID": "  "}, 1),
+        # The admin *is* the local user. There is no second knob to disagree
+        # with this one.
+        ({"ADMIN_USER_ID": "42"}, 42),
+        ({"ADMIN_USER_ID": " 123456789 "}, 123456789),
         # Junk and falsy ids fall back to 1: several call sites read a falsy
         # user or chat id as "absent", so 0 would silently address nobody.
-        ({"CONDOR_LOCAL_USER_ID": "nope"}, 1),
-        ({"CONDOR_LOCAL_USER_ID": "0"}, 1),
-        ({"CONDOR_LOCAL_USER_ID": "-5"}, 1),
+        # check_startup_config refuses to boot on these separately.
+        ({"ADMIN_USER_ID": "nope"}, 1),
+        ({"ADMIN_USER_ID": "0"}, 1),
+        ({"ADMIN_USER_ID": "-5"}, 1),
     ],
 )
 def test_resolve_local_user_id(env, expected):
     assert resolve_local_user_id(env) == expected
+
+
+def test_local_user_is_the_admin_when_a_telegram_install_flips_mode():
+    """The regression this collapse exists for.
+
+    A Telegram install that sets ``CONDOR_MODE=local`` keeps its Telegram
+    ``ADMIN_USER_ID``. Local mode used to log in as a hardcoded ``1`` that
+    ``config.yml`` had never heard of, so ``/auth/local-login`` 500'd on an
+    install that was, by every other measure, correctly configured.
+    """
+    env = {"CONDOR_MODE": "local", "ADMIN_USER_ID": "123456789"}
+
+    assert resolve_local_user_id(env) == 123456789
+    assert resolve_local_user_id(env) == resolve_admin_id(env)
+
+
+@pytest.mark.parametrize("raw", ["ralphsohandsome", "1.5", "0", "-5", "1,2"])
+def test_an_unusable_admin_id_refuses_to_start(raw):
+    """A typo'd ADMIN_USER_ID used to be swallowed, leaving *no admin at all*.
+
+    No admin panel, no approvals, no boot notification, and in local mode no
+    user to log in as — each of which surfaces later as unrelated breakage.
+    """
+    with pytest.raises(ConfigError) as excinfo:
+        check_startup_config({"ADMIN_USER_ID": raw, "TELEGRAM_TOKEN": "123:abc"})
+
+    assert "ADMIN_USER_ID" in str(excinfo.value)
+    assert raw in str(excinfo.value)
+
+
+@pytest.mark.parametrize("raw", ["1", "123456789", " 42 "])
+def test_a_usable_admin_id_starts(raw):
+    check_startup_config({"ADMIN_USER_ID": raw, "TELEGRAM_TOKEN": "123:abc"})
+
+
+# ── Local mode's user is checked at boot, not at login ──
+
+
+def test_local_mode_refuses_to_start_on_an_unconfigured_user():
+    """Ralph's report: the failure has to land in ``make run``, not the browser.
+
+    A dashboard that boots, opens, auto-logs-in and *then* 500s tells you
+    nothing about the .env line that caused it.
+    """
+    with pytest.raises(ConfigError) as excinfo:
+        check_local_user({"CONDOR_MODE": "local"}, get_role=lambda _uid: None)
+
+    message = str(excinfo.value)
+    assert "ADMIN_USER_ID" in message
+    assert "make setup" in message
+
+
+def test_local_mode_names_the_admin_id_it_actually_tried():
+    """The message has to name the id, or it sends you looking in config.yml."""
+    env = {"CONDOR_MODE": "local", "ADMIN_USER_ID": "999"}
+
+    with pytest.raises(ConfigError) as excinfo:
+        check_local_user(env, get_role=lambda _uid: None)
+
+    assert "999" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("role", [UserRole.ADMIN, UserRole.USER])
+def test_local_mode_starts_when_the_user_resolves(role):
+    check_local_user({"CONDOR_MODE": "local"}, get_role=lambda _uid: role)
+
+
+@pytest.mark.parametrize("role", [UserRole.PENDING, UserRole.BLOCKED, None])
+def test_local_mode_refuses_a_user_who_cannot_use_the_dashboard(role):
+    """Same bar as ``get_current_user``: pending and blocked are not sessions."""
+    with pytest.raises(ConfigError):
+        check_local_user({"CONDOR_MODE": "local"}, get_role=lambda _uid: role)
+
+
+@pytest.mark.parametrize("env", [{}, {"CONDOR_MODE": "telegram"}, {"CONDOR_MODE": ""}])
+def test_the_local_user_check_is_a_no_op_in_telegram_mode(env):
+    """Telegram mode has its own auth; this check must never touch it."""
+
+    def _explode(_uid):  # pragma: no cover - must not be called
+        raise AssertionError("config.yml consulted outside local mode")
+
+    check_local_user(env, get_role=_explode)
 
 
 def test_setup_template_gives_the_local_user_a_working_identity(tmp_path, monkeypatch):

@@ -425,6 +425,89 @@ def test_the_install_context_carries_no_identity(install):
             assert identifying not in blob
 
 
+def test_the_envelope_says_which_surface_the_install_runs(install, monkeypatch):
+    """`mode` is one of two fixed names — the adoption signal local mode was
+    built for, and nothing that could point at a host or a chat."""
+    monkeypatch.setattr("utils.config.CONDOR_MODE", "local", raising=False)
+    assert context.config_shape()["mode"] == "local"
+    monkeypatch.setattr("utils.config.CONDOR_MODE", "telegram", raising=False)
+    assert context.config_shape()["mode"] == "telegram"
+
+
+# ── Every install is counted ─────────────────────────────────────────────
+
+
+def test_a_fresh_install_is_counted_without_anyone_answering(install):
+    """The claim that gives this feature its floor. `install` used to be emitted
+    only from the Telegram consent callback, so an install that never answered
+    — every local-mode one — was never counted at all."""
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+
+    assert consent.state() == consent.UNKNOWN  # nobody answered anything
+    assert [e["name"] for e in emitter.drain()[0]] == ["install"]
+
+
+def test_an_install_is_counted_once_however_many_times_it_boots(install):
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+    emitter.drain()
+
+    telemetry.init(hosted=True)
+    telemetry.init(hosted=True)
+    assert emitter.drain()[0] == []
+
+
+def test_answering_the_prompt_does_not_count_the_install_a_second_time(install):
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+    emitter.drain()
+
+    consent.grant("usage")
+    assert consent.mark_install_reported() is False
+
+
+def test_an_install_silenced_by_the_environment_is_never_counted(install, monkeypatch):
+    """`CONDOR_TELEMETRY=off` is the kill switch, and counting is not exempt
+    from it — nothing is recorded and config.yml is left as it was found."""
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "off", raising=False)
+    import condor.telemetry as telemetry
+
+    assert telemetry.init(hosted=True) == consent.OFF
+    assert emitter.drain()[0] == []
+    assert not (install / "config.yml").exists()
+
+
+# ── Asking, on both surfaces ─────────────────────────────────────────────
+
+
+def test_telegram_and_the_dashboard_disclose_exactly_the_same_thing():
+    """Two prompts mean two chances to disagree about what is collected. The
+    dashboard card renders `DISCLOSURE`; the Telegram message is built from it."""
+    from condor.telemetry.prompt import _TEXT, DISCLOSURE
+
+    assert DISCLOSURE["headline"] in _TEXT
+    assert DISCLOSURE["always_on"] in _TEXT
+    assert DISCLOSURE["optional"] in _TEXT
+    assert DISCLOSURE["doc"] in _TEXT
+    for never in DISCLOSURE["never"]:
+        assert never in _TEXT
+
+
+def test_the_prompt_offers_no_way_to_switch_counting_off():
+    """`off` is the operator's env kill switch, never a button — on either
+    surface. A stray option here would quietly make the floor optional."""
+    from condor.telemetry.prompt import DISCLOSURE, OPTIONS
+
+    levels = {option["level"] for option in OPTIONS}
+    assert levels == set(consent.ANSWER_LEVELS)
+    assert consent.OFF not in levels
+    assert [o["level"] for o in DISCLOSURE["options"]] == [o["level"] for o in OPTIONS]
+
+
 # ── Out of process ───────────────────────────────────────────────────────
 
 

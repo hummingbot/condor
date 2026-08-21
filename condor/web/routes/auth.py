@@ -91,14 +91,19 @@ async def local_login(response: Response):
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["Cache-Control"] = "no-store"
 
+    # Who this is was settled at boot by ``utils.config.check_local_user``, which
+    # refuses to start an install this would 500 on. Reaching it here means the
+    # user was removed or blocked while the process was up, so the message names
+    # the knob that decides it rather than sending anyone back to the wizard.
     user_id = app_config.LOCAL_USER_ID
     role = get_config_manager().get_user_role(user_id)
     if role not in (UserRole.USER, UserRole.ADMIN):
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=(
-                f"Local mode user {user_id} is not configured in config.yml — "
-                "re-run `make setup`."
+                f"Local mode logs in as user {user_id} (ADMIN_USER_ID in .env), "
+                "who is no longer an approved user in config.yml. Restore that "
+                "user, or run `make setup` and choose Local mode."
             ),
         )
 

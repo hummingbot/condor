@@ -5,6 +5,12 @@ buttons next to the "Condor is online" notification the admin already gets. It
 is sent at most once per version, the intent is written to disk *before* the
 message goes out (a crash loop must not re-ask forever), and until it is
 answered the install stays at the ``ping`` floor — counted, nothing more.
+
+Telegram is not the only surface that asks. A local-mode install has no bot to
+message, so the dashboard asks instead — ``GET /api/v1/settings/telemetry``
+serves :data:`DISCLOSURE` to the consent card. Both surfaces render the same
+copy from the same constant: a privacy claim written down twice is a privacy
+claim that will eventually disagree with itself.
 """
 
 from __future__ import annotations
@@ -15,19 +21,61 @@ log = logging.getLogger(__name__)
 
 CALLBACK_PREFIX = "telemetry"
 
-_TEXT = (
-    "Help improve Condor?\n\n"
-    "Condor counts installs so the project knows it is used: a random id, the "
-    "version, and an uptime ping — nothing about you or your trading. That is "
-    "always on.\n\n"
-    "It can also send an anonymous, allowlisted usage summary: which commands "
-    "and screens get used, what breaks, and which models agents run. That part "
-    "is up to you.\n\n"
-    "Never included: API keys, wallet addresses, server names or URLs, "
-    "trading pairs, amounts, balances, positions, prompts or agent replies, "
-    "and no Telegram id or username.\n\n"
-    "Full details in PRIVACY.md at the root of the repo, which also says how "
-    "to change this answer at any time."
+# The two answers, in the order both surfaces offer them. `off` is deliberately
+# absent — install counting is the floor (see ``consent.ANSWER_LEVELS``).
+OPTIONS = (
+    {"level": "usage", "label": "Yes, share usage summaries"},
+    {"level": "ping", "label": "Only count my install"},
+)
+
+# Everything an install is told before it answers.
+DISCLOSURE = {
+    "headline": "Help improve Condor?",
+    "always_on": (
+        "Condor counts installs so the project knows it is used: a random id, "
+        "the version, and an uptime ping — nothing about you or your trading. "
+        "That is always on."
+    ),
+    "optional": (
+        "It can also send an anonymous, allowlisted usage summary: which "
+        "commands and screens get used, what breaks, and which models agents "
+        "run. That part is up to you."
+    ),
+    # A list in the browser, one sentence in Telegram. The last entry is phrased
+    # to close the sentence :func:`_never_line` builds.
+    "never": [
+        "API keys",
+        "wallet addresses",
+        "server names or URLs",
+        "trading pairs",
+        "amounts",
+        "balances",
+        "positions",
+        "prompts or agent replies",
+        "Telegram id or username",
+    ],
+    "doc": (
+        "Full details in PRIVACY.md at the root of the repo, which also says "
+        "how to change this answer at any time."
+    ),
+    "options": [dict(option) for option in OPTIONS],
+}
+
+
+def _never_line() -> str:
+    """The ``never`` list as the one sentence Telegram has always sent."""
+    items = DISCLOSURE["never"]
+    return f"Never included: {', '.join(items[:-1])}, and no {items[-1]}."
+
+
+_TEXT = "\n\n".join(
+    (
+        DISCLOSURE["headline"],
+        DISCLOSURE["always_on"],
+        DISCLOSURE["optional"],
+        _never_line(),
+        DISCLOSURE["doc"],
+    )
 )
 
 
@@ -38,15 +86,11 @@ def keyboard():
         [
             [
                 InlineKeyboardButton(
-                    "Yes, share usage summaries",
-                    callback_data=f"{CALLBACK_PREFIX}:usage",
+                    option["label"],
+                    callback_data=f"{CALLBACK_PREFIX}:{option['level']}",
                 )
-            ],
-            [
-                InlineKeyboardButton(
-                    "Only count my install", callback_data=f"{CALLBACK_PREFIX}:ping"
-                )
-            ],
+            ]
+            for option in OPTIONS
         ]
     )
 
@@ -106,7 +150,11 @@ async def callback_handler(update, context) -> None:
         chosen = consent.grant(answer)
         from condor.telemetry import emitter
 
-        emitter.emit("install")
+        # Almost always a no-op: boot counted this install already. It stays
+        # here for the install whose first boot was silenced by
+        # `CONDOR_TELEMETRY=off` and which is answering after that was lifted.
+        if consent.mark_install_reported():
+            emitter.emit("install")
         if chosen == consent.PING:
             await query.edit_message_text(
                 "Thanks. Condor will only report that this install exists and "

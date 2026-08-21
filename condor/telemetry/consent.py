@@ -217,6 +217,28 @@ def set_level(new_level: str) -> str:
     return new_level
 
 
+# ── Install counting ─────────────────────────────────────────────────────
+
+
+def mark_install_reported() -> bool:
+    """True the first time this install is counted, False forever after.
+
+    The ``install`` event carries no properties — it *is* the count — so it has
+    to be emitted exactly once per install, by whichever surface reaches it
+    first: boot, the Telegram prompt, or the dashboard card.
+
+    It used to be emitted only from the Telegram consent callback, which meant
+    an install that never answered was never counted at all — and a local-mode
+    install, which has no prompt to answer, could not be counted even in
+    principle. ``ping`` is the floor, so counting needs no answer; this flag is
+    what keeps it from being counted twice.
+    """
+    if _section().get("install_reported"):
+        return False
+    _update(install_reported=True)
+    return True
+
+
 # ── First-use tracking ───────────────────────────────────────────────────
 
 

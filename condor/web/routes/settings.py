@@ -894,9 +894,17 @@ async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
     The collector address is fixed in the source, so consent is the only thing
     that decides whether anything is transmitted: at level ``off`` no event is
     recorded in the first place.
+
+    Readable by every seat on purpose — anyone using an install should be able
+    to see what it shares — while ``can_change`` reports who may actually
+    answer. That is the admin, because consent is install-wide, and it is also
+    the discriminator the dashboard consent card uses, so asking costs no
+    second request. ``disclosure`` is the same copy the Telegram prompt sends.
     """
     from condor.telemetry import consent, emitter, outbox
+    from condor.telemetry.prompt import DISCLOSURE
 
+    cm = get_config_manager()
     return {
         "consent": consent.state(),
         "level": consent.level(),
@@ -904,6 +912,8 @@ async def get_telemetry_settings(user: WebUser = Depends(get_current_user)):
         "endpoint_configured": bool(outbox.endpoint()),
         "pending_events": emitter.buffered(),
         "privacy_doc": "PRIVACY.md",
+        "can_change": cm.is_admin(user.id),
+        "disclosure": DISCLOSURE,
     }
 
 

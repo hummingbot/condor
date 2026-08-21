@@ -18,6 +18,7 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReportIssueDialog } from "@/components/ReportIssueDialog";
+import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
 import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
@@ -174,6 +175,11 @@ function AppShellBody() {
           </div>
         </div>
       </header>
+
+      {/* Asks once, for an install that has never answered (FEAT-023). Renders
+          nothing for everyone else, including on the chat workspace, which owns
+          its own scrolling — hence outside `main` rather than inside it. */}
+      <TelemetryConsentBanner />
 
       {/* Main content */}
       <main

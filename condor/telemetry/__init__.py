@@ -62,11 +62,17 @@ def init(hosted: bool = True) -> str:
     ``hosted`` marks a process that owns a flush job, so events buffer in memory
     instead of going straight to a spool file. The MCP subprocess passes False.
 
-    Priming does two things and only two: it resolves the level once so
+    Priming does three things and only three: it resolves the level once so
     :func:`emit` never has to read the disk on a hot path, and — only if the
-    level is not ``off`` — it materializes the install's random ids. With the
-    ping floor that happens on the very first boot; only an install silenced by
-    ``CONDOR_TELEMETRY=off`` is left exactly as it was found.
+    level is not ``off`` — it materializes the install's random ids and counts
+    the install. With the ping floor all three happen on the very first boot;
+    only an install silenced by ``CONDOR_TELEMETRY=off`` is left exactly as it
+    was found.
+
+    Counting here, rather than when the admin answers the prompt, is what makes
+    "every install is counted" true rather than aspirational: an install whose
+    admin ignores the prompt — and a local-mode install, which has no prompt to
+    ignore — is still an install. ``mark_install_reported`` keeps it to once.
     """
     from condor.telemetry import consent, emitter
 
@@ -74,6 +80,8 @@ def init(hosted: bool = True) -> str:
     effective = consent.refresh()
     if effective != consent.OFF:
         consent.ensure_identity()
+        if consent.mark_install_reported():
+            emit("install")
     return effective
 
 

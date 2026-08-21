@@ -37,6 +37,7 @@ Every batch carries one context block describing the *deployment*, not you:
 | `app.version`, `app.branch` | `54ad4dc`, `main` | Which commit is actually running, so we know what to support. |
 | `app.python`, `app.os`, `app.arch`, `app.in_docker` | `3.12`, `linux`, `arm64`, `true` | What to test against. |
 | `config.*` | `has_gateway: true`, `user_count: 3`, `server_count: 2`, `llm_providers: ["openai"]` | Counts and capability flags. Numbers and fixed provider *names* — never a server name, never a URL, never a key. |
+| `config.mode` | `telegram` or `local` | Whether the install runs Telegram at all, or only the dashboard. One of two fixed names. |
 | `dropped` | `0` | How many events the rate limiter discarded. An honest count, so a quiet incident is visibly quiet. |
 
 And the events themselves:
@@ -136,9 +137,11 @@ Three ways to control it, in order of precedence:
 1. **Environment** — `CONDOR_TELEMETRY=off` in your `.env`. The one full kill
    switch: it overrides everything, suppresses the prompt, and is the right
    answer for an install that must send nothing at all.
-2. **The dashboard API** — `PUT /api/v1/settings/telemetry?level=ping|usage`
-   (admin only; `off` is rejected here). `GET` the same path to see the
-   current state.
+2. **The dashboard** — Settings → Privacy, which every seat can read and only
+   the admin can change (`GET`/`PUT /api/v1/settings/telemetry?level=ping|usage`;
+   `off` is rejected there). This is also where an install that runs without
+   Telegram is asked in the first place, since it has no bot to be asked
+   through.
 3. **`config.yml`** — edit the `telemetry` section directly:
 
    ```yaml
