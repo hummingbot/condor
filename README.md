@@ -118,7 +118,19 @@ install configured for Telegram whose `TELEGRAM_TOKEN` goes missing **exits at
 boot** telling you to run `make setup`. It never falls back to a login-less
 dashboard.
 
-Switching later is a `make setup` re-run (or editing `CONDOR_MODE` in `.env`).
+Local mode logs in as `ADMIN_USER_ID` — the same id `config.yml`, your servers,
+preferences and defaults already key on. `make setup` writes `ADMIN_USER_ID=1`
+for an install that never had a Telegram id; an install that has one **keeps
+it**, so switching modes keeps everything you had.
+
+Switching later is a `make setup` re-run — it shows the current mode and offers
+the other one — or editing `CONDOR_MODE` in `.env`. Your `TELEGRAM_TOKEN` is left
+in place either way, so switching back is one line.
+
+A mode that cannot work stops at boot, in `make run`, naming the `.env` line to
+fix: telegram mode with no token, an `ADMIN_USER_ID` that is not a positive
+integer, or a local user who is not in `config.yml`. None of it is deferred to
+the browser.
 
 ## Commands
 
@@ -259,7 +271,8 @@ Preferences are automatically saved and persist across sessions:
 ```bash
 CONDOR_MODE=telegram                     # telegram (default) or local — see Local mode
 TELEGRAM_TOKEN=your_bot_token            # Required unless CONDOR_MODE=local
-ADMIN_USER_ID=123456789                  # Your Telegram user id (local mode uses 1)
+ADMIN_USER_ID=123456789                  # Your Telegram user id. Local mode logs in
+                                         # as this same id (1 if you never had one)
 OPENAI_API_KEY=sk-...                    # Optional, for AI features
 OPENROUTER_API_KEY=sk-or-...             # Optional, unlocks the OpenRouter LLM picker
 WEB_HOST=0.0.0.0                         # Optional. Overrides the dashboard bind

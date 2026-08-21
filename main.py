@@ -30,6 +30,7 @@ from utils.config import (
     WEB_PORT,
     WEB_URL,
     ConfigError,
+    check_local_user,
     check_startup_config,
 )
 
@@ -843,8 +844,12 @@ def main() -> None:
     # Refuse to start on a configuration that cannot mean what it says: telegram
     # mode (the default) with no token used to surface as an InvalidToken
     # traceback from inside PTB, and must never be quietly read as "local mode".
+    # check_local_user() is the same idea one layer in — local mode logs in with
+    # no password, so who it logs in as is settled here, at boot, and not as a
+    # 500 from /auth/local-login with the browser already open.
     try:
         check_startup_config()
+        check_local_user()
     except ConfigError as exc:
         logger.error("%s", exc)
         raise SystemExit(1)

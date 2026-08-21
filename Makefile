@@ -69,17 +69,38 @@ check-stopped:
 		exit 1; \
 	fi
 
+# `remain-on-exit` keeps the pane alive after the process dies, so a startup
+# failure can be read back with capture-pane instead of scrolling away with the
+# session. Config errors (a bad ADMIN_USER_ID, a mode with no token, a local user
+# config.yml has never heard of) exit in the first second and used to leave
+# nothing behind but "run make run-fg to see the error".
+#
+# It is turned back off the moment the boot is confirmed: a crash three hours
+# later must still take the session with it, or `make status` and `check-stopped`
+# would report a dead Condor as running.
 run: check-stopped build-frontend
 	@tmux new-session -d -s $(SESSION) -c "$(CURDIR)" 'uv run python main.py'
-	@sleep 2
-	@if tmux has-session -t $(SESSION) 2>/dev/null; then \
-		echo "Condor started in tmux session '$(SESSION)'."; \
-		echo "  make logs - attach (detach: Ctrl+B then D)"; \
-		echo "  make stop - stop Condor"; \
-	else \
+	@tmux set-option -t $(SESSION) remain-on-exit on >/dev/null 2>&1 \
+		|| tmux set-window-option -t $(SESSION) remain-on-exit on >/dev/null 2>&1 || true
+	@sleep 3
+	@if ! tmux has-session -t $(SESSION) 2>/dev/null; then \
 		echo "Condor exited on startup. Run 'make run-fg' to see the error."; \
 		exit 1; \
 	fi
+	@if [ "$$(tmux list-panes -t $(SESSION) -F '#{pane_dead}' 2>/dev/null | head -1)" = "1" ]; then \
+		echo "Condor exited on startup:"; \
+		echo ""; \
+		tmux capture-pane -p -t $(SESSION) 2>/dev/null | grep -v '^[[:space:]]*$$' | tail -20 | sed 's/^/    /'; \
+		echo ""; \
+		echo "  make run-fg - run in the foreground for the full output"; \
+		tmux kill-session -t $(SESSION) >/dev/null 2>&1 || true; \
+		exit 1; \
+	fi
+	@tmux set-option -t $(SESSION) remain-on-exit off >/dev/null 2>&1 \
+		|| tmux set-window-option -t $(SESSION) remain-on-exit off >/dev/null 2>&1 || true
+	@echo "Condor started in tmux session '$(SESSION)'."
+	@echo "  make logs - attach (detach: Ctrl+B then D)"
+	@echo "  make stop - stop Condor"
 
 run-fg: build-frontend
 	uv run python main.py
