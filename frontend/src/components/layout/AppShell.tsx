@@ -18,12 +18,14 @@ import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { ConnectKeysOverlay } from "@/components/ConnectKeysOverlay";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReportIssueDialog } from "@/components/ReportIssueDialog";
+import { TelemetryConsentBanner } from "@/components/TelemetryConsentBanner";
 import { ChatProvider } from "@/hooks/useChat";
 import { useCredentials } from "@/hooks/useCredentials";
 import { usePrefetchData } from "@/hooks/usePrefetchData";
 import { useServer } from "@/hooks/useServer";
 import { useTheme } from "@/hooks/useTheme";
 import { CurrencySelector } from "./CurrencySelector";
+import { NotificationBell } from "./NotificationBell";
 import { ServerSelector } from "./ServerSelector";
 
 const NAV_ITEMS = [
@@ -128,6 +130,12 @@ function AppShellBody() {
           <CurrencySelector />
 
           <div className="flex items-center gap-1">
+            {/* Inside the ChatProvider on purpose: the bell reads the same
+                react-query cache the chat socket pushes live notifications
+                into, and that socket is what makes it update without a
+                reload (FEAT-048). */}
+            <NotificationBell />
+
             <button
               onClick={() => setReportOpen(true)}
               className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
@@ -167,6 +175,11 @@ function AppShellBody() {
           </div>
         </div>
       </header>
+
+      {/* Asks once, for an install that has never answered (FEAT-023). Renders
+          nothing for everyone else, including on the chat workspace, which owns
+          its own scrolling — hence outside `main` rather than inside it. */}
+      <TelemetryConsentBanner />
 
       {/* Main content */}
       <main

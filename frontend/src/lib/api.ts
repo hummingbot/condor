@@ -14,6 +14,25 @@ async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
+/** A finished background task, addressed to the user rather than to a chat. */
+export interface AppNotification {
+  id: string;
+  user_id: number;
+  ts: number;
+  /** "delegation" | "routine" | "agent" | "system" */
+  kind: string;
+  text: string;
+  title?: string | null;
+  /** A dashboard route to open, e.g. "/routines?tab=reports". */
+  link?: string | null;
+  read: boolean;
+}
+
+export interface NotificationsResponse {
+  items: AppNotification[];
+  unread: number;
+}
+
 // ── Types ──
 
 export interface ServerInfo {
@@ -22,6 +41,8 @@ export interface ServerInfo {
   port: number;
   online: boolean;
   permission: string;
+  /** The server commands fall back to when none is named — shared with Telegram. */
+  is_default: boolean;
 }
 
 export interface BalanceItem {
@@ -230,10 +251,21 @@ export interface ConsolidatedPosition {
   realized_pnl: number;
   cum_fees: number;
   executor_count: number;
+  /** The executors this row aggregates — how a hold is traced back to a pool. */
+  executor_ids?: string[];
   leverage: number;
   controller_id: string;
   source: "executor" | "bot";
   source_name: string;
+  /**
+   * Set only on a pool workspace: whether this hold is known to be *this* pool's.
+   *
+   * `true` when a contributing LP executor records the pool on screen, `false`
+   * when nothing ties it to any pool — a swap is routed by the aggregator, so
+   * the position it leaves behind is a fact about the pair, not about a pool.
+   * Undefined off a pool page, where the question does not arise.
+   */
+  pool_scoped?: boolean;
 }
 
 export interface ConsolidatedPositionsResponse {
@@ -386,6 +418,13 @@ export interface DexUpstream {
  * keep reading 0 until a human decides which token owns the symbol.
  */
 export type DexTokenVerdict = "listed" | "added" | "symbol_taken" | "failed";
+
+/** The token that already holds a ticker a new token wanted. */
+export interface DexTokenConflict {
+  symbol: string;
+  address: string;
+  name?: string | null;
+}
 
 /** A page of pools. `has_more`, not a count — no upstream reports a total. */
 export interface PoolPage {
@@ -918,6 +957,8 @@ export interface GatewayNetworkInfo {
 export interface GatewayNetworkConfig {
   network_id: string;
   config: Record<string, unknown>;
+  /** True when the server masked credential-bearing URL values (non-owner read, SEC-197). */
+  redacted?: boolean;
 }
 
 export interface GatewayWalletGroup {
@@ -957,6 +998,43 @@ export interface VoiceSettingsResponse {
   voice: VoicePrefs;
   available_models: Record<string, string>;
   available_languages: Record<string, string>;
+}
+
+// ── Telemetry (FEAT-023) ──
+
+/** The only two answers. `off` is reachable only from the environment. */
+export type TelemetryLevel = "ping" | "usage";
+
+export interface TelemetryOption {
+  level: TelemetryLevel;
+  label: string;
+}
+
+/**
+ * What the install is told before it answers, served by the backend so this
+ * copy and the Telegram prompt's cannot drift (`condor/telemetry/prompt.py`).
+ */
+export interface TelemetryDisclosure {
+  headline: string;
+  always_on: string;
+  optional: string;
+  never: string[];
+  doc: string;
+  options: TelemetryOption[];
+}
+
+export interface TelemetrySettingsResponse {
+  /** `unknown` until someone answers — that is what the consent card asks. */
+  consent: "unknown" | "granted" | "denied";
+  level: "off" | TelemetryLevel;
+  /** `CONDOR_TELEMETRY` is pinned in the environment; nothing here can change it. */
+  env_overridden: boolean;
+  endpoint_configured: boolean;
+  pending_events: number;
+  privacy_doc: string;
+  /** Consent is install-wide, so only the admin may answer. */
+  can_change: boolean;
+  disclosure: TelemetryDisclosure;
 }
 
 // ── Chat ──
@@ -1468,6 +1546,27 @@ export const api = {
     apiFetch<{ tokens: Record<string, DexTokenVerdict> }>(
       `/api/v1/servers/${encodeURIComponent(server)}/dex/tokens`,
       { method: "POST", body: JSON.stringify({ network, addresses }) },
+    ),
+
+  /**
+   * Register one token because the user asked to, where the automatic ensure
+   * only reported. Retries a `failed` verdict outright; on `symbol_taken` the
+   * answer names the ticker's current holder, and a second call with
+   * `replace: true` deletes that holder and registers this token in its place.
+   */
+  addDexToken: (
+    server: string,
+    network: string,
+    address: string,
+    symbol?: string,
+    replace?: boolean,
+  ) =>
+    apiFetch<{ verdict: DexTokenVerdict; conflict: DexTokenConflict | null }>(
+      `/api/v1/servers/${encodeURIComponent(server)}/dex/tokens/add`,
+      {
+        method: "POST",
+        body: JSON.stringify({ network, address, symbol, replace }),
+      },
     ),
 
   /** One pool by address, so /dex/{network}/{address} renders from the URL alone. */
@@ -2080,6 +2179,18 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  // ── Telemetry (FEAT-023) ──
+
+  getTelemetrySettings: () =>
+    apiFetch<TelemetrySettingsResponse>("/api/v1/settings/telemetry"),
+
+  /** Admin only (403 otherwise), and 409 when `CONDOR_TELEMETRY` is pinned. */
+  setTelemetryLevel: (level: TelemetryLevel) =>
+    apiFetch<{ level: TelemetryLevel; consent: string }>(
+      `/api/v1/settings/telemetry?level=${level}`,
+      { method: "PUT" },
+    ),
+
   // ── Chat ──
 
   getOpenRouterModels: () =>
@@ -2170,4 +2281,17 @@ export const api = {
       `/api/v1/settings/custom-providers/${encodeURIComponent(name)}`,
       { method: "DELETE" },
     ),
+
+  // ── Notifications (FEAT-048) ──
+
+  /** The bell's history. Scoped to the JWT server-side — there is no user param. */
+  getNotifications: (limit = 50) =>
+    apiFetch<NotificationsResponse>(`/api/v1/notifications?limit=${limit}`),
+
+  /** Mark some notifications read, or all of them when `ids` is omitted. */
+  markNotificationsRead: (ids?: string[]) =>
+    apiFetch<{ unread: number }>("/api/v1/notifications/read", {
+      method: "POST",
+      body: JSON.stringify({ ids: ids ?? null }),
+    }),
 };

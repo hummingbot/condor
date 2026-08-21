@@ -61,8 +61,10 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from condor.frontmatter import parse_frontmatter, render_frontmatter
+
 from .paths import builtin_skills_root, shared_skills_root
-from .store import _atomic_write, _parse_frontmatter, _render, _slugify, _utcnow
+from .store import _atomic_write, _slugify, _utcnow
 
 
 def _routine_exists(name: str, agent_slug: str | None = None) -> bool:
@@ -197,7 +199,7 @@ class SkillStore:
         # Preserve the original created date on overwrite.
         created = _utcnow()
         if path.exists():
-            existing_meta, _ = _parse_frontmatter(path.read_text())
+            existing_meta, _ = parse_frontmatter(path.read_text())
             created = existing_meta.get("created", created)
 
         meta = {
@@ -211,7 +213,7 @@ class SkillStore:
         if ref:
             meta["references_routine"] = ref
 
-        _atomic_write(path, _render(meta, body.strip()))
+        _atomic_write(path, render_frontmatter(meta, body.strip()))
         result = {
             "saved": True,
             "name": slug,
@@ -247,7 +249,7 @@ class SkillStore:
         if not path.exists():
             return {"error": f"Skill '{name}' not found"}
 
-        meta, body = _parse_frontmatter(path.read_text())
+        meta, body = parse_frontmatter(path.read_text())
         if fields.get("description"):
             meta["description"] = fields["description"].strip().replace("\n", " ")
         if fields.get("when_to_use"):
@@ -264,7 +266,7 @@ class SkillStore:
         # `_target_dir` above already moved the folder if it changed.
         meta.pop("shared", None)
 
-        _atomic_write(path, _render(meta, body))
+        _atomic_write(path, render_frontmatter(meta, body))
         return self.read(slug) or {"saved": True, "name": slug}
 
     def delete(self, name: str) -> bool | dict:
@@ -310,7 +312,7 @@ class SkillStore:
         if skill_dir is None:
             return None
         path = skill_dir / "SKILL.md"
-        meta, body = _parse_frontmatter(path.read_text())
+        meta, body = parse_frontmatter(path.read_text())
         ref = meta.get("references_routine")
         result = {
             "name": meta.get("name", slug),
@@ -496,7 +498,7 @@ class SkillStore:
                 if slug in seen:
                     continue
                 try:
-                    meta, body = _parse_frontmatter(f.read_text())
+                    meta, body = parse_frontmatter(f.read_text())
                 except Exception:
                     continue
                 seen.add(slug)

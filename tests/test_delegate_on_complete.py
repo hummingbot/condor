@@ -372,7 +372,9 @@ def _post(on_complete="notify", session_key="web:1:conv-1"):
             "scout",
             DelegateRequest(
                 task="scan pools",
-                chat_id=42,
+                # The caller's own chat: a foreign chat_id is 403 since SEC-198
+                # (see test_agents_chat_id_ownership.py).
+                chat_id=CALLER.id,
                 session_key=session_key,
                 on_complete=on_complete,
             ),

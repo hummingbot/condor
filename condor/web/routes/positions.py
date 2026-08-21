@@ -22,6 +22,14 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
         notional_value = abs(float(amount)) * float(entry_price)
     except (ValueError, TypeError):
         notional_value = 0
+    # Which executors this row aggregates. The only attribution the API gives a
+    # held position: a position has no pool of its own, but an LP executor
+    # records the pool it opened in, so the pool workspace can tell a hold that
+    # belongs to the pool on screen from one held in another pool of the same
+    # pair on the same chain.
+    executor_ids = pos.get("executor_ids") or []
+    if not isinstance(executor_ids, list):
+        executor_ids = []
     return {
         "connector_name": pos.get("connector_name") or pos.get("connector") or "",
         "trading_pair": pos.get("trading_pair") or "",
@@ -38,6 +46,7 @@ def _normalize_position(pos: dict, source: str, source_name: str) -> dict:
         "realized_pnl": pos.get("realized_pnl_quote") or 0,
         "cum_fees": pos.get("cum_fees_quote") or 0,
         "executor_count": pos.get("executor_count") or 0,
+        "executor_ids": [str(i) for i in executor_ids],
         "source": source,
         "source_name": source_name,
     }

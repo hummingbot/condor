@@ -1,6 +1,7 @@
 import { Check, ChevronDown, Search, Star, X } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 
+import { AnchoredMenu } from "@/components/ui/AnchoredMenu";
 import type { DexChain, DexVenue } from "@/lib/api";
 
 import {
@@ -45,22 +46,8 @@ function ChainSelect({
   onChange: (next: string) => void;
 }) {
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", keyHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", keyHandler);
-    };
-  }, []);
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   // One chain is not a choice — render it as a label rather than a dead dropdown.
   if (chains.length <= 1) return null;
@@ -68,8 +55,9 @@ function ChainSelect({
   const current = chains.find((c) => c.network_id === network);
 
   return (
-    <div ref={ref} className="relative">
+    <>
       <button
+        ref={setAnchor}
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         title="Chain to browse pools on"
@@ -81,30 +69,28 @@ function ChainSelect({
         />
       </button>
 
-      {open && (
-        <div className="absolute left-0 top-full z-50 mt-1.5 w-44 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl">
-          {chains.map((c) => (
-            <button
-              key={c.network_id}
-              onClick={() => {
-                onChange(c.network_id);
-                setOpen(false);
-              }}
-              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
-            >
-              <span
-                className={`h-1.5 w-1.5 shrink-0 rounded-full ${
-                  c.network_id === network
-                    ? "bg-[var(--color-primary)]"
-                    : "bg-transparent"
-                }`}
-              />
-              <span className="truncate">{c.label}</span>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
+      <AnchoredMenu anchor={anchor} open={open} onClose={close} className="w-44">
+        {chains.map((c) => (
+          <button
+            key={c.network_id}
+            onClick={() => {
+              onChange(c.network_id);
+              setOpen(false);
+            }}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
+          >
+            <span
+              className={`h-1.5 w-1.5 shrink-0 rounded-full ${
+                c.network_id === network
+                  ? "bg-[var(--color-primary)]"
+                  : "bg-transparent"
+              }`}
+            />
+            <span className="truncate">{c.label}</span>
+          </button>
+        ))}
+      </AnchoredMenu>
+    </>
   );
 }
 
@@ -126,23 +112,8 @@ function DexFilter({
 }) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
-  const ref = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node))
-        setOpen(false);
-    };
-    const keyHandler = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", handler);
-    document.addEventListener("keydown", keyHandler);
-    return () => {
-      document.removeEventListener("mousedown", handler);
-      document.removeEventListener("keydown", keyHandler);
-    };
-  }, []);
+  const [anchor, setAnchor] = useState<HTMLButtonElement | null>(null);
+  const close = useCallback(() => setOpen(false), []);
 
   const shown = useMemo(() => {
     const needle = filter.trim().toLowerCase();
@@ -171,8 +142,9 @@ function DexFilter({
         : `${selected.length} DEXes`;
 
   return (
-    <div ref={ref} className="relative">
+    <>
       <button
+        ref={setAnchor}
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         className={`flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors ${
@@ -197,55 +169,59 @@ function DexFilter({
         )}
       </button>
 
-      {open && (
-        <div className="absolute right-0 top-full z-50 mt-1.5 w-56 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-xl">
-          <div className="px-2 pb-1">
-            <input
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-              placeholder="Filter venues…"
-              autoFocus
-              spellCheck={false}
-              className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]"
-            />
-          </div>
-          <div className="max-h-64 overflow-y-auto">
-            {shown.map((v) => {
-              const active = selected.includes(v.id);
-              return (
-                <button
-                  key={v.id}
-                  onClick={() =>
-                    onChange(
-                      active
-                        ? selected.filter((id) => id !== v.id)
-                        : [...selected, v.id],
-                    )
-                  }
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
-                >
-                  <span
-                    className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
-                      active
-                        ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-white"
-                        : "border-[var(--color-border)]"
-                    }`}
-                  >
-                    {active && <Check className="h-2.5 w-2.5" />}
-                  </span>
-                  <span className="truncate">{v.name}</span>
-                </button>
-              );
-            })}
-            {!shown.length && (
-              <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">
-                No venue matches.
-              </div>
-            )}
-          </div>
+      <AnchoredMenu
+        anchor={anchor}
+        open={open}
+        onClose={close}
+        align="right"
+        className="w-56"
+      >
+        <div className="px-2 pb-1">
+          <input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Filter venues…"
+            autoFocus
+            spellCheck={false}
+            className="w-full rounded-md border border-[var(--color-border)] bg-[var(--color-bg)] px-2 py-1 text-xs text-[var(--color-text)] placeholder:text-[var(--color-text-muted)]"
+          />
         </div>
-      )}
-    </div>
+        <div>
+          {shown.map((v) => {
+              const active = selected.includes(v.id);
+            return (
+              <button
+                key={v.id}
+                onClick={() =>
+                  onChange(
+                    active
+                      ? selected.filter((id) => id !== v.id)
+                      : [...selected, v.id],
+                  )
+                }
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
+              >
+                <span
+                  className={`flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded border ${
+                    active
+                      ? "border-[var(--color-primary)] bg-[var(--color-primary)] text-white"
+                      : "border-[var(--color-border)]"
+                  }`}
+                >
+                  {active && <Check className="h-2.5 w-2.5" />}
+                </span>
+                <span className="truncate">{v.name}</span>
+              </button>
+            );
+          })}
+          {!shown.length && (
+            <div className="px-3 py-2 text-xs text-[var(--color-text-muted)]">
+              No venue matches.
+            </div>
+          )}
+        </div>
+      </AnchoredMenu>
+    </>
   );
 }
 

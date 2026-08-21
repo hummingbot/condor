@@ -24,9 +24,9 @@ from condor.acp.client import (
     ToolCallEvent,
     ToolCallUpdate,
     fold_tool_call_event,
-    resolve_acp,
 )
-from condor.acp.pydantic_ai_client import PydanticAIClient, is_pydantic_ai_model
+from condor.acp.pydantic_ai_client import PydanticAIClient
+from condor.runtime import toolsets
 from condor.runtime.registry_file import LoopState
 from condor.runtime.timeouts import resolve_tick_timeout
 from condor.telemetry import taps as telemetry_taps
@@ -204,6 +204,7 @@ class TickEngine:
                 self.strategy.slug,
                 self.session_num,
                 frequency_sec=self.config.get("frequency_sec", 60),
+                owner_id=self.user_id,
             )
 
         risk_limits = RiskLimits.from_dict(self.config.get("risk_limits", {}))
@@ -865,15 +866,10 @@ class TickEngine:
         (it only feeds the auto-approve callback and cannot change between the
         two points), avoiding a redundant per-tick journal re-parse.
         """
-        from handlers.agents._shared import (
-            build_mcp_servers_for_session,
-            get_project_dir,
-        )
-
         mode = self.config.get("execution_mode", "loop")
 
         # A configured server pins the toolset; None falls back to the chat's.
-        mcp_servers = build_mcp_servers_for_session(
+        mcp_servers = toolsets.build_mcp_servers_for_session(
             self.user_id,
             self.chat_id,
             server_name=self.config.get("server_name"),
@@ -888,47 +884,21 @@ class TickEngine:
             price_client=price_client,
         )
 
-        agent_key = self._agent_key()
-        use_pydantic_ai = is_pydantic_ai_model(agent_key)
+        # Shared factory (ARCH-192). Engine specifics: an explicit model_base_url
+        # in the run config still wins over the owner's saved custom endpoint,
+        # and the run config's tool_filter_mode beats the env fallback. Same
+        # allowlist the agent gets on consult; empty => unrestricted.
+        from condor.runtime.llm_client import build_llm_client
 
-        if use_pydantic_ai:
-            import os
-
-            from condor.preferences import resolve_custom_endpoint
-
-            # A custom endpoint's URL/key come from the owner's saved endpoints;
-            # an explicit model_base_url in the run config still wins.
-            custom_url, api_key = resolve_custom_endpoint(
-                agent_key, user_id=self.user_id
-            )
-            base_url = self.config.get("model_base_url") or custom_url or None
-            tool_filter_mode = (
-                self.config.get("tool_filter_mode")
-                or os.environ.get("PYDANTIC_AI_TOOL_FILTER")
-                or None
-            )
-            return PydanticAIClient(
-                model=agent_key,
-                mcp_servers=mcp_servers,
-                permission_callback=permission_cb,
-                base_url=base_url,
-                api_key=api_key,
-                tool_filter_mode=tool_filter_mode,
-                # Same allowlist the agent gets on consult; empty => unrestricted.
-                allowed_tools=self.agent.tools or None,
-            )
-        else:
-            # Supports a Claude model suffix, e.g. "claude-acp:opus" — selected via
-            # session/set_model after handshake (the bridge ignores ANTHROPIC_MODEL).
-            agent_cmd, model_env, model_pref = resolve_acp(agent_key)
-            return ACPClient(
-                command=agent_cmd,
-                working_dir=get_project_dir(),
-                mcp_servers=mcp_servers,
-                permission_callback=permission_cb,
-                extra_env=model_env or None,
-                model=model_pref or None,
-            )
+        return build_llm_client(
+            self._agent_key(),
+            mcp_servers=mcp_servers,
+            permission_callback=permission_cb,
+            allowed_tools=self.agent.tools or None,
+            user_id=self.user_id,
+            base_url_override=self.config.get("model_base_url") or None,
+            tool_filter_mode=self.config.get("tool_filter_mode"),
+        )
 
     # ------------------------------------------------------------------
     # Helpers

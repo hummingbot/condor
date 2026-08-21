@@ -98,10 +98,10 @@ def env(tmp_path, monkeypatch):
     monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     monkeypatch.setattr(conversations, "_live_recorders", set())
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _Client)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _Client)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     monkeypatch.setattr(
         "condor.runtime.binding.agent_identity_context", lambda *a, **k: ""
@@ -112,7 +112,7 @@ def env(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(session_routes, "get_config_manager", FakeConfigManager)
     monkeypatch.setattr("condor.web.auth.get_config_manager", FakeConfigManager)
-    monkeypatch.setattr("handlers.agents._shared.DEFAULT_AGENT", FALLBACK)
+    monkeypatch.setattr("condor.llm.options.DEFAULT_AGENT", FALLBACK)
     monkeypatch.setattr("condor.web.routes.chat_ws.DEFAULT_AGENT", FALLBACK)
 
     AgentStore().create(

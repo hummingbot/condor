@@ -36,6 +36,35 @@ async def _notify_admin_new_user(
         logger.warning(f"Failed to notify admin about new user: {e}")
 
 
+def _refresh_active_server(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Re-sync the cached ``active_server`` from config.yml before the handler runs.
+
+    ``chat_defaults`` in config.yml is where every surface records the chosen
+    default, but most handlers read the ``user_data`` copy of it
+    (``get_active_server``) rather than resolving through
+    ``get_effective_server``. That copy is only rewritten when something happens
+    to resolve — so a default picked on the web dashboard stayed invisible to
+    /portfolio, /bots and the gateway screens until the user opened /servers and
+    incidentally triggered a resolve.
+
+    Running the resolve here, at the one gate every Telegram update passes
+    through, keeps the copy true for whatever the handler does with it. It is a
+    dict lookup on the already-loaded config in the common case; the write only
+    happens on an actual change.
+    """
+    if context.user_data is None:
+        return
+    chat = getattr(update, "effective_chat", None)
+    if chat is None:
+        return
+    try:
+        from config_manager import get_effective_server
+
+        get_effective_server(chat.id, context.user_data)
+    except Exception as e:  # never block a command over a preference refresh
+        logger.debug("Could not refresh active server: %s", e)
+
+
 def restricted(func):
     """
     Decorator that checks if user is approved.
@@ -98,6 +127,7 @@ def restricted(func):
         # User is approved (USER or ADMIN role)
         # Store user_id in context for access control in subsequent calls
         context.user_data["_user_id"] = user_id
+        _refresh_active_server(update, context)
         return await func(update, context, *args, **kwargs)
 
     return wrapped

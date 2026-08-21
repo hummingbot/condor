@@ -25,7 +25,6 @@ def install(tmp_path, monkeypatch):
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", None, raising=False)
-    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY_URL", None, raising=False)
     monkeypatch.setattr(
         "condor.agents.agent._DATA_ROOT", str(tmp_path / "data"), raising=False
     )
@@ -46,23 +45,24 @@ def _grant(level="usage"):
     consent.grant(level)
 
 
-# ── The default is silence ───────────────────────────────────────────────
+# ── The default is the ping floor ────────────────────────────────────────
 
 
-def test_a_fresh_install_is_off_and_stays_off(install):
-    """No consent recorded means no telemetry — not "buffered until asked"."""
+def test_a_fresh_install_pings_and_says_nothing_more(install):
+    """No consent recorded means install counting only — the ping floor."""
     assert consent.state() == consent.UNKNOWN
-    assert consent.level() == consent.OFF
+    assert consent.level() == consent.PING
 
     for name in schema.EVENTS:
         emitter.emit(name, surface="telegram")
 
-    assert emitter.buffered() == 0
-    assert emitter.dropped() == 0
+    names = {e["name"] for e in emitter.drain()[0]}
+    assert names == set(schema.PING_EVENTS)
 
 
-def test_nothing_is_written_to_disk_when_off(install):
-    """Acceptance criterion: no condor/.runtime/telemetry directory is created."""
+def test_usage_events_write_nothing_to_disk_at_the_ping_floor(install):
+    """Acceptance criterion: no condor/.runtime/telemetry directory is created
+    by activity that the install has no consent to report."""
     emitter.set_hosted(False)  # the spooling path, which is the one that does I/O
     emitter.emit("command", name="portfolio", surface="telegram")
     assert not outbox.root().exists()
@@ -84,7 +84,7 @@ def test_env_off_overrides_a_granted_consent(install, monkeypatch):
 def test_a_nonsense_env_level_is_ignored_not_obeyed(install, monkeypatch):
     monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "yes-please", raising=False)
     consent.refresh()
-    assert consent.level() == consent.OFF
+    assert consent.level() == consent.PING  # the floor, not whatever was typed
 
 
 def test_ping_level_sends_only_the_adoption_events(install):
@@ -100,8 +100,8 @@ def test_ping_level_sends_only_the_adoption_events(install):
 # ── Nothing transmits ────────────────────────────────────────────────────
 
 
-def test_flush_is_a_no_op_without_consent(install, monkeypatch):
-    """A full session of activity must produce zero outbound requests."""
+def test_usage_activity_never_transmits_without_consent(install, monkeypatch):
+    """A full session of activity must produce zero outbound usage events."""
     calls = []
     monkeypatch.setattr(outbox, "post", lambda env: calls.append(env))
 
@@ -114,12 +114,39 @@ def test_flush_is_a_no_op_without_consent(install, monkeypatch):
     assert not outbox.root().exists()
 
 
-def test_no_endpoint_means_events_only_ever_reach_a_local_file(install):
-    """The shipped state: consent granted, but nowhere to send. Nothing leaves."""
+def test_the_ping_floor_actually_flushes_without_an_answer(install, monkeypatch):
+    """An unanswered install still delivers its adoption events — the count is
+    only worth anything if it leaves the machine."""
+    sent = []
+
+    async def ok_post(envelope):
+        sent.append(envelope)
+        return True
+
+    monkeypatch.setattr(outbox, "endpoint", lambda: "http://collector.invalid")
+    monkeypatch.setattr(outbox, "post", ok_post)
+
+    assert consent.state() == consent.UNKNOWN
+    emitter.emit("install")
+    assert asyncio.run(emitter.flush("test")) == 1
+    assert [e["name"] for env in sent for e in env["events"]] == ["install"]
+    assert sent[0]["level"] == consent.PING
+
+
+def test_the_endpoint_is_fixed_and_not_configurable(install, monkeypatch):
+    """The collector address is compiled in; no env var may redirect it."""
+    monkeypatch.setenv("CONDOR_TELEMETRY_URL", "http://attacker.invalid/v1/events")
+
+    assert outbox.endpoint() == outbox.COLLECTOR_URL
+    assert outbox.COLLECTOR_URL == "https://telemetry.hummingbot.org/v1/events"
+
+
+def test_no_endpoint_means_events_only_ever_reach_a_local_file(install, monkeypatch):
+    """With delivery impossible, events park in the capped outbox instead of leaving."""
     _grant("usage")
+    monkeypatch.setattr(outbox, "endpoint", lambda: None)
     emitter.emit("command", name="portfolio", surface="telegram")
 
-    assert outbox.endpoint() is None
     assert asyncio.run(emitter.flush("test")) == 0
 
     stashed = outbox.take_stashed()
@@ -164,7 +191,7 @@ def test_the_outbox_respects_its_cap(install):
     assert len(outbox.take_stashed()) == outbox.MAX_OUTBOX_EVENTS
 
 
-def test_denying_consent_destroys_what_was_collected(install):
+def test_withdrawing_usage_consent_destroys_what_was_collected(install):
     _grant("usage")
     emitter.emit("command", name="portfolio", surface="telegram")
     outbox.stash(
@@ -178,11 +205,23 @@ def test_denying_consent_destroys_what_was_collected(install):
     )
     assert outbox.outbox_path().exists()
 
-    consent.deny()
+    consent.set_level("ping")
 
-    assert consent.level() == consent.OFF
+    assert consent.level() == consent.PING
     assert emitter.buffered() == 0
     assert not outbox.outbox_path().exists()
+
+
+def test_off_is_not_a_grantable_answer(install):
+    """The consent form has no "off": a stale or unrecognized answer lands on
+    ping, the floor, and set_level rejects "off" outright."""
+    from config_manager import get_config_manager
+
+    get_config_manager()  # materialize config.yml in the tmp cwd
+    assert consent.grant("off") == consent.PING
+    assert consent.state() == consent.GRANTED
+    assert consent.set_level("off") == consent.PING  # rejected, level unchanged
+    assert consent.level() == consent.PING
 
 
 # ── The leak test ────────────────────────────────────────────────────────
@@ -386,6 +425,89 @@ def test_the_install_context_carries_no_identity(install):
             assert identifying not in blob
 
 
+def test_the_envelope_says_which_surface_the_install_runs(install, monkeypatch):
+    """`mode` is one of two fixed names — the adoption signal local mode was
+    built for, and nothing that could point at a host or a chat."""
+    monkeypatch.setattr("utils.config.CONDOR_MODE", "local", raising=False)
+    assert context.config_shape()["mode"] == "local"
+    monkeypatch.setattr("utils.config.CONDOR_MODE", "telegram", raising=False)
+    assert context.config_shape()["mode"] == "telegram"
+
+
+# ── Every install is counted ─────────────────────────────────────────────
+
+
+def test_a_fresh_install_is_counted_without_anyone_answering(install):
+    """The claim that gives this feature its floor. `install` used to be emitted
+    only from the Telegram consent callback, so an install that never answered
+    — every local-mode one — was never counted at all."""
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+
+    assert consent.state() == consent.UNKNOWN  # nobody answered anything
+    assert [e["name"] for e in emitter.drain()[0]] == ["install"]
+
+
+def test_an_install_is_counted_once_however_many_times_it_boots(install):
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+    emitter.drain()
+
+    telemetry.init(hosted=True)
+    telemetry.init(hosted=True)
+    assert emitter.drain()[0] == []
+
+
+def test_answering_the_prompt_does_not_count_the_install_a_second_time(install):
+    import condor.telemetry as telemetry
+
+    telemetry.init(hosted=True)
+    emitter.drain()
+
+    consent.grant("usage")
+    assert consent.mark_install_reported() is False
+
+
+def test_an_install_silenced_by_the_environment_is_never_counted(install, monkeypatch):
+    """`CONDOR_TELEMETRY=off` is the kill switch, and counting is not exempt
+    from it — nothing is recorded and config.yml is left as it was found."""
+    monkeypatch.setattr("utils.config.CONDOR_TELEMETRY", "off", raising=False)
+    import condor.telemetry as telemetry
+
+    assert telemetry.init(hosted=True) == consent.OFF
+    assert emitter.drain()[0] == []
+    assert not (install / "config.yml").exists()
+
+
+# ── Asking, on both surfaces ─────────────────────────────────────────────
+
+
+def test_telegram_and_the_dashboard_disclose_exactly_the_same_thing():
+    """Two prompts mean two chances to disagree about what is collected. The
+    dashboard card renders `DISCLOSURE`; the Telegram message is built from it."""
+    from condor.telemetry.prompt import _TEXT, DISCLOSURE
+
+    assert DISCLOSURE["headline"] in _TEXT
+    assert DISCLOSURE["always_on"] in _TEXT
+    assert DISCLOSURE["optional"] in _TEXT
+    assert DISCLOSURE["doc"] in _TEXT
+    for never in DISCLOSURE["never"]:
+        assert never in _TEXT
+
+
+def test_the_prompt_offers_no_way_to_switch_counting_off():
+    """`off` is the operator's env kill switch, never a button — on either
+    surface. A stray option here would quietly make the floor optional."""
+    from condor.telemetry.prompt import DISCLOSURE, OPTIONS
+
+    levels = {option["level"] for option in OPTIONS}
+    assert levels == set(consent.ANSWER_LEVELS)
+    assert consent.OFF not in levels
+    assert [o["level"] for o in DISCLOSURE["options"]] == [o["level"] for o in OPTIONS]
+
+
 # ── Out of process ───────────────────────────────────────────────────────
 
 
@@ -428,8 +550,9 @@ def test_emit_costs_under_50_microseconds_on_the_hot_path(install):
     assert per_call < 50e-6, f"emit() took {per_call * 1e6:.1f}us"
 
 
-def test_emit_is_free_when_off(install):
-    """The gate a trading path actually pays for."""
+def test_emit_is_free_below_usage(install):
+    """The gate a trading path actually pays for: at the ping floor a usage
+    event is rejected by the schema gate before any work happens."""
     iterations = 2000
     started = time.perf_counter()
     for _ in range(iterations):
@@ -491,7 +614,8 @@ def test_a_callback_reports_module_and_verb_only(install):
 
 
 def test_the_telegram_tap_emits_nothing_before_consent(install):
-    """The acceptance criterion, at the seam rather than at the emitter."""
+    """The acceptance criterion, at the seam rather than at the emitter:
+    commands and callbacks are usage events, and the ping floor drops them."""
     assert consent.state() == consent.UNKNOWN
     for update in (
         _FakeUpdate(text="/portfolio"),

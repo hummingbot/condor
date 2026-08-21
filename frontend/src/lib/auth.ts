@@ -21,6 +21,8 @@ export interface AuthState {
   token: string | null;
   isAuthenticated: boolean;
   loginWithToken: (loginToken: string) => Promise<void>;
+  /** Local mode (FEAT-049): claim the local admin's session. 404s elsewhere. */
+  loginLocal: () => Promise<void>;
   logout: () => void;
 }
 
@@ -34,6 +36,7 @@ export const AuthContext = createContext<AuthState>({
   token: null,
   isAuthenticated: false,
   loginWithToken: async () => {},
+  loginLocal: async () => {},
   logout: () => {},
 });
 
@@ -59,6 +62,23 @@ export function useAuthState(): AuthState {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.detail || "Login failed");
+    }
+    const data = await res.json();
+    localStorage.setItem(TOKEN_KEY, data.token);
+    localStorage.setItem(USER_KEY, JSON.stringify(data.user));
+    setToken(data.token);
+    setUser(data.user);
+  }, []);
+
+  // Local mode: the dashboard runs on this machine with no login at all, so
+  // the session is claimed rather than presented. Stores exactly what
+  // loginWithToken stores — downstream there is no such thing as a "local"
+  // session, only a session.
+  const loginLocal = useCallback(async () => {
+    const res = await fetch("/api/v1/auth/local-login", { method: "POST" });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || "Local login failed");
     }
     const data = await res.json();
     localStorage.setItem(TOKEN_KEY, data.token);
@@ -99,6 +119,7 @@ export function useAuthState(): AuthState {
     token,
     isAuthenticated: !!token && !!user,
     loginWithToken,
+    loginLocal,
     logout,
   };
 }

@@ -46,10 +46,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from condor.frontmatter import parse_frontmatter, render_frontmatter, slugify
+from condor.fsutil import atomic_write_text
 from condor.memory.paths import CHAT_SLUG
-from condor.memory.store import _parse_frontmatter
-
-from .strategy import _render_frontmatter, _slugify
 
 log = logging.getLogger(__name__)
 
@@ -160,7 +159,7 @@ def _load_agent_from_dir(agent_dir: Path) -> Agent | None:
     if not path.exists():
         return None
     try:
-        meta, body = _parse_frontmatter(path.read_text())
+        meta, body = parse_frontmatter(path.read_text())
         return Agent(
             slug=agent_dir.name,
             name=meta.get("name", agent_dir.name),
@@ -254,7 +253,7 @@ class AgentStore:
         server_name: str = "",
         created_by: int = 0,
     ) -> Agent:
-        slug = _slugify(name)
+        slug = slugify(name)
         if slug == CHAT_SLUG:
             # Reserved: `condor` names the default agent. The separate trees used
             # to make the collision impossible by construction (FEAT-003); with
@@ -316,8 +315,9 @@ class AgentStore:
             "created_at": agent.created_at,
         }
         agent.agent_dir.mkdir(parents=True, exist_ok=True)
-        (agent.agent_dir / "AGENT.md").write_text(
-            _render_frontmatter(meta, agent.instructions)
+        atomic_write_text(
+            agent.agent_dir / "AGENT.md",
+            render_frontmatter(meta, agent.instructions),
         )
 
     def _iter_agent_dirs(self):

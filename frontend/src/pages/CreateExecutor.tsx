@@ -5,8 +5,6 @@ import {
   ArrowLeft,
   ArrowUpDown,
   BarChart3,
-  CheckCircle,
-  Copy,
   Droplets,
   Grid3X3,
   Layers,
@@ -15,7 +13,6 @@ import {
   Rocket,
   Settings2,
   TrendingUp,
-  X,
 } from "lucide-react";
 
 import { NoServerCard } from "@/components/NoServerCard";
@@ -26,6 +23,10 @@ import { MarketDepthPanel } from "@/components/market/MarketDepthPanel";
 import { MarketsPanel } from "@/components/market/MarketsPanel";
 import { TradeChart } from "@/components/trade/TradeChart";
 import { GridConfigPanel, useGridValidation } from "@/components/grid/GridConfigPanel";
+import {
+  ErrorToast,
+  ExecutorSuccessModal,
+} from "@/components/executor/ExecutorSuccessModal";
 import { PositionConfigPanel, usePositionConfig } from "@/components/executor/PositionConfigPanel";
 import { OrderConfigPanel, useOrderConfig } from "@/components/executor/OrderConfigPanel";
 import { DCAConfigPanel, useDCAConfig } from "@/components/executor/DCAConfigPanel";
@@ -581,6 +582,7 @@ export function CreateExecutor() {
               side={chartProps.side}
               minSpread={chartProps.minSpread}
               activePickField={chartProps.activePickField}
+              lineLabels={chartProps.lineLabels}
               onPriceSet={handlePriceSet}
               pricePrecision={pricePrecision}
               extraLines={chartProps.extraLines}
@@ -754,46 +756,12 @@ export function CreateExecutor() {
 
       {/* Success modal */}
       {successInfo && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm">
-          <div className="relative w-[360px] rounded-xl border border-[var(--color-green)]/30 bg-[var(--color-surface)] p-6 shadow-2xl shadow-black/40 animate-in fade-in zoom-in-95 duration-200">
-            {/* Close button */}
-            <button
-              onClick={() => setSuccessInfo(null)}
-              className="absolute right-3 top-3 rounded p-1 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text)]"
-            >
-              <X className="h-4 w-4" />
-            </button>
-
-            {/* Icon */}
-            <div className="mb-4 flex justify-center">
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-[var(--color-green)]/15">
-                <CheckCircle className="h-6 w-6 text-[var(--color-green)]" />
-              </div>
-            </div>
-
-            {/* Title */}
-            <h3 className="mb-1 text-center text-sm font-semibold text-[var(--color-text)]">
-              {TYPE_LABELS[successInfo.type]} Created
-            </h3>
-            <p className="mb-4 text-center text-[11px] text-[var(--color-text-muted)]">
-              Successfully deployed on {successInfo.connector}
-            </p>
-
-            {/* Details */}
-            <div className="mb-4 space-y-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-bg)] p-3">
-              <div className="flex items-center justify-between text-[11px]">
-                <span className="text-[var(--color-text-muted)]">Executor ID</span>
-                <div className="flex items-center gap-1.5">
-                  <span className="font-mono text-[var(--color-text)]">{successInfo.id.slice(0, 12)}…</span>
-                  <button
-                    onClick={() => navigator.clipboard.writeText(successInfo.id)}
-                    className="rounded p-0.5 text-[var(--color-text-muted)] hover:text-[var(--color-text)]"
-                    title="Copy full ID"
-                  >
-                    <Copy className="h-3 w-3" />
-                  </button>
-                </div>
-              </div>
+        <ExecutorSuccessModal
+          executorId={successInfo.id}
+          title={`${TYPE_LABELS[successInfo.type]} Created`}
+          subtitle={`Successfully deployed on ${successInfo.connector}`}
+          details={
+            <>
               <div className="flex items-center justify-between text-[11px]">
                 <span className="text-[var(--color-text-muted)]">Pair</span>
                 <span className="font-mono text-[var(--color-text)]">{successInfo.pair}</span>
@@ -805,24 +773,16 @@ export function CreateExecutor() {
                   ACTIVE
                 </span>
               </div>
-            </div>
-
-            {/* Action */}
-            <button
-              onClick={() => setSuccessInfo(null)}
-              className="w-full rounded-lg bg-[var(--color-primary)] px-4 py-2 text-xs font-semibold text-white transition-colors hover:brightness-110"
-            >
-              Continue Trading
-            </button>
-          </div>
-        </div>
+            </>
+          }
+          primaryLabel="Continue Trading"
+          onClose={() => setSuccessInfo(null)}
+        />
       )}
 
       {/* Error toast */}
       {createMutation.isError && (
-        <div className="absolute bottom-16 right-4 rounded-lg border border-[var(--color-red)]/30 bg-[var(--color-red)]/10 px-4 py-2 text-sm text-[var(--color-red)]">
-          {(createMutation.error as Error).message}
-        </div>
+        <ErrorToast message={(createMutation.error as Error).message} />
       )}
     </div>
   );

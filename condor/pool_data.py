@@ -26,16 +26,8 @@ from geckoterminal_py import constants as GECKO_CONSTANTS
 from glom import glom
 
 from condor import orca_api
-from condor.cache import evict_expired, get_cached, set_cached
-from config_manager import get_client
 
 logger = logging.getLogger(__name__)
-
-# The conversation cache these functions write into is shared with the Telegram DEX
-# handlers, which read and invalidate it by group under the "_cache" namespace (see
-# handlers/dex/_shared). Entries written under any other namespace would survive an
-# invalidation the handler thinks it performed, so this must stay in step with it.
-_CACHE_NS = "_cache"
 
 # CLMM venues an ``lp_executor`` can open a position on: (brand, the qualifiers its
 # GeckoTerminal dex id must carry, the gecko networks it exists on). Deliberately
@@ -453,6 +445,8 @@ def reset_gecko_throttle() -> None:
         _token_symbol_cache,
         _token_pool_cache,
         _pair_pool_cache,
+        _ohlcv_cache,
+        _pool_bins_cache,
     ):
         cache.clear()
 
@@ -529,9 +523,8 @@ async def _single_flight(key: Tuple, factory) -> Any:
 
 
 # ── Small TTL caches for token lookups ──
-# These answers are process-wide (not per-user) and tiny, so they live here rather
-# than in a caller's user_data. Capped so an unbounded stream of distinct mints
-# cannot grow them without limit.
+# These answers are process-wide (not per-user) and tiny. Capped so an unbounded
+# stream of distinct mints cannot grow them without limit.
 _TOKEN_CACHE_MAX = 512
 _token_symbol_cache: Dict[Tuple[str, str], Tuple[float, str]] = {}
 # Both hold normalized pool dicts, and an empty dict for "asked, there is no such
@@ -948,22 +941,22 @@ async def fetch_ohlcv(
     network: str,
     timeframe: str = "1h",
     currency: str = "usd",
-    user_data: dict = None,
     limit: int = 100,
     before_timestamp: Optional[int] = None,
     token: str = "base",
+    use_cache: bool = True,
 ) -> Tuple[Optional[List], Optional[str]]:
     """Fetch OHLCV data for any pool via GeckoTerminal
 
-    Concurrent callers asking for the same upstream window share one request, no
-    matter what key each of them caches the answer under.
+    A pool's candles are global, not per-user, so the answer is cached once for
+    the process; concurrent callers asking for the same upstream window share one
+    request.
 
     Args:
         pool_address: Pool contract address
         network: Network identifier (will be converted to GeckoTerminal format)
         timeframe: OHLCV timeframe (see GECKO_TIMEFRAMES)
         currency: Price currency - "usd" or "token" (quote token)
-        user_data: Optional user_data dict for caching
         limit: Number of candles to fetch (capped at GECKO_OHLCV_MAX)
         before_timestamp: Unix seconds; candles walk back from here. None asks for
             the latest candles, which is also what keeps a live chart's cache key
@@ -971,6 +964,10 @@ async def fetch_ohlcv(
         token: Which side of the pool to price, "base" or "quote". "quote" flips
             the series, for a venue pair quoted the other way round from the pool
             (``XRP-RLUSD`` against a ``RLUSD / XRP`` pool).
+        use_cache: False skips the cache *read* — for a live poll that must see
+            the newest candle rather than one up to ``OHLCV_CACHE_TTL`` old. The
+            fresh answer is still written back, so cached readers only get newer
+            data out of it.
 
     Returns:
         Tuple of (ohlcv_list, error_message)
@@ -982,23 +979,24 @@ async def fetch_ohlcv(
         timeframe = normalize_timeframe(timeframe)
         limit = max(1, min(int(limit), GECKO_OHLCV_MAX))
 
-        # Check cache. limit/before_timestamp belong to the key: the same pool
-        # charted over a historical window and over the live one are different
-        # answers.
-        if user_data is not None:
-            cache_key = (
-                f"ohlcv_{gecko_network}_{pool_address}_{timeframe}_{currency}"
-                f"_{token}_{limit}_{before_timestamp or 0}"
-            )
-            cached = get_cached(
-                user_data, cache_key, ttl=OHLCV_CACHE_TTL, namespace=_CACHE_NS
-            )
+        # limit/before_timestamp belong to the key: the same pool charted over a
+        # historical window and over the live one are different answers. The same
+        # tuple keys the cache and the single-flight, so "one upstream window" is
+        # one entry everywhere.
+        cache_key = (
+            "ohlcv",
+            gecko_network,
+            pool_address,
+            timeframe,
+            currency,
+            token,
+            limit,
+            before_timestamp or 0,
+        )
+        if use_cache:
+            cached = _ttl_get(_ohlcv_cache, cache_key, OHLCV_CACHE_TTL)
             if cached is not None:
                 return cached, None
-            # Sweep on miss, as cached_call does. Historical windows mint a fresh
-            # key per executor, so a long-lived caller would otherwise accumulate
-            # one entry per chart forever.
-            evict_expired(user_data, namespace=_CACHE_NS)
 
         async def _fetch_upstream() -> Optional[List]:
             # Pass all parameters explicitly:
@@ -1054,34 +1052,17 @@ async def fetch_ohlcv(
 
             return rows
 
-        # Coalesce on the UPSTREAM window — pool, timeframe, currency, priced side
-        # and window — never on the caller's cache key. The TTL caches above are
-        # per-caller and only help once an answer has landed, so two callers whose
-        # own keys differ (a chart keyed by trading pair and one keyed by pool, the
-        # dashboard's shared cache and a chat's user_data) still resolve to the very
-        # same GeckoTerminal window and would each spend a request for it. Keyed
-        # here, they collapse onto one. A fetch that raises reaches every waiter and
-        # is cached by nobody. The rows are shared between callers: read-only.
-        ohlcv_list = await _single_flight(
-            (
-                "ohlcv",
-                gecko_network,
-                pool_address,
-                timeframe,
-                currency,
-                token,
-                limit,
-                before_timestamp or 0,
-            ),
-            _fetch_upstream,
-        )
+        # Coalesce on the upstream window: a TTL cache only helps once an answer
+        # has landed, so concurrent callers of the same window (a cache-bypassing
+        # live poll racing a chart render, say) would each spend a request without
+        # this. A fetch that raises reaches every waiter and is cached by nobody.
+        # The rows are shared between callers: read-only.
+        ohlcv_list = await _single_flight(cache_key, _fetch_upstream)
 
         if not ohlcv_list:
             return None, "No OHLCV data available"
 
-        # Cache result
-        if user_data is not None:
-            set_cached(user_data, cache_key, ohlcv_list, namespace=_CACHE_NS)
+        _ttl_put(_ohlcv_cache, cache_key, ohlcv_list, OHLCV_CACHE_TTL)
 
         return ohlcv_list, None
 
@@ -1090,11 +1071,13 @@ async def fetch_ohlcv(
         return None, f"Failed to fetch OHLCV: {str(e)}"
 
 
-# Bins for one pool, keyed ``(connector, pool_address)``. Used when no caller
-# supplies a ``user_data`` to cache in — i.e. by the web dashboard, where every
-# viewer of a pool would otherwise open its own Gateway call at the same cadence.
-# Same one-minute TTL as the per-chat cache: bins move with every swap through
-# the active bin, so a longer one would draw liquidity that has already left.
+# OHLCV per upstream window and bins per ``(connector, pool_address)``. Both are
+# global answers — a pool's candles and liquidity do not depend on who is asking —
+# so they are cached once for the process and every viewer (web dashboard, any
+# Telegram chat) shares one upstream call per window. Bins keep a one-minute TTL:
+# they move with every swap through the active bin, so a longer one would draw
+# liquidity that has already left.
+_ohlcv_cache: Dict[Tuple, Tuple[float, List]] = {}
 _pool_bins_cache: Dict[Tuple[str, str], Tuple[float, Dict[str, Any]]] = {}
 
 
@@ -1102,9 +1085,6 @@ async def fetch_liquidity_bins(
     pool_address: str,
     connector: str = "meteora",
     network: str = "solana-mainnet-beta",
-    user_data: dict = None,
-    chat_id: int = None,
-    context=None,
     client=None,
 ) -> Tuple[Optional[List], Optional[Dict], Optional[str]]:
     """Fetch liquidity bin data for CLMM pools via gateway
@@ -1113,13 +1093,10 @@ async def fetch_liquidity_bins(
         pool_address: Pool contract address
         connector: DEX connector (meteora, raydium, orca)
         network: Network identifier
-        user_data: Optional user_data dict for caching. When omitted the result
-            is cached process-wide instead, so callers with no conversation of
-            their own (the web dashboard) still share one Gateway call per pool.
-        chat_id: Chat ID for per-chat server selection
-        client: An already-resolved API client. The web side holds a server
-            *name* and resolves its client through the config manager, which the
-            ``get_client(chat_id)`` path below cannot express.
+        client: An already-resolved API client, required to reach Gateway.
+            Resolving one is the caller's job — the web side holds a server
+            *name*, a Telegram handler a chat id, and each has its own accessor
+            for turning that into a client.
 
     Returns:
         Tuple of (bins_list, pool_info, error_message)
@@ -1131,21 +1108,10 @@ async def fetch_liquidity_bins(
         if not can_fetch_liquidity(connector):
             return None, None, f"Liquidity data not available for {connector}"
 
-        # Check cache
-        cache_key = f"pool_bins_{connector}_{pool_address}"
-        if user_data is not None:
-            cached = get_cached(
-                user_data, cache_key, ttl=BINS_CACHE_TTL, namespace=_CACHE_NS
-            )
-        else:
-            cached = _ttl_get(
-                _pool_bins_cache, (connector, pool_address), BINS_CACHE_TTL
-            )
+        cached = _ttl_get(_pool_bins_cache, (connector, pool_address), BINS_CACHE_TTL)
         if cached is not None:
             return cached.get("bins"), cached, None
 
-        if client is None:
-            client = await get_client(chat_id, context=context)
         if not client:
             return None, None, "Gateway client not available"
 
@@ -1205,13 +1171,7 @@ async def fetch_liquidity_bins(
 
         bins = pool_info.get("bins", [])
 
-        # Cache result
-        if user_data is not None:
-            set_cached(user_data, cache_key, pool_info, namespace=_CACHE_NS)
-        else:
-            _ttl_put(
-                _pool_bins_cache, (connector, pool_address), pool_info, BINS_CACHE_TTL
-            )
+        _ttl_put(_pool_bins_cache, (connector, pool_address), pool_info, BINS_CACHE_TTL)
 
         return bins, pool_info, None
 

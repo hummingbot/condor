@@ -3,7 +3,7 @@
 An agent running in controller mode owns the bots it deploys, and the **name is
 the proof**: every bot a given ``(agent, strategy)`` may touch lives under the
 namespace ``{agent_slug}-{strategy_slug}``. Slugs never contain ``-``
-(``strategy._slugify`` maps ``[\\s-]+ → _``), so ``-`` delimits the namespace
+(``condor.frontmatter.slugify`` maps ``[\\s-]+ → _``), so ``-`` delimits the namespace
 unambiguously and two different agents can never claim the same bot — uniqueness
 is structural, with no registry, lock or lookup.
 
@@ -27,6 +27,8 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+from condor.fsutil import atomic_write_json
 
 log = logging.getLogger(__name__)
 
@@ -347,9 +349,6 @@ class BotLedger:
         if not path:
             return  # experiments: in-memory only
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(self.to_dict(), indent=2))
-            tmp.replace(path)
+            atomic_write_json(path, self.to_dict(), indent=2)
         except Exception:
             log.warning("BotLedger: could not write %s", path, exc_info=True)

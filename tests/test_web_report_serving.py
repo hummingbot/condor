@@ -12,11 +12,18 @@ import pytest
 from starlette.testclient import TestClient
 
 import condor.reports as reports
+import condor.web.routes.reports as reports_routes
 from condor.web.app import create_app
 from condor.web.auth import get_current_user
 from condor.web.models import WebUser
 
 USER = WebUser(id=111, username="u", first_name="U", role="user")
+
+
+class _NoAdmins:
+    def is_admin(self, user_id):
+        return False
+
 
 BODY = "<h1>Report</h1>"
 # Distinctive markers so a leak is unmistakable and cannot be confused with a
@@ -38,6 +45,10 @@ def reports_dir(tmp_path, monkeypatch):
     index.write_text(
         json.dumps(
             [
+                # Entries are stamped with USER's id: since SEC-196 an entry
+                # with no owner is admin-only, and these tests exercise the
+                # serving/path-containment logic, not the ownership gate
+                # (which has its own tests in test_reports_ownership.py).
                 {
                     "id": "abc123",
                     "title": "Sample",
@@ -46,6 +57,7 @@ def reports_dir(tmp_path, monkeypatch):
                     "source_type": "routine",
                     "source_name": "sample",
                     "tags": [],
+                    "user_id": 111,
                 },
                 # Hostile index entries: the filename must never escape the
                 # reports directory, and must be .html, even if the index lies.
@@ -57,6 +69,7 @@ def reports_dir(tmp_path, monkeypatch):
                     "source_type": "routine",
                     "source_name": "escape",
                     "tags": [],
+                    "user_id": 111,
                 },
                 {
                     "id": "nothtml",
@@ -66,6 +79,7 @@ def reports_dir(tmp_path, monkeypatch):
                     "source_type": "routine",
                     "source_name": "nothtml",
                     "tags": [],
+                    "user_id": 111,
                 },
             ]
         ),
@@ -73,6 +87,9 @@ def reports_dir(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(reports, "CHARTS_DIR", directory)
     monkeypatch.setattr(reports, "INDEX_FILE", index)
+    # Ownership (SEC-196) is orthogonal here: USER owns every seeded entry and
+    # is not an admin, so these tests keep exercising serving/containment.
+    monkeypatch.setattr(reports_routes, "get_config_manager", lambda: _NoAdmins())
     return directory
 
 

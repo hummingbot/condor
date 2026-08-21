@@ -218,7 +218,7 @@ def test_concurrent_writers_never_leave_a_torn_file(memory_root):
     # always parse cleanly (frontmatter + body), never a torn/interleaved one.
     import threading
 
-    from condor.memory.store import _parse_frontmatter
+    from condor.frontmatter import parse_frontmatter
 
     s = MemoryStore(user_id=42)
     target = s.memories_dir / "shared.md"
@@ -240,7 +240,7 @@ def test_concurrent_writers_never_leave_a_torn_file(memory_root):
     for t in threads:
         t.join()
 
-    meta, body = _parse_frontmatter(target.read_text())
+    meta, body = parse_frontmatter(target.read_text())
     # The surviving file is exactly one writer's payload, not a blend.
     assert meta.get("name") == "shared"
     assert body == "x" * 5000

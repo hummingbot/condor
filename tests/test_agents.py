@@ -544,11 +544,11 @@ def _run_create_session(monkeypatch, *, chat_id, user_id):
     from condor.runtime import sessions as session_module
 
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _FakeACPClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _FakeACPClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     # Resolved through condor.runtime.binding now, so patch it at the source.
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     _FakeACPClient.last_extra_env = None
     spec = SessionSpec(

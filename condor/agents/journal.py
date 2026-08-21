@@ -166,15 +166,6 @@ Duration: {duration:.1f}s
 """
 
 
-def get_session_dir(run_key: str, session_number: int) -> Path:
-    """Build the path for a specific session directory.
-
-    ``run_key`` is the ``"{agent_slug}.{strategy_slug}"`` prefix (legacy flat
-    slugs without a dot still resolve to ``agents/{slug}/``).
-    """
-    return _strategy_base_dir(run_key) / "sessions" / f"session_{session_number}"
-
-
 def next_session_number(agent_dir: Path) -> int:
     """Determine the next session number by scanning existing session_* dirs."""
     # Check new location first
@@ -400,13 +391,13 @@ class JournalManager:
         self._archive_last_section: str | None = None
 
         if not self._path.exists():
-            self._path.write_text(JOURNAL_TEMPLATE.format(agent_id=agent_id))
+            atomic_write_text(self._path, JOURNAL_TEMPLATE.format(agent_id=agent_id))
 
         # Ensure learnings.md exists at agent level
         if self._agent_dir:
             learnings_path = self._agent_dir / "learnings.md"
             if not learnings_path.exists():
-                learnings_path.write_text(LEARNINGS_TEMPLATE)
+                atomic_write_text(learnings_path, LEARNINGS_TEMPLATE)
 
         self._tick_count = self._count_ticks()
 
@@ -466,7 +457,7 @@ class JournalManager:
             return
 
         if not path.exists():
-            path.write_text(LEARNINGS_TEMPLATE)
+            atomic_write_text(path, LEARNINGS_TEMPLATE)
 
         # Resolve category to section header
         cat = category if category in LEARNING_CATEGORIES else DEFAULT_LEARNING_CATEGORY
@@ -518,7 +509,7 @@ class JournalManager:
             )
         else:
             new_text = full_text.rstrip() + f"\n\n## {section_header}\n{new_section}\n"
-        path.write_text(new_text)
+        atomic_write_text(path, new_text)
 
     def _append_learning_to_journal(self, text_content: str) -> None:
         """Legacy: append learning to journal's Learnings section."""

@@ -163,6 +163,22 @@ export function formatRelativeTime(
   return `${Math.floor(diff / 86400)}d ago`;
 }
 
+/**
+ * Significant-digits price formatter shared by the trade pane, the chart
+ * tooltip, and the LP position bar — the same entry price must render as the
+ * identical string in all three. Prices span memecoin to majors, hence
+ * significant digits below 1 rather than fixed decimals. Em-dash for a
+ * missing/zero price (an executor with no entry yet, an open LP bound).
+ * Distinct from `formatPrice` below, which locale-groups and uses 4
+ * significant digits — its call sites keep their rendering.
+ */
+export function formatPriceSig(val: number | null | undefined): string {
+  if (val == null || !Number.isFinite(val) || val === 0) return "—";
+  if (Math.abs(val) >= 1000) return val.toFixed(2);
+  if (Math.abs(val) >= 1) return val.toFixed(4);
+  return val.toPrecision(6);
+}
+
 export function formatPrice(val: number): string {
   if (!val) return "\u2014";
   if (val >= 1000) return val.toLocaleString("en-US", { maximumFractionDigits: 2 });

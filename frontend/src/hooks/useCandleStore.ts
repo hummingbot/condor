@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { CandleData } from "@/lib/api";
-import { candleStore } from "@/lib/candle-store";
+import { candleChannelKey, candleStore } from "@/lib/candle-store";
 
 /** Staleness thresholds by interval category */
 const STALE_THRESHOLD_SUB_1H_MS = 30_000; // 30s for intervals < 1h
@@ -38,10 +38,7 @@ export function useCandleStore(
   mergeCandles: (c: CandleData[]) => void;
   setDuration: (seconds: number) => void;
 } {
-  const key = server
-    ? `candles:${server}:${connector}:${pair}:${interval}` +
-      (poolAddress ? `:${poolAddress}` : "")
-    : "";
+  const key = server ? candleChannelKey(server, connector, pair, interval, poolAddress) : "";
 
   const [candles, setCandles] = useState<CandleData[]>([]);
   const [isStale, setIsStale] = useState(false);

@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { useServer } from "@/hooks/useServer";
 import { type ServerInfo, api } from "@/lib/api";
 
 interface ServerForm {
@@ -24,6 +25,7 @@ const EMPTY_FORM: ServerForm = { name: "", host: "", port: 8000, username: "", p
 
 export function ServersSettings() {
   const qc = useQueryClient();
+  const { server: activeServer, setServer } = useServer();
   const [adding, setAdding] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   const [form, setForm] = useState<ServerForm>(EMPTY_FORM);
@@ -54,9 +56,16 @@ export function ServersSettings() {
     onSuccess: () => { invalidate(); setConfirmDelete(null); },
   });
 
+  // Setting the default is two things at once, because the button reads as one:
+  // it writes the `chat_defaults` entry Telegram also uses, and it points this
+  // browser at that server. Without the second half the click had no visible
+  // effect at all — the star was never filled and the header never moved.
   const defaultMut = useMutation({
     mutationFn: (name: string) => api.setDefaultServer(name),
-    onSuccess: invalidate,
+    onSuccess: (_data, name) => {
+      if (name !== activeServer) setServer(name);
+      invalidate();
+    },
   });
 
   const startEdit = (s: ServerInfo) => {
@@ -204,6 +213,11 @@ export function ServersSettings() {
                   <span className="rounded bg-[var(--color-surface-hover)] px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-[var(--color-text-muted)]">
                     {s.permission}
                   </span>
+                  {s.is_default && (
+                    <span className="rounded bg-amber-400/15 px-1.5 py-0.5 text-[10px] font-medium uppercase tracking-wider text-amber-400">
+                      Default
+                    </span>
+                  )}
                 </div>
                 <span className="text-xs text-[var(--color-text-muted)]">
                   {s.host}:{s.port}
@@ -214,10 +228,21 @@ export function ServersSettings() {
             <div className="flex items-center gap-1">
               <button
                 onClick={() => defaultMut.mutate(s.name)}
-                className="rounded p-1.5 text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-amber-400"
-                title="Set as default"
+                disabled={s.is_default || defaultMut.isPending}
+                aria-pressed={s.is_default}
+                className={`rounded p-1.5 transition-colors disabled:cursor-default ${
+                  s.is_default
+                    ? "text-amber-400"
+                    : "text-[var(--color-text-muted)] hover:bg-[var(--color-surface-hover)] hover:text-amber-400 disabled:opacity-50"
+                }`}
+                title={s.is_default ? "Default server" : "Set as default"}
+                aria-label={s.is_default ? "Default server" : `Set ${s.name} as default`}
               >
-                <Star className="h-3.5 w-3.5" />
+                {defaultMut.isPending && defaultMut.variables === s.name ? (
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                ) : (
+                  <Star className={`h-3.5 w-3.5 ${s.is_default ? "fill-current" : ""}`} />
+                )}
               </button>
               {isOwner(s) && (
                 <>

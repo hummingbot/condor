@@ -2,15 +2,7 @@ import { useMemo } from "react";
 
 import { feeAmount, lpStateStyle, readLpPosition, type LpPosition } from "./lp-position";
 import { type ExecutorInfo } from "@/lib/api";
-import { formatPnl, isExecutorActive, pnlColor } from "@/lib/formatters";
-
-/** Prices here span memecoin to majors, so significant digits, not decimals. */
-function fmtPrice(price: number | null): string {
-  if (price === null || !Number.isFinite(price) || price <= 0) return "—";
-  if (price >= 1000) return price.toFixed(2);
-  if (price >= 1) return price.toFixed(4);
-  return price.toPrecision(5);
-}
+import { formatPnl, formatPriceSig, isExecutorActive, pnlColor } from "@/lib/formatters";
 
 /**
  * Where the price sits inside the range, as a 0–1 fraction, or `null`.
@@ -91,7 +83,7 @@ export function LpPositionBar({
 
             {/* Range, with the price's place inside it */}
             <span className="flex items-center gap-1.5 font-mono tabular-nums">
-              <span className="text-[var(--color-text-muted)]">{fmtPrice(pos.lowerPrice)}</span>
+              <span className="text-[var(--color-text-muted)]">{formatPriceSig(pos.lowerPrice)}</span>
               <span className="relative h-1 w-16 overflow-hidden rounded-full bg-[var(--color-border)]">
                 {fraction !== null && (
                   <span
@@ -103,7 +95,7 @@ export function LpPositionBar({
                   />
                 )}
               </span>
-              <span className="text-[var(--color-text-muted)]">{fmtPrice(pos.upperPrice)}</span>
+              <span className="text-[var(--color-text-muted)]">{formatPriceSig(pos.upperPrice)}</span>
             </span>
 
             <span className="ml-auto flex items-center gap-4 font-mono tabular-nums">

@@ -229,11 +229,39 @@ export function useLpValidation(state: LPState): ExecutorValidation {
 }
 
 /**
+ * Bins a Meteora DLMM position of this width would span.
+ *
+ * Each bin is a fixed geometric step of `1 + bin_step/10000`, so the count is the
+ * log of the price ratio over the log of that step. Null when the pool is not a
+ * DLMM (only those report a bin step) or the bounds are not a real range.
+ */
+export function dlmmBinSpan(
+  lower: number,
+  upper: number,
+  binStep: number | null | undefined,
+): number | null {
+  if (!binStep || binStep <= 0) return null;
+  if (!(lower > 0) || !(upper > lower)) return null;
+  return Math.ceil(Math.log(upper / lower) / Math.log(1 + binStep / 10000));
+}
+
+/**
+ * What one Meteora DLMM position can hold. A wider range is not rejected by the
+ * form — Gateway is the authority and its own cap can move — but it fails at
+ * open time, and until now the only trace of that was a line in the gateway log.
+ */
+export const DLMM_MAX_BINS = 69;
+
+/**
  * Things the schema permits but that are rarely meant. Kept apart from validation
  * because none of them should block a create — a deliberately odd position is
  * still a position.
  */
-export function rangeWarnings(state: LPState, price: number | null): string[] {
+export function rangeWarnings(
+  state: LPState,
+  price: number | null,
+  binStep?: number | null,
+): string[] {
   const warnings: string[] = [];
   const bothAmounts = state.base_amount > 0 && state.quote_amount > 0;
 
@@ -257,6 +285,13 @@ export function rangeWarnings(state: LPState, price: number | null): string[] {
   if (state.lower_limit_price > 0 && state.lower_limit_price >= state.lower_price) {
     warnings.push("Lower limit sits inside the range");
   }
+
+  const bins = dlmmBinSpan(state.lower_price, state.upper_price, binStep);
+  if (bins !== null && bins > DLMM_MAX_BINS) {
+    warnings.push(
+      `Range spans ~${bins} bins; Meteora opens at most ${DLMM_MAX_BINS} per position — narrow it or the open will fail`,
+    );
+  }
   return warnings;
 }
 
@@ -276,6 +311,15 @@ const SLOT_FIELD: Record<PickSlot, keyof LPState> = {
   end: "lower_price",
   limit: "upper_limit_price",
   limit2: "lower_limit_price",
+};
+
+// The slots are named for the grid executor; on an LP range they are prices,
+// not a direction of travel, so the chart is told what they mean here.
+const LP_LINE_LABELS: Partial<Record<PickSlot, string>> = {
+  start: "Upper",
+  end: "Lower",
+  limit: "Upper limit",
+  limit2: "Lower limit",
 };
 
 export function isMeteoraProvider(provider: string): boolean {
@@ -314,6 +358,7 @@ export function useLpConfig(
       side: state.side === LP_SIDE_SELL ? 2 : 1,
       minSpread: 0,
       activePickField: PICK_SLOT[state.activePickField ?? ""] ?? null,
+      lineLabels: LP_LINE_LABELS,
       extraLines:
         state.lower_limit_price > 0
           ? [

@@ -689,11 +689,14 @@ def resolve_bot(bot=None):
     """The best Telegram sender available in this process.
 
     Prefer the passed live ``bot``; otherwise fall back to the registered routine
-    bot, and finally the ``_HttpBot`` Telegram-HTTP path (``TELEGRAM_TOKEN``) that
+    bot, then the ``_HttpBot`` Telegram-HTTP path (``TELEGRAM_TOKEN``) that
     routines/notification already use, so a process with no live bot still
-    delivers. Public because a Telegram wake sink (FEAT-034) must reach the user
-    through exactly the same ladder a completion notice does -- two ladders would
-    eventually disagree about who can talk to a chat.
+    delivers. With no token at all the last rung is ``NotifyBot`` (FEAT-048),
+    which records the message as a dashboard notification -- an install with no
+    Telegram now tells the user things instead of dropping them. Public because a
+    Telegram wake sink (FEAT-034) must reach the user through exactly the same
+    ladder a completion notice does -- two ladders would eventually disagree
+    about who can talk to a chat.
     """
     target = bot
     if target is None:
@@ -706,7 +709,16 @@ def resolve_bot(bot=None):
     if target is None:
         from condor.routine_store import _HttpBot
 
-        target = _HttpBot()
+        http = _HttpBot()
+        if http.has_token():
+            return http
+        # No Telegram at all: record on the dashboard instead of handing the
+        # message to a sender that drops it (FEAT-048). This rung sits *below*
+        # both Telegram rungs, so an install with a bot is byte-for-byte
+        # unchanged and nothing is ever delivered twice to Telegram.
+        from condor.notifications import NotifyBot
+
+        return NotifyBot()
     return target
 
 
@@ -715,4 +727,16 @@ async def _notify_done(dt: DelegateTask, bot) -> None:
     if not dt.chat_id:
         return
 
-    await resolve_bot(bot).send_message(chat_id=dt.chat_id, text=_completion_text(dt))
+    from condor.notifications import NotifyBot, record
+
+    text = _completion_text(dt)
+    target = resolve_bot(bot)
+    await target.send_message(chat_id=dt.chat_id, text=text)
+
+    # And on the dashboard bell (FEAT-048), with the same text the Telegram push
+    # and the transcript note carry, so the three surfaces cannot tell three
+    # stories about one task. Skipped when the resolved sender *is* the bell:
+    # that rung only wins when there is no Telegram, and it has already recorded
+    # this very message.
+    if not isinstance(target, NotifyBot):
+        await record(dt.user_id, text, kind="delegation")

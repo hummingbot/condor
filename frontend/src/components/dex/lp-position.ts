@@ -1,6 +1,8 @@
 import { type ExecutorInfo } from "@/lib/api";
 import { formatUsd } from "@/lib/formatters";
 
+import { num } from "./format";
+
 /** LP executors are the only ones the DEX pages can route to a pool. */
 export const LP_EXECUTOR_TYPE = "lp_executor";
 
@@ -21,12 +23,6 @@ export const LP_REFRESH_MS = 20_000;
  * query — one cache entry, and opening a pool from the strip costs no fetch.
  */
 export const RECENT_LP_EXECUTORS = 200;
-
-function num(v: unknown): number | null {
-  if (v === null || v === undefined || v === "") return null;
-  const n = typeof v === "number" ? v : parseFloat(String(v));
-  return Number.isFinite(n) ? n : null;
-}
 
 function str(v: unknown): string {
   return typeof v === "string" ? v : "";

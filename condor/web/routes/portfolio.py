@@ -391,8 +391,3 @@ def _extract_connector_totals(data: object) -> dict[str, float]:
         elif isinstance(val, (int, float)):
             totals[account] = float(val)
     return totals
-
-
-def _sum_snapshot_value(data: object) -> float:
-    """Sum USD values from a portfolio snapshot (nested account/connector/balances)."""
-    return sum(_extract_connector_totals(data).values())

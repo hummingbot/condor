@@ -94,10 +94,12 @@ def _note_user(hashed: str | None, surface: str) -> None:
 @_quiet
 def feature_first_use(feature: str) -> None:
     """Fire once per install, ever. The activation funnel."""
-    if not _on():
-        return
     from condor.telemetry import consent
 
+    # Gated on `usage`, not merely "on": at the ping floor the event could
+    # never be sent, and the features_seen list should not accumulate for it.
+    if consent.level() != consent.USAGE:
+        return
     if consent.mark_feature_seen(feature):
         emit("feature_first_use", feature=feature)
 

@@ -1,19 +1,39 @@
 import os
+from typing import Optional
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+
+class ConfigError(RuntimeError):
+    """The process is configured in a way it must not start with."""
+
+
+def resolve_admin_id(env=None) -> Optional[int]:
+    """The primary admin's user id, or ``None`` when it is unset or unusable.
+
+    Junk resolves to ``None`` rather than raising here, because this runs at
+    import time and every module reads this file; the refusal happens once, at
+    boot, in :func:`check_startup_config`. Non-positive ids count as unusable:
+    several call sites read a falsy user or chat id as "absent", so ``0`` would
+    silently address nobody.
+    """
+    env = os.environ if env is None else env
+    raw = (env.get("ADMIN_USER_ID") or "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
+
+
 # Primary admin user ID - this user has full control over the bot
 # Set via ADMIN_USER_ID environment variable
-ADMIN_USER_ID = None
-_admin_id_str = os.environ.get("ADMIN_USER_ID", "").strip()
-if _admin_id_str:
-    try:
-        ADMIN_USER_ID = int(_admin_id_str)
-    except ValueError:
-        pass
+ADMIN_USER_ID = resolve_admin_id()
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
@@ -42,7 +62,146 @@ else:
 #   usage - the full allowlisted taxonomy in condor/telemetry/schema.py.
 CONDOR_TELEMETRY = os.environ.get("CONDOR_TELEMETRY", "").strip().lower() or None
 
-# Where a batch would be POSTed. Deliberately unset by default and NOT baked
-# into the source: with no URL the send path is inert, and events can only ever
-# accumulate in the local capped outbox. See PRIVACY.md.
-CONDOR_TELEMETRY_URL = os.environ.get("CONDOR_TELEMETRY_URL", "").strip() or None
+# ── Run mode (FEAT-049) ──
+# Condor runs either as a Telegram bot (the default) or as a local, Telegram-less
+# dashboard. The mode is *explicit*: it is read from CONDOR_MODE and is never
+# inferred from whether a token happens to be present. An install whose
+# TELEGRAM_TOKEN went missing must fail loudly at boot, not quietly become an
+# unauthenticated dashboard — local mode has no authentication at all.
+
+
+MODE_TELEGRAM = "telegram"
+MODE_LOCAL = "local"
+
+
+def resolve_mode(env=None) -> str:
+    """The configured run mode: ``"telegram"`` (default) or ``"local"``.
+
+    Only the exact value ``local`` (case- and space-insensitive) selects local
+    mode. Anything else — unset, empty, or a typo — is ``telegram``, which is
+    the fail-safe direction: telegram mode requires a token, so a mistyped mode
+    surfaces as the hard error below instead of as an open dashboard.
+    """
+    env = os.environ if env is None else env
+    value = (env.get("CONDOR_MODE") or "").strip().lower()
+    return MODE_LOCAL if value == MODE_LOCAL else MODE_TELEGRAM
+
+
+def resolve_web_host(env=None) -> str:
+    """The address the dashboard binds to.
+
+    Local mode has no login, so it binds loopback only: an unauthenticated
+    dashboard with full trading control must not be one firewall rule away from
+    the internet. ``WEB_HOST`` is the explicit, documented opt-out (set it to
+    ``0.0.0.0`` and you have chosen to expose it). Telegram mode, which does
+    authenticate, keeps binding all interfaces.
+    """
+    env = os.environ if env is None else env
+    explicit = (env.get("WEB_HOST") or "").strip()
+    if explicit:
+        return explicit
+    return "127.0.0.1" if resolve_mode(env) == MODE_LOCAL else "0.0.0.0"
+
+
+def resolve_local_user_id(env=None) -> int:
+    """The user id local mode logs in as: the admin, or ``1`` when there is none.
+
+    Local mode deliberately introduces no new identity concept — not even its
+    own. It logs in as ``ADMIN_USER_ID``, the same id ``config.yml``'s
+    ``admin_id``, ``server_access.owner_id``, ``chat_defaults``, preferences,
+    memory and session keys already key on, and the one ``ConfigManager``
+    materialises a user record for. Two knobs for one identity is what broke:
+    a Telegram install that flipped ``CONDOR_MODE=local`` kept its Telegram
+    ``ADMIN_USER_ID`` while the dashboard tried to log in as a hardcoded ``1``
+    that ``config.yml`` had never heard of.
+
+    ``1`` remains the answer for an install that never had a Telegram id — it is
+    what ``make setup`` writes as ``ADMIN_USER_ID`` in local mode — and ``1``
+    rather than ``0`` because several call sites read a falsy id as "absent".
+    """
+    return resolve_admin_id(env) or 1
+
+
+def check_startup_config(env=None) -> None:
+    """Refuse to start on a configuration that cannot mean what it says.
+
+    Two cases, both of which used to surface far from their cause:
+
+    * Telegram mode (including the default, i.e. an unset ``CONDOR_MODE``) with
+      no token. That surfaced deep inside PTB as an ``InvalidToken`` traceback;
+      more importantly it must *never* be treated as "well, local mode then".
+    * An ``ADMIN_USER_ID`` that is not a positive integer. That used to be
+      swallowed silently, leaving an install with **no admin at all**: no admin
+      panel, no approvals, no boot notification, and in local mode no user to
+      log in as — all of it looking like unrelated breakage later.
+    """
+    env = os.environ if env is None else env
+
+    raw_admin = (env.get("ADMIN_USER_ID") or "").strip()
+    if raw_admin and resolve_admin_id(env) is None:
+        raise ConfigError(
+            f"ADMIN_USER_ID is not a valid user id: {raw_admin!r}.\n"
+            "It must be a positive integer — your numeric Telegram user id "
+            "(get it from https://t.me/userinfobot), or 1 in local mode.\n"
+            "Fix it in .env, or run `make setup`."
+        )
+
+    if (
+        resolve_mode(env) != MODE_LOCAL
+        and not (env.get("TELEGRAM_TOKEN") or "").strip()
+    ):
+        raise ConfigError(
+            "TELEGRAM_TOKEN is not set and CONDOR_MODE is not 'local'.\n"
+            "Run `make setup` to configure a Telegram bot, or choose Local mode "
+            "there (CONDOR_MODE=local) to run the dashboard without Telegram."
+        )
+
+
+def check_local_user(env=None, get_role=None) -> None:
+    """In local mode, refuse to start unless the user it logs in as exists.
+
+    Local mode logs in without a password, so the *only* thing that decides who
+    that is happens before any request: ``ADMIN_USER_ID`` must resolve to a
+    ``config.yml`` user with a role that can use the dashboard. When it does
+    not, the failure belongs here — at boot, in ``make run``, next to the file
+    you have to edit — and not as a 500 from ``/auth/local-login`` once the
+    browser is already open.
+
+    ``get_role`` is injectable so this is testable without a config file; it
+    defaults to the real :class:`ConfigManager`, whose load also materialises
+    the admin's user record from the environment.
+    """
+    env = os.environ if env is None else env
+    if resolve_mode(env) != MODE_LOCAL:
+        return
+
+    user_id = resolve_local_user_id(env)
+    if get_role is None:
+        from config_manager import get_config_manager
+
+        get_role = get_config_manager().get_user_role
+
+    from config_manager import UserRole
+
+    if get_role(user_id) not in (UserRole.USER, UserRole.ADMIN):
+        raw_admin = (env.get("ADMIN_USER_ID") or "").strip()
+        source = (
+            f"ADMIN_USER_ID={raw_admin} in .env"
+            if raw_admin
+            else "the local-mode default (ADMIN_USER_ID is not set in .env)"
+        )
+        raise ConfigError(
+            f"Local mode logs in as user {user_id} — {source} — but that user "
+            f"is not an approved user in config.yml.\n"
+            "Run `make setup` and choose Local mode, or set ADMIN_USER_ID in "
+            ".env to a user that exists in config.yml.\n"
+            "Switching an existing Telegram install to local mode: keep your "
+            "Telegram ADMIN_USER_ID and the dashboard logs in as you, with all "
+            "your servers and preferences intact."
+        )
+
+
+CONDOR_MODE = resolve_mode()
+LOCAL_MODE = CONDOR_MODE == MODE_LOCAL
+WEB_HOST = resolve_web_host()
+LOCAL_USER_ID = resolve_local_user_id()

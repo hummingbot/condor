@@ -101,10 +101,10 @@ def registry(tmp_path, monkeypatch):
     monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     monkeypatch.setattr(conversations, "_live_recorders", set())
     monkeypatch.setattr(session_module, "_sessions", {})
-    monkeypatch.setattr(session_module, "ACPClient", _EchoClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _EchoClient)
     monkeypatch.setattr(session_module, "build_initial_context", lambda *a, **k: "")
     monkeypatch.setattr(
-        "handlers.agents._shared.build_mcp_servers_for_session", lambda *a, **k: []
+        "condor.runtime.toolsets.build_mcp_servers_for_session", lambda *a, **k: []
     )
     # Sink factories and the in-flight counts are process-global, exactly like the
     # confirmation registry: reset both so tests cannot leak into each other.
@@ -331,7 +331,7 @@ def test_a_typed_turn_is_still_recorded_as_the_user(registry):
 
 @pytest.fixture
 def gated(registry, monkeypatch):
-    monkeypatch.setattr(session_module, "ACPClient", _GatedClient)
+    monkeypatch.setattr("condor.acp.client.ACPClient", _GatedClient)
     return registry
 
 

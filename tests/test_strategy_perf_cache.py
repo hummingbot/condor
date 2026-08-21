@@ -7,7 +7,7 @@ after one final successful fetch.
 """
 
 import asyncio
-from collections import Counter
+from collections import Counter, OrderedDict
 from types import SimpleNamespace
 
 import pytest
@@ -65,7 +65,7 @@ def _make_sessions(strategy_dir, nums):
 def perf_env(tmp_path, monkeypatch):
     """Isolated caches + engine registry + a client factory hook."""
     monkeypatch.setattr(agents_routes, "_PERF_CACHE", {})
-    monkeypatch.setattr(agents_routes, "_CLOSED_PERF_CACHE", {})
+    monkeypatch.setattr(agents_routes, "_CLOSED_PERF_CACHE", OrderedDict())
     # The running-engine registry moved into the supervisor (FEAT-012).
     monkeypatch.setattr(loops_module.get_supervisor(), "_engines", {})
 
@@ -205,3 +205,61 @@ def test_reactivated_id_evicts_frozen_entry(perf_env):
     _compute(strategy_dir)
     assert api.calls[f"{RUN_KEY}_1"] == 2
     assert f"{RUN_KEY}_1" not in agents_routes._CLOSED_PERF_CACHE
+
+
+def test_closed_cache_never_exceeds_cap(perf_env, monkeypatch):
+    """PERF-186: the frozen cache is a bounded LRU, not a monotonic dict."""
+    cap = 4
+    monkeypatch.setattr(agents_routes, "_CLOSED_PERF_CACHE_MAX", cap)
+    n_sessions = cap + 4  # 7 closed + the newest (never frozen)
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, range(1, n_sessions + 1))
+    api = _FakeExecutorsApi(
+        {f"{RUN_KEY}_{n}": [_closed_executor(1.0)] for n in range(1, n_sessions + 1)}
+    )
+    use_client(_FakeClient(api))
+
+    sessions, totals = _compute(strategy_dir)
+
+    assert len(sessions) == n_sessions  # all sessions still render
+    # Exactly `cap` closed sessions survive (freeze order follows iterdir(),
+    # so which ones is filesystem-dependent); the newest is never frozen.
+    assert len(agents_routes._CLOSED_PERF_CACHE) == cap
+    closed_ids = {f"{RUN_KEY}_{n}" for n in range(1, n_sessions)}
+    assert set(agents_routes._CLOSED_PERF_CACHE) <= closed_ids
+    assert totals["total_pnl"] == pytest.approx(float(n_sessions))
+
+
+def test_evicted_session_refetched_and_refrozen(perf_env, monkeypatch):
+    """An LRU-evicted closed session flows through the fetch path again."""
+    cap = 2
+    monkeypatch.setattr(agents_routes, "_CLOSED_PERF_CACHE_MAX", cap)
+    strategy_dir, use_client = perf_env
+    _make_sessions(strategy_dir, [1, 2, 3, 4])
+    api = _FakeExecutorsApi(
+        {f"{RUN_KEY}_{n}": [_closed_executor(float(n))] for n in [1, 2, 3, 4]}
+    )
+    use_client(_FakeClient(api))
+
+    sessions1, totals1 = _compute(strategy_dir)
+    # Cap 2 with 3 closed sessions: exactly one closed session got evicted
+    # (freeze order follows iterdir(), so which one is filesystem-dependent).
+    closed_ids = {f"{RUN_KEY}_{n}" for n in [1, 2, 3]}
+    cached = set(agents_routes._CLOSED_PERF_CACHE)
+    evicted = closed_ids - cached
+    assert len(cached) == cap
+    assert len(evicted) == 1
+
+    agents_routes._PERF_CACHE.clear()
+    sessions2, totals2 = _compute(strategy_dir)
+
+    # The evicted session was re-fetched; the still-frozen ones were not.
+    for aid in evicted:
+        assert api.calls[aid] == 2
+    for aid in cached:
+        assert api.calls[aid] == 1
+    assert sorted(s.agent_id for s in sessions2) == sorted(
+        s.agent_id for s in sessions1
+    )
+    assert totals2 == totals1
+    assert totals2["total_pnl"] == pytest.approx(10.0)

@@ -26,6 +26,9 @@ _report_agent: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _report_source: contextvars.ContextVar[tuple[str, str] | None] = contextvars.ContextVar(
     "report_source", default=None
 )
+_report_owner: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "report_owner", default=None
+)
 
 
 def _charts_dir() -> Path:
@@ -60,6 +63,23 @@ def attribute_to(agent: str | None):
         yield
     finally:
         _report_agent.reset(token)
+
+
+@contextmanager
+def attribute_owner(user_id: int | None):
+    """Attribute reports saved within this block to an authenticated user id.
+
+    Every runner (routine store, code runner, Telegram routine handler, agent
+    session report) wraps execution with this so ``ReportBuilder.save`` records
+    who the report belongs to — the id the web routes then authorize reads and
+    deletes against (SEC-196). A falsy id (0, None) records no owner, which the
+    routes treat as admin-only, never world-readable.
+    """
+    token = _report_owner.set(int(user_id) if user_id else None)
+    try:
+        yield
+    finally:
+        _report_owner.reset(token)
 
 
 @contextmanager
@@ -128,10 +148,21 @@ def list_reports(
     agent: str | None = None,
     limit: int = 50,
     offset: int = 0,
+    owner_id: int | None = None,
 ) -> tuple[list[dict], int]:
+    """List index entries, newest first.
+
+    ``owner_id`` scopes the listing to one user's reports: entries whose
+    ``user_id`` differs — including legacy entries with no owner at all —
+    are dropped (fail closed, SEC-196). ``None`` means no owner filter,
+    which the web routes reserve for admins; internal callers that match
+    on ``source_name`` (routine run lists) also pass ``None``.
+    """
     entries = _read_index()
     entries.sort(key=lambda entry: entry.get("created_at", ""), reverse=True)
 
+    if owner_id is not None:
+        entries = [entry for entry in entries if entry.get("user_id") == owner_id]
     if source_type:
         entries = [
             entry for entry in entries if entry.get("source_type") == source_type
@@ -154,10 +185,16 @@ def list_reports(
     return entries[offset : offset + limit], total
 
 
-def list_reports_grouped() -> list[dict]:
-    """Return the latest report per source name, with count."""
+def list_reports_grouped(owner_id: int | None = None) -> list[dict]:
+    """Return the latest report per source name, with count.
+
+    ``owner_id`` scopes the grouping exactly as in ``list_reports``: ``None``
+    (admin) sees every entry, anyone else only entries stamped with their id.
+    """
     entries = _read_index()
     entries.sort(key=lambda entry: entry.get("created_at", ""), reverse=True)
+    if owner_id is not None:
+        entries = [entry for entry in entries if entry.get("user_id") == owner_id]
     groups: dict[str, dict] = {}
     for entry in entries:
         source_name = entry.get("source_name", "")

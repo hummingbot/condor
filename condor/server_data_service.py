@@ -896,10 +896,10 @@ def register_default_fetches() -> None:
 
     sds.register_fetch(ServerDataType.PORTFOLIO, fetch_portfolio)
     sds.register_fetch(ServerDataType.PORTFOLIO_HISTORY, fetch_portfolio_history)
-    sds.register_fetch(ServerDataType.PRICES, fetch_current_price)
     # strict=True on the cached reads: a failed call must reach
     # _do_fetch_and_cache's except branch (record_error, keep the last good
     # value, back off) instead of being cached as "nothing here".
+    sds.register_fetch(ServerDataType.PRICES, partial(fetch_current_price, strict=True))
     sds.register_fetch(ServerDataType.POSITIONS, partial(fetch_positions, strict=True))
     sds.register_fetch(
         ServerDataType.ACTIVE_ORDERS, partial(fetch_active_orders, strict=True)
@@ -917,8 +917,10 @@ def register_default_fetches() -> None:
     sds.register_fetch(ServerDataType.BOT_RUNS, fetch_bot_runs)
     sds.register_fetch(ServerDataType.CANDLE_CONNECTORS, fetch_candle_connectors)
     sds.register_fetch(ServerDataType.SERVER_STATUS, fetch_server_status)
-    sds.register_fetch(ServerDataType.TICKERS, fetch_tickers)
-    sds.register_fetch(ServerDataType.TICKER_POOL, fetch_ticker_pool)
+    sds.register_fetch(ServerDataType.TICKERS, partial(fetch_tickers, strict=True))
+    sds.register_fetch(
+        ServerDataType.TICKER_POOL, partial(fetch_ticker_pool, strict=True)
+    )
 
     logger.info(
         "ServerDataService: registered fetch functions for %d data types",
