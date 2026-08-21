@@ -600,6 +600,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "aiohttp" },
+    { name = "apscheduler" },
     { name = "beautifulsoup4" },
     { name = "bleach" },
     { name = "fastapi" },
@@ -634,6 +635,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp" },
+    { name = "apscheduler", specifier = ">=3.11,<4" },
     { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "bleach", specifier = ">=6.4.0" },
     { name = "fastapi" },

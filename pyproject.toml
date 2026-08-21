@@ -5,6 +5,12 @@ description = "Telegram bot for Hummingbot trading via Backend API"
 requires-python = ">=3.12"
 dependencies = [
     "python-telegram-bot[job-queue]",
+    # Condor's own scheduler (condor/scheduler.py). It already arrived with
+    # python-telegram-bot[job-queue] — PTB's JobQueue is a thin wrapper over it —
+    # so this is not a new dependency, only an honest one: we use APScheduler
+    # directly now instead of reaching it through a Telegram object. Capped
+    # below 4.0, which is a different API.
+    "apscheduler>=3.11,<4",
     "hummingbot-api-client==1.5.7",
     "python-dotenv",
     "PyYAML",
