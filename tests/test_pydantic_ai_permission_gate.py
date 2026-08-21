@@ -226,8 +226,10 @@ def test_dry_run_cannot_execute_a_real_trading_tool():
     )
     args = {
         "action": "create",
+        "executor_type": "grid_executor",
         "executor_config": {
             "controller_id": "test_controller",
+            "type": "grid_executor",
             "total_amount_quote": 100.0,
         },
     }
@@ -258,8 +260,10 @@ def test_risk_limit_denial_prevents_the_create():
     )
     args = {
         "action": "create",
+        "executor_type": "grid_executor",
         "executor_config": {
             "controller_id": "test_controller",
+            "type": "grid_executor",
             "total_amount_quote": 5000.0,
         },
     }
