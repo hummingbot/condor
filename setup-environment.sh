@@ -441,27 +441,6 @@ if ! command_exists npm; then
     fi
 fi
 
-# ── Install Claude ACP globally ─────────────────────
-
-# Ensure shell environment is refreshed so npm is available after node install.
-refresh_path
-hash -r
-
-if ! npm list -g @agentclientprotocol/claude-agent-acp >/dev/null 2>&1; then
-    msg_info "Installing @agentclientprotocol/claude-agent-acp globally..."
-    if npm install -g @agentclientprotocol/claude-agent-acp; then
-        msg_ok "@agentclientprotocol/claude-agent-acp installed successfully"
-        NEEDS_RESTART=true
-        refresh_path
-    else
-        msg_error "Failed to install @agentclientprotocol/claude-agent-acp globally."
-        msg_info "You can install it later with: npm install -g @agentclientprotocol/claude-agent-acp"
-        # Don't exit - this dependency is optional for core setup flow
-    fi
-else
-    msg_ok "@agentclientprotocol/claude-agent-acp is already installed"
-fi
-
 # ── Install TypeScript globally ─────────────────────
 
 if ! command_exists tsc && ! npm list -g typescript >/dev/null 2>&1; then
@@ -718,14 +697,30 @@ echo ""
 echo -e "${BOLD}Step 2: AI Model (LLM)${RESET}"
 echo ""
 
-# The wizard renders the same readiness probes the bot uses, so it has to run in
-# the project's Python env -- which means `uv run` syncs it here, a minute before
-# `make install` would have. Never fatal: a model can be picked later with
-# `make pick-model`, and setup has more to do.
+# The wizard (condor.setup_llm) renders the same readiness probes the bot
+# uses, so it has to run in the project's Python env. Sync it FIRST, before
+# asking anything below -- otherwise `uv run`'s own venv-creation/install
+# output shows up sandwiched between "Pick an AI model now?" and the actual
+# model menu, which reads as the prompt getting interrupted mid-conversation
+# rather than as one continuous step. Unconditional (not gated behind the
+# Y/n) since both branches below need it: picking a model runs the wizard
+# directly, and skipping still needs it synced for `--status`/no-tty.
+msg_info "Setting up Condor's Python environment (~250MB first run, 1-3 min)..."
+uv run python -c "pass"
+echo ""
+
 if (: </dev/tty) 2>/dev/null; then
-    msg_info "Preparing the Python environment (first run may take a minute)..."
-    uv run python -m condor.setup_llm < /dev/tty || \
-        msg_warn "Model selection did not complete -- run 'make pick-model' later"
+    prompt_visible "Pick an AI model now? [Y/n]" "Y" "pick_model_now"
+    if [[ "${pick_model_now:-Y}" =~ ^[Nn]$ ]]; then
+        msg_ok "Skipped -- run 'make pick-model' any time"
+    else
+        # The venv is already warm above, so this goes straight to the model
+        # menu -- and if the model picked (or kept) needs a CLI bridge that
+        # isn't installed yet (e.g. `npm install -g @google/gemini-cli`),
+        # installs and confirms it right here, no separate pass afterward.
+        uv run python -m condor.setup_llm < /dev/tty || \
+            msg_warn "Model selection did not complete -- run 'make pick-model' later"
+    fi
 else
     msg_info "No terminal available -- skipping model selection"
     uv run python -m condor.setup_llm --status || true
@@ -1197,29 +1192,8 @@ fi
 
 # ── Step 6: Summary ────────────────────────────────
 
-# Source nvm to make node/npm available in current shell
-if [ -s "$HOME/.nvm/nvm.sh" ]; then
-    \. "$HOME/.nvm/nvm.sh"
-fi
-
 echo -e "${BOLD}══════════════════════════════════════════════${RESET}"
 echo -e "  ${GREEN}Setup complete!${RESET}"
-echo ""
-echo -e "  ${BOLD}Installed dependencies:${RESET}"
-echo -e "    • uv:         $(command_exists uv && uv --version 2>/dev/null || echo 'not found')"
-echo -e "    • tmux:       $(command_exists tmux && tmux -V 2>/dev/null || echo 'not found')"
-echo -e "    • node:       $(command_exists node && node --version 2>/dev/null || echo 'not found')"
-echo -e "    • npm:        $(command_exists npm && npm --version 2>/dev/null || echo 'not found')"
-echo -e "    • typescript: $(command_exists tsc && tsc --version 2>/dev/null || echo 'not installed')"
-echo ""
-echo -e "  ${BOLD}Configuration:${RESET}"
-echo -e "    • Mode:       ${CONDOR_MODE:-telegram}$([ "${CONDOR_MODE:-telegram}" = "local" ] && echo ' (no Telegram, dashboard only)')"
-echo -e "    • Telegram:   $([ -n "${TELEGRAM_TOKEN:-}" ] && echo 'configured' || echo 'not set')"
-echo -e "    • AI model:   ${CONDOR_DEFAULT_AGENT:-from agents/condor/AGENT.md}"
-echo ""
-echo -e "  ${BOLD}Next steps:${RESET}"
-echo -e "  ${BOLD}make install${RESET}      Install Python dependencies"
-echo -e "  ${BOLD}make run${RESET}          Run Condor locally (dev)"
 if [ "${CONDOR_MODE:-telegram}" = "local" ]; then
 echo ""
 echo -e "  Then open ${BOLD}http://localhost:8088${RESET} — you are logged in already."

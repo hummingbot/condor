@@ -3,7 +3,7 @@
 ``uv run python -m condor.setup_llm`` lists every model this machine can
 actually run, says why each one is or isn't ready, and writes the pick to
 ``.env`` as ``CONDOR_DEFAULT_AGENT`` — the top of the precedence chain read by
-``handlers.agents._shared._default_agent()``, so it survives restarts and reaches
+``condor.llm.options._default_agent()``, so it survives restarts and reaches
 every entry point. ``--status`` (and any run without a TTY: CI, ``curl | bash``)
 prints the same report and changes nothing.
 
@@ -23,11 +23,14 @@ from __future__ import annotations
 import asyncio
 import getpass
 import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
 import httpx
 
+from condor.acp import ACP_COMMANDS
 from condor.acp.pydantic_ai_client import DEFAULT_BASE_URLS
 from condor.llm import readiness
 from condor.llm.openrouter_models import fetch_models
@@ -291,6 +294,36 @@ def _pick_openrouter(env, ask, say, ask_secret) -> tuple[str, dict[str, str]] | 
     return f"openrouter:{models[int(answer) - 1].slug}", extra
 
 
+def _install_bridge(base: str, say=print) -> bool:
+    """Run the install command for a MISSING ACP bridge, right where it's needed.
+
+    Reuses :func:`condor.llm.readiness.install_command` against
+    ``ACP_COMMANDS[base]`` -- the exact command already shown in that row's
+    "not installed" detail, so this can never run something different from
+    what the menu displayed. Streams the real install output (npm's progress,
+    not a silent hang) rather than capturing it. Returns ``False`` without
+    attempting anything when there's no known package-manager install for
+    this bridge (or the command fails), leaving the caller to report why.
+    """
+    cmd = ACP_COMMANDS.get(base, "")
+    install_cmd = readiness.install_command(cmd) if cmd else ""
+    if not install_cmd or install_cmd.startswith("install `"):
+        return False
+    say(f"\n  → {install_cmd}")
+    try:
+        result = subprocess.run(shlex.split(install_cmd))
+    except (OSError, subprocess.SubprocessError) as e:
+        say(f"  ✗ Install failed: {e}")
+        return False
+    if result.returncode != 0:
+        say(
+            f"  ✗ Install failed (exit {result.returncode}) — try `{install_cmd}` manually."
+        )
+        return False
+    say("  ✓ Installed.")
+    return True
+
+
 # ── The prompt loop ─────────────────────────────────────────────────────────
 
 
@@ -325,8 +358,17 @@ def choose(
                 continue
             return picked
         if state.state == MISSING:
-            say(f"  ✗ {options[key]['label']} isn't ready — {state.detail}\n")
-            continue
+            base = base_of(key)
+            if base in ACP_COMMANDS and _install_bridge(base, say):
+                states.pop(base, None)
+                state = asyncio.run(readiness.probe(base, env))
+                states[base] = state
+            if state.state == MISSING:
+                say(f"  ✗ {options[key]['label']} isn't ready — {state.detail}\n")
+                continue
+            say(
+                f"  {_BADGES.get(state.state, '?')} {options[key]['label']} — {state.detail}\n"
+            )
         if key in ("ollama:", "lmstudio:"):
             picked_key = _pick_local(key, state, ask, say)
             if picked_key is None:
@@ -383,8 +425,22 @@ def main(argv: list[str] | None = None) -> int:
             # moment ago makes a row that was MISSING at render time READY now.
             states.pop(base_of(chosen), None)
 
+    # Make sure whatever ends up being the effective default -- just picked,
+    # kept from a previous run, or the untouched recommended fallback -- has
+    # its CLI bridge actually installed. `choose()` already installs one the
+    # moment a MISSING row is selected; this only still fires for the "picker
+    # was skipped but the default needs it" case, in the same run rather than
+    # a separate pass tacked on afterward. Interactive-only: `--status`/no-tty
+    # promises to change nothing (see the module docstring), so this never
+    # runs there.
+    base = base_of(chosen)
+    state = _state_for(chosen, states, read_env(ENV_PATH))
+    if state.state == MISSING and base in ACP_COMMANDS and _install_bridge(base):
+        states.pop(base, None)
+        state = _state_for(chosen, states, read_env(ENV_PATH))
+
     print("")
-    print(render_report(chosen, _state_for(chosen, states, read_env(ENV_PATH))))
+    print(render_report(chosen, state))
     return 0
 
 
