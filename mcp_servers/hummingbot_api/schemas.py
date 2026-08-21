@@ -587,7 +587,11 @@ class GatewayCLMMRequest(BaseModel):
     )
 
     sort_key: str | None = Field(
-        default="volume", description="Sort by field (volume, tvl, feetvlratio, etc.)"
+        default="tvl",
+        description="Sort by field. Defaults to tvl — depth is the LP question, and "
+                    "volume ties at zero across every pool on a quiet pair. "
+                    "meteora: tvl, volume, feetvlratio. "
+                    "orca: tvl, volume, fees, rewards, yieldovertvl.",
     )
 
     order_by: str | None = Field(

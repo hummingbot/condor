@@ -821,7 +821,7 @@ async def explore_dex_pools(
     page: int = 0,
     limit: int = 50,
     search_term: str | None = None,
-    sort_key: str | None = "volume",
+    sort_key: str | None = "tvl",
     order_by: str | None = "desc",
     include_unknown: bool = True,
     detailed: bool = False,
@@ -844,7 +844,13 @@ async def explore_dex_pools(
         page: Page number for list_pools (default: 0).
         limit: Results per page for list_pools (default: 50, max: 100).
         search_term: Search term to filter pools by token symbols (e.g., 'SOL', 'USDC').
-        sort_key: Sort by field for list_pools (volume, tvl, feetvlratio, etc.).
+        sort_key: Sort by field for list_pools. Defaults to 'tvl', which is the LP
+            question — how much depth is there. 'volume' ranks by how much OTHERS traded,
+            and on a quiet pair every pool ties at zero, making the order arbitrary: on
+            UMBRA-USDC that put a pool holding $1.07 above one holding $15.34K, and buried
+            the deep one at row 68 of 73. meteora: tvl, volume, feetvlratio.
+            orca: tvl, volume, fees, rewards, yieldovertvl. Anything else is rejected with
+            the legal list rather than failing upstream.
         order_by: Sort order for list_pools ('asc' or 'desc').
         include_unknown: Include pools with unverified tokens (default: True).
         detailed: Return detailed table with more columns for list_pools (default: False).
