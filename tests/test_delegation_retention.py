@@ -112,11 +112,11 @@ def test_an_evicted_delegation_is_still_readable_from_disk(tmp_path, monkeypatch
     assert get_delegation(first.task_id) is None
     # ...but nothing was lost: the record and the transcript are on disk, which
     # is what the /agents/delegations/{task_id} routes fall through to.
-    record = read_history(first.task_id)
+    record = read_history(7, first.task_id)
     assert record is not None
     assert record["status"] == "done"
     assert record["result"] == "done ok"
-    events, _markdown = read_history_events(first.task_id)
+    events, _markdown = read_history_events(7, first.task_id)
     assert any(e["type"] == "thought" for e in events)
 
 

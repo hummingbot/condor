@@ -46,6 +46,21 @@ def _reset_gecko_throttle():
 
 
 @pytest.fixture(autouse=True)
+def _isolated_runtime_root(tmp_path, monkeypatch):
+    """Keep the whole runtime store out of the developer's live install.
+
+    The same wound as ``_isolated_notification_store`` below, one layer up: for
+    as long as every store derived its own root there was nothing to repoint,
+    so four test modules each had to remember to monkeypatch a private ``_root``
+    and four others forgot -- which is how 812 stub conversations ended up in a
+    real install (FEAT-051). One root, one env var, one fixture.
+    """
+    from condor import paths
+
+    monkeypatch.setenv(paths.RUNTIME_ROOT_ENV, str(tmp_path / "condor-runtime"))
+
+
+@pytest.fixture(autouse=True)
 def _isolated_notification_store(tmp_path, monkeypatch):
     """Keep the bell's store out of the developer's ``data/`` directory.
 

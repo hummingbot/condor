@@ -3,54 +3,82 @@
 The live registry in :mod:`condor.agents.delegate` is in-memory and per-process
 by design: membership there means "this can still be running". A restart
 therefore used to erase every trace of delegated work from the dashboard, even
-though the work itself was on disk the whole time --
-``agents/{slug}/delegations/{task_id}.md`` plus a ``{task_id}.status.json``
-sidecar, both written by the runner.
+though the work itself was on disk the whole time.
 
 This module is the read side of those files, and nothing else: no state, no
 writes, no knowledge of the web layer. It rebuilds a delegation record from what
 was persisted, so the same routes and the same two React components that serve a
 live task can serve one from two weeks ago.
 
-Three shapes of record exist on disk, and all three are readable here:
+**The owner is the first path segment** (FEAT-051). A record lives at
+``.condor/users/{user_id}/delegations/{task_id}/``, beside that person's
+conversations, which is why every reader here takes a ``user_id`` first:
+answering "what did this user delegate" is opening one directory, and reading
+someone else's is not a check a caller could forget to make -- it is a path they
+cannot name. ``user_id=None`` means "every user" and is reachable only from an
+admin path or the boot reconciler.
 
-* **current** -- ``.status.json`` (the whole record) + ``.events.json`` (the
-  transcript, in the exact projection the wire uses) + ``.md``.
+Four shapes of record exist on disk, and all four are readable here:
+
+* **current** -- a ``{task_id}/`` directory under its owner, holding
+  ``status.json`` (the whole record), ``events.json`` (the transcript, in the
+  exact projection the wire uses) and ``transcript.md``.
+* **pre-FEAT-051** -- the same three files, flat and keyed by agent, at
+  ``agents/{slug}/delegations/{task_id}.{status.json,events.json,md}``. The boot
+  migration moves every one of these that names a ``user_id``.
 * **pre-FEAT-035** -- a ``.status.json`` that carries only state and provenance;
   the task text and result come from parsing the markdown header.
 * **legacy** -- a lone ``.md``, from before status files existed at all.
+
+The last two belong to nobody -- no ``user_id`` was ever written -- so there is
+no user directory to file them under and the migration leaves them where they
+are. They stay readable through the unscoped path, which is admin-only.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
+from condor import paths
+
 log = logging.getLogger(__name__)
 
+# The current shape: one directory per delegation, the same idiom conversations
+# already use. ``status.json`` is ``registry_file``'s own default name.
+DELEGATION_STATUS_FILENAME = "status.json"
+DELEGATION_TRANSCRIPT_FILENAME = "transcript.md"
+DELEGATION_EVENTS_FILENAME = "events.json"
+
+# The flat, agent-keyed shape the migration reads and never writes.
 STATUS_SUFFIX = ".status.json"
 EVENTS_SUFFIX = ".events.json"
-
-# A task_id reaches this module straight from a URL path, and every lookup here
-# builds a filename out of it. Anything that is not a plain identifier is
-# refused rather than sanitized -- ``..`` and separators must never survive into
-# a path join.
-_SAFE_TASK_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # A record whose state was never recorded. Honest: the file exists, so the task
 # does; what it ended as we do not know.
 UNKNOWN = "unknown"
 
 
-def _is_safe_task_id(task_id: str) -> bool:
-    return bool(task_id) and ".." not in task_id and bool(_SAFE_TASK_ID.match(task_id))
+def _safe(value: int | str) -> str | None:
+    """One path segment, or None. Task ids reach this module from a URL path."""
+    try:
+        return paths.safe_id(value)
+    except paths.UnsafeIdError:
+        return None
 
 
-def _delegation_dirs(agent_slug: str | None = None):
-    """Every ``delegations/`` directory to look in, newest agents last."""
+def _owners(user_id: int | str | None) -> list[str]:
+    """Whose delegations to look in. ``None`` is the cross-user seam."""
+    if user_id is not None:
+        safe = _safe(user_id)
+        return [safe] if safe else []
+    return list(paths.iter_user_ids())
+
+
+def _legacy_dirs(agent_slug: str | None = None):
+    """Every pre-FEAT-051 ``delegations/`` directory, newest agents last."""
     from condor.agents.agent import AgentStore
 
     store = AgentStore()
@@ -97,7 +125,7 @@ def _section(text: str, heading: str) -> str:
     return (body if nxt < 0 else body[:nxt]).strip()
 
 
-def _from_markdown(md_path: Path, agent_slug: str) -> dict[str, Any]:
+def _from_markdown(md_path: Path, agent_slug: str, task_id: str) -> dict[str, Any]:
     """A record rebuilt from the transcript alone."""
     try:
         text = md_path.read_text(encoding="utf-8")
@@ -125,7 +153,7 @@ def _from_markdown(md_path: Path, agent_slug: str) -> dict[str, Any]:
         body = ""
 
     return {
-        "task_id": md_path.name[: -len(".md")],
+        "task_id": task_id,
         "agent": _header_value(text, "Agent") or agent_slug,
         "user_id": 0,
         "chat_id": 0,
@@ -145,7 +173,9 @@ def _from_markdown(md_path: Path, agent_slug: str) -> dict[str, Any]:
 # ── status.json ────────────────────────────────────────────────────────────
 
 
-def _from_status(status_path: Path, agent_slug: str) -> dict[str, Any]:
+def _from_status(
+    status_path: Path, agent_slug: str, task_id: str, md_path: Path
+) -> dict[str, Any]:
     """A record rebuilt from its status file, backfilled from the markdown.
 
     Backfill is what makes a *pre*-FEAT-035 status file useful: it recorded the
@@ -154,11 +184,8 @@ def _from_status(status_path: Path, agent_slug: str) -> dict[str, Any]:
     """
     from condor.runtime.registry_file import is_stale, read_status
 
-    task_id = status_path.name[: -len(STATUS_SUFFIX)]
     data = read_status(status_path.parent, status_path.name) or {}
-
-    md_path = status_path.parent / f"{task_id}.md"
-    md = _from_markdown(md_path, agent_slug) if md_path.is_file() else {}
+    md = _from_markdown(md_path, agent_slug, task_id) if md_path.is_file() else {}
 
     # A `running` record stamped by a boot that is not ours belongs to a process
     # that died without recording an end -- FEAT-012's distinction, and the only
@@ -194,53 +221,128 @@ def _from_status(status_path: Path, agent_slug: str) -> dict[str, Any]:
     }
 
 
-def _records_in(agent_slug: str, directory: Path):
-    """Every delegation recorded in one directory, status files taking priority."""
+# ── the current shape: one directory per delegation ─────────────────────────
+
+
+def _from_dir(record_dir: Path) -> dict[str, Any] | None:
+    """The record in one ``{task_id}/`` directory, or None if there is none."""
+    task_id = record_dir.name
+    status_path = record_dir / DELEGATION_STATUS_FILENAME
+    md_path = record_dir / DELEGATION_TRANSCRIPT_FILENAME
+    if status_path.is_file():
+        return _from_status(status_path, "", task_id, md_path)
+    if md_path.is_file():
+        return _from_markdown(md_path, "", task_id)
+    return None
+
+
+def _records_of(user_id: int | str):
+    """Every delegation this user has on disk."""
+    try:
+        children = sorted(paths.delegations_dir(user_id).iterdir())
+    except (OSError, paths.UnsafeIdError):
+        return
+    for child in children:
+        if not child.is_dir():
+            continue
+        record = _from_dir(child)
+        if record is not None:
+            yield record
+
+
+def _legacy_records_in(agent_slug: str, directory: Path):
+    """Every delegation in one pre-FEAT-051 directory, status files first."""
     seen: set[str] = set()
     for status_path in sorted(directory.glob(f"*{STATUS_SUFFIX}")):
-        record = _from_status(status_path, agent_slug)
-        seen.add(record["task_id"])
-        yield record
+        task_id = status_path.name[: -len(STATUS_SUFFIX)]
+        seen.add(task_id)
+        yield _from_status(
+            status_path, agent_slug, task_id, directory / f"{task_id}.md"
+        )
     for md_path in sorted(directory.glob("*.md")):
         task_id = md_path.name[: -len(".md")]
         if task_id not in seen:
-            yield _from_markdown(md_path, agent_slug)
+            yield _from_markdown(md_path, agent_slug, task_id)
+
+
+# ── the read API ───────────────────────────────────────────────────────────
 
 
 def list_history(
-    *, agent_slug: str | None = None, limit: int = 100
+    *,
+    user_id: int | str | None = None,
+    agent_slug: str | None = None,
+    limit: int = 100,
 ) -> list[dict[str, Any]]:
     """Recorded delegations, newest first.
+
+    Scoped to one person unless ``user_id`` is None, which is admin-only and
+    also picks up the unowned legacy records. Filtering by agent is a filter,
+    not a lookup: the store is keyed by user now, and the agent-first view is
+    the rarer one (it reads the same status files either way).
 
     Reads only what is on disk -- the caller merges in the live registry, which
     is the authority for anything still running in this process.
     """
     records: list[dict[str, Any]] = []
-    for slug, directory in _delegation_dirs(agent_slug):
+    for owner in _owners(user_id):
         try:
-            records.extend(_records_in(slug, directory))
+            records.extend(_records_of(owner))
         except OSError:
-            log.debug("Could not list delegations in %s", directory, exc_info=True)
+            log.debug("Could not list delegations for user %s", owner, exc_info=True)
+
+    if user_id is None:
+        seen = {r["task_id"] for r in records}
+        for slug, directory in _legacy_dirs(agent_slug):
+            try:
+                records.extend(
+                    r
+                    for r in _legacy_records_in(slug, directory)
+                    if r["task_id"] not in seen
+                )
+            except OSError:
+                log.debug("Could not list delegations in %s", directory, exc_info=True)
+
+    if agent_slug:
+        records = [r for r in records if r.get("agent") == agent_slug]
 
     records.sort(key=lambda r: r.get("started_at") or 0.0, reverse=True)
     return records[: max(0, limit)]
 
 
-def read_history(task_id: str) -> dict[str, Any] | None:
-    """One recorded delegation, or None if nothing on disk describes it."""
-    if not _is_safe_task_id(task_id):
+def read_history(user_id: int | str | None, task_id: str) -> dict[str, Any] | None:
+    """One recorded delegation, or None if nothing on disk describes it.
+
+    With an owner this is a single ``is_dir()``: the caller's id is a path
+    segment, so a stranger's task is not merely refused, it is unnameable.
+    """
+    safe = _safe(task_id)
+    if safe is None:
         return None
-    for slug, directory in _delegation_dirs():
-        status_path = directory / f"{task_id}{STATUS_SUFFIX}"
+
+    for owner in _owners(user_id):
+        record_dir = paths.delegation_dir(owner, safe)
+        if record_dir.is_dir():
+            record = _from_dir(record_dir)
+            if record is not None:
+                return record
+
+    if user_id is not None:
+        return None
+
+    for slug, directory in _legacy_dirs():
+        status_path = directory / f"{safe}{STATUS_SUFFIX}"
+        md_path = directory / f"{safe}.md"
         if status_path.is_file():
-            return _from_status(status_path, slug)
-        md_path = directory / f"{task_id}.md"
+            return _from_status(status_path, slug, safe, md_path)
         if md_path.is_file():
-            return _from_markdown(md_path, slug)
+            return _from_markdown(md_path, slug, safe)
     return None
 
 
-def read_history_events(task_id: str) -> tuple[list[dict[str, Any]], str]:
+def read_history_events(
+    user_id: int | str | None, task_id: str
+) -> tuple[list[dict[str, Any]], str]:
     """``(events, markdown)`` for a recorded delegation.
 
     The sidecar is preferred: it is the same projection
@@ -249,25 +351,50 @@ def read_history_events(task_id: str) -> tuple[list[dict[str, Any]], str]:
     before the sidecar existed return no events and their transcript instead --
     the client renders that markdown rather than showing an empty transcript.
     """
-    if not _is_safe_task_id(task_id):
+    safe = _safe(task_id)
+    if safe is None:
         return [], ""
 
-    for _slug, directory in _delegation_dirs():
-        sidecar = directory / f"{task_id}{EVENTS_SUFFIX}"
-        if sidecar.is_file():
-            try:
-                data = json.loads(sidecar.read_text(encoding="utf-8"))
-                events = data.get("events") if isinstance(data, dict) else None
-                if isinstance(events, list):
-                    return events, ""
-            except (OSError, json.JSONDecodeError):
-                log.debug("Unreadable events sidecar at %s", sidecar, exc_info=True)
+    for owner in _owners(user_id):
+        record_dir = paths.delegation_dir(owner, safe)
+        if not record_dir.is_dir():
+            continue
+        found = _events_or_markdown(
+            record_dir / DELEGATION_EVENTS_FILENAME,
+            record_dir / DELEGATION_TRANSCRIPT_FILENAME,
+        )
+        if found is not None:
+            return found
 
-        md_path = directory / f"{task_id}.md"
-        if md_path.is_file():
-            try:
-                return [], md_path.read_text(encoding="utf-8")
-            except OSError:
-                log.debug("Unreadable transcript at %s", md_path, exc_info=True)
-                return [], ""
+    if user_id is not None:
+        return [], ""
+
+    for _slug, directory in _legacy_dirs():
+        found = _events_or_markdown(
+            directory / f"{safe}{EVENTS_SUFFIX}", directory / f"{safe}.md"
+        )
+        if found is not None:
+            return found
     return [], ""
+
+
+def _events_or_markdown(
+    sidecar: Path, md_path: Path
+) -> tuple[list[dict[str, Any]], str] | None:
+    """The transcript from one record, or None when neither file is there."""
+    if sidecar.is_file():
+        try:
+            data = json.loads(sidecar.read_text(encoding="utf-8"))
+            events = data.get("events") if isinstance(data, dict) else None
+            if isinstance(events, list):
+                return events, ""
+        except (OSError, json.JSONDecodeError):
+            log.debug("Unreadable events sidecar at %s", sidecar, exc_info=True)
+
+    if md_path.is_file():
+        try:
+            return [], md_path.read_text(encoding="utf-8")
+        except OSError:
+            log.debug("Unreadable transcript at %s", md_path, exc_info=True)
+            return [], ""
+    return None

@@ -29,11 +29,11 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any
 
+from condor import paths
 from condor.runtime.registry_file import read_status, write_status
 
 log = logging.getLogger(__name__)
@@ -43,9 +43,6 @@ STATE_FILENAME = "state.json"
 # At most one disk write per namespace per second. Values are in memory
 # immediately; the file is a restart cushion, not the source of truth.
 WRITE_DEBOUNCE_S = 1.0
-
-# Namespaces map to directories, so they must not be able to escape one.
-_SAFE_NAMESPACE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # namespace -> {key: {"value": ..., "expires_at": float | None}}
 _cache: dict[str, dict[str, dict]] = {}
@@ -58,12 +55,14 @@ class NamespaceError(ValueError):
 
 
 def _validate(namespace: str) -> str:
-    if not namespace or not _SAFE_NAMESPACE.match(namespace):
+    """``paths.safe_id`` under this module's own error type."""
+    try:
+        return paths.safe_id(namespace)
+    except paths.UnsafeIdError as exc:
         raise NamespaceError(
             f"Invalid state namespace {namespace!r}: "
             "use letters, digits, dot, dash or underscore."
-        )
-    return namespace
+        ) from exc
 
 
 def _state_dir(namespace: str) -> Path:
@@ -81,7 +80,7 @@ def _state_dir(namespace: str) -> Path:
         if candidate.is_dir():
             return candidate
 
-    return Path(_DATA_ROOT).parent / "condor" / ".runtime" / "state" / namespace
+    return paths.state_dir(namespace)
 
 
 # ── Read/write ──

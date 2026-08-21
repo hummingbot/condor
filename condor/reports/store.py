@@ -221,6 +221,7 @@ def list_reports_grouped(owner_id: int | None = None) -> list[dict]:
 
 
 def get_report(report_id: str) -> dict | None:
+    """Return one report's index entry, or None when no report has that id."""
     for entry in _read_index():
         if entry["id"] == report_id:
             return entry
@@ -228,6 +229,7 @@ def get_report(report_id: str) -> dict | None:
 
 
 async def delete_report(report_id: str) -> bool:
+    """Delete a report's HTML and its index entry. True when one was removed."""
     async with _index_lock:
         entries = _read_index()
         new_entries = []

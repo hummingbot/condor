@@ -61,8 +61,8 @@ def test_a_fresh_install_pings_and_says_nothing_more(install):
 
 
 def test_usage_events_write_nothing_to_disk_at_the_ping_floor(install):
-    """Acceptance criterion: no condor/.runtime/telemetry directory is created
-    by activity that the install has no consent to report."""
+    """Acceptance criterion: no telemetry directory is created at all by
+    activity that the install has no consent to report."""
     emitter.set_hosted(False)  # the spooling path, which is the one that does I/O
     emitter.emit("command", name="portfolio", surface="telegram")
     assert not outbox.root().exists()

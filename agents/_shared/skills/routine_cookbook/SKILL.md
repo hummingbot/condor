@@ -29,6 +29,51 @@ Most routines need `report_builder.md` plus one or two others. A continuous
 price monitor with a live dashboard, for example, reads `hummingbot_client.md`
 + `continuous.md`.
 
+## First, ask what already exists
+
+Before writing a line, find out what Condor already has. The index is generated
+from the code, so it cannot be out of date, and it costs nothing until you read
+it:
+
+```python
+run_code(code="""
+from condor.primitives import catalog, describe
+print(catalog())                    # every fetcher + every routine, grouped
+print(catalog("market_data"))       # one group only
+print(describe("market_data.fetch_historical_candles"))   # signature + docstring
+print(describe("routine:arb_check"))                      # config fields + defaults
+""")
+```
+
+The same three imports work inside a routine. **Never guess a signature** — a
+wrong one costs a failed run, a traceback and a retry; `describe()` costs a line.
+
+## Compose instead of reimplementing
+
+A routine can call another routine and use its result:
+
+```python
+from condor.primitives import call_routine, start_routine
+import asyncio
+
+snap, pools = await asyncio.gather(
+    call_routine("portfolio_snapshot"),
+    call_routine("solana_pool_scanner", {"min_tvl": 250_000}),
+)
+print(snap.text, snap.report_id)
+```
+
+- `call_routine(name, config)` runs it **inline** and returns its
+  `RoutineResult` (plus a `report_id` attribute for the report it saved). It is
+  an implementation detail of your routine: no dock instance, no post-run hook,
+  no message to the user. Chains are capped at depth 3 and cycles are refused.
+- `start_routine(name, config)` runs it as a **real background run** and returns
+  an `instance_id` — the run shows up in the dock, fires its hooks and reports
+  back to the user. Use it for something slow, continuous, or that the user
+  should see; read it back with
+  `manage_routines(action="get_instance", name=<instance_id>)`.
+- Continuous routines can only be started, never called inline.
+
 ## First: is this a routine at all?
 
 A routine is a **durable artifact** — it has a name, a config schema, a place in
@@ -39,9 +84,10 @@ A **one-off computation** is not. "What were SOL's hourly returns yesterday",
 "what is the spread between these two venues right now", "aggregate these
 executors by controller" — write the Python and call
 `run_code(code="...")`. It runs in the bot with exactly the primitives below
-(`context`, `client`, pandas, `ReportBuilder`, every `condor.*` module), returns
-its `print` output and its `result`, and hands you the traceback to fix when it
-fails. No file, no `Config` class, no library entry.
+(`context`, `client`, pandas, `ReportBuilder`, every `condor.*` module, and
+`condor.primitives` to find the rest), returns its `print` output and its
+`result`, and hands you the traceback to fix when it fails. No file, no `Config`
+class, no library entry.
 
 Promote a snippet to a routine when you have run essentially the same thing a
 third time, or the moment it needs to be scheduled, shared, or visible to the
@@ -131,6 +177,9 @@ manage_routines(action="run", name="x", agent="agent_slug", config={})
 - **Parse defensively** where you read *external* data: handle `None`/missing
   keys and return an error string. This covers API responses, not your own
   report code — never turn it into a blanket `except` over the routine body.
+- **Look it up, don't guess** — `describe("<ref>")` before writing any call
+  whose exact signature you are not certain of, and `catalog()` before writing a
+  fetch you suspect already exists.
 - One routine per task. Lead with code, be direct.
 - Test after writing (`manage_routines(action="run", ...)`) and fix until the output is clean.
 

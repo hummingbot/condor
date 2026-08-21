@@ -593,6 +593,15 @@ async def startup(application: Application) -> None:
     and never run — which is exactly how boot reconciliation silently died.
     Called explicitly from :func:`_run_dual`, before the first update is served.
     """
+    # First, before anything reads a conversation or reconciles a delegation:
+    # settle where the runtime store lives (FEAT-051). Idempotent, so this is a
+    # no-op on every boot after the first; it is a named public function rather
+    # than inline code because a second entry point (a CLI, a worker) would have
+    # to call it too.
+    from condor.migrations import ensure_migrated
+
+    ensure_migrated()
+
     # Sync server permissions (ensures all servers have ownership entries)
     await sync_server_permissions()
 

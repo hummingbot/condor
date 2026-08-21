@@ -95,7 +95,6 @@ def env(tmp_path, monkeypatch):
     agents_root = tmp_path / "agents"
     agents_root.mkdir()
     monkeypatch.setattr(agent_module, "_DATA_ROOT", agents_root)
-    monkeypatch.setattr(conversations, "_root", lambda: tmp_path / "conversations")
     monkeypatch.setattr(conversations, "_live_recorders", set())
     monkeypatch.setattr(session_module, "_sessions", {})
     monkeypatch.setattr("condor.acp.client.ACPClient", _Client)

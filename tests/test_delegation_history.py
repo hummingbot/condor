@@ -1,9 +1,12 @@
 """Unit tests for delegation history -- the disk-backed read side (FEAT-035).
 
 The live registry dies with the process; these tests cover what survives it:
-the record rebuilt from ``{task_id}.status.json``, the transcript rebuilt from
-``{task_id}.events.json``, the markdown fallback for records written before
-either file existed, and the "the process died mid-task" reconciliation.
+the record rebuilt from ``status.json``, the transcript rebuilt from
+``events.json``, the two pre-FEAT-051 shapes still readable in the agent
+directories, and the "the process died mid-task" reconciliation.
+
+Every reader is scoped by owner (FEAT-051): ``user_id`` first, ``None`` only
+from an admin path.
 """
 
 import asyncio
@@ -11,6 +14,7 @@ import json
 
 import pytest
 
+from condor import paths
 from condor.agents import agent as agent_module
 from condor.agents import consult as consult_module
 from condor.agents import delegate as delegate_module
@@ -44,6 +48,9 @@ check the SOL pools
 
 three pools worth watching
 """
+
+
+USER = 7
 
 
 class _FakeBot:
@@ -95,7 +102,7 @@ def _run_delegation(monkeypatch, root, slug="scout", task="scan SOL pools"):
     async def scenario():
         dt = await start_delegation(
             agent_slug=slug,
-            user_id=7,
+            user_id=USER,
             chat_id=42,
             server_name="local",
             task=task,
@@ -116,7 +123,7 @@ def test_finished_delegation_is_readable_after_the_registry_is_gone(
     dt = _run_delegation(monkeypatch, tmp_path)
     delegate_module._delegations.clear()  # the restart
 
-    record = read_history(dt.task_id)
+    record = read_history(USER, dt.task_id)
     assert record is not None
     assert record["status"] == "done"
     assert record["agent"] == "scout"
@@ -128,7 +135,10 @@ def test_finished_delegation_is_readable_after_the_registry_is_gone(
     assert record["started_at"] > 0
     assert record["ended_at"] >= record["started_at"]
 
-    assert [r["task_id"] for r in list_history()] == [dt.task_id]
+    assert [r["task_id"] for r in list_history(user_id=USER)] == [dt.task_id]
+    # And a stranger cannot even name it: the id is a path segment now.
+    assert read_history(USER + 1, dt.task_id) is None
+    assert list_history(user_id=USER + 1) == []
 
 
 def test_transcript_survives_with_the_same_shape_the_wire_uses(tmp_path, monkeypatch):
@@ -136,13 +146,13 @@ def test_transcript_survives_with_the_same_shape_the_wire_uses(tmp_path, monkeyp
     _write_agent(tmp_path, "scout")
 
     dt = _run_delegation(monkeypatch, tmp_path)
-    sidecar = tmp_path / "scout" / "delegations" / f"{dt.task_id}.events.json"
+    sidecar = paths.delegation_dir(USER, dt.task_id) / "events.json"
     assert json.loads(sidecar.read_text())["events"] == delegate_module.events_for_wire(
         dt.events
     )
 
     delegate_module._delegations.clear()
-    events, markdown = read_history_events(dt.task_id)
+    events, markdown = read_history_events(USER, dt.task_id)
     assert markdown == ""  # structured events win; no fallback needed
     assert [e["type"] for e in events] == ["thought", "tool"]
     tool = events[1]
@@ -158,7 +168,7 @@ def test_legacy_transcript_without_a_status_file_is_still_listed(tmp_path, monke
         LEGACY_MD
     )
 
-    record = read_history("scout-delegate-legacy01")
+    record = read_history(None, "scout-delegate-legacy01")
     assert record is not None
     assert record["status"] == "done"
     assert record["agent"] == "scout"
@@ -168,7 +178,7 @@ def test_legacy_transcript_without_a_status_file_is_still_listed(tmp_path, monke
     # Nobody's, so nobody but an admin can see it -- the route relies on this.
     assert record["user_id"] == 0
 
-    events, markdown = read_history_events("scout-delegate-legacy01")
+    events, markdown = read_history_events(None, "scout-delegate-legacy01")
     assert events == []
     assert "🔧 **1. get_market_data**" in markdown
 
@@ -193,7 +203,7 @@ def test_a_task_the_process_died_on_reads_as_interrupted(tmp_path, monkeypatch):
         )
     )
 
-    record = read_history("scout-delegate-ghost01")
+    record = read_history(None, "scout-delegate-ghost01")
     assert record is not None
     assert record["status"] == "interrupted"
     assert record["task"] == "a task nobody finished"
@@ -209,12 +219,14 @@ def test_history_is_newest_first_and_filterable_by_agent(tmp_path, monkeypatch):
     other = _run_delegation(monkeypatch, tmp_path, slug="quant", task="someone else's")
     delegate_module._delegations.clear()
 
-    ids = [r["task_id"] for r in list_history()]
+    ids = [r["task_id"] for r in list_history(user_id=USER)]
     assert set(ids) == {old.task_id, new.task_id, other.task_id}
     assert ids.index(new.task_id) < ids.index(old.task_id)
 
-    assert len(list_history(limit=1)) == 1
-    assert [r["task_id"] for r in list_history(agent_slug="quant")] == [other.task_id]
+    assert len(list_history(user_id=USER, limit=1)) == 1
+    assert [r["task_id"] for r in list_history(user_id=USER, agent_slug="quant")] == [
+        other.task_id
+    ]
 
 
 def test_a_task_id_can_never_walk_out_of_the_delegations_directory(
@@ -224,5 +236,6 @@ def test_a_task_id_can_never_walk_out_of_the_delegations_directory(
     _write_agent(tmp_path, "scout")
     (tmp_path / "secrets.md").write_text("# Delegation secrets\n\n- **Status:** done\n")
 
-    assert read_history("../../secrets") is None
-    assert read_history_events("../../secrets") == ([], "")
+    assert read_history(None, "../../secrets") is None
+    assert read_history_events(None, "../../secrets") == ([], "")
+    assert read_history(USER, "../../secrets") is None

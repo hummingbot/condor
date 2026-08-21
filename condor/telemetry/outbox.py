@@ -1,6 +1,6 @@
 """Durable spool and the (deliberately inert) send path.
 
-Two files live under ``condor/.runtime/telemetry/``, the same gitignored place
+Two files live under ``.condor/telemetry/``, the same gitignored place
 the rest of the runtime keeps its append-only facts:
 
 ``spool.<pid>.jsonl``
@@ -46,10 +46,10 @@ COLLECTOR_URL = "https://telemetry.hummingbot.org/v1/events"
 
 
 def root() -> Path:
-    """Where the spool lives. Derived like every other runtime store."""
-    from condor.agents.agent import _DATA_ROOT
+    """Where the spool lives. One runtime root, resolved in ``condor.paths``."""
+    from condor import paths
 
-    return Path(_DATA_ROOT).parent / "condor" / ".runtime" / "telemetry"
+    return paths.telemetry_dir()
 
 
 def spool_path(pid: int | None = None) -> Path:

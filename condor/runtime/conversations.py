@@ -7,7 +7,7 @@ budget eviction or a crashed ACP bridge silently deleted the chat.
 They are separate here. The session still dies with the process — that is what
 a subprocess is. The conversation is a directory:
 
-    condor/.runtime/conversations/{user_id}/{conv_id}/
+    .condor/users/{user_id}/conversations/{conv_id}/
         meta.json                  # atomic merge, via registry_file.write_status()
         transcript.jsonl           # append-only, bounded; one JSON object per line
         transcript_archive.jsonl   # turns retired out of the file above
@@ -40,6 +40,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from condor import paths
 from condor.fsutil import atomic_write_bytes
 from condor.runtime.events import EventType
 from condor.runtime.registry_file import read_status, write_status
@@ -49,10 +50,6 @@ log = logging.getLogger(__name__)
 META_FILENAME = "meta.json"
 TRANSCRIPT_FILENAME = "transcript.jsonl"
 TRANSCRIPT_ARCHIVE_FILENAME = "transcript_archive.jsonl"
-
-# conv_id and user_id both become directory names, so neither may escape one.
-# Same guard, same reason, as state.py's namespace check.
-_SAFE_ID = re.compile(r"^[A-Za-z0-9._-]+$")
 
 # Upper bound on the replayed transcript, in characters. Load-bearing, not
 # cosmetic: a 300-turn conversation replayed whole would eat the context
@@ -173,12 +170,19 @@ def _utcnow() -> datetime:
 
 
 def _validate(value: str) -> str:
-    if not value or not _SAFE_ID.match(value):
+    """``paths.safe_id`` under this module's own error type.
+
+    The guard is shared (one regex, in ``condor.paths``); the exception is not,
+    because ``chat_ws`` and the conversations route both catch
+    :class:`ConversationIdError` to answer 400 rather than 500.
+    """
+    try:
+        return paths.safe_id(value)
+    except paths.UnsafeIdError as exc:
         raise ConversationIdError(
             f"Invalid conversation id {value!r}: "
             "use letters, digits, dot, dash or underscore."
-        )
-    return value
+        ) from exc
 
 
 def _truncate(text: str, limit: int) -> str:
@@ -313,23 +317,13 @@ class TurnEntry(BaseModel):
 # ── Paths ──
 
 
-def _root() -> Path:
-    """Where every conversation lives.
-
-    Derived from ``_DATA_ROOT`` exactly as ``state.py`` derives its own root, so
-    a test that repoints one repoints both.
-    """
-    from condor.agents.agent import _DATA_ROOT
-
-    return Path(_DATA_ROOT).parent / "condor" / ".runtime" / "conversations"
-
-
 def _user_dir(user_id: int | str) -> Path:
-    return _root() / _validate(str(user_id))
+    """This user's conversations. The store is partitioned by owner (FEAT-051)."""
+    return paths.conversations_dir(_validate(str(user_id)))
 
 
 def _conv_dir(user_id: int | str, conv_id: str) -> Path:
-    return _user_dir(user_id) / _validate(str(conv_id))
+    return paths.conversation_dir(_validate(str(user_id)), _validate(str(conv_id)))
 
 
 # ── Store ──

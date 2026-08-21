@@ -506,6 +506,12 @@ async def run_code(
       `from condor.reports import ReportBuilder` — a snippet that saves one
       produces a real dashboard report and its id comes back as `report_id`
 
+    Don't guess an import. `from condor.primitives import catalog, describe,
+    call_routine`: `catalog()` lists every primitive and routine this install
+    has, `describe(ref)` gives one full signature, docstring or config schema,
+    and `await call_routine(name, config)` runs an existing routine inline
+    instead of rewriting it (`start_routine` backgrounds it).
+
     On failure you get `status="error"` and a traceback whose line numbers are
     YOUR snippet's: read it, fix the code, run it again. Keep snippets short and
     `await` inside loops — a snippet that never yields blocks the bot until the

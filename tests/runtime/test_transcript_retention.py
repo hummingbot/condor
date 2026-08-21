@@ -73,11 +73,13 @@ def _talk(conv_id, turns, *, body=200):
 
 
 def _live(conv_root, conv_id):
-    return conv_root / str(USER) / conv_id / TRANSCRIPT_FILENAME
+    return conv_root / str(USER) / "conversations" / conv_id / TRANSCRIPT_FILENAME
 
 
 def _archive(conv_root, conv_id):
-    return conv_root / str(USER) / conv_id / TRANSCRIPT_ARCHIVE_FILENAME
+    return (
+        conv_root / str(USER) / "conversations" / conv_id / TRANSCRIPT_ARCHIVE_FILENAME
+    )
 
 
 # ── The file is bounded ──
