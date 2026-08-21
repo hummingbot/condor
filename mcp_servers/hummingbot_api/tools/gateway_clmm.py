@@ -264,11 +264,13 @@ async def manage_clmm_impl(client: Any, request: CLMMRequest) -> dict[str, Any]:
             # with every position the wallet holds on this connector — not wrong data,
             # but not the question, and it silently grows into a list once a wallet
             # holds more than one.
-            result = [await gc.get_position_info(
-                connector=connector,
-                network=net,
-                position_address=request.position_address,
-            )]
+            result = [
+                await gc.get_position_info(
+                    connector=connector,
+                    network=net,
+                    position_address=request.position_address,
+                )
+            ]
         else:
             # No pool filter: Gateway's positions-owned lists every CLMM position the
             # wallet owns on the connector, each row carrying its own pool_address.

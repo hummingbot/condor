@@ -5,6 +5,7 @@ the route: not hummingbot-api, not the client SDK, not this tool. So every swap 
 record went through the one-step execute, which re-prices at execution and throws away
 the quote the caller was shown — the whole value of a held quote on dflow, titan and 0x.
 """
+
 import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
@@ -68,4 +69,6 @@ def test_the_pair_and_size_are_required_because_the_record_needs_them():
     recorder = _Recorder()
 
     with pytest.raises(ToolError, match="filed under the pair"):
-        asyncio.run(manage_gateway_swaps(_client(recorder), _request(trading_pair=None)))
+        asyncio.run(
+            manage_gateway_swaps(_client(recorder), _request(trading_pair=None))
+        )

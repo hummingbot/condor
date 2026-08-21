@@ -1,13 +1,14 @@
+import logging
+from datetime import datetime, timezone
 
-from pydantic import BaseModel, Field
-from telegram.ext import ContextTypes
-from config_manager import get_client
-from condor.reports import ReportBuilder
 import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-import logging
-from datetime import datetime, timezone
+from pydantic import BaseModel, Field
+from telegram.ext import ContextTypes
+
+from condor.reports import ReportBuilder
+from config_manager import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -27,16 +28,27 @@ def _candle_minutes(interval: str) -> float:
 
 class Config(BaseModel):
     """Kalman filter regime detection — outputs regime signal and Kalman-sized grid params."""
-    connector_name: str = Field(default="bitget_perpetual", description="Exchange connector")
+
+    connector_name: str = Field(
+        default="bitget_perpetual", description="Exchange connector"
+    )
     trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
-    candle_interval: str = Field(default="1m", description="Candle interval (1m, 5m, 1h, etc.)")
-    lookback_candles: int = Field(default=60, description="Candles to fetch (60 × 1m = last 1 hour)")
+    candle_interval: str = Field(
+        default="1m", description="Candle interval (1m, 5m, 1h, etc.)"
+    )
+    lookback_candles: int = Field(
+        default=60, description="Candles to fetch (60 × 1m = last 1 hour)"
+    )
     q_level: float = Field(default=100.0, description="Process noise: level variance")
     q_slope: float = Field(default=1.0, description="Process noise: slope variance")
     r_obs: float = Field(default=40.0, description="Observation noise variance")
-    snr_trend_threshold: float = Field(default=0.3, description="SNR >= this → TRENDING")
+    snr_trend_threshold: float = Field(
+        default=0.3, description="SNR >= this → TRENDING"
+    )
     snr_range_threshold: float = Field(default=0.1, description="SNR <= this → RANGING")
-    target_grid_hours: float = Field(default=8.0, description="Target grid lifetime (hours) for D sizing")
+    target_grid_hours: float = Field(
+        default=8.0, description="Target grid lifetime (hours) for D sizing"
+    )
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -45,10 +57,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         return "No server available"
 
     result = await client.market_data.get_candles(
-        config.connector_name, config.trading_pair,
-        interval=config.candle_interval, max_records=config.lookback_candles
+        config.connector_name,
+        config.trading_pair,
+        interval=config.candle_interval,
+        max_records=config.lookback_candles,
     )
-    records = result if isinstance(result, list) else result.get("data", result.get("candles", []))
+    records = (
+        result
+        if isinstance(result, list)
+        else result.get("data", result.get("candles", []))
+    )
     if not records or len(records) < 20:
         return f"Insufficient candle data: got {len(records) if records else 0} records"
 
@@ -59,7 +77,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
             ts = r.get("timestamp", r.get("time", 0))
             if isinstance(ts, (int, float)) and ts > 0:
                 t = ts / 1000 if ts > 1e10 else ts
-                timestamps.append(datetime.fromtimestamp(t, tz=timezone.utc).strftime("%m-%d %H:%M"))
+                timestamps.append(
+                    datetime.fromtimestamp(t, tz=timezone.utc).strftime("%m-%d %H:%M")
+                )
             else:
                 timestamps.append(str(ts))
         except (KeyError, TypeError, ValueError):
@@ -121,42 +141,85 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
     if regime == "TRENDING_UP":
         g_start = recent_price - grid_D
-        g_end   = recent_price + 3 * grid_D
+        g_end = recent_price + 3 * grid_D
         g_limit = recent_price - 1.5 * grid_D
     elif regime == "TRENDING_DOWN":
         g_start = recent_price - 3 * grid_D
-        g_end   = recent_price + grid_D
+        g_end = recent_price + grid_D
         g_limit = recent_price + 1.5 * grid_D
     else:
         g_start = recent_price - 1.5 * grid_D
-        g_end   = recent_price + 1.5 * grid_D
+        g_end = recent_price + 1.5 * grid_D
         g_limit = None
 
     fig = make_subplots(
-        rows=3, cols=1, shared_xaxes=True,
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
         subplot_titles=[
             f"Price vs Kalman Level — {config.trading_pair}",
             "Kalman Slope ($/candle)",
-            "Innovation ($)"
+            "Innovation ($)",
         ],
         row_heights=[0.5, 0.25, 0.25],
         vertical_spacing=0.07,
     )
-    fig.add_trace(go.Scatter(x=x_axis, y=prices.tolist(), name="Close",
-                             line=dict(color="#94a3b8", width=1)), row=1, col=1)
-    fig.add_trace(go.Scatter(x=x_axis, y=levels.tolist(), name="Kalman Level",
-                             line=dict(color="#60a5fa", width=2)), row=1, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=x_axis,
+            y=prices.tolist(),
+            name="Close",
+            line=dict(color="#94a3b8", width=1),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=x_axis,
+            y=levels.tolist(),
+            name="Kalman Level",
+            line=dict(color="#60a5fa", width=2),
+        ),
+        row=1,
+        col=1,
+    )
     slope_colors = ["#22c55e" if s > 0 else "#ef4444" for s in slopes]
-    fig.add_trace(go.Bar(x=x_axis, y=slopes.tolist(), name="Slope",
-                         marker_color=slope_colors, showlegend=False), row=2, col=1)
+    fig.add_trace(
+        go.Bar(
+            x=x_axis,
+            y=slopes.tolist(),
+            name="Slope",
+            marker_color=slope_colors,
+            showlegend=False,
+        ),
+        row=2,
+        col=1,
+    )
     fig.add_hline(y=0, line_dash="dash", line_color="gray", line_width=1, row=2, col=1)
-    inn_colors = ["#f97316" if abs(i) > 2 * sigma_inn else "#64748b" for i in innovations]
-    fig.add_trace(go.Bar(x=x_axis, y=innovations.tolist(), name="Innovation",
-                         marker_color=inn_colors, showlegend=False), row=3, col=1)
-    fig.add_hline(y=sigma_inn,  line_dash="dot", line_color="#22c55e", line_width=1, row=3, col=1)
-    fig.add_hline(y=-sigma_inn, line_dash="dot", line_color="#22c55e", line_width=1, row=3, col=1)
+    inn_colors = [
+        "#f97316" if abs(i) > 2 * sigma_inn else "#64748b" for i in innovations
+    ]
+    fig.add_trace(
+        go.Bar(
+            x=x_axis,
+            y=innovations.tolist(),
+            name="Innovation",
+            marker_color=inn_colors,
+            showlegend=False,
+        ),
+        row=3,
+        col=1,
+    )
+    fig.add_hline(
+        y=sigma_inn, line_dash="dot", line_color="#22c55e", line_width=1, row=3, col=1
+    )
+    fig.add_hline(
+        y=-sigma_inn, line_dash="dot", line_color="#22c55e", line_width=1, row=3, col=1
+    )
     fig.update_layout(
-        height=700, template="plotly_dark",
+        height=700,
+        template="plotly_dark",
         title=f"Kalman Regime: {regime} | SNR={snr:.3f} | {config.candle_interval} × {n}",
         legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
     )
@@ -165,7 +228,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.source("routine", "kalman_regime_check")
     builder.tags(["analysis", "regime", "kalman", "adaptive-grid-trader"])
 
-    builder.section("01 / REGIME SIGNAL", "Kalman filter output and profile recommendation")
+    builder.section(
+        "01 / REGIME SIGNAL", "Kalman filter output and profile recommendation"
+    )
     builder.kpi("Regime", regime)
     builder.kpi("Profile", profile)
     builder.kpi("Current Price", f"${recent_price:,.2f}")
@@ -178,7 +243,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     builder.kpi("Grid D", f"${grid_D:,.2f}")
     builder.kpi("Grid Start", f"${g_start:,.2f}")
     builder.kpi("Grid End", f"${g_end:,.2f}")
-    builder.kpi("Limit Price", f"${g_limit:,.2f}" if g_limit else "N/A (ranging/uncertain)")
+    builder.kpi(
+        "Limit Price", f"${g_limit:,.2f}" if g_limit else "N/A (ranging/uncertain)"
+    )
 
     builder.section("03 / CHARTS", "Price, slope, and innovation over lookback window")
     builder.plotly(fig)

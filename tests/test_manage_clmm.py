@@ -228,9 +228,15 @@ def test_remove_liquidity_passes_percentage_as_decimal():
 
 def test_position_info_with_an_address_reads_that_position():
     client = _Client()
-    _run(CLMMRequest(action="position_info", connector="orca",
-                     network="solana-mainnet-beta",
-                     position_address="POS1"), client)
+    _run(
+        CLMMRequest(
+            action="position_info",
+            connector="orca",
+            network="solana-mainnet-beta",
+            position_address="POS1",
+        ),
+        client,
+    )
 
     names = [name for name, _ in client.gateway_clmm.calls]
     assert names == ["get_position_info"], (
@@ -242,9 +248,15 @@ def test_position_info_with_an_address_reads_that_position():
 
 def test_position_info_without_an_address_lists_the_wallet():
     client = _Client()
-    _run(CLMMRequest(action="position_info", connector="orca",
-                     network="solana-mainnet-beta",
-                     wallet_address="WALLET"), client)
+    _run(
+        CLMMRequest(
+            action="position_info",
+            connector="orca",
+            network="solana-mainnet-beta",
+            wallet_address="WALLET",
+        ),
+        client,
+    )
 
     names = [name for name, _ in client.gateway_clmm.calls]
     assert names == ["get_positions_owned"]
@@ -254,8 +266,14 @@ def test_position_info_without_an_address_lists_the_wallet():
 def test_a_single_position_is_returned_as_a_list():
     """The formatter renders position_info as rows either way, so the shapes must agree."""
     client = _Client()
-    result = _run(CLMMRequest(action="position_info", connector="orca",
-                              network="solana-mainnet-beta",
-                              position_address="POS1"), client)
+    result = _run(
+        CLMMRequest(
+            action="position_info",
+            connector="orca",
+            network="solana-mainnet-beta",
+            position_address="POS1",
+        ),
+        client,
+    )
 
     assert isinstance(result["result"], list) and len(result["result"]) == 1

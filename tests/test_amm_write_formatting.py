@@ -79,7 +79,10 @@ def test_a_partial_removal_omits_a_rent_refund_it_did_not_get():
     # rather than an absent event.
     out = format_amm_result(
         "remove_liquidity",
-        _result("remove_liquidity", {"baseTokenAmountRemoved": 1.0, "quoteTokenAmountRemoved": 2.0}),
+        _result(
+            "remove_liquidity",
+            {"baseTokenAmountRemoved": 1.0, "quoteTokenAmountRemoved": 2.0},
+        ),
     )
 
     assert "rent" not in out.lower()

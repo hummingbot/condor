@@ -1,12 +1,13 @@
-
 import asyncio
+import logging
 import time
+
+import numpy as np
 from pydantic import BaseModel, Field
 from telegram.ext import ContextTypes
-from config_manager import get_client
+
 from condor.reports import LiveReport
-import numpy as np
-import logging
+from config_manager import get_client
 
 logger = logging.getLogger(__name__)
 
@@ -16,27 +17,53 @@ CATEGORY = "Analysis"
 
 class Config(BaseModel):
     """Kalman adaptive grid operator — 1m regime check every minute, tunes grid on bitget_perpetual."""
-    connector_name: str = Field(default="bitget_perpetual", description="Exchange connector")
+
+    connector_name: str = Field(
+        default="bitget_perpetual", description="Exchange connector"
+    )
     trading_pair: str = Field(default="BTC-USDT", description="Trading pair")
     budget_usdt: float = Field(default=100.0, description="Total USDT budget")
-    reserve_pct: float = Field(default=0.10, description="Fraction held back (never traded)")
+    reserve_pct: float = Field(
+        default=0.10, description="Fraction held back (never traded)"
+    )
     max_leverage: int = Field(default=5, description="Max leverage")
-    max_loss_pct: float = Field(default=0.10, description="Max loss per grid as fraction of budget")
+    max_loss_pct: float = Field(
+        default=0.10, description="Max loss per grid as fraction of budget"
+    )
     min_order_size: float = Field(default=5.0, description="Min order size in USDT")
     interval_sec: int = Field(default=60, description="Tick interval in seconds")
-    lookback_candles: int = Field(default=60, description="1m candles (60 = last 1 hour)")
-    q_level: float = Field(default=100.0, description="Kalman process noise: level variance")
-    q_slope: float = Field(default=1.0, description="Kalman process noise: slope variance")
+    lookback_candles: int = Field(
+        default=60, description="1m candles (60 = last 1 hour)"
+    )
+    q_level: float = Field(
+        default=100.0, description="Kalman process noise: level variance"
+    )
+    q_slope: float = Field(
+        default=1.0, description="Kalman process noise: slope variance"
+    )
     r_obs: float = Field(default=40.0, description="Kalman observation noise variance")
-    snr_trend_threshold: float = Field(default=0.3, description="SNR >= this → deploy directional grid")
-    target_grid_hours: float = Field(default=8.0, description="Target grid lifetime (hours) for D sizing")
-    retune_d_pct: float = Field(default=0.20, description="Retune grid if Kalman D shifts by this fraction")
-    min_grid_age_min: int = Field(default=180, description="Min grid age (min) before directional flip")
-    profit_take_pct: float = Field(default=0.02, description="Take profit at this fraction of budget ($2 on $100)")
-    stale_ticks: int = Field(default=10, description="Recycle grid if fills stagnant for this many ticks")
+    snr_trend_threshold: float = Field(
+        default=0.3, description="SNR >= this → deploy directional grid"
+    )
+    target_grid_hours: float = Field(
+        default=8.0, description="Target grid lifetime (hours) for D sizing"
+    )
+    retune_d_pct: float = Field(
+        default=0.20, description="Retune grid if Kalman D shifts by this fraction"
+    )
+    min_grid_age_min: int = Field(
+        default=180, description="Min grid age (min) before directional flip"
+    )
+    profit_take_pct: float = Field(
+        default=0.02, description="Take profit at this fraction of budget ($2 on $100)"
+    )
+    stale_ticks: int = Field(
+        default=10, description="Recycle grid if fills stagnant for this many ticks"
+    )
 
 
 # ── Kalman filter ─────────────────────────────────────────────────────────────
+
 
 def _kalman_filter(prices, q_level, q_slope, r_obs):
     """Local linear trend Kalman filter. Returns (slopes, innovations)."""
@@ -85,18 +112,19 @@ def _get_signal(slopes, innovations, prices, config):
 
 # ── Grid config builder ───────────────────────────────────────────────────────
 
+
 def _grid_config(direction, price, grid_D, config):
     trade_budget = config.budget_usdt * (1 - config.reserve_pct)
     if direction == "LONG":
         start = round(price - grid_D, 1)
-        end   = round(price + 3 * grid_D, 1)
+        end = round(price + 3 * grid_D, 1)
         limit = round(price - 1.5 * grid_D, 1)
-        side  = "BUY"
+        side = "BUY"
     else:
         start = round(price - 3 * grid_D, 1)
-        end   = round(price + grid_D, 1)
+        end = round(price + grid_D, 1)
         limit = round(price + 1.5 * grid_D, 1)
-        side  = "SELL"
+        side = "SELL"
     n_levels = max(2, min(20, int(trade_budget / config.min_order_size)))
     return {
         "type": "grid_executor",
@@ -124,6 +152,7 @@ def _grid_config(direction, price, grid_D, config):
 
 # ── Executor helpers ──────────────────────────────────────────────────────────
 
+
 async def _teardown(client, executor_id, log, ts):
     try:
         await client.executors.stop_executor(executor_id)
@@ -149,6 +178,7 @@ async def _deploy(client, direction, price, grid_D, config, log, ts):
 
 
 # ── Main loop ─────────────────────────────────────────────────────────────────
+
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     chat_id = context._chat_id
@@ -183,12 +213,18 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
 
                 # ── 1. Kalman signal ──────────────────────────────────────
                 raw = await client.market_data.get_candles(
-                    config.connector_name, config.trading_pair,
-                    interval="1m", max_records=config.lookback_candles,
+                    config.connector_name,
+                    config.trading_pair,
+                    interval="1m",
+                    max_records=config.lookback_candles,
                 )
-                records = raw if isinstance(raw, list) else raw.get("data", raw.get("candles", []))
+                records = (
+                    raw
+                    if isinstance(raw, list)
+                    else raw.get("data", raw.get("candles", []))
+                )
                 closes = []
-                for r in (records or []):
+                for r in records or []:
                     try:
                         closes.append(float(r["close"]))
                     except (KeyError, TypeError, ValueError):
@@ -203,8 +239,8 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 slopes, innovations = _kalman_filter(
                     prices, config.q_level, config.q_slope, config.r_obs
                 )
-                regime, profile, snr, slope_pct, sigma_inn, grid_D, current_price = _get_signal(
-                    slopes, innovations, prices, config
+                regime, profile, snr, slope_pct, sigma_inn, grid_D, current_price = (
+                    _get_signal(slopes, innovations, prices, config)
                 )
 
                 # ── 2. Executor state & action decision ───────────────────
@@ -220,8 +256,12 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         controller_ids=[], status="active", limit=50
                     )
                     our_exec = next(
-                        (e for e in (execs or [])
-                         if str(e.get("id") or e.get("executor_id", "")) == executor_id),
+                        (
+                            e
+                            for e in (execs or [])
+                            if str(e.get("id") or e.get("executor_id", ""))
+                            == executor_id
+                        ),
                         None,
                     )
 
@@ -231,13 +271,17 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         executor_id = grid_D_deployed = deployed_at = None
                         pnl_history.clear()
                         fills_history.clear()
-                        new_direction = profile if profile in ("LONG", "SHORT") else direction
+                        new_direction = (
+                            profile if profile in ("LONG", "SHORT") else direction
+                        )
                         action = "deploy"
                         action_reason = "grid_died"
                     else:
                         pnl = float(our_exec.get("net_pnl_quote", 0))
                         fills = float(our_exec.get("filled_amount_quote", 0))
-                        grid_age_min = int((time.time() - deployed_at) / 60) if deployed_at else 0
+                        grid_age_min = (
+                            int((time.time() - deployed_at) / 60) if deployed_at else 0
+                        )
                         pnl_history.append(pnl)
                         fills_history.append(fills)
                         if len(pnl_history) > 20:
@@ -248,8 +292,16 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         profit_target = config.budget_usdt * config.profit_take_pct
 
                         # Priority: stale → profit → D-drift → flip → keep
-                        if (len(fills_history) >= config.stale_ticks and
-                                len(set(round(f, 2) for f in fills_history[-config.stale_ticks:])) == 1):
+                        if (
+                            len(fills_history) >= config.stale_ticks
+                            and len(
+                                set(
+                                    round(f, 2)
+                                    for f in fills_history[-config.stale_ticks :]
+                                )
+                            )
+                            == 1
+                        ):
                             action = "retune"
                             action_reason = f"stale {config.stale_ticks}t"
                             new_direction = direction  # same direction, fresh range
@@ -257,18 +309,25 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                         elif pnl >= profit_target:
                             action = "retune"
                             action_reason = f"profit_take ${pnl:.2f}"
-                            new_direction = profile if profile in ("LONG", "SHORT") else None
+                            new_direction = (
+                                profile if profile in ("LONG", "SHORT") else None
+                            )
 
-                        elif (grid_D_deployed and
-                              abs(grid_D - grid_D_deployed) / grid_D_deployed > config.retune_d_pct):
+                        elif (
+                            grid_D_deployed
+                            and abs(grid_D - grid_D_deployed) / grid_D_deployed
+                            > config.retune_d_pct
+                        ):
                             d_shift = abs(grid_D - grid_D_deployed) / grid_D_deployed
                             action = "retune"
                             action_reason = f"D_drift {d_shift:.0%}"
                             new_direction = direction  # same direction, updated range
 
-                        elif (profile not in ("HOLD", direction) and
-                              profile in ("LONG", "SHORT") and
-                              grid_age_min >= config.min_grid_age_min):
+                        elif (
+                            profile not in ("HOLD", direction)
+                            and profile in ("LONG", "SHORT")
+                            and grid_age_min >= config.min_grid_age_min
+                        ):
                             action = "flip"
                             action_reason = f"→{profile} age={grid_age_min}m"
                             new_direction = profile
@@ -330,7 +389,9 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 report.clear()
                 report.builder.manual_order()
 
-                report.builder.section("01 / KALMAN SIGNAL", "1m Kalman regime — updated every tick")
+                report.builder.section(
+                    "01 / KALMAN SIGNAL", "1m Kalman regime — updated every tick"
+                )
                 report.builder.kpi("Regime", regime)
                 report.builder.kpi("Profile", profile)
                 report.builder.kpi("Price", f"${current_price:,.2f}")
@@ -343,9 +404,13 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
                 report.builder.kpi("Status", "RUNNING" if executor_id else "FLAT")
                 report.builder.kpi("Direction", direction or "—")
                 report.builder.kpi("Age", f"{grid_age_min}m" if executor_id else "—")
-                report.builder.kpi("Unrealized PnL", f"${pnl:+.2f}" if executor_id else "—")
+                report.builder.kpi(
+                    "Unrealized PnL", f"${pnl:+.2f}" if executor_id else "—"
+                )
                 report.builder.kpi("Filled", f"${fills:.2f}" if executor_id else "—")
-                report.builder.kpi("D Deployed", f"${grid_D_deployed:.2f}" if grid_D_deployed else "—")
+                report.builder.kpi(
+                    "D Deployed", f"${grid_D_deployed:.2f}" if grid_D_deployed else "—"
+                )
                 report.builder.kpi("Action", f"{action} ({action_reason})")
                 report.builder.kpi("Tick #", str(tick_count))
 

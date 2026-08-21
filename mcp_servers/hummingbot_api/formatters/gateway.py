@@ -207,9 +207,14 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
         # AMM write responses are chain-neutral: the tx identifier is
         # `signature` (AMMTransactionResponse / AMMCreatePoolResponse), not
         # `transaction_hash` as on the CLMM surface.
-        lines = [header, f"Tx: {payload.get('signature')}  Status: {payload.get('status')}"]
+        lines = [
+            header,
+            f"Tx: {payload.get('signature')}  Status: {payload.get('status')}",
+        ]
         if action == "create_pool":
-            lines.append(f"Pool: {payload.get('pool_address')}  Seed price: {payload.get('price')}")
+            lines.append(
+                f"Pool: {payload.get('pool_address')}  Seed price: {payload.get('price')}"
+            )
             return "\n".join(lines)
 
         # What the transaction actually moved. hummingbot-api passes Gateway's `data`
@@ -225,9 +230,13 @@ def format_amm_result(action: str, result: dict[str, Any]) -> str:
         if result.get("position_address"):
             lines.insert(1, f"Position: {result['position_address']}")
         base = data.get("baseTokenAmountAdded" if added else "baseTokenAmountRemoved")
-        quote = data.get("quoteTokenAmountAdded" if added else "quoteTokenAmountRemoved")
+        quote = data.get(
+            "quoteTokenAmountAdded" if added else "quoteTokenAmountRemoved"
+        )
         if base is not None or quote is not None:
-            lines.append(f"Liquidity {'deposited' if added else 'withdrawn'} — base: {base}  quote: {quote}")
+            lines.append(
+                f"Liquidity {'deposited' if added else 'withdrawn'} — base: {base}  quote: {quote}"
+            )
         # Rent is a third kind of money, as on the CLMM close: locked when the position
         # account is created, returned when it closes, never income and never principal.
         # A partial removal closes nothing, so its absence there is a fact, not a gap.
@@ -258,9 +267,14 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
             return f"{header}\nNo open positions for this wallet on this connector."
         # Say which question was answered: one named position, or the whole wallet.
         asked_for_one = bool(result.get("position_address"))
-        lines = [f"{header}",
-                 "1 position" if asked_for_one
-                 else f"{len(payload)} position(s) owned by this wallet"]
+        lines = [
+            f"{header}",
+            (
+                "1 position"
+                if asked_for_one
+                else f"{len(payload)} position(s) owned by this wallet"
+            ),
+        ]
         for p in payload:
             lines.append(
                 f"  • {p.get('position_address')} — Pool: {p.get('pool_address')}"
@@ -273,7 +287,11 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
                 f"Quote: {p.get('quote_token_amount')}  "
                 f"Range: {p.get('lower_price')}–{p.get('upper_price')}  "
                 f"Price: {p.get('current_price')}"
-                + ("" if in_range is None else f"  [{'in range' if in_range else 'OUT OF RANGE'}]")
+                + (
+                    ""
+                    if in_range is None
+                    else f"  [{'in range' if in_range else 'OUT OF RANGE'}]"
+                )
             )
             lines.append(
                 f"    Uncollected fees — base: {p.get('base_fee_amount')}  "
@@ -313,7 +331,9 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
         removed_base = payload.get("base_token_amount_removed")
         removed_quote = payload.get("quote_token_amount_removed")
         if removed_base is not None or removed_quote is not None:
-            lines.append(f"Liquidity withdrawn — base: {removed_base}  quote: {removed_quote}")
+            lines.append(
+                f"Liquidity withdrawn — base: {removed_base}  quote: {removed_quote}"
+            )
         rent = payload.get("position_rent_refunded")
         if rent is not None:
             lines.append(f"Position rent refunded: {rent}")
@@ -324,16 +344,24 @@ def format_clmm_result(action: str, result: dict[str, Any]) -> str:
         lines = [header]
         if payload.get("position_address"):
             lines.append(f"Position: {payload['position_address']}")
-        lines.append(f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}")
+        lines.append(
+            f"Tx: {payload.get('transaction_hash')}  Status: {payload.get('status')}"
+        )
         # The amounts are the point of the call and were never printed: a removal that
         # moved thousands of base tokens reported only that a transaction confirmed.
         # These are flat and snake_case here — /clmm/add and /clmm/remove return a plain
         # dict, unlike the AMM writes above, which pass Gateway's camelCase `data`
         # through untouched.
-        base = payload.get("base_token_amount_added" if added else "base_token_amount_removed")
-        quote = payload.get("quote_token_amount_added" if added else "quote_token_amount_removed")
+        base = payload.get(
+            "base_token_amount_added" if added else "base_token_amount_removed"
+        )
+        quote = payload.get(
+            "quote_token_amount_added" if added else "quote_token_amount_removed"
+        )
         if base is not None or quote is not None:
-            lines.append(f"Liquidity {'deposited' if added else 'withdrawn'} — base: {base}  quote: {quote}")
+            lines.append(
+                f"Liquidity {'deposited' if added else 'withdrawn'} — base: {base}  quote: {quote}"
+            )
         gas = payload.get("gas_fee")
         if gas is not None:
             lines.append(f"Gas: {gas}")

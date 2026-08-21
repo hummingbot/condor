@@ -9,6 +9,7 @@ Fetches from the Meteora DAMM v2 data API, filters for pools with a valid
 alpha_vault address, applies TVL/vol/quote filters, and ranks by the API's
 native fee_tvl_ratio (fees/TVL per window).
 """
+
 import io
 import logging
 
@@ -72,25 +73,39 @@ def _build_chart(ranked: list[dict], window: str):
         texts.append(f"{apr:,.0f}%")
         colors.append("#d4a017" if rank <= 3 else "#8664c6")
 
-    fig = go.Figure(go.Bar(
-        y=labels, x=vals, orientation="h",
-        marker=dict(color=colors, line=dict(width=0)),
-        text=texts, textposition="outside",
-        textfont=dict(size=11, color="#ffffff", family="monospace"),
-        hovertemplate="<b>%{y}</b><br>Fee APR: %{text}<extra></extra>",
-        showlegend=False,
-    ))
+    fig = go.Figure(
+        go.Bar(
+            y=labels,
+            x=vals,
+            orientation="h",
+            marker=dict(color=colors, line=dict(width=0)),
+            text=texts,
+            textposition="outside",
+            textfont=dict(size=11, color="#ffffff", family="monospace"),
+            hovertemplate="<b>%{y}</b><br>Fee APR: %{text}<extra></extra>",
+            showlegend=False,
+        )
+    )
     fig.update_layout(
         title=dict(
             text=f"Meteora DAMM v2 Alpha Vault Pools — Fee APR (annualized from {window})",
-            font=dict(size=15, color="#ffffff"), x=0.5, xanchor="center",
+            font=dict(size=15, color="#ffffff"),
+            x=0.5,
+            xanchor="center",
         ),
-        height=max(450, n * 52 + 130), width=1100,
-        paper_bgcolor="#1a1a2e", plot_bgcolor="#1a1a2e",
+        height=max(450, n * 52 + 130),
+        width=1100,
+        paper_bgcolor="#1a1a2e",
+        plot_bgcolor="#1a1a2e",
         font=dict(size=11, color="#e0e0e0"),
-        margin=dict(l=300, r=90, t=70, b=40), bargap=0.3,
-        xaxis=dict(showticklabels=False, showgrid=False, zeroline=False,
-                   range=[0, (max(vals) if vals else 1) * 1.18]),
+        margin=dict(l=300, r=90, t=70, b=40),
+        bargap=0.3,
+        xaxis=dict(
+            showticklabels=False,
+            showgrid=False,
+            zeroline=False,
+            range=[0, (max(vals) if vals else 1) * 1.18],
+        ),
         yaxis=dict(showgrid=False, tickfont=dict(color="#e0e0e0", size=11)),
         legend=dict(orientation="h", yanchor="top", y=-0.15, xanchor="center", x=0.5),
     )
@@ -102,14 +117,26 @@ def _build_chart(ranked: list[dict], window: str):
 class Config(BaseModel):
     """Rank Meteora DAMM v2 pools with Alpha Vault (rate-limiter) by fee yield."""
 
-    quote_asset: str = Field(default="SOL", description="Quote token: SOL, USDC, or USDT")
-    ranking_window: str = Field(default="24h", description="Fee-yield window: 1h, 2h, 4h, 12h, or 24h")
+    quote_asset: str = Field(
+        default="SOL", description="Quote token: SOL, USDC, or USDT"
+    )
+    ranking_window: str = Field(
+        default="24h", description="Fee-yield window: 1h, 2h, 4h, 12h, or 24h"
+    )
     top_n: int = Field(default=10, description="Number of ranked pools to return")
     min_tvl_usd: float = Field(default=25000.0, description="Minimum pool TVL in USD")
-    min_vol24h_usd: float = Field(default=5000.0, description="Minimum 24h volume in USD")
-    include_launch_pools: bool = Field(default=False, description="Include pools with active fee-scheduler")
-    verified_only: bool = Field(default=False, description="Require both tokens verified")
-    exclude_pools: list[str] = Field(default=[], description="Pool addresses to skip (already held)")
+    min_vol24h_usd: float = Field(
+        default=5000.0, description="Minimum 24h volume in USD"
+    )
+    include_launch_pools: bool = Field(
+        default=False, description="Include pools with active fee-scheduler"
+    )
+    verified_only: bool = Field(
+        default=False, description="Require both tokens verified"
+    )
+    exclude_pools: list[str] = Field(
+        default=[], description="Pool addresses to skip (already held)"
+    )
 
 
 async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -167,26 +194,31 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
         cfg = p.get("pool_config") or {}
         if not config.include_launch_pools and cfg.get("is_fee_scheduler_active"):
             continue
-        if config.verified_only and not (tx.get("is_verified") and ty.get("is_verified")):
+        if config.verified_only and not (
+            tx.get("is_verified") and ty.get("is_verified")
+        ):
             continue
 
         base, quote_tok = (ty, tx) if tx.get("address") == quote_mint else (tx, ty)
         fee_yield = float((p.get("fee_tvl_ratio") or {}).get(window) or 0)
         vol_win = float((p.get("volume") or {}).get(window) or 0)
 
-        candidates.append({
-            "pool": p.get("address"),
-            "pair": p.get("name") or f"{base.get('symbol', '?')}-{quote_tok.get('symbol', '?')}",
-            "base_mint": base.get("address"),
-            "quote_mint": quote_tok.get("address"),
-            "base_fee_pct": float(cfg.get("base_fee_pct") or 0),
-            "tvl": tvl,
-            "vol_win": vol_win,
-            "vol24h": vol24h,
-            "fee_yield": fee_yield,
-            "price": float(p.get("current_price") or 0),
-            "alpha_vault": p.get("alpha_vault") or "",
-        })
+        candidates.append(
+            {
+                "pool": p.get("address"),
+                "pair": p.get("name")
+                or f"{base.get('symbol', '?')}-{quote_tok.get('symbol', '?')}",
+                "base_mint": base.get("address"),
+                "quote_mint": quote_tok.get("address"),
+                "base_fee_pct": float(cfg.get("base_fee_pct") or 0),
+                "tvl": tvl,
+                "vol_win": vol_win,
+                "vol24h": vol24h,
+                "fee_yield": fee_yield,
+                "price": float(p.get("current_price") or 0),
+                "alpha_vault": p.get("alpha_vault") or "",
+            }
+        )
 
     if not candidates:
         return (
@@ -198,23 +230,36 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     candidates.sort(key=lambda c: c["fee_yield"], reverse=True)
     ranked = candidates[: config.top_n]
 
-    columns = ["#", "Pair", "FeeYield", "BaseFee", "TVL", f"Vol{window}", "Price", "Pool", "BaseMint", "AlphaVault"]
+    columns = [
+        "#",
+        "Pair",
+        "FeeYield",
+        "BaseFee",
+        "TVL",
+        f"Vol{window}",
+        "Price",
+        "Pool",
+        "BaseMint",
+        "AlphaVault",
+    ]
     rows = []
     for i, c in enumerate(ranked, 1):
         av = c["alpha_vault"]
-        rows.append({
-            "#": i,
-            "Pair": c["pair"],
-            "FeeYield": f"{c['fee_yield']:.3f}%",
-            "BaseFee": f"{c['base_fee_pct']:.3f}%",
-            "TVL": f"${c['tvl']:,.0f}",
-            f"Vol{window}": f"${c['vol_win']:,.0f}",
-            "Price": f"{c['price']:.4g}",
-            "Pool": c["pool"],
-            "BaseMint": c["base_mint"],
-            "AlphaVault": (av[:8] + "…") if len(av) > 8 else av,
-            "quote_mint": c["quote_mint"],
-        })
+        rows.append(
+            {
+                "#": i,
+                "Pair": c["pair"],
+                "FeeYield": f"{c['fee_yield']:.3f}%",
+                "BaseFee": f"{c['base_fee_pct']:.3f}%",
+                "TVL": f"${c['tvl']:,.0f}",
+                f"Vol{window}": f"${c['vol_win']:,.0f}",
+                "Price": f"{c['price']:.4g}",
+                "Pool": c["pool"],
+                "BaseMint": c["base_mint"],
+                "AlphaVault": (av[:8] + "…") if len(av) > 8 else av,
+                "quote_mint": c["quote_mint"],
+            }
+        )
 
     top = rows[0]
     summary = (
@@ -260,6 +305,7 @@ async def run(config: Config, context: ContextTypes.DEFAULT_TYPE) -> str:
     await builder.save()
 
     from routines.base import RoutineResult
+
     return RoutineResult(
         text=summary,
         table_data=rows,

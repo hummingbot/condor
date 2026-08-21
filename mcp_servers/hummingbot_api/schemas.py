@@ -402,11 +402,13 @@ class GatewaySwapRequest(BaseModel):
     4. action="search" + filters -> Query swap history
     """
 
-    action: Literal["quote", "execute", "execute_quote", "search", "get_status"] = Field(
-        description="Action to perform: 'quote' (get price), 'execute' (perform swap at the "
-        "price found at execution), 'execute_quote' (execute a quote you already have, by its "
-        "quote_id — the price you were shown is the price you get), 'search' (query history), "
-        "'get_status' (check tx status)"
+    action: Literal["quote", "execute", "execute_quote", "search", "get_status"] = (
+        Field(
+            description="Action to perform: 'quote' (get price), 'execute' (perform swap at the "
+            "price found at execution), 'execute_quote' (execute a quote you already have, by its "
+            "quote_id — the price you were shown is the price you get), 'search' (query history), "
+            "'get_status' (check tx status)"
+        )
     )
 
     # Common swap parameters (required for quote/execute)
@@ -589,9 +591,9 @@ class GatewayCLMMRequest(BaseModel):
     sort_key: str | None = Field(
         default="tvl",
         description="Sort by field. Defaults to tvl — depth is the LP question, and "
-                    "volume ties at zero across every pool on a quiet pair. "
-                    "meteora: tvl, volume, feetvlratio. "
-                    "orca: tvl, volume, fees, rewards, yieldovertvl.",
+        "volume ties at zero across every pool on a quiet pair. "
+        "meteora: tvl, volume, feetvlratio. "
+        "orca: tvl, volume, fees, rewards, yieldovertvl.",
     )
 
     order_by: str | None = Field(
