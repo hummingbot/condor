@@ -33,7 +33,11 @@ over `manage_gateway_swaps(action="execute")` for any swap that is part of a str
 
 **Key Parameters:**
 - `connector_name`: Exchange to execute on
-- `trading_pair`: Trading pair (e.g., 'USDT-BRL')
+- `trading_pair`: Trading pair (e.g., 'USDT-BRL'). On a DEX, either side may be a raw
+  token address instead of a symbol — `BANKJmvh...-USDC` is valid. The token does NOT
+  need to be registered with Gateway first; it resolves the mint and reads decimals
+  on-chain. Never add a token to Gateway as a prerequisite for trading it, and never
+  guess decimals in order to do so
 - `side`: 1 (BUY) or 2 (SELL)
 - `amount`: Order amount (base currency, or '$100' for USD value)
 - `execution_strategy`: LIMIT, MARKET, LIMIT_MAKER, or LIMIT_CHASER

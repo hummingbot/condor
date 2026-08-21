@@ -1264,8 +1264,13 @@ async def manage_gateway_swaps(
             'jupiter/router', 'meteora/amm', 'raydium/clmm'.
         network: Network ID in 'chain-network' format (required for quote/execute), e.g.
             'solana-mainnet-beta', 'ethereum-mainnet'.
-        trading_pair: Trading pair as 'BASE-QUOTE' (required for quote/execute). Symbols or
-            token addresses. Pool-scoped connectors match Gateway's pool list by SYMBOL.
+        trading_pair: Trading pair as 'BASE-QUOTE' (required for quote/execute). Either
+            side may be a SYMBOL or a raw TOKEN ADDRESS, and the address does NOT have to
+            be registered with Gateway first — Gateway resolves an unknown mint on the
+            spot and reads its decimals on-chain. Do not add a token to Gateway's list as
+            a prerequisite for trading it: that write is a symbol/address mapping, it is
+            not required here, and guessing decimals to satisfy it corrupts the mapping.
+            Pool-scoped connectors match Gateway's pool list by SYMBOL.
         side: 'BUY' (buy base with quote) or 'SELL' (sell base for quote). Required for quote/execute.
         amount: Base token amount to buy or sell (required for quote/execute).
         slippage_pct: Maximum slippage percentage. OMIT to use the connector's configured
