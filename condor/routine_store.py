@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 import condor.reports as reports
-from condor import routine_hooks
+from condor import primitives, routine_hooks
 from condor.telemetry import taps as telemetry_taps
 from routines.base import (
     RoutineResult,
@@ -584,10 +584,13 @@ class RoutineStore:
             base_name = (routine.name or "").split("/")[-1]
             # attribute_owner records who this run executes for, so its reports
             # are readable by (and only by) that user on the web (SEC-196).
-            with reports.attribute_owner(user_id):
-                with reports.attribute_to(agent or _agent_of(routine)):
-                    with reports.default_source("routine", base_name):
-                        raw = await routine.run_fn(cfg, ctx)
+            # The context is published so a nested call_routine() inside this
+            # routine inherits its server, bot and user (FEAT-052).
+            with primitives.bind_context(ctx):
+                with reports.attribute_owner(user_id):
+                    with reports.attribute_to(agent or _agent_of(routine)):
+                        with reports.default_source("routine", base_name):
+                            raw = await routine.run_fn(cfg, ctx)
             result = normalize_result(raw)
         except asyncio.CancelledError:
             result = RoutineResult(text="Stopped by user")
