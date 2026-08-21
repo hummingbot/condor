@@ -8,10 +8,13 @@ pre-tick numbers.
 
 import asyncio
 
+import pytest
+
 from condor.agents.risk import (
     RiskEngine,
     RiskLimits,
     RiskState,
+    _planned_amount_quote,
     auto_approve_with_risk_check,
 )
 
@@ -23,8 +26,27 @@ def _create_call(amount: float = 100.0) -> dict:
             "action": "create",
             "executor_config": {
                 "controller_id": "test_controller",
+                "type": "grid_executor",
                 "total_amount_quote": amount,
             },
+        },
+    }
+
+
+def _order_call(amount: str | float) -> dict:
+    config = {
+        "controller_id": "test_controller",
+        "type": "order_executor",
+        "connector_name": "solana-mainnet-beta",
+        "trading_pair": "PUMP-USDC",
+        "amount": amount,
+    }
+    return {
+        "tool": "manage_executors",
+        "input": {
+            "action": "create",
+            "executor_type": "order_executor",
+            "executor_config": config,
         },
     }
 
@@ -42,11 +64,11 @@ def test_second_create_blocked_by_executor_count():
     engine = RiskEngine(RiskLimits(max_open_executors=5))
     state = RiskState(executor_count=4)
 
-    allowed, _ = engine.check_executor_action(_create_call(), state)
+    allowed, _ = engine.check_executor_action(_create_call(), state, 100.0)
     assert allowed
     assert state.executor_count == 5
 
-    allowed, reason = engine.check_executor_action(_create_call(), state)
+    allowed, reason = engine.check_executor_action(_create_call(), state, 100.0)
     assert not allowed
     assert "Max open executors" in reason
 
@@ -56,11 +78,11 @@ def test_cumulative_exposure_blocks_second_create():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState(total_exposure=300.0)
 
-    allowed, _ = engine.check_executor_action(_create_call(150.0), state)
+    allowed, _ = engine.check_executor_action(_create_call(150.0), state, 150.0)
     assert allowed
     assert state.total_exposure == 450.0
 
-    allowed, reason = engine.check_executor_action(_create_call(150.0), state)
+    allowed, reason = engine.check_executor_action(_create_call(150.0), state, 150.0)
     assert not allowed
     assert "position limit" in reason
 
@@ -69,7 +91,7 @@ def test_rejected_create_does_not_accumulate():
     engine = RiskEngine(RiskLimits(max_position_size_quote=500.0))
     state = RiskState(total_exposure=400.0)
 
-    allowed, _ = engine.check_executor_action(_create_call(200.0), state)
+    allowed, _ = engine.check_executor_action(_create_call(200.0), state, 200.0)
     assert not allowed
     assert state.total_exposure == 400.0
     assert state.executor_count == 0
@@ -84,6 +106,77 @@ def test_non_create_actions_do_not_accumulate():
     assert allowed
     assert state.executor_count == 2
     assert state.total_exposure == 100.0
+
+
+class _MarketData:
+    def __init__(self, price):
+        self.price = price
+
+    async def get_prices(self, connector_name, trading_pairs):
+        return {"prices": {trading_pairs: self.price} if self.price else {}}
+
+
+class _PriceClient:
+    def __init__(self, price):
+        self.market_data = _MarketData(price)
+
+
+@pytest.mark.parametrize(
+    ("executor_type", "config", "expected"),
+    [
+        ("grid_executor", {"total_amount_quote": 12}, 12),
+        ("twap_executor", {"total_amount_quote": 13}, 13),
+        ("dca_executor", {"amounts_quote": [4, 5], "total_amount_quote": 1}, 9),
+        ("order_executor", {"amount": 3, "total_amount_quote": 1}, 6),
+        ("position_executor", {"amount": 4, "total_amount_quote": 0}, 8),
+        (
+            "lp_executor",
+            {"base_amount": 3, "quote_amount": 4, "total_amount_quote": 1},
+            10,
+        ),
+    ],
+)
+def test_planned_amount_quote_uses_each_executor_capital_field(
+    executor_type, config, expected
+):
+    config.update(connector_name="solana-mainnet-beta", trading_pair="PUMP-USDC")
+
+    amount = asyncio.run(
+        _planned_amount_quote(
+            {"executor_type": executor_type, "executor_config": config},
+            _PriceClient(2),
+        )
+    )
+
+    assert amount == pytest.approx(expected)
+
+
+def test_oracle_prices_market_order_before_risk_check():
+    state = RiskState()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=10.0)),
+        state,
+        price_client=_PriceClient(0.002285209543),
+    )
+
+    result = asyncio.run(callback(_order_call("653.238363"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "selected"
+    assert state.total_exposure == pytest.approx(653.238363 * 0.002285209543)
+
+
+def test_missing_oracle_price_blocks_market_order():
+    state = RiskState()
+    callback = auto_approve_with_risk_check(
+        RiskEngine(RiskLimits(max_position_size_quote=10.0)),
+        state,
+        price_client=_PriceClient(None),
+    )
+
+    result = asyncio.run(callback(_order_call("653.238363"), _OPTIONS))
+
+    assert result["outcome"]["outcome"] == "cancelled"
+    assert state.total_exposure == 0
 
 
 # ---------------------------------------------------------------------------
