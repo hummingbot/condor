@@ -101,3 +101,20 @@ def test_position_info_formats_the_apis_snake_case_fields():
     assert "120.0" in out
     assert "0.01" in out and "1.2" in out
     assert "None" not in out
+
+
+def test_confidence_is_graded_against_the_emitted_direction():
+    from agents.derive_options_trader.routines.options_flow import _confidence
+
+    # The finding's exact scenario: rr=+1.0, oi=-0.25, ts=-0.5 with the
+    # negative-GEX 1.25 amplifier → composite +0.42 → LONG, while two of three
+    # votes say SHORT. Dominant-vote grading called this MEDIUM; only one vote
+    # agrees with LONG, so it is LOW — below the entry threshold.
+    assert _confidence(+0.42, 1.0, -0.25, -0.5) == "LOW"
+    # All three agreeing with the emitted direction is HIGH either way.
+    assert _confidence(+0.6, 0.5, 0.3, 0.2) == "HIGH"
+    assert _confidence(-0.6, -0.5, -0.3, -0.2) == "HIGH"
+    # Two of three agreeing with the emitted direction is MEDIUM.
+    assert _confidence(+0.45, 0.5, 0.3, -0.2) == "MEDIUM"
+    # A zero composite never grades above LOW.
+    assert _confidence(0.0, 1.0, 1.0, 1.0) == "LOW"
