@@ -988,9 +988,10 @@ async def _run_dual(application: Application) -> None:
         # Ask, once, whether this install wants to be counted (FEAT-023). Sent
         # next to the boot notification because that is the one moment the admin
         # is already looking. Until it is answered, nothing is collected. The
-        # prompt is a Telegram message with inline buttons, so local mode has
-        # nowhere to ask and stays silent — which leaves consent `unknown`,
-        # which emits nothing.
+        # prompt is a Telegram message with inline buttons, so local mode is
+        # skipped here and asked in the dashboard instead (the consent card in
+        # Settings → Privacy). Either way the install is already counted:
+        # `telemetry.init()` does that at the ping floor, without an answer.
         if not LOCAL_MODE:
             from condor.telemetry.prompt import maybe_prompt_admin
 

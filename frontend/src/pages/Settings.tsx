@@ -7,6 +7,7 @@ import { ApiKeysSettings } from "@/components/settings/ApiKeysSettings";
 import { CustomProvidersSettings } from "@/components/settings/CustomProvidersSettings";
 import { GatewaySettings } from "@/components/settings/GatewaySettings";
 import { ServersSettings } from "@/components/settings/ServersSettings";
+import { TelemetrySettings } from "@/components/settings/TelemetrySettings";
 import { VoiceSettings } from "@/components/settings/VoiceSettings";
 import { ADMIN_USERS_KEY, adminApi } from "@/lib/admin-api";
 import { useAuth } from "@/lib/auth";
@@ -17,6 +18,7 @@ const TABS = [
   { key: "keys", label: "Keys and Wallets" },
   { key: "llm", label: "LLM Endpoints" },
   { key: "voice", label: "Voice & AI" },
+  { key: "privacy", label: "Privacy" },
 ] as const;
 
 /** Admin-only, appended to TABS when the user turns out to be an admin (ARCH-177). */
@@ -80,6 +82,7 @@ export function Settings() {
       {tab === "keys" && <ApiKeysSettings />}
       {tab === "llm" && <CustomProvidersSettings />}
       {tab === "voice" && <VoiceSettings />}
+      {tab === "privacy" && <TelemetrySettings />}
       {tab === "admin" && <AdminSettings />}
     </div>
   );
