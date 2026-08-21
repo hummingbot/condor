@@ -126,10 +126,13 @@ def ctx(monkeypatch):
             "schedule": {"type": "interval", "interval_sec": 60},
         }
     }
+    buckets = {chat_id: {"routine_instances": instances}}
     return SimpleNamespace(
         bot=FakeBot(),
-        application=SimpleNamespace(
-            user_data={chat_id: {"routine_instances": instances}}
+        # ``condor.scheduler.JobContext.owner_data``: buckets keyed by owner,
+        # falling back to the chat for a payload that carries no ``user_id``.
+        owner_data=lambda owner_id, cid: buckets.get(
+            owner_id if owner_id is not None else cid, {}
         ),
         job=SimpleNamespace(
             data={

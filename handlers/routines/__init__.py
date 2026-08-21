@@ -16,11 +16,12 @@ import time
 from datetime import time as dt_time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackContext, ContextTypes
+from telegram.ext import ContextTypes
 
 import condor.reports
 from condor import routine_hooks
 from condor.routine_store import get_routine_store
+from condor.scheduler import JobContext, get_scheduler
 from handlers import clear_all_input_states
 from routines.base import (
     discover_routines,
@@ -86,6 +87,20 @@ def _owner_data(application, owner_id: int | None, chat_id: int) -> dict:
     the same graceful degradation ``_sync_instance_to_store`` applies.
     """
     return application.user_data.get(owner_id if owner_id is not None else chat_id, {})
+
+
+def _context_owner_data(context, owner_id: int | None, chat_id: int) -> dict:
+    """The same bucket, from either kind of context.
+
+    ``_execute_routine`` and ``_refresh_detail_msg`` are reached both from a job
+    (a :class:`condor.scheduler.JobContext`, which carries the buckets itself)
+    and from a Telegram handler (a PTB ``CallbackContext``, which reaches them
+    through its ``Application``).
+    """
+    owner_data = getattr(context, "owner_data", None)
+    if owner_data is not None:
+        return owner_data(owner_id, chat_id)
+    return _owner_data(context.application, owner_id, chat_id)
 
 
 def _get_draft(context: ContextTypes.DEFAULT_TYPE, routine_name: str) -> dict:
@@ -221,14 +236,13 @@ def _config_preview(config: dict, max_items: int = 2) -> str:
 
 
 def _job_name(chat_id: int, instance_id: str) -> str:
-    """Build job name for JobQueue."""
+    """Build the scheduler job name for an instance."""
     return f"routine_{chat_id}_{instance_id}"
 
 
-def _find_job(context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id: str):
-    """Find a job by instance ID."""
-    name = _job_name(chat_id, instance_id)
-    jobs = context.job_queue.get_jobs_by_name(name)
+def _find_job(chat_id: int, instance_id: str):
+    """Find a scheduled job by instance ID."""
+    jobs = get_scheduler().jobs_by_name(_job_name(chat_id, instance_id))
     return jobs[0] if jobs else None
 
 
@@ -236,10 +250,10 @@ def _stop_instance(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id: str
 ) -> bool:
     """Stop a job/task and remove instance. Returns True if found."""
-    # Try to stop JobQueue job (for scheduled one-shots)
-    job = _find_job(context, chat_id, instance_id)
+    # Try to stop the scheduled job (for scheduled one-shots)
+    job = _find_job(chat_id, instance_id)
     if job:
-        job.schedule_removal()
+        job.remove()
         logger.info(f"Removed scheduled job for instance {instance_id}")
 
     # Try to cancel asyncio task (for continuous routines)
@@ -282,7 +296,7 @@ def _stop_all_routine(
 
 
 async def _execute_routine(
-    context: CallbackContext,
+    context,
     instance_id: str,
     routine_name: str,
     config_dict: dict,
@@ -304,7 +318,7 @@ async def _execute_routine(
     # Prepare context for routine
     context._chat_id = chat_id
     context._instance_id = instance_id
-    user_data = _owner_data(context.application, owner_id, chat_id)
+    user_data = _context_owner_data(context, owner_id, chat_id)
     # Inject the active server captured at creation time so routines
     # in group chats connect to the correct server.
     if active_server and not user_data.get("preferences", {}).get("general", {}).get(
@@ -446,7 +460,7 @@ async def _run_continuous_routine(
         pass
 
 
-async def _interval_job_callback(context: CallbackContext) -> None:
+async def _interval_job_callback(context: JobContext) -> None:
     """Job callback for interval-scheduled one-shot routines. Sends message each run."""
     data = context.job.data or {}
     instance_id = data["instance_id"]
@@ -456,9 +470,7 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     owner_id = data.get("user_id")
 
     # Check if instance still exists (may have been stopped)
-    instances = _owner_data(context.application, owner_id, chat_id).get(
-        "routine_instances", {}
-    )
+    instances = context.owner_data(owner_id, chat_id).get("routine_instances", {})
     if instance_id not in instances:
         logger.warning(f"Instance {instance_id} no longer exists, skipping execution")
         return
@@ -474,9 +486,7 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     )
 
     # Re-check instance exists after execution (may have been stopped during run)
-    instances = _owner_data(context.application, owner_id, chat_id).get(
-        "routine_instances", {}
-    )
+    instances = context.owner_data(owner_id, chat_id).get("routine_instances", {})
     if instance_id not in instances:
         logger.warning(f"Instance {instance_id} was removed during execution")
         return
@@ -526,7 +536,7 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     )
 
 
-async def _oneshot_job_callback(context: CallbackContext) -> None:
+async def _oneshot_job_callback(context: JobContext) -> None:
     """Job callback for one-time runs."""
     data = context.job.data or {}
     instance_id = data["instance_id"]
@@ -548,9 +558,7 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
     )
 
     # Remove one-shot instance after completion
-    instances = _owner_data(context.application, owner_id, chat_id).get(
-        "routine_instances", {}
-    )
+    instances = context.owner_data(owner_id, chat_id).get("routine_instances", {})
     if instance_id in instances:
         del instances[instance_id]
         try:
@@ -601,7 +609,7 @@ async def _oneshot_job_callback(context: CallbackContext) -> None:
         )
 
 
-async def _daily_job_callback(context: CallbackContext) -> None:
+async def _daily_job_callback(context: JobContext) -> None:
     """Job callback for daily-scheduled routines."""
     data = context.job.data or {}
     instance_id = data["instance_id"]
@@ -621,9 +629,7 @@ async def _daily_job_callback(context: CallbackContext) -> None:
     )
 
     # Update instance state
-    instances = _owner_data(context.application, owner_id, chat_id).get(
-        "routine_instances", {}
-    )
+    instances = context.owner_data(owner_id, chat_id).get("routine_instances", {})
     if instance_id in instances:
         instances[instance_id]["last_run_at"] = time.time()
         instances[instance_id]["last_result"] = result
@@ -731,19 +737,20 @@ def _create_scheduled_instance(
 
     stype = schedule.get("type", "once")
 
+    scheduler = get_scheduler()
     if stype == "once":
-        context.job_queue.run_once(
+        scheduler.run_once(
             _oneshot_job_callback,
-            when=0.1,
+            0.1,
             data=job_data,
             name=job_name_str,
             chat_id=chat_id,
         )
     elif stype == "interval":
         interval = schedule.get("interval_sec", 60)
-        context.job_queue.run_repeating(
+        scheduler.run_repeating(
             _interval_job_callback,
-            interval=interval,
+            interval,
             first=0.5,
             data=job_data,
             name=job_name_str,
@@ -752,9 +759,9 @@ def _create_scheduled_instance(
     elif stype == "daily":
         time_str = schedule.get("daily_time", "09:00")
         hour, minute = map(int, time_str.split(":"))
-        context.job_queue.run_daily(
+        scheduler.run_daily(
             _daily_job_callback,
-            time=dt_time(hour=hour, minute=minute),
+            dt_time(hour=hour, minute=minute),
             data=job_data,
             name=job_name_str,
             chat_id=chat_id,
@@ -1244,7 +1251,7 @@ async def _show_help(
 
 
 async def _refresh_detail_msg(
-    context: CallbackContext,
+    context,
     chat_id: int,
     msg_id: int,
     routine_name: str,
@@ -1262,7 +1269,7 @@ async def _refresh_detail_msg(
     if not routine:
         return
 
-    user_data = _owner_data(context.application, owner_id, chat_id)
+    user_data = _context_owner_data(context, owner_id, chat_id)
     drafts = user_data.get("routine_drafts", {})
     draft = drafts.get(routine_name, {})
 
@@ -1947,9 +1954,9 @@ async def restore_scheduled_jobs(application) -> int:
             try:
                 if stype == "interval":
                     interval = schedule.get("interval_sec", 60)
-                    application.job_queue.run_repeating(
+                    get_scheduler().run_repeating(
                         _interval_job_callback,
-                        interval=interval,
+                        interval,
                         first=min(interval, 10),
                         data=job_data,
                         name=job_name_str,
@@ -1964,9 +1971,9 @@ async def restore_scheduled_jobs(application) -> int:
                 elif stype == "daily":
                     time_str = schedule.get("daily_time", "09:00")
                     hour, minute = map(int, time_str.split(":"))
-                    application.job_queue.run_daily(
+                    get_scheduler().run_daily(
                         _daily_job_callback,
-                        time=dt_time(hour=hour, minute=minute),
+                        dt_time(hour=hour, minute=minute),
                         data=job_data,
                         name=job_name_str,
                         chat_id=chat_id,

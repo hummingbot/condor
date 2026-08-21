@@ -57,30 +57,9 @@ class FakeStore:
         return self._instances.pop(instance_id, None) is not None
 
 
-class FakeJobQueue:
-    def __init__(self):
-        self.jobs = []
-
-    def _record(self, **kwargs):
-        self.jobs.append(kwargs)
-
-    def run_once(self, callback, **kwargs):
-        self._record(kind="once", **kwargs)
-
-    def run_repeating(self, callback, **kwargs):
-        self._record(kind="repeating", **kwargs)
-
-    def run_daily(self, callback, **kwargs):
-        self._record(kind="daily", **kwargs)
-
-    def get_jobs_by_name(self, name):
-        return []
-
-
 class FakeContext:
     def __init__(self):
         self.user_data = {}
-        self.job_queue = FakeJobQueue()
         self.application = None
 
 
@@ -95,6 +74,20 @@ class FakeUpdate:
 class FakeConfigManager:
     def is_admin(self, user_id):
         return user_id == ADMIN.id
+
+
+@pytest.fixture(autouse=True)
+def scheduler(monkeypatch):
+    """A scheduler per test, so jobs don't pile up on the process-wide one.
+
+    Never started: these tests are about what gets *recorded* at creation, not
+    about anything firing.
+    """
+    from condor.scheduler import Scheduler
+
+    sched = Scheduler()
+    monkeypatch.setattr(tg_routines, "get_scheduler", lambda: sched)
+    return sched
 
 
 @pytest.fixture
@@ -237,7 +230,6 @@ def test_sync_can_still_adopt_an_instance_that_had_no_owner(store):
 class FakeApplication:
     def __init__(self, user_data):
         self.user_data = user_data
-        self.job_queue = FakeJobQueue()
 
 
 def test_restore_adopts_ownerless_instances_from_their_user_data_bucket(

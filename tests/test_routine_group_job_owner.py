@@ -96,6 +96,23 @@ def _instances():
     }
 
 
+class FakeJobContext:
+    """``condor.scheduler.JobContext``'s surface, with a bot we can read back.
+
+    ``owner_data`` is the real one's semantics: buckets keyed by *user* id, with
+    ``chat_id`` as the fallback for a payload that predates the owner being
+    carried in it.
+    """
+
+    def __init__(self, buckets, data):
+        self._buckets = buckets
+        self.bot = FakeBot()
+        self.job = SimpleNamespace(data=data)
+
+    def owner_data(self, owner_id, chat_id):
+        return self._buckets.get(owner_id if owner_id is not None else chat_id, {})
+
+
 def _ctx(instances, *, user_id=OWNER_ID, chat_id=GROUP_ID, extra=None):
     """A job context shaped like a group run: instance in the owner's bucket."""
     data = {
@@ -108,13 +125,7 @@ def _ctx(instances, *, user_id=OWNER_ID, chat_id=GROUP_ID, extra=None):
     if user_id is not None:
         data["user_id"] = user_id
     data.update(extra or {})
-    return SimpleNamespace(
-        bot=FakeBot(),
-        application=SimpleNamespace(
-            user_data={OWNER_ID: {"routine_instances": instances}}
-        ),
-        job=SimpleNamespace(data=data),
-    )
+    return FakeJobContext({OWNER_ID: {"routine_instances": instances}}, data)
 
 
 # ---------------------------------------------------------------------------
