@@ -19,8 +19,9 @@ from datetime import time as dt_time
 from signals.base import discover_signals, get_latest_model_path, get_signal
 from signals.db import get_signals_db
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackContext, ContextTypes
+from telegram.ext import ContextTypes
 
+from condor.scheduler import JobContext, get_scheduler
 from handlers import clear_all_input_states
 from utils.auth import restricted
 from utils.telegram_formatters import escape_markdown_v2
@@ -178,14 +179,13 @@ def _config_preview(config: dict, max_items: int = 2) -> str:
 
 
 def _job_name(chat_id: int, instance_id: str) -> str:
-    """Build job name for JobQueue."""
+    """Build the scheduler job name for an instance."""
     return f"signal_{chat_id}_{instance_id}"
 
 
-def _find_job(context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id: str):
-    """Find a job by instance ID."""
-    name = _job_name(chat_id, instance_id)
-    jobs = context.job_queue.get_jobs_by_name(name)
+def _find_job(chat_id: int, instance_id: str):
+    """Find a scheduled job by instance ID."""
+    jobs = get_scheduler().jobs_by_name(_job_name(chat_id, instance_id))
     return jobs[0] if jobs else None
 
 
@@ -193,10 +193,10 @@ def _stop_instance(
     context: ContextTypes.DEFAULT_TYPE, chat_id: int, instance_id: str
 ) -> bool:
     """Stop a job/task and remove instance. Returns True if found."""
-    # Try to stop JobQueue job
-    job = _find_job(context, chat_id, instance_id)
+    # Try to stop the scheduled job
+    job = _find_job(chat_id, instance_id)
     if job:
-        job.schedule_removal()
+        job.remove()
         logger.info(f"Removed scheduled job for instance {instance_id}")
 
     # Try to cancel asyncio task
@@ -356,7 +356,7 @@ def _create_background_instance(
 # =============================================================================
 
 
-async def _interval_job_callback(context: CallbackContext) -> None:
+async def _interval_job_callback(context: JobContext) -> None:
     """Callback for interval-scheduled pipelines."""
     job_data = context.job.data
     chat_id = job_data["chat_id"]
@@ -365,11 +365,11 @@ async def _interval_job_callback(context: CallbackContext) -> None:
     pipeline = job_data["pipeline"]
     config_dict = job_data["config"]
 
-    instances = context.application.user_data.get(chat_id, {}).get(
-        "signals_instances", {}
-    )
+    # Signal instances are written through ``context.user_data``, which in a
+    # private chat is the chat's own bucket -- no owner is carried in the payload.
+    instances = context.owner_data(None, chat_id).get("signals_instances", {})
     if instance_id not in instances:
-        context.job.schedule_removal()
+        context.job.remove()
         return
 
     # Run pipeline
@@ -429,11 +429,12 @@ def _create_scheduled_instance(
     job_name = _job_name(chat_id, instance_id)
     stype = schedule.get("type")
 
+    scheduler = get_scheduler()
     if stype == "interval":
         interval = schedule.get("interval_sec", 60)
-        context.job_queue.run_repeating(
+        scheduler.run_repeating(
             _interval_job_callback,
-            interval=interval,
+            interval,
             first=interval,
             data=job_data,
             name=job_name,
@@ -442,9 +443,9 @@ def _create_scheduled_instance(
     elif stype == "daily":
         time_str = schedule.get("daily_time", "09:00")
         hour, minute = map(int, time_str.split(":"))
-        context.job_queue.run_daily(
+        scheduler.run_daily(
             _interval_job_callback,
-            time=dt_time(hour=hour, minute=minute),
+            dt_time(hour=hour, minute=minute),
             data=job_data,
             name=job_name,
             chat_id=chat_id,
@@ -1267,14 +1268,6 @@ async def restore_signal_jobs(application) -> int:
                 to_remove.append(instance_id)
                 continue
 
-            # Create mock context for job creation
-            class MockContext:
-                def __init__(self):
-                    self.job_queue = application.job_queue
-                    self.user_data = user_data
-
-            mock_ctx = MockContext()
-
             job_data = {
                 "chat_id": chat_id,
                 "instance_id": instance_id,
@@ -1287,9 +1280,9 @@ async def restore_signal_jobs(application) -> int:
 
             if stype == "interval":
                 interval = schedule.get("interval_sec", 60)
-                application.job_queue.run_repeating(
+                get_scheduler().run_repeating(
                     _interval_job_callback,
-                    interval=interval,
+                    interval,
                     first=interval,
                     data=job_data,
                     name=job_name,
@@ -1303,9 +1296,9 @@ async def restore_signal_jobs(application) -> int:
             elif stype == "daily":
                 time_str = schedule.get("daily_time", "09:00")
                 hour, minute = map(int, time_str.split(":"))
-                application.job_queue.run_daily(
+                get_scheduler().run_daily(
                     _interval_job_callback,
-                    time=dt_time(hour=hour, minute=minute),
+                    dt_time(hour=hour, minute=minute),
                     data=job_data,
                     name=job_name,
                     chat_id=chat_id,
