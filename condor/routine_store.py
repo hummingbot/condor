@@ -852,15 +852,27 @@ class RoutineStore:
             if instance_id not in self._instances:
                 get_scheduler().remove_by_name(_web_job_name(instance_id))
                 return
-            await self._execute_and_record(
-                instance_id,
-                routine,
-                config,
-                server_name,
-                user_id,
-                status_after="scheduled",
-                trigger="schedule",
-            )
+            # The tick publishes its own task for the length of the run, which
+            # is what lets stop() abort a run already in flight instead of
+            # leaving it to finish invisibly against a server nobody is watching
+            # any more. The sleep loop this replaces got that from owning the
+            # task outright; a job does not own one between ticks.
+            self._tasks[instance_id] = asyncio.current_task()
+            try:
+                await self._execute_and_record(
+                    instance_id,
+                    routine,
+                    config,
+                    server_name,
+                    user_id,
+                    status_after="scheduled",
+                    trigger="schedule",
+                )
+            finally:
+                # Only if it is still ours: stop() pops it on the way to
+                # cancelling, and a later tick may already have claimed it.
+                if self._tasks.get(instance_id) is asyncio.current_task():
+                    self._tasks.pop(instance_id, None)
 
         scheduler = get_scheduler()
         if daily_time:

@@ -169,3 +169,66 @@ def test_a_schedule_with_no_daily_time_is_still_an_interval(client, store):
     assert resp.status_code == 200
     meta = store.get_instance(resp.json()["instance_id"])
     assert meta["schedule"] == {"type": "interval", "interval_sec": 600}
+
+
+# ── stopping a run already in flight ──
+
+
+class _SlowRoutine:
+    """Just enough routine for _execute_and_record, blocking until released."""
+
+    name = "probe"
+    source = "global"
+    continuous = False
+
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.finished = False
+
+    class config_class:  # noqa: N801 - mirrors the attribute the store calls
+        def __init__(self, **kw):
+            pass
+
+    async def run_fn(self, cfg, ctx):
+        self.started.set()
+        await asyncio.sleep(30)
+        self.finished = True
+        return "never"
+
+
+def test_stop_aborts_a_run_already_in_flight(store, scheduler, monkeypatch):
+    """The sleep loop owned its task, so stop() cancelled the run underway.
+
+    A job owns no task between ticks, so the tick publishes its own — without
+    that, a stopped schedule would keep running against a server nobody is
+    watching until the routine happened to return.
+    """
+    routine = _SlowRoutine()
+    monkeypatch.setattr(store, "_resolve_routine", lambda name: routine)
+    monkeypatch.setattr(store, "_report_run", _noop)
+    monkeypatch.setattr(store, "_fire_hooks", _noop)
+
+    async def scenario():
+        instance_id = await store.schedule("probe", {}, "srv", interval_sec=60)
+        scheduler.start()
+        try:
+            await asyncio.wait_for(routine.started.wait(), timeout=5)
+            task = store._tasks[instance_id]
+
+            assert store.stop(instance_id) is True
+
+            # The run is torn down, not left to finish on its own. `done` is
+            # the assertion that bites: the routine is 30 seconds into a sleep,
+            # so without the cancel this task is still pending here.
+            await asyncio.sleep(0.05)
+            assert task.done()
+            assert routine.finished is False
+            assert scheduler.jobs_by_name(f"web:{instance_id}") == []
+        finally:
+            await scheduler.stop(wait=False)
+
+    asyncio.run(scenario())
+
+
+async def _noop(*a, **kw):
+    return None
