@@ -1,6 +1,7 @@
 ---
 name: kalman_grid_btc
-description: ''
+description: >-
+  Directional grid on BTC-USDT (bitget_perpetual) steered by a Kalman regime filter. Each tick re-reads regime, SNR and grid width, then deploys, retunes, profit-takes or flips a single 5x grid — $90 of a $100 budget, 10% max loss, LONG or SHORT only.
 agent_key: null
 skills: []
 default_config: {}

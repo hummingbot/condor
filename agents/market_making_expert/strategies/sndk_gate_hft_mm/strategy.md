@@ -1,6 +1,7 @@
 ---
 name: sndk_gate_hft_mm
-description: ''
+description: >-
+  Asymmetric PMM on SNDK-USDT perp (gate_io_perpetual) built around the Gate.io pro maker rebate. Tight buy-side quotes earn the rebate; wider sell-side quotes limit adverse selection. Spread profile switches with the volatility regime.
 agent_key: null
 skills: []
 default_config: {}
