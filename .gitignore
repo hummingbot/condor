@@ -121,6 +121,11 @@ celerybeat.pid
 
 # Environments
 .env
+# Every .env variant, not just the bare name. A `.env.bak-telegram` written by a
+# config switcher carried a live OpenRouter key into a commit, and GitHub push
+# protection is what caught it — the bare pattern below did not.
+.env.*
+*.bak-telegram
 .venv
 env/
 venv/
